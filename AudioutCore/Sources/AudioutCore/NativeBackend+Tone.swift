@@ -414,10 +414,14 @@ extension NativeBackend {
                 // stream for a row that says connected — a speaker fed nothing
                 // but idle fill, with the loop already settled at `want == isOn`.
                 // A speaker with a live session releases at its teardown instead
-                // (`removeFromAddedLocked`).
-                if previous != wantOn, !wantOn,
-                   !self.added.contains(id), !self.converging.contains(id) {
-                    self.wholeSystemStreamByDevice.removeValue(forKey: id)
+                // (`removeFromAddedLocked`); one whose op is still in flight
+                // releases when that op's slot does (`streamReleaseOnSettle`).
+                if previous != wantOn, !wantOn, !self.added.contains(id) {
+                    if self.converging.contains(id) {
+                        self.streamReleaseOnSettle.insert(id)
+                    } else {
+                        self.wholeSystemStreamByDevice.removeValue(forKey: id)
+                    }
                 }
 
                 // Connection-status brief §1/§3 semantics: a device newly

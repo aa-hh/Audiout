@@ -350,7 +350,8 @@ extension SerializedSharedState {
         storeDirectory: URL? = nil,
         engine: RecordingEngine? = nil,
         discovery: FakeDiscovery? = nil,
-        perAppCapture: PerAppCaptureCoordinator? = nil
+        perAppCapture: PerAppCaptureCoordinator? = nil,
+        delayClock: @escaping NativeBackend.DelayClock = NativeBackend.dispatchDelayClock
     ) -> (NativeBackend, FakeBTEnumerator, SpyBTSink, EventCollector) {
         let bt = FakeBTEnumerator()
         let backend = NativeBackend(
@@ -362,6 +363,7 @@ extension SerializedSharedState {
             systemVolume: NoOpSystemVolume(),
             ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
             injectedPerAppCapture: perAppCapture,
+            delayClock: delayClock,
             systemDefaultOutputIsAirPlayClass: { false },
             aggregateControl: NoOpAggregateControl(),
             handoffWatcherFactory: { onBlockedAttempt in
@@ -1011,7 +1013,12 @@ extension SerializedSharedState {
     @Test @MainActor func aFailedUserEditDuringCleanupIsNotBlamedOnTheRestoration() async {
         let engine = RecordingEngine()
         let discovery = FakeDiscovery()
-        let (backend, bt, _, _) = makeBackend(engine: engine, discovery: discovery)
+        // The audition's deadlines fire only when the test says. This test is
+        // about whose failure the stop reports, and on the wall clock a loaded
+        // run let the 4 s stop deadline expire while the restoration was held.
+        let deadlines = ManualDelayClock()
+        let (backend, bt, _, _) = makeBackend(engine: engine, discovery: discovery,
+                                              delayClock: deadlines.clock)
         defer { engine.releaseWrites(); backend.stop() }
         backend.captureCoordinator = ProbeStagingCapture()
         backend.start()
@@ -1523,6 +1530,10 @@ extension SerializedSharedState {
         #expect(report()?.staleReason == nil)
         #expect(report()?.clockState == .unknown, "a new link, and no verdict on its clock yet")
         #expect(report()?.settleRemainingSeconds == nil)
+        // `BTSpeakerTiming.noteConnected` writes the report under its lock and
+        // fires the change after releasing it, so the report can read
+        // `.fromLastTime` before the callback has run.
+        waitFor { changes.value == base + 2 }
         #expect(changes.value == base + 2)
 
         backend.endBTWizardLatencyPreview(forDevice: uid, keepMs: 300)
@@ -1969,6 +1980,47 @@ extension SerializedSharedState {
                 "…and the line names who released: \(line ?? "none")")
         #expect(line?.contains("\"waitedMs\"") == true)
         #expect(line?.contains("\"timedOut\":\"0\"") == true, "released, not timed out")
+
+        backend.setBTWizardTickActive(false, btTargetDeviceID: btMove.id, btReferenceDeviceID: nil)
+    }
+
+    /// THE DEFECT (live, freshly connected speaker: the sweeps never came out
+    /// until music had played once). The bed floor used to be counted from the
+    /// gate opening, and a sink plays nothing until its delay gate releases —
+    /// most of two seconds under the wizard's raised reference. So the floor
+    /// had always run out before release and the sweeps followed half a second
+    /// after the first audible frame, into a link and amp still waking up. The
+    /// floor now runs from the release, however long the gate waited for it.
+    @Test func theBedFloorIsTimedFromTheReleaseNotTheGateOpening() {
+        let capture = LineCapture()
+        let (backend, bt, sink, _) = makeBackend()
+        defer { backend.stop(); Telemetry._installTestSink(nil) }
+        backend.wizardArmPollInterval = 0.01
+        backend.wizardArmMinimumBedSeconds = 0.4
+        backend.wizardArmCeilingSeconds = 60
+        backend.start()
+        bt.fire([btMove])
+        waitFor { self.device(backend, self.btMove.id) != nil }
+        backend.setOutputSet([btMove.id])
+        waitFor { !sink.buffers.isEmpty }
+
+        Telemetry._installTestSink { capture.append($0) }
+        backend.setBTWizardTickActive(true, btTargetDeviceID: btMove.id, btReferenceDeviceID: nil)
+        // The gate waits longer than the whole floor with nothing released.
+        waitFor(timeout: 0.6) { !capture.armedLines().isEmpty }
+        #expect(capture.armedLines().isEmpty, "no tick while the speaker is silent")
+
+        let releasedAt = Date()
+        sink.rendering = [btMove.id]
+        waitFor { !capture.armedLines().isEmpty }
+        let bedHeard = Date().timeIntervalSince(releasedAt)
+        #expect(bedHeard >= 0.4,
+                "the arm waited a full floor after the release, not after the gate: \(bedHeard) s")
+        let line = capture.armedLines().first ?? ""
+        #expect(line.contains("\"timedOut\":\"0\""), "\(line)")
+        let bedMs = line.range(of: #""bedMs":"(\d+)""#, options: .regularExpression)
+            .map { String(line[$0]).filter(\.isNumber) }.flatMap { Int($0) }
+        #expect((bedMs ?? 0) >= 400, "the line records the audible bed: \(line)")
 
         backend.setBTWizardTickActive(false, btTargetDeviceID: btMove.id, btReferenceDeviceID: nil)
     }

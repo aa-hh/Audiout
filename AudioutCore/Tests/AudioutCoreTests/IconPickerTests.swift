@@ -13,6 +13,14 @@ import AppKit
 /// a backend or activates anything. These cases build the controller directly
 /// and drive it through its `test_*` hooks — a headless run can't synthesize
 /// the real grid-tap / search-typing / button-click gestures.
+///
+/// `@MainActor` on the whole suite: this package builds in Swift 5 mode, so a
+/// nonisolated test compiles while building the picker on a background
+/// thread, and AppKit's named-colour table (`NSColor(name:dynamicProvider:)`,
+/// behind every `Tokens.Color`) is not safe to touch from two threads at once.
+/// A full run once crashed inside it while these tests built pickers in
+/// parallel with the main thread.
+@MainActor
 @Suite struct IconPickerTests {
 
     // MARK: Curated grid
@@ -137,7 +145,7 @@ import AppKit
     /// Every cell is a stamped layer colour, so the grid keeps showing an old
     /// gold until something re-stamps it. Increase Contrast and the accent
     /// dial each arrive on their own notification — both must reach it.
-    @Test @MainActor func curatedCellsRestampOnAccentAndAccessibilityNotifications() {
+    @Test func curatedCellsRestampOnAccentAndAccessibilityNotifications() {
         let picker = IconPickerViewController()
         picker.configure(currentSymbolName: "airpods", defaultSymbolName: "hifispeaker.fill")
         _ = picker.view

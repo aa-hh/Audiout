@@ -65,9 +65,11 @@ git-owned history and comments that had drifted into being *wrong*.
   legitimate hit takes a trailing `slop-ok` comment.
 - `git commit --no-verify` remains the documented emergency escape, same as
   every guard.
-- The reviewing models run once per branch at merge time through
-  `scripts/review-branch.sh`, never inside a hook (the hook only checks the
-  receipt). `/pr-review` (`.claude/skills/pr-review/`) remains the deliberate
+- The reviewing models run once per branch at merge time, never inside a
+  hook (the hook only checks the receipt). They run as subagents of the
+  Claude session merging the branch, because headless `claude -p` is refused
+  on this account: `bash scripts/review-branch.sh`, follow its printed steps,
+  then `bash scripts/review-branch.sh --continue`. `/pr-review` (`.claude/skills/pr-review/`) remains the deliberate
   PR-comment review: adversarial, evidence-only, published as PR comments in
   one idempotent sweep; it never runs automatically.
 - Review discipline (merge-time review and PR review): fewer correct findings

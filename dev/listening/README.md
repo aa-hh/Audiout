@@ -25,11 +25,12 @@ more relaunch, then the block is skipped.
 
 ## One-time setup on the second Mac
 
-1. From the repo root, copy the scripts and runbook files outside Desktop and
-   Documents (that Mac's Desktop is iCloud-synced):
+1. From the repo root, copy the six files side by side into `~/listening/` (not
+   Desktop or Documents; that Mac's Desktop is iCloud-synced):
    ```
-   tar -cf - dev/listening/*.sh dev/listening/README.md dev/notes/bt-sync-discovery/runbooks \
-     | ssh alechamilton@SUMUP-M9Y197RFVG.local 'mkdir -p ~/audiout-listening && tar -xf - -C ~/audiout-listening'
+   tar -cf - -C dev/listening unattended-night.sh launch-tonight.sh README.md .gitignore \
+     -C ../notes/bt-sync-discovery/runbooks click-track-3s.wav click-pair-spacing.py \
+     | ssh alechamilton@SUMUP-M9Y197RFVG.local 'mkdir -p ~/listening && tar -xf - -C ~/listening'
    ```
 2. Install the dev build under `~/Applications` from the checkout whose `build/`
    holds it. The iCloud-synced Desktop adds extended attributes that break the
@@ -40,10 +41,9 @@ more relaunch, then the block is skipped.
    ```
    Open it once at the screen and grant its own prompts.
 3. Pair and connect both Moves; run the wizard once on each to store an alignment.
-4. `brew install blueutil ffmpeg`, then `python3 -m pip install numpy` (or point
-   `PYTHON=` at a Python that has numpy).
+4. `brew install blueutil ffmpeg`; `python3 -m pip install numpy` (or set `PYTHON=`).
 5. Grant permissions once while you are there, in Terminal, from
-   `~/audiout-listening/dev/listening`:
+   `~/listening`:
    - `./unattended-night.sh --dry-run`; Allow Microphone, "Terminal wants to
      control QuickTime Player" and Bluetooth. About 2 minutes; no "DRY RUN
      FALLBACK" note in its summary means the mic and QuickTime work.
@@ -104,7 +104,7 @@ Your main Claude session can run that under a monitor and push a phone notificat
 
 ## Starting it tonight
 
-In Terminal on the second Mac (Screen Sharing is fine), from `dev/listening`:
+In Terminal on the second Mac (Screen Sharing is fine), from `~/listening`:
 
 ```
 ./launch-tonight.sh 23:30                 # Blocks A and B, about 35 min

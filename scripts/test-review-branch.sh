@@ -47,12 +47,13 @@ git checkout -q -B main
 # uncommitted edits are what gets tested.
 rm -rf .githooks && cp -R "$SRC_ROOT/.githooks" .githooks
 cp "$SRC_ROOT/scripts/review-branch.sh" scripts/review-branch.sh
+cp "$SRC_ROOT/.gitignore" .gitignore
 rm -rf docs/review && cp -R "$SRC_ROOT/docs/review" docs/review
 cp "$SRC_ROOT/scripts/lib/suite-cache.sh" scripts/lib/suite-cache.sh
 printf '#!/bin/sh\necho "$*" >> "%s"\nexit "$(cat "%s")"\n' "$RUNNER_LOG" "$RUNNER_EXIT" > "scripts/$runner.sh"
 chmod +x "scripts/$runner.sh"
 echo 0 > "$RUNNER_EXIT"
-git add -A .githooks docs/review scripts/review-branch.sh scripts/lib/suite-cache.sh "scripts/$runner.sh"
+git add -A .gitignore .githooks docs/review scripts/review-branch.sh scripts/lib/suite-cache.sh "scripts/$runner.sh"
 git commit -q --no-verify -m "test setup" || { echo "setup commit failed" >&2; exit 1; }
 
 COMMON="$(cd "$(git rev-parse --git-common-dir)" && pwd)"
@@ -124,7 +125,7 @@ receipt_path() {
   key=$(git diff -U0 --no-renames "$(git merge-base main HEAD)" HEAD | git patch-id --stable | cut -d' ' -f1)
   echo "$RECEIPTS/${key:-empty}"
 }
-pending_path() { echo "$RECEIPTS/pending/$(basename "$(receipt_path)")"; }
+pending_path() { echo "$REPO/.review-pending/$(basename "$(receipt_path)")"; }
 
 # advance_main <file> <text>: one commit on main past the hooks, appending
 # <text> to <file>; leaves main checked out.

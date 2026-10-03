@@ -12,7 +12,8 @@
 #
 # The reviewers run as subagents of the Claude session merging the branch,
 # because headless Claude CLI runs are refused on this account. The script hands
-# work over through <git-common-dir>/audiout-branch-reviews/pending/<key>/:
+# work over through .review-pending/<key>/ in this worktree (git-ignored; a
+# session's subagents may write there but not into the shared .git folder):
 # a run writes one <pass>.prompt per pass and prints, per pass, its model,
 # the prompt path and the .out path the session saves the reply to; the
 # session runs those subagents, then runs --continue, which reads the replies
@@ -139,7 +140,7 @@ fi
 
 reviews_dir="$common/audiout-branch-reviews"
 review_log="$common/audiout-branch-reviews.log"
-pending_root="$reviews_dir/pending"
+pending_root="$PWD/.review-pending"
 state="$pending_root/$hash"
 
 if [ "$mode" = --continue ]; then

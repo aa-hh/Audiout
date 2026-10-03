@@ -1145,6 +1145,14 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// lets the running loop pick up the new target when its current op completes.
     var converging: Set<String> = []
 
+    /// Device ids deselected while a converge op held their slot, with no
+    /// session to tear down. `setOutputSet` cannot release such a device's
+    /// whole-system stream (the op may have read it), so the slot's release
+    /// does, if the op ended with no session. Without it, a deselect landing
+    /// between a refused connect's failure and its slot release was dropped,
+    /// and the reselect reused the refused stream. On `stateQueue`.
+    var streamReleaseOnSettle: Set<String> = []
+
     /// Device ids parked in a terminal-failure state (the engine NACKed / the add
     /// threw). While parked, converge does NOT keep issuing new sessions for the id
     /// (root cause 5: "converge kept issuing sessions post-failure"). The park is
@@ -2649,6 +2657,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             self.expectedSelected.removeAll()
             self.desiredOn.removeAll()
             self.converging.removeAll()
+            self.streamReleaseOnSettle.removeAll()
             self.failedGate.removeAll()
             self.fedDescriptors.removeAll()
             self.muted.removeAll()
@@ -3287,6 +3296,9 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
 
     func releaseConvergingAndRequeueIfNeeded(id: String) -> ConvergeReleaseAction {
         self.converging.remove(id)
+        if self.streamReleaseOnSettle.remove(id) != nil, !self.added.contains(id) {
+            self.wholeSystemStreamByDevice.removeValue(forKey: id)
+        }
         // Never requeue into a suspension. `convergeDevice` has no `suspended` guard
         // of its own, so a slot released mid-sleep would otherwise kick a loop that
         // issues addOutput at engine sessions sleep has already torn down. The slot

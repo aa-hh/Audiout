@@ -9776,6 +9776,49 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
                 "ids are monotonic, so anything but a HIGHER stream means the deselect never released it")
     }
 
+    /// The same release when the deselect lands while the refused connect
+    /// still holds its converge slot. `setOutputSet` has to leave the stream
+    /// alone then, so the slot's release gives it back. Drop that release
+    /// (`streamReleaseOnSettle`) and the retry lands on the refused stream.
+    /// Under load the test above landed its deselect in this window by chance.
+    @Test func aDeselectWhileTheRefusedConnectIsInFlightStillReleasesTheStream() async throws {
+        let (backend, engine, discovery) = makeBackend()
+        backend.captureCoordinator = FakeCapture()
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:6E", name: "Refusing Mid-Connect")
+        engine.addFailures = [device.outputID.rawValue]
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+        _ = await collect(from: backend) { events in
+            events.contains {
+                if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false }
+            }
+        } after: { discovery.fire(.appeared(device)) }
+        let addHold = HoldPoint()
+        engine.onAddOutputHold = { id, _ in
+            if id == device.outputID { await addHold.hold() }
+        }
+
+        backend.setOutputSet([device.id])
+        await pollUntil { addHold.entered }
+        let refused = try #require(
+            engine.wholeSystemAddCalls.first { $0.0 == device.outputID }?.1)
+
+        // Off and back on while the connect is still negotiating, then the
+        // receiver refuses it.
+        backend.setOutputSet([])
+        backend.setOutputSet([device.id])
+        addHold.open()
+        await pollUntil { backend.devices.first { $0.id == device.id }?.isAvailable == false }
+
+        engine.addFailures = []
+        backend.retryOutput(device.id)
+        await pollUntil {
+            (engine.liveStream(of: device.outputID) ?? 0) >= SpyEngine.wholeSystemStreamIDBase
+        }
+        #expect((engine.liveStream(of: device.outputID) ?? 0) > refused,
+                "the deselect released the refused stream, so the retry takes a fresh one")
+    }
+
     /// A session that dies under a speaker the user still wants keeps its home
     /// stream. The engine can re-establish that session itself, out of band and
     /// on the stream id it still holds, so dropping the home on `.failed` leaves

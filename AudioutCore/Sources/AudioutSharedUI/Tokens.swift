@@ -570,7 +570,8 @@ public enum Tokens {
         // its own doc); its Increase Contrast `#8A6614` still measures 5.04 /
         // 4.37 on `well`. Subtle light `#8F7B4A` 3.95 / 3.42 (IC `#6F5E33`
         // 6.06 / 5.25). Subtle dark `gold` clears `raised` at 5.91:1 (IC
-        // 7.42:1). In light mode gold now sits well above ember in luminance,
+        // 7.42:1); Subtle dark `ember` `#7D6B44` clears it at 3.05:1. In light
+        // mode gold now sits well above ember in luminance,
         // as in dark; `MembershipWellContrastTests` pins the pair at least
         // 1.40:1 apart.
         //
@@ -634,13 +635,15 @@ public enum Tokens {
         /// `raised` / 4.06:1 vs `well`, dark Increase Contrast `#A5824A` =
         /// 5.55 / 5.04 / 4.42 / 5.71; light `#7A5E2A` = 5.82:1 vs the flat
         /// ground / 5.04:1 vs `well`, light Increase Contrast `#5E4922` =
-        /// 8.21:1 / 7.11:1. SUBTLE column: dark `#6D5B34` = 3.01:1 vs
-        /// `canvas` / 2.73:1 vs `panel` / 2.40:1 vs `raised` / 3.10:1 vs
-        /// `well` — a documented under-floor case, because `ember` is a 2 pt
-        /// line paired with high-contrast `gold` nodes and the IC variant is
-        /// the escape valve (dark IC `#877146` = 4.22 / 3.83 / 3.36 / 4.34);
-        /// light `#71613B` = 5.79:1 vs the flat ground / 5.02:1 vs `well` (IC
-        /// `#5C5030` 7.61:1 / 6.59:1).
+        /// 8.21:1 / 7.11:1. SUBTLE column: dark `#7D6B44` = 3.82:1 vs
+        /// `canvas` / 3.47:1 vs `panel` / 3.05:1 vs `raised` / 3.94:1 vs
+        /// `well` (2026-10-04: the old `#6D5B34` gave the hollow 1.5 pt
+        /// connecting dot 2.73:1 on `panel`; same OKLab hue and chroma, only
+        /// lightness raised until the dot clears 3:1 on `raised`, the brighter
+        /// ground). It stays 1.94:1 dimmer than Subtle dark `gold`, since it is
+        /// the idle tone. Dark IC `#877146` = 4.22 / 3.83 / 3.36 / 4.34, still
+        /// further from the ground than the base. Light `#71613B` = 5.79:1 vs
+        /// the flat ground / 5.02:1 vs `well` (IC `#5C5030` 7.61:1 / 6.59:1).
         public static var ember: NSColor {
             accentDynamic(name: "ember",
                           // LIGHT IS DEEP ENOUGH TO BE TELLABLE FROM GOLD, and
@@ -674,7 +677,7 @@ public enum Tokens {
                           // stay strictly darker than their bases.
                           full: WarmVariants(dark: 0x8A6A2F, darkHighContrast: 0xA5824A,
                                              light: 0x7A5E2A, lightHighContrast: 0x5E4922),
-                          subtle: WarmVariants(dark: 0x6D5B34, darkHighContrast: 0x877146,
+                          subtle: WarmVariants(dark: 0x7D6B44, darkHighContrast: 0x877146,
                                                light: 0x71613B, lightHighContrast: 0x5C5030))
         }
 
@@ -735,7 +738,7 @@ public enum Tokens {
         /// Full, but the bead must be TELLABLE from the wire it lands on, so
         /// each value clears 1.5:1 against both Subtle wire tones of its
         /// appearance. Dark `#EBCE88` = 1.74:1 vs Subtle `gold` `#B99B53` /
-        /// 4.29:1 vs Subtle `ember` `#6D5B34`, and 11.73:1 vs `panel` /
+        /// 3.38:1 vs Subtle `ember` `#7D6B44`, and 11.73:1 vs `panel` /
         /// 10.30:1 vs `raised`; dark Increase Contrast `#FFE39E` = 1.69:1 vs
         /// Subtle IC `gold` `#CBAF6A` / 3.73:1 vs Subtle IC `ember` `#877146`,
         /// 14.31:1 vs `panel`. Light `#D1BC8A` = 2.21:1 vs Subtle `gold`

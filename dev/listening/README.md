@@ -3,7 +3,7 @@
 `unattended-night.sh` runs the measurable parts of
 `dev/notes/bt-sync-discovery/runbooks/00-listening-evening-m1.md` on the second
 Mac (`SUMUP-M9Y197RFVG.local`, user `alechamilton`) with nobody in the room. It
-loops the click track, records the built-in mic during each block, and writes
+plays a 75-minute click file with `afplay`, records the built-in mic, and writes
 `results/<date>_<time>/summary.md`. `launch-tonight.sh` starts it at a clock time.
 
 | Block | Selection | Length | From the runbooks |
@@ -46,9 +46,8 @@ more relaunch, then the block is skipped.
 4. `brew install blueutil ffmpeg`; `python3 -m pip install numpy` (or set `PYTHON=`).
 5. Grant permissions once while you are there, in Terminal, from
    `~/listening`:
-   - `./unattended-night.sh --dry-run`; Allow Microphone, "Terminal wants to
-     control QuickTime Player" and Bluetooth. About 2 minutes; no "DRY RUN
-     FALLBACK" note in its summary means the mic and QuickTime work.
+   - `./unattended-night.sh --dry-run`; Allow Microphone and Bluetooth. About 2
+     minutes; no "DRY RUN FALLBACK" note in its summary means the mic works.
    - `osascript -e 'tell application id "com.audiout.Audiout.dev" to quit'` and
      click Allow on "Terminal wants to control Audiout Dev".
 6. `./unattended-night.sh --list-devices`; paste the ids into `MOVE1_ID`,
@@ -71,7 +70,7 @@ seen. Names come from blueutil; no telemetry line has both an id and a name.
 
 ### Why it starts inside the logged-in session
 
-macOS grants Microphone, Automation (one app scripting another) and Bluetooth to
+macOS grants Microphone, Bluetooth and Automation (quitting Audiout Dev) to
 the app that started a process; a process started over ssh never gets a prompt.
 So a one-shot LaunchAgent in `gui/$(id -u)` (the logged-in user's launchd domain)
 opens Terminal, which holds the grants from step 5, to run the driver.
@@ -93,8 +92,9 @@ B is paused); every selected Bluetooth speaker logged `bt_clock_deviation` in th
 last 90 s; the load is under 4. A failing check writes `ALERT <block> <time>
 <check> <value>`; three in a row on one check write `ABORT` and end the block.
 Then `BLOCK-START`, `BLOCK-END` and `DONE`. Before Block A a 20 s probe runs the
-checks once and any ALERT stops the run with what to fix. The QuickTime recorder
-has no file until it stops, so its mic and click checks show `n/a`.
+checks once and any ALERT stops the run with what to fix. An `audio` check reads
+the app's newest `stream_health` line (peak above -60 dBFS or `silent_s` 0); on
+failure it starts a fresh `afplay`, which follows the current default output.
 
 Watch from another Mac (the driver prints the folder at start):
 ```

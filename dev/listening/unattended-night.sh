@@ -16,9 +16,13 @@
 # write results/<date>/summary.md.
 #
 # --dry-run: every phase lasts 10 s, Audiout is not relaunched and Bluetooth is
-# not touched. Exercises QuickTime, recording, conversion, analysis and the
-# summary on any Mac. If the mic or QuickTime cannot be used it falls back to a
-# synthetic recording and says so in the summary.
+# not touched. Exercises afplay, recording, conversion, analysis and the
+# summary on any Mac. If the mic cannot be used it falls back to a synthetic
+# recording and says so in the summary.
+#
+# Playback is afplay of a 75-minute copy of the click track, never QuickTime:
+# in the second smoke run QuickTime kept playing but its output left Audiout's
+# aggregate device after about 16 s.
 #
 # --smoke: the real run, shortened for a rehearsal with the owner in the room:
 # Block A 2 min (disconnect at minute 1), Block B 20 s / 30 s / 20 s, Block C 2 min.
@@ -52,15 +56,18 @@ WAIT_C_S=1800           # how long to wait for that confirmation
 AIRPLAY_NAME="AirPlay speaker"
 MAC_ID=local-mac         # This Mac; the same id on every Mac
 MAC_VOLUME=50            # system output volume set before each relaunch; Audiout adopts it as its master level
-# Recording: auto = ffmpeg if installed, else QuickTime. MIC_INDEX empty = find
-# the built-in mic in `ffmpeg -f avfoundation -list_devices true -i ""`.
-RECORDER=${RECORDER:-auto}
+# Recording: ffmpeg. MIC_INDEX empty = find the built-in mic in
+# `ffmpeg -f avfoundation -list_devices true -i ""`.
 MIC_INDEX=""
 MIC_PATTERN='MacBook.*Microphone|Built-in Microphone'
 CLICK_WAV="$HERE/click-track-3s.wav"      # beside the script (the ~/listening copy); else the repo's runbooks folder
 ANALYSER="$HERE/click-pair-spacing.py"
 [[ -f $CLICK_WAV ]] || CLICK_WAV="$HERE/../notes/bt-sync-discovery/runbooks/click-track-3s.wav"
 [[ -f $ANALYSER ]] || ANALYSER="$HERE/../notes/bt-sync-discovery/runbooks/click-pair-spacing.py"
+LONG_WAV="$HERE/click-track-70min.wav"   # the 30 s click track 151 times (75.5 min), made once with ffmpeg
+LONG_LOOPS=150
+AUDIO_PEAK_DB=-60    # stream_health peak_dbfs above this (or silent_s 0) means the app is getting audio
+AUDIO_WAIT_S=15      # after a play command, wait this long for such a stream_health line
 PYTHON=${PYTHON:-python3}
 TELEMETRY="$HOME/Library/Logs/Audiout/telemetry.jsonl"
 RESULTS_ROOT="$HERE/results"
@@ -72,7 +79,7 @@ B_PLAY_S=60
 B_PAUSE_S=90
 C_S=3600
 JUMP_MS=5            # an offset change bigger than this between 3 s rows is a jump
-OSA_TIMEOUT_S=30     # an osascript call longer than this is waiting on a permission prompt
+OSA_TIMEOUT_S=30     # limit on the osascript call that quits Audiout Dev
 BT_CONNECT_S=45      # per connect attempt: wait this long for blueutil --is-connected 1 (two attempts)
 CA_WAIT_S=10         # then wait this long for the speaker to show as a Core Audio output
 LOAD_EVERY_S=60      # load.csv sample interval
@@ -204,10 +211,13 @@ need "$PYTHON" "install Python 3"
 [[ -f $CLICK_WAV ]] || die "click track not found: $CLICK_WAV"
 [[ -f $ANALYSER ]] || die "click-pair-spacing.py not found: $ANALYSER"
 [[ -f $TELEMETRY ]] || die "no telemetry file: $TELEMETRY (launch Audiout Dev once)"
-if [[ $RECORDER == auto ]]; then
-  command -v ffmpeg >/dev/null && RECORDER=ffmpeg || RECORDER=quicktime
+need afplay "part of macOS"
+need ffmpeg "brew install ffmpeg"
+if [[ ! -s $LONG_WAV ]]; then
+  log "making $LONG_WAV (the click track $((LONG_LOOPS + 1)) times)"
+  ffmpeg -nostdin -hide_banner -loglevel error -y -stream_loop $LONG_LOOPS -i "$CLICK_WAV" -c copy "$LONG_WAV" \
+    || { rm -f "$LONG_WAV"; die "ffmpeg could not make $LONG_WAV"; }
 fi
-[[ $RECORDER == ffmpeg ]] && need ffmpeg "brew install ffmpeg"
 BLUE_PROBLEM=""
 if ! command -v blueutil >/dev/null; then BLUE_PROBLEM="blueutil not installed"
 elif ! to 15 blueutil --power >/dev/null 2>&1; then BLUE_PROBLEM="blueutil cannot reach Bluetooth (Terminal needs Bluetooth access in Privacy & Security)"; fi
@@ -290,14 +300,14 @@ fi
 if [[ $MODE == check ]]; then
   bt_connect_wait $MOVE1_ID || die "blueutil could not connect $MOVE1_ID; a real run reconnects the Moves before every relaunch"
   log "check: blueutil connected $MOVE1_ID (left connected)"
-  log "check passed: tools present, ids known, build has $RECONNECT_KEY; recorder $RECORDER; ${BLUE_PROBLEM:-blueutil works}"
+  log "check passed: tools present, ids known, build has $RECONNECT_KEY; ${BLUE_PROBLEM:-blueutil works}"
   exit 0
 fi
 
 SUFFIX=""; (( DRY )) && SUFFIX=-dry-run; (( SMOKE )) && SUFFIX=-smoke
 OUT="$RESULTS_ROOT/$(date +%Y-%m-%d_%H%M)$SUFFIX"
 mkdir -p "$OUT"
-log "results: $OUT; recorder: $RECORDER; dry run: $DRY; smoke: $SMOKE"
+log "results: $OUT; dry run: $DRY; smoke: $SMOKE"
 log "watch it: tail -F '$OUT/status.log'"
 
 # Once a minute for the whole run: the 1-minute load average and the busiest
@@ -313,7 +323,7 @@ print -n -- - > "$OUT/.block"
   done
 ) &
 LOAD_PID=$!
-trap 'kill $LOAD_PID 2>/dev/null' EXIT
+trap 'kill $LOAD_PID 2>/dev/null; [[ -n $PLAY_PID ]] && kill $PLAY_PID 2>/dev/null' EXIT
 [[ -n $BLUE_PROBLEM ]] && note "$BLUE_PROBLEM: Block A's disconnect and the connection checks are skipped"
 if (( DRY )); then
   [[ -n $KEY_PROBLEM ]] && note "a real run would stop here: $KEY_PROBLEM"
@@ -326,23 +336,65 @@ fi
 tel_size() { stat -f %z "$TELEMETRY" }
 now() { print -n -- $EPOCHREALTIME }
 
-FAKE_AUDIO=0      # 1 once the mic or QuickTime turned out to be unusable (dry run only)
-QT_DOC=${CLICK_WAV:t}
+FAKE_AUDIO=0      # 1 once the mic turned out to be unusable (dry run only)
 
-qt() { to $OSA_TIMEOUT_S osascript -e "tell application \"QuickTime Player\" to $1" >/dev/null }
+# afplay plays to the default output as it is when afplay STARTS, so a fresh
+# afplay is started whenever the app may have changed that (after a launch, and
+# when the audio check fails). Pause is a kill; resume starts again from 0 (the
+# clicks are periodic, so the offset is unchanged).
+PLAY_PID=""
 play_start() {
-  (( FAKE_AUDIO )) && return 0
-  to $OSA_TIMEOUT_S osascript >/dev/null <<EOF
-tell application "QuickTime Player"
-  set d to open (POSIX file "$CLICK_WAV")
-  set looping of d to true
-  play d
-end tell
+  play_stop
+  afplay "$LONG_WAV" 2>>"$OUT/driver.log" &
+  PLAY_PID=$!
+  sleep 0.5; kill -0 $PLAY_PID 2>/dev/null || { log "afplay exited at once"; PLAY_PID=""; return 1; }
+}
+play_stop() {
+  [[ -n $PLAY_PID ]] || return 0
+  kill $PLAY_PID 2>/dev/null; wait $PLAY_PID 2>/dev/null; PLAY_PID=""
+  return 0
+}
+play_pause() { play_stop }
+play_resume() { play_start }
+
+# Is audio reaching the app? The newest stream_health lines (every 5 s while it
+# streams) written after byte $1 and at most $2 s old. Prints "peak=<dB> silent_s=<n>"
+# or what is missing; exit 0 when the peak is above AUDIO_PEAK_DB or silent_s is 0.
+audio_flow() {  # from_byte max_age_s
+  "$PYTHON" - "$TELEMETRY" "$1" "$2" "$AUDIO_PEAK_DB" <<'EOF'
+import sys, os, json, datetime
+tel, start, max_age, floor = sys.argv[1], int(sys.argv[2]), float(sys.argv[3]), float(sys.argv[4])
+f = open(tel, "rb"); f.seek(max(start, os.path.getsize(tel) - 400_000))
+now = datetime.datetime.now(datetime.timezone.utc); fresh = []
+for l in f.read().decode("utf-8", "replace").splitlines():
+    if '"stream_health"' not in l: continue
+    try: r = json.loads(l); ts = datetime.datetime.fromisoformat(r["ts"].replace("Z", "+00:00"))
+    except (ValueError, KeyError): continue
+    if (now - ts).total_seconds() <= max_age: fresh.append(r)
+if not fresh: print(f"peak=none (no stream_health line in the last {max_age:g} s)"); sys.exit(1)
+peak = max(float(r.get("peak_dbfs", -120)) for r in fresh); silent = min(int(r.get("silent_s", 999)) for r in fresh)
+print(f"peak={peak:.1f} silent_s={silent}")
+sys.exit(0 if peak > floor or silent == 0 else 1)
 EOF
 }
-play_pause() { (( FAKE_AUDIO )) && return 0; qt "pause document \"$QT_DOC\"" }
-play_resume() { (( FAKE_AUDIO )) && return 0; qt "play document \"$QT_DOC\"" }
-play_stop() { (( FAKE_AUDIO )) && return 0; qt "close document \"$QT_DOC\" saving no" }
+
+# Start the long file from 0 and prove within AUDIO_WAIT_S that the app gets audio;
+# rewind and play once more if not, then fail with what stream_health said.
+play_verified() {
+  if (( DRY )); then play_start; log "dry run: audio-flow check skipped (Audiout Dev not relaunched)"; return 0; fi
+  local try from got end
+  for try in 1 2; do
+    from=$(tel_size); play_start || log "play command failed (try $try)"
+    end=$(( SECONDS + AUDIO_WAIT_S ))
+    while (( SECONDS < end )); do
+      got=$(audio_flow $from 6) && { log "audio flowing: $got (try $try)"; return 0; }
+      sleep 2
+    done
+    log "audio not flowing after play (try $try): $got"
+  done
+  note "audio did not reach Audiout Dev after two play commands: $got"
+  return 1
+}
 
 find_mic() {
   [[ -n $MIC_INDEX ]] && return 0
@@ -355,41 +407,14 @@ find_mic() {
 REC_PID=""
 rec_start() {  # $1 = raw file without extension
   (( FAKE_AUDIO )) && return 0
-  if [[ $RECORDER == ffmpeg ]]; then
-    ffmpeg -nostdin -hide_banner -loglevel error -f avfoundation -i ":$MIC_INDEX" -ac 1 -y "$1.wav" 2>>"$OUT/ffmpeg.log" &
-    REC_PID=$!
-  else
-    to $OSA_TIMEOUT_S osascript >/dev/null <<'EOF'
-tell application "QuickTime Player"
-  set r to new audio recording
-  start r
-end tell
-EOF
-  fi
+  ffmpeg -nostdin -hide_banner -loglevel error -f avfoundation -i ":$MIC_INDEX" -ac 1 -y "$1.wav" 2>>"$OUT/ffmpeg.log" &
+  REC_PID=$!
 }
-rec_stop() {  # $1 = raw file without extension; leaves $1.wav or $1.m4a
+rec_stop() {  # $1 = raw file without extension; leaves $1.wav
   (( FAKE_AUDIO )) && return 0
-  if [[ $RECORDER == ffmpeg ]]; then
-    kill -TERM $REC_PID 2>/dev/null || true; wait $REC_PID 2>/dev/null || true
-  else
-    # A stopped recording reopens as a new document; `save` fails on it, `export` works.
-    to 600 osascript >/dev/null <<EOF || return 1
-tell application "QuickTime Player"
-  set r to first document whose name is not "$QT_DOC"
-  stop r
-  delay 2
-  set r to first document whose name is not "$QT_DOC"
-  export r in (POSIX file "$1.m4a") using settings preset "Audio Only"
-end tell
-EOF
-    local size=-1 i; for i in {1..300}; do  # export can return before the file is complete
-      [[ -f $1.m4a && $(stat -f %z "$1.m4a") == $size ]] && break
-      [[ -f $1.m4a ]] && size=$(stat -f %z "$1.m4a"); sleep 2
-    done
-    qt "close (first document whose name is not \"$QT_DOC\") saving no"
-  fi
+  kill -TERM $REC_PID 2>/dev/null || true; wait $REC_PID 2>/dev/null || true
 }
-raw_file() { [[ -f $1.wav ]] && print -n -- "$1.wav" || print -n -- "$1.m4a" }
+raw_file() { print -n -- "$1.wav" }
 
 # Peak of a 16-bit recording; 0 when the mic gave digital silence (no permission).
 peak() {
@@ -415,13 +440,13 @@ w.writeframes(np.clip(x, -32767, 32767).astype(np.int16).tobytes()); w.close()
 EOF
 }
 
-# Before the night starts: can this process drive QuickTime and hear the mic?
+# Before the night starts: does afplay play and can this process hear the mic?
 preflight() {
-  [[ $RECORDER == ffmpeg ]] && find_mic
+  find_mic
   local why=""
-  play_start 2>>"$OUT/driver.log" || why="QuickTime could not be driven by osascript within $OSA_TIMEOUT_S s (Automation permission: error -1743 means denied, a timeout means a prompt is waiting on screen)"
+  play_start || why="afplay could not play $LONG_WAV"
   if [[ -z $why ]]; then
-    rec_start "$OUT/preflight" 2>>"$OUT/driver.log" || why="recording could not start (QuickTime recording timed out or failed)"
+    rec_start "$OUT/preflight" 2>>"$OUT/driver.log" || why="recording could not start"
     sleep 4
     [[ -z $why ]] && { rec_stop "$OUT/preflight" 2>>"$OUT/driver.log" || why="recording could not stop or save"; }
     play_stop 2>>"$OUT/driver.log" || true
@@ -434,7 +459,7 @@ preflight() {
       fi
     fi
   fi
-  [[ -z $why ]] && { log "preflight: QuickTime and mic both work"; return 0; }
+  [[ -z $why ]] && { log "preflight: afplay and mic both work"; return 0; }
   (( DRY )) || die "preflight failed: $why. Run the dry run once while present to approve the prompts."
   FAKE_AUDIO=1
   note "DRY RUN FALLBACK: $why. Playback and recording are replaced by a synthetic recording (two clicks per 3 s, the second 42 ms later)."
@@ -519,10 +544,14 @@ select_speakers() {  # ids...
     bt_prepare "$@" || { log "try $try: the Bluetooth links could not be set up"; continue; }
     from=$(tel_size); t0=$SECONDS
     open "$APP"
+    # afplay must start after the app has taken the default output (its aggregate)
+    local w; for w in {1..30}; do tail -c +$((from + 1)) "$TELEMETRY" | grep -q '"evt":"default_output_change"' && break; sleep 1; done
+    (( w < 30 )) || log "try $try: no default_output_change line within 30 s of launch; starting playback anyway"
     play_start || log "playback did not start"   # sinks only build with audio flowing
-    sleep $LIVE_CHECK_S
+    sleep $(( LIVE_CHECK_S > SECONDS - t0 ? LIVE_CHECK_S - (SECONDS - t0) : 0 ))
     got=$(selection_mismatch "$ROUTING" "$@")
     live=$(live_mismatch $from "$@")
+    local flow; flow=$(audio_flow $from 15) || live+="${live:+; }no audio reaching the app ($flow)"
     if [[ -z $got && -z $live ]]; then
       log "selection check passed for [$*]: routing.json and telemetry agree (try $try)"
       local left=$(( SETTLE_S - (SECONDS - t0) )); (( left > 0 )) && sleep $left
@@ -596,7 +625,7 @@ status() { print -r -- "$*" | tee -a "$OUT/status.log" }
 typeset -A ALERT_RUN       # consecutive alerts per check in the current block
 B_ABORT=0; B_PAUSED=0; B_REC_PREV=0; B_NEXT=0
 live_raw() {  # the growing recording the watchdog can read, or empty when there is none
-  (( FAKE_AUDIO )) || [[ $RECORDER != ffmpeg ]] && return 0
+  (( FAKE_AUDIO )) && return 0
   print -n -- "$OUT/block$B_NAME-raw.wav"
 }
 watch_check() {
@@ -604,6 +633,10 @@ watch_check() {
   local -a lines=("${(@f)out}"); local fields=$lines[1] l c
   [[ $fields == rec=<->* ]] && B_REC_PREV=${${fields#rec=}%% *}
   local -a fails=(${(@)lines[2,-1]:#})
+  if (( ! DRY && ! B_PAUSED )); then  # the source itself: lost audio shows here within one tick
+    local flow; flow=$(audio_flow 0 15) || { fails+=("audio $flow"); log "no audio reaching the app ($flow); starting a fresh afplay"; play_start || true; }
+    fields+=" audio=${${flow#peak=}%% *}"
+  fi
   local -A failed
   if (( ! $#fails )); then status "OK $B_NAME $t $fields"; ALERT_RUN=(); return 0; fi
   for l in $fails; do
@@ -618,8 +651,12 @@ watch_check() {
 watch_sleep() {  # seconds; sleeps, checking every WATCH_EVERY_S; returns at once after an abort
   local end=$(( SECONDS + $1 )) next
   while (( ! B_ABORT && SECONDS < end )); do
+    if (( ! B_PAUSED )) && [[ -n $PLAY_PID ]] && ! kill -0 $PLAY_PID 2>/dev/null; then
+      log "afplay ended; starting it again"; play_start || true   # a block longer than the file
+    fi
     (( SECONDS >= B_NEXT )) && { watch_check; B_NEXT=$(( SECONDS + WATCH_EVERY_S )); }
-    next=$(( B_NEXT < end ? B_NEXT : end )); (( next > SECONDS )) && sleep $(( next - SECONDS ))
+    next=$(( B_NEXT < end ? B_NEXT : end )); next=$(( next < SECONDS + 5 ? next : SECONDS + 5 ))
+    (( next > SECONDS )) && sleep $(( next - SECONDS ))
   done
   return 0
 }
@@ -629,10 +666,11 @@ watch_sleep() {  # seconds; sleeps, checking every WATCH_EVERY_S; returns at onc
 probe_check() {  # ids...
   local raw="$OUT/probe-raw" t=$(date +%H:%M:%S)
   play_start; rec_start "$raw"; sleep $PROBE_S
-  local p=""; (( FAKE_AUDIO )) || [[ $RECORDER != ffmpeg ]] || p="$raw.wav"
+  local p=""; (( FAKE_AUDIO )) || p="$raw.wav"
   local out=$(watch_probe "$p" 0 $PROBE_S 0 "$@")
   rec_stop "$raw" || true; play_stop || true
   local -a lines=("${(@f)out}"); local -a fails=(${(@)lines[2,-1]:#}); local l fix=""
+  if (( ! DRY )); then local flow; flow=$(audio_flow 0 15) || fails+=("audio $flow"); lines[1]+=" audio=${${flow#peak=}%% *}"; fi
   log "pre-flight probe: $lines[1]"
   if (( ! $#fails )); then status "OK PREFLIGHT $t $lines[1]"; return 0; fi
   for l in $fails; do
@@ -642,6 +680,7 @@ probe_check() {  # ids...
       rms) fix+="The mic hears nothing (${l#* } dBFS): check Terminal's Microphone access and the input level in Sound settings. " ;;
       clicks) fix+="Too few clicks heard (${l#* }): check the speakers are on, selected in Audiout Dev, loud enough and 1 to 2 m away. " ;;
       clock) fix+="No bt_clock_deviation line from ${${l#* }%:0} in $CLOCK_WINDOW_S s: that Move is not playing through Audiout Dev; check it is connected and selected. " ;;
+      audio) fix+="No audio is reaching Audiout Dev (${l#* }): check afplay is running and Audiout Dev holds the default output (its aggregate). " ;;
       load) fix+="The Mac is busy (load ${l#* }): stop that work, including test runs routed to this Mac, and start again. " ;;
     esac
   done
@@ -682,9 +721,10 @@ block_skip() { print -r -- "$1"$'\tskipped: '"$2"$'\t0\t0\t0\t\t' >> "$OUT/block
 preflight
 
 # Block A: both Moves.
-if select_speakers $IDS_A; then
-  probe_check $IDS_A
-  play_start; block_begin A $IDS_A
+if ! select_speakers $IDS_A; then block_skip A "both Moves could not be connected or selected (see driver.log)"
+elif probe_check $IDS_A && ! play_verified; then block_skip A "no audio reached the app after two play commands (see notes.txt)"
+else
+  block_begin A $IDS_A
   watch_sleep $A_FIRST_S
   if (( B_ABORT )); then :
   elif (( DRY )); then mark toggle_skipped_dry_run; watch_sleep $A_OFF_S
@@ -695,11 +735,13 @@ if select_speakers $IDS_A; then
   else mark toggle_skipped_no_blueutil; watch_sleep $A_OFF_S; fi
   watch_sleep $A_REST_S
   block_end
-else block_skip A "both Moves could not be connected or selected (see driver.log)"; fi
+fi
 
 # Block B: Move 1 plus This Mac. The second Move is disconnected so it cannot play.
-if select_speakers $IDS_B; then
-  play_start; block_begin B $IDS_B
+if ! select_speakers $IDS_B; then block_skip B "Move 1 could not be connected or selected with This Mac (see driver.log)"
+elif ! play_verified; then block_skip B "no audio reached the app after two play commands (see notes.txt)"
+else
+  block_begin B $IDS_B
   watch_sleep $B_PLAY_S
   if (( ! B_ABORT )); then
     mark pause; play_pause || log "pause failed"; B_PAUSED=1  # the mic and click checks expect silence now
@@ -708,7 +750,7 @@ if select_speakers $IDS_B; then
     watch_sleep $B_PLAY_S
   fi
   block_end
-else block_skip B "Move 1 could not be connected or selected with This Mac (see driver.log)"; fi
+fi
 
 # Block C: one Move on Bluetooth plus the other Move in Wi-Fi mode. Someone has
 # to press the Move's button, so wait for Enter or the go file.
@@ -729,11 +771,13 @@ wait_for_wifi_switch() {
 }
 if (( WITH_AIRPLAY )); then
   if ! wait_for_wifi_switch; then block_skip C "nobody confirmed the switch to Wi-Fi mode within $WAIT_C_S s"
-  elif select_speakers $IDS_C; then
-    play_start; block_begin C $IDS_C
+  elif ! select_speakers $IDS_C; then block_skip C "the Bluetooth Move or the Move in Wi-Fi mode could not be selected (see driver.log)"
+  elif ! play_verified; then block_skip C "no audio reached the app after two play commands (see notes.txt)"
+  else
+    block_begin C $IDS_C
     watch_sleep $C_S
     block_end
-  else block_skip C "the Bluetooth Move or the Move in Wi-Fi mode could not be selected (see driver.log)"; fi
+  fi
 fi
 (( ! DRY && ! WITH_AIRPLAY )) && { bt_connect_wait $MOVE2_ID || true; }
 if [[ $RECONNECT_WAS == off || $RECONNECT_WAS == 0 ]]; then

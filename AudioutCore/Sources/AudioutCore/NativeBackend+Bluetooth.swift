@@ -1319,10 +1319,23 @@ extension NativeBackend: BTOutputControlling {
     }
 
     public func resetBTAlignment(forDevice id: String) {
-        btTrimLock.withLock {
-            btLatencyMsByUID.removeValue(forKey: id)
-            btTrimsByUID.removeValue(forKey: id)
+        resetBTAlignment(forDevice: id, source: "drawer")
+    }
+
+    /// `source` names who asked — the drawer's Reset or the phone's Clear —
+    /// on the one line a reset leaves. A reset on a playing speaker is
+    /// otherwise silent: both of its seeks lengthen the delay, and only a
+    /// clamped shortening seek logs.
+    func resetBTAlignment(forDevice id: String, source: String) {
+        let (latency, trim) = btTrimLock.withLock {
+            (btLatencyMsByUID.removeValue(forKey: id), btTrimsByUID.removeValue(forKey: id))
         }
+        Telemetry.log(.localPlayback, "bt_alignment_reset", [
+            "uid": id,
+            "source": source,
+            "latencyMs": latency.map { String(Int($0)) } ?? "none",
+            "trimMs": trim.map { String(Int($0)) } ?? "none",
+        ])
         // ONE read-modify-write of the file for both maps — and a genuine
         // delete, which `save`/`saveLatencies` (whole-map overwrites) could
         // only express by round-tripping the maps back out again.
@@ -2354,7 +2367,7 @@ extension NativeBackend: BTOutputControlling {
         // set". Discarding here also means the order the phone sends the two
         // commands in cannot change the outcome.
         endCompanionTickSession(targetID: targetID, persist: false)
-        resetBTAlignment(forDevice: targetID)
+        resetBTAlignment(forDevice: targetID, source: "phone")
         btTrimLock.withLock { _ = companionPreMeasurementLatencyMsByUID.removeValue(forKey: targetID) }
         btSpeakerTiming.clearAligned(uid: targetID)
     }

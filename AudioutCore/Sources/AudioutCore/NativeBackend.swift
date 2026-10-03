@@ -346,6 +346,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// to `.connected` (or the degrade to `.failed`) removes it. On `stateQueue`.
     var btConnectingDeadlines: [String: Date] = [:]
 
+    /// When each Bluetooth UID's sink last died and was rebuilt, so a second
+    /// death inside 10 s marks the speaker gone instead of looping on a
+    /// zombie object id. On `stateQueue`.
+    var btSinkDeathAt: [String: Date] = [:]
+
     /// The armed poll that asks the sink manager which devices have started
     /// rendering. `nil` = nothing is breathing, so nothing is scheduled — the
     /// poll exists only for the duration of a connect. On `stateQueue`.
@@ -604,10 +609,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     static let wholeSystemStreamIDBase: UInt32 = 0x8000_0000
 
     /// Test seam: a BT `Device.id` (its Core Audio UID) → the live
-    /// `AudioObjectID` a per-device sink pins its engine to. `nil` (production)
-    /// falls back to `aggregateControl.resolveDeviceID(forUID:)` — the HAL's
-    /// own translation. Resolved fresh at each apply, never cached: object ids
-    /// go stale across a disconnect/rejoin while UIDs don't.
+    /// `AudioObjectID` a per-device sink pins its engine to. When set it is
+    /// authoritative, nil included: Core Audio is never consulted. Unset
+    /// (production), the sink uses `BTDeviceEnumerator.liveDeviceID(forUID:)`.
+    /// Resolved fresh at each apply, never cached: object ids go stale across a
+    /// disconnect/rejoin while UIDs don't.
     var btDeviceIDForUID: (@Sendable (String) -> AudioObjectID?)?
 
     /// The last BT decisions `setOutputSet` committed — enable, selected uids,

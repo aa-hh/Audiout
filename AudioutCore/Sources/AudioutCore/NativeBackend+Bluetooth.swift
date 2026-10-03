@@ -425,7 +425,7 @@ extension NativeBackend {
             // contributes no sink; it re-resolves on the next selection change
             // (reconnect-driven re-application is BT-RECONNECT's, Wave 4).
             let specs = uids.compactMap { uid in
-                let deviceID = btDeviceIDForUID?(uid) ?? aggregateControl.resolveDeviceID(forUID: uid)
+                let deviceID = resolveBTDeviceID(forUID: uid)
                 return deviceID.map { BTSyncedSink.DeviceSpec(deviceID: $0, uid: uid) }
             }
             // Departing speakers leave BEFORE the reference moves: a composition
@@ -629,6 +629,66 @@ extension NativeBackend {
         btLastUsedLock.withLock { btLastUsed }
     }
 
+    /// A per-device sink tore itself down: its device object died, or its
+    /// render callback stalled while fed. A UID that still resolves gets one
+    /// rebuild on the fresh object id; one that does not, or a second death
+    /// within 10 s, is a speaker that is gone, and its row says so. Callable
+    /// from any queue.
+    func handleBTSinkDead(uid: String) {
+        stateQueue.async { [weak self] in
+            guard let self else { return }
+            self.btEnumerator?.refresh()
+            let now = Date()
+            let resolves = self.resolveBTDeviceID(forUID: uid) != nil
+            let diedRecently = self.btSinkDeathAt[uid].map { now.timeIntervalSince($0) < 10 } ?? false
+            if resolves && !diedRecently {
+                self.btSinkDeathAt[uid] = now
+                self.reapplyBTSinkLocked()
+                return
+            }
+            self.markBTDeviceLostLocked(uid)
+            self.reconcileSilenceWatchdog()
+            self.reapplyBTSinkLocked()
+        }
+    }
+
+    /// UID → the object id a per-device sink pins to. A set ``btDeviceIDForUID``
+    /// owns the answer, nil included, so a test never reaches Core Audio.
+    private func resolveBTDeviceID(forUID uid: String) -> AudioObjectID? {
+        if let seam = btDeviceIDForUID { return seam(uid) }
+        return BTDeviceEnumerator.liveDeviceID(forUID: uid)
+    }
+
+    /// The per-device steps of a Bluetooth link loss: the row goes unavailable
+    /// and `.off` (a `.failed` story survives until retry or return), the
+    /// connect hold ends, and the hardware-volume watch drops. On `stateQueue`.
+    private func markBTDeviceLostLocked(_ id: String) {
+        guard var device = known[id] else { return }
+        if device.isAvailable {
+            device.isAvailable = false
+            commitKnownDevice(id, device)
+        }
+        btSpeakerTiming.noteDisconnected(uid: id)
+        btConnectingDeadlines[id] = nil
+        if case .failed = device.connectionState {
+            // keep the failure story
+        } else {
+            setConnectionState(.off, for: id)
+        }
+        reevaluateBTHardwareControlLocked(id)
+        logBTAvailabilityLocked(id)
+    }
+
+    /// Local-only: without it a speaker dropping while selected leaves no
+    /// trace of the edge in the log. On `stateQueue`.
+    private func logBTAvailabilityLocked(_ id: String) {
+        Telemetry.log(.localPlayback, "bt_device_availability", [
+            "uid": id,
+            "available": known[id]?.isAvailable == true ? "true" : "false",
+            "selected": expectedSelected.contains(id) ? "true" : "false",
+        ])
+    }
+
     /// Fold a full BT enumeration into the model, through the same
     /// `known`/`order`/`emit` flow AirPlay discovery uses. A BT device that
     /// leaves the merged list entirely (unpaired mid-session) goes unavailable
@@ -697,19 +757,14 @@ extension NativeBackend {
                             } else {
                                 setConnectionState(.off, for: id)
                             }
+                            // Availability is an input to the hardware-volume
+                            // decision (BT-HW-VOL): a link-up re-enters control
+                            // with a fresh device id, a link-down drops the watch.
+                            reevaluateBTHardwareControlLocked(id)
+                            logBTAvailabilityLocked(id)
                         } else {
-                            btSpeakerTiming.noteDisconnected(uid: id)
-                            btConnectingDeadlines[id] = nil
-                            if case .failed = existing.connectionState {
-                                // keep the failure story
-                            } else {
-                                setConnectionState(.off, for: id)
-                            }
+                            markBTDeviceLostLocked(id)
                         }
-                        // Availability is an input to the hardware-volume
-                        // decision (BT-HW-VOL): a link-up re-enters control
-                        // with a fresh device id, a link-down drops the watch.
-                        reevaluateBTHardwareControlLocked(id)
                     }
                 }
             } else {
@@ -745,6 +800,7 @@ extension NativeBackend {
             if expectedSelected.contains(id) { desiredAvailabilityMoved = true }
             commitKnownDevice(id, device)
             reevaluateBTHardwareControlLocked(id)
+            logBTAvailabilityLocked(id)
         }
         // BT-BACKEND: a SELECTED BT id's availability is its audible fact for
         // the silence fallback (`desiredDeviceAudibleLocked` — BT ids never

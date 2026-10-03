@@ -451,11 +451,15 @@ enum BTDeviceSinkError: Error, CustomStringConvertible {
     /// up front instead of debugging silence later.
     case aggregateDevice
     case engineNotRunning
+    /// The object id no longer answers alive: the speaker dropped and macOS
+    /// may have listed it again under a new id.
+    case deviceDead
 
     var description: String {
         switch self {
         case .aggregateDevice: return "aggregate/virtual devices silently no-op under AVAudioEngine"
         case .engineNotRunning: return "engine not running after start"
+        case .deviceDead: return "device object is no longer alive"
         }
     }
 }
@@ -581,6 +585,18 @@ final class BTDeviceSink: @unchecked Sendable {
     /// from a control queue (``lastAudibleRenderNanos()``) — so it lives in one
     /// aligned word, the same idiom ``ReferenceAudioRing``'s armed flag uses.
     private let lastAudibleRenderNanosPtr = UnsafeMutablePointer<Int64>.allocate(capacity: 1)
+    /// Monotonic instant of the last render callback (render thread) and of the
+    /// last `enqueue` (tap thread). Aligned words for the same reason as
+    /// `lastAudibleRenderNanosPtr`; read by the liveness check on `graphQueue`.
+    private let lastRenderCycleNanosPtr = UnsafeMutablePointer<Int64>.allocate(capacity: 1)
+    private let lastEnqueueNanosPtr = UnsafeMutablePointer<Int64>.allocate(capacity: 1)
+    /// A released, fed sink whose render callback has been quiet this long is
+    /// dead: the device clock can keep answering while nothing renders.
+    static let renderStallNanos: Int64 = 2_000_000_000
+    private let deviceIsAlive: @Sendable (AudioObjectID) -> Bool
+    private let onDead: (@Sendable (BTDeviceSink) -> Void)?
+    private var livenessTimer: DispatchSourceTimer?   // graphQueue
+    private var aliveListenerBlock: AudioObjectPropertyListenerBlock?
     private var configChangeObserver: NSObjectProtocol?
     private var rateListenerBlock: AudioObjectPropertyListenerBlock?
     private let listenerQueue: DispatchQueue
@@ -629,9 +645,13 @@ final class BTDeviceSink: @unchecked Sendable {
         maxBufferedSeconds: Double = 11,
         maxRenderFrames: Int = 8192,
         delayNanosProvider: @escaping @Sendable () -> Int64,
-        clockObserver: (@Sendable (String, BTClockStability.Outcome) -> Void)? = nil
+        clockObserver: (@Sendable (String, BTClockStability.Outcome) -> Void)? = nil,
+        deviceIsAlive: @escaping @Sendable (AudioObjectID) -> Bool = BTDeviceSink.halDeviceIsAlive,
+        onDead: (@Sendable (BTDeviceSink) -> Void)? = nil
     ) {
         let channels = max(1, channelCount)
+        self.deviceIsAlive = deviceIsAlive
+        self.onDead = onDead
         self.deviceID = deviceID
         self.deviceUID = deviceUID
         self.renderSampleRate = renderSampleRate
@@ -659,6 +679,8 @@ final class BTDeviceSink: @unchecked Sendable {
         self.scratch = UnsafeMutablePointer<Float>.allocate(capacity: scratchCapacity)
         self.scratch.initialize(repeating: 0, count: scratchCapacity)
         self.lastAudibleRenderNanosPtr.initialize(to: 0)
+        self.lastRenderCycleNanosPtr.initialize(to: 0)
+        self.lastEnqueueNanosPtr.initialize(to: 0)
 
         guard let format = AVAudioFormat(
             standardFormatWithSampleRate: renderSampleRate,
@@ -678,6 +700,8 @@ final class BTDeviceSink: @unchecked Sendable {
         stopLocked()
         scratch.deallocate()
         lastAudibleRenderNanosPtr.deallocate()
+        lastRenderCycleNanosPtr.deallocate()
+        lastEnqueueNanosPtr.deallocate()
     }
 
     /// The monotonic instant this device last rendered real program audio, or
@@ -765,6 +789,12 @@ final class BTDeviceSink: @unchecked Sendable {
             Telemetry.log(.localPlayback, "bt_sink_refused_aggregate", ["uid": deviceUID])
             throw BTDeviceSinkError.aggregateDevice
         }
+        guard deviceIsAlive(deviceID) else {
+            Telemetry.log(.localPlayback, "bt_sink_dead", [
+                "uid": deviceUID, "reason": "device_gone_at_start", "deviceID": String(deviceID),
+            ])
+            throw BTDeviceSinkError.deviceDead
+        }
         // Pin BEFORE the first start — a pin after start is silently ignored.
         // A failed transport read above falls OPEN (a momentarily unreadable
         // real speaker must not be refused); the pin below still targets the
@@ -812,9 +842,16 @@ final class BTDeviceSink: @unchecked Sendable {
         guard running else { throw BTDeviceSinkError.engineNotRunning }
         installEventListenersLocked()
         clockWatcher?.start(nominalRate: nominalRate)
+        let timer = DispatchSource.makeTimerSource(queue: listenerQueue)
+        timer.schedule(deadline: .now() + 1, repeating: 1)
+        timer.setEventHandler { [weak self] in self?.scheduleLivenessCheck() }
+        timer.resume()
+        livenessTimer = timer
     }
 
     private func stopLocked(carryDelay: Bool = false) {
+        livenessTimer?.cancel()
+        livenessTimer = nil
         clockWatcher?.cancel()
         removeEventListenersLocked()
         if running || engine.isRunning {
@@ -860,6 +897,42 @@ final class BTDeviceSink: @unchecked Sendable {
         }
     }
 
+    /// Hop to `graphQueue` and check liveness against the clock as of now.
+    /// Called from the 1 s timer and the alive-flag listener on `listenerQueue`.
+    private func scheduleLivenessCheck() {
+        graphQueue.async { [weak self] in
+            self?.checkLivenessLocked(nowNanos: Self.monotonicNowNanos())
+        }
+    }
+
+    /// Tear the sink down and report it when its device is gone or its render
+    /// callback stalled while fed. An idle sink (nothing fed) or one whose gate
+    /// has not opened never trips: a paused Mac is not a dead speaker.
+    private func checkLivenessLocked(nowNanos now: Int64) {   // on graphQueue
+        guard running else { return }
+        let reason: String
+        if !deviceIsAlive(deviceID) {
+            reason = "device_gone"
+        } else if stateLock.withLock({ released }),
+                  now &- lastEnqueueNanosPtr.pointee <= 1_000_000_000,
+                  now &- lastRenderCycleNanosPtr.pointee > Self.renderStallNanos {
+            reason = "render_stalled"
+        } else {
+            return
+        }
+        Telemetry.log(.localPlayback, "bt_sink_dead", [
+            "uid": deviceUID, "reason": reason, "deviceID": String(deviceID),
+        ])
+        stopLocked()
+        onDead?(self)
+    }
+
+    private static func monotonicNowNanos() -> Int64 {
+        var now = timespec()
+        clock_gettime(CLOCK_MONOTONIC, &now)
+        return SyncTiming.monotonicNanos(now)
+    }
+
     /// Whether the delay gate has OPENED — this device is emitting real audio,
     /// not pre-release silence. A started engine is not yet audible (the gate
     /// holds silence for the whole reference delay), so this, not `running`, is
@@ -882,6 +955,14 @@ final class BTDeviceSink: @unchecked Sendable {
 
     /// Test seam: block until any `requestRebuild` queued so far has run.
     func test_waitForPendingRebuild() { graphQueue.sync {} }
+
+    func test_checkLiveness(nowNanos: Int64) { graphQueue.sync { checkLivenessLocked(nowNanos: nowNanos) } }
+    func test_markReleased() { stateLock.withLock { released = true } }
+    func test_noteRenderCycle(nowNanos: Int64) { lastRenderCycleNanosPtr.pointee = nowNanos }
+    func test_noteEnqueue(nowNanos: Int64) { lastEnqueueNanosPtr.pointee = nowNanos }
+    var test_isRunning: Bool { graphQueue.sync { running } }
+    /// Marks the sink running without starting the engine, so liveness runs with no HAL.
+    func test_forceRunning() { graphQueue.sync { running = true } }
 
     /// Test seam: the tone this sink is holding — proof that a value remembered
     /// by the manager before this sink existed actually reached it.
@@ -930,6 +1011,7 @@ final class BTDeviceSink: @unchecked Sendable {
     /// sink's rate/channel layout is the caller's job (BT-FANOUT).
     func enqueue(interleavedFrames: UnsafePointer<Float>, frameCount: Int, pts: timespec) {
         guard frameCount > 0 else { return }
+        lastEnqueueNanosPtr.pointee = Self.monotonicNowNanos()
         var carriedDelayNanos: Int64?
         var hasReleaseToLog = false
         var hasAnchorToLog = false
@@ -1139,6 +1221,7 @@ final class BTDeviceSink: @unchecked Sendable {
         // Rebase the cycle's mach host time onto CLOCK_MONOTONIC through this sink's own cached offset, healed by the shared helper.
         let cycleStart = SyncTiming.monotonicNanos(
             CoreAudioSystemTap.timespec(fromHostTime: timestamp.pointee.mHostTime, offset: &machToMonotonicOffsetNanos))
+        lastRenderCycleNanosPtr.pointee = cycleStart
 
         let buffer = UnsafeMutableBufferPointer(start: scratch, count: frames * channelCount)
         let producedAudio = renderInterleaved(
@@ -1274,6 +1357,16 @@ final class BTDeviceSink: @unchecked Sendable {
             var address = Self.nominalRateAddress
             AudioObjectAddPropertyListenerBlock(deviceID, &address, listenerQueue, block)
         }
+        // The HAL fires this the moment the object goes away, so a death is not
+        // left to the next timer tick.
+        if aliveListenerBlock == nil {
+            let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+                self?.scheduleLivenessCheck()
+            }
+            aliveListenerBlock = block
+            var address = Self.deviceIsAliveAddress
+            AudioObjectAddPropertyListenerBlock(deviceID, &address, listenerQueue, block)
+        }
     }
 
     private func removeEventListenersLocked() {
@@ -1286,6 +1379,11 @@ final class BTDeviceSink: @unchecked Sendable {
             AudioObjectRemovePropertyListenerBlock(deviceID, &address, listenerQueue, block)
             rateListenerBlock = nil
         }
+        if let block = aliveListenerBlock {
+            var address = Self.deviceIsAliveAddress
+            AudioObjectRemovePropertyListenerBlock(deviceID, &address, listenerQueue, block)
+            aliveListenerBlock = nil
+        }
     }
 
     // MARK: Core Audio property helpers
@@ -1294,6 +1392,20 @@ final class BTDeviceSink: @unchecked Sendable {
         mSelector: kAudioDevicePropertyNominalSampleRate,
         mScope: kAudioObjectPropertyScopeGlobal,
         mElement: kAudioObjectPropertyElementMain)
+
+    private static let deviceIsAliveAddress = AudioObjectPropertyAddress(
+        mSelector: kAudioDevicePropertyDeviceIsAlive,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain)
+
+    /// The HAL's own alive flag. A failed read counts as dead: an object id
+    /// that cannot be read is not one an engine can render into.
+    static let halDeviceIsAlive: @Sendable (AudioObjectID) -> Bool = { device in
+        var address = deviceIsAliveAddress
+        var alive: UInt32 = 0
+        var size = UInt32(MemoryLayout<UInt32>.size)
+        return AudioObjectGetPropertyData(device, &address, 0, nil, &size, &alive) == noErr && alive != 0
+    }
 
     private static func nominalSampleRate(_ device: AudioObjectID) -> Double? {
         var address = nominalRateAddress
@@ -1368,6 +1480,9 @@ final class BTSyncedSink: @unchecked Sendable {
     /// Handed every sink's clock-stability verdicts, keyed by device UID.
     /// `nil` (tests) means no sink watches its clock.
     private let clockObserver: (@Sendable (String, BTClockStability.Outcome) -> Void)?
+    private let deviceIsAlive: @Sendable (AudioObjectID) -> Bool
+    /// Told the UID of a sink that tore itself down, after that sink has left the table.
+    private let sinkDeathObserver: (@Sendable (String) -> Void)?
 
     private let tableLock = NSLock()
     private var sinksByUID: [String: BTDeviceSink] = [:]
@@ -1390,8 +1505,12 @@ final class BTSyncedSink: @unchecked Sendable {
         channelCount: Int = 2,
         btOnlyBufferMs: Int = BTSyncedSink.defaultBTOnlyBufferMs,
         presentationDelayMs: @escaping @Sendable () -> Int,
-        clockObserver: (@Sendable (String, BTClockStability.Outcome) -> Void)? = nil
+        clockObserver: (@Sendable (String, BTClockStability.Outcome) -> Void)? = nil,
+        deviceIsAlive: @escaping @Sendable (AudioObjectID) -> Bool = BTDeviceSink.halDeviceIsAlive,
+        sinkDeathObserver: (@Sendable (String) -> Void)? = nil
     ) {
+        self.deviceIsAlive = deviceIsAlive
+        self.sinkDeathObserver = sinkDeathObserver
         self.renderSampleRate = renderSampleRate
         self.channelCount = max(1, channelCount)
         self.btOnlyBufferMs = btOnlyBufferMs
@@ -1424,14 +1543,21 @@ final class BTSyncedSink: @unchecked Sendable {
 
     /// Reconcile toward exactly `specs`: new devices get a sink (started only
     /// while the manager is armed), vanished devices' sinks stop and drop.
-    /// Unchanged devices are untouched — their sessions keep playing.
+    /// Unchanged devices are untouched — their sessions keep playing. A UID
+    /// that comes back under a different object id is a different device to
+    /// Core Audio: its old sink would render into a dead id, so it is replaced.
     func setDevices(_ specs: [DeviceSpec]) {
         removeDevices(notIn: Set(specs.map(\.uid)))
         var added: [(sink: BTDeviceSink, gain: Float, eq: DeviceEQ)] = []
+        var replaced: [(old: BTDeviceSink, newID: AudioObjectID)] = []
         var shouldStart = false
         tableLock.lock()
         let wantedByUID = Dictionary(specs.map { ($0.uid, $0) }, uniquingKeysWith: { first, _ in first })
-        for (uid, spec) in wantedByUID where sinksByUID[uid] == nil {
+        for (uid, spec) in wantedByUID {
+            if let existing = sinksByUID[uid] {
+                guard existing.deviceID != spec.deviceID else { continue }
+                replaced.append((existing, spec.deviceID))
+            }
             let sink = makeSink(spec)
             sinksByUID[uid] = sink
             added.append((sink, gainByUID[uid] ?? 1, eqByUID[uid] ?? .flat))
@@ -1439,6 +1565,13 @@ final class BTSyncedSink: @unchecked Sendable {
         shouldStart = desiredRunning
         let keepAlive = keepAliveWindowNanos
         tableLock.unlock()
+
+        for (old, newID) in replaced {
+            old.stop()
+            Telemetry.log(.localPlayback, "bt_sink_device_replaced", [
+                "uid": old.deviceUID, "from": String(old.deviceID), "to": String(newID),
+            ])
+        }
 
         if keepAlive > 0 {
             for (sink, _, _) in added { sink.setKeepAliveWindow(nanos: keepAlive) }
@@ -1751,7 +1884,21 @@ final class BTSyncedSink: @unchecked Sendable {
             renderSampleRate: renderSampleRate,
             channelCount: channelCount,
             delayNanosProvider: { [weak self] in self?.delayNanos(forUID: uid) ?? 0 },
-            clockObserver: clockObserver)
+            clockObserver: clockObserver,
+            deviceIsAlive: deviceIsAlive,
+            onDead: { [weak self] dead in self?.sinkDied(dead) })
+    }
+
+    /// Drop `dead` only if it is still the table's sink for its UID: a
+    /// replacement built for the same UID must survive the old instance's late death.
+    private func sinkDied(_ dead: BTDeviceSink) {
+        let uid = dead.deviceUID
+        let removed = tableLock.withLock { () -> Bool in
+            guard sinksByUID[uid] === dead else { return false }
+            sinksByUID[uid] = nil
+            return true
+        }
+        if removed { sinkDeathObserver?(uid) }
     }
 
     private func delayNanos(forUID uid: String) -> Int64 {

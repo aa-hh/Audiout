@@ -833,6 +833,81 @@ import CoreAudio
                 "the reconnect-reapply re-enters the applied set")
     }
 
+    // MARK: - A per-device sink reports its device dead
+
+    /// A uid no real Mac lists, so a resolver that slips past the seam finds nothing.
+    private let btSinkDeathSpeaker = BTDeviceSnapshot(
+        id: "0A-0B-0C-0D-0E-0F:output", name: "Test Speaker", isConnected: true)
+
+    /// A selected Bluetooth speaker whose sink is rendering, so the row has left
+    /// its connect hold and no timeout can turn it `.failed` mid-test.
+    private func selectedMove() -> (NativeBackend, FakeBTEnumerator, SpyBTSink) {
+        let (backend, _, _, bt, sink, _) = makeBackend()
+        backend.start()
+        bt.fire([btSinkDeathSpeaker])
+        waitFor { self.device(backend, self.btSinkDeathSpeaker.id) != nil }
+        backend.setOutputSet([btSinkDeathSpeaker.id])
+        waitFor { sink.calls.contains("start") }
+        sink.renderingUIDs = [btSinkDeathSpeaker.id]
+        waitFor { self.device(backend, self.btSinkDeathSpeaker.id)?.connectionState == .connected }
+        return (backend, bt, sink)
+    }
+
+    /// Red if a sink death whose UID no longer resolves leaves the row available:
+    /// the speaker would breathe forever with no sink behind it.
+    @Test func btSinkDeath_whenUIDNoLongerResolves_marksDeviceUnavailableAndOff() {
+        let (backend, _, _) = selectedMove()
+        defer { backend.stop() }
+
+        backend.btDeviceIDForUID = { _ in nil }
+        backend.handleBTSinkDead(uid: btSinkDeathSpeaker.id)
+
+        waitFor {
+            let d = self.device(backend, self.btSinkDeathSpeaker.id)
+            return d?.isAvailable == false && d?.connectionState == .off
+        }
+        #expect(device(backend, btSinkDeathSpeaker.id)?.isAvailable == false)
+        #expect(device(backend, btSinkDeathSpeaker.id)?.connectionState == ConnectionState.off)
+    }
+
+    /// Red if a sink death is not followed by a reapply: the manager dropped the dead
+    /// sink, so without one the speaker stays silent although its UID resolves to a live object.
+    @Test func btSinkDeath_whenUIDResolvesToNewID_reappliesWithFreshDeviceID() {
+        let (backend, _, sink) = selectedMove()
+        defer { backend.stop() }
+        let before = sink.deviceSets.count
+        let freshID: AudioObjectID = 4242
+
+        backend.btDeviceIDForUID = { _ in freshID }
+        backend.handleBTSinkDead(uid: btSinkDeathSpeaker.id)
+
+        let id = btSinkDeathSpeaker.id
+        func reappliedWithFreshID() -> Bool {
+            sink.deviceSets.dropFirst(before).contains { specs in
+                specs.contains { $0.uid == id && $0.deviceID == freshID }
+            }
+        }
+        waitFor { reappliedWithFreshID() }
+        #expect(reappliedWithFreshID())
+        #expect(device(backend, btSinkDeathSpeaker.id)?.isAvailable == true)
+    }
+
+    /// Red if repeated sink deaths keep retrying: a device that dies again within
+    /// 10 s must be marked gone, or a zombie object id rebuilds a dying sink in a loop.
+    @Test func secondSinkDeathWithinTenSeconds_marksUnavailableInsteadOfRetrying() {
+        let (backend, _, _) = selectedMove()
+        defer { backend.stop() }
+
+        backend.handleBTSinkDead(uid: btSinkDeathSpeaker.id)
+        backend.handleBTSinkDead(uid: btSinkDeathSpeaker.id)
+
+        waitFor {
+            let d = self.device(backend, self.btSinkDeathSpeaker.id)
+            return d?.isAvailable == false && d?.connectionState == .off
+        }
+        #expect(device(backend, btSinkDeathSpeaker.id)?.isAvailable == false)
+    }
+
     // MARK: - BT-LIFECYCLE: breathing until the music starts
 
     /// Selecting an ALREADY-AVAILABLE BT speaker still runs a full connect

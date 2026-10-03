@@ -1525,6 +1525,10 @@ extension SerializedSharedState {
         #expect(report()?.staleReason == nil)
         #expect(report()?.clockState == .unknown, "a new link, and no verdict on its clock yet")
         #expect(report()?.settleRemainingSeconds == nil)
+        // `BTSpeakerTiming.noteConnected` writes the report under its lock and
+        // fires the change after releasing it, so the report can read
+        // `.fromLastTime` before the callback has run.
+        waitFor { changes.value == base + 2 }
         #expect(changes.value == base + 2)
 
         backend.endBTWizardLatencyPreview(forDevice: uid, keepMs: 300)

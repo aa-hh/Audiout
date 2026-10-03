@@ -198,7 +198,14 @@ extension NativeBackend {
         // buffer below is not the reference, the room delay is, and the
         // slowest speaker has to be able to raise THAT.
         if updateBTRoomTermLocked(latencies: latencies) {
-            roomDelayChangedLocked(cause: "bt_latency")
+            if pushToSink {
+                roomDelayChangedLocked(cause: "bt_latency")
+            } else {
+                // The room-delay fan-out rebuilds every sink the manager holds.
+                // One hop later on this serial queue it lands behind the
+                // caller's transition, which drops a departing speaker first.
+                stateQueue.async { [weak self] in self?.roomDelayChangedLocked(cause: "bt_latency") }
+            }
         }
         let desired = btWizardReferenceRaised
             ? Self.btWizardReferenceBufferMs
@@ -229,10 +236,12 @@ extension NativeBackend {
     /// it counts only when that exceeds the start buffer: a speaker that fits
     /// under the buffer was never held back, so the `nil` keeps every room
     /// that ships today on today's exact delays, by construction rather than
-    /// by a flag. Once standing it never falls while any selected speaker
-    /// still needs it, so a re-measurement that comes in lower does not jump
-    /// every output forward for a number the next one may undo. On
-    /// `stateQueue`.
+    /// by a flag. Once standing it does not fall to a lower re-measurement
+    /// that still exceeds the start buffer, so that one does not jump every
+    /// output forward for a number the next one may undo. It is cleared when
+    /// the slowest selected speaker's latency plus headroom no longer exceeds
+    /// the start buffer: the room delay then falls back to the buffer, with
+    /// one gap. On `stateQueue`.
     @discardableResult
     func updateBTRoomTermLocked(latencies: [String: Double]? = nil) -> Bool {   // on stateQueue
         let latencies = latencies ?? btTrimLock.withLock { btLatencyMsByUID }

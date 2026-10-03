@@ -212,7 +212,9 @@ grep -q '^Review level: full (20 product lines, risk: AudioutCore/Sources/Audiou
   && ok "e: risk path forces full" || { fail "e: not full"; show; }
 
 # (f) Scoring: one haiku pass per finding, under 80 dropped and listed apart.
-# Catches: a low-confidence finding counted, or one dropped silently.
+# A surviving LOW still blocks the receipt and gets a fix group.
+# Catches: a low-confidence finding counted, one dropped silently, or a LOW
+# landing unfixed.
 reset_answers
 printf 'LOW | a.swift:1 | real\nLOW | a.swift:2 | DROPME nit\n' > "$ANSWERS/deep"
 echo 'MEDIUM | a.swift:3 | DROPME' > "$ANSWERS/rules"
@@ -229,8 +231,10 @@ if printf '%s\n' "$kept_part" | grep -q 'a.swift:1' && ! printf '%s\n' "$kept_pa
   ok "f: survivor kept, two DROPME lines under Dropped by scorer"
 else fail "f: wrong split"; show; fi
 grep -q '^Findings: 0 high, 0 medium, 1 low (2 dropped)$' "$out" && ok "f: counts" || { fail "f: counts"; show; }
-[ "$rc" = 0 ] && ok "f: exit 0" || fail "f: exit $rc"
-[ -f "$(receipt_path)" ] && ok "f: receipt written" || fail "f: no receipt"
+[ "$rc" = 1 ] && ok "f: exit 1" || fail "f: exit $rc"
+[ ! -f "$(receipt_path)" ] && ok "f: no receipt" || fail "f: receipt written"
+[ "$(grep -c '^fix-' "$out")" = 1 ] && grep -qx 'fix-1  file=a.swift' "$out" && ! grep -q '^    .*DROPME' "$out" \
+  && ok "f: one fix group for the survivor only" || { fail "f: fix groups wrong"; show; }
 
 # (g) A surviving HIGH blocks the receipt and the merge.
 # Catches: a HIGH from a non-deep reviewer being ignored.
@@ -239,6 +243,8 @@ echo 'HIGH | a.swift:1 | x' > "$ANSWERS/comments"
 make_branch high "$license" 20
 review
 [ "$rc" = 1 ] && ok "g: exit 1" || { fail "g: exit $rc"; show; }
+grep -q 'start a fresh review: bash scripts/review-branch.sh' "$out" && ! grep -q '^Blocked:' "$out" \
+  && ok "g: fix instructions printed" || { fail "g: no fix instructions"; show; }
 [ ! -f "$(receipt_path)" ] && ok "g: no receipt" || fail "g: receipt written"
 merge high
 if [ "$mrc" != 0 ] && grep -q 'REFUSED (Guard 10)' "$mout" && grep -q 'scripts/review-branch.sh' "$mout"; then
@@ -265,14 +271,15 @@ n=$(wc -l < "$PRINTED" | tr -d ' ')
   && ok "i: cheap pass then four reviewers" || fail "i: passes: $(cat "$PRINTED")"
 last_log | grep -q "$(printf '\tfull-escalated\t')" && ok "i: logged full-escalated" || fail "i: log line '$(last_log)'"
 
-# (j) Cheap findings are counted unscored.
-# Catches: cheap findings dropped or sent to the scorer.
+# (j) Cheap findings are counted unscored and block the receipt.
+# Catches: cheap findings dropped, sent to the scorer, or landing unfixed.
 reset_answers
 echo 'MEDIUM | a.swift:1 | x' > "$ANSWERS/cheap"
 make_branch cheap-medium "$analytics" 120
 review
-[ "$rc" = 0 ] && ok "j: exit 0" || { fail "j: exit $rc"; show; }
-[ -f "$(receipt_path)" ] && ok "j: receipt written" || fail "j: no receipt"
+[ "$rc" = 1 ] && ok "j: exit 1" || { fail "j: exit $rc"; show; }
+[ ! -f "$(receipt_path)" ] && ok "j: no receipt" || fail "j: receipt written"
+grep -qx 'fix-1  file=a.swift' "$out" && ok "j: fix group printed" || { fail "j: no fix group"; show; }
 last_log | grep -q "$(printf '\tcheap\t0\t1\t0\t0\t')" && ok "j: log counts 0 1 0 0" || fail "j: log line '$(last_log)'"
 [ "$(printed 'model=haiku')" = 0 ] && ok "j: no scorer pass" || fail "j: haiku pass printed"
 
@@ -435,6 +442,39 @@ rm -f "$(pending_path)/passes"
 bash scripts/review-branch.sh --continue > "$out" 2>&1; rc=$?
 [ "$rc" = 2 ] && grep -q 'no reviewer passes were handed over' "$out" && [ ! -f "$(receipt_path)" ] \
   && ok "x: no pass list → exit 2, no receipt" || { fail "x: exit $rc"; show; }
+
+# (y) Fix groups: one per file, a file's findings together.
+# Catches: two builders handed the same file, or one file's findings split.
+reset_answers
+printf 'MEDIUM | a.swift:1 | x\nLOW | b.swift:2 | y\n' > "$ANSWERS/cheap"
+make_branch two-files "$analytics" 120
+review
+if [ "$rc" = 1 ] && [ "$(grep -c '^fix-' "$out")" = 2 ] && grep -qx 'fix-1  file=a.swift' "$out" \
+   && grep -qx 'fix-2  file=b.swift' "$out"; then
+  ok "y: two files → two fix groups"
+else fail "y: two-file groups wrong (rc $rc)"; show; fi
+reset_answers
+printf 'MEDIUM | b.swift:2 | first\nLOW | b.swift:9 | second\n' > "$ANSWERS/cheap"
+make_branch one-file "$analytics" 120
+review
+group=$(sed -n '/^fix-1  file=b.swift$/,/^$/p' "$out")
+if [ "$rc" = 1 ] && [ "$(grep -c '^fix-' "$out")" = 1 ] \
+   && printf '%s\n' "$group" | grep -qx '    MEDIUM | b.swift:2 | first' \
+   && printf '%s\n' "$group" | grep -qx '    LOW | b.swift:9 | second'; then
+  ok "y: one file → one fix group with both lines"
+else fail "y: one-file group wrong (rc $rc)"; show; fi
+
+# (z) After a findings run, the fix commit's clean review writes a receipt.
+# Catches: a blocked review leaving state that stops the next one passing.
+reset_answers
+echo 'LOW | a.swift:1 | x' > "$ANSWERS/cheap"
+make_branch fixed-later "$analytics" 120
+review
+[ "$rc" = 1 ] && [ ! -f "$(receipt_path)" ] && ok "z: findings block the first review" || { fail "z: first exit $rc"; show; }
+echo "// the fix" >> "$analytics"; git commit -q --no-verify -am "fix"
+reset_answers
+review
+[ "$rc" = 0 ] && [ -f "$(receipt_path)" ] && ok "z: clean review after the fix → receipt" || { fail "z: second exit $rc"; show; }
 
 # (o) The script refuses to review main.
 git checkout -q main

@@ -118,7 +118,7 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
     /// owner's call, not this ticket's.
     private static let expiredHeadline = "Your 14-day trial has ended."
     private static let expiredBody =
-        "Buy Audiout for €30, once, and keep everything you set up. "
+        "Buy Audiout for €24.99, once, and keep everything you set up. "
         + "Your scenes and speaker settings are still here."
     private static let trialTitle = "Try Audiout free for 14 days"
 

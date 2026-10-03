@@ -17,7 +17,7 @@ volume fader for each room, saved groups, and a phone remote.
 ![Apple Silicon](https://img.shields.io/badge/Apple%20Silicon-native-333333?style=flat-square)
 ![Swift 5.10](https://img.shields.io/badge/Swift-5.10-F05138?style=flat-square&logo=swift&logoColor=white)
 [![Licence: GPL-2.0-or-later](https://img.shields.io/badge/licence-GPL--2.0--or--later-4c8b2b?style=flat-square)](LICENSE)
-[![€30 one-time](https://img.shields.io/badge/%E2%82%AC30-one--time-c9a227?style=flat-square)](https://audiout.app/buy)
+[![€24.99 one-time](https://img.shields.io/badge/%E2%82%AC24.99-one--time-c9a227?style=flat-square)](https://audiout.app/buy)
 [![audiout.app](https://img.shields.io/badge/audiout.app-1a1a1a?style=flat-square)](https://audiout.app)
 
 <br>
@@ -47,12 +47,12 @@ with the machine offline.
 
 ## Get Audiout
 
-**€30, one-time.** Covers the current major version and every update until the
+**€24.99, one-time.** Covers the current major version and every update until the
 next major release. No subscription.
 
 <div align="center">
 
-### [**Buy Audiout — €30**](https://audiout.app/buy)
+### [**Buy Audiout — €24.99**](https://audiout.app/buy)
 
 </div>
 
@@ -71,7 +71,7 @@ free.** No feature is held back, no key is required, nothing is crippled. See
 Homebrew libraries the source build expects.
 
 What the paid download adds is convenience, not capability: notarisation, bundled
-libraries, and in-app updates. If that is worth €30 to you, buy it. If it isn't,
+libraries, and in-app updates. If that is worth €24.99 to you, buy it. If it isn't,
 build it — that path is supported and it always will be.
 
 ## Features

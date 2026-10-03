@@ -5203,10 +5203,15 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         let engine = SpyEngine()
         let discovery = FakeDiscovery()
         let capture = FakeCapture()
+        // Backoff retries fire only when the test says. On the wall clock a
+        // loaded run let the 0.05 s retries spend all five attempts before
+        // recapture #2, which then found no session to rebind and never added.
+        let retries = ManualDelayClock()
         let backend = NativeBackend(
             engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
             ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
             maxRebindRecoveryAttempts: 5, rebindRecoveryRetryDelay: 0.05,
+            delayClock: retries.clock,
             aggregateControl: NoOpAggregateControl(),
             handoffWatcherFactory: { onBlockedAttempt in
                 AirPlayHandoffWatcher(spawn: NoOpLogStream(), onBlockedAttempt: onBlockedAttempt)
@@ -5224,7 +5229,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         // scheduled (bumps rebindRecoveryGen to 1, schedules attempt 2).
         engine.addFailures = [device.outputID.rawValue]
         capture.fireDeviceRateRebuild()
-        await pollUntil { engine.removedIDs.filter { $0 == device.outputID }.count >= 1 }
+        await pollUntil { backend.test_hasPendingRebindRecovery(deviceID: device.id) }
         let addsAfterFirstAttempt = engine.addedIDs.filter { $0 == device.outputID }.count
 
         // Recapture #2 arrives immediately — well inside the 0.05s backoff window —
@@ -5239,9 +5244,10 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         let addsAfterSecondRecapture = engine.addedIDs.filter { $0 == device.outputID }.count
         let removesAfterSecondRecapture = engine.removedIDs.filter { $0 == device.outputID }.count
 
-        // Wait well past the FIRST recapture's 0.05s backoff window (3x) — if its
-        // retry had NOT been superseded/cancelled, it would fire here and grow the
-        // counts.
+        // The FIRST recapture's backoff elapses. Had its retry NOT been
+        // superseded/cancelled, it would run here and grow the counts; the sleep
+        // gives the engine ops such a retry would start the time to land.
+        retries.fireAll()
         try? await Task.sleep(nanoseconds: 150_000_000)
         #expect(engine.addedIDs.filter { $0 == device.outputID }.count == addsAfterSecondRecapture,
                        "a newer recapture must cancel the older recapture's pending backoff retry (single-flight)")

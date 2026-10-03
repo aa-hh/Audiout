@@ -819,7 +819,16 @@ extension NativeBackend {
                 // bow out: that loop owns the engine ops right now and will
                 // settle the device into whatever state is currently desired —
                 // the next topology change re-binds/re-syncs it idempotently.
-                guard !self.converging.contains(deviceID) else {
+                //
+                // Our OWN recovery chain waiting out a backoff is the exception:
+                // it has no engine op in flight, so this reset supersedes it
+                // (cancels its timer, bumps the generation) and keeps its slot.
+                // Bowing out here made the earlier chain's delayed retry the
+                // only thing that could rebind the device, on that chain's
+                // clock and attempt budget.
+                let supersedesBackoff = self.rebindConverging.contains(deviceID)
+                    && self.pendingRebindRecoveries[deviceID] != nil
+                guard !self.converging.contains(deviceID) || supersedesBackoff else {
                     Telemetry.log(.airplay, "whole_system_rebind_skipped", [
                         "device": deviceID, "reason": "already_converging",
                     ])
@@ -1068,6 +1077,9 @@ extension NativeBackend {
                             }
                             return .none
                         }
+                        // The backoff is over: an entry here now means only
+                        // "waiting out a delay", which a newer recapture may supersede.
+                        self.pendingRebindRecoveries.removeValue(forKey: deviceID)
                         self.enqueueRebindRecovery(
                             deviceID: deviceID, outputID: out, scope: scope,
                             gen: gen, attempt: attempt + 1, verifyFirst: verifyFirst)

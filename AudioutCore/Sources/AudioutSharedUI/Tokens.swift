@@ -316,17 +316,19 @@ public enum Tokens {
         /// The connected glyph ring's colour on a device row, and the
         /// not-playing status dot's hollow ring, which must always match it.
         /// Both read this one token, so changing the connected-ring colour is
-        /// this one line. Its own token, not an alias: the hexes start equal
-        /// to ``ring``'s steel blue (owner's ruling, 2026-10-03) and are
-        /// expected to move apart from it without moving the wizard or the
+        /// this one line. Its own token, not an alias of ``ring``: dark shares
+        /// `ring`'s steel blue, light is a softer value of the same hue
+        /// (owner's pick, 2026-10-03), and neither moves the wizard or the
         /// system banner.
         ///
-        /// CONTRAST RATIONALE (measured; floor 3:1): light `#2C6E86` = 5.47:1
-        /// on the flat ground, IC `#265E73` = 6.87:1; dark `#7FB4C4` = 7.89:1
-        /// on `panel`, IC `#9FC7D3` = 8.70:1 on `raised`.
+        /// CONTRAST RATIONALE (measured; floor 3:1): light `#5D91A1` = 3.34:1
+        /// on the flat ground, 3.12:1 on a live row's gold wash; light IC
+        /// `#4E7A88` (same hue and saturation, darker) = 4.51:1. Dark
+        /// `#7FB4C4` = 7.89:1 on `panel` / 6.93:1 on `raised`; dark IC
+        /// `#9FC7D3` = 8.70:1 on `raised`.
         public static var ringConnected: NSColor {
             warmDynamic(name: "ringConnected", dark: 0x7FB4C4, darkHighContrast: 0x9FC7D3,
-                       light: 0x2C6E86, lightHighContrast: 0x265E73)
+                       light: 0x5D91A1, lightHighContrast: 0x4E7A88)
         }
 
         /// The under-name level meter's EMPTY-track fill (`LevelMeterView`'s

@@ -741,10 +741,14 @@ Playing is a `gold` disc with a 1 pt `ember` edge; connected but muted is a
 hollow ring in `ringConnected`. Every other state has no dot.
 
 `ringConnected` is the connected glyph ring's own colour token, read by that
-ring and by the hollow dot, so changing it is one line in `Tokens.swift`. Its
-hexes start equal to `ring`'s steel blue but it is a separate token, so `ring`
-stays fenced to the wizard's reference light and the system banner. Main
-Audio's connected ring keeps the rail's spine tone instead.
+ring and by the hollow dot, so changing it is one line in `Tokens.swift`. It
+is a separate token from `ring`, which stays fenced to the wizard's reference
+light and the system banner. Dark is `#7FB4C4`, `ring`'s own dark value. Light
+is the owner's pick from a swatch mockup, `#5D91A1`: the same hue and strength
+as the dark value, only lightness differs, at 3.34:1 on `#FAFAFB` (3.12:1 on a
+live row's gold wash). Increase Contrast moves each further from its ground:
+light `#4E7A88` (4.51:1), dark `#9FC7D3`. Main Audio's connected ring keeps
+the rail's spine tone instead.
 
 Row glyphs are sized and optically centred per symbol by one table,
 `DeviceIcon.rowGlyphFits`, drawn by `DeviceIcon.rowGlyph` (derivation in

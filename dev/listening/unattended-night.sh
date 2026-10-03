@@ -622,7 +622,7 @@ select_manual() {  # block letter, then ids
   human_names "$@" > "$OUT/.names"; local -a nm=("${(@f)$(<"$OUT/.names")}")
   local list="${(j:" and ":)nm}" pre="" try from end bad flow
   [[ $blk == C ]] && pre="switch the Move that is not on Bluetooth to Wi-Fi mode and wait until it shows as an AirPlay speaker; then "
-  [[ $blk == B && -n $TOGGLE_ID ]] && pre="deselect \"$(human_names $TOGGLE_ID)\" (disconnected in Block A); then "
+  [[ $blk == B && -n $TOGGLE_ID ]] && pre="quit and reopen Audiout Dev first (a Move whose link was dropped stays silent until the app restarts); then "
   for try in {1..$SELECT_TRIES}; do
     play_stop; rm -f "$GO_DIR/go-block-${(L)blk}"; from=$(tel_size)
     status "WAITING $blk $(date +%H:%M:%S) ${pre}in Audiout Dev select exactly: \"$list\" and nothing else, then press Enter (or: touch $GO_DIR/go-block-${(L)blk})"

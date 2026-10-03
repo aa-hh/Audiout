@@ -5,9 +5,11 @@
 #   ./unattended-night.sh --list-devices      # ids this Mac has seen, in the form the driver takes
 #   ./unattended-night.sh --check [flags]     # tools, ids and build only, then exit (launch-tonight.sh runs it)
 #
-# Block A (25 min): both Moves, click track loops, mic records; at minute 20 the
-#   second Move is disconnected for 10 s and reconnected (needs blueutil).
-# Block B (~5 min): the Move that is not --c-move, plus This Mac; play 60 s, pause 90 s, play 60 s.
+# Block A (25 min): both Moves, click track loops, mic records; at minute 22 the
+#   Move that is not --c-move is disconnected for 10 s and reconnected (needs
+#   blueutil). Last, because in the 2026-10-03 smoke run that Move stayed silent
+#   for the rest of the run after its reconnect.
+# Block B (~5 min): the --c-move Move, plus This Mac; play 60 s, pause 90 s, play 60 s.
 #
 # Selection is manual by default: at each block the driver writes a WAITING line
 # naming the rows to select in Audiout Dev and waits for Enter or
@@ -31,7 +33,7 @@
 # aggregate device after about 16 s.
 #
 # --smoke: the real run, shortened for a rehearsal with the owner in the room:
-# Block A 2 min (disconnect at minute 1), Block B 20 s / 30 s / 20 s, Block C 2 min.
+# Block A 2 min (disconnect at 1:30), Block B 20 s / 30 s / 20 s, Block C 2 min.
 #
 # A watchdog checks the recording, the mic level, the clicks, the clock lines and
 # the load every WATCH_EVERY_S during each block and writes results/<date>/status.log.
@@ -82,9 +84,9 @@ PYTHON=${PYTHON:-python3}
 TELEMETRY="$HOME/Library/Logs/Audiout/telemetry.jsonl"
 RESULTS_ROOT="$HERE/results"
 SETTLE_S=60          # Bluetooth clocks step for ~40 s after a connect
-A_FIRST_S=1200       # Block A: 20 min, then the disconnect
+A_FIRST_S=1320       # Block A: 22 min, then the disconnect
 A_OFF_S=10
-A_REST_S=300         # Block A: 5 min after the reconnect
+A_REST_S=170         # Block A: from the reconnect to the end of the block (25 min in all)
 B_PLAY_S=60
 B_PAUSE_S=90
 C_S=3600
@@ -125,7 +127,7 @@ if (( DRY )); then
   SETTLE_S=0; A_FIRST_S=10; A_OFF_S=10; A_REST_S=10; B_PLAY_S=10; B_PAUSE_S=10; C_S=10; LOAD_EVERY_S=5; WATCH_EVERY_S=5; PROBE_S=10; WAIT_C_S=10
 fi
 if (( SMOKE )); then
-  A_FIRST_S=60; A_OFF_S=10; A_REST_S=50; B_PLAY_S=20; B_PAUSE_S=30; C_S=120
+  A_FIRST_S=90; A_OFF_S=10; A_REST_S=20; B_PLAY_S=20; B_PAUSE_S=30; C_S=120
 fi
 
 OUT=""
@@ -298,8 +300,8 @@ fi
 # Ids per block; a real run refuses an empty or unknown id before anything plays.
 typeset -a IDS_A IDS_B IDS_C
 C_MOVE_ID=${C_MOVE_ID:-$MOVE1_ID}
-B_MOVE_ID=$MOVE2_ID; [[ $C_MOVE_ID == $MOVE2_ID ]] && B_MOVE_ID=$MOVE1_ID   # the c-move's partner
-IDS_A=($MOVE1_ID $MOVE2_ID); IDS_B=($B_MOVE_ID $MAC_ID); IDS_C=($C_MOVE_ID $AIRPLAY_ID)
+TOGGLE_ID=$MOVE2_ID; [[ $C_MOVE_ID == $MOVE2_ID ]] && TOGGLE_ID=$MOVE1_ID   # the c-move's partner: disconnected in Block A
+IDS_A=($MOVE1_ID $MOVE2_ID); IDS_B=($C_MOVE_ID $MAC_ID); IDS_C=($C_MOVE_ID $AIRPLAY_ID)
 (( MANUAL )) && KEY_PROBLEM=""   # the reconnect setting only matters for --relaunch
 if (( MANUAL && ! DRY )) && ! pgrep -f "$APP/Contents/MacOS/" >/dev/null; then
   KEY_PROBLEM+="Audiout Dev is not running: open Audiout Dev first (manual selection needs it running). "
@@ -308,7 +310,7 @@ ids_problem=""
 for pair in MOVE1_ID:$MOVE1_ID MOVE2_ID:$MOVE2_ID $( (( WITH_AIRPLAY )) && print AIRPLAY_ID:$AIRPLAY_ID ); do
   [[ -n ${pair#*:} ]] || ids_problem+="${pair%%:*} is empty (run --list-devices and set it). "
 done
-unknown=$(devices check $MOVE1_ID $MOVE2_ID $( (( WITH_AIRPLAY )) && print -- $C_MOVE_ID $AIRPLAY_ID )) || ids_problem+="$unknown "
+unknown=$(devices check $MOVE1_ID $MOVE2_ID $C_MOVE_ID $( (( WITH_AIRPLAY )) && print -- $AIRPLAY_ID )) || ids_problem+="$unknown "
 [[ -z $C_MOVE_ID || $C_MOVE_ID == *:output ]] || ids_problem+="--c-move must be a Bluetooth id (ending :output): $C_MOVE_ID. "
 
 if (( ! DRY )); then
@@ -620,6 +622,7 @@ select_manual() {  # block letter, then ids
   human_names "$@" > "$OUT/.names"; local -a nm=("${(@f)$(<"$OUT/.names")}")
   local list="${(j:" and ":)nm}" pre="" try from end bad flow
   [[ $blk == C ]] && pre="switch the Move that is not on Bluetooth to Wi-Fi mode and wait until it shows as an AirPlay speaker; then "
+  [[ $blk == B && -n $TOGGLE_ID ]] && pre="deselect \"$(human_names $TOGGLE_ID)\" (disconnected in Block A); then "
   for try in {1..$SELECT_TRIES}; do
     play_stop; rm -f "$GO_DIR/go-block-${(L)blk}"; from=$(tel_size)
     status "WAITING $blk $(date +%H:%M:%S) ${pre}in Audiout Dev select exactly: \"$list\" and nothing else, then press Enter (or: touch $GO_DIR/go-block-${(L)blk})"
@@ -747,6 +750,7 @@ EOF
 status() { print -r -- "$*" | tee -a "$OUT/status.log" }
 typeset -A ALERT_RUN       # consecutive alerts per check in the current block
 B_ABORT=0; B_PAUSED=0; B_REC_PREV=0; B_NEXT=0
+CLOCK_EXEMPT=""   # Block A after the toggle: this id's clock check no longer counts toward ABORT
 live_raw() {  # the growing recording the watchdog can read, or empty when there is none
   (( FAKE_AUDIO )) && return 0
   print -n -- "$OUT/block$B_NAME-raw.wav"
@@ -763,7 +767,11 @@ watch_check() {
   local -A failed
   if (( ! $#fails )); then status "OK $B_NAME $t $fields"; ALERT_RUN=(); return 0; fi
   for l in $fails; do
-    c=${l%% *}; failed[$c]=1; ALERT_RUN[$c]=$(( ${ALERT_RUN[$c]:-0} + 1 ))
+    c=${l%% *}
+    if [[ -n $CLOCK_EXEMPT && $l == "clock $CLOCK_EXEMPT:0" ]]; then  # its failure is the measurement
+      status "ALERT $B_NAME $t $c ${l#* } (the toggled Move; not counted toward ABORT)"; continue
+    fi
+    failed[$c]=1; ALERT_RUN[$c]=$(( ${ALERT_RUN[$c]:-0} + 1 ))
     status "ALERT $B_NAME $t $c ${l#* }"
     if (( ALERT_RUN[$c] >= ALERTS_TO_ABORT )); then
       status "ABORT $B_NAME $t $c ${l#* }"; B_ABORT=1; mark "abort_$c"; note "block $B_NAME ended early: $ALERTS_TO_ABORT alerts in a row on $c (${l#* })"
@@ -816,7 +824,7 @@ print -r -- $'block\tstatus\tbytes_from\tbytes_to\trec_start\tevents\tids' > "$O
 B_NAME=""; B_FROM=0; B_T0=0; B_EVENTS=""; B_IDS=""
 block_begin() {  # $1 = A/B/C, then the selected ids
   B_NAME=$1; B_IDS=${(j: :)@[2,-1]}; B_FROM=$(tel_size); B_EVENTS=""; print -n -- $1 > "$OUT/.block"
-  B_ABORT=0; B_PAUSED=0; B_REC_PREV=0; ALERT_RUN=(); B_NEXT=$(( SECONDS + WATCH_EVERY_S ))
+  B_ABORT=0; B_PAUSED=0; B_REC_PREV=0; ALERT_RUN=(); CLOCK_EXEMPT=""; B_NEXT=$(( SECONDS + WATCH_EVERY_S ))
   status "BLOCK-START $1 $(date +%H:%M:%S)"
   rec_start "$OUT/block$1-raw"; B_T0=$(now)
   log "block $1: recording, telemetry offset $B_FROM"
@@ -843,33 +851,34 @@ block_skip() { print -r -- "$1"$'\tskipped: '"$2"$'\t0\t0\t0\t\t' >> "$OUT/block
 # ---- The night --------------------------------------------------------------
 preflight
 
-# Block A: both Moves.
+# Block A: both Moves; the c-move's partner is disconnected for A_OFF_S near the
+# end (after the 2026-10-03 smoke run's reconnect it stayed silent all night).
 if ! choose_speakers A $IDS_A; then block_skip A "both Moves could not be selected (see driver.log and status.log)"
 elif probe_check $IDS_A && ! play_verified; then block_skip A "no audio reached the app after two play commands (see notes.txt)"
 else
   block_begin A $IDS_A
   watch_sleep $A_FIRST_S
   if (( B_ABORT )); then :
-  elif (( DRY )); then mark toggle_skipped_dry_run; watch_sleep $A_OFF_S
+  elif (( DRY )); then mark toggle_skipped_dry_run; watch_sleep $A_OFF_S; watch_sleep $A_REST_S
   elif (( HAVE_BLUEUTIL )); then
-    mark disconnect; bt_disconnect_wait $MOVE2_ID || log "disconnect failed"
+    mark disconnect; CLOCK_EXEMPT=$TOGGLE_ID; bt_disconnect_wait $TOGGLE_ID || log "disconnect failed"
     watch_sleep $A_OFF_S
-    mark reconnect; local_from=$(tel_size); bt_connect_wait $MOVE2_ID || note "block A: second Move did not reconnect"
+    mark reconnect; local_from=$(tel_size); rc_t=$SECONDS; bt_connect_wait $TOGGLE_ID || note "block A: $TOGGLE_ID did not reconnect"
     if (( ! DRY )); then
       sink_seen=0
       for w in {1..$((RECONNECT_SINK_S / 5))}; do
-        tail -c +$((local_from + 1)) "$TELEMETRY" | grep '"bt_sink_\(rebuild\|anchored\)"\|"bt_clock_deviation"' | grep -q "\"uid\":\"$MOVE2_ID\"" && { sink_seen=1; break; }
+        tail -c +$((local_from + 1)) "$TELEMETRY" | grep '"bt_sink_\(rebuild\|anchored\)"\|"bt_clock_deviation"' | grep -q "\"uid\":\"$TOGGLE_ID\"" && { sink_seen=1; break; }
         watch_sleep 5
       done
       (( sink_seen )) && log "block A: the reconnected Move is streaming again" \
-        || status "ALERT A $(date +%H:%M:%S) reconnect no Bluetooth output line for $MOVE2_ID within $RECONNECT_SINK_S s of the reconnect"
+        || status "ALERT A $(date +%H:%M:%S) reconnect no Bluetooth output line for $TOGGLE_ID within $RECONNECT_SINK_S s of the reconnect"
     fi
-  else mark toggle_skipped_no_blueutil; watch_sleep $A_OFF_S; fi
-  watch_sleep $A_REST_S
+    watch_sleep $(( A_REST_S > SECONDS - rc_t ? A_REST_S - (SECONDS - rc_t) : 0 ))  # the check above counts toward the rest
+  else mark toggle_skipped_no_blueutil; watch_sleep $A_OFF_S; watch_sleep $A_REST_S; fi
   block_end
 fi
 
-# Block B: the c-move's partner plus This Mac.
+# Block B: the c-move plus This Mac (its partner was disconnected in Block A).
 if ! choose_speakers B $IDS_B; then block_skip B "the Move and This Mac could not be selected (see driver.log and status.log)"
 elif ! play_verified; then block_skip B "no audio reached the app after two play commands (see notes.txt)"
 else
@@ -906,16 +915,16 @@ if (( WITH_AIRPLAY )); then
     block_end
   fi
 fi
-(( ! DRY && ! WITH_AIRPLAY )) && { bt_connect_wait $MOVE2_ID || true; }
+(( ! DRY && ! WITH_AIRPLAY )) && { bt_connect_wait $TOGGLE_ID || true; }
 if [[ $RECONNECT_WAS == off || $RECONNECT_WAS == 0 ]]; then
   defaults write $BUNDLE_ID $RECONNECT_KEY -bool false; log "set $RECONNECT_KEY back to off"
 fi
 
 # ---- Summary ----------------------------------------------------------------
-"$PYTHON" - "$OUT" "$TELEMETRY" "$JUMP_MS" "$DRY" "$AIRPLAY_NAME" "$LOAD_WARN" "$SMOKE" <<'EOF'
-import sys, os, re, json
+"$PYTHON" - "$OUT" "$TELEMETRY" "$JUMP_MS" "$DRY" "$AIRPLAY_NAME" "$LOAD_WARN" "$SMOKE" "$TOGGLE_ID" <<'EOF'
+import sys, os, re, json, datetime
 out, tel, jump_ms, dry, airplay = sys.argv[1], sys.argv[2], float(sys.argv[3]), sys.argv[4] == "1", sys.argv[5]
-load_warn = float(sys.argv[6]); smoke = sys.argv[7] == "1"
+load_warn = float(sys.argv[6]); smoke = sys.argv[7] == "1"; toggle = sys.argv[8]
 loads = {}
 for l in list(open(f"{out}/load.csv"))[1:]:
     ts, blk, load1, top = (l.rstrip("\n").split(",", 3) + [""] * 4)[:4]
@@ -924,8 +933,8 @@ for l in list(open(f"{out}/load.csv"))[1:]:
 EVTS = ["bt_clock_jump", "bt_sink_anchored", "bt_sink_release_overshoot", "bt_sink_seek_clamped",
         "tap_feed_gap", "bt_clock_deviation", "drift_window_result", "drift_window_dropped",
         "drift_correction", "bt_room_term_changed", "room_delay_changed"]
-TITLES = {"A": "Block A: both Moves, 25 min, one Move off for 10 s at minute 20",
-          "B": "Block B: one Move + This Mac, play 60 s, pause 90 s, play 60 s",
+TITLES = {"A": "Block A: both Moves, 25 min, the Move that is not `--c-move` off for 10 s at minute 22",
+          "B": "Block B: the `--c-move` Move + This Mac, play 60 s, pause 90 s, play 60 s",
           "C": "Block C: one Move on Bluetooth + the other Move in Wi-Fi mode (AirPlay), 60 min"}
 
 def tel_slice(a, b):
@@ -967,7 +976,7 @@ def deviation_slopes(lines):
     return res
 
 md = [f"# {'SMOKE: ' if smoke else ''}Listening night {os.path.basename(out)}", ""]
-if smoke: md += ["SMOKE run: Block A 2 min (disconnect at minute 1), Block B 20 s / 30 s / 20 s, Block C 2 min. A rehearsal; the block titles below give the full-run lengths.", ""]
+if smoke: md += ["SMOKE run: Block A 2 min (disconnect at 1:30), Block B 20 s / 30 s / 20 s, Block C 2 min. A rehearsal; the block titles below give the full-run lengths.", ""]
 if os.path.exists(f"{out}/status.log"):
     st = [l.strip() for l in open(f"{out}/status.log")]
     bad = [l for l in st if l.startswith(("ALERT", "ABORT"))]
@@ -993,6 +1002,19 @@ for line in list(open(f"{out}/blocks.tsv"))[1:]:
     rows, fit = rows_of(txt) if os.path.exists(txt) else ([], None)
     merged = sum(1 for _, o in rows if o is None)
     md += [f"Click periods measured: {len(rows)} ({merged} with one merged arrival)."]
+    if name == "A":
+        if "reconnect" in marks:
+            t_rc = float(t0) + marks["reconnect"]
+            def after(r):
+                try: return datetime.datetime.fromisoformat(r["ts"].replace("Z", "+00:00")).timestamp() >= t_rc
+                except (KeyError, ValueError): return False
+            mine = [r for r in lines if r.get("uid") == toggle and after(r)]
+            sinks = sum(1 for r in mine if r.get("evt") in ("bt_sink_rebuild", "bt_sink_anchored"))
+            clocks = sum(1 for r in mine if r.get("evt") == "bt_clock_deviation")
+            pairs = sum(1 for t, o in rows if t > marks["reconnect"] and o is not None)
+            md += ["", f"Toggled Move: {toggle}; sink lines after reconnect: {sinks}; clock lines after reconnect: {clocks}; mic click pairs after reconnect: {pairs}",
+                   "(a click pair is a 3 s period with a separate second arrival; a merged arrival is not counted)"]
+        else: md += ["", f"Toggled Move: {toggle or 'not set'}; no reconnect in this run ({', '.join(marks) or 'no marks'})."]
     if name == "B" and "pause" in marks and "resume" in marks:
         before = [o for t, o in rows if t < marks["pause"]][-5:]
         after = [o for t, o in rows if t > marks["resume"]]

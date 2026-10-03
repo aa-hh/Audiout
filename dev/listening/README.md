@@ -8,8 +8,8 @@ plays a 75-minute click file with `afplay`, records the built-in mic, and writes
 
 | Block | Selection | Length | From the runbooks |
 |---|---|---|---|
-| A | both Moves | 25 min; the second Move is disconnected for 10 s at minute 20 | M1 Part 1 section 1 (fix 1) |
-| B | Move 2 (the Move that is not `--c-move`) + This Mac | play 60 s, pause 90 s, play 60 s | runbook 1 Run B (M1 Part 2) |
+| A | both Moves | 25 min; the Move that is not `--c-move` (Move 2 by default) is disconnected for 10 s at minute 22 | M1 Part 1 section 1 (fix 1) |
+| B | the `--c-move` Move (Sonos Move 089E by default) + This Mac | play 60 s, pause 90 s, play 60 s | runbook 1 Run B (M1 Part 2) |
 | C (`--with-airplay`) | Move 1 on Bluetooth (`--c-move`) + the other Move in Wi-Fi mode (`--airplay-id`) | 60 min | runbook 2 Part A, AirPlay variant (M1 Part 4) |
 
 Selection is by hand: three clicks a night (four with Block C). The app's
@@ -69,7 +69,7 @@ process started over ssh never gets a prompt. So a one-shot LaunchAgent in
 ## Rehearsal: `--smoke`
 
 `./unattended-night.sh --smoke` (same flags as the night) is the real run with
-Block A 2 min (disconnect at minute 1), B 20 s / 30 s / 20 s, C 2 min; "SMOKE" on top.
+Block A 2 min (disconnect at 1:30), B 20 s / 30 s / 20 s, C 2 min; "SMOKE" on top.
 
 ## The watchdog
 
@@ -109,13 +109,21 @@ The clicks, each after its `WAITING` line, then Enter in that Terminal or
 `ssh alechamilton@SUMUP-M9Y197RFVG.local touch ~/listening/go-block-a` (`-b`, `-c`):
 
 1. A: select both Moves, nothing else.
-2. B: select Move 2 and This Mac (the MacBook Air Speakers row); deselect the other Move.
+2. B: select the `--c-move` Move (Sonos Move 089E by default) and This Mac (the
+   MacBook Air Speakers row); deselect the Move that Block A disconnected.
 3. C: press the other Move's button for Wi-Fi mode, wait for its AirPlay row, then
    select that row plus the Bluetooth Move, nothing else. A Move is Bluetooth or
    AirPlay, never both. The last line then says to switch it back.
 
-Block A's minute-20 disconnect and reconnect are automatic. No output line within
-60 s of the reconnect is an `ALERT` and a finding, not a cue to click.
+Block A's minute-22 disconnect and reconnect are automatic. They come last, and
+Block B uses the other Move, because in the 2026-10-03 smoke run the reconnected
+Move stayed silent for the rest of the run: the app rebuilt and anchored its
+output and logged clock lines, but no sound came out, not after a reselect in
+Block B and not after a full capture rebuild. No output line within 60 s of the
+reconnect is an `ALERT` and a finding, not a cue to click. From the disconnect to
+the end of Block A, a `clock` alert for that Move is still written but does not
+count toward `ABORT`. summary.md's Block A gives that Move's output lines, clock
+lines and mic click pairs after the reconnect.
 
 ### When the app's restore works: `--relaunch`
 

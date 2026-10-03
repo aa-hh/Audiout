@@ -201,7 +201,10 @@ repo. `AudioutCore` pins it by version.
   changed once; Guard 4 at commit reuses it. `bash scripts/test-suite-cache.sh`
   and `bash scripts/test-guard-test-scope.sh` self-test the cache and the
   commit-time scoping.
-- **A merge onto `main` runs the full suite uncached, even a clean one.**
+- **A merge onto `main` runs the full suite uncached, even a clean one,**
+  unless `/tmp/audiout-suite-cache` holds a full-suite pass (`<hash>.full`)
+  for the identical staged merged tree; then it prints one line naming that
+  pass and skips. A filtered pass never counts.
   `.githooks/pre-merge-commit` runs for a merge without conflicts and calls
   `pre-commit` with `AUDIOUT_IN_MERGE=1`; `pre-commit` sets the same flag itself
   when `MERGE_HEAD` exists. Guards test that flag, never `MERGE_HEAD` alone,

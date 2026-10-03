@@ -8094,9 +8094,13 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         let (levels, task) = subscribeLevels(backend); defer { task.cancel() }
         try? await Task.sleep(nanoseconds: 20_000_000)   // let the subscription register
 
-        capture.fireLevelIfActive(0.6)
-
-        await pollUntil { (levels.lastDeviceLevel(NativeBackend.localDeviceID) ?? 0) > 0 }
+        // Keep delivering, as the real tap does every few milliseconds:
+        // `noteSystemRMS` drops a sample that meets the periodic drain holding
+        // its lock, and a single sample lost that race under load.
+        await pollUntil {
+            capture.fireLevelIfActive(0.6)
+            return (levels.lastDeviceLevel(NativeBackend.localDeviceID) ?? 0) > 0
+        }
         #expect(abs((levels.lastDeviceLevel(NativeBackend.localDeviceID) ?? 0) - 0.6) <= 0.001,
                        "the local device must receive the SAME whole-system-tap RMS driving the AirPlay device's meter")
         #expect(abs((levels.lastDeviceLevel(device.id) ?? 0) - 0.6) <= 0.001,

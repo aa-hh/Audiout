@@ -420,6 +420,24 @@ final class PassiveDriftTracker: @unchecked Sendable {
     /// inside the capture once a speaker's delay has shifted it.
     static let searchMarginMs = 50.0
 
+    /// Starts the periodic window timer: the first fire after
+    /// `firstSeconds`, then every `intervalSeconds`, each on `queue`. Hands
+    /// back the function that stops it.
+    typealias PeriodicClock = @Sendable (_ firstSeconds: Double,
+                                         _ intervalSeconds: Double,
+                                         _ queue: DispatchQueue,
+                                         _ fire: @escaping @Sendable () -> Void)
+        -> @Sendable () -> Void
+
+    /// The shipping clock: a repeating timer on the tracker's own queue.
+    static let dispatchPeriodicClock: PeriodicClock = { firstSeconds, intervalSeconds, queue, fire in
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        timer.schedule(deadline: .now() + firstSeconds, repeating: intervalSeconds)
+        timer.setEventHandler(handler: fire)
+        timer.resume()
+        return { timer.cancel() }
+    }
+
     private let ring: ReferenceAudioRing
     private let makeRecorder: @Sendable () -> MicProbeRecording
     private let permissionIsGranted: @Sendable () -> Bool
@@ -436,11 +454,16 @@ final class PassiveDriftTracker: @unchecked Sendable {
     private let pollIntervalSeconds: Double
     private let clockStepWindowSpacingSeconds: Double
     private let clockStepStormCount: Int
+    /// Only the tests pass anything but ``dispatchPeriodicClock``: a real
+    /// timer fires again on its own while a busy suite keeps the test from
+    /// looking, so they step time by hand instead.
+    private let periodicClock: PeriodicClock
     private let queue = DispatchQueue(label: "com.audiout.passive-drift")
 
     /// `queue` only.
     private var sampler = PassiveDriftSampler()
-    private var timer: DispatchSourceTimer?
+    /// Stops the periodic timer; `nil` while it is not running.
+    private var cancelPeriodicTimer: (@Sendable () -> Void)?
     private var silenceTimer: DispatchSourceTimer?
     private var windowInFlight = false
     /// Whether periodic sampling is meant to be running — true between
@@ -486,8 +509,10 @@ final class PassiveDriftTracker: @unchecked Sendable {
          programIsSilent: @escaping @Sendable () -> Bool = { false },
          now: @escaping @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
          isNearMiss: @escaping @Sendable ([DriftPeak], PassiveDriftCorrelator) -> Bool = PassiveDriftSampler.isNearMiss,
+         periodicClock: @escaping PeriodicClock = PassiveDriftTracker.dispatchPeriodicClock,
          onObservations: @escaping @Sendable ([DriftCorrectionPolicy.Observation]) -> Void) {
         self.ring = ring
+        self.periodicClock = periodicClock
         self.windowSeconds = windowSeconds
         self.intervalSeconds = intervalSeconds
         self.firstWindowSeconds = firstWindowSeconds
@@ -506,7 +531,7 @@ final class PassiveDriftTracker: @unchecked Sendable {
     }
 
     deinit {
-        timer?.cancel()
+        cancelPeriodicTimer?()
         silenceTimer?.cancel()
     }
 
@@ -518,7 +543,7 @@ final class PassiveDriftTracker: @unchecked Sendable {
             // A blind spell cancelled the periodic timer; re-arming the sampler
             // without rescheduling it would leave only event triggers sampling,
             // for good.
-            if isRunning, timer == nil { scheduleTimer() }
+            if isRunning, cancelPeriodicTimer == nil { scheduleTimer() }
         }
     }
 
@@ -537,7 +562,7 @@ final class PassiveDriftTracker: @unchecked Sendable {
     func start() {
         queue.async { [self] in
             isRunning = true
-            if timer == nil { scheduleTimer() }
+            if cancelPeriodicTimer == nil { scheduleTimer() }
             if silenceTimer == nil { scheduleSilencePoll() }
         }
     }
@@ -545,8 +570,8 @@ final class PassiveDriftTracker: @unchecked Sendable {
     func stop() {
         queue.async {
             self.isRunning = false
-            self.timer?.cancel()
-            self.timer = nil
+            self.cancelPeriodicTimer?()
+            self.cancelPeriodicTimer = nil
             self.silenceTimer?.cancel()
             self.silenceTimer = nil
             // Silence measured before the stop says nothing about the sink the
@@ -560,11 +585,9 @@ final class PassiveDriftTracker: @unchecked Sendable {
 
     /// `queue` only.
     private func scheduleTimer() {
-        let timer = DispatchSource.makeTimerSource(queue: queue)
-        timer.schedule(deadline: .now() + firstWindowSeconds, repeating: intervalSeconds)
-        timer.setEventHandler { [weak self] in self?.takeWindow() }
-        self.timer = timer
-        timer.resume()
+        cancelPeriodicTimer = periodicClock(firstWindowSeconds, intervalSeconds, queue) { [weak self] in
+            self?.takeWindow()
+        }
     }
 
     /// `queue` only.
@@ -775,7 +798,7 @@ final class PassiveDriftTracker: @unchecked Sendable {
                 self?.takeWindow(reason: .retry)
             }
         }
-        if sampler.isBlind { timer?.cancel(); timer = nil }
+        if sampler.isBlind { cancelPeriodicTimer?(); cancelPeriodicTimer = nil }
     }
 
     /// Diagnostic only: with `defaults write <bundle id> audiout.driftDumpWindows

@@ -497,6 +497,10 @@ protocol BTSyncedSinkControlling: SyncedLocalPCMSink {
     func start()
     func stop()
     func setDevices(_ specs: [BTSyncedSink.DeviceSpec])
+    /// Drop every per-device sink outside `uids` — see
+    /// ``BTSyncedSink/removeDevices(notIn:)``. Same default-no-op posture as
+    /// `setTrimMs`.
+    func removeDevices(notIn uids: Set<String>)
     func setComposition(_ composition: BTGroupComposition)
     /// The UIDs whose per-device sink is emitting real audio right now — the
     /// signal a Bluetooth row's `.connecting` hold ends on.
@@ -563,6 +567,7 @@ extension BTSyncedSinkControlling {
     func reanchorAll(cause: String) {}
     func setOffsetMs(_ ms: Int, forDeviceUID uid: String) {}
     func setBTOnlyBufferMs(_ ms: Int) {}
+    func removeDevices(notIn uids: Set<String>) {}
     func usableTrimRangeMs(forDeviceUID uid: String) -> ClosedRange<Double> {
         -BTSyncTrim.rangeMs...BTSyncTrim.rangeMs
     }

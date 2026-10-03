@@ -1713,6 +1713,44 @@ extension SerializedSharedState {
         #expect(sink.buffers.last == 740)
     }
 
+    /// DEFECT (customer log, 1.2.0): deselecting one of two measured speakers
+    /// moved the reference, and the move rebuilt EVERY sink the manager still
+    /// held, the departing one included, before `setDevices` dropped it. So a
+    /// speaker the user had just turned off restarted its engine once, and on
+    /// that night the restart failed with -10851 into the log.
+    @Test func aDeselectedSpeakerIsDroppedBeforeTheReferenceMoves() throws {
+        let dir = scratchDir
+        try BTTrimStore(directory: dir).saveLatencies([btMove.id: 583, btFlip.id: 527])
+        let (backend, bt, _, _) = makeBackend(storeDirectory: dir)
+        defer { backend.stop() }
+        let real = BTSyncedSink(renderSampleRate: 48_000, channelCount: 1, presentationDelayMs: { 100 })
+        backend.btSyncedSinkFactory = { real }
+        backend.btDeviceIDForUID = { _ in AudioObjectID(0) }
+        backend.start()
+        bt.fire([btMove, btFlip])
+        waitFor { self.device(backend, self.btMove.id) != nil
+            && self.device(backend, self.btFlip.id) != nil }
+        backend.setOutputSet([btMove.id, btFlip.id])
+        waitFor { real.sinkForTesting(uid: self.btMove.id) != nil
+            && real.sinkForTesting(uid: self.btFlip.id) != nil }
+        real.sinkForTesting(uid: btMove.id)?.test_waitForPendingRebuild()
+        real.sinkForTesting(uid: btFlip.id)?.test_waitForPendingRebuild()
+
+        let capture = LineCapture()
+        Telemetry._installTestSink { capture.append($0) }
+        defer { Telemetry._installTestSink(nil) }
+        backend.setOutputSet([btFlip.id])   // reference 683 → 627 ms
+        waitFor { real.sinkForTesting(uid: self.btMove.id) == nil
+            && capture.lines(evt: "bt_sink_rebuild").contains { $0.contains(self.btFlip.id) } }
+        Telemetry._installTestSink(nil)     // flush barrier
+
+        let rebuilds = capture.lines(evt: "bt_sink_rebuild")
+        #expect(!rebuilds.contains { $0.contains(btMove.id) },
+                "the deselected speaker must not be rebuilt on its way out: \(rebuilds)")
+        #expect(rebuilds.contains { $0.contains(btFlip.id) },
+                "positive control: the reference moved, so the remaining speaker re-anchors")
+    }
+
     /// Selecting a device whose measured latency is past the floor moves the
     /// reference for the BT sinks AND for the Mac's own, which rides it.
     @Test func aStoredLatencyRaisesTheReferenceOnSelect() throws {
@@ -2065,6 +2103,78 @@ extension SerializedSharedState {
         // Keep, not on the preview path.
         #expect(sink.offsets.contains { $0.uid == self.btMove.id && $0.ms == -96 },
                 "got \(sink.offsets)")
+    }
+
+    /// A customer's 1.2.0 session (two Sonos Moves) replayed: deselecting and
+    /// reselecting a speaker keeps both stored halves, and the reselected sink
+    /// is handed reference − latency + trim. That trim was −205, reached by 76
+    /// persisted steps the live sink refused, so the reselect anchored at 0 —
+    /// the formula doing its job on a trim nobody heard.
+    @Test @MainActor func aReselectedSpeakerKeepsItsStoredAlignment() async throws {
+        let dir = scratchDir
+        let sonos = BTDeviceSnapshot(id: "54-2A-1B-79-08-9E:output", name: "Sonos Move", isConnected: true)
+        let move2 = BTDeviceSnapshot(id: "C4-38-75-0E-BF-4A:output", name: "Move 2", isConnected: true)
+        let store = BTTrimStore(directory: dir)
+        try store.saveLatencies([sonos.id: 295, move2.id: 483])
+        try store.save([sonos.id: 80, move2.id: 0])
+        try store.saveSpeakerIndex([move2.id: 1, sonos.id: 2])
+
+        let (backend, bt, sink, _) = makeBackend(storeDirectory: dir)
+        defer { backend.stop() }
+        backend.start()
+        bt.fire([move2, sonos])
+        await SuiteWait.until { self.device(backend, sonos.id) != nil && self.device(backend, move2.id) != nil }
+        backend.setOutputSet([move2.id, sonos.id])
+        await SuiteWait.until { sink.offsets.contains { $0.uid == sonos.id } }
+        backend.setOutputSet([sonos.id])                                 // 19:59:41
+        backend.setBTSyncTrim(-205, forDevice: sonos.id, persist: true)  // 21:36:52
+        backend.setOutputSet([])                                         // 21:46:57
+        SuiteWait.settle(0.3)
+        let pushesBefore = sink.offsets.count
+        backend.setOutputSet([sonos.id])                                 // 21:54:24
+        await SuiteWait.until { sink.offsets.count > pushesBefore }
+        SuiteWait.settle(0.3)
+
+        #expect(try store.loadLatencies()?[sonos.id] == 295, "deselect/reselect kept the latency")
+        #expect(try store.load()?[sonos.id] == -205, "deselect/reselect kept the trim")
+        let offset = try #require(sink.offsets.last { $0.uid == sonos.id }?.ms)
+        let trim = try #require(sink.trims.last { $0.uid == sonos.id }?.ms)
+        let buffer = try #require(sink.buffers.last)
+        #expect((offset, trim, buffer) == (295, -205, 500))
+        // 500 − 295 + (−205): the stored trim is honoured, and it lands on 0.
+        let delay = BTReferenceTimeline.delayNanos(
+            composition: BTGroupComposition(airPlayPresent: false, macLocalPresent: false),
+            presentationDelayMs: 0, btOnlyBufferMs: buffer,
+            deviceOffsetMs: offset, trimMs: trim)
+        #expect(delay == 0)
+    }
+
+    /// A Reset on a playing speaker left no line at all (both of its seeks run
+    /// backward, and only a clamped forward seek logs), so a customer's emptied
+    /// trims file was first blamed on a code path that never ran.
+    @Test @MainActor func aResetLeavesALineNamingWhoAskedAndWhatItDeleted() async throws {
+        let dir = scratchDir
+        let store = BTTrimStore(directory: dir)
+        try store.saveLatencies([btMove.id: 295, btFlip.id: 483])
+        try store.save([btMove.id: -205, btFlip.id: 0])
+        let (backend, _, _, _) = makeBackend(storeDirectory: dir)
+        defer { backend.stop() }
+        let capture = LineCapture()
+        Telemetry._installTestSink { capture.append($0) }
+        defer { Telemetry._installTestSink(nil) }
+
+        backend.resetBTAlignment(forDevice: btMove.id)
+        backend.clearCompanionAlignmentTuning(targetID: btFlip.id)
+
+        await SuiteWait.until { capture.lines(evt: "bt_alignment_reset").count == 2 }
+        let lines = capture.lines(evt: "bt_alignment_reset")
+        #expect(lines.count == 2, "got \(lines)")
+        let drawer = try #require(lines.first { $0.contains(btMove.id) })
+        #expect(drawer.contains("\"source\":\"drawer\""), "\(drawer)")
+        #expect(drawer.contains("\"latencyMs\":\"295\""), "\(drawer)")
+        #expect(drawer.contains("\"trimMs\":\"-205\""), "\(drawer)")
+        let phone = try #require(lines.first { $0.contains(btFlip.id) })
+        #expect(phone.contains("\"source\":\"phone\""), "\(phone)")
     }
 }
 

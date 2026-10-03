@@ -590,6 +590,17 @@ final class BTDeviceSink: @unchecked Sendable {
     /// `lastAudibleRenderNanosPtr`; read by the liveness check on `graphQueue`.
     private let lastRenderCycleNanosPtr = UnsafeMutablePointer<Int64>.allocate(capacity: 1)
     private let lastEnqueueNanosPtr = UnsafeMutablePointer<Int64>.allocate(capacity: 1)
+    /// Render cycles and the largest absolute sample rendered since the last
+    /// `bt_sink_health` line. Written on the render thread, zeroed on
+    /// `graphQueue` when the line is written; a cycle landing between the read
+    /// and the zero is lost from one line, never misreported. The peak is the
+    /// source node's output BEFORE `mainMixerNode.outputVolume`, so a held or
+    /// muted sink still reports its program peak.
+    private let renderCyclesSinceHealthPtr = UnsafeMutablePointer<Int64>.allocate(capacity: 1)
+    private let renderPeakSinceHealthPtr = UnsafeMutablePointer<Float>.allocate(capacity: 1)
+    /// Same cadence as `bt_clock_deviation`.
+    static let healthIntervalNanos: Int64 = 30_000_000_000
+    private var lastHealthNanos: Int64 = 0   // graphQueue
     /// A released, fed sink whose render callback has been quiet this long is
     /// dead: the device clock can keep answering while nothing renders.
     static let renderStallNanos: Int64 = 2_000_000_000
@@ -681,6 +692,8 @@ final class BTDeviceSink: @unchecked Sendable {
         self.lastAudibleRenderNanosPtr.initialize(to: 0)
         self.lastRenderCycleNanosPtr.initialize(to: 0)
         self.lastEnqueueNanosPtr.initialize(to: 0)
+        self.renderCyclesSinceHealthPtr.initialize(to: 0)
+        self.renderPeakSinceHealthPtr.initialize(to: 0)
 
         guard let format = AVAudioFormat(
             standardFormatWithSampleRate: renderSampleRate,
@@ -702,6 +715,8 @@ final class BTDeviceSink: @unchecked Sendable {
         lastAudibleRenderNanosPtr.deallocate()
         lastRenderCycleNanosPtr.deallocate()
         lastEnqueueNanosPtr.deallocate()
+        renderCyclesSinceHealthPtr.deallocate()
+        renderPeakSinceHealthPtr.deallocate()
     }
 
     /// The monotonic instant this device last rendered real program audio, or
@@ -847,6 +862,7 @@ final class BTDeviceSink: @unchecked Sendable {
         timer.setEventHandler { [weak self] in self?.scheduleLivenessCheck() }
         timer.resume()
         livenessTimer = timer
+        lastHealthNanos = Self.monotonicNowNanos()
     }
 
     private func stopLocked(carryDelay: Bool = false) {
@@ -908,23 +924,57 @@ final class BTDeviceSink: @unchecked Sendable {
     /// Tear the sink down and report it when its device is gone or its render
     /// callback stalled while fed. An idle sink (nothing fed) or one whose gate
     /// has not opened never trips: a paused Mac is not a dead speaker.
+    ///
+    /// A live sink also writes `bt_sink_health` every `healthIntervalNanos`:
+    /// render cycles and peak since the last line, so a silent speaker shows
+    /// whether the render callback ran and what it rendered.
     private func checkLivenessLocked(nowNanos now: Int64) {   // on graphQueue
         guard running else { return }
-        let reason: String
-        if !deviceIsAlive(deviceID) {
+        let alive = deviceIsAlive(deviceID)
+        let isReleased = stateLock.withLock { released }
+        let fed = now &- lastEnqueueNanosPtr.pointee <= 1_000_000_000
+        var reason: String?
+        if !alive {
             reason = "device_gone"
-        } else if stateLock.withLock({ released }),
-                  now &- lastEnqueueNanosPtr.pointee <= 1_000_000_000,
-                  now &- lastRenderCycleNanosPtr.pointee > Self.renderStallNanos {
+        } else if isReleased, fed, now &- lastRenderCycleNanosPtr.pointee > Self.renderStallNanos {
             reason = "render_stalled"
-        } else {
+        }
+        if let reason {
+            Telemetry.log(.localPlayback, "bt_sink_dead", [
+                "uid": deviceUID, "reason": reason, "deviceID": String(deviceID),
+            ])
+            stopLocked()
+            onDead?(self)
             return
         }
-        Telemetry.log(.localPlayback, "bt_sink_dead", [
-            "uid": deviceUID, "reason": reason, "deviceID": String(deviceID),
+        guard now &- lastHealthNanos >= Self.healthIntervalNanos else { return }
+        let snapshot = healthSnapshotLocked()
+        Telemetry.log(.localPlayback, "bt_sink_health", [
+            "uid": deviceUID,
+            "deviceID": String(deviceID),
+            "cycles": String(snapshot.cycles),
+            "peak_dbfs": String(format: "%.1f", snapshot.peakDBFS),
+            "released": isReleased ? "true" : "false",
+            "fed": fed ? "true" : "false",
+            "alive": alive ? "true" : "false",
         ])
-        stopLocked()
-        onDead?(self)
+        renderCyclesSinceHealthPtr.pointee = 0
+        renderPeakSinceHealthPtr.pointee = 0
+        lastHealthNanos = now
+    }
+
+    private func healthSnapshotLocked() -> (cycles: Int64, peakDBFS: Double) {
+        let peak = Double(renderPeakSinceHealthPtr.pointee)
+        return (renderCyclesSinceHealthPtr.pointee, peak > 0 ? max(-120, 20 * log10(peak)) : -120)
+    }
+
+    /// Render thread: count the cycle and fold its rendered samples into the
+    /// running peak. A plain loop: no allocation, no locks.
+    private func noteRenderedForHealth(_ samples: UnsafeMutablePointer<Float>, count: Int) {
+        var peak = renderPeakSinceHealthPtr.pointee
+        for i in 0..<count { peak = max(peak, abs(samples[i])) }
+        renderPeakSinceHealthPtr.pointee = peak
+        renderCyclesSinceHealthPtr.pointee &+= 1
     }
 
     private static func monotonicNowNanos() -> Int64 {
@@ -961,6 +1011,7 @@ final class BTDeviceSink: @unchecked Sendable {
     func test_noteRenderCycle(nowNanos: Int64) { lastRenderCycleNanosPtr.pointee = nowNanos }
     func test_noteEnqueue(nowNanos: Int64) { lastEnqueueNanosPtr.pointee = nowNanos }
     var test_isRunning: Bool { graphQueue.sync { running } }
+    func test_healthSnapshot() -> (cycles: Int64, peakDBFS: Double) { graphQueue.sync { healthSnapshotLocked() } }
     /// Marks the sink running without starting the engine, so liveness runs with no HAL.
     func test_forceRunning() { graphQueue.sync { running = true } }
 
@@ -1255,6 +1306,7 @@ final class BTDeviceSink: @unchecked Sendable {
         // Silence-first: real audio overwrites its slice; whatever the drain
         // cannot fill (pre-release frames, a ring underrun tail) stays zero.
         base.update(repeating: 0, count: frameCount * channelCount)
+        defer { noteRenderedForHealth(base, count: frameCount * channelCount) }
 
         var plan = SyncTiming.RenderPlan(silentFrames: frameCount, releasesThisCycle: false)
         // A2DP sinks servo to the host delivery rate — one 120-second run

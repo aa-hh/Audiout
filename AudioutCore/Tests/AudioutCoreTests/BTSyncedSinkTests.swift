@@ -917,6 +917,35 @@ import AVFoundation
         }
     }
 
+    /// Red if the health peak is not taken from the rendered buffer: a silent speaker's
+    /// `bt_sink_health` line could not say whether real audio reached its engine.
+    @Test func renderedPeakReachesHealthCounters() throws {
+        let (manager, sink, ramp) = try Self.anchoredSink()
+        defer { manager.stop() }
+        _ = try #require(Self.drainUntilDry(sink, from: Self.anchorNanos), "the ramp never drained")
+
+        let health = sink.test_healthSnapshot()
+        let expected = 20 * log10(Double(ramp.map { abs($0) }.max() ?? 0))
+        #expect(health.cycles > 0)
+        #expect(abs(health.peakDBFS - expected) <= 0.5, "peak \(health.peakDBFS) dBFS, expected \(expected)")
+    }
+
+    /// Red if silence is reported as anything but the -120 dBFS floor: an idle
+    /// sink would read as playing in its health line.
+    @Test func silentSinkReportsFloorPeak() throws {
+        let manager = BTSyncedSink(
+            renderSampleRate: Self.sampleRate, channelCount: 1, presentationDelayMs: { 100 })
+        manager.setDevices([.init(deviceID: 0, uid: "dev-a")])
+        let sink = try #require(manager.sinkForTesting(uid: "dev-a"))
+        for cycle in 0..<3 {
+            _ = Self.renderCycle(sink, at: Self.anchorNanos + Int64(cycle) * 10_000_000)
+        }
+
+        let health = sink.test_healthSnapshot()
+        #expect(health.cycles > 0)
+        #expect(health.peakDBFS == -120)
+    }
+
     /// Red if the manager drops a dead sink by UID instead of by instance: the
     /// replaced sink's late death would remove the live replacement for the same speaker.
     @Test func replacementSinkSurvivesOldSinkDeathCallback() throws {

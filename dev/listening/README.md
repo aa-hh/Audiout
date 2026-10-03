@@ -10,7 +10,7 @@ loops the click track, records the built-in mic during each block, and writes
 |---|---|---|---|
 | A | both Moves | 25 min; the second Move is disconnected for 10 s at minute 20 | M1 Part 1 section 1 (fix 1) |
 | B | Move 1 + This Mac | play 60 s, pause 90 s, play 60 s | runbook 1 Run B (M1 Part 2) |
-| C (`--with-airplay`) | the AirPlay speaker + Move 1 | 60 min | runbook 2 Part A, AirPlay variant (M1 Part 4) |
+| C (`--with-airplay`) | Move 1 on Bluetooth (`--c-move`) + the other Move in Wi-Fi mode (`--airplay-id`) | 60 min | runbook 2 Part A, AirPlay variant (M1 Part 4) |
 
 Before each block the driver quits Audiout Dev, writes the speakers into
 `~/Library/Application Support/com.audiout.Audiout.dev/routing.json`
@@ -60,19 +60,19 @@ more relaunch, then the block is skipped.
 
 A Bluetooth id is the speaker's own hardware address with dashes plus
 `:output` (`54-2A-1B-79-08-9E:output`), so it is the same on every Mac. An
-AirPlay id is a colon-separated address; `--list-devices` marks the AirPlay entry
-that shares a Move's address as that Move's Wi-Fi side. The alignment store
+AirPlay id is a colon-separated address; `--list-devices` marks AirPlay ids that
+share a Move's first three octets "(a Sonos Move in Wi-Fi mode)". A Move in Wi-Fi
+mode must have been selected once on that Mac so the log knows its id. The alignment store
 (`bt-sync-trims.json`) is per Mac, so the wizard has to run on the second Mac.
 The driver refuses, by name, an id that neither that store nor `telemetry.jsonl`
 has seen. No telemetry line carries an id and a name; names come from blueutil.
 
 ### Why it starts inside the logged-in session
 
-macOS grants Microphone, Automation (one app scripting another) and Bluetooth
-access to the app that started a process. A process started over ssh has no
-logged-in session and never gets a prompt. So `launch-tonight.sh` loads a
-one-shot LaunchAgent into `gui/$(id -u)` (the logged-in user's launchd domain)
-that opens Terminal, which holds the grants from step 5, to run the driver.
+macOS grants Microphone, Automation (one app scripting another) and Bluetooth to
+the app that started a process; a process started over ssh never gets a prompt.
+So a one-shot LaunchAgent in `gui/$(id -u)` (the logged-in user's launchd domain)
+opens Terminal, which holds the grants from step 5, to run the driver.
 
 ## Rehearsal: `--smoke`
 
@@ -97,7 +97,7 @@ has no file until it stops, so its mic and click checks show `n/a`.
 Watch from another Mac (the driver prints the folder at start):
 
 ```
-ssh alechamilton@SUMUP-M9Y197RFVG.local tail -F '<results path>/status.log' | grep --line-buffered -E 'ALERT|ABORT|BLOCK|DONE'
+ssh alechamilton@SUMUP-M9Y197RFVG.local tail -F '<results path>/status.log' | grep --line-buffered -E 'ALERT|ABORT|BLOCK|WAITING|DONE'
 ```
 
 Your main Claude session can run that under a monitor and push a phone notification per line.
@@ -116,35 +116,34 @@ reconnect setting), loads `~/Library/LaunchAgents/com.audiout.listening-night.pl
 `launchctl bootstrap`, and keeps the Mac awake with `caffeinate -dims` until the
 agent fires, removes itself and runs the driver. It prints how to cancel.
 
+A Move is Bluetooth or AirPlay, never both, and only its button switches it. After
+Block B the driver quits Audiout Dev and writes `WAITING C`: switch the other Move
+to Wi-Fi mode, wait until it shows as an AirPlay speaker, then press Enter in that
+Terminal or run `ssh alechamilton@SUMUP-M9Y197RFVG.local touch ~/listening/go-block-c`.
+After 30 min it writes `ABORT C` and finishes with A and B. The last line says
+`DONE switch the Move back to Bluetooth mode if you want both on Bluetooth tomorrow`.
+
 Then, and never before the driver starts, on the development Mac:
 
-1. At "Block A started at <time>; set remoteSlots to 0 on the dev Mac now" (in
-   `driver.log`), run `git config audiout.remoteSlots 0`; tests then run locally, no wait.
-2. At "Block C started", `git config audiout.remoteSlots 1` only if tests must keep flowing.
-3. After the run ("done; set remoteSlots back to 2"): `git config audiout.remoteSlots 2`.
+1. At "Block A started … set remoteSlots to 0": `git config audiout.remoteSlots 0`.
+2. At "Block C started": `git config audiout.remoteSlots 1`, only if tests must keep flowing.
+3. At "done; set remoteSlots back to 2": `git config audiout.remoteSlots 2`.
 
 ## The results folder
 
 `results/<date>_<time>/`:
 
-- `summary.md`: per block, the offsets from `click-pair-spacing.py` (Block B:
-  before the pause, right after resume, one minute after; Blocks A and C: linear
-  fit and jump count), counts of each telemetry line, the `bt_clock_deviation`
-  slope per speaker, the load, and runbook 2's interpretation table.
-- `blocks.tsv`: per block, telemetry byte offsets at start and end, marks
-  (seconds into the recording) and ids.
-- `block<X>-raw.wav` or `.m4a` (the recording), `block<X>.wav` (16-bit),
-  `block<X>.txt` (the script's per-period output), `block<X>-telemetry.jsonl`
+- `summary.md`: per block, the `click-pair-spacing.py` offsets (Block B: before
+  the pause, right after resume, one minute after; A and C: linear fit and jump
+  count), telemetry line counts, `bt_clock_deviation` slope per speaker, load, and
+  runbook 2's interpretation table.
+- `blocks.tsv` (telemetry byte offsets, marks, ids per block); `block<X>-raw.wav`
+  or `.m4a`, `block<X>.wav` (16-bit), `block<X>.txt`, `block<X>-telemetry.jsonl`
   (the block's lines matching `bt_clock_jump|bt_sink_anchored|bt_sink_release_overshoot|bt_sink_seek_clamped|tap_feed_gap|bt_clock_deviation|drift_window_result|drift_window_dropped|drift_correction|bt_room_term_changed|room_delay_changed`).
-- `load.csv`: once a minute, time, block, 1-minute load from `uptime`, busiest
-  process; `summary.md` gives each block's max and mean and warns above 4.
-- `status.log` (the watchdog), `driver.log` (every step with times),
-  `notes.txt` (skips, fallbacks and early block ends).
+- `load.csv` (load once a minute), `status.log` (watchdog), `driver.log`, `notes.txt`.
 
 ## What it does not cover
 
-- M1 Part 1 sections 2 to 4 (drawer stepper, reselect, wizard, Try again, reset):
-  they need a person at the popover.
+- M1 Part 1 sections 2 to 4 (stepper, reselect, wizard, Try again, reset): need a person.
 - Listening by ear; the mic measures offsets only. M1 Part 3 (PR #228): the 950 ms store edit, steps 3 to 5, questions (a) and (b).
-- Fix 7's PostHog check; runbook 1 Runs A and C; runbook 2 Part B (the drift meter).
-- The minute between blocks: the mic records only while a block runs.
+- Fix 7's PostHog check; runbook 1 Runs A and C; runbook 2 Part B (the drift meter); the minute between blocks (no recording).

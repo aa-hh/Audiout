@@ -1,14 +1,17 @@
 #!/bin/zsh
 # Unattended listening night for the Bluetooth sync fixes. See README.md here.
 #
-#   ./unattended-night.sh [--dry-run | --smoke] [--with-airplay] [--move1 ID] [--move2 ID] [--airplay-id ID]
+#   ./unattended-night.sh [--dry-run | --smoke] [--with-airplay] [--move1 ID] [--move2 ID] [--airplay-id ID] [--c-move ID]
 #   ./unattended-night.sh --list-devices      # ids this Mac has seen, in the form the driver takes
 #   ./unattended-night.sh --check [flags]     # tools, ids and build only, then exit (launch-tonight.sh runs it)
 #
 # Block A (25 min): both Moves, click track loops, mic records; at minute 20 the
 #   second Move is disconnected for 10 s and reconnected (needs blueutil).
 # Block B (~5 min): Move 1 + This Mac; play 60 s, pause 90 s, play 60 s.
-# Block C (60 min, --with-airplay only): the AirPlay speaker + Move 1.
+# Block C (60 min, --with-airplay only): one Move on Bluetooth (--c-move, default
+#   Move 1) + the other Move in Wi-Fi mode as an AirPlay speaker (--airplay-id).
+#   A Move is Bluetooth or AirPlay, never both, and switching is a button press,
+#   so before Block C the driver waits for someone to switch it and confirm.
 # Then: convert, run click-pair-spacing.py, cut each block's telemetry lines,
 # write results/<date>/summary.md.
 #
@@ -42,7 +45,10 @@ RELAUNCH_TRIES=2     # a speaker discovered after the restore is dropped, so one
 # Bluetooth: the speaker's address with dashes plus ":output"; AirPlay: colon hex.
 MOVE1_ID=""
 MOVE2_ID=""
-AIRPLAY_ID=""            # only needed for --with-airplay
+AIRPLAY_ID=""            # only needed for --with-airplay: the other Move's id in Wi-Fi mode
+C_MOVE_ID=""             # the Move that stays on Bluetooth in Block C; empty = MOVE1_ID
+GO_FILE="$HOME/listening/go-block-c"   # touch this to confirm the Wi-Fi switch (Enter works too at a terminal)
+WAIT_C_S=1800           # how long to wait for that confirmation
 AIRPLAY_NAME="AirPlay speaker"
 MAC_ID=local-mac         # This Mac; the same id on every Mac
 MAC_VOLUME=50            # system output volume set before each relaunch; Audiout adopts it as its master level
@@ -86,13 +92,14 @@ while (( $# )); do
     --move1) MOVE1_ID=${2:?--move1 needs an id}; shift ;;
     --move2) MOVE2_ID=${2:?--move2 needs an id}; shift ;;
     --airplay-id) AIRPLAY_ID=${2:?--airplay-id needs an id}; shift ;;
+    --c-move) C_MOVE_ID=${2:?--c-move needs a Bluetooth id}; shift ;;
     *) print -u2 "unknown argument: $1"; exit 2 ;;
   esac
   shift
 done
 (( DRY && SMOKE )) && { print -u2 "--dry-run and --smoke cannot be combined"; exit 2 }
 if (( DRY )); then
-  SETTLE_S=0; A_FIRST_S=10; A_OFF_S=10; A_REST_S=10; B_PLAY_S=10; B_PAUSE_S=10; C_S=10; LOAD_EVERY_S=5; WATCH_EVERY_S=5; PROBE_S=10
+  SETTLE_S=0; A_FIRST_S=10; A_OFF_S=10; A_REST_S=10; B_PLAY_S=10; B_PAUSE_S=10; C_S=10; LOAD_EVERY_S=5; WATCH_EVERY_S=5; PROBE_S=10; WAIT_C_S=10
 fi
 if (( SMOKE )); then
   A_FIRST_S=60; A_OFF_S=10; A_REST_S=50; B_PLAY_S=20; B_PAUSE_S=30; C_S=120
@@ -169,6 +176,9 @@ for i in sorted(seen, key=lambda i: (seen[i]["kind"], i)):
     else:
         twin = i.replace(":", "-") + ":output"
         if twin in seen: bits.append(f"same address as Bluetooth {twin}, so the Wi-Fi side of that speaker")
+        moves = [b for b in seen if seen[b]["kind"] == "Bluetooth"
+                 and (not paired or "move" in paired.get(b, {}).get("name", "").lower())]
+        if any(b[:8].replace("-", ":") == i[:8] for b in moves): bits.insert(0, "(a Sonos Move in Wi-Fi mode)")
     if "store" not in d["src"] and "log" not in d["src"]: bits.append("never seen by Audiout Dev, so the driver refuses it")
     if d["last"]: bits.append(f'last log line {d["last"]} ({", ".join(sorted(d["evts"])[:3])})')
     print(f'{d["kind"]:<10} {i:<25} {"; ".join(bits)}')
@@ -207,12 +217,14 @@ fi
 
 # Ids per block; a real run refuses an empty or unknown id before anything plays.
 typeset -a IDS_A IDS_B IDS_C
-IDS_A=($MOVE1_ID $MOVE2_ID); IDS_B=($MOVE1_ID $MAC_ID); IDS_C=($MOVE1_ID $AIRPLAY_ID)
+C_MOVE_ID=${C_MOVE_ID:-$MOVE1_ID}
+IDS_A=($MOVE1_ID $MOVE2_ID); IDS_B=($MOVE1_ID $MAC_ID); IDS_C=($C_MOVE_ID $AIRPLAY_ID)
 ids_problem=""
 for pair in MOVE1_ID:$MOVE1_ID MOVE2_ID:$MOVE2_ID $( (( WITH_AIRPLAY )) && print AIRPLAY_ID:$AIRPLAY_ID ); do
   [[ -n ${pair#*:} ]] || ids_problem+="${pair%%:*} is empty (run --list-devices and set it). "
 done
-unknown=$(devices check $MOVE1_ID $MOVE2_ID $( (( WITH_AIRPLAY )) && print -- $AIRPLAY_ID )) || ids_problem+="$unknown "
+unknown=$(devices check $MOVE1_ID $MOVE2_ID $( (( WITH_AIRPLAY )) && print -- $C_MOVE_ID $AIRPLAY_ID )) || ids_problem+="$unknown "
+[[ -z $C_MOVE_ID || $C_MOVE_ID == *:output ]] || ids_problem+="--c-move must be a Bluetooth id (ending :output): $C_MOVE_ID. "
 
 if (( ! DRY )); then
   [[ -z $KEY_PROBLEM$ids_problem ]] || die "$ids_problem$KEY_PROBLEM"
@@ -650,15 +662,32 @@ if ensure_connected $MOVE1_ID && select_speakers $IDS_B; then
   block_end
 else block_skip B "Move 1 could not be connected or selected with This Mac (see driver.log)"; fi
 
-# Block C: the AirPlay speaker plus Move 1.
+# Block C: one Move on Bluetooth plus the other Move in Wi-Fi mode. Someone has
+# to press the Move's button, so wait for Enter or the go file.
+wait_for_wifi_switch() {
+  if (( ! DRY )); then
+    to 20 osascript -e "tell application id \"$BUNDLE_ID\" to quit" >/dev/null 2>&1 || true
+  fi
+  rm -f "$GO_FILE"
+  status "WAITING C $(date +%H:%M:%S) switch the other Move to Wi-Fi mode, wait for it to appear as an AirPlay speaker, then confirm (Enter here, or: touch $GO_FILE)"
+  local end=$(( SECONDS + WAIT_C_S ))
+  while (( SECONDS < end )); do
+    [[ -f $GO_FILE ]] && { rm -f "$GO_FILE"; log "Block C confirmed by $GO_FILE"; return 0; }
+    if [[ -t 0 ]]; then read -t 2 -r _ && { log "Block C confirmed by Enter"; return 0; }
+    else sleep 2; fi
+  done
+  status "ABORT C timeout waiting for the AirPlay switch"
+  return 1
+}
 if (( WITH_AIRPLAY )); then
-  if ensure_connected $MOVE1_ID && select_speakers $IDS_C; then
+  if ! wait_for_wifi_switch; then block_skip C "nobody confirmed the switch to Wi-Fi mode within $WAIT_C_S s"
+  elif ensure_connected $C_MOVE_ID && select_speakers $IDS_C; then
     play_start; block_begin C $IDS_C
     watch_sleep $C_S
     block_end
-  else block_skip C "Move 1 or the AirPlay speaker could not be selected (see driver.log)"; fi
+  else block_skip C "the Bluetooth Move or the Move in Wi-Fi mode could not be selected (see driver.log)"; fi
 fi
-(( ! DRY && HAVE_BLUEUTIL )) && { to 30 blueutil --connect $(bt_addr $MOVE2_ID) || true; }
+(( ! DRY && HAVE_BLUEUTIL && ! WITH_AIRPLAY )) && { to 30 blueutil --connect $(bt_addr $MOVE2_ID) || true; }
 if [[ $RECONNECT_WAS == off || $RECONNECT_WAS == 0 ]]; then
   defaults write $BUNDLE_ID $RECONNECT_KEY -bool false; log "set $RECONNECT_KEY back to off"
 fi
@@ -678,7 +707,7 @@ EVTS = ["bt_clock_jump", "bt_sink_anchored", "bt_sink_release_overshoot", "bt_si
         "drift_correction", "bt_room_term_changed", "room_delay_changed"]
 TITLES = {"A": "Block A: both Moves, 25 min, one Move off for 10 s at minute 20",
           "B": "Block B: one Move + This Mac, play 60 s, pause 90 s, play 60 s",
-          "C": f"Block C: {airplay} + one Move, 60 min"}
+          "C": "Block C: one Move on Bluetooth + the other Move in Wi-Fi mode (AirPlay), 60 min"}
 
 def tel_slice(a, b):
     """Bytes a..b of the telemetry file; if it rotated in between, the tail of .1 plus the head of the new file."""
@@ -784,5 +813,6 @@ md += ["## Reading Blocks A and C (table from runbook 2)", "",
 open(f"{out}/summary.md", "w").write("\n".join(md))
 print(f"{out}/summary.md")
 EOF
-status "DONE $(date +%H:%M:%S)"
+if (( WITH_AIRPLAY )); then status "DONE switch the Move back to Bluetooth mode if you want both on Bluetooth tomorrow"
+else status "DONE $(date +%H:%M:%S)"; fi
 log "done; set remoteSlots back to 2 on the dev Mac (git config audiout.remoteSlots 2)"

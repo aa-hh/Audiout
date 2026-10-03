@@ -152,19 +152,28 @@ if [ -f "$g9" ] && command -v python3 >/dev/null 2>&1; then
 fi
 
 # ---------------------------------------------------------------------------
-# GUARD 7 (BLOCKING): staged Swift must pass the readability self-review.
+# GUARD 7 (BLOCKING): staged Swift must pass the readability screen.
 #
 # Numbered by arrival like every guard, but positioned HERE — before the
-# test-suite guards — so a review bounce costs seconds, not a full suite run.
-# Logic lives in guard-self-review.sh (same split as Guard 2's checker):
-# a deterministic screen over added comment lines, then a receipt proving
-# scripts/self-review.sh ran against these exact staged bytes. Rubric and
-# rationale: docs/REVIEW-RUBRIC.md. Missing helper => silently skip, same
-# principle as Guard 2 — a hook that errors on an unrelated machine is worse
-# than a hook that isn't there.
+# test-suite guards — so a bounce costs seconds, not a full suite run.
+# Logic lives in guard-self-review.sh (same split as Guard 2's checker): a
+# deterministic screen over added comment lines (rubric:
+# docs/REVIEW-RUBRIC.md). The code review happens at merge time (Guard 10).
+# Missing helper => silently skip, same principle as Guard 2 — a hook that
+# errors on an unrelated machine is worse than a hook that isn't there.
 g7="$hook_dir/guard-self-review.sh"
 if [ -f "$g7" ]; then
     sh "$g7" || exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# GUARD 10 (BLOCKING): a merge onto main needs a code-review receipt.
+# A conflict-resolution merge commit runs this hook instead of pre-merge-commit,
+# so the receipt check runs here too. A clean merge gets it from pre-merge-commit.
+# Before Guard 4, so a refused merge never pays for a suite run.
+g10="$hook_dir/guard-merge-review.sh"
+if [ "$branch" = "main" ] && [ -f "$git_dir/MERGE_HEAD" ] && [ -f "$g10" ]; then
+    sh "$g10" || exit 1
 fi
 
 # ---------------------------------------------------------------------------
@@ -178,6 +187,7 @@ fi
 #     suite whenever it cannot map a file)
 #   - a merge landing on main runs the FULL suite with the pass cache off,
 #     unless a full-suite pass is stamped on the identical merged tree
+#   - merging main into a branch runs the FULL suite, which stamps that pass
 # The full run on every commit was the main cost of committing, and the risk it
 # absorbed lands one step later instead: nothing reaches main without a full
 # run on its exact sources, so a too-narrow branch filter costs at most one fix cycle at

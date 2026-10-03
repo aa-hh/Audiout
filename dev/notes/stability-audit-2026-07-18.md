@@ -79,6 +79,28 @@ When fixed: delete the STABILITY(C8) marker(s) at `NativeBackend.swift:482`,
 `NativeBackend.swift:220`, and `GroupController.swift:167` and move this
 entry to Resolved.
 
+**2026-10-03, live freeze:** the structural risk above happened. With
+coreaudiod not answering, two samples showed the main thread parked in
+`setOutputSet` and `setMeteringActive`, each in a `stateQueue.sync`, while
+`stateQueue` was running (or queued behind) Core Audio calls: the aggregate
+default-output chain (`reconcileAggregateDefault` and the reads and the
+set-default write under it) and the AirPlay-class read in
+`reconcileSystemAirPlayGuard`. Those calls now run on `captureControlQueue`,
+or on the default-output listener's own thread before it hops in, and only
+the resulting state is committed on `stateQueue`. This entry stays open: the
+main-thread `stateQueue.sync` sites themselves remain, so any Core Audio call
+added back onto `stateQueue` brings the freeze back. Three Core Audio calls
+are still on `stateQueue`, pending a follow-up: `start()`'s default-output read
+(`NativeBackend.swift`, the `publishVolumeOwnershipLocked` seed), `stop()`'s
+default-output read, resolve and restore write, and `liveBTDeviceIDLocked`'s
+resolve fallback in `NativeBackend+Bluetooth.swift`. Because `stop()` is
+still on `stateQueue`, one window of a few milliseconds remains: if `stop()`
+runs between `pointDefaultAtAggregate`'s `started` check and its set-default
+write, `stop()` reads the old default and skips its restore, the write then
+lands, and `sweepOrphans()` destroys the aggregate while it is the Mac's
+default, so macOS picks the fallback device itself. Moving `stop()`'s restore
+off `stateQueue` (the follow-up) closes it.
+
 ### D4 — UI-thread stalls and stuck-drag state (several sub-items)
 
 **Sync persistence on main per gesture:**

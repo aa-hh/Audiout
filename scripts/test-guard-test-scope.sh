@@ -102,6 +102,25 @@ got="$(cd "$CLONE" && env -u AUDIOUT_FULL_SUITE sh "$SCOPE")"
 [ "$got" = FULL ] && ok "a deleted Swift file runs FULL" \
   || fail "a deleted Swift file printed '$got', expected FULL"
 
+# --- Merging main into a branch is FULL; merging any other commit is not -----
+
+# sync_scope <merged ref>: a merge into a branch, as pre-merge-commit sees it
+# before git writes MERGE_HEAD, staging an edit that alone maps by name.
+git -C "$CLONE" checkout -q -B scope-sync
+git -C "$CLONE" branch -f main HEAD
+sync_scope() {
+  git -C "$CLONE" reset -q --hard
+  echo "// scope test" >> "$CLONE/$SRC/AudioutCore/NativeBackend.swift"
+  git -C "$CLONE" add -- "$SRC/AudioutCore/NativeBackend.swift"
+  (cd "$CLONE" && env -u AUDIOUT_FULL_SUITE AUDIOUT_IN_MERGE=1 GIT_REFLOG_ACTION="merge $1" sh "$SCOPE")
+}
+got="$(sync_scope main)"
+[ "$got" = FULL ] && ok "merging main into a branch runs FULL" \
+  || fail "merging main into a branch printed '$got', expected FULL"
+got="$(sync_scope HEAD~1)"
+[ "$got" != FULL ] && [ -n "$got" ] && ok "merging another commit into a branch keeps the branch scope" \
+  || fail "merging another commit into a branch printed '$got'"
+
 # --- The dependents table matches AudioutCore/Package.swift -------------------
 
 # Library targets and their target dependencies, read from Package.swift: one

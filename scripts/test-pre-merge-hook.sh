@@ -38,6 +38,8 @@ target="AudioutCore/Sources/AudioutCore/Analytics.swift"
 export AUDIOUT_TEST_CACHE_DIR="$TMP_DIR/stamps"
 unset AUDIOUT_TEST_NO_CACHE
 mkdir -p "$AUDIOUT_TEST_CACHE_DIR"
+# This file covers Guard 4; Guard 10 has scripts/test-review-branch.sh.
+export AUDIOUT_SKIP_BRANCH_REVIEW=1
 
 git clone -q "$SRC_ROOT" "$REPO" || { echo "clone failed" >&2; exit 1; }
 cd "$REPO" || exit 1
@@ -207,6 +209,26 @@ stamp_branch untracked full
 merge_case "h" untracked
 expect_run "h"
 rm -f "$extra"
+
+# (i) Merging main into a branch runs the full suite, and landing that branch
+# on main then skips it on the pass that run stamped. Catches: the sync running
+# only the suites for main's changed files, so the merge onto main pays again.
+rm -f "$AUDIOUT_TEST_CACHE_DIR"/*
+make_branch synced "branch side of a sync"
+echo "// main moves on" >> AudioutCore/Sources/AudioutCore/LicenseGate.swift
+git commit -q --no-verify -am "main moves on"
+git checkout -q synced
+: > "$LOG"
+git merge -q --no-ff --no-edit main >"$TMP_DIR/sync.out" 2>&1 \
+  || { fail "i: syncing main into the branch was refused"; cat "$TMP_DIR/sync.out" >&2; }
+if [ "$(cat "$LOG")" = "|" ]; then ok "i: sync ran the full suite with the cache on"
+else fail "i: sync runner call was '$(cat "$LOG")', expected one unfiltered call"; fi
+# The real runner stamps that pass; the stub does not, so stamp it as (f) does.
+suite_cache_record "$(suite_cache_source_hash "$REPO" AudioutCore)"
+git checkout -q main
+merge_case "i" synced
+if [ ! -s "$LOG" ] && grep -q "Guard 4: skipped" "$merge_out"; then ok "i: merge onto main skipped the suite"
+else fail "i: merge onto main ran the suite (log: '$(cat "$LOG")')"; cat "$merge_out" >&2; fi
 
 if [ "$FAILURES" -gt 0 ]; then
   echo "$FAILURES pre-merge hook test(s) FAILED" >&2

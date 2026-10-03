@@ -182,6 +182,7 @@ import CoreAudio
 
         func start() { lock.withLock { _calls.append("start") } }
         func stop() { lock.withLock { _calls.append("stop") } }
+        func reanchorAll(cause: String) { lock.withLock { _calls.append("reanchorAll") } }
         func setDevices(_ specs: [BTSyncedSink.DeviceSpec]) {
             lock.withLock { _calls.append("setDevices"); _deviceSets.append(specs) }
         }
@@ -502,6 +503,95 @@ import CoreAudio
                 "exactly the BT id lands in the sink manager — never the AirPlay id")
         #expect(sink.compositions.last?.airPlayPresent == true,
                 "an AirPlay member makes the AirPlay presentation timeline the reference")
+    }
+
+    /// Delay-to-worst across transports (owner's call, 2026-09-26): a
+    /// Bluetooth speaker whose measured latency plus headroom fits under the
+    /// AirPlay start buffer changes nothing — no AirPlay pre-delay line is
+    /// ever published and the BT sinks keep the start buffer as their
+    /// reference. Turns red if the BT term ever counts a speaker the buffer
+    /// already covers.
+    @Test func btSpeakerUnderTheStartBufferNeverHoldsAirPlayBack() {
+        let (backend, engine, discovery, bt, sink, capture) = makeBackend()
+        defer { backend.stop() }
+        backend.start()
+        let ap = ap2Device()
+        discovery.fire(.appeared(ap))
+        bt.fire([btMove])
+        waitFor { self.device(backend, ap.id) != nil && self.device(backend, self.btMove.id) != nil }
+        waitFor { engine.fedIDs.contains(ap.outputID) }
+        backend.setOutputSet([ap.id, btMove.id])
+        waitFor { engine.addedIDs.contains(ap.outputID) && sink.calls.contains("start") }
+        let startBuffer = backend.startBufferMs
+
+        // Headroom is 100 ms, so this lands exactly on the buffer, not over it.
+        backend.endBTWizardLatencyPreview(forDevice: btMove.id, keepMs: Double(startBuffer - 100))
+        waitFor { backend.btMeasuredLatencyMs(forDevice: self.btMove.id) == Double(startBuffer - 100) }
+        waitFor(timeout: 0.3) { false }   // let the async recompute settle
+
+        #expect(capture.preDelayMs.isEmpty, "got \(capture.preDelayMs)")
+        #expect(backend.btReferenceDelayMs() == startBuffer)
+        #expect(backend.localSinkReferenceDelayMs() == startBuffer)
+    }
+
+    /// The other side of the same rule: a speaker slower than the buffer
+    /// raises the room delay to its latency plus headroom, AirPlay is held
+    /// back by the difference, and every sink reads the raised value. Turns
+    /// red if the AirPlay line is not published or the BT reference stays at
+    /// the start buffer.
+    @Test func btSpeakerSlowerThanTheStartBufferHoldsAirPlayBackByTheDifference() {
+        let (backend, engine, discovery, bt, sink, capture) = makeBackend()
+        defer { backend.stop() }
+        backend.start()
+        let ap = ap2Device()
+        discovery.fire(.appeared(ap))
+        bt.fire([btMove])
+        waitFor { self.device(backend, ap.id) != nil && self.device(backend, self.btMove.id) != nil }
+        waitFor { engine.fedIDs.contains(ap.outputID) }
+        backend.setOutputSet([ap.id, btMove.id])
+        waitFor { engine.addedIDs.contains(ap.outputID) && sink.calls.contains("start") }
+        let startBuffer = backend.startBufferMs
+        let slow = startBuffer + 300
+
+        backend.endBTWizardLatencyPreview(forDevice: btMove.id, keepMs: Double(slow))
+        waitFor { capture.preDelayMs.last == slow + NativeBackend.btReferenceHeadroomMs - startBuffer }
+
+        #expect(backend.btReferenceDelayMs() == slow + NativeBackend.btReferenceHeadroomMs)
+        #expect(backend.localSinkReferenceDelayMs() == slow + NativeBackend.btReferenceHeadroomMs)
+        #expect(sink.calls.contains("reanchorAll"), "the BT sinks re-anchor on the moved room delay")
+    }
+
+    /// Hysteresis, the Cast term's rule applied to Bluetooth: a re-measurement
+    /// that comes in LOWER leaves the room delay where it is (a move is one
+    /// gap for the whole house), and only the speaker leaving the selection
+    /// retires the term and takes the AirPlay line away. Turns red if the
+    /// term follows a lower latency down, or outlives the speaker.
+    @Test func btRoomTermNeverFallsWhileTheSpeakerStaysSelected() {
+        let (backend, engine, discovery, bt, sink, capture) = makeBackend()
+        defer { backend.stop() }
+        backend.start()
+        let ap = ap2Device()
+        discovery.fire(.appeared(ap))
+        bt.fire([btMove])
+        waitFor { self.device(backend, ap.id) != nil && self.device(backend, self.btMove.id) != nil }
+        waitFor { engine.fedIDs.contains(ap.outputID) }
+        backend.setOutputSet([ap.id, btMove.id])
+        waitFor { engine.addedIDs.contains(ap.outputID) && sink.calls.contains("start") }
+        let startBuffer = backend.startBufferMs
+        let raised = startBuffer + 300 + NativeBackend.btReferenceHeadroomMs
+
+        backend.endBTWizardLatencyPreview(forDevice: btMove.id, keepMs: Double(startBuffer + 300))
+        waitFor { capture.preDelayMs.last == raised - startBuffer }
+
+        backend.endBTWizardLatencyPreview(forDevice: btMove.id, keepMs: Double(startBuffer + 100))
+        waitFor { backend.btMeasuredLatencyMs(forDevice: self.btMove.id) == Double(startBuffer + 100) }
+        waitFor(timeout: 0.3) { false }
+        #expect(backend.btReferenceDelayMs() == raised, "a lower re-measurement never lowers the room")
+        #expect(capture.preDelayMs.last == raised - startBuffer, "got \(capture.preDelayMs)")
+
+        backend.setOutputSet([ap.id])
+        waitFor { capture.preDelayMs.last == 0 }
+        #expect(backend.btReferenceDelayMs() == startBuffer, "the term leaves with the speaker")
     }
 
     /// The composition is recomputed on every selection change: AirPlay

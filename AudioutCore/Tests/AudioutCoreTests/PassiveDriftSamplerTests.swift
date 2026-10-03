@@ -386,6 +386,47 @@ import Testing
         return (ReferenceAudioRing(), pcm)
     }
 
+    /// The periodic timer, stepped by hand: `advance(to:)` runs every fire
+    /// due by then on the tracker's queue and returns once they have run, so
+    /// a busy suite can never slip a fire in before the test looks.
+    private final class HandDrivenPeriodicClock: @unchecked Sendable {
+        private let lock = NSLock()
+        private var queue: DispatchQueue?
+        private var fire: (@Sendable () -> Void)?
+        private var nowSeconds = 0.0
+        private var nextFireSeconds = 0.0
+        private var intervalSeconds = 0.0
+
+        /// What `PassiveDriftTracker(periodicClock:)` takes.
+        var clock: PassiveDriftTracker.PeriodicClock {
+            { [self] firstSeconds, intervalSeconds, queue, fire in
+                lock.withLock {
+                    self.queue = queue
+                    self.fire = fire
+                    self.nextFireSeconds = nowSeconds + firstSeconds
+                    self.intervalSeconds = intervalSeconds
+                }
+                return { [self] in lock.withLock { self.fire = nil } }
+            }
+        }
+
+        func advance(to seconds: Double) {
+            while true {
+                let due: (DispatchQueue, @Sendable () -> Void)? = lock.withLock {
+                    guard let queue, let fire, nextFireSeconds <= seconds else {
+                        nowSeconds = seconds
+                        return nil
+                    }
+                    nowSeconds = nextFireSeconds
+                    nextFireSeconds += intervalSeconds
+                    return (queue, fire)
+                }
+                guard let due else { return }
+                due.0.sync(execute: due.1)
+            }
+        }
+    }
+
     /// THE DEFECT. The first window used to land at the periodic interval
     /// itself (decision 18 wants a window soon after start, then far apart),
     /// or the periodic timer kept firing every interval from the start
@@ -396,6 +437,7 @@ import Testing
         let (ring, program) = Self.silenceProgram(rate: rate)
         let silence = [Float](repeating: 0, count: Int(rate))
         let windowCount = UncheckedBox<Int>(0)
+        let clock = HandDrivenPeriodicClock()
         let tracker = PassiveDriftTracker(
             ring: ring,
             windowSeconds: 0.05,
@@ -408,21 +450,31 @@ import Testing
                                 feed: { ring.append(program, pts: timespec(tv_sec: 500, tv_nsec: 0)) })
             },
             permissionIsGranted: { true },
+            periodicClock: clock.clock,
             onObservations: { _ in })
         tracker.setBaselines([PassiveDriftSampler.Baseline(
             deviceUID: "bt", kind: .bluetooth, expectedDelayMs: 100)])
         tracker.start()
+        // A read goes through the tracker's queue, so it returns only once
+        // start() has armed the clock.
+        _ = tracker.isBlind
 
-        // Waited for, not slept past, so a 1 s sleep that resumes late cannot
-        // let the 10 s periodic window fire first. KNOWN GAP: this still reads
-        // a real clock. Under a full-suite run heavy enough to starve the
-        // process past 10 s, both windows land before the first poll and the
-        // count reads 2. Pinning that needs an injected clock, not a longer
-        // wait.
-        await SuiteWait.until("the first window to run at its start delay",
-                              timeout: 5) { windowCount.value >= 1 }
+        clock.advance(to: 0.1)
         #expect(windowCount.value == 1,
                 "exactly one window inside the first interval — got \(windowCount.value)")
+
+        // The first window has to finish before another can start; its
+        // unusable verdict is the sign it has.
+        try await Self.waitUntil("the first window to finish") {
+            tracker.consecutiveUnusableWindows == 1
+        }
+        clock.advance(to: 10.0)
+        #expect(windowCount.value == 1,
+                "no second window before the periodic interval — got \(windowCount.value)")
+
+        clock.advance(to: 10.1)
+        #expect(windowCount.value == 2,
+                "the second window lands at the periodic interval — got \(windowCount.value)")
     }
 
     /// THE DEFECT. Every clock step used to take its own window; the rate

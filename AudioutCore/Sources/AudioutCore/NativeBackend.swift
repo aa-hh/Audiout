@@ -1513,6 +1513,25 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// pay real wall-clock seconds; production never needs to tune it.
     let rebindRecoveryRetryDelay: TimeInterval
 
+    /// How a one-shot delayed job is scheduled: run `work` on `queue` once
+    /// `delaySeconds` have passed. Cancelling `work` stops it.
+    typealias DelayClock = @Sendable (_ delaySeconds: Double,
+                                      _ queue: DispatchQueue,
+                                      _ work: DispatchWorkItem) -> Void
+
+    /// The shipping clock: `asyncAfter` on the wall clock.
+    static let dispatchDelayClock: DelayClock = { delaySeconds, queue, work in
+        queue.asyncAfter(deadline: .now() + delaySeconds, execute: work)
+    }
+
+    /// Runs the backed-off retries (`.processNotYetAudible`, rebind recovery,
+    /// whole-system capture) and the companion audition's preparation, lease and
+    /// stop deadlines. Only the tests pass anything but ``dispatchDelayClock``:
+    /// on the wall clock, a loaded test run let a 0.05 s backoff burn every
+    /// rebind attempt before the test's next step, and a 4 s stop deadline
+    /// expire mid-restoration.
+    let delayClock: DelayClock
+
     // MARK: Metering (T3 — three real level sources through the event channel)
     //
     // Replaces the old single whole-system RMS fanned identically to every device.
@@ -1659,6 +1678,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         syncedLocalTransitionHorizon: TimeInterval = 2.0,
         captureRetryDelay: TimeInterval = 2.0,
         captureRetryMaxBackoff: TimeInterval = 10.0,
+        delayClock: @escaping DelayClock = NativeBackend.dispatchDelayClock,
         takeoverStripDelay: TimeInterval = 3.0,
         watchdogScheduler: SilenceWatchdogScheduling? = nil,
         silenceFallbackDelay: TimeInterval = NativeBackend.defaultSilenceFallbackDelay,
@@ -1757,6 +1777,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         self.syncedLocalTransitionHorizon = syncedLocalTransitionHorizon
         self.captureRetryDelay = captureRetryDelay
         self.captureRetryMaxBackoff = captureRetryMaxBackoff
+        self.delayClock = delayClock
         self.takeoverStripDelay = takeoverStripDelay
 
         // Wire the per-app routing callback graph (T6/T8). All four are set once

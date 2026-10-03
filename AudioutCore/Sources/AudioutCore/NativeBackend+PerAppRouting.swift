@@ -1082,7 +1082,7 @@ extension NativeBackend {
                 }
                 self.pendingRebindRecoveries.removeValue(forKey: deviceID)?.cancel()
                 self.pendingRebindRecoveries[deviceID] = work
-                DispatchQueue.global().asyncAfter(deadline: .now() + delay, execute: work)
+                self.delayClock(delay, .global(), work)
                 return .none // still in progress — keep the `converging` slot held
             }
             if action.redrivePerApp { self.replayPendingPerAppBindings(trigger: "ws_release") }
@@ -1265,8 +1265,7 @@ extension NativeBackend {
             self.pendingRetries.removeValue(forKey: bundleID)?.cancel()
             self.pendingRetries[bundleID] = work
         }
-        DispatchQueue.global().asyncAfter(
-            deadline: .now() + delay, execute: work)
+        delayClock(delay, .global(), work)
     }
 
     /// React to the WHOLE-SYSTEM tap's state transition (T16, E10). Before this,
@@ -1391,8 +1390,7 @@ extension NativeBackend {
             self.pendingCaptureRetry?.cancel()
             self.pendingCaptureRetry = work
         }
-        DispatchQueue.global().asyncAfter(
-            deadline: .now() + delay, execute: work)
+        delayClock(delay, .global(), work)
     }
 
     /// Forward an app-quit notification from the AppKit boundary (T8, edge case 1:

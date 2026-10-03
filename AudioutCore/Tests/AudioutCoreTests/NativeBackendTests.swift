@@ -1379,6 +1379,26 @@ func subscribeLevels(_ backend: NativeBackend) -> (LevelSink, Task<Void, Never>)
     return (sink, task)
 }
 
+/// A `NativeBackend.DelayClock` that runs nothing until the test says so: a
+/// backed-off retry or a deadline waits in `pending` until `fireAll()`, so a
+/// slow machine can no longer fire one between two of the test's own steps.
+/// Shared with the BT-alignment suite, whose audition deadlines run on it too.
+final class ManualDelayClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var jobs: [DispatchWorkItem] = []
+    var clock: NativeBackend.DelayClock {
+        { [self] _, _, work in lock.withLock { jobs.append(work) } }
+    }
+    /// Jobs scheduled and not yet fired or cancelled.
+    var pendingCount: Int { lock.withLock { jobs.filter { !$0.isCancelled }.count } }
+    /// Run every job scheduled so far, on the caller's thread, as if its delay
+    /// had passed. A cancelled job is skipped, as `asyncAfter` would skip it.
+    func fireAll() {
+        let due = lock.withLock { () -> [DispatchWorkItem] in defer { jobs = [] }; return jobs }
+        for work in due where !work.isCancelled { work.perform() }
+    }
+}
+
 /// A per-app capture over `BundleTaggingTap`s that self-register so a test can
 /// push content into a specific bundle's tap — same shape the cross-stream
 /// leakage test uses, factored out for the metering tests. Every bundle id the
@@ -5385,12 +5405,16 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         let engine = SpyEngine()
         let discovery = FakeDiscovery()
         let capture = FakeCapture()
-        // A long backoff so the sleep below lands squarely INSIDE the delay window,
-        // with the retry still pending and the `converging` slot still held.
+        // The backoff retry fires only when the test says, so the sleep below
+        // always lands INSIDE the delay window, with the retry still pending and
+        // the `converging` slot still held. A 0.5 s wall-clock backoff did not:
+        // under load the retries spent every attempt before the sleep arrived.
+        let retries = ManualDelayClock()
         let backend = NativeBackend(
             engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
             ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
             maxRebindRecoveryAttempts: 5, rebindRecoveryRetryDelay: 0.5,
+            delayClock: retries.clock,
             aggregateControl: NoOpAggregateControl(),
             handoffWatcherFactory: { onBlockedAttempt in
                 AirPlayHandoffWatcher(spawn: NoOpLogStream(), onBlockedAttempt: onBlockedAttempt)
@@ -5398,7 +5422,6 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:93", name: "Sleep-Race Speaker")
         await startSelectAndStream(backend, engine, discovery, capture, device)
-        let addsBeforeRebuild = engine.addedIDs.filter { $0 == device.outputID }.count
 
         // This test drives the teardown/backoff path specifically, so force the
         // FLUSH re-anchor to fail — the recovery falls through to the
@@ -5408,9 +5431,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         // a backed-off retry — the state the sleep has to clean up after.
         engine.addFailures = [device.outputID.rawValue]
         capture.fireDeviceRateRebuild()
-        await pollUntil {
-            engine.addedIDs.filter { $0 == device.outputID }.count > addsBeforeRebuild
-        }
+        await pollUntil { backend.test_hasPendingRebindRecovery(deviceID: device.id) }
         let addsAfterFailedAttempt = engine.addedIDs.filter { $0 == device.outputID }.count
 
         backend.handleSystemWillSleep()
@@ -6751,14 +6772,14 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
             makeTap: { tap }, processResolver: singleProcessResolver(["com.foo": 4242]), muteBehavior: .mutedWhenTapped)
         let engine = SpyEngine()
         let discovery = FakeDiscovery()
+        // The retry fires only when the test says, so the de-route always lands
+        // inside its delay. On the wall clock a loaded run fired it first.
+        let retries = ManualDelayClock()
         let backend = NativeBackend(
             engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
             ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
             processResolver: singleProcessResolver(["com.foo": 4242]), injectedPerAppCapture: perAppCapture,
-            // A generous 0.3s delay (well past the 5ms poll granularity and the
-            // sub-millisecond de-route call below) so the de-route deterministically
-            // lands before the timer fires, rather than racing it.
-            processNotYetAudibleRetryDelay: 0.3, processNotYetAudibleMaxBackoff: 0.6,
+            delayClock: retries.clock,
             aggregateControl: NoOpAggregateControl(),
             handoffWatcherFactory: { onBlockedAttempt in
                 AirPlayHandoffWatcher(spawn: NoOpLogStream(), onBlockedAttempt: onBlockedAttempt)
@@ -6769,9 +6790,8 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
 
         backend.updateAppRoutes([route("com.foo", name: "Foo", toDevice: device.id)])
 
-        // Let the first (scripted) failure happen — its retry is now scheduled
-        // ~0.3s out.
-        await pollUntil { tap.attemptsMade >= 1 }
+        // Let the first (scripted) failure happen and schedule its retry.
+        await pollUntil { tap.attemptsMade >= 1 && backend.test_hasPendingRetry(bundleID: "com.foo") }
 
         // De-route WITHOUT removing "com.foo" from the table (destination ->
         // .noRedirect instead of dropping the AppRoute entirely), so the T8
@@ -6792,13 +6812,17 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         // union, which a `.device` -> `.noRedirect` demotion does. So the retry
         // never fires and no second attempt is ever made.
         await pollUntil { !backend.test_hasPendingRetry(bundleID: "com.foo") }
-        // Well past the 0.3s the cancelled retry was due at. A sleep, not
-        // `SuiteWait.settle` — this test is async, where settle does nothing.
-        try? await Task.sleep(nanoseconds: 500_000_000)
+        // The retry's delay passes: a cancelled retry does nothing.
+        retries.fireAll()
         #expect(tap.attemptsMade == 1,
                 "R5 must cancel the pending retry at the de-route — a second attempt means a de-routed app's muted tap can restart itself")
 
-        // Nothing ever recaptured, so the coordinator slot must be idle.
+        // Nothing ever recaptured, so the coordinator slot must settle idle.
+        // (The 500 ms sleep this replaced was also what gave it time to.)
+        await pollUntil {
+            if case .idle = perAppCapture.state(for: "com.foo") { return true }
+            return false
+        }
         if case .idle = perAppCapture.state(for: "com.foo") {} else {
             Issue.record("a de-routed bundle must leave no live coordinator slot — it stayed \(perAppCapture.state(for: "com.foo"))")
         }

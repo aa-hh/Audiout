@@ -381,11 +381,14 @@ import Testing
 
     /// Fails if a restored Bluetooth id that never appears stays selected (and on
     /// disk) past `bluetoothRestoreWindow` instead of being dropped at the bound.
+    /// Also fails if an AirPlay id (colon MAC, also 12 hex digits) is taken for a
+    /// Bluetooth one and dropped at the bound: AirPlay ids stay one-shot.
     @MainActor
     @Test func reconnectAtLaunchDropsBluetoothIdThatNeverAppears() async throws {
         let bt = "54-2A-1B-79-08-9E:output"
+        let airPlay = "AA:BB:CC:DD:EE:01"
         let routing = RoutingStore(directory: tempDirectory())
-        try routing.save(.init(selectedDeviceIDs: [bt, "office"], mainOut: .selectedDevices))
+        try routing.save(.init(selectedDeviceIDs: [bt, "office", airPlay], mainOut: .selectedDevices))
         let settings = AppSettings(defaults: isolatedDefaults)
         settings.reconnectAtLaunch = true
         let backend = RecordingBackend(try await makeBackend())
@@ -395,11 +398,34 @@ import Testing
         controller.updateDevices(.demoFleet)
         controller.ensureDefaultSelection()
         controller.ensureDefaultSelection()
-        #expect(controller.selectedDeviceIDs == ["office"])
+        #expect(controller.selectedDeviceIDs == ["office", airPlay])
         #expect(backend.outputSetWrites.last == ["office"])
         #expect(backend.retryWrites.isEmpty)
         controller.flushPendingRoutingSave()
-        #expect(try routing.load()?.selectedDeviceIDs == ["office"])
+        #expect(Set(try routing.load()?.selectedDeviceIDs ?? []) == ["office", airPlay])
+    }
+
+    /// Fails if a restored Bluetooth id the user deselected during the restore
+    /// window still gets the connect kick once it appears.
+    @MainActor
+    @Test func reconnectAtLaunchSkipsRetryForBluetoothIdDeselectedBeforeItSettles() async throws {
+        let bt = "54-2A-1B-79-08-9E:output"
+        let routing = RoutingStore(directory: tempDirectory())
+        try routing.save(.init(selectedDeviceIDs: [bt, "office"], mainOut: .selectedDevices))
+        let settings = AppSettings(defaults: isolatedDefaults)
+        settings.reconnectAtLaunch = true
+        let backend = RecordingBackend(try await makeBackend())
+        let controller = GroupController(backend: backend, store: GroupStore(directory: tempDirectory()),
+                                         routingStore: routing, settings: settings, loadPersisted: false)
+        controller.updateDevices(.demoFleet)
+        controller.ensureDefaultSelection()
+
+        controller.updateDevices(.demoFleet + [Device(id: bt, name: "Move", kind: .bluetooth, isAvailable: false)])
+        _ = controller.setDeviceSelected(bt, false)
+        controller.ensureDefaultSelection()
+
+        #expect(!controller.selectedDeviceIDs.contains(bt))
+        #expect(backend.retryWrites.isEmpty)
     }
 
     @Test func autoSwapDropsLocalWhenSoleMember() async throws {

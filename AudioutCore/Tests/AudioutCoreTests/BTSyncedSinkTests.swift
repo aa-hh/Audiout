@@ -946,6 +946,21 @@ import AVFoundation
         #expect(health.peakDBFS == -120)
     }
 
+    /// Red if a first start that finds the device dead only logs a start failure:
+    /// the stopped sink would sit in the table with nobody told.
+    @Test func deadDeviceAtFirstStart_reportsDeadAndDropsSink() {
+        let alive = AliveSwitch(), deaths = DeathLog()
+        let manager = Self.livenessManager(alive: alive, deaths: deaths)
+        manager.start()
+        defer { manager.stop() }
+        alive.kill(0)
+
+        manager.setDevices([.init(deviceID: 0, uid: "dev-a")])
+
+        #expect(deaths.uids == ["dev-a"])
+        #expect(manager.sinkForTesting(uid: "dev-a") == nil)
+    }
+
     /// Red if a rebuild that finds the device dead stops the sink without reporting it:
     /// the config-change rebuild can win the race against the alive listener.
     @Test func deadDeviceAtRebuild_reportsDeadAndDropsSink() throws {

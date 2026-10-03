@@ -63,7 +63,10 @@ import CoreAudio
         /// How often a user gesture asked for the Bluetooth grant (the ask the
         /// enumerator no longer fires at backend start).
         var userActionAsks: Int { lock.withLock { _userActionAsks } }
-        func start() {}
+        private var _starts = 0
+        /// How often the enumerator was (re)started.
+        var starts: Int { lock.withLock { _starts } }
+        func start() { lock.withLock { _starts += 1 } }
         func stop() {}
         func refresh() {}
         func requestAuthorizationForUserAction() { lock.withLock { _userActionAsks += 1 } }
@@ -841,8 +844,10 @@ import CoreAudio
 
     /// A selected Bluetooth speaker whose sink is rendering, so the row has left
     /// its connect hold and no timeout can turn it `.failed` mid-test.
-    private func selectedMove() -> (NativeBackend, FakeBTEnumerator, SpyBTSink) {
-        let (backend, _, _, bt, sink, _) = makeBackend()
+    private func selectedMove(
+        btConnection: BTConnectionManaging? = nil
+    ) -> (NativeBackend, FakeBTEnumerator, SpyBTSink) {
+        let (backend, _, _, bt, sink, _) = makeBackend(btConnection: btConnection)
         backend.start()
         bt.fire([btSinkDeathSpeaker])
         waitFor { self.device(backend, self.btSinkDeathSpeaker.id) != nil }
@@ -913,6 +918,47 @@ import CoreAudio
         #expect(device(backend, id)?.isAvailable == false)
         #expect(sink.deviceSets.dropFirst(beforeSecond).allSatisfy { !$0.contains { $0.uid == id } },
                 "a speaker marked gone must not get a fresh sink")
+    }
+
+    /// Red if a speaker marked gone by a sink death is never re-listed: the
+    /// enumerator emits only on a list change, so a speaker macOS still lists
+    /// would stay unavailable until relaunch.
+    @Test func sinkDeathMarkedGone_restartsTheEnumeratorAfterTheRecoveryDelay() {
+        let (backend, bt, _) = selectedMove()
+        defer { backend.stop() }
+        backend.btSinkDeathRecoverySeconds = 0.1
+        let id = btSinkDeathSpeaker.id
+        let startsBefore = bt.starts
+
+        backend.handleBTSinkDead(uid: id)
+        backend.handleBTSinkDead(uid: id)
+
+        waitFor { bt.starts > startsBefore }
+        #expect(bt.starts == startsBefore + 1)
+    }
+
+    /// Red if a manual reconnect that succeeds leaves the row unavailable: after a
+    /// sink death marked it gone, the user's tap is the one way to heal it at once.
+    @Test func manualReconnectAfterSinkDeathMakesTheRowAvailableAgain() {
+        let manager = FakeBTConnectionManager()
+        let (backend, _, sink) = selectedMove(btConnection: manager)
+        defer { backend.stop() }
+        let id = btSinkDeathSpeaker.id
+        backend.handleBTSinkDead(uid: id)
+        backend.handleBTSinkDead(uid: id)
+        waitFor {
+            let d = self.device(backend, id)
+            return d?.isAvailable == false && d?.connectionState == .off
+        }
+        let setsBefore = sink.deviceSets.count
+
+        backend.retryOutput(id)
+
+        waitFor { self.device(backend, id)?.isAvailable == true }
+        #expect(device(backend, id)?.isAvailable == true)
+        waitFor { sink.deviceSets.dropFirst(setsBefore).contains { $0.contains { $0.uid == id } } }
+        #expect(sink.deviceSets.dropFirst(setsBefore).contains { $0.contains { $0.uid == id } },
+                "the healed speaker gets its sink back")
     }
 
     // MARK: - BT-LIFECYCLE: breathing until the music starts

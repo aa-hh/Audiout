@@ -805,9 +805,9 @@ final class BTDeviceSink: @unchecked Sendable {
             throw BTDeviceSinkError.aggregateDevice
         }
         guard deviceIsAlive(deviceID) else {
-            Telemetry.log(.localPlayback, "bt_sink_dead", [
-                "uid": deviceUID, "reason": "device_gone_at_start", "deviceID": String(deviceID),
-            ])
+            Telemetry.fail(.localPlayback, "bt_sink:dead",
+                           local: ["uid": deviceUID, "deviceID": String(deviceID)],
+                           shared: ["reason": "device_gone_at_start"])
             throw BTDeviceSinkError.deviceDead
         }
         // Pin BEFORE the first start — a pin after start is silently ignored.
@@ -909,13 +909,18 @@ final class BTDeviceSink: @unchecked Sendable {
         } catch BTDeviceSinkError.deviceDead {
             // A vanishing device fires the config change alongside the alive
             // listener; when the rebuild wins, it is the one that must report.
-            // `startLocked` already wrote the `bt_sink_dead` line.
-            onDead?(self)
+            // `startLocked` already wrote the `bt_sink:dead` line.
+            reportDead()
         } catch {
             Telemetry.log(.localPlayback, "bt_sink_restart_failed", [
                 "uid": deviceUID, "cause": cause, "error": String(describing: error),
             ])
         }
+    }
+
+    /// Tell the owner this sink's device is dead, so it drops the sink.
+    func reportDead() {
+        onDead?(self)
     }
 
     /// Hop to `graphQueue` and check liveness against the clock as of now.
@@ -945,9 +950,9 @@ final class BTDeviceSink: @unchecked Sendable {
             reason = "render_stalled"
         }
         if let reason {
-            Telemetry.log(.localPlayback, "bt_sink_dead", [
-                "uid": deviceUID, "reason": reason, "deviceID": String(deviceID),
-            ])
+            Telemetry.fail(.localPlayback, "bt_sink:dead",
+                           local: ["uid": deviceUID, "deviceID": String(deviceID)],
+                           shared: ["reason": reason])
             stopLocked()
             onDead?(self)
             return
@@ -1976,6 +1981,9 @@ final class BTSyncedSink: @unchecked Sendable {
     private func startSink(_ sink: BTDeviceSink) {
         do {
             try sink.start()
+        } catch BTDeviceSinkError.deviceDead {
+            // `startLocked` already wrote the `bt_sink:dead` line.
+            sink.reportDead()
         } catch {
             Telemetry.log(.localPlayback, "bt_sink_start_failed", [
                 "uid": sink.deviceUID, "error": String(describing: error),

@@ -350,18 +350,8 @@ final class BTDeviceEnumerator: BTDeviceEnumerating, @unchecked Sendable {
     /// can pin the engine to a zombie: prefer an alive object with output
     /// streams, else any alive one.
     static func liveDeviceID(forUID uid: String) -> AudioObjectID? {
-        let alive = allDeviceIDs().filter { deviceUID($0) == uid && isAlive($0) }
+        let alive = allDeviceIDs().filter { deviceUID($0) == uid && BTDeviceSink.halDeviceIsAlive($0) }
         return alive.first(where: hasOutputStreams) ?? alive.first
-    }
-
-    private static func isAlive(_ device: AudioObjectID) -> Bool {
-        var addr = AudioObjectPropertyAddress(
-            mSelector: kAudioDevicePropertyDeviceIsAlive,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain)
-        var alive: UInt32 = 0
-        var size = UInt32(MemoryLayout<UInt32>.size)
-        return AudioObjectGetPropertyData(device, &addr, 0, nil, &size, &alive) == noErr && alive != 0
     }
 
     private static func allDeviceIDs() -> [AudioObjectID] {

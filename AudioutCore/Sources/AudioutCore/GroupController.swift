@@ -254,7 +254,7 @@ public final class GroupController {
            !stored.selectedDeviceIDs.isEmpty {
             selectedDeviceIDs = Set(stored.selectedDeviceIDs)
             pendingBluetoothRestoreIDs = selectedDeviceIDs.filter {
-                device($0) == nil && BTConnectionManager.macAddress(fromUID: $0) != nil
+                device($0) == nil && BTDeviceEnumerator.derivedUID(fromAddress: $0) == $0
             }
             if !pendingBluetoothRestoreIDs.isEmpty {
                 bluetoothRestoreDeadline = Date().addingTimeInterval(bluetoothRestoreWindow)
@@ -288,9 +288,11 @@ public final class GroupController {
     /// An id that appears gets the output set first, so the backend already
     /// expects it, then `retryOutput`, the same connect a click on a greyed row
     /// sends; `setOutputSet` alone never opens a Bluetooth link
-    /// (`NativeBackend.retryBTOutput`).
+    /// (`NativeBackend.retryBTOutput`). An id the user deselected while it
+    /// waited stops waiting and gets no connect.
     private func settleBluetoothRestore() {
         guard !pendingBluetoothRestoreIDs.isEmpty else { return }
+        pendingBluetoothRestoreIDs.formIntersection(selectedDeviceIDs)
         let appeared = pendingBluetoothRestoreIDs.filter { device($0) != nil }
         pendingBluetoothRestoreIDs.subtract(appeared)
         if !appeared.isEmpty {

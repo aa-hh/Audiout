@@ -351,6 +351,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// zombie object id. On `stateQueue`.
     var btSinkDeathAt: [String: Date] = [:]
 
+    /// How long after a sink death marks a speaker gone the enumerator is
+    /// restarted, which re-emits the full list: it otherwise emits only on a
+    /// change, so a speaker macOS still lists would never come back.
+    var btSinkDeathRecoverySeconds: TimeInterval = 30
+
     /// The armed poll that asks the sink manager which devices have started
     /// rendering. `nil` = nothing is breathing, so nothing is scheduled — the
     /// poll exists only for the duration of a connect. On `stateQueue`.

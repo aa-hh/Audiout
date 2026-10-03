@@ -1734,7 +1734,10 @@ extension SerializedSharedState {
         try BTTrimStore(directory: dir).saveLatencies([btMove.id: 583, btFlip.id: 527])
         let (backend, bt, _, _) = makeBackend(storeDirectory: dir)
         defer { backend.stop() }
-        let real = BTSyncedSink(renderSampleRate: 48_000, channelCount: 1, presentationDelayMs: { 100 })
+        // Object id 0 is not a live HAL device; without this the alive check at
+        // first start would drop both sinks before the reference could move.
+        let real = BTSyncedSink(renderSampleRate: 48_000, channelCount: 1, presentationDelayMs: { 100 },
+                                deviceIsAlive: { _ in true })
         backend.btSyncedSinkFactory = { real }
         backend.btDeviceIDForUID = { _ in AudioObjectID(0) }
         backend.start()

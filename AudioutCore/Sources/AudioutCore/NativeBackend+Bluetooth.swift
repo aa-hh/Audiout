@@ -220,11 +220,16 @@ extension NativeBackend {
     ///
     /// `btSinkEnabled` deliberately keeps its narrower whole-system-only
     /// meaning: it is what ``roomDelayLocked()`` branches on, and widening it
-    /// would put a per-app destination in charge of the room's timing. On
-    /// `stateQueue`.
+    /// would put a per-app destination in charge of the room's timing.
+    ///
+    /// Selection is intent, so a claimed speaker marked unavailable is left out
+    /// of `uids`: it gets no sink, or a zombie id that still resolves would be
+    /// rebuilt to die again. A return commits `isAvailable = true` before it
+    /// reapplies. On `stateQueue`.
     func btArmingLocked() -> (enable: Bool, uids: [String]) {   // on stateQueue
         (btSinkEnabled || !btPerAppClaimedUIDs.isEmpty,
-         Set(btSelectedUIDs).union(btPerAppClaimedUIDs).sorted())
+         Set(btSelectedUIDs).union(btPerAppClaimedUIDs)
+            .filter { known[$0]?.isAvailable != false }.sorted())
     }
 
     /// Wave-4 reconnect-reapply: re-run the CURRENT BT sink decision so a
@@ -234,12 +239,8 @@ extension NativeBackend {
     /// which `applyBTSinkTransition` performs fresh on every apply. On
     /// `stateQueue`.
     func reapplyBTSinkLocked() {
-        let (armed, armedUIDs) = btArmingLocked()
+        let (armed, uids) = btArmingLocked()
         guard armed else { return }
-        // Selection is intent; a selected speaker marked unavailable gets no
-        // sink, or a zombie id that still resolves would be rebuilt to die again.
-        // A return commits `isAvailable = true` before it reapplies.
-        let uids = armedUIDs.filter { known[$0]?.isAvailable != false }
         let composition = btComposition
         let gains = btSinkGains(forUIDs: uids)
         let referenceMs = updateBTReferenceBufferLocked(pushToSink: false)
@@ -426,8 +427,9 @@ extension NativeBackend {
             }
             // UID → live AudioObjectID, resolved fresh per apply. A uid that no
             // longer resolves (the speaker dropped between selection and apply)
-            // contributes no sink; it re-resolves on the next selection change
-            // (reconnect-driven re-application is BT-RECONNECT's, Wave 4).
+            // contributes no sink; it re-resolves through `resolveBTDeviceID`
+            // on the next reapply: a selection change, a reconnect, or a sink
+            // death (`handleBTSinkDead`).
             let specs = uids.compactMap { uid in
                 let deviceID = resolveBTDeviceID(forUID: uid)
                 return deviceID.map { BTSyncedSink.DeviceSpec(deviceID: $0, uid: uid) }
@@ -636,8 +638,10 @@ extension NativeBackend {
     /// A per-device sink tore itself down: its device object died, or its
     /// render callback stalled while fed. A UID that still resolves gets one
     /// rebuild on the fresh object id; one that does not, or a second death
-    /// within 10 s, is a speaker that is gone, and its row says so. Callable
-    /// from any queue.
+    /// within 10 s, is a speaker that is gone, and its row says so. A gone
+    /// speaker gets an enumerator restart after `btSinkDeathRecoverySeconds`:
+    /// the enumerator emits only on a list change, so the full re-emit is what
+    /// returns a speaker macOS still lists. Callable from any queue.
     func handleBTSinkDead(uid: String) {
         stateQueue.async { [weak self] in
             guard let self else { return }
@@ -651,6 +655,10 @@ extension NativeBackend {
                 return
             }
             self.markBTDeviceLostLocked(uid)
+            self.stateQueue.asyncAfter(deadline: .now() + self.btSinkDeathRecoverySeconds) { [weak self] in
+                self?.btEnumerator?.stop()
+                self?.btEnumerator?.start()
+            }
             self.reconcileSilenceWatchdog()
             self.reapplyBTSinkLocked()
         }

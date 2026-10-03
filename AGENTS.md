@@ -204,12 +204,24 @@ repo. `AudioutCore` pins it by version.
 - **A merge onto `main` runs the full suite uncached, even a clean one,**
   unless `/tmp/audiout-suite-cache` holds a full-suite pass (`<hash>.full`)
   for the identical staged merged tree; then it prints one line naming that
-  pass and skips. A filtered pass never counts.
+  pass and skips. A filtered pass never counts. `git merge main` into a
+  branch runs the full suite when main's side changes AudioutCore Swift
+  (`guard-test-scope.sh`), which stamps that pass, so the merge onto `main`
+  then skips it; otherwise the full suite runs at the merge onto `main`.
+  Either way it runs once.
   `.githooks/pre-merge-commit` runs for a merge without conflicts and calls
   `pre-commit` with `AUDIOUT_IN_MERGE=1`; `pre-commit` sets the same flag itself
   when `MERGE_HEAD` exists. Guards test that flag, never `MERGE_HEAD` alone,
-  because git writes `MERGE_HEAD` only after `pre-merge-commit` returns. Guard 7
-  skips its self-review record check on merges. A fast-forward creates no
+  because git writes `MERGE_HEAD` only after `pre-merge-commit` returns. The
+  exception is Guard 10's call in `pre-commit`, which tests `MERGE_HEAD` alone
+  deliberately so it fires only on a conflict-resolution merge commit (a clean
+  merge runs it from `pre-merge-commit` instead); adding the `AUDIOUT_IN_MERGE`
+  test there would run it twice. `pre-merge-commit` runs Guard 10 before the
+  suite, so an out-of-date branch, or a merge onto `main` with no review
+  receipt for the branch diff, is refused before any tests run (`scripts/review-branch.sh`;
+  `--already-reviewed` for work /scope-and-run's reviewer approved;
+  `AUDIOUT_SKIP_BRANCH_REVIEW=1` is the loud override;
+  `bash scripts/test-review-branch.sh` self-tests it). A fast-forward creates no
   commit and runs no hook: land branches with `git merge --no-ff`.
   `bash scripts/test-pre-merge-hook.sh` self-tests the hook.
 - **Hold the live-test slot before building or launching the shared dev id.**
@@ -315,13 +327,23 @@ warn-only 3/5) are documented in the hook file itself:
   truth is still true) and not the working tree (which would have let `f1f3e94`
   through). Known false positives: AppKit types named as design guidance but used
   nowhere.
-- **Guard 7 blocks** a Swift commit until the staged-diff readability
-  self-review has run: `scripts/self-review.sh` shows the checklist and writes
-  a receipt keyed to the exact staged bytes — READ your staged diff against
-  [docs/REVIEW-RUBRIC.md](docs/REVIEW-RUBRIC.md) (change-log narration, stale
-  claims, misleading names, reviewer-speak) before committing; restaging
-  invalidates the receipt on purpose. It also hard-blocks near-certain slop
-  patterns in added comments (trailing `slop-ok` exempts a legitimate line).
+- **Guard 7 blocks** a Swift commit whose added comments match near-certain
+  slop patterns (`slop-ok` exempts a line; rubric
+  [docs/REVIEW-RUBRIC.md](docs/REVIEW-RUBRIC.md)).
+- **Guard 10 blocks** a merge onto `main` until `scripts/review-branch.sh` has
+  reviewed the branch's committed diff: it picks skip, cheap (one sonnet pass)
+  or full (four parallel reviewers plus a confidence scorer, instructions in
+  `docs/review/`) from the diff, thresholds and risk paths at the top of the
+  script, prints findings, logs one line per review to
+  `.git/audiout-branch-reviews.log`, and writes a receipt keyed to the
+  branch's own committed changes; a HIGH finding blocks the receipt. Merging
+  main into the branch keeps the receipt valid; a commit or conflict resolution
+  that changes the branch's own lines needs a new review. The merge onto
+  `main` also requires the branch to contain the latest main; an out-of-date
+  branch is refused before any tests run. `git merge main` into a branch runs
+  the full suite when main's side changes AudioutCore Swift, and the merge
+  onto `main` then skips it; otherwise the full suite runs at the merge onto
+  `main`. Either way it runs once.
 
 ## UI / Design Conventions (all targets)
 

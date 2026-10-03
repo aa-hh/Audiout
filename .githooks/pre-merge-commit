@@ -2,5 +2,9 @@
 # A clean `git merge` skips pre-commit and runs this instead, with the merged
 # tree staged. Git writes MERGE_HEAD only after this hook returns, so the flag
 # below is how pre-commit knows it is gating a merge (full uncached suite).
+# Guard 10 first (latest-main check and receipt lookup, both instant and
+# model-free), so a refused merge never pays for a suite run; then the tests.
 export AUDIOUT_IN_MERGE=1
-exec "$(dirname "$0")/pre-commit" "$@"
+sh "$(dirname "$0")/guard-merge-review.sh" || exit 1
+"$(dirname "$0")/pre-commit" "$@" || exit 1
+exit 0

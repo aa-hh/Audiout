@@ -1,11 +1,10 @@
-# Staged-diff readability rubric (Guard 7)
+# Readability rubric (Guard 7 and the merge-time review)
 
-Every commit that stages Swift code gets a self-review against this rubric
-BEFORE committing: run `scripts/self-review.sh`, read your full staged diff
-with these categories in mind, fix what you find, restage, re-run the script,
-then commit. Guard 7 refuses the commit until the script has been run against
-the exact staged state. This is a readability review — bugs and tests are
-Guard 4/6's job.
+This rubric has two consumers. Guard 7's deterministic screen runs at commit
+and blocks only the three near-certain slop patterns below. The merge-time code
+review, `scripts/review-branch.sh`, runs once per branch before it lands on
+`main`; its instruction files in `docs/review/` carry a digest of this file.
+Readability is one category of that review; bugs come first.
 
 Born from the 2026-08-06 audit (`dev/notes/verbosity-audit-2026-08-06.md`):
 240 findings, of which the two biggest categories were comments narrating
@@ -61,21 +60,19 @@ git-owned history and comments that had drifted into being *wrong*.
 
 ## Mechanics
 
-- `scripts/self-review.sh` writes a receipt hashed over the staged Swift
-  diff; Guard 7 verifies it. Restaging Swift changes invalidates the receipt
-  — review again (the re-review is the point, not the ceremony).
 - The deterministic screen hard-blocks only near-certain slop ("this
   session", dated changelog parentheticals, `=====` banners). A rare
   legitimate hit takes a trailing `slop-ok` comment.
 - `git commit --no-verify` remains the documented emergency escape, same as
   every guard.
-- razor: ceiling — the reviewing intelligence is the committing agent itself
-  reading its own staged diff; there is no LLM call in the hook (latency and
-  cost train people to bypass gates — 2026 consensus). The PR-time second
-  review exists as the `/pr-review` skill (`.claude/skills/pr-review/`):
-  adversarial, evidence-only, published as PR comments in one idempotent
-  sweep. Invoke it deliberately on a PR; it never runs automatically.
-- Review discipline (both self-review and PR review): fewer correct findings
+- The reviewing models run once per branch at merge time, never inside a
+  hook (the hook only checks the receipt). They run as subagents of the
+  Claude session merging the branch, because headless `claude -p` is refused
+  on this account: `bash scripts/review-branch.sh`, follow its printed steps,
+  then `bash scripts/review-branch.sh --continue`. `/pr-review` (`.claude/skills/pr-review/`) remains the deliberate
+  PR-comment review: adversarial, evidence-only, published as PR comments in
+  one idempotent sweep; it never runs automatically.
+- Review discipline (merge-time review and PR review): fewer correct findings
   beat many doubtful ones, and a complexity finding must name exactly what to
   delete and what replaces it — never call something over-engineered without
   showing the smaller shape.

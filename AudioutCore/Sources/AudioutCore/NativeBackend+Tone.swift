@@ -414,10 +414,14 @@ extension NativeBackend {
                 // stream for a row that says connected — a speaker fed nothing
                 // but idle fill, with the loop already settled at `want == isOn`.
                 // A speaker with a live session releases at its teardown instead
-                // (`removeFromAddedLocked`).
-                if previous != wantOn, !wantOn,
-                   !self.added.contains(id), !self.converging.contains(id) {
-                    self.wholeSystemStreamByDevice.removeValue(forKey: id)
+                // (`removeFromAddedLocked`); one whose op is still in flight
+                // releases when that op's slot does (`streamReleaseOnSettle`).
+                if previous != wantOn, !wantOn, !self.added.contains(id) {
+                    if self.converging.contains(id) {
+                        self.streamReleaseOnSettle.insert(id)
+                    } else {
+                        self.wholeSystemStreamByDevice.removeValue(forKey: id)
+                    }
                 }
 
                 // Connection-status brief §1/§3 semantics: a device newly
@@ -686,9 +690,11 @@ extension NativeBackend {
         // (Q1): the app takes the Mac's default output only when the user actually
         // routes (whole-system selection becomes non-empty), never at launch. It
         // also (re)evaluates the routing-blocked warning for the new steady state.
-        // Scheduled `async` (not inside the critical section above) so the HAL
-        // default-output write never extends the main-thread `sync` block; still
-        // serial on `stateQueue`, so it observes the just-written `expectedSelected`.
+        // Scheduled `async` (not inside the critical section above). The reconcile
+        // decides on `stateQueue`, so it observes the just-written
+        // `expectedSelected`, and does its default-output reads and the
+        // set-default write on `captureControlQueue`, so a slow coreaudiod never
+        // holds `stateQueue` and the main-thread `sync` above.
         stateQueue.async { self.reconcileAggregateDefault() }
 
         // The synced-local transition is no longer enqueued here — it fires from

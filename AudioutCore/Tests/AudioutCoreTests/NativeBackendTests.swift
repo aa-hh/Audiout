@@ -219,8 +219,15 @@ private final class SpyEngine: EngineControlling, @unchecked Sendable {
     /// Records BOTH halves into the same arrays/`opLog` the separate
     /// `removeOutput`/`addOutput` pair used to, so every pre-T7 assertion about
     /// a rebind's observable ops keeps holding.
+    /// Output ids whose receiver refuses a `rebindOutput` outright, leaving the
+    /// live session where it was (unlike `addFailures`, which fails it torn down).
+    var rebindRefusals: Set<UInt64> = []
+
     func rebindOutput(_ id: OutputID, toStreamId streamId: UInt32) async throws {
         try await runOp(id) {
+            if self.lock.withLock({ self.rebindRefusals.contains(id.rawValue) }) {
+                throw self.addFailureError
+            }
             self.lock.withLock {
                 self.rebinds.append((id, streamId))
                 self.removed.append(id)
@@ -657,7 +664,8 @@ private func makeBackend(
     /// The synced-local settle timing. The rapid-toggle tests shrink these; the
     /// production defaults are pinned by tests that construct the backend directly.
     syncedLocalSettleWindow: TimeInterval = 0.5,
-    syncedLocalTransitionHorizon: TimeInterval = 2.0
+    syncedLocalTransitionHorizon: TimeInterval = 2.0,
+    delayClock: @escaping NativeBackend.DelayClock = NativeBackend.dispatchDelayClock
 ) -> (NativeBackend, SpyEngine, FakeDiscovery) {
     let engine = SpyEngine()
     let discovery = FakeDiscovery()
@@ -672,6 +680,7 @@ private func makeBackend(
         syncedLocalTransitionHorizon: syncedLocalTransitionHorizon,
         captureRetryDelay: captureRetryDelay,
         captureRetryMaxBackoff: captureRetryMaxBackoff,
+        delayClock: delayClock,
         // 0 = the old synchronous `.takingOver` emit. The suite's scripted
         // activators resolve instantly, so the production debounce (which
         // exists to SUPPRESS the strip on fast resolutions) would hide the
@@ -1377,6 +1386,26 @@ func subscribeLevels(_ backend: NativeBackend) -> (LevelSink, Task<Void, Never>)
     let stream = backend.makeEventStream()
     let task = Task { for await event in stream { sink.record(event) } }
     return (sink, task)
+}
+
+/// A `NativeBackend.DelayClock` that runs nothing until the test says so: a
+/// backed-off retry or a deadline waits in `pending` until `fireAll()`, so a
+/// slow machine can no longer fire one between two of the test's own steps.
+/// Shared with the BT-alignment suite, whose audition deadlines run on it too.
+final class ManualDelayClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var jobs: [DispatchWorkItem] = []
+    var clock: NativeBackend.DelayClock {
+        { [self] _, _, work in lock.withLock { jobs.append(work) } }
+    }
+    /// Jobs scheduled and not yet fired or cancelled.
+    var pendingCount: Int { lock.withLock { jobs.filter { !$0.isCancelled }.count } }
+    /// Run every job scheduled so far, on the caller's thread, as if its delay
+    /// had passed. A cancelled job is skipped, as `asyncAfter` would skip it.
+    func fireAll() {
+        let due = lock.withLock { () -> [DispatchWorkItem] in defer { jobs = [] }; return jobs }
+        for work in due where !work.isCancelled { work.perform() }
+    }
 }
 
 /// A per-app capture over `BundleTaggingTap`s that self-register so a test can
@@ -5183,10 +5212,15 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         let engine = SpyEngine()
         let discovery = FakeDiscovery()
         let capture = FakeCapture()
+        // Backoff retries fire only when the test says. On the wall clock a
+        // loaded run let the 0.05 s retries spend all five attempts before
+        // recapture #2, which then found no session to rebind and never added.
+        let retries = ManualDelayClock()
         let backend = NativeBackend(
             engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
             ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
             maxRebindRecoveryAttempts: 5, rebindRecoveryRetryDelay: 0.05,
+            delayClock: retries.clock,
             aggregateControl: NoOpAggregateControl(),
             handoffWatcherFactory: { onBlockedAttempt in
                 AirPlayHandoffWatcher(spawn: NoOpLogStream(), onBlockedAttempt: onBlockedAttempt)
@@ -5204,7 +5238,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         // scheduled (bumps rebindRecoveryGen to 1, schedules attempt 2).
         engine.addFailures = [device.outputID.rawValue]
         capture.fireDeviceRateRebuild()
-        await pollUntil { engine.removedIDs.filter { $0 == device.outputID }.count >= 1 }
+        await pollUntil { backend.test_hasPendingRebindRecovery(deviceID: device.id) }
         let addsAfterFirstAttempt = engine.addedIDs.filter { $0 == device.outputID }.count
 
         // Recapture #2 arrives immediately — well inside the 0.05s backoff window —
@@ -5219,9 +5253,10 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         let addsAfterSecondRecapture = engine.addedIDs.filter { $0 == device.outputID }.count
         let removesAfterSecondRecapture = engine.removedIDs.filter { $0 == device.outputID }.count
 
-        // Wait well past the FIRST recapture's 0.05s backoff window (3x) — if its
-        // retry had NOT been superseded/cancelled, it would fire here and grow the
-        // counts.
+        // The FIRST recapture's backoff elapses. Had its retry NOT been
+        // superseded/cancelled, it would run here and grow the counts; the sleep
+        // gives the engine ops such a retry would start the time to land.
+        retries.fireAll()
         try? await Task.sleep(nanoseconds: 150_000_000)
         #expect(engine.addedIDs.filter { $0 == device.outputID }.count == addsAfterSecondRecapture,
                        "a newer recapture must cancel the older recapture's pending backoff retry (single-flight)")
@@ -5385,12 +5420,16 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         let engine = SpyEngine()
         let discovery = FakeDiscovery()
         let capture = FakeCapture()
-        // A long backoff so the sleep below lands squarely INSIDE the delay window,
-        // with the retry still pending and the `converging` slot still held.
+        // The backoff retry fires only when the test says, so the sleep below
+        // always lands INSIDE the delay window, with the retry still pending and
+        // the `converging` slot still held. A 0.5 s wall-clock backoff did not:
+        // under load the retries spent every attempt before the sleep arrived.
+        let retries = ManualDelayClock()
         let backend = NativeBackend(
             engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
             ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
             maxRebindRecoveryAttempts: 5, rebindRecoveryRetryDelay: 0.5,
+            delayClock: retries.clock,
             aggregateControl: NoOpAggregateControl(),
             handoffWatcherFactory: { onBlockedAttempt in
                 AirPlayHandoffWatcher(spawn: NoOpLogStream(), onBlockedAttempt: onBlockedAttempt)
@@ -5398,7 +5437,6 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:93", name: "Sleep-Race Speaker")
         await startSelectAndStream(backend, engine, discovery, capture, device)
-        let addsBeforeRebuild = engine.addedIDs.filter { $0 == device.outputID }.count
 
         // This test drives the teardown/backoff path specifically, so force the
         // FLUSH re-anchor to fail — the recovery falls through to the
@@ -5408,9 +5446,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         // a backed-off retry — the state the sleep has to clean up after.
         engine.addFailures = [device.outputID.rawValue]
         capture.fireDeviceRateRebuild()
-        await pollUntil {
-            engine.addedIDs.filter { $0 == device.outputID }.count > addsBeforeRebuild
-        }
+        await pollUntil { backend.test_hasPendingRebindRecovery(deviceID: device.id) }
         let addsAfterFailedAttempt = engine.addedIDs.filter { $0 == device.outputID }.count
 
         backend.handleSystemWillSleep()
@@ -6751,14 +6787,14 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
             makeTap: { tap }, processResolver: singleProcessResolver(["com.foo": 4242]), muteBehavior: .mutedWhenTapped)
         let engine = SpyEngine()
         let discovery = FakeDiscovery()
+        // The retry fires only when the test says, so the de-route always lands
+        // inside its delay. On the wall clock a loaded run fired it first.
+        let retries = ManualDelayClock()
         let backend = NativeBackend(
             engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
             ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
             processResolver: singleProcessResolver(["com.foo": 4242]), injectedPerAppCapture: perAppCapture,
-            // A generous 0.3s delay (well past the 5ms poll granularity and the
-            // sub-millisecond de-route call below) so the de-route deterministically
-            // lands before the timer fires, rather than racing it.
-            processNotYetAudibleRetryDelay: 0.3, processNotYetAudibleMaxBackoff: 0.6,
+            delayClock: retries.clock,
             aggregateControl: NoOpAggregateControl(),
             handoffWatcherFactory: { onBlockedAttempt in
                 AirPlayHandoffWatcher(spawn: NoOpLogStream(), onBlockedAttempt: onBlockedAttempt)
@@ -6769,9 +6805,8 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
 
         backend.updateAppRoutes([route("com.foo", name: "Foo", toDevice: device.id)])
 
-        // Let the first (scripted) failure happen — its retry is now scheduled
-        // ~0.3s out.
-        await pollUntil { tap.attemptsMade >= 1 }
+        // Let the first (scripted) failure happen and schedule its retry.
+        await pollUntil { tap.attemptsMade >= 1 && backend.test_hasPendingRetry(bundleID: "com.foo") }
 
         // De-route WITHOUT removing "com.foo" from the table (destination ->
         // .noRedirect instead of dropping the AppRoute entirely), so the T8
@@ -6792,13 +6827,17 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         // union, which a `.device` -> `.noRedirect` demotion does. So the retry
         // never fires and no second attempt is ever made.
         await pollUntil { !backend.test_hasPendingRetry(bundleID: "com.foo") }
-        // Well past the 0.3s the cancelled retry was due at. A sleep, not
-        // `SuiteWait.settle` — this test is async, where settle does nothing.
-        try? await Task.sleep(nanoseconds: 500_000_000)
+        // The retry's delay passes: a cancelled retry does nothing.
+        retries.fireAll()
         #expect(tap.attemptsMade == 1,
                 "R5 must cancel the pending retry at the de-route — a second attempt means a de-routed app's muted tap can restart itself")
 
-        // Nothing ever recaptured, so the coordinator slot must be idle.
+        // Nothing ever recaptured, so the coordinator slot must settle idle.
+        // (The 500 ms sleep this replaced was also what gave it time to.)
+        await pollUntil {
+            if case .idle = perAppCapture.state(for: "com.foo") { return true }
+            return false
+        }
         if case .idle = perAppCapture.state(for: "com.foo") {} else {
             Issue.record("a de-routed bundle must leave no live coordinator slot — it stayed \(perAppCapture.state(for: "com.foo"))")
         }
@@ -8064,9 +8103,13 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         let (levels, task) = subscribeLevels(backend); defer { task.cancel() }
         try? await Task.sleep(nanoseconds: 20_000_000)   // let the subscription register
 
-        capture.fireLevelIfActive(0.6)
-
-        await pollUntil { (levels.lastDeviceLevel(NativeBackend.localDeviceID) ?? 0) > 0 }
+        // Keep delivering, as the real tap does every few milliseconds:
+        // `noteSystemRMS` drops a sample that meets the periodic drain holding
+        // its lock, and a single sample lost that race under load.
+        await pollUntil {
+            capture.fireLevelIfActive(0.6)
+            return (levels.lastDeviceLevel(NativeBackend.localDeviceID) ?? 0) > 0
+        }
         #expect(abs((levels.lastDeviceLevel(NativeBackend.localDeviceID) ?? 0) - 0.6) <= 0.001,
                        "the local device must receive the SAME whole-system-tap RMS driving the AirPlay device's meter")
         #expect(abs((levels.lastDeviceLevel(device.id) ?? 0) - 0.6) <= 0.001,
@@ -9746,6 +9789,86 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
                 "ids are monotonic, so anything but a HIGHER stream means the deselect never released it")
     }
 
+    /// The same release when the deselect lands while the refused connect
+    /// still holds its converge slot. `setOutputSet` has to leave the stream
+    /// alone then, so the slot's release gives it back. Drop that release
+    /// (`streamReleaseOnSettle`) and the retry lands on the refused stream.
+    /// Under load the test above landed its deselect in this window by chance.
+    @Test func aDeselectWhileTheRefusedConnectIsInFlightStillReleasesTheStream() async throws {
+        let (backend, engine, discovery) = makeBackend()
+        backend.captureCoordinator = FakeCapture()
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:6E", name: "Refusing Mid-Connect")
+        engine.addFailures = [device.outputID.rawValue]
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+        _ = await collect(from: backend) { events in
+            events.contains {
+                if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false }
+            }
+        } after: { discovery.fire(.appeared(device)) }
+        let addHold = HoldPoint()
+        engine.onAddOutputHold = { id, _ in
+            if id == device.outputID { await addHold.hold() }
+        }
+
+        backend.setOutputSet([device.id])
+        await pollUntil { addHold.entered }
+        let refused = try #require(
+            engine.wholeSystemAddCalls.first { $0.0 == device.outputID }?.1)
+
+        // Off and back on while the connect is still negotiating, then the
+        // receiver refuses it.
+        backend.setOutputSet([])
+        backend.setOutputSet([device.id])
+        addHold.open()
+        await pollUntil { backend.devices.first { $0.id == device.id }?.isAvailable == false }
+
+        engine.addFailures = []
+        backend.retryOutput(device.id)
+        await pollUntil {
+            (engine.liveStream(of: device.outputID) ?? 0) >= SpyEngine.wholeSystemStreamIDBase
+        }
+        #expect((engine.liveStream(of: device.outputID) ?? 0) > refused,
+                "the deselect released the refused stream, so the retry takes a fresh one")
+    }
+
+    /// The same deferred release when sleep, not the slot's own release, frees
+    /// the slot: a rebind recovery holds it through its backoff, the session
+    /// dies under it, the user deselects. Sleep frees rebind-held slots
+    /// directly, so drop the release there and the reselect after wake lands
+    /// back on the old stream.
+    @Test func aDeselectWaitingOnARebindSlotStillReleasesTheStreamAcrossSleep() async throws {
+        let retries = ManualDelayClock()
+        let (backend, engine, discovery) = makeBackend(delayClock: retries.clock)
+        let capture = FakeCapture()
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:6D", name: "Sleep-Release Speaker")
+        await startSelectAndStream(backend, engine, discovery, capture, device)
+        defer { backend.stop() }
+        let home = try #require(engine.liveStream(of: device.outputID))
+
+        // Recovery attempt 1 is refused; its retry waits out the backoff,
+        // holding the device's converge slot.
+        engine.flushFailures = [device.outputID.rawValue]
+        engine.addFailures = [device.outputID.rawValue]
+        capture.fireDeviceRateRebuild()
+        await pollUntil { backend.test_hasPendingRebindRecovery(deviceID: device.id) }
+
+        // The session dies out of band, then the user deselects.
+        engine.pushState(device.outputID, .failed)
+        await pollUntil { backend.devices.first { $0.id == device.id }?.isAvailable == false }
+        backend.setOutputSet([])
+
+        backend.handleSystemWillSleep()
+        backend.handleSystemDidWake()
+        engine.addFailures = []
+        backend.setOutputSet([device.id])
+        await pollUntil {
+            (engine.liveStream(of: device.outputID) ?? 0) >= SpyEngine.wholeSystemStreamIDBase
+        }
+        #expect((engine.liveStream(of: device.outputID) ?? 0) > home,
+                "the deselect released the old stream, so the reselect takes a fresh one")
+    }
+
     /// A session that dies under a speaker the user still wants keeps its home
     /// stream. The engine can re-establish that session itself, out of band and
     /// on the stream id it still holds, so dropping the home on `.failed` leaves
@@ -10806,6 +10929,56 @@ extension SerializedSharedState {
         await pollUntil { backend.test_scopeConflict(deviceID: device.id) != nil }
         #expect(backend.test_scopeConflict(deviceID: device.id) != nil,
                 "no per-app bookkeeping survives — the demotion is queryable")
+    }
+
+    /// Test 9's settle, refused once and waiting out its backoff when a
+    /// sample-rate rebuild recaptures. The recapture must leave the settle
+    /// alone: let it supersede a verify-first chain and its plain flush
+    /// "succeeds" on stream 1, the settle is cancelled, and the speaker stays
+    /// in the per-app domain.
+    @Test func aRecaptureLeavesAVerifyFirstSettleInBackoffToFinish() async {
+        let retries = ManualDelayClock()
+        let (backend, engine, discovery) = makeBackend(
+            injectedPerAppCapture: workingPerAppCapture(bundleIDs: ["com.foo.player"]),
+            delayClock: retries.clock)
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        defer { backend.stop() }
+        let device = ap2Device()
+        await startAndDiscover(backend, engine, discovery, device)
+
+        let perAppHold = HoldPoint()
+        let wsHold = HoldPoint()
+        engine.onAddOutputHold = { id, stream in
+            guard id == device.outputID else { return }
+            if SpyEngine.isWholeSystem(stream) {
+                await wsHold.hold()
+            } else {
+                await perAppHold.hold()
+            }
+        }
+        engine.rebindRefusals = [device.outputID.rawValue]
+
+        // Test 9's interleaving: the session lands astray on stream 1.
+        backend.updateAppRoutes([route("com.foo.player", name: "Foo", toDevice: device.id)])
+        await pollUntil { perAppHold.entered }
+        backend.setOutputSet([device.id])
+        await pollUntil { wsHold.entered }
+        perAppHold.open()
+        await pollUntil { engine.liveStream(of: device.outputID) == 1 }
+        wsHold.open()
+
+        // The settle's rebind is refused; its retry waits out the backoff.
+        await pollUntil { backend.test_hasPendingRebindRecovery(deviceID: device.id) }
+        #expect(engine.liveStream(of: device.outputID) == 1, "precondition: still astray")
+
+        capture.fireDeviceRateRebuild()
+        engine.rebindRefusals = []
+        retries.fireAll()
+
+        await pollUntil { onAWholeSystemStream(engine, device.outputID) }
+        #expect(onAWholeSystemStream(engine, device.outputID),
+                "the settle's retry must still move the session home")
     }
 
     /// Test 10 (defect found in the final adversarial review): an `.unbind`

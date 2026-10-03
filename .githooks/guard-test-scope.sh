@@ -6,6 +6,8 @@
 # commits now run only the suites that plausibly cover the staged Swift; the
 # full suite runs when a merge lands on main — the one commit shape Guard 1
 # permits there, and the last gate before main.
+# Merging main into a branch also runs the full suite (owner's call,
+# 2026-10-03), so landing that branch on main can skip it.
 #
 # Prints ONE line on stdout:
 #   FULL      — run the whole suite
@@ -61,6 +63,24 @@ else
     merge=0
     if [ "$branch" = "main" ] && [ -f "$git_dir/MERGE_HEAD" ]; then
         merge=1
+    elif [ -n "${AUDIOUT_IN_MERGE:-}" ]; then
+        # Merging main into a branch (owner's call): the full suite, so the
+        # runner stamps a full pass that the later merge onto main reuses on the
+        # identical code. The merged commit is found the same way as in
+        # guard-merge-review.sh; merging any other commit keeps the branch scope.
+        word=""
+        if [ -f "$git_dir/MERGE_HEAD" ]; then
+            word=$(head -n 1 "$git_dir/MERGE_HEAD")
+        else
+            case "${GIT_REFLOG_ACTION:-}" in
+                "merge "*) word=${GIT_REFLOG_ACTION##* } ;;
+            esac
+        fi
+        main_tip=$(git rev-parse --verify -q 'main^{commit}' 2>/dev/null)
+        if [ -n "$word" ] && [ -n "$main_tip" ] \
+           && [ "$(git rev-parse --verify -q "$word^{commit}" 2>/dev/null)" = "$main_tip" ]; then
+            merge=1
+        fi
     fi
 fi
 
@@ -86,7 +106,7 @@ dependents_of() {
 
 # Library targets rule 2 knows about. A target missing from this list (the
 # executables: AudioutApp, the harnesses, the snapshot tools) maps to nothing.
-library_targets=" AudioutCore AudioutSharedUI AudioutPopoverUI AudioutWindowUI AudioutSettingsUI AudioutOnboardingUI CastSender CastFakeReceiver ObjCExceptionShim "
+library_targets=" AudioutCore AudioutSharedUI AudioutPopoverUI AudioutWindowUI AudioutSettingsUI AudioutOnboardingUI CastSender CastFakeReceiver ObjCExceptionShim TestKeySilencer "
 
 # Prints the test files rule 2 selects for a source file, or nothing.
 tests_by_target() {

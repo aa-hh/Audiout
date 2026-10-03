@@ -6,7 +6,9 @@
 # dir, swaps the test runner for a stub that logs how it was called, and does
 # real `git merge --no-ff` runs through the hooks: one where the stub passes
 # (merge lands, one unfiltered call with the cache off) and one where it fails
-# (merge refused, main unchanged). No compile — the stub stands in for it.
+# (merge refused, main unchanged). Then the one case the merge may skip: a
+# full-suite pass stamped on the identical merged tree, and the near misses
+# that must still run. No compile — the stub stands in for it.
 #
 # Usage: scripts/test-pre-merge-hook.sh
 
@@ -32,6 +34,13 @@ EXIT_FILE="$TMP_DIR/stub-exit"
 runner="run-tests"   # built from parts: the Claude Code Bash hook matches the literal name
 target="AudioutCore/Sources/AudioutCore/Analytics.swift"
 
+# A scratch stamp folder, so the live /tmp/audiout-suite-cache is never read.
+export AUDIOUT_TEST_CACHE_DIR="$TMP_DIR/stamps"
+unset AUDIOUT_TEST_NO_CACHE
+mkdir -p "$AUDIOUT_TEST_CACHE_DIR"
+# This file covers Guard 4; Guard 10 has scripts/test-review-branch.sh.
+export AUDIOUT_SKIP_BRANCH_REVIEW=1
+
 git clone -q "$SRC_ROOT" "$REPO" || { echo "clone failed" >&2; exit 1; }
 cd "$REPO" || exit 1
 git config user.name test; git config user.email test@example.invalid
@@ -41,11 +50,12 @@ git checkout -q -B main
 # The clone has only committed content; bring over this checkout's hooks so
 # uncommitted hook edits are what gets tested.
 rm -rf .githooks && cp -R "$SRC_ROOT/.githooks" .githooks
+cp "$SRC_ROOT/scripts/lib/suite-cache.sh" scripts/lib/suite-cache.sh
 
 printf '#!/bin/sh\necho "${AUDIOUT_TEST_NO_CACHE:-}|$*" >> "%s"\nexit "$(cat "%s")"\n' \
   "$LOG" "$EXIT_FILE" > "scripts/$runner.sh"
 chmod +x "scripts/$runner.sh"
-git add -A .githooks "scripts/$runner.sh"
+git add -A .githooks scripts/lib/suite-cache.sh "scripts/$runner.sh"
 git commit -q --no-verify -m "stub the runner" || { echo "stub commit failed" >&2; exit 1; }
 
 # make_branch <name> <line>: one trivial Swift edit, committed past the hooks.
@@ -91,6 +101,134 @@ fi
 git merge --abort >/dev/null 2>&1
 if [ "$(git rev-parse main)" = "$before" ]; then ok "main HEAD unchanged"; else fail "main moved"; fi
 if [ -s "$LOG" ]; then ok "refusal came from the runner"; else fail "runner never called on the failing merge"; cat "$TMP_DIR/merge2.out" >&2; fi
+
+# --- A stamped full pass on the identical tree lets the merge skip -----------
+. "$SRC_ROOT/scripts/lib/suite-cache.sh"
+echo 0 > "$EXIT_FILE"
+
+# stamp_branch <branch> <suffix>: write the stamp <hash>.<suffix> for the
+# branch's working tree, hashed the way run-tests.sh hashes it. A --no-ff
+# merge of a branch cut from main commits exactly the branch's tree.
+stamp_branch() {
+  git checkout -q "$1"
+  key="$(suite_cache_source_hash "$REPO" AudioutCore)"
+  : > "$AUDIOUT_TEST_CACHE_DIR/$key.$2"
+  git checkout -q main
+}
+
+# merge_case <label> <branch> [env...]: merge with the stub passing, then
+# report whether the runner was called. Sets $merge_out.
+merge_case() {
+  label="$1"; br="$2"; shift 2
+  : > "$LOG"
+  merge_out="$TMP_DIR/$br.out"
+  env "$@" git merge -q --no-ff -m "merge $br" "$br" >"$merge_out" 2>&1 \
+    || { fail "$label: merge refused"; cat "$merge_out" >&2; }
+}
+expect_run() {
+  if grep -q '^1|$' "$LOG"; then ok "$1: runner ran the full suite uncached"
+  else fail "$1: runner not called uncached (log: '$(cat "$LOG")')"; cat "$merge_out" >&2; fi
+}
+
+# (a) A full pass stamped on the same tree: no run, one line naming the stamp.
+# Catches: the merge still paying for a full run the branch already passed.
+rm -f "$AUDIOUT_TEST_CACHE_DIR"/*
+make_branch same-full "identical tree, full stamp"
+stamp_branch same-full full
+merge_case "a" same-full
+if [ ! -s "$LOG" ]; then ok "a: runner not called"; else fail "a: runner called: $(cat "$LOG")"; fi
+if grep -q "Guard 4: skipped — full suite already passed on this exact merged tree" "$merge_out" \
+   && grep -q "stamp $(printf '%.12s' "$key"), passed 20" "$merge_out"; then
+  ok "a: printed the stamp's hash prefix and time"
+else
+  fail "a: no skip line naming stamp $(printf '%.12s' "$key")"; cat "$merge_out" >&2
+fi
+
+# (b) Only per-name stamps on the same tree. Catches: a filtered pass being
+# taken for a full one.
+rm -f "$AUDIOUT_TEST_CACHE_DIR"/*
+make_branch same-filtered "identical tree, filtered stamps"
+stamp_branch same-filtered suite.AnalyticsTests
+stamp_branch same-filtered suite.PopoverControllerTests
+merge_case "b" same-filtered
+expect_run "b"
+
+# (c) A full stamp for an earlier commit of the branch. Catches: a stamp
+# lookup that ignores the hash.
+rm -f "$AUDIOUT_TEST_CACHE_DIR"/*
+make_branch moved-on "stamped, then changed"
+stamp_branch moved-on full
+git checkout -q moved-on; echo "// after the stamp" >> "$target"; git commit -q --no-verify -am more; git checkout -q main
+merge_case "c" moved-on
+expect_run "c"
+
+# (d) AUDIOUT_TEST_NO_CACHE=1 forces the run past a matching full stamp.
+rm -f "$AUDIOUT_TEST_CACHE_DIR"/*
+make_branch no-cache "identical tree, cache forced off"
+stamp_branch no-cache full
+merge_case "d" no-cache AUDIOUT_TEST_NO_CACHE=1
+expect_run "d"
+
+# (e) An old-format stamp (before 400b60c2: <src>.<sha256 of "package\nargs">)
+# for an argument-free run on the same tree. Catches: a pre-.full stamp
+# satisfying the merge.
+rm -f "$AUDIOUT_TEST_CACHE_DIR"/*
+make_branch old-format "identical tree, old-format full stamp"
+stamp_branch old-format "$(printf 'AudioutCore\n' | shasum -a 256 | awk '{print $1}')"
+merge_case "e" old-format
+expect_run "e"
+
+# (f) A full pass that ran on the remote Mac. run-tests.sh records it here
+# with the same call as a local pass (suite_cache_record "$key" "$@", no
+# arguments for a full run), keyed on this Mac's sources. Catches: a remote
+# pass not counting, or recording a stamp the merge cannot find.
+rm -f "$AUDIOUT_TEST_CACHE_DIR"/*
+make_branch remote-pass "identical tree, full pass on the remote Mac"
+git checkout -q remote-pass
+suite_cache_record "$(suite_cache_source_hash "$REPO" AudioutCore)"
+git checkout -q main
+merge_case "f" remote-pass
+if [ ! -s "$LOG" ] && grep -q "Guard 4: skipped" "$merge_out"; then ok "f: remote pass let the merge skip"
+else fail "f: remote pass did not satisfy the merge (log: '$(cat "$LOG")')"; cat "$merge_out" >&2; fi
+
+# (g) A stamp from a filter that selects every suite. Catches: any stamp
+# other than an argument-free full run satisfying the merge.
+rm -f "$AUDIOUT_TEST_CACHE_DIR"/*
+make_branch regex-all "identical tree, --filter '.*' stamp"
+stamp_branch regex-all "$(suite_cache_args_stamp --filter '.*')"
+merge_case "g" regex-all
+expect_run "g"
+
+# (h) The stamp matches the working tree only because of an untracked file the
+# merge does not commit. Catches: hashing the working tree instead of the index.
+rm -f "$AUDIOUT_TEST_CACHE_DIR"/*
+make_branch untracked "working tree differs from the index"
+extra="AudioutCore/Sources/AudioutCore/UntrackedByMergeTest.swift"
+echo "// untracked" > "$extra"
+stamp_branch untracked full
+merge_case "h" untracked
+expect_run "h"
+rm -f "$extra"
+
+# (i) Merging main into a branch runs the full suite, and landing that branch
+# on main then skips it on the pass that run stamped. Catches: the sync running
+# only the suites for main's changed files, so the merge onto main pays again.
+rm -f "$AUDIOUT_TEST_CACHE_DIR"/*
+make_branch synced "branch side of a sync"
+echo "// main moves on" >> AudioutCore/Sources/AudioutCore/LicenseGate.swift
+git commit -q --no-verify -am "main moves on"
+git checkout -q synced
+: > "$LOG"
+git merge -q --no-ff --no-edit main >"$TMP_DIR/sync.out" 2>&1 \
+  || { fail "i: syncing main into the branch was refused"; cat "$TMP_DIR/sync.out" >&2; }
+if [ "$(cat "$LOG")" = "|" ]; then ok "i: sync ran the full suite with the cache on"
+else fail "i: sync runner call was '$(cat "$LOG")', expected one unfiltered call"; fi
+# The real runner stamps that pass; the stub does not, so stamp it as (f) does.
+suite_cache_record "$(suite_cache_source_hash "$REPO" AudioutCore)"
+git checkout -q main
+merge_case "i" synced
+if [ ! -s "$LOG" ] && grep -q "Guard 4: skipped" "$merge_out"; then ok "i: merge onto main skipped the suite"
+else fail "i: merge onto main ran the suite (log: '$(cat "$LOG")')"; cat "$merge_out" >&2; fi
 
 if [ "$FAILURES" -gt 0 ]; then
   echo "$FAILURES pre-merge hook test(s) FAILED" >&2

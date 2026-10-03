@@ -9,21 +9,18 @@ plays a 75-minute click file with `afplay`, records the built-in mic, and writes
 | Block | Selection | Length | From the runbooks |
 |---|---|---|---|
 | A | both Moves | 25 min; the second Move is disconnected for 10 s at minute 20 | M1 Part 1 section 1 (fix 1) |
-| B | Move 1 + This Mac | play 60 s, pause 90 s, play 60 s | runbook 1 Run B (M1 Part 2) |
+| B | Move 2 (the Move that is not `--c-move`) + This Mac | play 60 s, pause 90 s, play 60 s | runbook 1 Run B (M1 Part 2) |
 | C (`--with-airplay`) | Move 1 on Bluetooth (`--c-move`) + the other Move in Wi-Fi mode (`--airplay-id`) | 60 min | runbook 2 Part A, AirPlay variant (M1 Part 4) |
 
-Before each block the driver quits Audiout Dev, writes the speakers into
-`~/Library/Application Support/com.audiout.Audiout.dev/routing.json`
-(`{"schemaVersion":1,"state":{"mainOutKind":"selected","selectedDeviceIDs":[...]}}`),
-sets the volume to 50, connects the wanted Moves with blueutil (until Core Audio
-lists them; quitting drops the links and launch keeps only speakers it already
-sees) and disconnects the others, then relaunches. Launch restores that file only with
-"Reconnect last speakers when Audiout starts" on (`general.reconnectAtLaunch`,
-off by default); the driver turns it on, notes it, and turns it off at the end.
-90 s after launch the file and telemetry must both show exactly those speakers
-(`set_output_set` count, Bluetooth sink lines and AirPlay `connect_requested` by
-id). A speaker discovered after the restore is dropped, so a mismatch gets one
-more relaunch, then the block is skipped.
+Selection is by hand: three clicks a night (four with Block C). The app's
+launch-time restore leaves Bluetooth speakers selected but not connected (third
+smoke run, 2026-10-03), so the driver never quits Audiout Dev and needs it open.
+At each block it stops `afplay`, writes `WAITING <block>` naming the exact rows,
+and waits for Enter or `~/listening/go-block-<a|b|c>` (30 min, then that block is
+aborted). It then plays and, within 35 s, needs the app's selection
+(`set_output_set`), a Bluetooth output line per Move, `connect_requested` for
+the AirPlay row, and audio (`stream_health`) to match; otherwise it says what
+differs and shows `WAITING` again, three times at most.
 
 ## One-time setup on the second Mac
 
@@ -43,48 +40,40 @@ more relaunch, then the block is skipped.
    ```
    Open it once at the screen and grant its own prompts.
 3. Pair and connect both Moves; run the wizard once on each to store an alignment.
-4. `brew install blueutil ffmpeg`; `python3 -m pip install numpy` (or set `PYTHON=`).
-5. Grant permissions once while you are there, in Terminal, from
-   `~/listening`:
-   - `./unattended-night.sh --dry-run`; Allow Microphone and Bluetooth. About 2
-     minutes; no "DRY RUN FALLBACK" note in its summary means the mic works.
-   - `osascript -e 'tell application id "com.audiout.Audiout.dev" to quit'` and
-     click Allow on "Terminal wants to control Audiout Dev".
-6. `./unattended-night.sh --list-devices`; paste the ids into `MOVE1_ID`,
+   `brew install blueutil ffmpeg`; `python3 -m pip install numpy` (or set `PYTHON=`).
+4. In Terminal in `~/listening`, run `./unattended-night.sh --dry-run` and Allow
+   Microphone and Bluetooth (2 minutes; no "DRY RUN FALLBACK" note = mic works).
+5. `./unattended-night.sh --list-devices`; paste the ids into `MOVE1_ID`,
    `MOVE2_ID`, `AIRPLAY_ID` at the top, or pass `--move1`, `--move2`, `--airplay-id`.
-7. The room: quiet; speakers 1 to 2 m from the Mac, equidistant; AirPods and phone
+6. The room: quiet; speakers 1 to 2 m from the Mac, equidistant; AirPods and phone
    away; 5 GHz Wi-Fi, lid open, on mains; no Game Mode (moves Bluetooth latency 70 to 90 ms).
-8. Nothing else may use that Mac during the blocks. It is also the remote test
+7. Nothing else may use that Mac during the blocks. It is also the remote test
    Mac; "Starting it tonight" says when to take its test permits away.
 
 ### Device ids
 
-A Bluetooth id is the speaker's own hardware address with dashes plus
-`:output` (`54-2A-1B-79-08-9E:output`), so it is the same on every Mac. An
-AirPlay id is a colon-separated address; `--list-devices` marks AirPlay ids that
-share a Move's first three octets "(a Sonos Move in Wi-Fi mode)". A Move in Wi-Fi
-mode must have been selected once on that Mac so the log knows its id. The alignment store
-(`bt-sync-trims.json`) is per Mac, so the wizard has to run on the second Mac.
-The driver refuses, by name, an id neither that store nor `telemetry.jsonl` has
-seen. Names come from blueutil; no telemetry line has both an id and a name.
+A Bluetooth id is the speaker's hardware address with dashes plus `:output`
+(`54-2A-1B-79-08-9E:output`), the same on every Mac; an AirPlay id is colon hex.
+`--list-devices` marks AirPlay ids sharing a Move's first three octets "(a Sonos
+Move in Wi-Fi mode)"; such a Move must have been selected once so the log knows
+its id. The alignment store is per Mac, so the wizard runs on the second Mac. The
+driver refuses an id that store and `telemetry.jsonl` have never seen. `WAITING`
+names Moves as the app does, "Move 2 (SONOS BF4A)": the last two address bytes.
 
 ### Why it starts inside the logged-in session
 
-macOS grants Microphone, Bluetooth and Automation (quitting Audiout Dev) to
-the app that started a process; a process started over ssh never gets a prompt.
-So a one-shot LaunchAgent in `gui/$(id -u)` (the logged-in user's launchd domain)
-opens Terminal, which holds the grants from step 5, to run the driver.
+macOS grants Microphone and Bluetooth to the app that started a process; a
+process started over ssh never gets a prompt. So a one-shot LaunchAgent in
+`gui/$(id -u)` (the logged-in user's launchd domain) opens Terminal (step 4's grants).
 
 ## Rehearsal: `--smoke`
 
-In the room, run `./unattended-night.sh --smoke` (same flags as the night): the
-real run, relaunches included, with Block A 2 min (disconnect at minute 1), Block
-B 20 s / 30 s / 20 s, Block C 2 min. Its summary starts with "SMOKE".
+`./unattended-night.sh --smoke` (same flags as the night) is the real run with
+Block A 2 min (disconnect at minute 1), B 20 s / 30 s / 20 s, C 2 min; "SMOKE" on top.
 
 ## The watchdog
 
-Every 60 s during a block the driver writes one line to `status.log` and to
-Terminal:
+Every 60 s during a block it writes to `status.log` and Terminal:
 `OK <block> <time> rec=<bytes> rms=<dBFS> clicks=<n> clock_lines=<id:count,...> load=<load1>`.
 Checks: the recording grew; the mic level over the last 10 s is above -80 dBFS;
 `click-pair-spacing.py` finds at least 8 clicks in the last 30 s (not while Block
@@ -100,8 +89,7 @@ Watch from another Mac (the driver prints the folder at start):
 ```
 ssh alechamilton@SUMUP-M9Y197RFVG.local tail -F '<results path>/status.log' | grep --line-buffered -E 'ALERT|ABORT|BLOCK|WAITING|DONE'
 ```
-
-Your main Claude session can run that under a monitor and push a phone notification per line.
+Your main Claude session can run that under a monitor and notify your phone per line.
 
 ## Starting it tonight
 
@@ -112,17 +100,31 @@ In Terminal on the second Mac (Screen Sharing is fine), from `~/listening`:
 ./launch-tonight.sh 23:30 --with-airplay  # adds Block C, about 1 h 40 min
 ```
 
-It runs `--check` first (missing tool, empty or unknown id, build without the
-reconnect setting), loads `~/Library/LaunchAgents/com.audiout.listening-night.plist` with
+It runs `--check` first (missing tool, empty or unknown id, Audiout Dev not
+running), loads `~/Library/LaunchAgents/com.audiout.listening-night.plist` with
 `launchctl bootstrap`, and keeps the Mac awake with `caffeinate -dims` until the
 agent fires, removes itself and runs the driver. It prints how to cancel.
 
-A Move is Bluetooth or AirPlay, never both, and only its button switches it. After
-Block B the driver quits Audiout Dev and writes `WAITING C`: switch the other Move
-to Wi-Fi mode, wait until it shows as an AirPlay speaker, then press Enter in that
-Terminal or run `ssh alechamilton@SUMUP-M9Y197RFVG.local touch ~/listening/go-block-c`.
-After 30 min it writes `ABORT C` and finishes with A and B. The last line says
-`DONE switch the Move back to Bluetooth mode if you want both on Bluetooth tomorrow`.
+The clicks, each after its `WAITING` line, then Enter in that Terminal or
+`ssh alechamilton@SUMUP-M9Y197RFVG.local touch ~/listening/go-block-a` (`-b`, `-c`):
+
+1. A: select both Moves, nothing else.
+2. B: select Move 2 and This Mac (the MacBook Air Speakers row); deselect the other Move.
+3. C: press the other Move's button for Wi-Fi mode, wait for its AirPlay row, then
+   select that row plus the Bluetooth Move, nothing else. A Move is Bluetooth or
+   AirPlay, never both. The last line then says to switch it back.
+
+Block A's minute-20 disconnect and reconnect are automatic. No output line within
+60 s of the reconnect is an `ALERT` and a finding, not a cue to click.
+
+### When the app's restore works: `--relaunch`
+
+`--relaunch` writes `~/Library/Application Support/com.audiout.Audiout.dev/routing.json`
+(`{"schemaVersion":1,"state":{"mainOutKind":"selected","selectedDeviceIDs":[...]}}`)
+with Audiout Dev quit, turns on "Reconnect last speakers when Audiout starts"
+(`general.reconnectAtLaunch`, off by default, turned back off at the end),
+connects the wanted Moves with blueutil, relaunches, and checks the file and
+telemetry 90 s later. It needs Automation for Terminal to quit Audiout Dev.
 
 Then, and never before the driver starts, on the development Mac:
 
@@ -132,14 +134,12 @@ Then, and never before the driver starts, on the development Mac:
 
 ## The results folder
 
-`results/<date>_<time>/`:
-
-- `summary.md`: per block, the `click-pair-spacing.py` offsets (Block B: before
-  the pause, right after resume, one minute after; A and C: linear fit and jump
-  count), telemetry line counts, `bt_clock_deviation` slope per speaker, load, and
-  runbook 2's interpretation table.
-- `blocks.tsv` (telemetry byte offsets, marks, ids per block); `block<X>-raw.wav`
-  or `.m4a`, `block<X>.wav` (16-bit), `block<X>.txt`, `block<X>-telemetry.jsonl`
+- `results/<date>_<time>/summary.md`: per block, the `click-pair-spacing.py`
+  offsets (B: before the pause, right after resume, one minute after; A and C:
+  linear fit and jumps), telemetry line counts, `bt_clock_deviation` slope per
+  speaker, load, and runbook 2's interpretation table.
+- `blocks.tsv` (telemetry byte offsets, marks, ids per block); `block<X>-raw.wav`,
+  `block<X>.wav` (16-bit), `block<X>.txt`, `block<X>-telemetry.jsonl`
   (the block's lines matching `bt_clock_jump|bt_sink_anchored|bt_sink_release_overshoot|bt_sink_seek_clamped|tap_feed_gap|bt_clock_deviation|drift_window_result|drift_window_dropped|drift_correction|bt_room_term_changed|room_delay_changed`).
 - `load.csv` (load once a minute), `status.log` (watchdog), `driver.log`, `notes.txt`.
 

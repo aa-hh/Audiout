@@ -1,13 +1,19 @@
 #!/bin/zsh
 # Unattended listening night for the Bluetooth sync fixes. See README.md here.
 #
-#   ./unattended-night.sh [--dry-run | --smoke] [--with-airplay] [--move1 ID] [--move2 ID] [--airplay-id ID] [--c-move ID]
+#   ./unattended-night.sh [--dry-run | --smoke] [--relaunch] [--with-airplay] [--move1 ID] [--move2 ID] [--airplay-id ID] [--c-move ID]
 #   ./unattended-night.sh --list-devices      # ids this Mac has seen, in the form the driver takes
 #   ./unattended-night.sh --check [flags]     # tools, ids and build only, then exit (launch-tonight.sh runs it)
 #
 # Block A (25 min): both Moves, click track loops, mic records; at minute 20 the
 #   second Move is disconnected for 10 s and reconnected (needs blueutil).
-# Block B (~5 min): Move 1 + This Mac; play 60 s, pause 90 s, play 60 s.
+# Block B (~5 min): the Move that is not --c-move, plus This Mac; play 60 s, pause 90 s, play 60 s.
+#
+# Selection is manual by default: at each block the driver writes a WAITING line
+# naming the rows to select in Audiout Dev and waits for Enter or
+# ~/listening/go-block-<a|b|c>, then checks telemetry. The app's launch-time
+# restore leaves Bluetooth speakers selected but not connected (third smoke run,
+# 2026-10-03), so the relaunch path is kept behind --relaunch for when it is fixed.
 # Block C (60 min, --with-airplay only): one Move on Bluetooth (--c-move, default
 #   Move 1) + the other Move in Wi-Fi mode as an AirPlay speaker (--airplay-id).
 #   A Move is Bluetooth or AirPlay, never both, and switching is a button press,
@@ -51,8 +57,12 @@ MOVE1_ID=""
 MOVE2_ID=""
 AIRPLAY_ID=""            # only needed for --with-airplay: the other Move's id in Wi-Fi mode
 C_MOVE_ID=""             # the Move that stays on Bluetooth in Block C; empty = MOVE1_ID
-GO_FILE="$HOME/listening/go-block-c"   # touch this to confirm the Wi-Fi switch (Enter works too at a terminal)
-WAIT_C_S=1800           # how long to wait for that confirmation
+GO_DIR="$HOME/listening"  # touch $GO_DIR/go-block-<a|b|c> to confirm a WAITING line (Enter works too at a terminal)
+WAIT_C_S=1800           # how long a WAITING line waits before that block is aborted
+SELECT_CHECK_S=35       # after confirming: telemetry must show the selection within this (bt_clock_deviation is every 30 s)
+SELECT_TRIES=3          # WAITING is shown again after a mismatch, this many times in all
+RECONNECT_SINK_S=60     # Block A: after the reconnect, a sink line for that Move must appear within this
+MAC_ROW="This Mac (the MacBook Air Speakers row)"
 AIRPLAY_NAME="AirPlay speaker"
 MAC_ID=local-mac         # This Mac; the same id on every Mac
 MAC_VOLUME=50            # system output volume set before each relaunch; Audiout adopts it as its master level
@@ -92,11 +102,13 @@ ALERTS_TO_ABORT=3    # consecutive alerts on one check that end a block early
 PROBE_S=20           # pre-flight probe recording before Block A
 
 # ---- Flags ------------------------------------------------------------------
-MODE=night; DRY=0; SMOKE=0; WITH_AIRPLAY=0
+MODE=night; DRY=0; SMOKE=0; WITH_AIRPLAY=0; MANUAL=1
 while (( $# )); do
   case $1 in
     --dry-run) DRY=1 ;;
     --smoke) SMOKE=1 ;;
+    --manual-selection) MANUAL=1 ;;
+    --relaunch) MANUAL=0 ;;
     --with-airplay) WITH_AIRPLAY=1 ;;
     --list-devices) MODE=list ;;
     --check) MODE=check ;;
@@ -286,7 +298,12 @@ fi
 # Ids per block; a real run refuses an empty or unknown id before anything plays.
 typeset -a IDS_A IDS_B IDS_C
 C_MOVE_ID=${C_MOVE_ID:-$MOVE1_ID}
-IDS_A=($MOVE1_ID $MOVE2_ID); IDS_B=($MOVE1_ID $MAC_ID); IDS_C=($C_MOVE_ID $AIRPLAY_ID)
+B_MOVE_ID=$MOVE2_ID; [[ $C_MOVE_ID == $MOVE2_ID ]] && B_MOVE_ID=$MOVE1_ID   # the c-move's partner
+IDS_A=($MOVE1_ID $MOVE2_ID); IDS_B=($B_MOVE_ID $MAC_ID); IDS_C=($C_MOVE_ID $AIRPLAY_ID)
+(( MANUAL )) && KEY_PROBLEM=""   # the reconnect setting only matters for --relaunch
+if (( MANUAL && ! DRY )) && ! pgrep -f "$APP/Contents/MacOS/" >/dev/null; then
+  KEY_PROBLEM+="Audiout Dev is not running: open Audiout Dev first (manual selection needs it running). "
+fi
 ids_problem=""
 for pair in MOVE1_ID:$MOVE1_ID MOVE2_ID:$MOVE2_ID $( (( WITH_AIRPLAY )) && print AIRPLAY_ID:$AIRPLAY_ID ); do
   [[ -n ${pair#*:} ]] || ids_problem+="${pair%%:*} is empty (run --list-devices and set it). "
@@ -520,6 +537,112 @@ print("; ".join(bad) if bad else "")
 EOF
 }
 
+# ---- Manual selection ----------------------------------------------------------
+# The app names a Move like "Move 2 (SONOS BF4A)": the last two bytes of its
+# address. Names come from this Mac's set_output_set lines matched on that,
+# else from blueutil, else the id. This Mac never reaches set_output_set.
+manual_py() {  # mode tel from_byte id=name...
+  "$PYTHON" - "$@" <<'EOF'
+import sys, json, re, os
+mode, tel, start, pairs = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4:]
+BT = re.compile(r"^[0-9A-F]{2}(-[0-9A-F]{2}){5}:output$"); AP = re.compile(r"^[0-9A-F]{2}(:[0-9A-F]{2}){5}$")
+def lines(path):
+    try: return open(path, "rb").read().decode("utf-8", "replace").splitlines()
+    except OSError: return []
+rows = []
+for l in lines(tel + ".1") + lines(tel):
+    try: rows.append(json.loads(l))
+    except ValueError: pass
+lst = lambda r, k: [n for n in str(r.get(k, "")).strip("[]").split(",") if n]
+known = {n for r in rows if r.get("evt") == "set_output_set" for k in ("added", "removed", "desiredOn") for n in lst(r, k)}
+def name(i, fallback):
+    if BT.match(i):
+        tail = i[12:17].replace("-", "")
+        hit = sorted(n for n in known if tail in n.upper())
+        if hit: return hit[0]
+    return fallback or i
+ids = [p.split("=", 1)[0] for p in pairs]; given = {p.split("=", 1)[0]: p.split("=", 1)[1] for p in pairs}
+names = {i: name(i, given[i]) for i in ids}
+if mode == "names":
+    for i in ids: print(names[i])
+    sys.exit(0)
+# check: the app's live selection against the wanted ids, from telemetry
+sid = rows[-1].get("sid") if rows else None
+running = set()
+for r in rows:
+    if r.get("sid") == sid and r.get("evt") == "set_output_set":
+        running = (running | set(lst(r, "added"))) - set(lst(r, "removed"))
+f = open(tel, "rb"); f.seek(start); recent = []
+for l in f.read().decode("utf-8", "replace").splitlines():
+    try: recent.append(json.loads(l))
+    except ValueError: pass
+bt = [i for i in ids if BT.match(i)]; ap = [i for i in ids if AP.match(i)]
+want_bt_names = {names[i] for i in bt}
+bad = []
+if len(running) != len(bt) + len(ap): bad.append(f"the app has {len(running)} speakers selected [{', '.join(sorted(running))}], wanted {len(bt) + len(ap)}")
+missing = want_bt_names - running
+if missing: bad.append("not selected: " + ", ".join(sorted(missing)))
+extra = running - want_bt_names
+if len(extra) > len(ap): bad.append("selected but not wanted: " + ", ".join(sorted(extra)))
+sinks = {r.get("uid") for r in recent if r.get("evt") in ("bt_sink_rebuild", "bt_sink_anchored", "bt_clock_deviation")}
+for i in bt:
+    if i not in sinks: bad.append(f"no Bluetooth output line for {names[i]} ({i}) since the WAITING line")
+conns = {r.get("device") for r in recent if r.get("evt") == "connect_requested"}
+for i in ap:
+    if i not in conns: bad.append(f"no connect_requested for the AirPlay id {i} since the WAITING line")
+print("; ".join(bad))
+EOF
+}
+typeset -a PAIRS   # id=fallback-name for the current block, shared by the WAITING line and the check
+human_names() {  # ids...; one name per line, as the WAITING line shows them
+  PAIRS=(); local id
+  for id in "$@"; do
+    case $id in
+      $MAC_ID) PAIRS+=("$id=$MAC_ROW") ;;
+      *:output) PAIRS+=("$id=$( (( HAVE_BLUEUTIL )) && bt_name $(bt_addr $id))") ;;
+      *) PAIRS+=("$id=the AirPlay row of the Move in Wi-Fi mode (id $id)") ;;
+    esac
+  done
+  manual_py names "$TELEMETRY" 0 "${PAIRS[@]}"
+}
+wait_go() {  # block letter; true on Enter or the go file, false after WAIT_C_S
+  local go="$GO_DIR/go-block-${(L)1}" end=$(( SECONDS + WAIT_C_S ))
+  (( DRY )) && { sleep 2; log "dry run: confirming block $1 automatically"; return 0; }
+  while (( SECONDS < end )); do
+    [[ -f $go ]] && { rm -f "$go"; log "block $1 confirmed by $go"; return 0; }
+    if [[ -t 0 ]]; then read -t 2 -r _ && { log "block $1 confirmed by Enter"; return 0; }
+    else sleep 2; fi
+  done
+  return 1
+}
+select_manual() {  # block letter, then ids
+  local blk=$1; shift
+  human_names "$@" > "$OUT/.names"; local -a nm=("${(@f)$(<"$OUT/.names")}")
+  local list="${(j:" and ":)nm}" pre="" try from end bad flow
+  [[ $blk == C ]] && pre="switch the Move that is not on Bluetooth to Wi-Fi mode and wait until it shows as an AirPlay speaker; then "
+  for try in {1..$SELECT_TRIES}; do
+    play_stop; rm -f "$GO_DIR/go-block-${(L)blk}"; from=$(tel_size)
+    status "WAITING $blk $(date +%H:%M:%S) ${pre}in Audiout Dev select exactly: \"$list\" and nothing else, then press Enter (or: touch $GO_DIR/go-block-${(L)blk})"
+    wait_go $blk || { status "ABORT $blk $(date +%H:%M:%S) nobody confirmed the selection within $WAIT_C_S s"; return 1; }
+    play_start || log "afplay did not start"
+    (( DRY )) && { log "dry run: selection and audio checks skipped (no app running)"; return 0; }
+    end=$(( SECONDS + SELECT_CHECK_S ))
+    while (( SECONDS < end )); do
+      sleep 5
+      bad=$(manual_py check "$TELEMETRY" $from "${PAIRS[@]}")
+      flow=$(audio_flow $from 15) || bad+="${bad:+; }no audio reaching the app ($flow)"
+      [[ -z $bad ]] && { log "selection check passed for block $blk [$list]; audio $flow"; return 0; }
+    done
+    status "ALERT $blk $(date +%H:%M:%S) selection $bad"
+  done
+  status "ABORT $blk $(date +%H:%M:%S) selection still wrong after $SELECT_TRIES tries"
+  return 1
+}
+choose_speakers() {  # block letter, then ids
+  local blk=$1; shift
+  if (( MANUAL )); then select_manual $blk "$@"; else select_speakers "$@"; fi
+}
+
 RECONNECT_WAS=""
 select_speakers() {  # ids...
   if (( DRY )); then  # write and check a copy; the app's own file is left alone
@@ -721,7 +844,7 @@ block_skip() { print -r -- "$1"$'\tskipped: '"$2"$'\t0\t0\t0\t\t' >> "$OUT/block
 preflight
 
 # Block A: both Moves.
-if ! select_speakers $IDS_A; then block_skip A "both Moves could not be connected or selected (see driver.log)"
+if ! choose_speakers A $IDS_A; then block_skip A "both Moves could not be selected (see driver.log and status.log)"
 elif probe_check $IDS_A && ! play_verified; then block_skip A "no audio reached the app after two play commands (see notes.txt)"
 else
   block_begin A $IDS_A
@@ -731,14 +854,23 @@ else
   elif (( HAVE_BLUEUTIL )); then
     mark disconnect; bt_disconnect_wait $MOVE2_ID || log "disconnect failed"
     watch_sleep $A_OFF_S
-    mark reconnect; bt_connect_wait $MOVE2_ID || note "block A: second Move did not reconnect"
+    mark reconnect; local_from=$(tel_size); bt_connect_wait $MOVE2_ID || note "block A: second Move did not reconnect"
+    if (( ! DRY )); then
+      sink_seen=0
+      for w in {1..$((RECONNECT_SINK_S / 5))}; do
+        tail -c +$((local_from + 1)) "$TELEMETRY" | grep '"bt_sink_\(rebuild\|anchored\)"\|"bt_clock_deviation"' | grep -q "\"uid\":\"$MOVE2_ID\"" && { sink_seen=1; break; }
+        watch_sleep 5
+      done
+      (( sink_seen )) && log "block A: the reconnected Move is streaming again" \
+        || status "ALERT A $(date +%H:%M:%S) reconnect no Bluetooth output line for $MOVE2_ID within $RECONNECT_SINK_S s of the reconnect"
+    fi
   else mark toggle_skipped_no_blueutil; watch_sleep $A_OFF_S; fi
   watch_sleep $A_REST_S
   block_end
 fi
 
-# Block B: Move 1 plus This Mac. The second Move is disconnected so it cannot play.
-if ! select_speakers $IDS_B; then block_skip B "Move 1 could not be connected or selected with This Mac (see driver.log)"
+# Block B: the c-move's partner plus This Mac.
+if ! choose_speakers B $IDS_B; then block_skip B "the Move and This Mac could not be selected (see driver.log and status.log)"
 elif ! play_verified; then block_skip B "no audio reached the app after two play commands (see notes.txt)"
 else
   block_begin B $IDS_B
@@ -758,20 +890,15 @@ wait_for_wifi_switch() {
   if (( ! DRY )); then
     to 20 osascript -e "tell application id \"$BUNDLE_ID\" to quit" >/dev/null 2>&1 || true
   fi
-  rm -f "$GO_FILE"
-  status "WAITING C $(date +%H:%M:%S) switch the other Move to Wi-Fi mode, wait for it to appear as an AirPlay speaker, then confirm (Enter here, or: touch $GO_FILE)"
-  local end=$(( SECONDS + WAIT_C_S ))
-  while (( SECONDS < end )); do
-    [[ -f $GO_FILE ]] && { rm -f "$GO_FILE"; log "Block C confirmed by $GO_FILE"; return 0; }
-    if [[ -t 0 ]]; then read -t 2 -r _ && { log "Block C confirmed by Enter"; return 0; }
-    else sleep 2; fi
-  done
+  rm -f "$GO_DIR/go-block-c"
+  status "WAITING C $(date +%H:%M:%S) switch the other Move to Wi-Fi mode, wait for it to appear as an AirPlay speaker, then confirm (Enter here, or: touch $GO_DIR/go-block-c)"
+  wait_go C && return 0
   status "ABORT C timeout waiting for the AirPlay switch"
   return 1
 }
 if (( WITH_AIRPLAY )); then
-  if ! wait_for_wifi_switch; then block_skip C "nobody confirmed the switch to Wi-Fi mode within $WAIT_C_S s"
-  elif ! select_speakers $IDS_C; then block_skip C "the Bluetooth Move or the Move in Wi-Fi mode could not be selected (see driver.log)"
+  if (( ! MANUAL )) && ! wait_for_wifi_switch; then block_skip C "nobody confirmed the switch to Wi-Fi mode within $WAIT_C_S s"
+  elif ! choose_speakers C $IDS_C; then block_skip C "the Bluetooth Move or the Move in Wi-Fi mode could not be selected (see driver.log)"
   elif ! play_verified; then block_skip C "no audio reached the app after two play commands (see notes.txt)"
   else
     block_begin C $IDS_C

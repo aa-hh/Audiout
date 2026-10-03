@@ -946,6 +946,23 @@ import AVFoundation
         #expect(health.peakDBFS == -120)
     }
 
+    /// Red if a rebuild that finds the device dead stops the sink without reporting it:
+    /// the config-change rebuild can win the race against the alive listener.
+    @Test func deadDeviceAtRebuild_reportsDeadAndDropsSink() throws {
+        let alive = AliveSwitch(), deaths = DeathLog()
+        let manager = Self.livenessManager(alive: alive, deaths: deaths)
+        manager.setDevices([.init(deviceID: 0, uid: "dev-a")])
+        let sink = try #require(manager.sinkForTesting(uid: "dev-a"))
+        sink.test_forceRunning()
+
+        alive.kill(0)
+        sink.requestRebuild(cause: "config_change")
+        sink.test_waitForPendingRebuild()
+
+        #expect(deaths.uids == ["dev-a"])
+        #expect(manager.sinkForTesting(uid: "dev-a") == nil)
+    }
+
     /// Red if the manager drops a dead sink by UID instead of by instance: the
     /// replaced sink's late death would remove the live replacement for the same speaker.
     @Test func replacementSinkSurvivesOldSinkDeathCallback() throws {

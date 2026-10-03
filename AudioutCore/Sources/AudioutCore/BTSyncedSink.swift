@@ -906,6 +906,11 @@ final class BTDeviceSink: @unchecked Sendable {
         guard wasRunning else { return }
         do {
             try startLocked()
+        } catch BTDeviceSinkError.deviceDead {
+            // A vanishing device fires the config change alongside the alive
+            // listener; when the rebuild wins, it is the one that must report.
+            // `startLocked` already wrote the `bt_sink_dead` line.
+            onDead?(self)
         } catch {
             Telemetry.log(.localPlayback, "bt_sink_restart_failed", [
                 "uid": deviceUID, "cause": cause, "error": String(describing: error),

@@ -234,8 +234,12 @@ extension NativeBackend {
     /// which `applyBTSinkTransition` performs fresh on every apply. On
     /// `stateQueue`.
     func reapplyBTSinkLocked() {
-        let (armed, uids) = btArmingLocked()
+        let (armed, armedUIDs) = btArmingLocked()
         guard armed else { return }
+        // Selection is intent; a selected speaker marked unavailable gets no
+        // sink, or a zombie id that still resolves would be rebuilt to die again.
+        // A return commits `isAvailable = true` before it reapplies.
+        let uids = armedUIDs.filter { known[$0]?.isAvailable != false }
         let composition = btComposition
         let gains = btSinkGains(forUIDs: uids)
         let referenceMs = updateBTReferenceBufferLocked(pushToSink: false)

@@ -237,7 +237,7 @@ public final class MainOutRowView: NSView {
         // moves both.
         haloRingView.connectedSpineArmed = isSpineLive
         // Shown only while a member is connected: gold while the master
-        // plays, a hollow `ringConnected` ring while it is muted.
+        // plays, a hollow `rim` ring while it is muted.
         armedDotView.apply(armed: armed, shown: isConnected)
         // The master fader's engaged (gold) fill reuses the EXACT same armed
         // predicate the dot renders — one armed truth, two instruments.

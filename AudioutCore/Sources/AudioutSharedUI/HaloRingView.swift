@@ -23,7 +23,7 @@ import AudioutCore
 ///   the dashed FORM survives, STATIC (no animation) — "incomplete", legible
 ///   frozen. `ember` is the same colour the rail's connecting node wears, so
 ///   one row never shows connecting in two colours.
-/// - `.connected` → **solid quiet ring**, `Tokens.Color.ringConnected`.
+/// - `.connected` → **solid quiet ring**, `Tokens.Color.rim`.
 ///   Tested ≥3:1 vs the panel at `haloRingDiameter`, both themes.
 /// - `.failed` → **red solid ring**, `failure` token.
 /// - **`.resting`** (Main Audio only) — a rail exists (speakers are selected
@@ -73,7 +73,7 @@ public final class HaloRingView: NSView {
         /// `.connecting` / `.reconnecting` — dashed, breathing (static under
         /// Reduce Motion).
         case connecting
-        /// `.connected` — solid quiet ring, `ringConnected`.
+        /// `.connected` — solid quiet ring, `rim`.
         case connected
         /// `.failed` — solid red ring, `failure`.
         case failed
@@ -112,12 +112,12 @@ public final class HaloRingView: NSView {
         didSet { needsLayout = true }
     }
     /// Makes the **connected** form wear the rail's SPINE TONE instead of the
-    /// shared `ringConnected` token (Warm Signal nitpicks): the Main Audio ring
+    /// shared `rim` token (Warm Signal nitpicks): the Main Audio ring
     /// is the rail's terminus, so its connected color must match whatever tone
     /// the rail's curve is drawn in for the join to read as one continuous line
     /// rather than two different colors touching. `true`/`false` = the spine is
     /// armed / not; `nil` (every device row) keeps the shared
-    /// `Tokens.Color.ringConnected`, untouched by the accent dial.
+    /// `Tokens.Color.rim`, untouched by the accent dial.
     ///
     /// It carries the armed STATE, never a resolved color: the tone itself
     /// comes from `Tokens.Color.spineTone(armed:)` at stamp time — the same
@@ -240,7 +240,7 @@ public final class HaloRingView: NSView {
             // rim there while the wire curving into it was gold read as two
             // unrelated things touching.
             strokeToken = connectedSpineArmed.map(Tokens.Color.spineTone(armed:))
-                ?? Tokens.Color.ringConnected
+                ?? Tokens.Color.rim
         case .failed:
             strokeToken = Tokens.Color.failure
         }

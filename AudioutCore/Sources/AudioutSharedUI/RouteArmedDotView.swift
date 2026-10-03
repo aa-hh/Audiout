@@ -14,7 +14,7 @@ import AppKit
 ///   halo. The edge keeps the dot ≥3:1 against the ground where light gold
 ///   alone is 1.77:1.
 /// - **shown, not armed** (connected and in the mix, but muted) → a hollow
-///   ring in `Tokens.Color.ringConnected`, the connected glyph ring's own
+///   ring in `Tokens.Color.rim`, the connected glyph ring's own
 ///   colour, so a later change to that colour moves both.
 /// - **not shown** (not connected, not in the mix, connecting, failed) → no
 ///   dot at all (owner's ruling, 2026-10-03; it retires spec §3.3's
@@ -161,7 +161,7 @@ public final class RouteArmedDotView: NSView {
                 dotLayer.strokeColor = Tokens.Color.ember.cgColor
             } else {
                 dotLayer.fillColor = nil
-                dotLayer.strokeColor = Tokens.Color.ringConnected.cgColor
+                dotLayer.strokeColor = Tokens.Color.rim.cgColor
             }
         }
         dotLayer.lineWidth = strokeWidth

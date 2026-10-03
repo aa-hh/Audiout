@@ -313,24 +313,6 @@ public enum Tokens {
                        light: 0x66717A, lightHighContrast: 0x586269)
         }
 
-        /// The connected glyph ring's colour on a device row, and the
-        /// not-playing status dot's hollow ring, which must always match it.
-        /// Both read this one token, so changing the connected-ring colour is
-        /// this one line. Its own token, not an alias of ``ring``: dark shares
-        /// `ring`'s steel blue, light is a softer value of the same hue
-        /// (owner's pick, 2026-10-03), and neither moves the wizard or the
-        /// system banner.
-        ///
-        /// CONTRAST RATIONALE (measured; floor 3:1): light `#5D91A1` = 3.34:1
-        /// on the flat ground, 3.12:1 on a live row's gold wash; light IC
-        /// `#4E7A88` (same hue and saturation, darker) = 4.51:1. Dark
-        /// `#7FB4C4` = 7.89:1 on `panel` / 6.93:1 on `raised`; dark IC
-        /// `#9FC7D3` = 8.70:1 on `raised`.
-        public static var ringConnected: NSColor {
-            warmDynamic(name: "ringConnected", dark: 0x7FB4C4, darkHighContrast: 0x9FC7D3,
-                       light: 0x5D91A1, lightHighContrast: 0x4E7A88)
-        }
-
         /// The under-name level meter's EMPTY-track fill (`LevelMeterView`'s
         /// `trackLayer`). A meter reads a RATIO, so its full length (the
         /// denominator) must be visible at every level, including 0 — but it is
@@ -798,7 +780,7 @@ public enum Tokens {
         /// membership node's disc when the row is dimmed (`MembershipBusView`'s
         /// `dimmed`) — the seat stays and the gold is lifted out of it. (The
         /// route-armed dot stopped using it on 2026-10-03: a not-playing dot is
-        /// now a hollow `ringConnected` ring.) Because it is always ringed, it is
+        /// now a hollow `rim` ring.) Because it is always ringed, it is
         /// measured against the tone that rings it rather than the ground
         /// behind it.
         ///

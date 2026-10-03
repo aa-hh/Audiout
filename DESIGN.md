@@ -22,7 +22,6 @@ colors:
   emberText: "#A98341"
   inkOnFill: "#171104"
   ring: "#7FB4C4"
-  ringConnected: "#7FB4C4"
   failure: "#D9564A"
   muted: "#8E93F0"
   equalizer: "#41B07A"
@@ -738,17 +737,13 @@ connecting pulse only grows the ring outward from its resting radius
 
 The status dot shows only for a speaker that is connected and in the mix.
 Playing is a `gold` disc with a 1 pt `ember` edge; connected but muted is a
-hollow ring in `ringConnected`. Every other state has no dot.
+hollow ring in `rim`. Every other state has no dot.
 
-`ringConnected` is the connected glyph ring's own colour token, read by that
-ring and by the hollow dot, so changing it is one line in `Tokens.swift`. It
-is a separate token from `ring`, which stays fenced to the wizard's reference
-light and the system banner. Dark is `#7FB4C4`, `ring`'s own dark value. Light
-is the owner's pick from a swatch mockup, `#5D91A1`: the same hue and strength
-as the dark value, only lightness differs, at 3.34:1 on `#FAFAFB` (3.12:1 on a
-live row's gold wash). Increase Contrast moves each further from its ground:
-light `#4E7A88` (4.51:1), dark `#9FC7D3`. Main Audio's connected ring keeps
-the rail's spine tone instead.
+The connected glyph ring and the hollow dot are `rim`, the same grey as an
+unarmed volume slider's fill. That match is deliberate: the iPhone app draws
+a speaker's volume as its ring, so the ring and the slider are one colour on
+both platforms. Main Audio's connected ring keeps the rail's spine tone
+instead.
 
 Row glyphs are sized and optically centred per symbol by one table,
 `DeviceIcon.rowGlyphFits`, drawn by `DeviceIcon.rowGlyph` (derivation in

@@ -293,7 +293,7 @@ public enum PopoverColumnGrid {
     // it), and was tuned by rendering + eyeballing per the spec's ~3–4 pt
     // target, landing this constant at 26 pt (up from the original 21 pt,
     // which hugged the glyph at ~1.5–2.5 pt). `haloRingDiameter` is also the
-    // size the ≥3:1 `ringConnected` contrast floor is tested at (spec §3.2).
+    // size the ≥3:1 `rim` contrast floor is tested at (spec §3.2).
     // The breathing pulse REUSES the `statusDotBreath*` timing constants above
     // (spec §6: "breathing pulse (`statusDotBreathDuration` timing)").
 

@@ -638,7 +638,7 @@ public final class DeviceRowView: NSView {
         isRouteArmed = mainMixArmed || hasLiveFeeds
         // The dot shows only for a connected speaker carrying the mix (the
         // main mix or a per-app feed): gold while armed, a hollow
-        // `ringConnected` ring while muted. Anything else has no dot.
+        // `rim` ring while muted. Anything else has no dot.
         armedDotView.apply(armed: isRouteArmed,
                            shown: isConnected && (activeMember || hasLiveFeeds))
         nameLabel.textColor = rowTextColor

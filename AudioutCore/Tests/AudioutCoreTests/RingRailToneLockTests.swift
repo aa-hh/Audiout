@@ -233,16 +233,16 @@ extension SerializedSharedState {
     // MARK: 3 — scope guard: the device rows' ring is NOT on the dial
 
     /// The coupling is the MAIN AUDIO pair only. A device row's ring keeps the
-    /// cool `ringConnected` token, which the dial never remaps — the a11y plan
+    /// cool `rim` token, which the dial never remaps — the a11y plan
     /// re-baselines that hex, so it must stay a hex.
-    @Test func aDeviceRowRingStaysRingConnectedInEveryDialPosition() {
+    @Test func aDeviceRowRingStaysRimInEveryDialPosition() {
         let ring = HaloRingView()
         ring.appearance = NSAppearance(named: .darkAqua)
         ring.apply(.connected)                      // no `connectedSpineArmed`
         for style in AccentStyle.allCases {
             Tokens.accentStyle = style      // the broadcast re-stamps it in place
-            expectSameInk(resolved(Tokens.Color.ringConnected, .darkAqua), ring.test_strokeColor,
-                          "a device row's connected ring must stay ringConnected under \(style)")
+            expectSameInk(resolved(Tokens.Color.rim, .darkAqua), ring.test_strokeColor,
+                          "a device row's connected ring must stay rim under \(style)")
         }
     }
 }

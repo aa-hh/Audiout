@@ -26,9 +26,9 @@
 // `Device` values and pushed through `PopoverController.update(devices:)` —
 // no script timing to wait on, so the render is fully deterministic. This is
 // the PRIMARY visual gate for the Warm Signal v3 §3.2 halo ring: `.off` → no
-// ring · `.connecting`/`.reconnecting` → dashed `ringConnected` ring (the
+// ring · `.connecting`/`.reconnecting` → dashed `ember` ring (the
 // breathing pulse renders settled/full-opacity via `cacheDisplay`, so the PNG
-// is deterministic) · `.connected` → solid `ringConnected` ring · `.failed` →
+// is deterministic) · `.connected` → solid `rim` ring · `.failed` →
 // heavier solid red `failure` ring + red "Couldn't connect" sublabel.
 //
 // `AIRPLAY_SNAPSHOT_MODE=feed-composite` renders the Warm Signal v4.1 item 3
@@ -390,8 +390,8 @@ func snapshotMeters(appearanceName: NSAppearance.Name, label: String, outDir: UR
 /// `connection-states` snapshot mode. Each device's name says what it's
 /// demoing so the PNG is self-explanatory without cross-referencing code. This
 /// now exercises the halo connection ring (Warm Signal v3 §3.2): `.off` shows
-/// no ring, `.connecting`/`.reconnecting` a dashed breathing `ringConnected`
-/// ring, `.connected` a solid `ringConnected` ring, `.failed` a heavier solid
+/// no ring, `.connecting`/`.reconnecting` a dashed breathing `ember`
+/// ring, `.connected` a solid `rim` ring, `.failed` a heavier solid
 /// red `failure` ring with the red "Couldn't connect" sublabel.
 private var connectionStatesFleet: [Device] {
     [

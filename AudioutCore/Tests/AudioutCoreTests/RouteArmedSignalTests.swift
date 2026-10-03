@@ -164,7 +164,7 @@ import AudioutCore
         row.apply(makeDevice(isMuted: true), selected: true)
         #expect(row.test_dotIsShown, "connected and in the mix keeps the dot")
         #expect(row.test_dotFillColor == nil, "not playing is hollow")
-        assertSameHue(row.test_dotStrokeColor, Tokens.Color.ringConnected,
+        assertSameHue(row.test_dotStrokeColor, Tokens.Color.rim,
                       "the hollow dot follows the connected ring's colour token")
     }
 

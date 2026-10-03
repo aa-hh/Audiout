@@ -7,7 +7,7 @@ import AudioutCore
 /// the sublabel precedence ladder: the four `ConnectionState` ring renderings
 /// (`test_statusKind`/`test_ringForm`/`test_statusText`), the ring's per-state
 /// FORM (dashed connecting vs solid connected/failed), the per-state hues
-/// (`ember` connecting, `ringConnected` connected, `failure`) at one stroke width, the VoiceOver
+/// (`ember` connecting, `rim` connected, `failure`) at one stroke width, the VoiceOver
 /// spoken equivalent per state, the name-click-toggles-enabled wiring
 /// (`test_clickName`) through the checkbox, the routing sublabel composed from
 /// `selected` + `routedAppNames`, and that a repeated `apply` cleanly
@@ -100,7 +100,7 @@ import AudioutCore
         #expect(!row.test_ringIsDashed, "the failed ring is solid, not dashed")
     }
 
-    // MARK: Ring HUE + weight — `ember` / `ringConnected` vs failure-exclusive red (§3.2/R8)
+    // MARK: Ring HUE + weight — `ember` / `rim` vs failure-exclusive red (§3.2/R8)
     //
     // Ring colors are stamped as resolved `CGColor`s (the dynamic token resolved
     // against the effective appearance), so they're compared by resolved sRGB
@@ -118,24 +118,24 @@ import AudioutCore
         #expect(abs(a.blueComponent - b.blueComponent) < 0.01, "\(message)", sourceLocation: sourceLocation)
     }
 
-    @Test func connectingRingIsEmberAndConnectedRingIsRingConnected() {
+    @Test func connectingRingIsEmberAndConnectedRingIsRim() {
         // Connecting is `ember`, the colour the rail's connecting node wears
         // beside it, so one row never shows connecting in two colours.
         let connecting = DeviceRowView(device: makeDevice(connectionState: .connecting))
         let connected = DeviceRowView(device: makeDevice(connectionState: .connected))
         assertSameHue(connecting.test_ringStrokeColor, Tokens.Color.ember,
                       "the connecting ring is ember, matching the rail node")
-        assertSameHue(connected.test_ringStrokeColor, Tokens.Color.ringConnected,
-                      "the connected ring is the ringConnected token")
+        assertSameHue(connected.test_ringStrokeColor, Tokens.Color.rim,
+                      "the connected ring is the rim token")
         let a = connecting.test_ringStrokeColor?.usingColorSpace(.sRGB)
         let b = connected.test_ringStrokeColor?.usingColorSpace(.sRGB)
         #expect(a?.blueComponent != b?.blueComponent, "connecting ≠ connected")
     }
 
-    @Test func connectedRingUsesRingConnectedToken() {
+    @Test func connectedRingUsesRimToken() {
         let row = DeviceRowView(device: makeDevice(connectionState: .connected))
-        assertSameHue(row.test_ringStrokeColor, Tokens.Color.ringConnected,
-                      "the connected ring is the ringConnected token")
+        assertSameHue(row.test_ringStrokeColor, Tokens.Color.rim,
+                      "the connected ring is the rim token")
     }
 
     @Test func failedRingUsesTheFailureHueNotRim() {

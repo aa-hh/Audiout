@@ -342,7 +342,9 @@ warn-only 3/5) are documented in the hook file itself:
   runs them and saves the replies, and `bash scripts/review-branch.sh
   --continue` reads them (exit 3 means more passes to run). It then prints findings, logs one line per review to
   `.git/audiout-branch-reviews.log`, and writes a receipt keyed to the
-  branch's own committed changes; a HIGH finding blocks the receipt. Merging
+  branch's own committed changes. Every surviving finding, of any severity,
+  blocks the receipt: the script prints fix groups (one per file) for builder
+  subagents to fix in parallel in the same worktree, then a fresh review. Merging
   main into the branch keeps the receipt valid; a commit or conflict resolution
   that changes the branch's own lines needs a new review. The merge onto
   `main` also requires the branch to contain the latest main; an out-of-date

@@ -245,10 +245,12 @@ extension NativeBackend {
     /// it counts only when that exceeds the start buffer: a speaker that fits
     /// under the buffer was never held back, so the `nil` keeps every room
     /// that ships today on today's exact delays, by construction rather than
-    /// by a flag. Once standing it never falls while any selected speaker
-    /// still needs it, so a re-measurement that comes in lower does not jump
-    /// every output forward for a number the next one may undo. On
-    /// `stateQueue`.
+    /// by a flag. Once standing it does not fall to a lower re-measurement
+    /// that still exceeds the start buffer, so that one does not jump every
+    /// output forward for a number the next one may undo. It is cleared when
+    /// the slowest selected speaker's latency plus headroom no longer exceeds
+    /// the start buffer: the room delay then falls back to the buffer, with
+    /// one gap. On `stateQueue`.
     @discardableResult
     func updateBTRoomTermLocked() -> Bool {   // on stateQueue
         let (latencies, trims) = btTrimLock.withLock { (btLatencyMsByUID, btTrimsByUID) }

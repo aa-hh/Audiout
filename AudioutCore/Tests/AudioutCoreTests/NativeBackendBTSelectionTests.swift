@@ -594,6 +594,38 @@ import CoreAudio
         #expect(backend.btReferenceDelayMs() == startBuffer, "the term leaves with the speaker")
     }
 
+    /// A departing speaker leaves before any rebuild, for the room term too:
+    /// deselecting the slow speaker clears the term, and the room-delay fan-out (`reanchorAll`)
+    /// must reach the manager only after the transition's `setDevices` has
+    /// dropped the departing speaker. Turns red if the selection path fires
+    /// `roomDelayChangedLocked` inline, ahead of the queued transition.
+    @Test func deselectingTheSlowSpeakerDropsItBeforeTheRoomDelayMoves() {
+        let (backend, engine, discovery, bt, sink, capture) = makeBackend()
+        defer { backend.stop() }
+        backend.start()
+        let ap = ap2Device()
+        discovery.fire(.appeared(ap))
+        bt.fire([btMove, btFlip])
+        waitFor { self.device(backend, ap.id) != nil && self.device(backend, self.btMove.id) != nil
+            && self.device(backend, self.btFlip.id) != nil }
+        waitFor { engine.fedIDs.contains(ap.outputID) }
+        backend.setOutputSet([ap.id, btMove.id, btFlip.id])
+        waitFor { engine.addedIDs.contains(ap.outputID) && sink.calls.contains("start") }
+        backend.endBTWizardLatencyPreview(forDevice: btMove.id, keepMs: Double(backend.startBufferMs + 300))
+        waitFor { (capture.preDelayMs.last ?? 0) > 0 }
+        SuiteWait.settle(0.3)
+        let mark = sink.calls.count
+
+        backend.setOutputSet([ap.id, btFlip.id])
+        waitFor { capture.preDelayMs.last == 0 && sink.calls.dropFirst(mark).contains("reanchorAll") }
+
+        let after = Array(sink.calls.dropFirst(mark))
+        let drop = after.firstIndex(of: "setDevices")
+        let reanchor = after.firstIndex(of: "reanchorAll")
+        #expect(drop != nil && reanchor != nil && drop! < reanchor!,
+                "the departing speaker must leave before the room delay rebuilds the sinks: \(after)")
+    }
+
     /// The composition is recomputed on every selection change: AirPlay
     /// joining/leaving a BT-containing selection re-feeds the sink manager.
     @Test func compositionRecomputesOnSelectionChange() {

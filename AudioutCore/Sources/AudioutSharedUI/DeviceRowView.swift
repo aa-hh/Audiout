@@ -234,8 +234,8 @@ public final class DeviceRowView: NSView {
     /// composite joined by " · "), hosted in a plain horizontal `NSStackView`.
     /// Every pill carries TEXT ONLY; its tint says whether the value it names
     /// is sounding (D7): the main-mix segment (``mainMixSourceName``, "System"
-    /// or the active group's name) reads `goldText` while the main mix is
-    /// armed here, an app pill reads `goldText` while its feed is live, and
+    /// or the active group's name) reads primary `label` while the main mix is
+    /// armed here, an app pill reads `label` while its feed is live, and
     /// both fall back to `label2` (`label3` while the row is not adjustable).
     /// A `.failed`/unavailable device OVERRIDES
     /// this with a SINGLE failure-red pill instead ("Couldn't connect" /
@@ -1289,20 +1289,21 @@ public final class DeviceRowView: NSView {
         }
         var segments: [FeedSegment] = []
         // Pill tint says what is SOUNDING (D7): the main-mix pill goes
-        // `goldText` while the main mix is armed on this row, an app pill goes
-        // `goldText` while its feed is confirmed live, and anything not
-        // sounding wears the chrome tone. A row in the muted-unconnected
+        // `label` while the main mix is armed on this row, an app pill goes
+        // `label` while its feed is confirmed live, and anything not sounding
+        // wears the chrome tone. Primary text, not `goldText` (owner, 2026-10-04):
+        // gold on the `well` fill measured only 4.90:1 in light mode. A row in the muted-unconnected
         // treatment drops the whole column to `label3`.
         if let mainMixSourceName {
             let color = controlsMuted
                 ? Tokens.Color.label3
-                : (isMainMixArmed ? Tokens.Color.goldText : Tokens.Color.label2)
+                : (isMainMixArmed ? Tokens.Color.label : Tokens.Color.label2)
             segments.append(.init(text: mainMixSourceName, color: color))
         }
         for name in feedAppNames {
             let color = controlsMuted
                 ? Tokens.Color.label3
-                : (hasLiveFeeds ? Tokens.Color.goldText : Tokens.Color.label2)
+                : (hasLiveFeeds ? Tokens.Color.label : Tokens.Color.label2)
             segments.append(.init(text: name, color: color))
         }
         setFeedSegments(segments)

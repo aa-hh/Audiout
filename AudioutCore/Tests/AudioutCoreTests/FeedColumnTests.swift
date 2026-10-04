@@ -332,12 +332,14 @@ import AudioutCore
 
     // MARK: Pill tint (D7)
 
-    @Test func mainMixPillIsGoldTextWhileSoundingAndLabel2Otherwise() {
+    /// Turns red if a sounding pill goes back to `goldText` (too low contrast
+    /// on the pill fill) or stops differing from a silent pill's `label2`.
+    @Test func mainMixPillIsPrimaryLabelWhileSoundingAndLabel2Otherwise() {
         let live = makeBusRow()
         let device = makeDevice(connectionState: .connected)
         live.apply(device, selected: true, controllable: true)
-        assertSameHue(live.test_feedNeutralColor, Tokens.Color.goldText,
-                      "the main-mix pill is goldText while the main mix sounds here")
+        assertSameHue(live.test_feedNeutralColor, Tokens.Color.label,
+                      "the main-mix pill is primary label while the main mix sounds here")
 
         let idle = makeBusRow(device: makeDevice(connectionState: .off))
         idle.apply(makeDevice(connectionState: .off), selected: true, controllable: true)
@@ -345,7 +347,7 @@ import AudioutCore
                       "a silent row's main-mix pill is the chrome label2")
     }
 
-    /// Assert two colors resolve to the same sRGB components — `goldText` is a
+    /// Assert two colors resolve to the same sRGB components — a token is a
     /// computed `static var`, so `==` never holds on it.
     private func assertSameHue(_ a: NSColor?, _ b: NSColor?, _ message: String,
                                sourceLocation: SourceLocation = #_sourceLocation) {

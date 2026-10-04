@@ -360,16 +360,27 @@ import AppKit
         #expect(ys[0] < plan.railTopY, "every stop hangs below the origin hook")
     }
 
-    @Test func activeGroupDrivesTheOriginHookTone() throws {
+    /// In the editor the line follows the group's active state (owner's
+    /// ruling, 2026-10-04): an inactive group's hook, segments and terminus are
+    /// `ember`, matching its member discs; the active group's are gold. The
+    /// Mixer's always-gold line is `RingRailToneLockTests`' job.
+    @Test func theEditorLineIsGoldOnlyWhileTheGroupIsActive() throws {
         let (editor, controller, devices) = try makeEditor()
-        #expect(editor.test_railPlan()?.gold == false, "an inactive group's hook is ember")
+        func expectWire(_ tone: NSColor, _ label: String) throws {
+            let plan = try #require(editor.test_railPlan())
+            let runs = BusRailOverlayView().wireRuns(for: plan)
+            let ink = tone.usingColorSpace(.sRGB)
+            #expect(!runs.isEmpty, "\(label): the rail draws")
+            #expect(runs.allSatisfy { $0.color.usingColorSpace(.sRGB) == ink },
+                    "\(label): every run wears one tone")
+        }
+        try expectWire(Tokens.Color.ember, "inactive group")
 
         let group = try #require(controller.groups.first)
         controller.activateGroup(id: group.id)
         editor.show(groupID: group.id, devices: devices)
         editor.view.layoutSubtreeIfNeeded()
-        #expect(editor.test_railPlan()?.gold == true,
-                "the ACTIVE group's hook goes gold, like its icon well's ring")
+        try expectWire(Tokens.Color.gold, "active group")
     }
 
     /// Mark `ids` as being in the backend's current output set — the echo that

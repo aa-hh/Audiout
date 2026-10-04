@@ -530,7 +530,7 @@ import CoreAudio
         // Headroom is 100 ms, so this lands exactly on the buffer, not over it.
         backend.endBTWizardLatencyPreview(forDevice: btMove.id, keepMs: Double(startBuffer - 100))
         waitFor { backend.btMeasuredLatencyMs(forDevice: self.btMove.id) == Double(startBuffer - 100) }
-        waitFor(timeout: 0.3) { false }   // let the async recompute settle
+        SuiteWait.settle(0.3)   // let the async recompute settle
 
         #expect(capture.preDelayMs.isEmpty, "got \(capture.preDelayMs)")
         #expect(backend.btReferenceDelayMs() == startBuffer)
@@ -564,6 +564,32 @@ import CoreAudio
         #expect(sink.calls.contains("reanchorAll"), "the BT sinks re-anchor on the moved room delay")
     }
 
+    /// The wizard's ceiling is solved against the room delay the Bluetooth
+    /// sinks really render on: with a slow speaker's term standing, that is
+    /// its latency plus headroom, not the start buffer. Turns red if
+    /// `btWizardLatencyRangeMs` solves the ceiling against the start buffer
+    /// instead of the room delay the Bluetooth sinks render on.
+    @Test func btWizardCeilingFollowsTheStandingRoomTerm() {
+        let (backend, engine, discovery, bt, sink, capture) = makeBackend()
+        defer { backend.stop() }
+        backend.start()
+        let ap = ap2Device()
+        discovery.fire(.appeared(ap))
+        bt.fire([btMove])
+        waitFor { self.device(backend, ap.id) != nil && self.device(backend, self.btMove.id) != nil }
+        waitFor { engine.fedIDs.contains(ap.outputID) }
+        backend.setOutputSet([ap.id, btMove.id])
+        waitFor { engine.addedIDs.contains(ap.outputID) && sink.calls.contains("start") }
+        let startBuffer = backend.startBufferMs
+        let slow = startBuffer + 300
+
+        backend.endBTWizardLatencyPreview(forDevice: btMove.id, keepMs: Double(slow))
+        waitFor { capture.preDelayMs.last == slow + NativeBackend.btReferenceHeadroomMs - startBuffer }
+
+        #expect(backend.btWizardLatencyRangeMs(forDevice: btMove.id).upperBound
+                == Double(slow + NativeBackend.btReferenceHeadroomMs - BTSyncedSink.defaultBTOnlyBufferMs))
+    }
+
     /// Hysteresis, the Cast term's rule applied to Bluetooth: a re-measurement
     /// that comes in LOWER leaves the room delay where it is (a move is one
     /// gap for the whole house), and only the speaker leaving the selection
@@ -588,7 +614,7 @@ import CoreAudio
 
         backend.endBTWizardLatencyPreview(forDevice: btMove.id, keepMs: Double(startBuffer + 100))
         waitFor { backend.btMeasuredLatencyMs(forDevice: self.btMove.id) == Double(startBuffer + 100) }
-        waitFor(timeout: 0.3) { false }
+        SuiteWait.settle(0.3)
         #expect(backend.btReferenceDelayMs() == raised, "a lower re-measurement never lowers the room")
         #expect(capture.preDelayMs.last == raised - startBuffer, "got \(capture.preDelayMs)")
 
@@ -1545,6 +1571,190 @@ import CoreAudio
         #expect(sink.deviceSets.last?.map(\.uid).contains(btMove.id) == true,
                 "the speaker must stay in the whole-system device set, not drop out for being contested")
         #expect(engine.addedIDs.isEmpty, "no BT id may ever reach the AirPlay engine")
+    }
+
+    /// Turns red if a per-app-only Bluetooth claim stops breathing `.connecting` until its sink renders, or promotes on anything but rendering.
+    @Test func perAppOnlyBTRouteBreathesUntilTheSinkRenders() {
+        let perAppCapture = workingPerAppCapture(bundleIDs: ["com.foo"])
+        let (backend, _, _, bt, sink, _) = makeBackend(injectedPerAppCapture: perAppCapture)
+        defer { backend.stop() }
+        backend.start()
+        bt.fire([btMove])
+        waitFor { self.device(backend, self.btMove.id)?.isAvailable == true }
+
+        backend.updateAppRoutes([route("com.foo", name: "Foo", toDevice: btMove.id)])
+        waitFor { self.device(backend, self.btMove.id)?.connectionState == .connecting }
+        #expect(device(backend, btMove.id)?.connectionState == ConnectionState.connecting)
+        SuiteWait.settle(0.3)
+        #expect(device(backend, btMove.id)?.connectionState == ConnectionState.connecting,
+                "a started-but-silent sink must not light the dot")
+
+        sink.renderingUIDs = [btMove.id]
+        waitFor { self.device(backend, self.btMove.id)?.connectionState == .connected }
+        #expect(device(backend, btMove.id)?.connectionState == ConnectionState.connected)
+        #expect(device(backend, btMove.id)?.isSelected == false)
+    }
+
+    /// Turns red if removing a per-app Bluetooth route stops ending its hold and returning the row to `.off`.
+    @Test func removingThePerAppBTRouteEndsTheHoldAndReadsOff() {
+        let perAppCapture = workingPerAppCapture(bundleIDs: ["com.foo"])
+        let (backend, _, _, bt, sink, _) = makeBackend(injectedPerAppCapture: perAppCapture)
+        defer { backend.stop() }
+        backend.start()
+        bt.fire([btMove])
+        waitFor { self.device(backend, self.btMove.id)?.isAvailable == true }
+
+        backend.updateAppRoutes([route("com.foo", name: "Foo", toDevice: btMove.id)])
+        waitFor { self.device(backend, self.btMove.id)?.connectionState == .connecting }
+        backend.updateAppRoutes([])
+        waitFor { self.device(backend, self.btMove.id)?.connectionState == .off }
+        #expect(device(backend, btMove.id)?.connectionState == ConnectionState.off)
+
+        // The hold is gone: a later render cannot resurrect the row.
+        sink.renderingUIDs = [btMove.id]
+        SuiteWait.settle(0.3)
+        #expect(device(backend, btMove.id)?.connectionState == ConnectionState.off,
+                "a removed route's deadline must not promote the row afterwards")
+    }
+
+    /// Turns red if the per-app claim's release writes `.off` over the `.failed` of a Bluetooth speaker whose own loss dropped the route.
+    @Test func perAppOnlyBTSpeakerLostAfterTheCeilingKeepsItsFailure() {
+        let perAppCapture = workingPerAppCapture(bundleIDs: ["com.foo"])
+        let (backend, _, _, bt, sink, _) = makeBackend(
+            btRenderStartTimeout: 0.2, injectedPerAppCapture: perAppCapture)
+        defer { backend.stop() }
+        backend.start()
+        bt.fire([btMove])
+        waitFor { self.device(backend, self.btMove.id)?.isAvailable == true }
+
+        backend.updateAppRoutes([route("com.foo", name: "Foo", toDevice: btMove.id)])
+        waitFor { sink.perAppClaimedUIDCalls.last == [self.btMove.id] }
+        waitFor {
+            if case .failed = self.device(backend, self.btMove.id)?.connectionState { return true }
+            return false
+        }
+        guard case .failed = device(backend, btMove.id)?.connectionState else {
+            Issue.record("expected the per-app hold to reach the ceiling and read .failed"); return
+        }
+
+        backend.btDeviceIDForUID = { _ in nil }
+        backend.handleBTSinkDead(uid: btMove.id)
+        waitFor { sink.perAppClaimedUIDCalls.last == [] }
+        #expect(device(backend, btMove.id)?.isAvailable == false)
+        guard case .failed = device(backend, btMove.id)?.connectionState else {
+            Issue.record("the speaker's own loss dropped the route: its failure must survive the release")
+            return
+        }
+    }
+
+    /// Turns red if a per-app claim's release writes `.off` over a speaker the whole-system selection has since taken.
+    @Test func selectingAPerAppBTTargetLeavesItsHoldToTheWholeSystemPath() {
+        let perAppCapture = workingPerAppCapture(bundleIDs: ["com.foo"])
+        let (backend, _, _, bt, sink, _) = makeBackend(injectedPerAppCapture: perAppCapture)
+        defer { backend.stop() }
+        backend.start()
+        bt.fire([btMove])
+        waitFor { self.device(backend, self.btMove.id)?.isAvailable == true }
+
+        backend.updateAppRoutes([route("com.foo", name: "Foo", toDevice: btMove.id)])
+        waitFor { sink.perAppClaimedUIDCalls.last == [self.btMove.id] }
+        backend.setOutputSet([btMove.id])
+        waitFor { sink.perAppClaimedUIDCalls.last == [] }
+        #expect(device(backend, btMove.id)?.connectionState == ConnectionState.connecting,
+                "the whole-system hold carries on; the released claim must not turn it off")
+
+        sink.renderingUIDs = [btMove.id]
+        waitFor { self.device(backend, self.btMove.id)?.connectionState == .connected }
+        #expect(device(backend, btMove.id)?.connectionState == ConnectionState.connected)
+    }
+
+    /// Turns red if `setOutputSet`'s Bluetooth deselect arm clears the hold and writes `.off` for a speaker the per-app claim still holds.
+    @Test func deselectingABTSpeakerThePerAppClaimStillHoldsLeavesItsStoryAlone() {
+        let perAppCapture = workingPerAppCapture(bundleIDs: ["com.foo"])
+        let (backend, _, _, bt, sink, _) = makeBackend(injectedPerAppCapture: perAppCapture)
+        defer { backend.stop() }
+        backend.start()
+        bt.fire([btMove])
+        waitFor { self.device(backend, self.btMove.id)?.isAvailable == true }
+
+        backend.updateAppRoutes([route("com.foo", name: "Foo", toDevice: btMove.id)])
+        waitFor { sink.perAppClaimedUIDCalls.last == [self.btMove.id] }
+        sink.renderingUIDs = [btMove.id]
+        waitFor { self.device(backend, self.btMove.id)?.connectionState == .connected }
+
+        // Hold the capture queue so the select's replay cannot release the claim before the deselect.
+        let gate = DispatchSemaphore(value: 0)
+        backend.captureControlQueue.async { gate.wait() }
+        backend.setOutputSet([btMove.id])
+        backend.setOutputSet([])
+        gate.signal()
+
+        waitFor { self.device(backend, self.btMove.id)?.connectionState == .connected }
+        #expect(device(backend, btMove.id)?.connectionState == ConnectionState.connected,
+                "the per-app claim still feeds the speaker; the deselect must not turn it off")
+        #expect(device(backend, btMove.id)?.isSelected == false)
+        #expect(sink.perAppClaimedUIDCalls.last == [btMove.id])
+    }
+
+    /// Turns red if `finishBTReconnect(.connected)` writes `.off` for an unselected speaker the per-app claim holds instead of starting its per-app hold.
+    @Test func aBasebandReconnectOfAPerAppOnlyBTSpeakerRestartsItsPerAppHold() {
+        let perAppCapture = workingPerAppCapture(bundleIDs: ["com.foo"])
+        let (backend, _, _, bt, sink, _) = makeBackend(injectedPerAppCapture: perAppCapture)
+        defer { backend.stop() }
+        backend.start()
+        bt.fire([btMove])
+        waitFor { self.device(backend, self.btMove.id)?.isAvailable == true }
+
+        backend.updateAppRoutes([route("com.foo", name: "Foo", toDevice: btMove.id)])
+        waitFor { sink.perAppClaimedUIDCalls.last == [self.btMove.id] }
+        sink.renderingUIDs = [btMove.id]
+        waitFor { self.device(backend, self.btMove.id)?.connectionState == .connected }
+
+        backend.finishBTReconnect(id: btMove.id, outcome: .connected)
+        backend.stateQueue.sync {}
+        waitFor { self.device(backend, self.btMove.id)?.connectionState == .connected }
+        #expect(device(backend, btMove.id)?.connectionState == ConnectionState.connected,
+                "a reconnect under a per-app claim breathes, then lights on render; it never reads .off")
+        #expect(device(backend, btMove.id)?.isSelected == false)
+    }
+
+    /// Turns red if a route to an unavailable Bluetooth speaker starts a connecting hold.
+    @Test func perAppRouteToAnUnavailableBTSpeakerNeverBreathes() {
+        let perAppCapture = workingPerAppCapture(bundleIDs: ["com.foo"])
+        let (backend, _, _, bt, _, _) = makeBackend(injectedPerAppCapture: perAppCapture)
+        defer { backend.stop() }
+        backend.start()
+        bt.fire([BTDeviceSnapshot(id: btMove.id, name: btMove.name, isConnected: false)])
+        waitFor { self.device(backend, self.btMove.id) != nil }
+
+        backend.updateAppRoutes([route("com.foo", name: "Foo", toDevice: btMove.id)])
+        SuiteWait.settle(0.3)
+        #expect(device(backend, btMove.id)?.connectionState == ConnectionState.off,
+                "nothing is connecting to a speaker that is not there")
+    }
+
+    /// Turns red if `effectiveAppRoutesLocked` stops demoting a route whose Bluetooth target is unavailable, or if the availability-return replay stops starting that target's per-app hold once it is back.
+    @Test func perAppRouteToABTSpeakerThatReturnsStartsItsHold() {
+        let perAppCapture = workingPerAppCapture(bundleIDs: ["com.foo"])
+        let (backend, _, _, bt, sink, _) = makeBackend(injectedPerAppCapture: perAppCapture)
+        defer { backend.stop() }
+        backend.start()
+        bt.fire([BTDeviceSnapshot(id: btMove.id, name: btMove.name, isConnected: false)])
+        waitFor { self.device(backend, self.btMove.id) != nil }
+
+        backend.updateAppRoutes([route("com.foo", name: "Foo", toDevice: btMove.id)])
+        SuiteWait.settle(0.3)
+        #expect(device(backend, btMove.id)?.connectionState == ConnectionState.off)
+        #expect(sink.perAppClaimedUIDCalls.last != [btMove.id])
+
+        bt.fire([btMove])
+        waitFor { sink.perAppClaimedUIDCalls.last == [self.btMove.id] }
+        #expect(device(backend, btMove.id)?.connectionState == ConnectionState.connecting)
+
+        sink.renderingUIDs = [btMove.id]
+        waitFor { self.device(backend, self.btMove.id)?.connectionState == ConnectionState.connected }
+        #expect(device(backend, btMove.id)?.connectionState == ConnectionState.connected)
+        #expect(device(backend, btMove.id)?.isSelected == false)
     }
 
     /// The mirror case: with no whole-system BT ever selected, clearing the

@@ -269,7 +269,7 @@ import AudioutCore
     }
 
     @Test func ringRestampsItsTokenColorOnDisplayOptionsChange() {
-        // The handler re-resolves `ringConnected`/`failure` (whose Increase-
+        // The handler re-resolves `rim`/`failure` (whose Increase-
         // Contrast variants read the LIVE workspace flag). Headless, the flag
         // can't flip — assert the re-stamp path runs and lands back on the
         // correctly-resolved token, i.e. the notification never corrupts state.

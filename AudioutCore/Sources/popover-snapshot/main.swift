@@ -26,10 +26,10 @@
 // `Device` values and pushed through `PopoverController.update(devices:)` —
 // no script timing to wait on, so the render is fully deterministic. This is
 // the PRIMARY visual gate for the Warm Signal v3 §3.2 halo ring: `.off` → no
-// ring · `.connecting`/`.reconnecting` → dashed `ringConnected` ring (the
+// ring · `.connecting`/`.reconnecting` → dashed `rim` ring (the
 // breathing pulse renders settled/full-opacity via `cacheDisplay`, so the PNG
-// is deterministic) · `.connected` → solid `ringConnected` ring · `.failed` →
-// heavier solid red `failure` ring + red "Couldn't connect" sublabel.
+// is deterministic) · `.connected` → solid `rim` ring · `.failed` →
+// solid red `failure` ring + red "Couldn't connect" sublabel.
 //
 // `AIRPLAY_SNAPSHOT_MODE=feed-composite` renders the Warm Signal v4.1 item 3
 // FEED column's full precedence ladder in one panel — see
@@ -390,8 +390,8 @@ func snapshotMeters(appearanceName: NSAppearance.Name, label: String, outDir: UR
 /// `connection-states` snapshot mode. Each device's name says what it's
 /// demoing so the PNG is self-explanatory without cross-referencing code. This
 /// now exercises the halo connection ring (Warm Signal v3 §3.2): `.off` shows
-/// no ring, `.connecting`/`.reconnecting` a dashed breathing `ringConnected`
-/// ring, `.connected` a solid `ringConnected` ring, `.failed` a heavier solid
+/// no ring, `.connecting`/`.reconnecting` a dashed breathing `rim`
+/// ring, `.connected` a solid `rim` ring, `.failed` a solid
 /// red `failure` ring with the red "Couldn't connect" sublabel.
 private var connectionStatesFleet: [Device] {
     [
@@ -413,11 +413,11 @@ private var connectionStatesFleet: [Device] {
 /// AirPlay members caught mid-switch to a group plus one that fails:
 ///   - `en-kitchen` — already `.connected` (the top of the sweep has landed:
 ///     filled gold node + gold rail segment),
-///   - `en-living` — `.connecting` (mid-handshake: gold DASHED node, ember
-///     segment) in the mid-sequence variant; `.connected` in the settled
+///   - `en-living` — `.connecting` (mid-handshake: plain gold node, line
+///     stops short) in the mid-sequence variant; `.connected` in the settled
 ///     Reduce-Motion variant so there is no in-flight residue to strip,
 ///   - `en-office` / `en-bedroom` — still `.off`: these carry the energize
-///     PENDING beat (ember dashed node) mid-sequence, and SNAP to their
+///     PENDING beat (plain gold node) mid-sequence, and SNAP to their
 ///     resolved filled-gold member node under Reduce Motion,
 ///   - `en-patio` — `.failed` (never toggled in, so it bounces off selection
 ///     exactly like the `connection-states` fixture's failed row): red halo
@@ -472,7 +472,7 @@ private func stageEnergize(fleet: [Device], reduceMotion: Bool,
     popover.test_simulateOpen()             // rebuild as if reopened → rows mounted
 
     // Fixed Reduce Motion posture on the still-`.off` members, THEN raise the
-    // pending beat: mid-sequence (motion on) → ember dashed pending nodes;
+    // pending beat: mid-sequence (motion on) → plain gold pending nodes;
     // settled (motion reduced) → the beat is dropped, the members render their
     // resolved filled-gold member nodes (snap to resolved).
     for id in ["en-office", "en-bedroom"] {
@@ -506,9 +506,9 @@ private func stageEnergize(fleet: [Device], reduceMotion: Bool,
 }
 
 /// Render the `energize-mid-sequence` scenario (Warm Signal v4.1 item 9): a
-/// FROZEN mid-switch frame — one member landed (gold), one connecting (gold
-/// dashed), two on the ember PENDING beat, one failed — so the whole energize
-/// vocabulary reads in one panel. Motion ON (the pending nodes are dashed).
+/// FROZEN mid-switch frame — one member landed (gold), one connecting (plain
+/// gold node), two on the PENDING beat (plain gold node), one failed — so the whole energize
+/// vocabulary reads in one panel. Motion ON (the pending nodes are plain gold).
 @MainActor
 func snapshotEnergizeMidSequence(appearanceName: NSAppearance.Name, label: String, outDir: URL) {
     guard let panelView = stageEnergize(fleet: energizeFleet(livingConnecting: true),
@@ -617,10 +617,10 @@ func snapshotConnectionStates(appearanceName: NSAppearance.Name, label: String, 
 /// label. Two app routes are seeded so the two rungs are visible side by
 /// side in one panel:
 ///   - "office": redirected to Music AND given a live `.routedApps` event ⇒
-///     its row shows the CONFIRMED label ("Music") — and (S2, spec §3.3) its
-///     GOLD route-armed corner dot, lit via the `liveAppNames` branch on an
-///     UNCHECKED row (redirect-only: hollow bus node + gold dot + bright feed
-///     token).
+///     its row shows the CONFIRMED label ("Music"): the mock marks a device
+///     with a live `.routedApps` feed connected, so the unchecked row shows
+///     the connected ring and the gold dot (redirect-only: hollow bus node,
+///     gold dot, bright feed token).
 ///   - "homepod-bed": redirected to Safari but given NO live event ⇒ its row
 ///     falls back to the INTENT-based label ("Safari"), demonstrating the
 ///     "routed but not yet confirmed streaming" fallback case.

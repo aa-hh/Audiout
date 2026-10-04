@@ -315,6 +315,22 @@ import AudioutCore
                 "sanity: the resting sizes the two hovers trade between are the real ones")
     }
 
+    // Turns red if the connecting node's rim leaves gold or any hollow rim colour swaps.
+    @Test func hollowNodeRimColours() {
+        func same(_ a: NSColor, _ b: NSColor) -> Bool {
+            guard let a = a.usingColorSpace(.sRGB), let b = b.usingColorSpace(.sRGB) else { return false }
+            return abs(a.redComponent - b.redComponent) <= 0.02
+                && abs(a.greenComponent - b.greenComponent) <= 0.02
+                && abs(a.blueComponent - b.blueComponent) <= 0.02
+        }
+        #expect(same(makeBusView(node: .connecting).test_rimColor, Tokens.Color.gold),
+                "a connecting node is a plain gold circle")
+        #expect(same(makeBusView(node: .nonMember).test_rimColor, Tokens.Color.ember),
+                "a non-member rim is ember")
+        #expect(same(makeBusView(node: .failed).test_rimColor, Tokens.Color.failure),
+                "a failed rim is failure red")
+    }
+
     private func makeBusView(node: MembershipBusView.Node = .nonMember) -> MembershipBusView {
         let bus = MembershipBusView()
         bus.frame = NSRect(x: 0, y: 0, width: PopoverColumnGrid.busColumnWidth, height: 40)

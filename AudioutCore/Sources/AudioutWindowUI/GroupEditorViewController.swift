@@ -405,6 +405,10 @@ public final class GroupEditorViewController: NSViewController {
         // to list it (see `RailRepaintingView.performKeyEquivalent`).
         backButton.toolTip = "Back to Scenes (\u{2318}[)"
 
+        // An inactive group's line is ember, like its member discs; only the
+        // active group's goes gold (owner's ruling, 2026-10-04 — the Mixer's
+        // line stays gold in every state).
+        railOverlay.unarmedLineTone = Tokens.Color.ember
         let container = RailRepaintingView()
         container.railOverlay = railOverlay
         container.membershipWell = membershipWell
@@ -1694,11 +1698,11 @@ extension GroupEditorViewController: RailHookProviding {
     ///
     /// The well is a rounded-rect tile rather than a circle, so the "ring"
     /// reported here is its inscribed circle; only `ringCenterX - ringRadius`
-    /// (the left edge) and `centerY` are ever drawn to. `gold` follows the SAME
-    /// active-group truth as the well's §5.3 gold ring, so an inactive group's
-    /// hook reads in the quiet `ember` idle tone.
+    /// (the left edge) and `centerY` are ever drawn to. `armed` follows the
+    /// SAME active-group truth as the well's §5.3 gold ring, so the line is
+    /// gold while active and ember otherwise (`unarmedLineTone`).
     public func railHookAnchor(in view: NSView)
-        -> (centerY: CGFloat, ringCenterX: CGFloat, ringRadius: CGFloat, gold: Bool)? {
+        -> (centerY: CGFloat, ringCenterX: CGFloat, ringRadius: CGFloat, armed: Bool)? {
         guard isViewLoaded, iconWell.superview != nil else { return nil }
         iconWell.layoutSubtreeIfNeeded()
         let center = iconWell.convert(

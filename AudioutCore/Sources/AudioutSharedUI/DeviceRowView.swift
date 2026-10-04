@@ -143,7 +143,9 @@ public final class DeviceRowView: NSView {
     /// model `isSelectedInSet` and always reset in ``apply(_:selected:…)`` and on
     /// re-parenting, so a hover can never "stick" as a stale highlight after the
     /// pointer leaves the popover without a matching `mouseExited` (T-U8 bug).
-    private var isHovered: Bool = false
+    private var isHovered: Bool = false {
+        didSet { armedDotView.rowWash = rowWash }
+    }
 
     /// Transient pointer-in-the-gutter state, the same discipline as
     /// `isHovered` (reset on `apply` and re-parenting via
@@ -198,7 +200,9 @@ public final class DeviceRowView: NSView {
     /// The **gold route-armed corner dot** (Warm Signal v3 §3.3, S2) at the
     /// icon's bottom-right — the position the retired connection dot vacated.
     /// PURE MODEL STATE, never RMS: lit iff the §3.3 predicate holds (see
-    /// `routeArmed(...)` in ``apply``); dark/empty socket otherwise. Paused
+    /// `routeArmed(...)` in ``apply``) on a connected speaker; otherwise a
+    /// hollow ring in the glyph ring's own colour while that ring is drawn,
+    /// and hidden when it is not. Paused
     /// and playing render identically here (R3 — only the meter differs).
     let armedDotView = RouteArmedDotView()
     /// Whether the MASTER (Main Out) mute is currently engaged — folded into
@@ -208,8 +212,13 @@ public final class DeviceRowView: NSView {
     /// Whether the row's live-feed set (`liveAppNames`) was non-empty at the
     /// last `apply` — picks the "playing here" vs "armed" VoiceOver wording.
     private var hasLiveFeeds = false
-    /// The armed predicate's last computed value (what the dot renders).
-    private var isRouteArmed = false
+    /// The armed predicate's last computed value. The dot draws gold only when
+    /// this is true AND the speaker is connected (`apply` passes
+    /// `isRouteArmed && isConnected`); the fader fill and VoiceOver read the
+    /// predicate alone.
+    private var isRouteArmed = false {
+        didSet { armedDotView.rowWash = rowWash }
+    }
     /// The main-mix term of the armed predicate, read by the FEED column's pill tint.
     private var isMainMixArmed = false
     /// Whether the row's volume/mute gesture is pending its Cast feed-gain
@@ -314,8 +323,8 @@ public final class DeviceRowView: NSView {
     /// The **energize "press-play" pending beat** (Warm Signal v4.1 item 9): a
     /// DRAWING-ONLY flag the host raises on the members of a Main-Audio source
     /// switch that haven't started connecting yet (`connectionState == .off`),
-    /// so at the switch instant the rail drops to ember PENDING and those nodes
-    /// render hollow-dashed (`MembershipBusView.Node.connecting`) BEFORE the
+    /// so at the switch instant those nodes render the plain gold
+    /// `.connecting` node (`MembershipBusView.Node.connecting`) BEFORE the
     /// backend reports `.connecting`. It NEVER changes the model — the moment
     /// the device's real `connectionState` leaves `.off` (→ `.connecting`, then
     /// `.member`), that model state supersedes this beat in ``updateBus()``, so
@@ -624,13 +633,7 @@ public final class DeviceRowView: NSView {
         // `DeviceIcon.resolve` short-circuits on a `nil` override — so behavior
         // is unchanged unless a caller passes an explicit override name.
         let resolvedSymbolName = DeviceIcon.resolve(iconSymbolName, default: device.kind.symbolName)
-        iconView.image = NSImage(
-            systemSymbolName: resolvedSymbolName,
-            accessibilityDescription: device.name
-        )?.withSymbolConfiguration(
-            NSImage.SymbolConfiguration(pointSize: PopoverColumnGrid.iconGlyphPointSize,
-                                        weight: .regular)
-        )
+        iconView.image = DeviceIcon.rowGlyph(resolvedSymbolName)
         // The icon is ALWAYS neutral: identity only, no
         // accent-when-selected fill. Selection reads from the switch state; the
         // on-icon corner dot carries the connection status instead. (This also
@@ -647,9 +650,11 @@ public final class DeviceRowView: NSView {
 
         // Connection halo ring: driven off `connectionState` ALONE (spec §3.2 /
         // §3.1 — the ring is the connection channel; teal is retired, so a live
-        // per-app redirect no longer tints the ring). A redirect-only device
-        // reads via its gold route-armed dot + sublabel + bus node, never the
-        // ring. `liveAppNames` still feeds the routing sublabel below.
+        // per-app redirect no longer tints the ring). A speaker fed only by a
+        // per-app route is reported connecting and then connected by the
+        // backend while its feed session is up, so it draws the same ring and
+        // dot as a member; only its rail node stays hollow, because it is not
+        // in the main output. `liveAppNames` still feeds the routing sublabel below.
         haloRingView.apply(device.connectionState)
 
         // Route-armed corner dot (spec §3.3) — the normative predicate,
@@ -671,7 +676,11 @@ public final class DeviceRowView: NSView {
         let mainMixArmed = activeMember && isConnected && !device.isMuted && !masterMuted
         isMainMixArmed = mainMixArmed
         isRouteArmed = mainMixArmed || hasLiveFeeds
-        armedDotView.apply(armed: isRouteArmed)
+        // The ring decides whether the dot shows and its hollow colour
+        // (`haloRingView.cutoutDot`). Gold needs a connected speaker: a
+        // per-app feed arms the row while it is still connecting, and that
+        // speaker's dot stays the connecting ring's hollow `rim`.
+        armedDotView.apply(armed: isRouteArmed && isConnected)
         nameLabel.textColor = rowTextColor
 
         // FEED column (v4.1 item 3): main-mix segment wording — "System" for a
@@ -868,7 +877,7 @@ public final class DeviceRowView: NSView {
     /// The rail node a bus row shows for `device`, from the values `apply(...)`
     /// pushes. The one derivation: the row calls it, and the popover calls it
     /// for a device whose row is not mounted (hidden inside a collapsed
-    /// subsection) to decide where the rail is cut.
+    /// subsection) to decide whether that subsection's header gets a rail dot.
     public static func busNode(device: Device, selected: Bool, energizePending: Bool,
                                reduceMotion: Bool, localFallbackOutput: Bool) -> MembershipBusView.Node {
         let node: MembershipBusView.Node
@@ -897,7 +906,7 @@ public final class DeviceRowView: NSView {
         } else if energizePending, !reduceMotion, case .off = device.connectionState {
             // Energize "press-play" pending beat (v4.1 item 9): a member of a
             // source switch that hasn't started connecting yet renders the
-            // hollow gold DASHED `.connecting` node ON the spine, instantly,
+            // plain gold `.connecting` node ON the spine, instantly,
             // before the backend reports `.connecting` — the beat has no node
             // form of its own. Guarded to `.off` so it never overrides a real
             // in-flight/resolved state — the moment `connectionState` advances,
@@ -907,7 +916,7 @@ public final class DeviceRowView: NSView {
             node = .connecting
         } else if selected {
             // Selected members key their node off the CONNECTION state (v4
-            // §Call-1 node vocabulary): connecting/reconnecting → gold dashed;
+            // §Call-1 node vocabulary): connecting/reconnecting → plain gold node, line stops short;
             // failed → failure-red ring; connected/idle → filled gold.
             switch device.connectionState {
             case .connecting, .reconnecting: node = .connecting
@@ -1736,6 +1745,7 @@ public final class DeviceRowView: NSView {
         addSubview(iconView)
         addSubview(haloRingView)           // ring around the icon glyph
         addSubview(armedDotView)           // gold route-armed dot on its corner
+        haloRingView.cutoutDot = armedDotView
         unavailableStatusLabel.translatesAutoresizingMaskIntoConstraints = false
         unavailableStatusLabel.font = Tokens.Font.caption
         unavailableStatusLabel.textColor = Tokens.Color.labelCool2
@@ -2730,25 +2740,30 @@ public final class DeviceRowView: NSView {
             nameLabel.textColor = rowTextColor
         } else {
             // Menu-less host (popover card / mixer window). A rounded pill behind
-            // the row: a gold 12 % wash while the row is SOUNDING (D1 —
-            // `isRouteArmed`, the iPhone's "gold at 12% behind a live row"),
-            // else a fainter neutral hover wash on pointer-over. Both are driven
-            // off state that ``apply`` resets, so a row that stops sounding
-            // returns to a fully clean background (T-U8 bug fix).
+            // the row: only a neutral hover wash on pointer-over, driven off
+            // state that ``apply`` resets, so a row never keeps a stale
+            // background (T-U8 bug fix).
             let rect = bounds.insetBy(dx: PopoverColumnGrid.selectionHighlightInsetX,
                                       dy: PopoverColumnGrid.selectionHighlightInsetY)
             let path = NSBezierPath(roundedRect: rect,
                                     xRadius: PopoverColumnGrid.selectionHighlightCornerRadius,
                                     yRadius: PopoverColumnGrid.selectionHighlightCornerRadius)
-            if isRouteArmed {
-                Tokens.Color.gold.withAlphaComponent(PopoverColumnGrid.rowLiveWashAlpha).setFill()
-                path.fill()
-            } else if isHovered {
-                Tokens.Color.engagedChrome.withAlphaComponent(PopoverColumnGrid.rowHoverWashAlpha).setFill()
+            if let rowWash {
+                rowWash.setFill()
                 path.fill()
             }
         }
         super.draw(dirtyRect)
+    }
+
+    /// The wash `draw(_:)` paints behind a menu-less row: the neutral hover
+    /// wash on pointer-over, else `nil`. The status dot's cut-out wears the
+    /// same value (`isHovered` and `isRouteArmed` push it), so it never shows
+    /// as a ring on the wash.
+    private var rowWash: NSColor? {
+        guard !isInMenu else { return nil }
+        if isHovered { return Tokens.Color.engagedChrome.withAlphaComponent(PopoverColumnGrid.rowHoverWashAlpha) }
+        return nil
     }
 
     // MARK: Attention flash (A4)
@@ -2803,6 +2818,7 @@ public final class DeviceRowView: NSView {
             layerToClear?.removeFromSuperlayer()
         }
         flashLayer.add(pulse, forKey: Self.flashAnimationKey)
+        armedDotView.flash(pulse)
         CATransaction.commit()
     }
 
@@ -2815,9 +2831,8 @@ public final class DeviceRowView: NSView {
     /// Simulate a host asking this row to flash (A4 test hook).
     public func test_flashRow() { flashRow() }
 
-    /// Whether the row is currently painting its live gold wash. It follows the
-    /// armed predicate (D1) — a row that stops sounding MUST report `false`.
-    public var test_isShowingLiveWash: Bool { !isInMenu && isRouteArmed }
+    /// The wash `draw(_:)` paints behind the row right now, `nil` for none.
+    public var test_rowWash: NSColor? { rowWash }
     /// Whether a transient hover wash is currently active (must reset on deselect).
     public var test_isHovered: Bool { isHovered }
 

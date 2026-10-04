@@ -24,7 +24,7 @@ import AppKit
 ///  - `relativeLuminance`/`contrastRatio` — ported from `AppTetherColorTests`.
 ///  - `resolved(_:appearanceName:)` — ported from `SettingsAccentAndHintsTests`.
 /// `SettingsAccentAndHintsTests.accentDialNeverRemapsFailureCautionOrRing`
-/// names `failure`/`caution`/`ringConnected` explicitly — not "every token the
+/// names `failure`/`caution`/`ring` explicitly — not "every token the
 /// dial doesn't touch" — so these five permission tokens (which the dial DOES
 /// remap, just not via `accentDynamic`) don't trip it.
 ///

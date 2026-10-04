@@ -338,11 +338,26 @@ public final class MockBackend: OutputBackend, @unchecked Sendable {
     /// emits `.routedApps` organically — so this is purely a scripted fixture:
     /// it lets `popover-harness`/`popover-snapshot`/tests demonstrate T9's
     /// confirmed-streaming device-row indicator offline, without a real
-    /// per-app-routing backend. Fire-and-forget, matching every other mock
-    /// mutation (`test_` prefix marks it as a fixture hook, not a real
-    /// capability).
+    /// per-app-routing backend. It mirrors the backend's per-app connection
+    /// report: a live feed marks an `.off` device `.connected`, and clearing
+    /// the feed returns an unselected one to `.off`. Fire-and-forget, matching
+    /// every other mock mutation (`test_` prefix marks it as a fixture hook,
+    /// not a real capability).
     public func test_emitRoutedApps(deviceID: String, appNames: [String]) {
-        queue.async { self.emit(.routedApps(deviceID: deviceID, appNames: appNames)) }
+        queue.async {
+            if var device = self.live[deviceID] {
+                if !appNames.isEmpty, device.connectionState == .off {
+                    device.connectionState = .connected
+                    self.live[deviceID] = device
+                    self.emit(.deviceUpdated(device))
+                } else if appNames.isEmpty, !device.isSelected {
+                    device.connectionState = .off
+                    self.live[deviceID] = device
+                    self.emit(.deviceUpdated(device))
+                }
+            }
+            self.emit(.routedApps(deviceID: deviceID, appNames: appNames))
+        }
     }
 
     // MARK: T7 offline fixtures — per-app level meters

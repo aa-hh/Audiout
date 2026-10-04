@@ -677,20 +677,17 @@ public final class AppRowView: NSView {
 
     // MARK: Drawing
 
-    /// Row highlight colour, `nil` when none of the three states apply. The
-    /// order is keyboard selection > live > hover (D3): `isSelected` is the
-    /// host's single-selection focus and must stay visible over a sounding row,
-    /// so it keeps the neutral selection wash; a sounding row (routed ∧
-    /// running) takes the gold live wash `DeviceRowView` paints; hover is the
-    /// faintest and only shows when neither applies. None uses a fully
+    /// Row highlight colour, `nil` when neither state applies. The order is
+    /// keyboard selection > hover: `isSelected` is the host's single-selection
+    /// focus, so it keeps the neutral selection wash; hover paints the fainter
+    /// neutral wash only when the row is not selected. A sounding row paints
+    /// no wash of its own. Neither uses a fully
     /// opaque system background, which would obscure the row's slider /
     /// readout / destination popup. Factored out of `draw(_:)` so offscreen
     /// tests (which never rasterize `draw(_:)`'s actual pixels) can assert it.
     private var currentHighlightColor: NSColor? {
         if isSelected {
             return Tokens.Color.engagedChrome.withAlphaComponent(PopoverColumnGrid.rowSelectionWashAlpha)
-        } else if faderCell.isRouteArmed {
-            return Tokens.Color.gold.withAlphaComponent(PopoverColumnGrid.rowLiveWashAlpha)
         } else if isHovered {
             return Tokens.Color.engagedChrome.withAlphaComponent(PopoverColumnGrid.rowHoverWashAlpha)
         } else {
@@ -1207,6 +1204,19 @@ public final class AppRowView: NSView {
     public func test_simulateSliderClick() {
         layoutSubtreeIfNeeded()
         mouseDown(with: mouseEvent(at: NSPoint(x: slider.frame.midX, y: slider.frame.midY)))
+    }
+
+    /// Simulate a real click landing on the destination popup's frame — same
+    /// `mouseDown(with:)` entry point as `test_simulateBodyClick`, but at a
+    /// point inside `destinationPopUp.frame`. In a live window a click there is
+    /// intercepted by the `NSPopUpButton` subview and never reaches this view's
+    /// override at all; this hook proves the same on the row's own override
+    /// as a belt-and-suspenders structural check — see
+    /// `test_pointIsInSelectableDeadZone` for the point-in-dead-zone rule the
+    /// real subview hit-testing enforces.
+    public func test_simulateDestinationPopUpClick() {
+        layoutSubtreeIfNeeded()
+        mouseDown(with: mouseEvent(at: NSPoint(x: destinationPopUp.frame.midX, y: destinationPopUp.frame.midY)))
     }
 
     /// Whether `point` (in the row's own coordinate space) falls inside a

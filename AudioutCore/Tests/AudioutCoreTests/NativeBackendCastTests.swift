@@ -727,6 +727,34 @@ import CoreAudio
         #expect(rig.capture.preDelayMs.allSatisfy { $0 == 0 }, "got \(rig.capture.preDelayMs)")
     }
 
+    /// A room held back by a slow Bluetooth speaker alone (the Cast receiver
+    /// has failed, so its term is gone) still owes an AirPlay speaker that
+    /// joins it the line from its first buffer. Turns red if the selection
+    /// path re-publishes the AirPlay line only for a standing Cast term and
+    /// not for a standing Bluetooth term.
+    @Test func anAirPlaySpeakerJoiningABluetoothTermRoomGetsTheLine() {
+        let rig = makeBackend(withBT: true)
+        let ap = Self.ap2Device()
+        rig.discovery.fire(.appeared(ap))
+        rig.cast.fire([Self.record])
+        let btID = "C4-38-75-0E-BF-4A:output"
+        rig.bt.fire([BTDeviceSnapshot(id: btID, name: "Move 2", isConnected: true)])
+        waitFor { Self.device(rig.backend, btID) != nil && Self.device(rig.backend, ap.id) != nil }
+
+        rig.backend.setOutputSet([Self.record.id, btID])
+        rig.manager.fire(id: Self.record.id, state: .failed(.timedOut))
+        waitFor { rig.backend.localSinkReferenceDelayMs() == rig.backend.startBufferMs }
+        let slow = rig.backend.startBufferMs + 300
+        rig.backend.endBTWizardLatencyPreview(forDevice: btID, keepMs: Double(slow))
+        waitFor { rig.backend.btReferenceDelayMs() == slow + NativeBackend.btReferenceHeadroomMs }
+        #expect(rig.capture.preDelayMs.allSatisfy { $0 == 0 }, "got \(rig.capture.preDelayMs)")
+
+        rig.backend.setOutputSet([Self.record.id, btID, ap.id])
+        waitFor { rig.capture.preDelayMs.last == slow + NativeBackend.btReferenceHeadroomMs - rig.backend.startBufferMs }
+        #expect(rig.capture.preDelayMs.last == slow + NativeBackend.btReferenceHeadroomMs - rig.backend.startBufferMs,
+                "got \(rig.capture.preDelayMs)")
+    }
+
     /// A receiver that turns out to play LATER than assumed moves the whole
     /// room once more — and a settled one that stays where it is moves nothing
     /// at all, however many samples it reports.

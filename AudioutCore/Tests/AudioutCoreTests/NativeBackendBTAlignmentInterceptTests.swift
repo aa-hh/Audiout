@@ -716,6 +716,9 @@ extension SerializedSharedState {
         let local = ScriptedLocalPlayback()
         defer { sink.openGainGate(); backend.stop() }
         backend.captureCoordinator = capture
+        // The deadline is not what this test checks; a starved runner needs the
+        // headroom (see auditionZerosRedirectedCaptureWithoutDroppingFrames).
+        backend.companionAuditionPreparationSeconds = 60
         backend.localPlaybackEngine = local
         backend.start()
         bt.fire([btMove, btFlip, btExtra])

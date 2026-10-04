@@ -148,6 +148,7 @@ extension SerializedSharedState {
         Exception(token: "gold", ground: $0, appearance: .aqua, icOn: false)
     }
 
+    // Turns red if any listed token (including `rim` on `panel`) falls under its floor on a listed ground.
     @Test func everyInstrumentClearsItsFloorAcrossAppearanceAndIncreaseContrast() {
         Tokens.accentStyle = .fullGold
         defer { Tokens.test_increaseContrastOverride = nil }
@@ -161,19 +162,18 @@ extension SerializedSharedState {
         let textGrounds: [(String, NSColor)] = [("canvas", canvas), ("panel", panel),
                                                 ("raised", raised), ("well", well)]
 
-        // The two WASHED grounds a device row's mute pill also sits on, built
-        // the way `DeviceRowView.draw(_:)` builds them: the row's `panel`
-        // ground under the gold live wash, or under the neutral hover wash.
-        // Neither is a token, so neither can be named as one — they are
-        // composited per appearance and handed in as opaque grounds.
+        // The one WASHED ground a device row's mute pill also sits on, built
+        // the way `DeviceRowView.draw(_:)` builds it: the row's `panel`
+        // ground under the neutral hover wash. It is not a token, so it
+        // cannot be named as one — it is composited per appearance and
+        // handed in as an opaque ground.
         func rowWashGrounds(_ appearanceName: NSAppearance.Name) -> [(String, NSColor)] {
             let ground = resolved(panel, appearanceName: appearanceName)
             func wash(_ token: NSColor, _ alpha: CGFloat) -> NSColor {
                 composited(resolved(token, appearanceName: appearanceName)
                             .withAlphaComponent(alpha), over: ground)
             }
-            return [("live wash", wash(Tokens.Color.gold, PopoverColumnGrid.rowLiveWashAlpha)),
-                    ("hover wash", wash(Tokens.Color.engagedChrome, PopoverColumnGrid.rowHoverWashAlpha))]
+            return [("hover wash", wash(Tokens.Color.engagedChrome, PopoverColumnGrid.rowHoverWashAlpha))]
         }
 
         let entries: [ContrastEntry] = [
@@ -232,7 +232,8 @@ extension SerializedSharedState {
             ContrastEntry(name: "panel knocked out of muted", token: panel, floor: 4.5,
                          groundsFor: sameGrounds([("muted", Tokens.Color.muted)])),
             ContrastEntry(name: "rim", token: Tokens.Color.rim, floor: 3.0,
-                         groundsFor: sameGrounds([("canvas", canvas), ("raised", raised), ("well", well)])),
+                         groundsFor: sameGrounds([("canvas", canvas), ("panel", panel),
+                                                  ("raised", raised), ("well", well)])),
             ContrastEntry(name: "railDormant", token: Tokens.Color.railDormant, floor: 3.0,
                          groundsFor: sameGrounds([("canvas", canvas), ("panel", panel), ("raised", raised)])),
             ContrastEntry(name: "scopeFlatLine", token: Tokens.Color.scopeFlatLine, floor: 3.0,
@@ -291,6 +292,15 @@ extension SerializedSharedState {
             }
         }
 
+        // Dark Subtle `ember` is the non-member node's hollow rim, so it holds
+        // the non-text floor on the two grounds the Mixer puts behind it (2026-10-04: `#7D6B44`, 3.47:1 panel / 3.05:1
+        // raised; the old `#6D5B34` sat at 2.73:1 / 2.40:1).
+        for (groundName, ground) in [("panel", panel), ("raised", Tokens.Color.raised)] {
+            let ratio = measuredRatio(Tokens.Color.ember, over: ground, appearanceName: .darkAqua)
+            #expect(ratio >= nonTextFloor,
+                "ember/subtle vs \(groundName) dark: \(String(format: "%.2f", ratio)):1 under \(nonTextFloor):1")
+        }
+
         let textFloor: CGFloat = 4.5
         for (name, token) in [("goldText", Tokens.Color.goldText), ("emberText", Tokens.Color.emberText)] {
             for (groundName, ground) in grounds {
@@ -327,9 +337,8 @@ extension SerializedSharedState {
 
     // MARK: - Test D: the unlit seat vs the ring around it
 
-    /// `socket` fills two instruments that are always RINGED — the
-    /// route-armed dot on its icon corner, and a dimmed membership node inside
-    /// the rail's own rim — so the pairing that decides whether it reads is
+    /// `socket` fills an instrument that is always RINGED — a dimmed
+    /// membership node inside the rail's own rim — so the pairing that decides whether it reads is
     /// seat-vs-ring, not seat-vs-ground. It carries no ground floor by design
     /// (Tokens.swift), so nothing else in this matrix measures it at all.
     ///

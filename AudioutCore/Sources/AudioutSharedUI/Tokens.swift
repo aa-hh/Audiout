@@ -156,13 +156,6 @@ public enum Tokens {
         /// (`Tokens.Material.windowBackground`/`popover`) while Reduce
         /// Transparency is on.
         public static var windowBackground: NSColor { .windowBackgroundColor }
-        /// The color a decorative punch-out border is drawn in so a corner badge
-        /// reads as separate from what's behind it. Alias of
-        /// `NSColor.underPageBackgroundColor`. (Its former consumer, the corner
-        /// connection dot `StatusDotView`, was retired for the halo ring in S1;
-        /// the gold route-armed corner dot in a later task, spec §3.3, re-adopts
-        /// this punch-out border.)
-        public static var underPageBackground: NSColor { .underPageBackgroundColor }
         /// Hover/selection wash background for list rows (`AppRowView`,
         /// `DeviceRowView`). Alias of
         /// `NSColor.selectedContentBackgroundColor`.
@@ -568,7 +561,7 @@ public enum Tokens {
         // `#E8B84B` measures 10.73:1 vs `canvas` / 9.74:1 vs `panel` / 8.55:1
         // vs `raised` / 11.04:1 vs `well` (Increase Contrast `#F2C75E` 12.35 /
         // 11.21 / 9.84 / 12.71). `ember` is dimmer by design — it is the
-        // connecting line, not the node — at 3.94 / 3.58 / 3.14 / 4.06.
+        // idle tone, never a live one — at 3.94 / 3.58 / 3.14 / 4.06.
         //
         // LIGHT `ember` IS MEASURED AGAINST `well`, NOT ONLY THE FLAT GROUND:
         // the Groups editor's sections are filled with `well`, so the rail
@@ -577,7 +570,8 @@ public enum Tokens {
         // its own doc); its Increase Contrast `#8A6614` still measures 5.04 /
         // 4.37 on `well`. Subtle light `#8F7B4A` 3.95 / 3.42 (IC `#6F5E33`
         // 6.06 / 5.25). Subtle dark `gold` clears `raised` at 5.91:1 (IC
-        // 7.42:1). In light mode gold now sits well above ember in luminance,
+        // 7.42:1); Subtle dark `ember` `#7D6B44` clears it at 3.05:1. In light
+        // mode gold now sits well above ember in luminance,
         // as in dark; `MembershipWellContrastTests` pins the pair at least
         // 1.40:1 apart.
         //
@@ -641,13 +635,15 @@ public enum Tokens {
         /// `raised` / 4.06:1 vs `well`, dark Increase Contrast `#A5824A` =
         /// 5.55 / 5.04 / 4.42 / 5.71; light `#7A5E2A` = 5.82:1 vs the flat
         /// ground / 5.04:1 vs `well`, light Increase Contrast `#5E4922` =
-        /// 8.21:1 / 7.11:1. SUBTLE column: dark `#6D5B34` = 3.01:1 vs
-        /// `canvas` / 2.73:1 vs `panel` / 2.40:1 vs `raised` / 3.10:1 vs
-        /// `well` — a documented under-floor case, because `ember` is a 2 pt
-        /// line paired with high-contrast `gold` nodes and the IC variant is
-        /// the escape valve (dark IC `#877146` = 4.22 / 3.83 / 3.36 / 4.34);
-        /// light `#71613B` = 5.79:1 vs the flat ground / 5.02:1 vs `well` (IC
-        /// `#5C5030` 7.61:1 / 6.59:1).
+        /// 8.21:1 / 7.11:1. SUBTLE column: dark `#7D6B44` = 3.82:1 vs
+        /// `canvas` / 3.47:1 vs `panel` / 3.05:1 vs `raised` / 3.94:1 vs
+        /// `well` (2026-10-04: the old `#6D5B34` gave the hollow 1.6 pt
+        /// non-member node rim 2.73:1 on `panel`; same OKLab hue and chroma, only
+        /// lightness raised until the rim clears 3:1 on `raised`, the brighter
+        /// ground). It stays 1.94:1 dimmer than Subtle dark `gold`, since it is
+        /// the idle tone. Dark IC `#877146` = 4.22 / 3.83 / 3.36 / 4.34, still
+        /// further from the ground than the base. Light `#71613B` = 5.79:1 vs
+        /// the flat ground / 5.02:1 vs `well` (IC `#5C5030` 7.61:1 / 6.59:1).
         public static var ember: NSColor {
             accentDynamic(name: "ember",
                           // LIGHT IS DEEP ENOUGH TO BE TELLABLE FROM GOLD, and
@@ -655,10 +651,11 @@ public enum Tokens {
                           // Pinning both inks just over the 3:1 non-text floor
                           // on the same ground leaves them ~1.03:1 apart — a 3%
                           // luminance difference on a 2 pt line, which no one
-                          // reads. ``spineTone(armed:)`` would then resolve to
-                          // one visible colour in light and the rail could not
-                          // report liveness at all, which is the one thing gold
-                          // exists to say. Dark's own pair sits at 2.72:1; light
+                          // reads. The Groups editor's member discs (gold when
+                          // routed, ember when only saved) would then resolve
+                          // to one visible colour in light and could not report
+                          // liveness at all, which is the one thing gold exists
+                          // to say. Dark's own pair sits at 2.72:1; light
                           // has to buy a comparable gap, and depth is the only
                           // axis available once both are floor-bound.
                           //
@@ -681,7 +678,7 @@ public enum Tokens {
                           // stay strictly darker than their bases.
                           full: WarmVariants(dark: 0x8A6A2F, darkHighContrast: 0xA5824A,
                                              light: 0x7A5E2A, lightHighContrast: 0x5E4922),
-                          subtle: WarmVariants(dark: 0x6D5B34, darkHighContrast: 0x877146,
+                          subtle: WarmVariants(dark: 0x7D6B44, darkHighContrast: 0x877146,
                                                light: 0x71613B, lightHighContrast: 0x5C5030))
         }
 
@@ -707,18 +704,21 @@ public enum Tokens {
                                                light: 0x71613B, lightHighContrast: 0x584C2E))
         }
 
-        /// **The membership rail's SPINE TONE** — `gold` while the spine is
-        /// armed, its `ember` companion otherwise (Warm Signal v4 §Call-1
-        /// rail-segment tone).
+        /// **The membership rail's SPINE TONE** — always `gold` (owner's
+        /// ruling, 2026-10-04). The system is always connected to at least Main
+        /// Audio, so an idle rail never occurs in the Mixer (the Groups editor shows an inactive
+        /// group's line in `ember` through `BusRailOverlayView.unarmedLineTone`), and the old `ember` idle line
+        /// read as a connecting state that wasn't one. A DORMANT rail still
+        /// takes `railDormant`; that choice lives in `BusRailOverlayView`.
         ///
         /// It exists so the rail's line/hook/terminus (`BusRailOverlayView`)
         /// and the Main Audio ring the hook LANDS ON (`HaloRingView`'s
         /// connected stroke) resolve their tone from ONE place: the two are
         /// required to read as a single continuous line, and while each picked
-        /// `gold`/`ember` for itself that agreement was pure convention — the
-        /// accent dial moved one and not the other. Nothing else may consume
-        /// this; a non-rail instrument wanting gold asks for ``gold``.
-        public static func spineTone(armed: Bool) -> NSColor { armed ? gold : ember }
+        /// its own token that agreement was pure convention — the accent dial
+        /// moved one and not the other. Nothing else may consume this; a
+        /// non-rail instrument wanting gold asks for ``gold``.
+        public static var spineTone: NSColor { gold }
 
         // MARK: Glow + socket (accent halo and the routed dot's seat)
 
@@ -742,7 +742,7 @@ public enum Tokens {
         /// Full, but the bead must be TELLABLE from the wire it lands on, so
         /// each value clears 1.5:1 against both Subtle wire tones of its
         /// appearance. Dark `#EBCE88` = 1.74:1 vs Subtle `gold` `#B99B53` /
-        /// 4.29:1 vs Subtle `ember` `#6D5B34`, and 11.73:1 vs `panel` /
+        /// 3.38:1 vs Subtle `ember` `#7D6B44`, and 11.73:1 vs `panel` /
         /// 10.30:1 vs `raised`; dark Increase Contrast `#FFE39E` = 1.69:1 vs
         /// Subtle IC `gold` `#CBAF6A` / 3.73:1 vs Subtle IC `ember` `#877146`,
         /// 14.31:1 vs `panel`. Light `#D1BC8A` = 2.21:1 vs Subtle `gold`
@@ -783,11 +783,11 @@ public enum Tokens {
                        light: 0x171104, lightHighContrast: 0xFFFFFF)
         }
 
-        /// The **dark/empty socket** an unlit instrument rests in. Two
-        /// consumers, same meaning: the route-armed dot when nothing is armed
-        /// (spec §3.3), and the membership node's disc when the row is dimmed
-        /// (`MembershipBusView`'s `dimmed`) — in both, the seat stays and the
-        /// gold is lifted out of it. Because it is always ringed, it is
+        /// The **dark/empty socket** an unlit instrument rests in: the
+        /// membership node's disc when the row is dimmed (`MembershipBusView`'s
+        /// `dimmed`) — the seat stays and the gold is lifted out of it. (The
+        /// route-armed dot stopped using it on 2026-10-03: a not-playing dot is
+        /// now a hollow `rim` ring.) Because it is always ringed, it is
         /// measured against the tone that rings it rather than the ground
         /// behind it.
         ///

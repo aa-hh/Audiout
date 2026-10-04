@@ -186,7 +186,7 @@ repo. `AudioutCore` pins it by version.
   worktree is refused with the reason printed.
 - **Every compile and test takes one capacity permit from a machine-wide pool.**
   Local pool (this machine): `git config audiout.localSlots` (set to 2).
-  Mule pool (remote M3 Air): `git config audiout.remoteSlots` (set to 3).
+  Mule pool (remote M3 Air): `git config audiout.remoteSlots` (set to 2).
   Entry points: `scripts/run-tests.sh`, `scripts/build.sh`, `scripts/make-app.sh`,
   `scripts/ios.sh`, `scripts/run-app.sh`, and pre-commit Guard 6 all acquire a
   permit before work starts. Mule-full falls back to local at once (no wait).
@@ -280,8 +280,10 @@ any commit on `main`; GitHub's ruleset refuses a push. End every task with:
 git push -u origin HEAD
 gh pr create --fill
 bash scripts/review-branch.sh   # run the passes it prints as subagents, then: bash scripts/review-branch.sh --continue
-gh pr merge --merge --auto
 ```
+
+Then **stop and ask the owner before merging.** Only after a clear yes, run
+`gh pr merge --merge --auto`.
 
 Local `main` is a fast-forward mirror of `origin/main`, kept by
 `scripts/sync-main.sh` on a 2-minute launchd timer; never commit on it (Guard 1
@@ -289,7 +291,8 @@ still refuses), and cut worktrees from `origin/main` after `git fetch`.
 
 `tests` (the full suite, on GitHub) and `review` (the status
 `review-branch.sh --continue` posts) are the two required checks; `--auto`
-queues the PR once both are green, and the session does not wait for it.
+queues the PR to land on its own once both are green, which is why it waits for
+the owner's yes. The merge-approval hook asks on `gh pr merge` either way.
 
 **Do not work in the `main` checkout at all.** Merely *editing* it starts the
 accident, even if you never commit.

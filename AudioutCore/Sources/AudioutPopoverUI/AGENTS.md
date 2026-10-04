@@ -2,30 +2,30 @@
 
 ## Purpose
 
-Menu-bar Mixer and shared surface host. It renders presentation; Core owns routing decisions.
+Menu-bar Mixer and shared surface host; it renders, Core owns routing.
 
 ## Rules
 
-- Consume live snapshot edges, never poll connection state; failure retains wanted playback intent.
+- React to connection-state edges, never poll; failure keeps wanted playback intent.
 - Speaker visibility is display-only. Current Main Audio, app-route, live-feed and recovery use stay visible; inactive scenes alone force nothing.
-- Remembered presentation records never enter backend collections or route pickers. A hidden available network speaker must not trigger the discovery-empty message.
-- Unavailable names request host recovery; membership nodes remain playback actions. Recovery never creates selection or routes.
+- Remembered presentation records stay out of backend collections and route pickers; a hidden available network speaker never triggers the discovery-empty message.
+- Unavailable names request host recovery, which never creates selection or routes; membership nodes stay playback actions.
 - Manage opens Speakers; Pair opens Bluetooth settings and stays reachable when Bluetooth collapses.
-- Hidden surfaces stay idle: opens refresh state; preference changes never construct hidden screens.
-- Keep one bounded output-list scroll area; shared row columns and rail order survive collapse.
+- Hidden surfaces stay idle: opens refresh; preference changes never build hidden screens.
+- One bounded output-list scroll area; row columns and rail order survive collapse. `updateRailRows` names each collapsed subsection hiding a reached speaker (DESIGN.md "Membership rail extent").
 - Publish height through the content-size channel; screen swaps never resize the session frame.
-- One sync drawer; scrubs affect audio immediately but persist only when committed.
+- One sync drawer; scrubs sound immediately, persist only when committed.
 - Permission answers restore window manners; abandoned alignment runs never reopen the surface.
-- AppKit owns toolbar chrome; screen cues work on every supported macOS version.
+- AppKit owns toolbar chrome; screen cues work on every supported macOS.
 - Group-route membership stays live; exclusivity never hides saved-group choices.
 - Equalizer buttons open editors; the Mixer contains no tone editor.
 - The alignment note may carry one underlined text action left of its button, both centred.
-- Under the limit the note is session state (`limitNoteRaised`), shown by a wizard door, not the wizard; the thank-you card's shown flag is written on Close or hide, never on raise.
+- Under the limit the note is session state (`limitNoteRaised`) shown by a wizard door, not the wizard; the thank-you card's shown flag is written on Close or hide, not raise.
 - Earlier decisions and traps: [AGENTS-HISTORY.md](AGENTS-HISTORY.md).
 
 ## Map
 
-- `PopoverController` → Mixer presentation and host action dispatch.
+- `PopoverController` → Mixer presentation and host actions.
 - `PopoverPanelViewController` → Hosted Mixer panel content.
-- `AppSurfaceController` → Shared shell and the four screens' lifecycle.
+- `AppSurfaceController` → Shared shell and four screens' lifecycle.
 - `SurfaceToolbarController` → Native toolbar screen and pin actions.

@@ -296,8 +296,8 @@ import AppKit
 
     /// The spine runs to the LOWEST SELECTED device, and a collapsed
     /// subsection hiding that device does NOT shorten it: the rail keeps
-    /// running past the rows above and is CUT at that subsection's header with
-    /// a dot — exactly what collapsing the whole CARD already does.
+    /// running past the rows above and ends on a dot on that subsection's
+    /// header — exactly what collapsing the whole CARD already does.
     ///
     /// Ending it on the highest still-visible selected row instead, with no
     /// dot, is the bug this pins: the rail's length reads as "how far down the
@@ -323,6 +323,25 @@ import AppKit
                 "…so the rail is cut at the collapsed subsection's header, with a dot")
         #expect(controller.selectedDeviceIDs.contains("bt-z:output"),
                 "collapse is display only — Zed Box is still in the mix")
+    }
+
+    /// S5 through the real host: with BOTH subsections collapsed over a
+    /// speaker in the mix, each header gets its own dot and the rail ends on
+    /// the lower one. The old host named only the lowest fold, so the AirPlay
+    /// header looked the same as one hiding nothing.
+    @Test func everyCollapsedSubsectionHidingAMemberGetsItsOwnDot() throws {
+        let fleet = [airplay(), bt("bt-z:output", name: "Zed Box")]
+        let (popover, controller) = makePopover(fleet: fleet)
+        controller.setDeviceSelected("office", true)
+        controller.setDeviceSelected("bt-z:output", true)
+        popover.update(devices: fleet)
+        popover.test_fireSubsectionHeaderClick(title: airPlayTitle)
+        popover.test_fireSubsectionHeaderClick(title: bluetoothTitle)
+        popover.test_applyExactFitSize()
+
+        let plan = try #require(popover.test_railPlan())
+        #expect(plan.headerDotYs.count == 2, "one dot on each collapsed header hiding a member")
+        #expect(plan.terminusDotY == plan.headerDotYs.min(), "the rail ends on the lower dot")
     }
 
     /// The case that erased the rail outright: EVERY device inside the subsection

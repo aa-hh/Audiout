@@ -15,9 +15,8 @@ import AppKit
 /// foreground against the ground it is ACTUALLY drawn on, including grounds
 /// that only exist as a composite:
 ///
-///  - a wash over another ground (a device row's gold live wash and its
-///    neutral hover wash, the Groups card's live wash, a banner's tinted
-///    plate),
+///  - a wash over another ground (a device row's neutral hover wash, the
+///    Groups card's live wash, a banner's tinted plate),
 ///  - a colour pinned to one appearance drawn on a surface that resolves in
 ///    the other (the Equalizer seat's border, the alignment wizard's primary
 ///    plate).
@@ -116,8 +115,8 @@ extension SerializedSharedState {
         resolved(Tokens.Color.panel, appearanceName: appearanceName)
     }
 
-    /// The gold wash behind a SOUNDING row, exactly as
-    /// `DeviceRowView.draw(_:)` builds it (`DeviceRowView.swift:3095-3097`).
+    /// The gold wash behind the Groups overview's live card, exactly as
+    /// `GroupsOverviewViewController.swift:834-836` builds it.
     private func liveWash(over base: NSColor, _ appearanceName: NSAppearance.Name) -> NSColor {
         composited(resolved(Tokens.Color.gold, appearanceName: appearanceName)
                     .withAlphaComponent(PopoverColumnGrid.rowLiveWashAlpha), over: base)
@@ -232,19 +231,9 @@ extension SerializedSharedState {
         [
             // MARK: A device row's WASHED grounds
             //
-            // Each foreground below is listed against the wash a row can
-            // ACTUALLY put behind it. A sounding row wears the gold wash and a
-            // hovered row the neutral one, and `draw(_:)` checks `isRouteArmed`
-            // FIRST — so a sounding row never also shows the hover wash, and
-            // any ink that only appears while a row is silent never sits on
-            // the gold one. Pairs that combination cannot produce are left out
-            // rather than measured.
+            // A row's only wash is the neutral hover wash on pointer-over, so
+            // each ink below is measured on it.
 
-            // The subordinate sublabel on a sounding row
-            // (`DeviceRowView.swift:1119`, armed branch).
-            CompositePair(name: "label2 on the row's live wash", floor: 4.5,
-                          foreground: { self.resolved(Tokens.Color.label2, appearanceName: $0) },
-                          ground: { self.liveWash(over: self.rowGround($0), $0) }),
             // The same ink on a hovered row — it is also the row's icon tint
             // and its at-rest Equalizer glyph (`DeviceRowView.swift:596`, `:1005`).
             CompositePair(name: "label2 on the row's hover wash", floor: 4.5,
@@ -254,47 +243,22 @@ extension SerializedSharedState {
             CompositePair(name: "labelCool on the row's hover wash", floor: 4.5,
                           foreground: { self.resolved(Tokens.Color.labelCool, appearanceName: $0) },
                           ground: { self.hoverWash(over: self.rowGround($0), $0) }),
-            // A sounding row's NAME (`DeviceRowView.swift:2270`, armed branch).
-            // `label` is `NSColor.labelColor`, hence no direction assertion.
-            CompositePair(name: "label on the row's live wash", floor: 4.5,
-                          foreground: { self.resolved(Tokens.Color.label, appearanceName: $0) },
-                          ground: { self.liveWash(over: self.rowGround($0), $0) },
-                          checksIncreaseContrastDirection: false),
-            // The `%` readout while the row is sounding
-            // (`DeviceRowView.swift:736`).
-            CompositePair(name: "goldText readout on the row's live wash", floor: 4.5,
-                          foreground: { self.resolved(Tokens.Color.goldText, appearanceName: $0) },
-                          ground: { self.liveWash(over: self.rowGround($0), $0) }),
             // The Equalizer door's ACTIVE mark: an opaque `goldText` seat
-            // (`DeviceRowView`'s `updateEQButton()`), measured on ALL THREE
-            // grounds a row can put behind it — at rest, sounding, hovered.
-            // The seat was `gold` until 2026-09-04 and only the live wash was
-            // measured; the ground it actually failed on was the HOVER wash,
-            // where light `gold` reads 2.91:1, under this floor. `goldText` is
-            // the same accent deepened for light and identical in dark, so the
-            // dark door is unmoved and the light one clears by 1.5x.
+            // (`DeviceRowView`'s `updateEQButton()`), measured on both
+            // grounds a row can put behind it — at rest and hovered. On the
+            // hover wash light `gold` reads 2.91:1, under this floor, so the
+            // seat is `goldText`: the same accent deepened for light and
+            // identical in dark, so the dark door is unmoved and the light one
+            // clears by 1.5x.
             CompositePair(name: "Equalizer gold seat on the row at rest", floor: 3.0,
                           foreground: { self.resolved(Tokens.Color.goldText, appearanceName: $0) },
                           ground: { self.rowGround($0) }),
-            CompositePair(name: "Equalizer gold seat on the row's live wash", floor: 3.0,
-                          foreground: { self.resolved(Tokens.Color.goldText, appearanceName: $0) },
-                          ground: { self.liveWash(over: self.rowGround($0), $0) }),
             CompositePair(name: "Equalizer gold seat on the row's hover wash", floor: 3.0,
                           foreground: { self.resolved(Tokens.Color.goldText, appearanceName: $0) },
                           ground: { self.hoverWash(over: self.rowGround($0), $0) }),
-            // A FEED pill's load-bearing edge, measured on its OUTER side —
-            // the wash, not the pill's own `well` fill
-            // (`FeedPillView.swift:148`, fill and edge stamped together).
-            // The margin here is thin: dark measures 3.06:1 against the 3.0
-            // floor, six hundredths above it. Kept as a passing assertion on
-            // purpose — the next re-tune of `rim` or `gold` turns this red
-            // instead of sliding under unnoticed.
-            CompositePair(name: "feed pill rim on the row's live wash", floor: 3.0,
-                          foreground: { self.resolved(Tokens.Color.rim, appearanceName: $0) },
-                          ground: { self.liveWash(over: self.rowGround($0), $0) }),
-            // The same pill's rim on the OTHER wash a row can wear: the
-            // neutral hover wash rather than gold (`FeedPillView.swift:141-142`
-            // over `DeviceRowView.swift:3143-3149`).
+            // The same pill's rim on the row's hover wash, the only wash a
+            // row paints (`FeedPillView.swift:141-142` over
+            // `DeviceRowView.swift:3143-3149`).
             CompositePair(name: "feed pill rim on the row's hover wash", floor: 3.0,
                           foreground: { self.resolved(Tokens.Color.rim, appearanceName: $0) },
                           ground: { self.hoverWash(over: self.rowGround($0), $0) }),
@@ -306,9 +270,8 @@ extension SerializedSharedState {
                           foreground: { self.resolved(Tokens.Color.failure, appearanceName: $0) },
                           ground: { self.resolved(Tokens.Color.well, appearanceName: $0) }),
             // The `%` readout's not-armed ink (`DeviceRowView.swift:740-750`),
-            // on the row's hover wash. Only the hover wash is reachable here
-            // — `emberText` marks the state where the row is NOT sounding,
-            // and an unarmed row never wears the gold live wash.
+            // on the row's hover wash. `emberText` marks a row that is not
+            // sounding, measured at rest and on the hover wash.
             CompositePair(name: "emberText readout on the row's hover wash", floor: 4.5,
                           foreground: { self.resolved(Tokens.Color.emberText, appearanceName: $0) },
                           ground: { self.hoverWash(over: self.rowGround($0), $0) }),
@@ -322,7 +285,7 @@ extension SerializedSharedState {
 
             // MARK: The Groups overview's live CARD
             //
-            // The same 12 % gold wash, over `raised` instead of `panel`
+            // The Groups card's 12 % gold wash (`rowLiveWashAlpha`), over `raised` instead of `panel`
             // (`GroupsOverviewViewController.swift:788-793`). Its meta line
             // reads `label2` while live and `labelCool2` while not, so only
             // the live inks are measured on the washed ground.

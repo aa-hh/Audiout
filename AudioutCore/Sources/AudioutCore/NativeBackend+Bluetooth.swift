@@ -607,9 +607,11 @@ extension NativeBackend {
     /// Callers own the precondition that a connect is even plausible — a
     /// selected-but-unavailable row stays `.off` (nothing is connecting), while
     /// a just-succeeded baseband connect arms regardless of whether the
-    /// enumerator snapshot has caught up yet. On `stateQueue`.
-    func beginBTConnectingLocked(_ id: String) {   // on stateQueue
-        guard expectedSelected.contains(id), known[id]?.isBluetooth == true else { return }
+    /// enumerator snapshot has caught up yet. `perApp` starts the same hold for
+    /// a speaker a per-app route claims instead of the selection. On `stateQueue`.
+    func beginBTConnectingLocked(_ id: String, perApp: Bool = false) {   // on stateQueue
+        let claimed = perApp ? btPerAppClaimedUIDs.contains(id) : expectedSelected.contains(id)
+        guard claimed, known[id]?.isBluetooth == true else { return }
         setConnectionState(.connecting, for: id)
         btConnectingDeadlines[id] = Date().addingTimeInterval(btRenderStartTimeout)
         scheduleBTRenderPollLocked()
@@ -639,8 +641,8 @@ extension NativeBackend {
 
     /// End every hold that has an answer — rendering wins first, then the
     /// ceiling — and re-arm the poll for whatever is still breathing. A row
-    /// deselected mid-hold just drops out: the deselect edge already wrote its
-    /// own `.off`. On `stateQueue`.
+    /// deselected, or whose per-app route was removed, mid-hold just drops
+    /// out: that edge already wrote its own `.off`. On `stateQueue`.
     ///
     /// The ceiling only means FAILURE for a device that was handed audio and
     /// still never started playing it. A device that was handed nothing is
@@ -656,7 +658,7 @@ extension NativeBackend {
     ) {   // on stateQueue
         let now = Date()
         for (id, deadline) in btConnectingDeadlines {
-            guard expectedSelected.contains(id) else {
+            guard expectedSelected.contains(id) || btPerAppClaimedUIDs.contains(id) else {
                 btConnectingDeadlines[id] = nil
                 continue
             }
@@ -2662,6 +2664,11 @@ extension NativeBackend: BTOutputControlling {
         // latency, collapsed the range onto 0 and bowed the run out as
         // `.unreachable`.
         //
+        // The reference is the live one the sinks render on: in an AirPlay or
+        // Cast room, the room delay (`roomDelayLocked()`), which a standing
+        // Bluetooth or Cast term raises above the start buffer; otherwise the
+        // wizard's raised buffer.
+        //
         // The CEILING is the reference less one default BT-only buffer, not the
         // reference itself: at `latency == reference` the delay is 0, the ring
         // is seeked completely dry, and the speaker is silent for the rest of
@@ -2679,7 +2686,7 @@ extension NativeBackend: BTOutputControlling {
         // wrong early answer, so the range gives it somewhere to go.
         let reference = stateQueue.sync { () -> Int in
             btComposition.usesPresentationReference
-                ? _startBufferMs : Self.btWizardReferenceBufferMs
+                ? roomDelayLocked() : Self.btWizardReferenceBufferMs
         }
         let lower = -BTSyncTrim.rangeMs
         let upper = Double(reference) - Double(BTSyncedSink.defaultBTOnlyBufferMs)

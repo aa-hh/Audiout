@@ -13,7 +13,7 @@ private final class UnconstrainedDeviceRowWindow: NSWindow {
 /// the sublabel precedence ladder: the four `ConnectionState` ring renderings
 /// (`test_statusKind`/`test_ringForm`/`test_statusText`), the ring's per-state
 /// FORM (dashed connecting vs solid connected/failed), the per-state hues
-/// (`ring` connecting, `rim` connected, `failure`) and heavier failed stroke, the VoiceOver
+/// (`rim` connecting and connected, `failure`) at one stroke width, the VoiceOver
 /// spoken equivalent per state, the name-click-toggles-enabled wiring
 /// (`test_clickName`) through the checkbox, the routing sublabel composed from
 /// `selected` + `routedAppNames`, and that a repeated `apply` cleanly
@@ -106,7 +106,7 @@ private final class UnconstrainedDeviceRowWindow: NSWindow {
         #expect(!row.test_ringIsDashed, "the failed ring is solid, not dashed")
     }
 
-    // MARK: Ring HUE + weight — `ring` / `rim` vs failure-exclusive red (§3.2/R8)
+    // MARK: Ring HUE + weight — `ember` / `rim` vs failure-exclusive red (§3.2/R8)
     //
     // Ring colors are stamped as resolved `CGColor`s (the dynamic token resolved
     // against the effective appearance), so they're compared by resolved sRGB
@@ -124,23 +124,22 @@ private final class UnconstrainedDeviceRowWindow: NSWindow {
         #expect(abs(a.blueComponent - b.blueComponent) < 0.01, "\(message)", sourceLocation: sourceLocation)
     }
 
-    @Test func connectingRingIsRingAndConnectedRingIsRim() {
-        // The connecting form now carries colour as well as dash.
+    // Turns red if the connecting ring goes back to `ember` or loses its dash.
+    @Test func connectingRingIsDashedRimAndConnectedRingIsSolidRim() {
         let connecting = DeviceRowView(device: makeDevice(connectionState: .connecting))
         let connected = DeviceRowView(device: makeDevice(connectionState: .connected))
-        assertSameHue(connecting.test_ringStrokeColor, Tokens.Color.ring,
-                      "the connecting ring is the steel-blue ring token")
+        assertSameHue(connecting.test_ringStrokeColor, Tokens.Color.rim,
+                      "the connecting ring is the rim token")
+        #expect(connecting.test_ringIsDashed, "the connecting ring is dashed")
         assertSameHue(connected.test_ringStrokeColor, Tokens.Color.rim,
-                      "the connected ring is the cool rim")
-        let a = connecting.test_ringStrokeColor?.usingColorSpace(.sRGB)
-        let b = connected.test_ringStrokeColor?.usingColorSpace(.sRGB)
-        #expect(a?.blueComponent != b?.blueComponent, "connecting ≠ connected")
+                      "the connected ring is the rim token")
+        #expect(!connected.test_ringIsDashed, "the connected ring is solid")
     }
 
     @Test func connectedRingUsesRimToken() {
         let row = DeviceRowView(device: makeDevice(connectionState: .connected))
         assertSameHue(row.test_ringStrokeColor, Tokens.Color.rim,
-                      "the connected ring is the cool rim")
+                      "the connected ring is the rim token")
     }
 
     @Test func failedRingUsesTheFailureHueNotRim() {
@@ -151,16 +150,15 @@ private final class UnconstrainedDeviceRowWindow: NSWindow {
         // And it must be a DIFFERENT hue from the connected ring.
         let f = failed.test_ringStrokeColor?.usingColorSpace(.sRGB)
         let c = connected.test_ringStrokeColor?.usingColorSpace(.sRGB)
-        #expect(f?.redComponent != c?.redComponent, "failed red ≠ the connected rim")
+        #expect(f?.redComponent != c?.redComponent, "failed red ≠ the connected ring")
     }
 
-    @Test func failedRingIsHeavierThanConnectedRing() {
-        let connected = DeviceRowView(device: makeDevice(connectionState: .connected))
-        let failed = DeviceRowView(device: makeDevice(connectionState: .failed(.init(cause: .notResponding))))
-        #expect(connected.test_ringLineWidth == PopoverColumnGrid.haloRingConnectedStroke)
-        #expect(failed.test_ringLineWidth == PopoverColumnGrid.haloRingFailedStroke)
-        #expect(failed.test_ringLineWidth > connected.test_ringLineWidth,
-                "the failed ring carries redundant extra weight so it wins the scan")
+    /// Turns red if any ring form goes back to its own stroke width.
+    @Test func everyRingFormStrokesAtTheOneSharedWidth() {
+        for state: ConnectionState in [.connecting, .connected, .failed(.init(cause: .notResponding))] {
+            let row = DeviceRowView(device: makeDevice(connectionState: state))
+            #expect(row.test_ringLineWidth == PopoverColumnGrid.ringStrokeWidth, "\(state)")
+        }
     }
 
     @Test func failedSublabelUsesTheFailureHue() {
@@ -230,6 +228,27 @@ private final class UnconstrainedDeviceRowWindow: NSWindow {
         let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
         #expect(row.test_ringIsBreathing == !reduceMotion,
                 "the connecting ring breathes iff Reduce Motion is off and it's on screen")
+    }
+
+    @Test func breathingNeverPullsTheRingInsideItsRestingRadius() {
+        // A pulse that shrank the ring (the old 0.82 scale) cut through the
+        // glyph inside it. Every frame must sit at or outside the resting circle.
+        let ring = HaloRingView()
+        ring.test_reduceMotionOverride = false
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 60, height: 60),
+                              styleMask: [.borderless], backing: .buffered, defer: false)
+        ring.frame = NSRect(x: 0, y: 0, width: PopoverColumnGrid.haloRingHostBoxDiameter,
+                            height: PopoverColumnGrid.haloRingHostBoxDiameter)
+        window.contentView?.addSubview(ring)
+        ring.apply(.connecting)
+        ring.layout()
+        let radii = ring.test_breathRadii
+        #expect(radii.count == 2, "the pulse animates the ring's radius")
+        for r in radii {
+            #expect(r >= ring.test_restingRadius - 0.01, "breath radius \(r) < resting \(ring.test_restingRadius)")
+            // The grown stroke stays inside the host box, so nothing clips it.
+            #expect(r + PopoverColumnGrid.ringStrokeWidth / 2 <= ring.bounds.width / 2)
+        }
     }
 
     // MARK: Repeated `apply` cleanly re-derives the ring

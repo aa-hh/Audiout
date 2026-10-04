@@ -159,20 +159,12 @@ public enum PopoverColumnGrid {
 
     /// Diameter of the Main Audio ring's visible circle (stroke centerline).
     /// Deliberately its OWN constant, not `haloRingDiameter` — grown slightly
-    /// past the device-row ring so the heavier matched stroke doesn't read
-    /// cramped against the icon glyph.
+    /// past the device-row ring so it doesn't read cramped against the icon
+    /// glyph.
     public static let mainAudioRingDiameter: CGFloat = 34
-    /// Stroke width of the Main Audio ring while connected — set equal to
-    /// `busLineWidth` (the rail's own stroke) so the rail and ring read as ONE
-    /// continuous line at their join, not two different-weight strokes
-    /// touching. Only the CONNECTED form uses this; connecting/failed keep the
-    /// shared `haloRingConnectingStroke`/`haloRingFailedStroke` weights (the
-    /// rail's tone already matches those states via `segColor`, and neither
-    /// state is the "one continuous line" case this override exists for).
-    public static var mainAudioRingConnectedStroke: CGFloat { busLineWidth }
     /// Extra headroom (mirrors `haloBreathingRoomGap`) added to the Main Audio
     /// ring's own host box past `iconWidth`, so the larger `mainAudioRingDiameter`
-    /// ring plus its heavier matched stroke has drawing room without crowding
+    /// ring has drawing room without crowding
     /// the row's other controls.
     public static let mainAudioRingHostBoxGap: CGFloat = 8
     /// The Main Audio ring's host square diameter once breathing room is
@@ -258,7 +250,7 @@ public enum PopoverColumnGrid {
     //
     // Geometry inherited from the RETIRED corner connection dot (the halo ring
     // §3.2 replaced it): `statusDotInset` still seats `RouteArmedDotView` on
-    // the icon's corner, `statusDotBorderWidth` its punch-out rim, and the
+    // the icon's corner, `routeArmedDotCutoutDiameter` its punch-out, and the
     // `statusDotBreath*` timings drive `HaloRingView`'s breathing pulse.
     // Grouped as NAMED CONSTANTS on purpose: a future settings menu will offer
     // compact/normal/large row densities, so icon + badge sizing must be
@@ -267,17 +259,11 @@ public enum PopoverColumnGrid {
 
     /// Diameter of the on-icon status badge (the connection-state dot).
     public static let statusDotDiameter: CGFloat = 10
-    /// Width of the punch-out border ringing the badge, drawn in the card/window
-    /// background colour so the dot reads as a separate badge over the icon. A
-    /// best-effort separator — tuned live later.
-    public static let statusDotBorderWidth: CGFloat = 1.5
     /// Duration of one half-cycle of the connecting/reconnecting "breathing"
-    /// pulse (opacity + scale), auto-reversed and repeated forever.
+    /// pulse (opacity + radius), auto-reversed and repeated forever.
     public static let statusDotBreathDuration: CFTimeInterval = 1.6
     /// The breathing pulse's minimum opacity (rises to 1.0).
     public static let statusDotBreathMinOpacity: Float = 0.3
-    /// The breathing pulse's minimum scale (grows to 1.0).
-    public static let statusDotBreathMinScale: CGFloat = 0.82
 
     /// SF-Symbol point size for the device icon glyph. Without this the symbol
     /// renders at its small default size and floats in the middle of the 26pt
@@ -307,7 +293,7 @@ public enum PopoverColumnGrid {
     // it), and was tuned by rendering + eyeballing per the spec's ~3–4 pt
     // target, landing this constant at 26 pt (up from the original 21 pt,
     // which hugged the glyph at ~1.5–2.5 pt). `haloRingDiameter` is also the
-    // size the ≥3:1 `ringConnected` contrast floor is tested at (spec §3.2).
+    // size the ≥3:1 `rim` contrast floor is tested at (spec §3.2).
     // The breathing pulse REUSES the `statusDotBreath*` timing constants above
     // (spec §6: "breathing pulse (`statusDotBreathDuration` timing)").
 
@@ -330,15 +316,20 @@ public enum PopoverColumnGrid {
     // so the enlarged ring still has host-box headroom. Stays the smaller
     // sibling of the bespoke `mainAudioRingDiameter` (34).
     public static let haloRingDiameter: CGFloat = 30
-    /// Stroke width of the **connected** solid ring (spec §3.2 ≈1.6 pt).
-    public static let haloRingConnectedStroke: CGFloat = 1.6
-    /// Stroke width of the **connecting/reconnecting** dashed ring — same weight
-    /// as connected; the dashed FORM (not weight) carries "pending" (spec §3.2).
-    public static let haloRingConnectingStroke: CGFloat = 1.6
-    /// Stroke width of the **failed** solid ring — deliberately heavier than the
-    /// connected ring (spec §3.2 ≈1.8 pt) so a failed row wins the scan beside
-    /// flickering meters (redundant weight atop the failure hue).
-    public static let haloRingFailedStroke: CGFloat = 1.8
+    /// The ONE stroke width every ring on a Mixer row draws at (owner's
+    /// ruling, 2026-10-03): the glyph ring in every form (connected,
+    /// connecting, failed, resting), Main Audio's ring, and the rail's node
+    /// circles. Weight never carries state; colour and dash do. At 1.6 pt the
+    /// device ring's inner edge sits 14.2 pt from the icon centre, Main
+    /// Audio's 16.2 pt.
+    public static let ringStrokeWidth: CGFloat = 1.6
+    /// How far the connecting ring's breathing pulse pushes its radius OUT
+    /// past the resting radius at the top of each breath. The pulse only ever
+    /// grows the ring — it never comes inside the resting radius, so the ring
+    /// can never touch the glyph it surrounds. Sized so the grown stroke stays
+    /// inside both host boxes: device ring 15 + 2 + 0.8 = 17.8 pt of the
+    /// 19 pt half-box, Main Audio 17 + 2 + 0.8 = 19.8 of 21.
+    public static let haloRingBreathGrowth: CGFloat = 2
     /// Dash segment length for the connecting ring (the "incomplete" form).
     public static let haloRingDashLength: CGFloat = 2.6
     /// Gap length between connecting-ring dashes.
@@ -354,8 +345,8 @@ public enum PopoverColumnGrid {
     public static let haloRingGapCenterAngle: CGFloat = -.pi / 4
     /// Total angular width (radians) of the ring's permanent gap. 70° puts
     /// each arc stop 8.8 pt (device-row ring, radius 15) / 9.8 pt (Main Audio
-    /// ring, radius 17) from the dot's center — 3.3 / 4.3 pt clear of its
-    /// punch-out rim at both sizes. Fixed across every drawn ring form
+    /// ring, radius 17) from the dot's center — with the 1.6 pt stroke's round
+    /// cap, 2.75 / 3.75 pt clear of the dot's 10.5 pt cut-out. Fixed across every drawn ring form
     /// (connected, connecting-dashed, failed, resting); stays far from the
     /// rail's join at the Main Audio ring's LEFT edge (180°).
     public static let haloRingGapWidth: CGFloat = .pi * 70 / 180
@@ -394,6 +385,16 @@ public enum PopoverColumnGrid {
     // the glyph. Paired with the `routeArmedDotBoxSize` bump so the larger disc
     // isn't clipped.
     public static let routeArmedDotDiameter: CGFloat = 8
+    /// The disc drawn in the popover ground (`Tokens.Color.panel`) BEHIND the
+    /// dot, cutting it out of the glyph: 1.25 pt of clear ground all round the
+    /// full 8 pt dot, in every state, appearance and accent setting.
+    public static let routeArmedDotCutoutDiameter: CGFloat = 10.5
+    /// The playing dot's `ember` edge, drawn inside the 8 pt outline.
+    public static let routeArmedDotEdgeWidth: CGFloat = 1
+    /// The not-playing dot's hollow ring, drawn inside the 8 pt outline. 1.5 pt
+    /// covers at least one whole device pixel at 1x, so the ring renders at its
+    /// token's full contrast instead of an anti-aliased blend under 3:1.
+    public static let routeArmedDotRingWidth: CGFloat = 1.5
     /// Duration of the one-shot `ember → gold` bloom when a dot transitions
     /// INTO armed while visible (spec §6 first-light bloom, ≤450 ms ease-out;
     /// instant under Reduce Motion; never fires on initial render).
@@ -441,20 +442,23 @@ public enum PopoverColumnGrid {
     public static let busNodeDiameterUnselected: CGFloat = 11
     /// Stroke width of the bus line (spec §4.1 "~2 pt").
     public static let busLineWidth: CGFloat = 2
-    /// Stroke width of the rim ringing a filled node / edging a hollow one.
-    public static let busNodeRimWidth: CGFloat = 1.5
     /// Rim width for a SELECTED-but-unavailable member (`MembershipBusView`'s
     /// `emphasizesDimmedMemberRim`, set true only by the Groups editor's own
-    /// row) — 2x `busNodeRimWidth`, so the seat that already carries the
-    /// visual weight (`socket`) reads as emphasized rather than merely
-    /// dim.
-    public static let busNodeDimmedRimWidth: CGFloat = busNodeRimWidth * 2
+    /// row), so the seat that already carries the visual weight (`socket`)
+    /// reads as emphasized rather than merely dim. Groups editor only; every
+    /// Mixer node rim draws at `ringStrokeWidth`.
+    public static let busNodeDimmedRimWidth: CGFloat = 3
     /// The unstroked VERTICAL gap between a node's edge and where the rail line
     /// stops/resumes above and below it (the owner's clearance refinement) —
     /// the rail "meets" a node with breathing room instead of jamming into it,
     /// so consecutive nodes read airy. Applied to the straight through-rail
-    /// (member / connecting / pending / failed nodes, which sit ON the spine).
+    /// (member and failed nodes, which sit ON the spine; a connecting node uses
+    /// `busConnectingNodeRailGap` instead).
     public static let busNodeRailGap: CGFloat = 3
+    /// The same gap for a CONNECTING node: the line stops this far from the
+    /// node's edge, above and below, so the break says "not joined yet" by
+    /// shape rather than by colour.
+    public static let busConnectingNodeRailGap: CGFloat = 9
     /// How far the detour arc bows out past an off-spine node's own edge, so the
     /// line visibly goes AROUND a node it doesn't run through. Added to that
     /// node's radius, so a large node and a small one are cleared by the same
@@ -505,10 +509,9 @@ public enum PopoverColumnGrid {
     /// run), so a box derived to land EXACTLY on the icon's leading edge lands
     /// under it half the time — this pulls it clear.
     public static let busHitTargetIconGap: CGFloat = 1
-    /// Diameter of the small filled dot the rail draws where it is CUT SHORT by a
-    /// collapsed (or mid-collapse clipping) section — the terminus marker that
-    /// says "the rail stops HERE, at this section's header, nothing below it is
-    /// currently visible" (collapse-reactive rail, 2026-07-22). Matches the old
+    /// Diameter of the small filled dot the rail draws on a collapsed header
+    /// that hides a reached speaker, centred on the header's text line, and on
+    /// a collapsed origin header (owner's ruling, 2026-10-04). Matches the old
     /// `busOriginDotDiameter` weight so the collapsed terminus reads as the same
     /// family of gutter dot the rail used before the ring-hook terminus landed.
     public static let railCollapsedTerminusDotDiameter: CGFloat = 5

@@ -67,7 +67,8 @@ public final class GroupController {
 
     /// Keyed by device id. Cleared WHOLESALE on group-activation transitions
     /// (`syncActiveGroupToSelection()`, `activateGroup(id:)`,
-    /// `deactivateGroup()` — search `memberState.removeAll()`), never pruned
+    /// `deactivateGroup()` — all through `clearMuteBookkeeping()`, which
+    /// restores each muted member's volume first), never pruned
     /// per-device. Growth is bounded (one entry per distinct real device id
     /// this controller has ever muted, not unbounded), but a device that's
     /// muted once and then permanently leaves the fleet keeps its entry
@@ -740,7 +741,7 @@ public final class GroupController {
         guard case .group = mainOut else {
             if activeGroupID != nil {
                 activeGroupID = nil
-                memberState.removeAll()
+                clearMuteBookkeeping()
                 onStateDidChange?()
             }
             return activeGroupID
@@ -750,7 +751,7 @@ public final class GroupController {
             activeGroupID = derived
             // A different (or no) active group invalidates mute bookkeeping
             // tied to the previous group's membership.
-            memberState.removeAll()
+            clearMuteBookkeeping()
             onStateDidChange?()
         }
         return activeGroupID
@@ -769,13 +770,24 @@ public final class GroupController {
     public func saveGroup(_ group: Group) throws -> Group {
         guard !group.memberIDs.isEmpty else { throw GroupError.emptyMembership }
         var updated = groups
+        var previousMembers: Set<String>?
         if let index = updated.firstIndex(where: { $0.id == group.id }) {
+            previousMembers = Set(updated[index].memberIDs)
             updated[index] = group
         } else {
             updated.append(group)
         }
         try store.save(updated)
         groups = updated
+        // Only a membership change re-routes the ACTIVE scene: `setOutputSet` probes permissions and
+        // ends a handoff to macOS even when nothing changed, so a rename must not call it.
+        // `activateGroup` is deliberately not used because it clears mute bookkeeping and replays
+        // remembered volumes.
+        if mainOut == .group(id: group.id), previousMembers != Set(group.memberIDs) {
+            let airplayMembers = routableOutputs(in: group.memberIDs)
+            backend.setOutputSet(airplayMembers)
+            onMainOutMembersChanged?(airplayMembers)
+        }
         onStateDidChange?()
         return group
     }
@@ -881,7 +893,7 @@ public final class GroupController {
     public func activateGroup(id: String) {
         guard let group = groups.first(where: { $0.id == id }) else { return }
         activeGroupID = id
-        memberState.removeAll()
+        clearMuteBookkeeping()
         // Only the group's REAL (AirPlay) members reach the backend output set —
         // the same local-device filter `applyRouting()`'s Selected-Devices branch
         // applies, and the contract `NativeBackend.setOutputSet` documents ("the
@@ -920,7 +932,7 @@ public final class GroupController {
     public func deactivateGroup() {
         guard activeGroupID != nil else { return }
         activeGroupID = nil
-        memberState.removeAll()
+        clearMuteBookkeeping()
         onStateDidChange?()
     }
 
@@ -1138,6 +1150,16 @@ public final class GroupController {
     }
 
     // MARK: Mute (Q4 — volume-based; see "Mute semantics" above)
+
+    /// Clearing the bookkeeping is an unmute, otherwise the member stays at 0 with no mute to lift.
+    private func clearMuteBookkeeping() {
+        for (id, state) in memberState where state.explicitMute {
+            var unmuted = state
+            unmuted.explicitMute = false
+            applySilence(for: id, state: &unmuted, wasSilent: true)
+        }
+        memberState.removeAll()
+    }
 
     public func setMuted(_ muted: Bool, for id: String) {
         var state = memberState[id] ?? MemberState()

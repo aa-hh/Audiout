@@ -1429,6 +1429,64 @@ import Testing
         #expect(volume("sonos-move", in: backend) == 70, "unmute restores the original level, not 0")
     }
 
+    // Turns red if a `memberState.removeAll()` drops the stash without restoring the volume (the Mac stays at 0).
+    @Test func switchingMainOutAwayAndBackRestoresAMutedMacInsteadOfLeavingItAtZero() async throws {
+        let (controller, backend) = try await makeController()
+        try controller.saveGroup(Group(id: "g1", name: "Mac + Office", memberIDs: ["local-mac", "office"], memberVolumes: [:]))
+        controller.setMainOut(.group(id: "g1"))
+        await SuiteWait.until("g1 to become active") { controller.activeGroupID == "g1" }
+        controller.setMuted(true, for: "local-mac")
+        await SuiteWait.until("local-mac to sit at zero") { volume("local-mac", in: backend) == 0 }
+
+        controller.setMainOut(.selectedDevices)
+        controller.setMainOut(.group(id: "g1"))
+        await SuiteWait.until("local-mac to come back at 65") { volume("local-mac", in: backend) == 65 }
+
+        #expect(volume("local-mac", in: backend) == 65)
+        #expect(!controller.isMuted("local-mac"))
+        #expect(!controller.isMainOutMuted)
+    }
+
+    // Turns red if `saveGroup` stops calling `setOutputSet` for the active group, or starts routing through `activateGroup` (which would lift the mute).
+    @Test func savingTheActiveGroupReappliesItsMembersToTheBackend() async throws {
+        let (controller, backend) = try await makeRecordingController()
+        try controller.saveGroup(Group(id: "g1", name: "Pair", memberIDs: ["local-mac", "office"], memberVolumes: [:]))
+        controller.setMainOut(.group(id: "g1"))
+        await SuiteWait.until("g1 to become active") { controller.activeGroupID == "g1" }
+        controller.setMuted(true, for: "local-mac")
+        backend.reset()
+
+        try controller.saveGroup(Group(id: "g1", name: "Pair", memberIDs: ["local-mac"], memberVolumes: [:]))
+        #expect(backend.outputSetWrites.last == [])
+        #expect(controller.isMuted("local-mac"))
+
+        try controller.saveGroup(Group(id: "g1", name: "Pair", memberIDs: ["local-mac", "office", "sonos-move"], memberVolumes: [:]))
+        #expect(backend.outputSetWrites.last == ["office", "sonos-move"])
+        #expect(controller.isMuted("local-mac"))
+    }
+
+    // Turns red if `saveGroup` re-routes the active group when its members did not change (a rename would end a handoff to macOS AirPlay).
+    @Test func renamingTheActiveGroupDoesNotTouchTheBackend() async throws {
+        let (controller, backend) = try await makeRecordingController()
+        try controller.saveGroup(Group(id: "g1", name: "Pair", memberIDs: ["local-mac", "office"], memberVolumes: [:]))
+        controller.setMainOut(.group(id: "g1"))
+        backend.reset()
+
+        try controller.saveGroup(Group(id: "g1", name: "Renamed", memberIDs: ["local-mac", "office"], memberVolumes: [:]))
+        #expect(backend.outputSetWrites.isEmpty)
+    }
+
+    // Turns red if `saveGroup` re-routes for a scene Main Out is not pointed at.
+    @Test func savingAnInactiveGroupDoesNotTouchTheBackend() async throws {
+        let (controller, backend) = try await makeRecordingController()
+        controller.ensureDefaultSelection()
+        try controller.saveGroup(Group(id: "g1", name: "Solo", memberIDs: ["office"], memberVolumes: [:]))
+        backend.reset()
+
+        try controller.saveGroup(Group(id: "g1", name: "Solo", memberIDs: ["office", "sonos-move"], memberVolumes: [:]))
+        #expect(backend.outputSetWrites.isEmpty)
+    }
+
     // MARK: Persistence round-trip
 
     @Test func persistenceRoundTrip() throws {

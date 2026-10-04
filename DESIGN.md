@@ -796,8 +796,8 @@ names and glyphs, `label` on the live one, pinned by
 ring and an unarmed fader fill read as one tone — a Mac-only instrument with
 no iOS equivalent (the phone has no membership rail).
 
-The rail is one colour from its start to its end. `RailPlan`'s
-`originColor` (`BusRailOverlayView.swift`) picks it once for the whole line:
+The rail is one colour from its start to its end.
+`BusRailOverlayView.originColor(for:)` picks it once for the whole line:
 `railDormant` when the rail is dormant; otherwise the host's
 `unarmedLineTone` when one is set and Main Audio's spine is not armed;
 otherwise `Tokens.Color.spineTone`, which is `gold`. Hook, segments, end

@@ -296,8 +296,8 @@ public final class DeviceRowView: NSView {
     /// The **energize "press-play" pending beat** (Warm Signal v4.1 item 9): a
     /// DRAWING-ONLY flag the host raises on the members of a Main-Audio source
     /// switch that haven't started connecting yet (`connectionState == .off`),
-    /// so at the switch instant the rail drops to ember PENDING and those nodes
-    /// render hollow-dashed (`MembershipBusView.Node.connecting`) BEFORE the
+    /// so at the switch instant those nodes render hollow-dashed ember
+    /// (`MembershipBusView.Node.connecting`) BEFORE the
     /// backend reports `.connecting`. It NEVER changes the model — the moment
     /// the device's real `connectionState` leaves `.off` (→ `.connecting`, then
     /// `.member`), that model state supersedes this beat in ``updateBus()``, so
@@ -850,7 +850,7 @@ public final class DeviceRowView: NSView {
         } else if energizePending, !reduceMotion, case .off = device.connectionState {
             // Energize "press-play" pending beat (v4.1 item 9): a member of a
             // source switch that hasn't started connecting yet renders the
-            // hollow gold DASHED `.connecting` node ON the spine, instantly,
+            // hollow ember DASHED `.connecting` node ON the spine, instantly,
             // before the backend reports `.connecting` — the beat has no node
             // form of its own. Guarded to `.off` so it never overrides a real
             // in-flight/resolved state — the moment `connectionState` advances,

@@ -413,7 +413,7 @@ private var connectionStatesFleet: [Device] {
 /// AirPlay members caught mid-switch to a group plus one that fails:
 ///   - `en-kitchen` — already `.connected` (the top of the sweep has landed:
 ///     filled gold node + gold rail segment),
-///   - `en-living` — `.connecting` (mid-handshake: gold DASHED node, ember
+///   - `en-living` — `.connecting` (mid-handshake: ember DASHED node, gold
 ///     segment) in the mid-sequence variant; `.connected` in the settled
 ///     Reduce-Motion variant so there is no in-flight residue to strip,
 ///   - `en-office` / `en-bedroom` — still `.off`: these carry the energize

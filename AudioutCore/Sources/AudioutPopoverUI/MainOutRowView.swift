@@ -114,14 +114,14 @@ public final class MainOutRowView: NSView {
     /// coerces incoming meter pushes to 0 so the drained master meter stays
     /// down while muted (S3).
     private var isMasterMuted = false
-    /// Whether the Main Audio spine is LIVE — the continuous rail overlay reads
-    /// this to tone the origin hook AND the member segments below it, gold vs
-    /// ember. Live = the armed target (connected ∧ unmuted) **or** the
+    /// Whether the Main Audio spine is LIVE. It feeds the armed dot, the rail's
+    /// connect-pulse gate and the VoiceOver "armed" word; it never tones the
+    /// rail line, which is always gold (`Tokens.Color.spineTone`,
+    /// `BusRailOverlayView.originColor(for:)`). Live = the armed target
+    /// (connected ∧ unmuted) **or** the
     /// local-only armed case, where audio genuinely plays through the
     /// Mac and no remote handshake exists for `connectionState` to report. Both
-    /// carry real audio to a member node, so both must read live: the hook's
-    /// corner and the rail leaving it are one stroke, and a truth that covers
-    /// only the remote case draws them in two tones.
+    /// carry real audio to a member node, so both must read live.
     private var isSpineLive = false
     /// Whether a rail exists at all — the host pushes it through
     /// ``setRailLive(_:)``, resolved from the same rule the wire itself draws by

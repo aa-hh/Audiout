@@ -84,18 +84,22 @@ import Testing
     }
 
     /// A capture that starts handing over its chunks 752 frames (~15.7 ms, more
-    /// than one render cycle, under the 20 ms threshold) later than it did at
-    /// release leaves the ring a little short of the margin at a few forward
-    /// re-alignments; the late chunks then land. The loss is ~5 ms over the
-    /// storm, too little to reach the 25 ms limit, so the offset is held to
-    /// that of a punctual capture. Red if every clamped forward re-alignment
-    /// re-bases the measurement instead of only a shortfall of at least
-    /// `pullRealignThresholdMs`, which throws each remainder away.
-    @Test func aCaptureThatDeliversMoreThanOneCycleLateDoesNotMoveThePlayoutOffset() throws {
+    /// than one render cycle, under the 20 ms threshold) or 1680 frames (35 ms)
+    /// later than it did at release leaves the ring short of the margin at a
+    /// few forward re-alignments; the late chunks then land, so the offset is
+    /// held near that of a punctual capture. The 1680-frame row gets 4 ms: the
+    /// ring is short of the late chunks for a moment, ~3 ms over the punctual
+    /// run under any rule. Red if every clamped forward re-alignment re-bases
+    /// the measurement, which throws each remainder away. Red if the re-base
+    /// keys on a shortfall of at least `pullRealignThresholdMs` rather than on
+    /// a device gap: the 1680-frame row then measured ~23 ms over the punctual
+    /// run, against ~3 ms with the gap rule.
+    @Test(arguments: zip([752, 1680], [2.0, 4.0]))
+    func aCaptureThatDeliversMoreThanOneCycleLateDoesNotMoveThePlayoutOffset(lagFrames: Int, boundMs: Double) throws {
         let punctual = try Self.worstStormOffsetMs(anchoredDelayMs: Self.delayMs)
         let late = try Self.worstStormOffsetMs(
-            anchoredDelayMs: Self.delayMs, captureLagFrames: 752, lagFromSecond: 1)
-        #expect(late - punctual <= 2,
+            anchoredDelayMs: Self.delayMs, captureLagFrames: lagFrames, lagFromSecond: 1)
+        #expect(late - punctual <= boundMs,
                 "a late capture left the Move \(String(format: "%+.1f", late)) ms off, a punctual one \(String(format: "%+.1f", punctual)) ms")
     }
 
@@ -162,10 +166,14 @@ import Testing
                     manager.setTrimMs(move.ms, forDeviceUID: "move-2")
                     manager.reanchorIfTrimClamped(forDeviceUID: "move-2")
                     sink.test_waitForPendingRebuild()
-                    #expect(sink.hasStartedRendering, "the trim was clamped, so the commit re-anchored")
+                    #expect(sink.hasStartedRendering, "the trim must apply in full and keep the sink released, so the margin cap is what is under test")
                     targetDelayMs += move.ms
                     pendingTrim = nil
                 }
+                // The render path only tries `stateLock` and renders silence
+                // when the producer's telemetry block on `graphQueue` holds it,
+                // which left a run a cycle late now and then: drain it first.
+                sink.test_waitForPendingRebuild()
                 out.withUnsafeMutableBufferPointer {
                     _ = sink.renderInterleaved(
                         into: $0, frameCount: cycleFrames, cycleStartMonotonicNanos: Int64(host))
@@ -220,6 +228,7 @@ import Testing
             written += chunkFrames
         }
         func render(at host: Double) {
+            sink.test_waitForPendingRebuild()   // see worstStormOffsetMs
             out.withUnsafeMutableBufferPointer {
                 _ = sink.renderInterleaved(
                     into: $0, frameCount: cycleFrames, cycleStartMonotonicNanos: Int64(host))

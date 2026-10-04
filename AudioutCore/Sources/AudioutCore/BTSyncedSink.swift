@@ -1496,14 +1496,12 @@ final class BTDeviceSink: @unchecked Sendable {
                 steadyRoomFramesPtr.pointee)
             let room = Swift.max(0, held - marginFrames)
             if frames > room {
-                // A shortfall of a threshold or more means capture stalled
-                // together with the device and never refills, so take what fits
-                // and measure from here like the stall branch, or the stuck
-                // remainder hides the backward move a later over-pull needs. A
-                // smaller one is a capture chunk landing later than it did at
-                // release, so take what fits and leave the rest pending for a
-                // later cycle.
-                guard Double(frames - room) < Self.pullRealignThresholdMs / 1_000 * renderSampleRate else {
+                // A ring short after a device gap of a threshold or more means
+                // capture stalled with the device and the shortfall never
+                // refills, so take what fits and measure from here. A ring short
+                // with even cycles is a late capture chunk, so take what fits
+                // and leave the remainder pending.
+                guard Double(gap) < Self.pullRealignThresholdMs * 1_000_000 else {
                     delayLine.shift(byFrames: room)
                     pullOriginNanos = t
                     framesPulledSinceOrigin = frameCount

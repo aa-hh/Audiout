@@ -38,7 +38,8 @@ public struct SpeakerLibraryState: Equatable, Sendable {
 }
 
 public struct SpeakerLibraryStore: Sendable {
-    /// Raw strings, so one unknown kind or visibility drops that entry instead of failing the whole file.
+    /// Raw strings, so one unknown kind or visibility drops that entry instead of failing the whole file;
+    /// `load` then keeps a copy of the file, since the next save drops the entry for good.
     private struct Envelope: Codable {
         struct Metadata: Codable {
             var name: String
@@ -81,8 +82,11 @@ public struct SpeakerLibraryStore: Sendable {
         let metadata = envelope.metadata.compactMapValues { entry in
             Device.Kind(rawValue: entry.kind).map { SpeakerMetadata(name: entry.name, kind: $0) }
         }
-        return SpeakerLibraryState(metadata: metadata,
-                                   visibility: envelope.visibility.compactMapValues(SpeakerMixerVisibility.init(rawValue:)))
+        let visibility = envelope.visibility.compactMapValues(SpeakerMixerVisibility.init(rawValue:))
+        if metadata.count < envelope.metadata.count || visibility.count < envelope.visibility.count {
+            StoreRecovery.preserveCopy(fileURL)
+        }
+        return SpeakerLibraryState(metadata: metadata, visibility: visibility)
     }
 
     public func save(_ state: SpeakerLibraryState) throws {

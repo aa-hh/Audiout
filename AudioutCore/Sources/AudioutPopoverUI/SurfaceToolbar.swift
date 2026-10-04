@@ -25,7 +25,7 @@ import AudioutSharedUI
 /// carries ONE name however many languages it is read in; and that name is
 /// clamped to `SurfaceToolbarSeat.maxNameWidth` and truncates past it, so no
 /// word in any language can push the strip wider than
-/// `widestCapsuleWidth` + Pin = 291 pt of the fixed 653 pt surface.
+/// `widestCapsuleWidth` + Pin = 282.5 pt of the fixed 653 pt surface.
 /// `SurfaceToolbarTests.theStripCannotOutgrowTheSurfaceInAnyLanguage` asserts
 /// it against a name no translator could produce.
 ///

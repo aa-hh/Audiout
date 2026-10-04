@@ -220,8 +220,8 @@ extension SerializedSharedState {
             #expect(try String(contentsOf: scratchDir.appendingPathComponent("hidden-speakers.json"), encoding: .utf8).contains("old"))
         }
 
-        // An unknown kind or visibility string throwing out of the envelope decode again quarantines the file and lets the controller write an empty library, and this test turns red.
-        @Test func unknownEntriesDropAloneWithoutQuarantine() throws {
+        // An unknown kind or visibility string throwing out of the envelope decode again quarantines the file and lets the controller write an empty library, or `load` dropping an entry without keeping a copy of the file, turns this test red.
+        @Test func unknownEntriesDropAloneAndKeepACopy() throws {
             let file = scratchDir.appendingPathComponent("speaker-library.json")
             let json = #"""
             {"schemaVersion": 1,
@@ -229,11 +229,14 @@ extension SerializedSharedState {
              "visibility": {"ok": "hideWhenNotInUse", "weird": "always", "odd": "sometimes"}}
             """#
             try Data(json.utf8).write(to: file)
+            let alertedBefore = StoreRecovery.quarantinedFileNames.count
             let loaded = try #require(try SpeakerLibraryStore(directory: scratchDir).load())
             #expect(Set(loaded.metadata.keys) == ["ok"])
             #expect(loaded.visibility == ["ok": .hideWhenNotInUse, "weird": .always])
+            #expect(StoreRecovery.quarantinedFileNames.count == alertedBefore)
             let names = try FileManager.default.contentsOfDirectory(atPath: scratchDir.path)
-            #expect(!names.contains { $0.hasPrefix("speaker-library.corrupt-") })
+            let copy = try #require(names.first { $0.hasPrefix("speaker-library.corrupt-") })
+            #expect(try String(contentsOf: scratchDir.appendingPathComponent(copy), encoding: .utf8) == json)
             #expect(library().visibility(for: "ok") == .hideWhenNotInUse)
             #expect(FileManager.default.fileExists(atPath: file.path))
         }

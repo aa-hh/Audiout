@@ -2950,10 +2950,8 @@ public final class DeviceRowView: NSView {
         slider.setAccessibilityRole(.slider)
         slider.setAccessibilityLabel("\(device.name) volume")
         muteButton.setAccessibilityLabel(device.isMuted ? "Unmute \(device.name)" : "Mute \(device.name)")
-        // The name-click is a mouse convenience; the switch stays the
-        // authoritative accessibility control. A hint on the name label documents
-        // the click for VoiceOver users who land on it.
-        nameLabel.setAccessibilityRole(canRecoverByName ? .button : .staticText)
+        // `DeviceNameLabel` reports its own role (a button while pressable); the
+        // help text says what the press does.
         nameLabel.setAccessibilityLabel(device.name)
         nameLabel.setAccessibilityHelp(canRecoverByName
             ? (unavailableHelp ?? "Reconnect speaker")
@@ -3142,6 +3140,8 @@ final class DeviceNameLabel: NSTextField {
     override var acceptsFirstResponder: Bool { isPressable && (NSApp?.isFullKeyboardAccessEnabled ?? false) }
     override func drawFocusRingMask() { bounds.fill() }
     override var focusRingMaskBounds: NSRect { bounds }
+    // VoiceOver offers a press only on a button, so the role follows the same gate as the press itself.
+    override func accessibilityRole() -> NSAccessibility.Role? { isPressable ? .button : .staticText }
     override func accessibilityPerformPress() -> Bool {
         guard isPressable else { return false }
         onPress?()

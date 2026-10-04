@@ -616,7 +616,7 @@ import AppKit
         #expect(popover.test_subsectionTitles() == [kind == .cast ? castTitle : airPlayTitle])
     }
 
-    // Restricting current use to checked speakers hides active scene/app targets; announcing volume invents a value for missing members. It also turns red when unknown speakers render before a Bluetooth row or the Pair footer stops following them.
+    // Restricting current use to checked speakers hides active scene/app targets; announcing volume invents a value for missing members. It also turns red when the unknown speaker's mounted row sits above a Bluetooth row in the Output Speakers card, or the Pair footer stops following it.
     @Test func hiddenRowsFollowActiveMainSceneAndDeviceAndGroupAppIntent() throws {
         let fleet = [local(), airplay()]
         let backend = RecordingRetryBackend(MockBackend(fleet: fleet, staggerDiscovery: false,
@@ -648,8 +648,11 @@ import AppKit
         popover.update(devices: fleet + [desk])
         let order = popover.test_renderedDeviceIDs()
         #expect(order.first == "mac")
-        let missingIndex = try #require(order.firstIndex(of: "missing"))
-        let deskIndex = try #require(order.firstIndex(of: "desk"))
+        let cardRows = popover.panel.test_cardRows(title: PopoverController.outputDevicesCardTitle)
+        let missingRow = try #require(popover.test_deviceRow(for: "missing"))
+        let deskRow = try #require(popover.test_deviceRow(for: "desk"))
+        let missingIndex = try #require(cardRows.firstIndex { missingRow.isDescendant(of: $0) })
+        let deskIndex = try #require(cardRows.firstIndex { deskRow.isDescendant(of: $0) })
         #expect(missingIndex > deskIndex, "unknown speakers close the list, after every Bluetooth row")
         #expect(popover.test_pairBluetoothIsLastCardRow, "the Pair footer still follows the unknown row")
         popover.update(devices: fleet)

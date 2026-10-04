@@ -815,7 +815,7 @@ private final class UnconstrainedDeviceRowWindow: NSWindow {
         }
     }
 
-    // Letting `DeviceNameLabel` accept first responder with keyboard navigation off, dropping its Tab forwarding, or guarding its accessibility press on recovery alone turns red.
+    // Letting `DeviceNameLabel` accept first responder with keyboard navigation off, dropping its Tab forwarding, guarding its accessibility press on recovery alone, or reporting a role other than button while pressable and static text otherwise turns red.
     @Test func availableNameTogglesOnKeysAndHandsTabOn() throws {
         let device = Device(id: "dev-1", name: "Test Speaker", kind: .homePod)
         let row = DeviceRowView(device: device, showsBus: true)
@@ -837,6 +837,7 @@ private final class UnconstrainedDeviceRowWindow: NSWindow {
         row.delegate = delegate
         row.apply(device, selected: false, controllable: true)
         let name = row.nameLabel
+        #expect(name.accessibilityRole() == .button)
         let keyboardNavigation = NSApplication.shared.isFullKeyboardAccessEnabled
         #expect(name.acceptsFirstResponder == keyboardNavigation)
         row.test_pressNameKey(36)
@@ -866,6 +867,7 @@ private final class UnconstrainedDeviceRowWindow: NSWindow {
         row2.apply(device, selected: true, controllable: true)
         #expect(!row2.nameLabel.acceptsFirstResponder)
         #expect(!row2.test_pressNameAccessibility())
+        #expect(row2.nameLabel.accessibilityRole() == .staticText)
     }
 
     private func findNameLabel(in view: NSView) -> DeviceNameLabel? {

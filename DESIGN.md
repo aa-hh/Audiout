@@ -607,10 +607,15 @@ custom view. The `NSToolbar` itself stays because it is the window's unified
 title-bar strip and supplies the system material and the Reduce Transparency
 handling. ⌘1–⌘4 select the tabs in order.
 
-Geometry comes from `SurfaceToolbarSeat`. The strip is 34pt tall; a collapsed
-tab is 30 × 28pt with its glyph at 15pt; the capsule is the collapsed tabs side
-by side plus 3pt of padding on every side, so its floor width
-(`capsuleSize`) is four seats, 126pt. Every highlight is cut at half its own
+Geometry comes from `SurfaceToolbarSeat`. The strip is 34pt tall and a tab
+28pt. Tabs are laid out by their glyphs' measured ink, never by the symbol
+image's own box, which is 2–4pt bigger than the ink by a different amount per
+symbol. Each glyph starts at 15pt and is drawn smaller until its ink fits an
+18 × 15pt box (`glyphBox`: Mixer 14.5pt, Scenes 13, Speakers 12.75, Settings
+14.25), with its ink centred top to bottom. A collapsed tab is its glyph's ink
+with 7.5pt (`glyphPadding`) on each side, so the four are 28.5, 33, 29.5 and
+30pt wide; the capsule is those side by side plus 3pt of padding on every
+side, so its floor width (`capsuleSize`) is 127pt. Every highlight is cut at half its own
 height, so a tab's highlight is a stadium concentric with the pill and Pin, a
 28pt square, is a circle. Weights are `engagedChrome` at the ladder the
 mixer's rows already use: the capsule itself washes at 0.06, hover at
@@ -637,10 +642,13 @@ strip is converted whole or not at all. And nothing in the seat is behind
 14–25 showed three identical circles and no current screen at all.
 
 Only the current tab shows its name, to the right of its glyph, at
-`Tokens.Font.captionMedium`; the others are icon-only, and the tooltip
+`Tokens.Font.captionMedium`. The glyph keeps its place and the tab grows to the
+right, with the same 7.5pt from the glyph's ink to the name's first letter and
+after its last letter, measured off the drawn letters rather than the label's
+frame. The others are icon-only, and the tooltip
 ("Scenes (⌘2)") and VoiceOver label carry every name. The name is clamped to
 `maxNameWidth` (120pt) and truncates past it, so the widest the strip can be
-is `widestCapsuleWidth` plus Pin, 284pt of the fixed 653pt surface, in any
+is `widestCapsuleWidth` plus Pin, 282.5pt of the fixed 653pt surface, in any
 language: a widening strip is what would sweep the tabs behind the overflow
 chevron, and primary navigation cannot live behind a chevron.
 

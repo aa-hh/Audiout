@@ -133,7 +133,9 @@ public final class DeviceRowView: NSView {
     /// model `isSelectedInSet` and always reset in ``apply(_:selected:…)`` and on
     /// re-parenting, so a hover can never "stick" as a stale highlight after the
     /// pointer leaves the popover without a matching `mouseExited` (T-U8 bug).
-    private var isHovered: Bool = false
+    private var isHovered: Bool = false {
+        didSet { armedDotView.rowWash = rowWash }
+    }
 
     /// Transient pointer-in-the-gutter state, the same discipline as
     /// `isHovered` (reset on `apply` and re-parenting via
@@ -201,7 +203,9 @@ public final class DeviceRowView: NSView {
     /// last `apply` — picks the "playing here" vs "armed" VoiceOver wording.
     private var hasLiveFeeds = false
     /// The armed predicate's last computed value (what the dot renders).
-    private var isRouteArmed = false
+    private var isRouteArmed = false {
+        didSet { armedDotView.rowWash = rowWash }
+    }
     /// The main-mix term of the armed predicate, read by the FEED column's pill tint.
     private var isMainMixArmed = false
     /// Whether the row's volume/mute gesture is pending its Cast feed-gain
@@ -638,8 +642,6 @@ public final class DeviceRowView: NSView {
         // per-app feed arms the row while it is still connecting, and that
         // speaker's dot stays the connecting ring's hollow ember.
         armedDotView.apply(armed: isRouteArmed && isConnected)
-        // The cut-out matches the row's wash, which follows `isRouteArmed` alone.
-        armedDotView.rowWashed = isRouteArmed
         nameLabel.textColor = rowTextColor
 
         // FEED column (v4.1 item 3): main-mix segment wording — "System" for a
@@ -2660,15 +2662,22 @@ public final class DeviceRowView: NSView {
             let path = NSBezierPath(roundedRect: rect,
                                     xRadius: PopoverColumnGrid.selectionHighlightCornerRadius,
                                     yRadius: PopoverColumnGrid.selectionHighlightCornerRadius)
-            if isRouteArmed {
-                Tokens.Color.gold.withAlphaComponent(PopoverColumnGrid.rowLiveWashAlpha).setFill()
-                path.fill()
-            } else if isHovered {
-                Tokens.Color.engagedChrome.withAlphaComponent(PopoverColumnGrid.rowHoverWashAlpha).setFill()
+            if let rowWash {
+                rowWash.setFill()
                 path.fill()
             }
         }
         super.draw(dirtyRect)
+    }
+
+    /// The wash `draw(_:)` paints behind a menu-less row right now, `nil` for
+    /// none. The status dot's cut-out wears the same value (`isHovered` and
+    /// `isRouteArmed` push it), so it never shows as a ring on the wash.
+    private var rowWash: NSColor? {
+        guard !isInMenu else { return nil }
+        if isRouteArmed { return Tokens.Color.gold.withAlphaComponent(PopoverColumnGrid.rowLiveWashAlpha) }
+        if isHovered { return Tokens.Color.engagedChrome.withAlphaComponent(PopoverColumnGrid.rowHoverWashAlpha) }
+        return nil
     }
 
     // MARK: Attention flash (A4)
@@ -2723,6 +2732,7 @@ public final class DeviceRowView: NSView {
             layerToClear?.removeFromSuperlayer()
         }
         flashLayer.add(pulse, forKey: Self.flashAnimationKey)
+        armedDotView.flash(pulse)
         CATransaction.commit()
     }
 

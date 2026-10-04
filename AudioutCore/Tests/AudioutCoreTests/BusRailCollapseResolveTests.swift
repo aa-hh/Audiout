@@ -296,29 +296,20 @@ import Testing
         return input
     }
 
-    /// A segment that detours PAST a non-member keeps the spine's tone: the
-    /// line carries the same signal past that node as it does into the member
-    /// below, so nothing on the wire changes colour between hook and terminus.
-    /// Armed or not, that tone is gold (owner's ruling, 2026-10-04: there is
-    /// no idle line).
-    @Test func detourPastNonMembersKeepsTheWireGoldArmedOrNot() {
+    /// The Mixer's wire is one colour from hook to terminus, armed or not: a
+    /// detour past a non-member, and the segments feeding a connecting and a
+    /// failed node, all wear the spine tone. A speaker's state lives in its
+    /// node and glyph ring, never in the line (owner's rulings, 2026-10-03 and
+    /// 2026-10-04).
+    @Test func theMixerWireIsOneColourPastEveryKindOfNode() {
         for armed in [true, false] {
-            let plan = RailPlan.resolve(toneInput(armed: armed, nodes: [.nonMember, .nonMember, .member]))
+            let plan = RailPlan.resolve(toneInput(armed: armed,
+                                                  nodes: [.nonMember, .connecting, .failed, .member]))
             let runs = BusRailOverlayView().wireRuns(for: plan)
-            #expect(runs.count > 1, "hook plus at least one segment")
-            #expect(runs.allSatisfy { sameInk($0.color, Tokens.Color.gold) },
-                    "every run is gold (armed=\(armed))")
+            #expect(runs.count == 6, "hook, detour (line + arc), three on-spine runs")
+            #expect(runs.allSatisfy { sameInk($0.color, Tokens.Color.spineTone) },
+                    "every run wears the spine tone (armed=\(armed))")
         }
-    }
-
-    /// A speaker's state lives in its node and glyph ring, never in the line:
-    /// segments feeding a connecting node and a failed node wear the same
-    /// spine tone as the rest of the wire (owner's ruling, 2026-10-03).
-    @Test func connectingAndFailedMembersLeaveTheWireOneColour() {
-        let plan = RailPlan.resolve(toneInput(armed: true, nodes: [.connecting, .failed, .member]))
-        let runs = BusRailOverlayView().wireRuns(for: plan)
-        #expect(runs.count == 4, "hook + three on-spine runs")
-        #expect(runs.allSatisfy { sameInk($0.color, Tokens.Color.spineTone) }, "every run wears the spine tone")
     }
 
     // MARK: Folded subsections (owner's ruling, 2026-10-04)
@@ -484,5 +475,19 @@ import Testing
         #expect(plan.signalTerminusIndex == nil, "no visible node ends the rail")
         #expect(plan.lineEndY == 320 && plan.headerDotYs.isEmpty,
                 "the line stops at the list's top edge, with no dot")
+    }
+
+    /// The only reached speaker straddles the list's TOP edge (band 260...440):
+    /// its centre is inside, so its node draws, and the line must run into it
+    /// rather than stop at the edge above it (DESIGN.md rule 4, "the lowest
+    /// visible reached node").
+    @Test func aReachedRowCutByTheTopEdgeStillEndsTheRail() {
+        var input = expandedInput()
+        input.stops = [.init(y: 432, node: .member, halfHeight: 14),    // 418...446
+                       .init(y: 380, node: .nonMember, halfHeight: 14),
+                       .init(y: 340, node: .nonMember, halfHeight: 14)]
+        let plan = RailPlan.resolve(input)
+        #expect(plan.signalTerminusIndex == 0, "the straddling member ends the rail")
+        #expect(plan.lineEndY == nil, "no line runs to the top edge instead")
     }
 }

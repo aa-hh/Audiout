@@ -727,34 +727,62 @@ draws the same bare glyph. This knowingly retires the Bluetooth-UI rule that
 still read apart, on the tooltip and in the spoken value.
 
 ### Connection Ring and Status Dot (Mixer rows)
-Owner's rulings, 2026-10-03. Every ring on a Mixer row strokes at one width,
+Every ring on a Mixer row strokes at one width,
 `PopoverColumnGrid.ringStrokeWidth` (1.6 pt): the glyph ring in every form,
 Main Audio's ring, and the rail's node circles. Weight never carries state;
-colour and dash do. Connecting is dashed `ember` on both the glyph ring and
-the rail node, so one row never shows connecting in two colours. The
-connecting pulse only grows the ring outward from its resting radius
-(`haloRingBreathGrowth`), so it never crosses the glyph.
+colour and dash do. `HaloRingView` draws one form per connection state: no
+ring while off; dashed `ember` while connecting or reconnecting; solid `rim`
+while connected; solid `failure` when failed. Connecting is dashed `ember` on
+both the glyph ring and the rail node (`MembershipBusView`'s `.connecting`),
+so one row never shows connecting in two colours. The connecting pulse only
+grows the ring outward from its resting radius, by at most
+`PopoverColumnGrid.haloRingBreathGrowth` (2 pt), so it never crosses the
+glyph; under Reduce Motion the dashed ring stays, still.
+`DeviceRowConnectionStateTests` pins the forms, dashes and colours.
 
-Whenever a glyph ring is drawn, a status dot sits in its gap: a hollow ring
-in the glyph ring's own colour, except playing, which is a `gold` disc with a
-1 pt `ember` edge. So connecting is hollow `ember`, failed is hollow
-`failure`, connected but not playing is hollow `rim`, and a speaker with no
-ring has no dot and no cut-out. The ring hands the dot its stroke colour
-(`HaloRingView.cutoutDot`), so a ring colour change moves both. Main Audio
-follows the same rule, its hollow dot wearing the ring's spine tone.
+Main Audio's ring sets `joinsSpine`, so where a device row's connected ring
+is `rim`, Main Audio's is `Tokens.Color.spineTone`, the rail's own tone. It
+also has a resting form a device row never shows: while the rail is live but
+no member has connected yet, the ring draws solid in `spineTone` instead of
+hiding, so the rail's curve never lands on nothing. `RingRailToneLockTests`
+pins the ring to the rail's ink in every accent setting and both appearances,
+and a device row's connected ring to `rim`.
 
-The connected glyph ring and the hollow dot are `rim`, the same grey as an
-unarmed volume slider's fill. That match is deliberate: the iPhone app draws
-a speaker's volume as its ring, so the ring and the slider are one colour on
-both platforms. Main Audio's connected ring keeps the rail's spine tone
-instead.
+The connected glyph ring is `rim`, the same grey as an unarmed volume
+slider's fill. The iPhone app draws a speaker's volume as its ring, so the
+ring and the slider are one colour on both platforms.
+
+The status dot (`RouteArmedDotView`) shows only while a ring is drawn. The
+ring hands the dot its stroke colour on every repaint
+(`HaloRingView.cutoutDot` sets the dot's `ringColor`, `nil` when no ring is
+drawn), so a ring colour change moves both, and a speaker with no ring has
+no dot and no cut-out. Not playing, the dot is a hollow 1.5 pt ring
+(`routeArmedDotRingWidth`) in the ring's own colour: hollow `ember` while
+connecting, hollow `failure` when failed, hollow `rim` when connected but
+silent or muted, and hollow `spineTone` on Main Audio. Playing, it is a
+`gold` disc with a 1 pt `ember` edge (`routeArmedDotEdgeWidth`), because
+light `gold` alone measures 1.77:1 against the ground. A device row's dot
+turns gold only while the row is route-armed AND its speaker is connected
+(`DeviceRowView.apply`): a per-app feed arms a row whose speaker is still
+connecting, and that dot stays hollow `ember`. Main Audio's dot is gold
+while the spine is live, a connected member playing unmuted or the Mac
+playing on its own. Subtle dark `ember` is `#7D6B44` so the hollow 1.5 pt
+connecting dot clears 3:1 on `raised`, the brighter ground (3.47:1 on
+`panel`); it stays 1.94:1 dimmer than Subtle dark `gold`. `RouteArmedSignalTests`
+pins the armed rules, the gold disc, and a hollow dot in each ring's colour.
 
 Row glyphs are sized and optically centred per symbol by one table,
 `DeviceIcon.rowGlyphFits`, drawn by `DeviceIcon.rowGlyph` (derivation in
-`dev/notes/ring-glyph-optical-table-2026-10-03.md`). The dot sits on a 10.5 pt cut-out in the popover ground (`panel`,
-plus the row's 12 % gold wash when the row paints one), so it reads as a
-badge over the glyph. Main Audio's ring now strokes at 1.6 pt against the
-rail's 2 pt `busLineWidth` where the two meet.
+`dev/notes/ring-glyph-optical-table-2026-10-03.md`). The 8 pt dot
+(`routeArmedDotDiameter`) sits on a 10.5 pt cut-out
+(`routeArmedDotCutoutDiameter`) in the popover ground, `panel`, so it reads
+as a badge over the glyph. On a device row the cut-out also takes the row's
+current wash (`rowWash`): the 12 % `gold` wash while route-armed
+(`rowLiveWashAlpha`), the 10 % `engagedChrome` hover wash
+(`rowHoverWashAlpha`), and the row's one-shot `gold` attention flash
+(`flash(_:)`), so it matches the ground under it in every row state. Main
+Audio paints no row wash, so its cut-out is plain `panel`. Main Audio's ring
+strokes at 1.6 pt against the rail's 2 pt `busLineWidth` where the two meet.
 
 ### Group Row and Membership Rail (Groups, signature component)
 `GroupIdentityGlowView` sits behind every group seat, active or not, drawn
@@ -768,45 +796,63 @@ names and glyphs, `label` on the live one, pinned by
 ring and an unarmed fader fill read as one tone — a Mac-only instrument with
 no iOS equivalent (the phone has no membership rail).
 
-The Mixer rail is one colour from Main Audio's ring to its terminus (owner's
-ruling, 2026-10-03): `gold`, or `railDormant` along its whole length when the
-rail is dormant. The line has no idle tone (owner's ruling, 2026-10-04): the
-system is always connected to at least Main Audio, so an idle rail never
-occurs, and an `ember` line read as a connecting state that wasn't one. Hook,
-segments, end dots, collapsed-header dots and Main Audio's ring where the line
-joins it all resolve through `Tokens.Color.spineTone`. A segment feeding a
-connecting or failed speaker keeps the line's colour; the speaker's state shows in
-its node (dashed `ember` while connecting, `failure` red when failed) and its
-glyph ring, never in the line. Main Audio's status dot still turns gold only
-while the spine is live.
+The rail is one colour from its start to its end. `RailPlan`'s
+`originColor` (`BusRailOverlayView.swift`) picks it once for the whole line:
+`railDormant` when the rail is dormant; otherwise the host's
+`unarmedLineTone` when one is set and Main Audio's spine is not armed;
+otherwise `Tokens.Color.spineTone`, which is `gold`. Hook, segments, end
+dots, collapsed-header dots, and Main Audio's ring where the line joins it
+all take that one colour. The Mixer never sets `unarmedLineTone`, so its
+line is `gold` in every state but dormant: the system always has Main Audio
+connected, so an idle Mixer rail never occurs. The Groups editor sets
+`unarmedLineTone` to `ember` (`GroupEditorViewController`), and its spine is
+armed only while the group is the active one, so the editor's line is `ember`
+for an inactive group, matching its saved member discs, and `gold` for the
+active group (`MembershipRailTests`). A segment feeding a connecting or
+failed speaker keeps the line's colour; the speaker's state shows in its
+node (dashed `ember` while connecting, `failure` red when failed) and its
+glyph ring, never in the line (`BusRailCollapseResolveTests`). `armed` also
+gates the connect pulse.
 
-#### Membership rail extent (owner's ruling, 2026-10-04)
-Where the Mixer rail starts and stops. No rule existed before this; the
-situations behind it are in `dev/notes/rail-extent-variants-2026-10-04.md`.
-"Reached" means a listed speaker that is selected AND connected or
-connecting, visible or folded away.
+#### Membership rail extent
+Where the Mixer rail starts and stops. The situations behind it are drawn in
+`dev/notes/rail-extent-variants-2026-10-04.md`. "Reached" means a listed
+speaker whose node is a member, connecting, or the origin
+(`BusRailOverlayView.railReaches`), visible or folded away.
 
 1. The rail starts at the Main Audio ring. When the System Audio card is
-   collapsed it starts at a dot centred on that header's line.
-2. The rail exists only while some listed speaker is reached. Failed and
-   unselected speakers never count.
-3. Every collapsed header (a section, or the whole Output Speakers card)
-   that hides a reached speaker gets a dot centred on the header's own text
-   line, the vertical centre of the header row, never its bottom edge.
+   collapsed and the ring has left the card's shrinking visible band, it
+   starts at a dot centred on that header's line instead, so the start rides
+   up with the collapse rather than jumping.
+2. The rail exists only while some listed speaker is reached
+   (`RailPlan.isLive`). Failed and unselected speakers never count.
+3. Every collapsed header that hides a reached speaker gets a dot centred on
+   the header's own text line (`headerDotY`), the vertical centre of the
+   header row. That covers each collapsed subsection whose header is fully
+   in view, and the Output Speakers card while a collapse is actually hiding
+   a reached speaker, never just because its collapse flag is set. While the
+   body is still closing, the dot sits the same distance above the
+   shrinking floor that the header's centre sits above the band's top, so it
+   lands on the centre as the body shuts.
 4. The rail ends at the lowest visible reached node or the lowest dotted
    header, whichever is lower, passing straight through any dotted header
-   above that.
+   above that. A node counts as visible while its centre is inside the
+   list's visible band, so a reached row the top edge cuts through still
+   ends the rail.
 5. A collapsed header hiding no reached speaker gets nothing on the rail.
 6. Above the end, unselected speakers keep the detour arc. Below the end,
    rows show their own circle and no line.
-7. The rail never draws outside the scrolling list's visible bounds, top or
-   bottom. When the member or dotted header that would end the rail is
-   scrolled below the visible edge, the rail ends on the lowest fully visible
-   row on the spine: its own circle is the end, with no extra dot.
-8. Dormant changes only the colour (gold to `railDormant`), never where the
-   rail starts or stops. The line is gold in every other state.
+7. The rail never draws outside the scrolling list's visible band, top or
+   bottom. When a reached speaker or a dotted header lies below the visible
+   bottom edge and the card is not collapsing, the rail ends on the lowest
+   fully visible row on the spine: its own circle is the end, with no extra
+   dot. When reached speakers exist but none is visible and no dot shows,
+   the line runs to the edge they lie past, with no dot.
+8. Dormant changes only the colour (to `railDormant`), never where the rail
+   starts or stops.
 
-`RailPlan.resolve` (`BusRailOverlayView.swift`) is the one implementation;
+`RailPlan.resolve` (`BusRailOverlayView.swift`) is the one implementation and
+carries no state, so re-expanding restores the identical rail.
 `BusRailCollapseResolveTests` and `PopoverDeviceVisibilityTests` pin it. The
 Groups editor's rail passes no sections, so only rules 2, 6 and 8 reach it.
 

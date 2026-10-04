@@ -184,6 +184,23 @@ import AudioutCore
         #expect(row.armedDotView.test_cutoutWashColor == nil, "no wash on the row, none in the cut-out")
     }
 
+    /// Pointer-over a connected row that is not playing paints the neutral
+    /// hover wash; the cut-out wears that same wash, not a plain panel disc.
+    @Test func hoveringANonPlayingRowWashesTheDotsCutOut() {
+        let row = DeviceRowView(device: makeDevice(isMuted: true))
+        row.apply(makeDevice(isMuted: true), selected: true)
+        #expect(!row.test_isShowingLiveWash, "a muted row does not play")
+        row.test_setHovered(true)
+        let hover = Tokens.Color.engagedChrome.withAlphaComponent(PopoverColumnGrid.rowHoverWashAlpha)
+        assertSameHue(row.armedDotView.test_cutoutWashColor, hover, "the cut-out matches the hovered row")
+        let cutAlpha = row.armedDotView.test_cutoutWashColor?.usingColorSpace(.sRGB)?.alphaComponent ?? -1
+        let hoverAlpha = hover.usingColorSpace(.sRGB)?.alphaComponent ?? -2
+        #expect(abs(cutAlpha - hoverAlpha) < 0.01, "at the hover wash's strength")
+
+        row.test_setHovered(false)
+        #expect(row.armedDotView.test_cutoutWashColor == nil, "the pointer left, the cut-out is plain again")
+    }
+
     @Test func mutedConnectedDotIsAHollowRingInTheConnectedRingColour() {
         let row = DeviceRowView(device: makeDevice(isMuted: true))
         row.apply(makeDevice(isMuted: true), selected: true)

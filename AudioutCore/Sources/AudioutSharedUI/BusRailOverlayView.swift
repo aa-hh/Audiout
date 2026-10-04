@@ -69,9 +69,11 @@ public final class BusRailOverlayView: NSView {
     public weak var originSection: RailSectionProviding?
     /// The collapsed device SUBSECTIONS that each hide a speaker the rail
     /// reaches. The host decides which (`PopoverController.updateRailRows`) —
-    /// a collapsed subsection hiding none is never listed — and keeps them
-    /// alive. Each gets a dot on its header's text line; the rail passes
-    /// through every one and ends at the lowest end it has.
+    /// a collapsed subsection hiding none is never listed. Held strongly, so a
+    /// host-built adapter needs no other owner (the old `weak deviceSection`
+    /// dropped one the instant nothing else retained it). Each gets a dot on
+    /// its header's text line; the rail passes through every one and ends at
+    /// the lowest end it has.
     public var foldedSections: [RailSectionProviding] = []
     /// The dormant-divergent condition (spec §4.7): the checked set genuinely
     /// diverges from the active group target, so nothing on this rail is
@@ -79,6 +81,11 @@ public final class BusRailOverlayView: NSView {
     /// WHOLE signal path draws in one quiet tone rather than a per-row patchwork.
     /// Node fills stay per-row; this is the wire's tone alone.
     public var dormant = false
+    /// The line's tone while the hook is NOT armed; `nil` keeps it `spineTone`
+    /// in every state. The Mixer leaves it `nil` (its line is always gold);
+    /// the Groups editor sets `ember`, so an inactive group's rail matches its
+    /// ember member discs (owner's ruling, 2026-10-04).
+    public var unarmedLineTone: NSColor?
     /// The section holding the whole device LIST (the "Output Speakers" card).
     /// Its clip is the scrolling viewport: the rail never draws above or below
     /// it. When the card itself collapses over a reached speaker, its header
@@ -261,6 +268,7 @@ public final class BusRailOverlayView: NSView {
             listHeaderDotY: deviceListSection.flatMap(headerDotY(of:)),
             folds: foldedSections.compactMap(fold(of:)),
             dormant: dormant,
+            unarmedLineTone: unarmedLineTone,
             stops: stops)
         return input
     }
@@ -349,9 +357,12 @@ public final class BusRailOverlayView: NSView {
     /// through an accent-dial change. A DORMANT rail (spec §4.7) takes one quiet
     /// tone for its whole path — hook, every segment and the terminus dot —
     /// rather than the gold/grey patchwork per-stop tones drew on a wire that is
-    /// feeding nothing.
+    /// feeding nothing. An unarmed hook takes the host's `unarmedLineTone` when
+    /// it set one (the Groups editor); the Mixer sets none, so stays gold.
     private static func originColor(for plan: RailPlan) -> NSColor {
-        plan.dormant ? Tokens.Color.railDormant : Tokens.Color.spineTone
+        if plan.dormant { return Tokens.Color.railDormant }
+        if !plan.armed, let tone = plan.unarmedLineTone { return tone }
+        return Tokens.Color.spineTone
     }
 
     /// The wire's stroked runs in path order, origin → terminus. Warm Signal
@@ -400,8 +411,8 @@ public final class BusRailOverlayView: NSView {
             let stopR = MembershipBusView.nodeRadius(for: stop.node)
             // Segment tone (owner's ruling, 2026-10-03): the wire is ONE line
             // from the hook to the terminus, so every segment wears
-            // `originColor` — the spine tone (always gold), or `railDormant`
-            // when the whole rail is dormant.
+            // `originColor` — the spine tone, the host's unarmed tone, or
+            // `railDormant` when the whole rail is dormant.
             // A segment feeding a connecting or failed node does NOT step: the
             // speaker's state lives in its node and its glyph ring, never in
             // the line. Reusing the hook's own resolution rather than naming a
@@ -943,9 +954,11 @@ public struct RailPlan: Equatable {
     /// The dormant-divergent condition (spec §4.7), resolved ONCE for the whole
     /// rail so the wire takes one tone end to end instead of a per-stop patchwork.
     public var dormant: Bool
-    /// Whether the Main Audio spine is armed. Not a colour: the line is always
-    /// gold. It gates only the connect pulse (`playConnectPulse`).
+    /// Whether the Main Audio spine is armed. It gates the connect pulse
+    /// (`playConnectPulse`), and picks `unarmedLineTone` when the host set one.
     public var armed: Bool
+    /// The host's line tone while unarmed; `nil` (the Mixer) keeps it gold.
+    public var unarmedLineTone: NSColor?
 
     /// The rail's end when it lands on a dotted header; `nil` when it ends on a
     /// node or at the list's edge.
@@ -993,6 +1006,8 @@ public struct RailPlan: Equatable {
         public var folds: [Fold]
         /// The host-resolved dormant-divergent condition (spec §4.7).
         public var dormant: Bool
+        /// ``BusRailOverlayView/unarmedLineTone``.
+        public var unarmedLineTone: NSColor?
         /// Every device stop, unclipped, sorted top-to-bottom (highest y first).
         public var stops: [Stop]
 
@@ -1001,7 +1016,7 @@ public struct RailPlan: Equatable {
                     originClipBand: ClosedRange<CGFloat>?, originHeaderY: CGFloat?,
                     deviceSectionCollapsed: Bool, listBand: ClosedRange<CGFloat>?,
                     listHeaderDotY: CGFloat? = nil, folds: [Fold] = [],
-                    dormant: Bool = false, stops: [Stop]) {
+                    dormant: Bool = false, unarmedLineTone: NSColor? = nil, stops: [Stop]) {
             self.armed = armed
             self.ringCenterY = ringCenterY
             self.ringCenterX = ringCenterX
@@ -1015,6 +1030,7 @@ public struct RailPlan: Equatable {
             self.listHeaderDotY = listHeaderDotY
             self.folds = folds
             self.dormant = dormant
+            self.unarmedLineTone = unarmedLineTone
             self.stops = stops
         }
     }
@@ -1115,12 +1131,14 @@ public struct RailPlan: Equatable {
         // Which nodes may end the rail. Scrolled (not collapsing) with a reached
         // speaker below the edge: the lowest fully visible on-spine row, since
         // the line runs on past the edge. Otherwise the lowest visible reached
-        // node.
+        // node — visible meaning its centre is in the band, as every entry of
+        // `stops` already is, so a reached row the top edge cuts through still
+        // gets its line.
         let scrolledPast = reachedBelowEdge && !cardCollapsing
         let endStop = stops.lastIndex { stop in
-            fullyVisible(stop) && (scrolledPast
-                ? BusRailOverlayView.onSpine(stop.node)
-                : BusRailOverlayView.railReaches(stop.node))
+            scrolledPast
+                ? fullyVisible(stop) && BusRailOverlayView.onSpine(stop.node)
+                : BusRailOverlayView.railReaches(stop.node)
         }
 
         var signalTerminusIndex: Int?
@@ -1141,7 +1159,8 @@ public struct RailPlan: Equatable {
         return RailPlan(origin: origin, railTopY: railTopY, stops: stops,
                         signalTerminusIndex: signalTerminusIndex, lineEndY: lineEndY,
                         headerDotYs: dots.map { min($0, railTopY) },
-                        dormant: input.dormant, armed: input.armed)
+                        dormant: input.dormant, armed: input.armed,
+                        unarmedLineTone: input.unarmedLineTone)
     }
 }
 
@@ -1169,7 +1188,7 @@ public protocol RailNodeProviding: AnyObject {
 public protocol RailHookProviding: AnyObject {
     /// The ring's centre-Y and centre-X (both converted into `view`'s
     /// coordinates) plus its radius, and whether the spine is armed (gates the
-    /// connect pulse; the line itself is always gold). `nil` if the anchor
+    /// connect pulse, and the line's `unarmedLineTone` when the host set one). `nil` if the anchor
     /// can't be resolved (no window / not laid out). The overlay curves the rail from the gutter column up to this
     /// ring's left edge (`ringCenterX - ringRadius`, `centerY`).
     func railHookAnchor(in view: NSView) -> (centerY: CGFloat, ringCenterX: CGFloat, ringRadius: CGFloat, armed: Bool)?

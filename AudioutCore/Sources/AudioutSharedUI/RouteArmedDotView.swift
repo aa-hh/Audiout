@@ -27,10 +27,10 @@ import AppKit
 /// ground (`Tokens.Color.panel`, what `ControlPanelBackingView` fills the
 /// popover with) that cuts it out of the glyph, so the full
 /// 8 pt dot reads as a badge over the glyph, not part of it. A device row
-/// paints a 12 % gold wash behind itself while armed; with
-/// `rowWashed` set, the cut-out carries the same wash so it matches the
-/// ground it sits on instead of showing as a lighter (light) or black (dark)
-/// ring.
+/// paints a wash behind itself (gold while armed, neutral on hover) and a
+/// one-shot gold attention flash; the cut-out carries the same wash
+/// (`rowWash`) and the same flash (`flash(_:)`), so it matches the ground it
+/// sits on instead of showing as a lighter (light) or black (dark) ring.
 ///
 /// **Bloom transition** (spec §6 first-light) — a colour transition and
 /// nothing more: on a model transition INTO armed while on screen, the fill
@@ -51,6 +51,7 @@ public final class RouteArmedDotView: NSView {
 
     private let cutoutLayer = CAShapeLayer()
     private let cutoutWashLayer = CAShapeLayer()
+    private let cutoutFlashLayer = CAShapeLayer()
     private let dotLayer = CAShapeLayer()
     private static let bloomFillKey = "routeArmedDot.bloomFill"
 
@@ -67,6 +68,8 @@ public final class RouteArmedDotView: NSView {
         isHidden = true             // no ring has handed over a colour yet
         layer?.addSublayer(cutoutLayer)
         layer?.addSublayer(cutoutWashLayer)
+        cutoutFlashLayer.opacity = 0
+        layer?.addSublayer(cutoutFlashLayer)
         layer?.addSublayer(dotLayer)
         // Mid-session accessibility-display changes reconcile LIVE (same
         // pattern as `HaloRingView`): Increase Contrast re-stamps the token
@@ -109,12 +112,18 @@ public final class RouteArmedDotView: NSView {
 
     public required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-    /// Whether the host row is painting its gold live wash behind the dot
-    /// right now. Pushed by `DeviceRowView` from the row's own armed flag,
-    /// which can be on while the dot is not (a connecting speaker with a
-    /// per-app feed); Main Audio's row never washes.
-    public var rowWashed = false {
+    /// The wash the host row is painting behind the dot right now, `nil` for
+    /// none. Pushed by `DeviceRowView` from the same value its `draw(_:)`
+    /// fills with; Main Audio's row never washes.
+    public var rowWash: NSColor? {
         didSet { updateLayerAppearance() }
+    }
+
+    /// Play the host row's attention flash over the cut-out too, with the
+    /// row's own animation, so the cut-out stays the ground it sits on. The
+    /// model opacity stays 0, so nothing is left behind.
+    func flash(_ pulse: CAAnimation) {
+        cutoutFlashLayer.add(pulse, forKey: "routeArmedDot.rowFlash")
     }
 
     /// The stroke token of the glyph ring this dot sits in, pushed by
@@ -166,9 +175,8 @@ public final class RouteArmedDotView: NSView {
     private func updateLayerAppearance() {
         effectiveAppearance.performAsCurrentDrawingAppearance {
             cutoutLayer.fillColor = Tokens.Color.panel.cgColor
-            cutoutWashLayer.fillColor = rowWashed
-                ? Tokens.Color.gold.withAlphaComponent(PopoverColumnGrid.rowLiveWashAlpha).cgColor
-                : nil
+            cutoutWashLayer.fillColor = rowWash?.cgColor
+            cutoutFlashLayer.fillColor = Tokens.Color.gold.cgColor
             if isArmed {
                 dotLayer.fillColor = Tokens.Color.gold.cgColor
                 dotLayer.strokeColor = Tokens.Color.ember.cgColor
@@ -189,9 +197,11 @@ public final class RouteArmedDotView: NSView {
         super.layout()
         cutoutLayer.frame = bounds
         cutoutWashLayer.frame = bounds
+        cutoutFlashLayer.frame = bounds
         dotLayer.frame = bounds
         cutoutLayer.path = Self.circle(PopoverColumnGrid.routeArmedDotCutoutDiameter, in: bounds)
         cutoutWashLayer.path = cutoutLayer.path
+        cutoutFlashLayer.path = cutoutLayer.path
         // The stroke sits INSIDE the 8 pt outline, so the dot's outer edge is
         // the full `routeArmedDotDiameter` in both states.
         dotLayer.path = Self.circle(PopoverColumnGrid.routeArmedDotDiameter - strokeWidth, in: bounds)
@@ -243,7 +253,7 @@ public final class RouteArmedDotView: NSView {
         return NSColor(cgColor: cg)
     }
 
-    /// The cut-out's wash fill — the row's gold wash, or `nil` (plain panel).
+    /// The cut-out's wash fill — the row's wash, or `nil` (plain panel).
     public var test_cutoutWashColor: NSColor? {
         guard let cg = cutoutWashLayer.fillColor else { return nil }
         return NSColor(cgColor: cg)

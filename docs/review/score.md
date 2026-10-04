@@ -9,6 +9,19 @@ c. 50: Moderately confident. The agent was able to verify this is a real issue, 
 d. 75: Highly confident. The agent double checked the issue, and verified that it is very likely it is a real issue that will be hit in practice. The existing approach in the PR is insufficient. The issue is very important and will directly impact the code's functionality, or it is an issue that is directly mentioned in the relevant CLAUDE.md.
 e. 100: Absolutely certain. The agent double checked the issue, and confirmed that it is definitely a real issue, that will happen frequently in practice. The evidence directly confirms this.
 
+Verify before you score. Open the cited file at the cited line with Read (paths in the diff are relative to the worktree you are running in) and read the functions the finding names, including ones the diff does not show. A line being absent from the diff is not evidence against the finding; "the lines are not visible in the diff" is never a reason for a low score. When the finding quotes an `AGENTS.md` rule, find that sentence in the `AGENTS.md` text below.
+
 False positives score low: pre-existing issues; something that looks like a bug but is not; pedantic nitpicks a senior engineer wouldn't call out; anything a compiler, typechecker or linter would catch; general code-quality complaints not required by an `AGENTS.md`; issues silenced in the code on purpose; changes that are clearly intentional; real issues on lines the branch did not modify.
 
-Output exactly one line: `SCORE: <integer 0-100>`. Nothing else.
+Findings at 75 or above are kept; below 75 they are dropped.
+
+## Examples
+
+Four findings from the 2026-10-03 reviews, scored.
+
+- Finding: `BTSyncedSink.realignToDevicePulls` applies a forward seek with no `seekSafetyMarginMs` clamp, while `applyTrimDelta` clamps every forward seek 100 ms short of the write pointer. Evidence: both functions read; the unclamped call is `delayLine.shift(byFrames:)`; a stall can drain the ring and drop out. SCORE: 85
+- Finding: `reanchorIfTrimClamped()` rebuilds the sink on a committed trim. Evidence: `AudioutCore/Sources/AudioutCore/AGENTS.md` says "A Bluetooth trim is a ring seek and must never clear session state"; the function calls `requestRebuild(cause: "trim_clamped")`. SCORE: 80
+- Finding: doc links ``btOnlyReferenceMs(latencies:uids:)`` no longer resolve after the signature became `latencies:trims:uids:`. Evidence: real, no runtime effect; a nit a senior engineer might fix in passing. SCORE: 50
+- Finding: a folder `AGENTS.md` is over its word budget and hard-codes a 20 ms threshold that lives in a constant. Evidence: the budget rule exists but is general; the number is one clause. SCORE: 40
+
+Output: one sentence of evidence (what you opened and what you saw), then on its own line `SCORE: <integer 0-100>`. Nothing after the score line.

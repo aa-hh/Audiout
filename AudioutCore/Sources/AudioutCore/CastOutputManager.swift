@@ -569,8 +569,8 @@ final class CastOutputManager: CastOutputControlling, @unchecked Sendable {
         /// sum is what reaches the feed.
         var roomDelayMs = 0
         var userOffsetMs = 0
-        /// The one producer ``ring`` accepts. A `.perApp` session holds no room
-        /// delay and no trim: it is not part of the room's timing.
+        /// The one producer ``ring`` accepts. A `.perApp` session stores its room
+        /// delay and trim but applies neither: it is not part of the room's timing.
         var source: CastFeedSource
         var playDeadline: DispatchWorkItem?
         var statusPoll: DispatchSourceTimer?

@@ -507,6 +507,8 @@ import Testing
     /// session, resets the ring, or leaves a room delay on an app-owned
     /// receiver, because handing a receiver between the whole system and one
     /// app would then relaunch it or hold the app's audio back by the room.
+    /// Also red if `setCastRoomDelayMs` stops storing a value pushed while
+    /// app-owned, or the hand-back to the whole system stops applying it.
     @Test func handingAReceiverBetweenProducersKeepsTheSessionAndDropsTheRoomDelay() throws {
         guard #available(macOS 15, *) else { return }
         let (fake, endpoint) = try startFake()
@@ -528,10 +530,17 @@ import Testing
         manager.setCastRoomDelayMs(3000, forDeviceID: "dev1")
         _ = manager.castFeedStats(forDevice: "dev1")          // flushes the queue
         #expect(ring.test_hasDelayLine == false, "an app-owned receiver took the room's delay")
+        manager.setCastUserOffsetMs(-500, forDeviceID: "dev1")
+        _ = manager.castFeedStats(forDevice: "dev1")
+        #expect(ring.test_hasDelayLine == false, "an app-owned receiver took a negative user offset")
+        manager.setCastUserOffsetMs(500, forDeviceID: "dev1")
+        _ = manager.castFeedStats(forDevice: "dev1")
+        #expect(ring.test_hasDelayLine == false, "an app-owned receiver took a positive user offset")
+        manager.setCastUserOffsetMs(0, forDeviceID: "dev1")
 
-        // Claimed by the whole system: the delay lands, and the next block adopts it.
+        // Claimed by the whole system: the delay pushed while app-owned lands
+        // with no second push, and the next block adopts it.
         manager.setDevices([record(endpoint)], sources: ["dev1": .wholeSystem])
-        manager.setCastRoomDelayMs(3000, forDeviceID: "dev1")
         _ = manager.castFeedStats(forDevice: "dev1")
         #expect(ring.test_hasDelayLine)
         manager.feed.write(pcm: block, pts: pts)

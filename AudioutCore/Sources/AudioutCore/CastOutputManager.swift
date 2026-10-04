@@ -620,11 +620,7 @@ final class CastOutputManager: CastOutputControlling, @unchecked Sendable {
                 guard session.source != source else { continue }
                 session.source = source
                 session.ring.setSource(source)
-                if source == .perApp {
-                    session.roomDelayMs = 0
-                    session.userOffsetMs = 0
-                    self.applyFeedDelay(session)
-                }
+                self.applyFeedDelay(session)
                 Telemetry.log(.cast, "cast_feed_source", [
                     "device": record.id,
                     "source": source == .perApp ? "per_app" : "whole_system",
@@ -678,12 +674,12 @@ final class CastOutputManager: CastOutputControlling, @unchecked Sendable {
 
     /// Both delay setters take the ``setLevel(_:forDevice:)`` posture: an id
     /// with no session is ignored, and the value lives on the session, so it
-    /// survives a drop-and-reconnect without being re-pushed. A `.perApp`
-    /// session drops both: it is not part of the room's timing.
+    /// survives a drop-and-reconnect, and a spell owned by one app, without
+    /// being re-pushed. A `.perApp` session stores both but applies neither:
+    /// it is not part of the room's timing.
     func setCastRoomDelayMs(_ ms: Int, forDeviceID id: String) {
         queue.async { [weak self] in
             guard let self, let session = self.sessions[id] else { return }
-            guard session.source != .perApp else { return }
             session.roomDelayMs = ms
             self.applyFeedDelay(session)
         }
@@ -692,7 +688,6 @@ final class CastOutputManager: CastOutputControlling, @unchecked Sendable {
     func setCastUserOffsetMs(_ ms: Int, forDeviceID id: String) {
         queue.async { [weak self] in
             guard let self, let session = self.sessions[id] else { return }
-            guard session.source != .perApp else { return }
             session.userOffsetMs = ms
             self.applyFeedDelay(session)
         }
@@ -705,7 +700,7 @@ final class CastOutputManager: CastOutputControlling, @unchecked Sendable {
     /// `D_cast + trim`, clamped at the floor: this leg can only be lengthened,
     /// because the frames a shorter delay would need have not been captured yet.
     private func applyFeedDelay(_ session: Session) {
-        let applied = max(0, session.roomDelayMs + session.userOffsetMs)
+        let applied = session.source == .perApp ? 0 : max(0, session.roomDelayMs + session.userOffsetMs)
         session.ring.setDelayMs(applied)
         Telemetry.log(.cast, "cast_feed_delay", [
             "device": session.record.id,

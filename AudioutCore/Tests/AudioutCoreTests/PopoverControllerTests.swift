@@ -3900,11 +3900,11 @@ import AudioutProtocol
     @Test func cardTitlesTintGoldWhileTheirRowsSound() async throws {
         let (popover, _, backend) = try await makePopover()
         // The fixture opens with only the Mac selected, so Main Out is
-        // local-only armed — sounding, even though no remote ring is lit and
-        // the row's armed dot stays dark.
+        // local-only armed — sounding, and the row's dot is lit gold with it,
+        // even though no remote speaker is connected.
         assertSameRGBA(popover.test_cardHeaderTitleColor(title: "System Audio"),
                        Tokens.Color.goldText, "the Mac alone is still the mix")
-        #expect(popover.test_mainOutRow.test_routeArmed == false)
+        #expect(popover.test_mainOutRow.test_routeArmed == true)
         for title in ["Output Speakers", "App Routing"] {
             assertSameRGBA(popover.test_cardHeaderTitleColor(title: title),
                            Tokens.Color.label2, "\(title) starts silent")

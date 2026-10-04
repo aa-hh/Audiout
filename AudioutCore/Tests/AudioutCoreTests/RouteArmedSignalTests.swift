@@ -201,6 +201,8 @@ import AudioutCore
         #expect(row.armedDotView.test_cutoutWashColor == nil, "the pointer left, the cut-out is plain again")
     }
 
+    /// Turns red if a connected speaker that is in the mix but not playing
+    /// drops its ring (and so its dot), or strokes the hollow dot in any token but `rim`.
     @Test func mutedConnectedDotIsAHollowRingInTheConnectedRingColour() {
         let row = DeviceRowView(device: makeDevice(isMuted: true))
         row.apply(makeDevice(isMuted: true), selected: true)
@@ -461,6 +463,18 @@ import AudioutCore
         #expect(!(row.test_routeArmed), "master mute darkens the Main Out dot")
         #expect(row.test_isMutePillEngaged, "the master mute pill engages")
         #expect(row.test_accessibilityValue == "muted")
+    }
+
+    /// Turns red if the spoken "armed" or `test_routeArmed` stops reading the
+    /// dot's own state and goes back to the fader's connected-only flag.
+    @Test func mainOutLocalOnlyPlaybackLightsTheDotAndSpeaksArmed() {
+        let row = MainOutRowView()
+        row.setRailLive(true)
+        row.apply(options: mainOutOptions(), current: .selectedDevices, master: 60,
+                  isMuted: false, connectionState: .off, localOnlyArmed: true)
+        #expect(row.test_routeArmed, "the Mac playing on its own lights the dot")
+        assertSameHue(row.test_dotFillColor, Tokens.Color.gold, "lit means gold")
+        #expect(row.test_accessibilityValue == "armed", "VoiceOver says what the dot shows")
     }
 
     @Test func mainOutDarkWhenNotConnected() {

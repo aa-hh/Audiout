@@ -704,7 +704,7 @@ public final class MainOutRowView: NSView {
         // dot — the spoken equivalents shipped with the drawing.
         var valueParts: [String] = []
         if isMasterMuted { valueParts.append("muted") }
-        if faderCell.isRouteArmed { valueParts.append("armed") }
+        if isSpineLive { valueParts.append("armed") }
         setAccessibilityValue(valueParts.joined(separator: ", "))
         slider.setAccessibilityRole(.slider)
         slider.setAccessibilityLabel("Main Audio master volume")
@@ -776,14 +776,15 @@ public final class MainOutRowView: NSView {
     /// drawn ink, not a re-derived token.
     public var test_ringStrokeColor: NSColor? { haloRingView.test_strokeColor }
 
-    /// Whether the Main Out route-armed corner dot is LIT (spec §3.3: active
-    /// target has a connected member ∧ master unmuted) — the same flag the
-    /// master fader's gold fill reads.
-    public var test_routeArmed: Bool { faderCell.isRouteArmed }
+    /// Whether the Main Out route-armed corner dot is LIT: a connected member
+    /// with the master unmuted, or the Mac playing on its own
+    /// (`localOnlyArmed`). Read off the dot itself.
+    public var test_routeArmed: Bool { armedDotView.test_isLit }
 
     /// Whether the master fader would render its ENGAGED (gold-gradient) fill
-    /// — the cell's own gate, so the test can't drift from the pixels. Must
-    /// track `test_routeArmed` (one armed truth, two instruments).
+    /// — the cell's own gate, so the test can't drift from the pixels. Tracks
+    /// `test_routeArmed` except while the Mac plays on its own, which lights
+    /// the dot but not the fader.
     public var test_isFaderEngaged: Bool { faderCell.test_isEngagedFill }
 
     /// Whether the master slider is wearing the Warm fader skin (structural).

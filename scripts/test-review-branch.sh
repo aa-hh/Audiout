@@ -64,6 +64,9 @@ cp "$SRC_ROOT/.gitignore" .gitignore
 rm -rf docs/review && cp -R "$SRC_ROOT/docs/review" docs/review
 git add -A .gitignore docs/review scripts/review-branch.sh
 git commit -q --no-verify --allow-empty -m "test setup" || { echo "setup commit failed" >&2; exit 1; }
+# origin is the clone itself, so the script's `git fetch origin` makes
+# origin/main follow this clone's main.
+git remote set-url origin "$REPO"
 
 COMMON="$(cd "$(git rev-parse --git-common-dir)" && pwd)"
 REVIEW_LOG="$COMMON/audiout-branch-reviews.log"
@@ -132,7 +135,7 @@ start_review() {
 
 pending_path() {
   local key
-  key=$(git diff -U0 --no-renames "$(git merge-base main HEAD)" HEAD | git patch-id --stable | cut -d' ' -f1)
+  key=$(git diff -U0 --no-renames "$(git merge-base origin/main HEAD)" HEAD | git patch-id --stable | cut -d' ' -f1)
   echo "$REPO/.review-pending/${key:-empty}"
 }
 # printed <text>: how many pass lines the script printed containing <text>.
@@ -154,7 +157,7 @@ review
 grep -q '^Review level: skip' "$out" && ok "a: level skip" || { fail "a: not skip"; show; }
 [ "$rc" = 0 ] && [ ! -s "$PRINTED" ] && ok "a: no pass handed over" || fail "a: rc $rc, passes: $(cat "$PRINTED")"
 if [ "$(statuses)" = 1 ] && [ "$(comments)" = 1 ] \
-   && head -n 1 "$GH_COMMENT" | grep -qx "<!-- audiout-review round=1 head=$(git rev-parse HEAD) level=skip high=0 -->" \
+   && head -n 1 "$GH_COMMENT" | grep -qx "<!-- audiout-review round=1 head=$(git rev-parse HEAD) level=skip high=0 changes=none -->" \
    && [ "$(status_call)" = "api repos/aa-hh/Audiout/statuses/$(git rev-parse HEAD) -f context=review -f state=success -f description=skip" ]; then
   ok "a: success status 'skip' on HEAD, comment carries the round marker"
 else fail "a: gh calls: $(cat "$GH_CALLS")"; fi
@@ -183,7 +186,7 @@ grep -q 'Then run: bash scripts/review-branch.sh --continue' "$out" && ok "c: ha
 [ ! -e "$(pending_path)" ] && ok "c: pending directory removed" || fail "c: pending directory left"
 [ "$rc" = 0 ] && ok "c: exit 0" || fail "c: exit $rc"
 grep -q '^pr comment 42 --body-file ' "$GH_CALLS" && [ "$(comments)" = 1 ] \
-  && head -n 1 "$GH_COMMENT" | grep -qx "<!-- audiout-review round=1 head=$(git rev-parse HEAD) level=cheap high=0 -->" \
+  && head -n 1 "$GH_COMMENT" | grep -qx "<!-- audiout-review round=1 head=$(git rev-parse HEAD) level=cheap high=0 changes=[0-9a-f]* -->" \
   && sed -n 2p "$GH_COMMENT" | grep -qx '## Review: cheap, round 1' && grep -qx 'Review: no findings' "$GH_COMMENT" \
   && ok "c: one comment on PR 42: marker, heading, then 'Review: no findings'" || { fail "c: comment wrong"; cat "$GH_CALLS" "$GH_COMMENT" >&2; }
 status_call | grep -q -- '-f state=success -f description=cheap, round 1, 0 HIGH$' \
@@ -372,6 +375,40 @@ bash scripts/review-branch.sh --continue > "$out" 2>&1; rc=$?
 [ "$rc" = 0 ] && grep -q 'already reviewed in round 1' "$out" && [ "$(comments)" = 0 ] \
   && status_call | grep -q -- '-f state=success -f description=cheap, round 1, 0 HIGH$' \
   && ok "m: running again re-posts round 1's status" || { fail "m: retry exit $rc"; show; }
+
+# (n) A docs-only commit after a review uses no round: same own changes, so
+# round 1's status is re-posted on the new HEAD with no new comment.
+# Catches: a push that leaves the branch's own lines alone consuming a round.
+reset_answers
+make_branch same-changes "$analytics" 120
+review
+first=$(git rev-parse HEAD)
+reset_answers
+echo "notes" >> docs/review-test-notes.md; git add docs/review-test-notes.md; git commit -q --no-verify -m "docs only"
+review
+[ "$rc" = 0 ] && [ "$(comments)" = 0 ] && [ ! -s "$PRINTED" ] && grep -q 'already reviewed in round 1' "$out" \
+  && status_call | grep -q "statuses/$(git rev-parse HEAD) .*-f state=success -f description=cheap, round 1, 0 HIGH$" \
+  && [ "$(git rev-parse HEAD)" != "$first" ] \
+  && ok "n: docs-only commit → round 1 status re-posted on the new HEAD, no round used" || { fail "n: exit $rc"; show; }
+reset_answers
+echo "// real change" >> "$analytics"; git commit -q --no-verify -am "code"
+start_review
+grep -q ', round 2$' "$out" && ok "n: the next code change is round 2" || { fail "n: not round 2"; show; }
+
+# (n2) Merging main into the branch, with main's change elsewhere, uses no round.
+# Catches: the old receipt's "merging main in keeps the review" rule lost.
+reset_answers
+make_branch main-merged "$analytics" 120
+review
+git checkout -q main
+echo "// main moves" >> "$license"; git commit -q --no-verify -am "main moves"
+git checkout -q main-merged
+git merge -q --no-verify --no-edit main > /dev/null 2>&1 || fail "n2: merging main did not merge cleanly"
+reset_answers
+review
+[ "$rc" = 0 ] && [ "$(comments)" = 0 ] && [ ! -s "$PRINTED" ] \
+  && status_call | grep -q "statuses/$(git rev-parse HEAD) .*-f state=success -f description=cheap, round 1, 0 HIGH$" \
+  && ok "n2: main merged in → round 1 status re-posted on the merge commit, no round used" || { fail "n2: exit $rc"; show; }
 
 # (v) A commit between the handover and --continue means no review.
 # Catches: replies about older code recorded against the new code.

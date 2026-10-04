@@ -3,7 +3,8 @@
 # comment and as the `review` commit status on HEAD, one of the two checks
 # main's merge queue requires.
 #
-# Picks a level from the committed diff against main: skip (no model), cheap
+# Picks a level from the committed diff against origin/main (fetched first;
+# local main is never used, since nothing updates it any more): skip (no model), cheap
 # (one sonnet pass) or full (four parallel reviewers, then one haiku
 # confidence score per finding, findings under 80 dropped). Prints the
 # findings and appends one line to <git-common-dir>/audiout-branch-reviews.log.
@@ -12,8 +13,12 @@
 # At most two rounds per PR. The round state lives on the PR, not in local
 # files, so a fresh checkout works the same: every comment this script posts
 # starts with a marker line
-#   <!-- audiout-review round=<n> head=<sha> level=<level> high=<k> -->
-# and the next run reads the PR's comments, highest round wins. Round 2
+#   <!-- audiout-review round=<n> head=<sha> level=<level> high=<k> changes=<id> -->
+# and the next run reads the PR's comments, highest round wins. <id> is the
+# patch id of the branch's own non-Markdown changes against origin/main
+# (`none` when there are none). A push that leaves it unchanged, such as
+# merging main in or a docs-only commit, uses no round: the run re-posts that
+# round's status on the new HEAD and exits with its result. Round 2
 # reviews only what was committed since round 1's head (the fix for its HIGH
 # findings) and never skips; a third run refuses. No PR yet means round 1
 # against main. Only a HIGH finding fails the status; MEDIUM and LOW are
@@ -119,7 +124,11 @@ cd "$top" || exit 2
 common=$(cd "$(git rev-parse --git-common-dir)" && pwd) || exit 2
 
 GH=${GH:-gh}
+git fetch -q origin || echo "Warning: git fetch origin failed; origin/main may be out of date." >&2
 tip=$(git rev-parse --verify HEAD) || exit 2
+main_base=$(git merge-base origin/main "$tip") || { echo "No merge base with origin/main." >&2; exit 2; }
+changes=$(git diff "$main_base" "$tip" -- . ':!*.md' | git patch-id --stable | cut -d' ' -f1)
+[ -n "$changes" ] || changes=none
 pending_root="$PWD/.review-pending"
 review_log="$common/audiout-branch-reviews.log"
 
@@ -132,23 +141,27 @@ post_status() {
 }
 
 # The last round posted on this branch's PR: prev_round, prev_head,
-# prev_level, prev_high (prev_round 0 when none or no PR).
+# prev_level, prev_high, prev_changes (prev_round 0 when none or no PR).
 pr=$($GH pr view --json number -q .number 2>/dev/null)
-prev_round=0; prev_head=""; prev_level=""; prev_high=0
+prev_round=0; prev_head=""; prev_level=""; prev_high=0; prev_changes=""
 if [ -n "$pr" ]; then
   bodies=$($GH api --paginate "repos/aa-hh/Audiout/issues/$pr/comments" --jq '.[].body') \
     || { echo "Could not read the comments on PR #$pr, so the review round is unknown." >&2; exit 2; }
-  last=$(printf '%s\n' "$bodies" \
-    | sed -n 's/^<!-- audiout-review round=\([0-9][0-9]*\) head=\([0-9a-f][0-9a-f]*\) level=\([a-z-]*\) high=\([0-9][0-9]*\) -->.*/\1 \2 \3 \4/p' \
-    | sort -n | tail -n 1)
-  [ -n "$last" ] && read -r prev_round prev_head prev_level prev_high <<< "$last"
+  last=$(printf '%s\n' "$bodies" | grep '^<!-- audiout-review round=[0-9]' \
+    | sed 's/^<!-- audiout-review round=\([0-9]*\)/\1	&/' | sort -n | tail -n 1 | cut -f2-)
+  marker_field() { printf '%s\n' "$last" | sed -n "s/.* $1=\([^ ]*\).*/\1/p"; }
+  if [ -n "$last" ]; then
+    prev_round=$(marker_field round); prev_head=$(marker_field head)
+    prev_level=$(marker_field level); prev_high=$(marker_field high)
+    prev_changes=$(marker_field changes)
+  fi
 fi
 round=$((prev_round + 1))
-# This head already has a posted round (its status post may have failed, or
-# the run is a repeat): post that round's status again rather than review the
-# same commit twice.
-if [ -n "$prev_head" ] && [ "$prev_head" = "$tip" ]; then
-  echo "This commit was already reviewed in round $prev_round (PR #$pr)."
+# Same head, or the same own changes as the last round (main merged in, a
+# docs-only commit, a failed status post): post that round's status on this
+# HEAD again rather than review again.
+if [ -n "$prev_head" ] && { [ "$prev_head" = "$tip" ] || [ "$prev_changes" = "$changes" ]; }; then
+  echo "This branch's changes were already reviewed in round $prev_round (PR #$pr)."
   if [ "$prev_level" = skip ]; then d=skip; else d="$prev_level, round $prev_round, $prev_high HIGH"; fi
   if [ "$prev_high" -gt 0 ]; then post_status failure "$d"; exit 1; fi
   post_status success "$d"
@@ -163,7 +176,7 @@ if [ "$round" = 2 ]; then
   git rev-parse --verify -q "$base^{commit}" > /dev/null \
     || { echo "Round 1's head $base (from PR #$pr) is not in this clone; git fetch, then run again." >&2; exit 2; }
 else
-  base=$(git merge-base main "$tip") || { echo "No merge base with main." >&2; exit 2; }
+  base=$main_base
 fi
 # Keys the pending review to the reviewed changes, so a commit between the
 # handover and --continue is caught.
@@ -227,7 +240,7 @@ post_result() {
   local st=success desc
   [ "$1" -gt 0 ] && st=failure
   if [ "$level" = skip ]; then desc=skip; else desc="$level, round $round, $1 HIGH"; fi
-  { echo "<!-- audiout-review round=$round head=$tip level=$level high=$1 -->"; cat "$2"; } > "$2.post" || exit 2
+  { echo "<!-- audiout-review round=$round head=$tip level=$level high=$1 changes=$changes -->"; cat "$2"; } > "$2.post" || exit 2
   if [ -n "$pr" ]; then
     $GH pr comment "$pr" --body-file "$2.post" > /dev/null \
       || { echo "Review result not posted: gh pr comment failed for PR #$pr." >&2; exit 2; }

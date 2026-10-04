@@ -339,8 +339,10 @@ warn-only 3/5) are documented in the hook file itself:
   fix, commit, push and run it again, and round 2 reviews only the fix. A
   third run refuses. The round is read from a marker line at the top of the
   script's own PR comments, not from local files, so a fresh checkout counts
-  the same. A push after the review clears the status, since a status
-  belongs to one commit. `bash scripts/test-review-branch.sh` self-tests it.
+  the same. A push clears the status, since a status belongs to one commit;
+  run the script again, and if the branch's own non-Markdown lines are
+  unchanged (the marker's `changes=` patch id, e.g. after merging main in) it
+  re-posts the last round's status on the new HEAD without using a round. `bash scripts/test-review-branch.sh` self-tests it.
 
 ## UI / Design Conventions (all targets)
 

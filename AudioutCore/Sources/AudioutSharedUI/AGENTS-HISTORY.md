@@ -104,3 +104,4 @@ SharedUI also hosts shared WINDOW CHROME, not only row views: `ControlPanelWindo
 | `VolumeHUDPanel` | Transient non-interactive HUD replacing the system volume readout with a segmented level bar (not a percentage); holds, fades out. |
 
 - The rail line's colour never carries a connecting state, but its length does: it stops `busConnectingNodeRailGap` short of a connecting node, which is a plain gold circle; the glyph ring and status dot are dashed `rim`.
+- 2026-10-04: the 12 % gold wash behind a sounding `DeviceRowView` and `AppRowView` is gone. The rail node, the fader fill, the readout ink and the System pill already say sounding; rows now paint only the neutral hover wash, and app rows the neutral selection wash. `PopoverColumnGrid.rowLiveWashAlpha` stays for the Groups overview's live card and Setup's demo row.

@@ -99,7 +99,7 @@ components:
     typography: "{typography.body}"
     rounded: "999pt (rounded bezel)"
   device-row:
-    backgroundColor: "none at rest; {colors.gold} at 12% wash while route-armed, or the neutral hover wash"
+    backgroundColor: "none at rest; the neutral hover wash on pointer-over"
     textColor: "system labelColor (live) / {colors.labelCool} (idle) for the name; {colors.goldText} (live) / {colors.emberText} (idle) for the readout"
     rounded: "{rounded.row}"
     height: "{spacing.bodyRowHeight}"
@@ -306,8 +306,7 @@ this hue with the two band sliders left as holes. It is not a general "on"
 green, not a success tone, and not available to a second control that happens
 to be engaged; `DeviceRowMutedStateTests` fails if a second call site appears
 in `Sources/`. The door wore `goldText` until 2026-09-04, and gold means
-"audio is flowing here" everywhere else — including the live wash the same row
-draws behind the door — so one hue was carrying two ideas. Green was
+"audio is flowing here" everywhere else, so one hue was carrying two ideas. Green was
 unspoken for, and stays 84–86° of hue off `muted`, the control 6 pt to its
 right, and 9° off `permissionUsageStats`, which is fenced to onboarding and
 never shares a screen with a device row.
@@ -335,12 +334,11 @@ smallest step available; `.regular` draws the same 1.5 pt stroke but grows the
 square to 18 pt, buying nothing for the size.
 
 Measured against every ground a device row can put behind the door — `canvas`,
-`panel`, `raised`, the gold live wash, the hover wash — dark `#41B07A` runs
-7.27 / 6.60 / 5.79 / 5.23 / 5.23 and light `#007835` runs 5.39 on the flat
-grounds, 4.72 live, 4.45 hovered, against a 3:1 non-text floor. The values they
+`panel`, `raised`, the hover wash — dark `#41B07A` runs
+7.27 / 6.60 / 5.79 / 5.23 and light `#007835` runs 5.39 on the flat
+grounds, 4.45 hovered, against a 3:1 non-text floor. The values they
 replaced (`#227950` / `#1C6543`, 2026-09-05) were measured on `panel` alone:
-the dark half sat at 2.66:1 on the live wash — the ground a shaped speaker
-spends most of its time on — and the light half, at chroma 0.091, read as
+the dark half sat at 2.66:1 on the gold wash rows painted behind a sounding speaker at the time, and the light half, at chroma 0.091, read as
 near-black rather than as green.
 
 **The Instrument Ground Rule (Mac-only).** The alignment wizard's stage
@@ -616,7 +614,7 @@ the name label takes the system label color while sounding and
 `Tokens.Color.labelCool` while idle; the readout takes `goldText` while
 route-armed, `emberText` while idle-but-adjustable, and drops to
 `labelCool2` when the slider is disabled or the row is in the muted-
-unconnected treatment (`DeviceRowView.swift`). Warm ink and a gold wash mean
+unconnected treatment (`DeviceRowView.swift`). Warm ink means
 `isRouteArmed`; cool means silent. Instruments are flat — no `CALayer`
 blooms.
 
@@ -687,9 +685,9 @@ under the 3:1 non-text floor in every appearance — which is why the
 `engagedChrome`-at-0.22 pill it replaces, holding an unslashed speaker, read as
 a faint grey pill with an ordinary speaker in it. Opaque, the pill clears that
 floor on every ground the row can put behind it: 6.48:1 on `panel`, 7.14 on
-`canvas`, 5.69 on `raised`, 5.14 on the gold live wash and 5.15 on the hover
-wash in dark; 6.17 / 6.17 / 6.17 / 5.41 / 5.10 in light; 8.90 / 9.80 / 7.81 /
-6.90 / 7.07 dark Increase Contrast; 8.22 / 8.22 / 8.22 / 7.03 / 6.80 light
+`canvas`, 5.69 on `raised`, and 5.15 on the hover
+wash in dark; 6.17 / 6.17 / 6.17 / 5.10 in light; 8.90 / 9.80 / 7.81 /
+7.07 dark Increase Contrast; 8.22 / 8.22 / 8.22 / 6.80 light
 Increase Contrast.
 
 The glyph's ink is `panel`, the row's own ground, so the mark reads as punched
@@ -790,9 +788,8 @@ Row glyphs are sized and optically centred per symbol by one table,
 (`routeArmedDotDiameter`) sits on a 10.5 pt cut-out
 (`routeArmedDotCutoutDiameter`) in the popover ground, `panel`, so it reads
 as a badge over the glyph. On a device row the cut-out also takes the row's
-current wash (`rowWash`): the 12 % `gold` wash while route-armed
-(`rowLiveWashAlpha`), the 10 % `engagedChrome` hover wash
-(`rowHoverWashAlpha`), and the row's one-shot `gold` attention flash
+current wash (`rowWash`): the 10 % `engagedChrome` hover wash
+(`rowHoverWashAlpha`) and the row's one-shot `gold` attention flash
 (`flash(_:)`), so it matches the ground under it in every row state. Main
 Audio paints no row wash, so its cut-out is plain `panel`. Main Audio's ring
 strokes at 1.6 pt against the rail's 2 pt `busLineWidth` where the two meet.

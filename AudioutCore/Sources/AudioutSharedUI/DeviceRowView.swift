@@ -2688,11 +2688,9 @@ public final class DeviceRowView: NSView {
             nameLabel.textColor = rowTextColor
         } else {
             // Menu-less host (popover card / mixer window). A rounded pill behind
-            // the row: a gold 12 % wash while the row is SOUNDING (D1 —
-            // `isRouteArmed`, the iPhone's "gold at 12% behind a live row"),
-            // else a fainter neutral hover wash on pointer-over. Both are driven
-            // off state that ``apply`` resets, so a row that stops sounding
-            // returns to a fully clean background (T-U8 bug fix).
+            // the row: only a neutral hover wash on pointer-over, driven off
+            // state that ``apply`` resets, so a row never keeps a stale
+            // background (T-U8 bug fix).
             let rect = bounds.insetBy(dx: PopoverColumnGrid.selectionHighlightInsetX,
                                       dy: PopoverColumnGrid.selectionHighlightInsetY)
             let path = NSBezierPath(roundedRect: rect,
@@ -2706,12 +2704,12 @@ public final class DeviceRowView: NSView {
         super.draw(dirtyRect)
     }
 
-    /// The wash `draw(_:)` paints behind a menu-less row right now, `nil` for
-    /// none. The status dot's cut-out wears the same value (`isHovered` and
-    /// `isRouteArmed` push it), so it never shows as a ring on the wash.
+    /// The wash `draw(_:)` paints behind a menu-less row: the neutral hover
+    /// wash on pointer-over, else `nil`. The status dot's cut-out wears the
+    /// same value (`isHovered` and `isRouteArmed` push it), so it never shows
+    /// as a ring on the wash.
     private var rowWash: NSColor? {
         guard !isInMenu else { return nil }
-        if isRouteArmed { return Tokens.Color.gold.withAlphaComponent(PopoverColumnGrid.rowLiveWashAlpha) }
         if isHovered { return Tokens.Color.engagedChrome.withAlphaComponent(PopoverColumnGrid.rowHoverWashAlpha) }
         return nil
     }
@@ -2781,9 +2779,8 @@ public final class DeviceRowView: NSView {
     /// Simulate a host asking this row to flash (A4 test hook).
     public func test_flashRow() { flashRow() }
 
-    /// Whether the row is currently painting its live gold wash. It follows the
-    /// armed predicate (D1) — a row that stops sounding MUST report `false`.
-    public var test_isShowingLiveWash: Bool { !isInMenu && isRouteArmed }
+    /// The wash `draw(_:)` paints behind the row right now, `nil` for none.
+    public var test_rowWash: NSColor? { rowWash }
     /// Whether a transient hover wash is currently active (must reset on deselect).
     public var test_isHovered: Bool { isHovered }
 

@@ -1,0 +1,48 @@
+name: Tests
+
+# The full suite on a GitHub-hosted Mac, once per PR and once more in the
+# merge queue. No path filter on purpose: a required check that does not run
+# leaves the PR stuck at "expected". Free on this public repo, same as the
+# licence gate's macOS job.
+
+on:
+  pull_request:
+  merge_group:
+  workflow_dispatch:
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    runs-on: macos-26
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      # Same list as license-gate.yml's build-invariants job; the packages are
+      # named in AudioutCore/Package.swift.
+      - name: Install build dependencies
+        run: brew install libevent libsodium libgcrypt libgpg-error libplist ffmpeg
+
+      - name: Restore SwiftPM build caches
+        uses: actions/cache@v4
+        with:
+          path: |
+            AudioutCore/.build
+            AirPlayEngine/.build
+          key: swiftpm-${{ runner.os }}-${{ hashFiles('AudioutCore/Package.resolved', 'AudioutCore/Package.swift', 'AirPlayEngine/Package.swift') }}
+          restore-keys: |
+            swiftpm-${{ runner.os }}-
+
+      # The runner has neither of the owner's Macs: AUDIOUT_TEST_PREFER=local
+      # and no audiout.remoteHost mean no mule probe, AUDIOUT_TEST_NO_CACHE=1
+      # skips the /tmp pass cache, and the permit pool is empty on a fresh
+      # runner so the first permit is free.
+      - name: AudioutCore suite
+        run: AUDIOUT_BUILD_LOCAL=1 AUDIOUT_TEST_PREFER=local AUDIOUT_TEST_NO_CACHE=1 bash scripts/run-tests.sh
+
+      # Guard 6's suite, through the same runner (it takes the package name).
+      - name: AirPlayEngine suite
+        run: AUDIOUT_TEST_PACKAGE=AirPlayEngine AUDIOUT_BUILD_LOCAL=1 AUDIOUT_TEST_PREFER=local AUDIOUT_TEST_NO_CACHE=1 bash scripts/run-tests.sh

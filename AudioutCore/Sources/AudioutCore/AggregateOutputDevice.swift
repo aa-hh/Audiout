@@ -297,4 +297,3 @@ struct CoreAudioAggregateDeviceControl: AggregateDeviceControlling {
         return value
     }
 }
-// CI incremental-build probe for PR #255 run C; reverted in the next commit.

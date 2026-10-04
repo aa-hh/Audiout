@@ -354,15 +354,17 @@ import Testing
         let bufferB = s16BufferAtFrame(value: 10, count: 500, atFrame: 44_600)
         let doneA = DispatchSemaphore(value: 0)
         let doneB = DispatchSemaphore(value: 0)
-        DispatchQueue.global().async {
+        // Own threads, not the shared dispatch pool: in a parallel run the
+        // pool can stay starved for longer than the 10 s waits below.
+        Thread {
             m.handleBuffer(bundleID: "a", buffer: bufferA)
             doneA.signal()
-        }
+        }.start()
         #expect(entered.wait(timeout: .now() + 10) == .success, "the first emission never reached the handler")
-        DispatchQueue.global().async {
+        Thread {
             m.handleBuffer(bundleID: "b", buffer: bufferB)
             doneB.signal()
-        }
+        }.start()
         // 200 ms is a hang-stop, not a speed claim: it gives "b" the time to
         // overtake "a" if the lock lets it.
         Thread.sleep(forTimeInterval: 0.2)

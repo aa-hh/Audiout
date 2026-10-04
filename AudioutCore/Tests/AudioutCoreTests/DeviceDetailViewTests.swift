@@ -240,6 +240,36 @@ import AppKit
         #expect(detail.test_eqMarkLastAnnouncement == "Equalizer flat")
     }
 
+    // Moving `refreshEQTitleRow(userCaused: true)` back after `onSetEQ` in either EQ delegate method turns it red.
+    @Test func aCommittedFlipAnimatesAndSpeaksWhenTheAppRepaintsThePageAtOnce() {
+        let base = makeDevice(id: "office")
+        let detail = makeLoadedPane(device: base)
+        detail.test_eqMarkReduceMotionOverride = false
+        // The real app repaints this page inside a committed `onSetEQ`. The
+        // icon's last-effect hook resets on every refresh, so it is read as
+        // the repaint arrives, before the repaint's own refresh clears it.
+        var effectsAtRepaint: [EqualizerMarkView.FlipEffect] = []
+        detail.onSetEQ = { [unowned detail] eq, _, committed in
+            guard committed else { return }
+            effectsAtRepaint.append(detail.test_eqMarkLastFlipEffect)
+            var echoed = base
+            echoed.eq = eq
+            detail.refresh(device: echoed)
+        }
+        let editor = detail.test_eqEditor
+        editor.test_pointerGestureOverride = false
+        editor.test_committedGestureOverride = true
+
+        editor.test_dragBass(to: 3)
+        #expect(detail.test_eqMarkIsEngaged)
+        #expect(detail.test_eqMarkLastAnnouncement == "Equalizer shaped")
+
+        detail.test_fireResetClick()
+        #expect(!detail.test_eqMarkIsEngaged)
+        #expect(detail.test_eqMarkLastAnnouncement == "Equalizer flat")
+        #expect(effectsAtRepaint == [.crossFadeAndScale, .crossFadeOnly])
+    }
+
     private let isolation = TestIsolation(owner: "DeviceDetailViewTests")
 
     private func tempDirectory() -> URL {

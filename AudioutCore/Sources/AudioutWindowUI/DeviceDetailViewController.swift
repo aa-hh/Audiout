@@ -1374,8 +1374,11 @@ extension DeviceDetailViewController: EQEditorViewDelegate {
         // Set BEFORE forwarding: `onSetEQ` can fan a snapshot straight back,
         // and until it matches this exact value the snapshot must not win.
         eqEdits[id] = (eq, committed)
-        onSetEQ?(eq, id, committed)
+        // Flip the icon BEFORE forwarding too: on a commit the app repaints
+        // this page synchronously, and that repaint's silent flip would leave
+        // this one nothing to animate or announce.
         refreshEQTitleRow(userCaused: true)
+        onSetEQ?(eq, id, committed)
         if committed { eqMarkView.gestureEnded() }
         if committed { Analytics.capture("eq:adjusted", ["target": "device"]) }
     }
@@ -1385,8 +1388,8 @@ extension DeviceDetailViewController: EQEditorViewDelegate {
         // One committed action, not ten: the editor has already put its own
         // controls back to flat.
         eqEdits[id] = (.flat, true)
-        onSetEQ?(.flat, id, true)
         refreshEQTitleRow(userCaused: true)
+        onSetEQ?(.flat, id, true)
         eqMarkView.gestureEnded()
         Analytics.capture("eq:reset", ["target": "device"])
     }

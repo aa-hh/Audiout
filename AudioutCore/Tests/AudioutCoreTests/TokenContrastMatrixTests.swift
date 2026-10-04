@@ -162,19 +162,18 @@ extension SerializedSharedState {
         let textGrounds: [(String, NSColor)] = [("canvas", canvas), ("panel", panel),
                                                 ("raised", raised), ("well", well)]
 
-        // The two WASHED grounds a device row's mute pill also sits on, built
-        // the way `DeviceRowView.draw(_:)` builds them: the row's `panel`
-        // ground under the gold live wash, or under the neutral hover wash.
-        // Neither is a token, so neither can be named as one — they are
-        // composited per appearance and handed in as opaque grounds.
+        // The one WASHED ground a device row's mute pill also sits on, built
+        // the way `DeviceRowView.draw(_:)` builds it: the row's `panel`
+        // ground under the neutral hover wash. It is not a token, so it
+        // cannot be named as one — it is composited per appearance and
+        // handed in as an opaque ground.
         func rowWashGrounds(_ appearanceName: NSAppearance.Name) -> [(String, NSColor)] {
             let ground = resolved(panel, appearanceName: appearanceName)
             func wash(_ token: NSColor, _ alpha: CGFloat) -> NSColor {
                 composited(resolved(token, appearanceName: appearanceName)
                             .withAlphaComponent(alpha), over: ground)
             }
-            return [("live wash", wash(Tokens.Color.gold, PopoverColumnGrid.rowLiveWashAlpha)),
-                    ("hover wash", wash(Tokens.Color.engagedChrome, PopoverColumnGrid.rowHoverWashAlpha))]
+            return [("hover wash", wash(Tokens.Color.engagedChrome, PopoverColumnGrid.rowHoverWashAlpha))]
         }
 
         let entries: [ContrastEntry] = [

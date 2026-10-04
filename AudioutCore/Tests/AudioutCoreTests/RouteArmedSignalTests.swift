@@ -187,27 +187,22 @@ import AudioutCore
         #expect(!off.test_dotIsShown, "no ring, no dot")
     }
 
-    /// The dot's cut-out carries the row's gold wash whenever the row paints
-    /// it, including a connecting speaker with a per-app feed, whose dot stays
-    /// hollow `rim` while the row washes gold; pointer-over a connected row
-    /// that is not playing paints the neutral hover wash, and the cut-out
-    /// wears that same wash, not a plain panel disc.
-    /// Turns red if the cut-out stops taking `rowWash`, or the connecting dot turns gold.
-    @Test func dotsCutOutTakesTheLiveWashOnAConnectingFeedAndTheHoverWashOnAnIdleRow() {
+    /// A sounding row paints no wash, so the dot's cut-out stays plain, even
+    /// on a connecting speaker with a per-app feed, whose dot stays hollow
+    /// `rim`; pointer-over a connected row that is not playing paints the
+    /// neutral hover wash, and the cut-out wears that same wash, not a plain
+    /// panel disc.
+    /// Turns red if a sounding row paints a wash again, or the cut-out stops taking the hover wash.
+    @Test func dotsCutOutIsPlainOnASoundingRowAndTakesTheHoverWashOnAnIdleRow() {
         let row = DeviceRowView(device: makeDevice(connectionState: .connecting))
         row.apply(makeDevice(connectionState: .connecting), selected: true, liveAppNames: ["Spotify"])
-        #expect(row.test_isShowingLiveWash, "a per-app feed washes the row")
+        #expect(row.test_rowWash == nil, "a sounding row paints no wash")
         #expect(!row.armedDotView.test_isLit, "a connecting speaker's dot is not gold")
-        assertSameHue(row.armedDotView.test_cutoutWashColor,
-                      Tokens.Color.gold.withAlphaComponent(PopoverColumnGrid.rowLiveWashAlpha),
-                      "the cut-out matches the washed row")
-
-        row.apply(makeDevice(connectionState: .connecting), selected: true, liveAppNames: [])
         #expect(row.armedDotView.test_cutoutWashColor == nil, "no wash on the row, none in the cut-out")
 
         let hoverRow = DeviceRowView(device: makeDevice(isMuted: true))
         hoverRow.apply(makeDevice(isMuted: true), selected: true)
-        #expect(!hoverRow.test_isShowingLiveWash, "a muted row does not play")
+        #expect(hoverRow.test_rowWash == nil, "a muted row at rest paints no wash")
         hoverRow.test_setHovered(true)
         let hover = Tokens.Color.engagedChrome.withAlphaComponent(PopoverColumnGrid.rowHoverWashAlpha)
         assertSameHue(hoverRow.armedDotView.test_cutoutWashColor, hover, "the cut-out matches the hovered row")

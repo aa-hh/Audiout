@@ -20,6 +20,11 @@ concurrency:
   group: tests-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+  pull-requests: read
+  statuses: write
+
 env:
   DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
   HOMEBREW_NO_AUTO_UPDATE: "1"
@@ -144,3 +149,43 @@ jobs:
         run: |
           echo "suite=${{ needs.suite.result }} airplayengine=${{ needs.airplayengine.result }}"
           [ "${{ needs.suite.result }}" = success ] && [ "${{ needs.airplayengine.result }}" = success ]
+
+  # The ruleset requires a `review` commit status, which the session posts on
+  # the PR head. A merge-queue run checks its own temporary merge commit,
+  # where that status never appears, so copy the PR head's verdict onto it.
+  review-relay:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'merge_group'
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      QUEUE_REF: ${{ github.ref }}
+      QUEUE_SHA: ${{ github.sha }}
+    steps:
+      - name: Relay the review status from the PR head
+        run: |
+          set -eu
+          echo "queue ref: $QUEUE_REF"
+          echo "queue sha: $QUEUE_SHA"
+          # refs/heads/gh-readonly-queue/main/pr-255-<sha>
+          pr=$(printf '%s\n' "$QUEUE_REF" | sed -n 's|.*/pr-\([0-9][0-9]*\)-[0-9a-f]*$|\1|p')
+          echo "pr: ${pr:-<none>}"
+          if [ -z "$pr" ]; then
+            echo "could not read a PR number from $QUEUE_REF" >&2
+            exit 1
+          fi
+          head=$(gh api "repos/$REPO/pulls/$pr" -q .head.sha)
+          short=$(printf '%s' "$head" | cut -c1-8)
+          echo "pr head: $head"
+          state=$(gh api "repos/$REPO/commits/$head/status" -q '[.statuses[] | select(.context == "review")][0].state // ""')
+          echo "review state on pr head: ${state:-<none>}"
+          if [ "$state" = success ]; then
+            gh api "repos/$REPO/statuses/$QUEUE_SHA" -f context=review -f state=success \
+              -f description="relayed from PR head $short" >/dev/null
+            echo "posted review=success on $QUEUE_SHA"
+          else
+            gh api "repos/$REPO/statuses/$QUEUE_SHA" -f context=review -f state=failure \
+              -f description="no passing review on PR head $short" >/dev/null
+            echo "posted review=failure on $QUEUE_SHA" >&2
+            exit 1
+          fi

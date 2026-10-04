@@ -8392,6 +8392,45 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         #expect(failure.cause == .unknown)
     }
 
+    /// Turns red if `isRouteTargetReachableLocked` stops reading a speaker that waits for a password as unreachable (the app stays out of the system mix, bound to a refused session), or if `droppedByOwnFailureLocked` stops keeping that `.failed` through the unbind (the `.off` re-arms the route and it binds again).
+    @Test func perAppRouteToAPasswordSpeakerAwaitingAPasswordRejoinsTheSystemMix() async {
+        let perApp = workingPerAppCapture(bundleIDs: ["com.foo"])
+        let (backend, engine, discovery) = makeBackend(injectedPerAppCapture: perApp)
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:C9", name: "Locked Speaker", access: .password)
+        await startAndDiscover(backend, engine, discovery, device)
+        engine.addFailures = [device.outputID.rawValue]
+        engine.addFailureError = .passwordRequired
+        engine.onMirroredAddFailure = { _ in
+            await pollUntil { self.failureCause(backend, device.id) == .authRequired }
+        }
+        let binds = { engine.streamAddCalls.filter { $0.0 == device.outputID }.count }
+
+        backend.updateAppRoutes([route("com.foo", name: "Foo", toDevice: device.id)])
+        await pollUntil { binds() == 1 }
+        await pollUntil {
+            perApp.state(for: "com.foo") == .idle
+                && backend.stateQueue.sync { backend.streamBindings[device.id] == nil }
+        }
+        try? await Task.sleep(nanoseconds: 300_000_000)
+
+        #expect(perApp.state(for: "com.foo") == .idle,
+                "its per-app tap stops, so the app rejoins the whole-system mix while the speaker waits for a password")
+        #expect(backend.devices.first { $0.id == device.id }?.isAvailable == true,
+                "the row stays available so it offers Enter password")
+        #expect(failureCause(backend, device.id) == .authRequired,
+                "the unbind keeps the password demand instead of writing .off")
+        #expect(binds() == 1, "no second bind into the same refusal")
+
+        engine.addFailures = []
+        backend.stateQueue.sync { backend.setConnectionState(.connected, for: device.id) }
+        await pollUntil { binds() == 2 }
+        await pollUntil { perApp.state(for: "com.foo") != .idle }
+        #expect(binds() == 2, "the .connected edge re-binds the route")
+        #expect(perApp.state(for: "com.foo") != .idle,
+                "the replayed route restarts the app's own tap")
+    }
+
     /// Turns red if a per-app bind refused for want of a clock stops reporting `.failed(.timingUnavailable)`, or if removing that route leaves the row `.failed` instead of `.off`.
     @Test func perAppOnlyBindRefusedByThePTPGateReportsTimingUnavailable() async {
         let activator = ScriptedPTPHelperActivator(

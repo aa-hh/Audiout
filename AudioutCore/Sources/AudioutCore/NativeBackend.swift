@@ -2713,6 +2713,8 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             self.fedDescriptors.removeAll()
             self.expectStaleFailure.removeAll()
             self.failureEchoSeen.removeAll()
+            self.passwordResubmitted.removeAll()
+            self.passwordForNextFeed.removeAll()
             self.muted.removeAll()
             self.stashedVolume.removeAll()
             // Per-app routing state (T6): reset so a later start() re-decides from a
@@ -3651,11 +3653,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                         // it rather than retry it.
                         let rejectedStored = (error as? AirPlayEngineError) == .passwordRequired
                             && self.fedDescriptors[id]?.password != nil
-                        // Deletes are exempt from the off-`stateQueue` Keychain rule (AGENTS-HISTORY.md,
-                        // 2026-10-04 AirPlay passwords): they target an item this app's own signature
-                        // created, so a Developer ID build raises no access prompt, and running them
-                        // synchronously is what stops a background delete from erasing a password
-                        // the user types right after.
+                        // Synchronous on purpose: see `applyPasswordFailureLocked`.
                         if rejectedStored { self.passwordStore.removePassword(for: id) }
                         self.removeFromAddedLocked(id)
                         self.failedGate.insert(id)

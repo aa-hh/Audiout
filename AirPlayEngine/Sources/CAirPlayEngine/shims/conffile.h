@@ -78,6 +78,14 @@ void conffile_set_ipv6(bool enabled);
 void conffile_set_ports(long int timing_port, long int control_port);
 void conffile_set_libhash(uint64_t h);              /* device id / PTP clock seed */
 
+/* Per-device password, keyed by the name the vendored device callbacks pass to
+ * cfg_gettsec (AirPlay 2: the Bonjour instance name; RAOP: the part after the
+ * first '@'). password == NULL clears it. Both strings are copied, and a
+ * replaced copy is never freed, because device->password and session->password
+ * alias it (airplay.c:4129, :1706, raop.c:4472, shims/outputs.c:143).
+ * A per-device auth_key setter for on-screen code pairing belongs in the same table. */
+void conffile_set_device_password(const char *name, const char *password);
+
 /* --- Unknown-key loud-miss policy (first-light hardening #5) ---
  * cfg_getstr/getint/getbool no longer silently return 0/NULL for a key the
  * shim doesn't serve: the miss is logged at E_WARN and (in debug builds)

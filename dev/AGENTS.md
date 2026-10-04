@@ -24,5 +24,6 @@ It ships nothing.
 - `audiocap/` → standalone Core Audio process-tap capture CLI.
 - `phase-spike/` → throwaway phase-lock measurement harness.
 - `spikes/` → older one-off experiments kept for reference.
+- `listening/` → unattended Bluetooth listening-night driver, scheduler and results summary.
 - `notes/` → research briefs; per-file index in AGENTS-HISTORY.md
 - `README.md` → setup and rationale for the mock, fake-speaker and native backends.

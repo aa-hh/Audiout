@@ -4460,15 +4460,19 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         // Collect .level events on our own stream (the shared `collect` helper
         // filters .level out).
         let stream = backend.makeEventStream()
-        actor LevelBox {
-            private(set) var levels: [Float] = []
-            func append(_ v: Float) { levels.append(v) }
+        // Lock-guarded rather than an actor so `pollUntil`'s synchronous
+        // condition can read it.
+        final class LevelBox: @unchecked Sendable {
+            private let lock = NSLock()
+            private var _levels: [Float] = []
+            var levels: [Float] { lock.withLock { _levels } }
+            func append(_ v: Float) { lock.withLock { _levels.append(v) } }
         }
         let box = LevelBox()
         let collector = Task {
             for await event in stream {
                 if case .level(let id, let rms) = event, id == device.id {
-                    await box.append(rms)
+                    box.append(rms)
                 }
             }
         }
@@ -4487,13 +4491,17 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
             try? await Task.sleep(nanoseconds: burstDuration / UInt64(steps))
         }
 
-        // Give the trailing flush (scheduled up to ~40ms after the last coalesced
-        // leading edge) time to deliver the final value.
-        try? await Task.sleep(nanoseconds: 80_000_000)
+        // Wait for the trailing flush (scheduled ~40ms after the last coalesced
+        // leading edge) to deliver the final value. A fixed 80ms sleep here was
+        // a machine-speed assertion: on the 3-core GitHub runner the flush's
+        // `asyncAfter` landed after it (run 37176319005, `levels.last` 0.925).
+        // The poll's deadline is a hang-stop; the assertion below still fails
+        // if the flush never delivers the sentinel.
+        await pollUntil { box.levels.last == finalValue }
         let windowMs = Double(DispatchTime.now().uptimeNanoseconds - windowStart.uptimeNanoseconds) / 1_000_000
         collector.cancel()
 
-        let levels = await box.levels
+        let levels = box.levels
         // The bound scales with how long the emission window ACTUALLY took: under
         // heavy load every `Task.sleep` above stretches, so genuinely more 40ms
         // cadences elapse and more coalesced events are CORRECT (a fixed bound of

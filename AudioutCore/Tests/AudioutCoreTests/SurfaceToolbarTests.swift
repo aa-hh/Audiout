@@ -415,13 +415,20 @@ private func makeParkedWindow(height: CGFloat = 400) -> NSWindow {
 
     // MARK: The seat's real pixels
 
-    /// Render a seat and hand back its bitmap, or `nil` where this machine
-    /// cannot cache a display (the same offscreen `cacheDisplay` path the
-    /// snapshot tests use).
+    /// Render a seat at 2x and hand back its bitmap, or `nil` where this
+    /// machine cannot allocate one (the same offscreen `cacheDisplay` path the
+    /// snapshot tests use). The probes were authored at the owner's 2x
+    /// density and the runner draws at 1x, where a 1-pt probe straddles the
+    /// highlight's antialiased edge, so the density is fixed here.
     private func render(_ view: NSView,
                         appearanceName: NSAppearance.Name) -> NSBitmapImageRep? {
         view.appearance = NSAppearance(named: appearanceName)
-        guard let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return nil }
+        guard let rep = NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: Int(view.bounds.width) * 2, pixelsHigh: Int(view.bounds.height) * 2,
+            bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+            colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0) else { return nil }
+        rep.size = view.bounds.size
         view.cacheDisplay(in: view.bounds, to: rep)
         return rep
     }
@@ -861,7 +868,7 @@ private func makeParkedWindow(height: CGFloat = 400) -> NSWindow {
     /// The tabs are collapsed here. The selected tab is expanded in the running
     /// strip, but only its RIGHT end moves — the left end cap this measures is
     /// the same arc either way.
-    @Test(.enabled(if: ProcessInfo.processInfo.environment["CI"] == nil, "Quarantined on GitHub runners 2026-10-04: reveal/collapse heights and the toolbar alpha depend on an awake display and the runner's appearance. Issue #258.")) func theSelectedHighlightIsConcentricWithTheCapsulesBorder() {
+    @Test func theSelectedHighlightIsConcentricWithTheCapsulesBorder() {
         let capsule = makeCapsule(engaged: .mixer)
         let radius = SurfaceToolbarSeat.seatCornerRadius(
             forHeight: SurfaceToolbarSeat.size.height)

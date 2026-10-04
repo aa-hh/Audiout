@@ -2493,8 +2493,15 @@ final class WriteSchedulingProbe: @unchecked Sendable {
     private var lastWriteArrivalMs: Double?
     private var windowStartMs: Double?
 
-    init(logInterval: Double = 5.0, ringCapacity: Int = 1024) {
+    /// Same idiom as `WriteCadenceTracker.now`: injectable so a test can drive
+    /// deterministic gaps without a real sleep. Production always takes the
+    /// default, which is the real monotonic clock this class exists to
+    /// measure against — nothing about a live producer's cadence changes.
+    private let nowMs: () -> Double
+
+    init(logInterval: Double = 5.0, ringCapacity: Int = 1024, nowMs: @escaping () -> Double = WriteSchedulingProbe.nowMs) {
         self.logInterval = logInterval
+        self.nowMs = nowMs
         self.wakeRing = MetricRing(capacity: ringCapacity)
         self.workRing = MetricRing(capacity: ringCapacity)
         self.gapRing = MetricRing(capacity: ringCapacity)
@@ -2531,7 +2538,7 @@ final class WriteSchedulingProbe: @unchecked Sendable {
     /// Also drives the rate-limited log check, so logging cadence tracks
     /// real write activity rather than a separate timer.
     func recordWriteArrival() {
-        let now = Self.nowMs()
+        let now = self.nowMs()
         lock.lock()
         defer { lock.unlock() }
         if let last = lastWriteArrivalMs {

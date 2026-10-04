@@ -203,7 +203,7 @@ review
 grep -q '^Review level: full' "$out" && ok "d: level full" || { fail "d: not full"; show; }
 n=$(wc -l < "$PRINTED" | tr -d ' ')
 [ "$n" = 4 ] && ok "d: four reviewer passes" || fail "d: $n passes"
-[ "$(printed 'deep  model=opus  ')" = 1 ] && ok "d: deep reviewer on opus" || fail "d: passes: $(cat "$PRINTED")"
+[ "$(printed 'deep  model=fable  ')" = 1 ] && ok "d: deep reviewer on fable" || fail "d: passes: $(cat "$PRINTED")"
 [ "$(printed 'rules  model=sonnet  ')" = 1 ] && [ "$(printed 'history  model=sonnet  ')" = 1 ] \
   && [ "$(printed 'comments  model=sonnet  ')" = 1 ] && ok "d: three sonnet reviewers" || fail "d: sonnet passes wrong"
 grep -q 'The history pass may only run git log and git blame' "$out" \
@@ -327,7 +327,7 @@ make_branch escalate "$analytics" 120
 review
 grep -q '^ESCALATE:' "$out" && ok "i: escalation printed" || { fail "i: no ESCALATE line"; show; }
 n=$(wc -l < "$PRINTED" | tr -d ' ')
-[ "$n" = 5 ] && [ "$(head -n 1 "$PRINTED" | cut -d' ' -f1)" = cheap ] && [ "$(printed 'model=opus')" = 1 ] \
+[ "$n" = 5 ] && [ "$(head -n 1 "$PRINTED" | cut -d' ' -f1)" = cheap ] && [ "$(printed 'model=fable')" = 1 ] \
   && ok "i: cheap pass then four reviewers" || fail "i: passes: $(cat "$PRINTED")"
 last_log | grep -q "$(printf '\tfull-escalated\t')" && ok "i: logged full-escalated" || fail "i: log line '$(last_log)'"
 

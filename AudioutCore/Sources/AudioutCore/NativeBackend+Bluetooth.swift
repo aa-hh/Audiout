@@ -206,6 +206,19 @@ extension NativeBackend {
     @discardableResult
     func updateBTReferenceBufferLocked(pushToSink: Bool = true) -> Int {   // on stateQueue
         let (latencies, trims) = btTrimLock.withLock { (btLatencyMsByUID, btTrimsByUID) }
+        // Same inputs, other composition: with AirPlay or Cast in the room the
+        // buffer below is not the reference, the room delay is, and the
+        // slowest speaker has to be able to raise THAT.
+        if updateBTRoomTermLocked(latencies: latencies, trims: trims) {
+            if pushToSink {
+                roomDelayChangedLocked(cause: "bt_latency")
+            } else {
+                // The room-delay fan-out rebuilds every sink the manager holds.
+                // One hop later on this serial queue it lands behind the
+                // caller's transition, which drops a departing speaker first.
+                stateQueue.async { [weak self] in self?.roomDelayChangedLocked(cause: "bt_latency") }
+            }
+        }
         let desired = btWizardReferenceRaised
             ? Self.btWizardReferenceBufferMs
             : Self.btOnlyReferenceMs(latencies: latencies, trims: trims, uids: btSelectedUIDs)
@@ -222,6 +235,49 @@ extension NativeBackend {
             if localRides { self.syncedLocalSink?.requestReanchor(cause: "bt_composition_change") }
         }
         return desired
+    }
+
+    /// Recompute ``NativeBackend/btRoomTermMs`` and report whether it moved.
+    ///
+    /// The term exists only while the whole-system selection renders against
+    /// a presentation timeline (AirPlay or Cast): with Bluetooth alone the
+    /// BT-only buffer above already sits past the slowest speaker, and a
+    /// per-app-only speaker never sets the room's timing
+    /// (``NativeBackend/btPerAppClaimedUIDs``). It is the same number the
+    /// BT-only buffer would be — slowest measured latency plus headroom, a negative trim counting as latency as it does for the buffer — and
+    /// it counts only when that exceeds the start buffer: a speaker that fits
+    /// under the buffer was never held back, so the `nil` keeps every room
+    /// that ships today on today's exact delays, by construction rather than
+    /// by a flag. Once standing it does not fall to a lower re-measurement
+    /// that still exceeds the start buffer, so that one does not jump every
+    /// output forward for a number the next one may undo. It is cleared when
+    /// the slowest selected speaker's latency plus headroom no longer exceeds
+    /// the start buffer: the room delay then falls back to the buffer, with
+    /// one gap. On `stateQueue`.
+    @discardableResult
+    func updateBTRoomTermLocked(latencies: [String: Double]? = nil,
+                                trims: [String: Double]? = nil) -> Bool {   // on stateQueue
+        var latencies = latencies, trims = trims
+        if latencies == nil || trims == nil {
+            let (storedLatencies, storedTrims) = btTrimLock.withLock { (btLatencyMsByUID, btTrimsByUID) }
+            latencies = latencies ?? storedLatencies
+            trims = trims ?? storedTrims
+        }
+        let candidate = Self.btOnlyReferenceMs(latencies: latencies!, trims: trims!, uids: btSelectedUIDs)
+        let wanted: Int?
+        if btSinkEnabled, btComposition.usesPresentationReference, candidate > _startBufferMs {
+            wanted = Swift.max(btRoomTermMs ?? 0, candidate)
+        } else {
+            wanted = nil
+        }
+        guard wanted != btRoomTermMs else { return false }
+        Telemetry.log(.localPlayback, "bt_room_term_changed", [
+            "from_ms": btRoomTermMs.map(String.init) ?? "nil",
+            "to_ms": wanted.map(String.init) ?? "nil",
+            "start_buffer_ms": String(_startBufferMs),
+        ])
+        btRoomTermMs = wanted
+        return true
     }
 
     /// Whether the sink manager must be armed and for which UIDs: the two

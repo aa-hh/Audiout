@@ -151,7 +151,7 @@ machine (it is marked internal). Then release the slot:
 - Part 2: the three offsets from the script (before the pause, right after
   resume, one minute after), what you heard, and the script and `grep` output.
 - Part 3: pass or fail for steps 3, 4 and 5, and your answers to (a) and (b).
-- Part 4, if run: the script's last line, the deviation slope, and `hour.txt`
+- Part 4, if run: the script's last three lines, the deviation slope, and `hour.txt`
   and `dev.txt`.
 - `telemetry.jsonl` if anything failed, plus `runB.wav` if the offsets look
   odd.

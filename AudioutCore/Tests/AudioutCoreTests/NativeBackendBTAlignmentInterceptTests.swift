@@ -399,6 +399,12 @@ extension SerializedSharedState {
         let (backend, bt, _, _) = makeBackend()
         defer { backend.stop() }
         backend.captureCoordinator = ProbeStagingCapture()
+        // Preparation waits for every Bluetooth hold to reach the sink on
+        // `captureControlQueue`. That queue is immediate on a real Mac but can
+        // be starved for seconds under a full parallel test run, and this test
+        // is not about the deadline — so it does not race one.
+        backend.companionAuditionPreparationSeconds = 60
+        backend.companionAuditionStopSeconds = 60
         backend.start()
         bt.fire([btMove, btFlip])
         await SuiteWait.until { self.device(backend, self.btMove.id) != nil && self.device(backend, self.btFlip.id) != nil }
@@ -426,9 +432,12 @@ extension SerializedSharedState {
         defer { backend.stop() }
         let capture = ProbeStagingCapture()
         backend.captureCoordinator = capture
-        // The deadline is not what this test checks; a starved runner needs the
-        // headroom (see auditionZerosRedirectedCaptureWithoutDroppingFrames).
+        // Preparation waits for every Bluetooth hold to reach the sink on
+        // `captureControlQueue`. That queue is immediate on a real Mac but can
+        // be starved for seconds under a full parallel test run, and this test
+        // is not about the deadline — so it does not race one.
         backend.companionAuditionPreparationSeconds = 60
+        backend.companionAuditionStopSeconds = 60
         backend.start()
         bt.fire([btMove, btFlip, btExtra])
         await SuiteWait.until { self.device(backend, self.btExtra.id) != nil }

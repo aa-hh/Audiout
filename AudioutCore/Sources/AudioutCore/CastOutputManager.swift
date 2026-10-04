@@ -197,7 +197,7 @@ final class CastFeedRing: CastPCMSource, @unchecked Sendable {
     private var targetGain: Float = 1
     /// Lock-guarded, and `nil` until a non-zero delay is asked for.
     private var delayLine: PCMDelayLine?
-    /// Producer-owned: incremented only by ``push(_:)``, which cannot take the
+    /// Producer-owned: incremented only by ``push(_:pts:nowNanos:)``, which cannot take the
     /// lock on the path that matters (a failed `try()` IS one of the drops).
     /// How many times the producer re-tries the ring's lock before it gives up
     /// and drops the block. Small: the holder is only ever a memcpy away from

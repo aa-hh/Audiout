@@ -231,8 +231,11 @@ import Testing
             var now = timespec()
             clock_gettime(CLOCK_MONOTONIC, &now)
             let pts = SyncTiming.monotonicNanos(now) - 20_000_000
-            feed.write(pcm: block, pts: timespec(tv_sec: Int(pts / 1_000_000_000),
-                                                 tv_nsec: Int(pts % 1_000_000_000)))
+            // A loaded machine merges missed ticks into one fire; `data` counts them.
+            for _ in 0..<max(1, Int(writer.data)) {
+                feed.write(pcm: block, pts: timespec(tv_sec: Int(pts / 1_000_000_000),
+                                                     tv_nsec: Int(pts % 1_000_000_000)))
+            }
         }
         writer.resume()
         defer { writer.cancel() }

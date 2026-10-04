@@ -60,7 +60,7 @@ cp "$SRC_ROOT/scripts/review-branch.sh" scripts/review-branch.sh
 cp "$SRC_ROOT/.gitignore" .gitignore
 rm -rf docs/review && cp -R "$SRC_ROOT/docs/review" docs/review
 git add -A .gitignore docs/review scripts/review-branch.sh
-git commit -q --no-verify -m "test setup" || { echo "setup commit failed" >&2; exit 1; }
+git commit -q --no-verify --allow-empty -m "test setup" || { echo "setup commit failed" >&2; exit 1; }
 
 COMMON="$(cd "$(git rev-parse --git-common-dir)" && pwd)"
 REVIEW_LOG="$COMMON/audiout-branch-reviews.log"

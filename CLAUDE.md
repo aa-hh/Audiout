@@ -30,7 +30,7 @@ with `scripts/ios.sh build --root <that checkout>`.
 git config core.hooksPath .githooks
 ```
 
-Guards: **Guard 1** blocks direct commits on `main` (merges only). **Guard 4/6** run the test suites on any commit touching Swift sources — on a branch commit Guard 4 runs only the suites covering the staged files (`.githooks/guard-test-scope.sh` derives them: a staged file matches tests by name with any `+Aspect` part dropped, so `NativeBackend+Bluetooth.swift` runs the `NativeBackend*Tests` files; a file that matches no test by name runs every test file importing its target or a target built on it; anything in `AudioutCore` or a target it depends on, any deleted file, and anything the script cannot map still runs the full suite. `bash scripts/test-guard-test-scope.sh` tests these rules and checks the script's target table against `AudioutCore/Package.swift`); a merge landing on `main` runs the full suite with the pass cache off unless the cache holds a full-suite pass (`<hash>.full`, never a filtered one) on the identical staged merged tree, in which case it prints one line naming that pass and skips the run. That cache is on the Mac that started the run, whichever Mac executed it: `run-tests.sh` records a pass from the mule here, so a full run started here and executed on the mule satisfies a merge here, while a run typed directly on the mule does not, and a reboot empties `/tmp` so the merge runs the suite again. Enforcement is in `.githooks/pre-merge-commit`: git skips `pre-commit` for a merge without conflicts and runs that hook instead, which calls `pre-commit` with `AUDIOUT_IN_MERGE=1` because git writes `MERGE_HEAD` only after the hook returns (`bash scripts/test-pre-merge-hook.sh` proves it). A fast-forward merge creates no commit and runs no hook, so land branches with `git merge --no-ff`. `AUDIOUT_FULL_SUITE=1` forces the full run anywhere. Guard 6 (AirPlayEngine, ~2s) always runs in full. **Guard 9** blocks any newly-added line that could put a window on a real screen during a test run (see "Tests must stay invisible" in [`AudioutCore/AGENTS.md`](AudioutCore/AGENTS.md)). **Guard 7** blocks a Swift commit whose added comments match near-certain slop patterns (rubric in [`docs/REVIEW-RUBRIC.md`](docs/REVIEW-RUBRIC.md)). **Guard 10** refuses a merge onto `main` until `bash scripts/review-branch.sh` has reviewed the branch (run it in the branch's worktree after committing; it picks the review depth from the diff, prints the reviewer passes for the Claude session merging the branch to run as its own subagents, because headless `claude -p` is refused on this account, then `bash scripts/review-branch.sh --continue` reads their replies; every surviving finding, of any severity, blocks the receipt, and the script prints fix groups (one per file) for builder subagents to fix in parallel in the same worktree, then a fresh review; with no findings it writes a receipt keyed on the branch's own changes, which survives merging main into the branch but not a commit that changes the branch's lines; `--already-reviewed` records work that /scope-and-run's reviewer already approved; `AUDIOUT_SKIP_BRANCH_REVIEW=1 git merge ...` is the loud override). A merge onto `main` also requires the branch to contain the latest main; an out-of-date branch is refused before any tests run. `git merge main` into a branch runs the full suite when main's side changes AudioutCore Swift, and the merge onto `main` then skips it; otherwise the full suite runs at the merge onto `main`. Either way it runs once.
+Guards: **Guard 1** blocks every commit on `main`. **Guard 4/6** run the test suites on any commit touching Swift sources — Guard 4 runs only the suites covering the staged files (`.githooks/guard-test-scope.sh` derives them: a staged file matches tests by name with any `+Aspect` part dropped, so `NativeBackend+Bluetooth.swift` runs the `NativeBackend*Tests` files; a file that matches no test by name runs every test file importing its target or a target built on it; anything in `AudioutCore` or a target it depends on, any deleted file, and anything the script cannot map still runs the full suite. `bash scripts/test-guard-test-scope.sh` tests these rules and checks the script's target table against `AudioutCore/Package.swift`). `AUDIOUT_FULL_SUITE=1` forces the full run. The full suite runs on GitHub: the `tests` workflow, on every pull request and again in the merge queue. Guard 6 (AirPlayEngine, ~2s) always runs in full. **Guard 9** blocks any newly-added line that could put a window on a real screen during a test run (see "Tests must stay invisible" in [`AudioutCore/AGENTS.md`](AudioutCore/AGENTS.md)). **Guard 7** blocks a Swift commit whose added comments match near-certain slop patterns (rubric in [`docs/REVIEW-RUBRIC.md`](docs/REVIEW-RUBRIC.md)).
 
 ## Build & run
 
@@ -147,7 +147,9 @@ on macOS. `run-tests.sh` refuses with a message rather than let this surface as
 a mysterious build failure, and its message names the exact command for the
 Xcode it finds: `sudo xcode-select -s
 /Applications/<Xcode>.app/Contents/Developer`. `AUDIOUT_TEST_MODE=serial`
-runs the suite strictly one test at a time, for flake hunting.
+runs the suite strictly one test at a time, for flake hunting only, never for a gate.
+
+**Flaky tests are quarantined.** A test that fails in the merge queue and passes on rerun is skipped with a dated reason and a GitHub issue, in the same PR that hits it.
 
 **A pass covers everything it ran.** The runner stamps each green run in `/tmp/audiout-suite-cache` and skips a later run on byte-identical sources that an earlier pass already covered: a green full run satisfies any later filtered run, and a green `--filter A` lets a later `--filter A|B` run only `B` (the runner prints which suites it skipped). This is how a filtered run while coding counts toward Guard 4 at commit. `AUDIOUT_TEST_NO_CACHE=1` turns the cache off for a run; `bash scripts/test-suite-cache.sh` tests the cache itself.
 
@@ -157,7 +159,7 @@ The mule runs macOS 26.5 with only the Xcode 27 beta installed, so `remote_run` 
 
 ## Critical workflow rules
 
-- **`main` is merge-only.** Never `git commit` on `main`. Work in a worktree branch; reach `main` via merge only. Guard 1 enforces this.
+- **`main` accepts nothing but the merge queue.** Never commit or merge into `main` locally (Guard 1 refuses a commit there) and never push to it; GitHub's ruleset refuses anything that does not come through the queue. Work in a worktree branch.
 - **Work in worktrees, not the `main` checkout.** Worktrees live in `.claude/worktrees/<slug>/`. Never edit files in the `main` checkout.
 - **Every worktree branch must have a GitHub counterpart.** When creating a worktree, immediately push the branch to origin:
   ```bash
@@ -165,7 +167,14 @@ The mule runs macOS 26.5 with only the Xcode 27 beta installed, so `remote_run` 
   cd .claude/worktrees/<slug>
   git push -u origin claude/<slug>
   ```
-  Commits on the branch are pushed to `origin/<branch>` as work progresses. The branch merges into `main` BOTH as a local `git merge` AND as a GitHub PR — so origin/main and local main stay in sync.
+  Commits on the branch are pushed to `origin/<branch>` as work progresses. When the task is done, end with:
+  ```bash
+  git push -u origin HEAD
+  gh pr create --fill
+  bash scripts/review-branch.sh   # run the passes it prints as subagents, then: bash scripts/review-branch.sh --continue
+  gh pr merge --merge --auto
+  ```
+  The two required checks are `tests` (the full suite on GitHub) and `review` (the commit status `--continue` posts, with one PR comment listing the findings). `--auto` queues the PR once both are green; don't wait for the queue. The reviewers run as subagents of your session because headless `claude -p` is refused on this account. Only a HIGH finding fails `review`: fix it, commit, push, and run the script again, which reviews only the fix; a third run refuses. A status belongs to one commit, so any push after the review needs that second round.
 - **If you find uncommitted edits in the `main` checkout: stop and ask.** Never stash, reset, or discard them — they belong to another session.
 - **Finished with a worktree (branch merged + live-verified, or abandoned-but-pushed)?** `touch .claude/worktrees/<slug>/.prunable` — `scripts/housekeeping.sh` removes it safely at the next build, and also collects stale build caches — every `.build` in the tree plus Xcode's `iOS DeviceSupport` and `DerivedData` (see AGENTS.md).
 

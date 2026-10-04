@@ -188,6 +188,24 @@ import Testing
         #expect(ring.stats.droppedBlocks == 0)
     }
 
+    /// Turns red if `push` stops counting the block its failed
+    /// `producerLock.try()` throws away, writes it anyway, or a later push
+    /// stops landing.
+    @Test func aPushRefusedByTheProducerLockIsCountedAndWritesNothing() {
+        let ring = CastFeedRing()
+        let block = tone(frames: 882)
+        ring.test_withProducerLockHeld {
+            DispatchQueue.global().sync { ring.push(block) }
+        }
+        #expect(ring.stats.droppedBlocks == 1)
+        #expect(ring.stats.writes == 0)
+        #expect((ring.bufferedFrames ?? 0) == 0)
+
+        ring.push(block)
+        #expect(ring.stats.droppedBlocks == 1)
+        #expect(ring.stats.writes == 1)
+    }
+
     // MARK: - Was there SOUND in what the server served?
 
     /// The counters cannot answer it. `underrunFrames` only sees frames the

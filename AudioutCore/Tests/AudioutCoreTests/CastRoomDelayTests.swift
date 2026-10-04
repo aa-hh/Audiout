@@ -184,8 +184,9 @@ import Testing
     /// A by-ear advance raises the room only past the receiver's own slack:
     /// it is added to the receiver's last settle, never to its high-water
     /// term, and an unsettled receiver adds it to the lead it is assumed at.
-    /// The advanced term stops at `maxTermMs`.
-    /// Turns red if the advance is added to the high-water term instead of the receiver's last settle, an unsettled receiver's advance is dropped, or an advance carries the term past `maxTermMs`.
+    /// The advanced term stops at `maxTermMs`, and a term already past it
+    /// stays where it is.
+    /// Turns red if the advance is added to the high-water term instead of the receiver's last settle, an unsettled receiver's advance is dropped, an advance carries the term past `maxTermMs`, or the `maxTermMs` cap lowers a receiver's own term that a hold above `macHoldMs` put past it.
     @Test func anAdvanceRaisesTheTermOnlyPastTheReceiversLastSettle() {
         var policy = CastRoomDelay()
         policy.setReceivers(["tv"])
@@ -208,6 +209,14 @@ import Testing
         feed(&deep, 9_400, id: "far")
         #expect(deep.setAdvanceMs(1_000, forID: "far") == true)
         #expect(deep.termMs == CastRoomDelay.maxTermMs)
+
+        var held = CastRoomDelay()
+        held.setReceivers(["far"])
+        feed(&held, 9_400, id: "far", holdMs: 300)
+        let ownTerm = 9_400 + 300 - CastFeedRing.macHoldMs
+        #expect(held.termMs == ownTerm)
+        #expect(held.setAdvanceMs(1_000, forID: "far") == false)
+        #expect(held.termMs == ownTerm)
     }
 
     // MARK: - R_max

@@ -925,14 +925,13 @@ import CoreAudio
     }
 
     /// A settle that moves the receiver's share past the band keeps its feed
-    /// shut until audio carrying the new share has reached the receiver's play
-    /// head, the settled lead plus the measured hold later; a sample in
-    /// between does not open it.
-    /// Turns red if the gate opens at that settle or on a later sample before the held-back open fires, or that open waits anything but the settled lead plus the receiver's measured hold.
+    /// shut until the audio still queued on the Mac under the old share has
+    /// drained, the measured hold later; a sample in between does not open it.
+    /// Turns red if the gate opens at that settle or on a later sample before the held-back open fires, or that open waits anything but the receiver's measured hold.
     @Test func aSettleThatMovesTheShareOpensTheGateOnlyWhenTheHeldBackOpenFires() {
         let clock = ManualDelayClock()
-        // Only a job asked to wait the settled lead plus the hold reaches the clock.
-        let wait = Double(4_000 + 84) / 1000
+        // Only a job asked to wait the hold reaches the clock.
+        let wait = Double(84) / 1000
         let (rig, ap) = castRoom(delayClock: { seconds, queue, work in
             guard seconds == wait else { return }
             clock.clock(seconds, queue, work)

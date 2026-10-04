@@ -242,6 +242,8 @@ final class CastFeedRing: CastPCMSource, @unchecked Sendable {
     private let stampsWrittenWord: UnsafeMutablePointer<Int>
     private let writesWord: UnsafeMutablePointer<Int>
     /// Producer-owned: blocks refused for want of room or at a producer hand-off.
+    /// A hand-off drop also bumps it after a failed `try()`, without the lock,
+    /// so two drops at the same instant can lose one count; telemetry only.
     private let droppedBlocksWord: UnsafeMutablePointer<Int>
     /// Frames the consumer has taken or skipped. Written only under the lock;
     /// the producer reads it behind a barrier.
@@ -341,9 +343,11 @@ final class CastFeedRing: CastPCMSource, @unchecked Sendable {
         defer { producerLock.unlock() }
         OSMemoryBarrier()                       // acquire: the line and the consumer's progress
         let line = delayLineWord.pointee.map { Unmanaged<PCMDelayLine>.fromOpaque($0).takeUnretainedValue() }
-        // The line runs before the room check: its clock is the producer's, so
-        // a block the ring then has no space for still has to go through it,
-        // or the delay walks.
+        // Every block that gets the producer lock goes through the line, before
+        // the room check: its clock is the producer's, so a block the ring then
+        // has no space for still has to go through it, or the delay walks. A
+        // block dropped at a failed `try()` (a producer hand-off) skips it,
+        // which costs one block of delay until the next refill.
         let block = line?.exchange(pcm) ?? pcm
         let pushed = pushedFramesWord.pointee
         OSMemoryBarrier()
@@ -589,6 +593,12 @@ final class CastFeedRing: CastPCMSource, @unchecked Sendable {
         lock.lock()
         body()
         lock.unlock()
+    }
+
+    func test_withProducerLockHeld(_ body: () -> Void) {
+        producerLock.lock()
+        body()
+        producerLock.unlock()
     }
 
     /// Ramps `out` from `gain` towards `target` and returns where the ramp

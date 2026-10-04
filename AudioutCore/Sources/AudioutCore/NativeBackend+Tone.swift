@@ -948,10 +948,10 @@ extension NativeBackend {
                 pushCastFeedDelaysLocked()
             }
             pendingCastFeedGateOpens.removeValue(forKey: id)?.cancel()
-            // The gate acts on the audio leaving the Mac now, but the new share
-            // only enters with the next pushed block, which reaches the
-            // receiver's play head after the Mac's hold plus the settled lead.
-            // A share that moved past the band keeps the gate shut until then.
+            // The gate acts on audio as the Mac renders it, so the only
+            // old-share audio it must keep shut is what is still queued in the
+            // ring at this settle: the Mac's hold. A share that moved past the
+            // band keeps the gate shut until that has drained.
             let hold = castRoomDelay.holdMs(forID: id)
             if let settled = castRoomDelay.settledLeadMs(forID: id),
                abs(Swift.max(0, roomDelayLocked() - settled - hold) - feedDelayMs)
@@ -962,7 +962,7 @@ extension NativeBackend {
                     self.castOutputManager?.setCastFeedGate(open: true, forDeviceID: id, generation: generation)
                 }
                 pendingCastFeedGateOpens[id] = work
-                delayClock(Double(settled + hold) / 1000, stateQueue, work)
+                delayClock(Double(hold) / 1000, stateQueue, work)
             }
         }
         // What the listener hears from this receiver: its lead, the Mac's hold

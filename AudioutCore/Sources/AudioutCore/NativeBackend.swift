@@ -714,10 +714,10 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// Per Cast id, the pending room move for a by-ear offset change, on
     /// `stateQueue`; a newer change cancels and replaces it.
     var pendingCastOffsetSettles: [String: DispatchWorkItem] = [:]
-    /// Per Cast id, the feed-gate open held back after a settle that moved the
-    /// receiver's share by more than ``CastRoomDelay/feedGateBandMs``, on
-    /// `stateQueue`. While one is pending the gate stays shut; a newer settle,
-    /// a deselect or `stop()` cancels it.
+    /// Per Cast id, the feed-gate open held back by the receiver's Mac hold
+    /// after a settle that moved its share by more than
+    /// ``CastRoomDelay/feedGateBandMs``, on `stateQueue`. While one is pending
+    /// the gate stays shut; a newer settle, a deselect or `stop()` cancels it.
     var pendingCastFeedGateOpens: [String: DispatchWorkItem] = [:]
     /// Whether the capture fan-out's Cast slot is attached
     /// (`captureControlQueue`), so an already-armed selection change never

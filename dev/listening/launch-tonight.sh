@@ -22,7 +22,7 @@ TIME=$1; shift
 HH=$((10#${TIME%%:*})); MM=$((10#${TIME##*:}))
 now=$(date +%s)
 start=$(date -j -f '%Y-%m-%d %H:%M:%S' "$(date +%Y-%m-%d) $(printf %02d:%02d $HH $MM):00" +%s)
-(( start > now + 60 )) || start=$(( start + 86400 ))
+(( start > now )) || start=$(( start + 86400 ))
 
 launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1 && die "a night is already scheduled; cancel it first: launchctl bootout $DOMAIN/$LABEL; rm '$PLIST'"
 

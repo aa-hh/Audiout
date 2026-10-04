@@ -482,7 +482,10 @@ echo
 # is a night already running: the Terminal wrapper, the driver and the
 # caffeinate holding the Mac awake. launch-tonight.sh's pre-start caffeinate
 # has its own -t deadline and ends by itself.
-echo "==> Listening-night driver processes"
+# Its install on the listening Mac is ~/listening (README there: Desktop and
+# Documents are iCloud-synced, and the folder is typed by hand in Terminal on
+# the night), recognised by the driver script inside it.
+echo "==> Listening-night driver processes and install"
 night_pids="$(pgrep -f 'listening/results/night.command|unattended-night.sh' || true)"
 if [ -z "$night_pids" ]; then
   echo "    none running"
@@ -490,6 +493,13 @@ else
   echo "    pids: $(echo $night_pids | tr '\n' ' ')"
   if [ "$APPLY" -eq 1 ]; then
     kill $night_pids 2>/dev/null || true
+    removed_anything=1
+  fi
+fi
+if [ -f "$HOME/listening/unattended-night.sh" ]; then
+  echo "    $HOME/listening (driver install; results/ holds the recordings)"
+  if [ "$APPLY" -eq 1 ]; then
+    rm -rf "$HOME/listening"
     removed_anything=1
   fi
 fi

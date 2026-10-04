@@ -320,7 +320,7 @@ fi
 if [[ $MODE == check ]]; then
   bt_connect_wait $MOVE1_ID || die "blueutil could not connect $MOVE1_ID; a real run reconnects the Moves before every relaunch"
   log "check: blueutil connected $MOVE1_ID (left connected)"
-  log "check passed: tools present, ids known, build has $RECONNECT_KEY; ${BLUE_PROBLEM:-blueutil works}"
+  log "check passed: tools present, ids known$( (( MANUAL )) || print -n ", build has $RECONNECT_KEY"); ${BLUE_PROBLEM:-blueutil works}"
   exit 0
 fi
 
@@ -343,8 +343,17 @@ print -n -- - > "$OUT/.block"
   done
 ) &
 LOAD_PID=$!
-PLAY_PID=""; REC_PID=""   # read by the trap before either is first set
-trap 'kill $LOAD_PID 2>/dev/null; [[ -n $PLAY_PID ]] && kill $PLAY_PID 2>/dev/null; [[ -n $REC_PID ]] && kill -TERM $REC_PID 2>/dev/null' EXIT
+PLAY_PID=""; REC_PID=""; RECONNECT_WAS=""   # read by cleanup before any is first set
+cleanup() {
+  kill $LOAD_PID 2>/dev/null
+  [[ -n $PLAY_PID ]] && kill $PLAY_PID 2>/dev/null
+  [[ -n $REC_PID ]] && kill -TERM $REC_PID 2>/dev/null
+  if [[ $RECONNECT_WAS == off || $RECONNECT_WAS == 0 ]]; then
+    defaults write $BUNDLE_ID $RECONNECT_KEY -bool false; log "set $RECONNECT_KEY back to off"
+  fi
+}
+trap cleanup EXIT
+trap 'exit 143' TERM HUP INT   # zsh runs no EXIT trap on a signal unless the handler exits
 [[ -n $BLUE_PROBLEM ]] && note "$BLUE_PROBLEM: Block A's disconnect and the connection checks are skipped"
 if (( DRY )); then
   [[ -n $KEY_PROBLEM ]] && note "a real run would stop here: $KEY_PROBLEM"
@@ -648,7 +657,6 @@ choose_speakers() {  # block letter, then ids
   if (( MANUAL )); then select_manual $blk "$@"; else select_speakers "$@"; fi
 }
 
-RECONNECT_WAS=""
 select_speakers() {  # ids...
   if (( DRY )); then  # write and check a copy; the app's own file is left alone
     write_routing "$OUT/routing-dry-run.json" "$@"
@@ -673,7 +681,7 @@ select_speakers() {  # ids...
     from=$(tel_size); t0=$SECONDS
     open "$APP"
     # afplay must start after the app has taken the default output (its aggregate)
-    local w; for w in {1..30}; do tail -c +$((from + 1)) "$TELEMETRY" | grep -q '"evt":"default_output_change"' && break; sleep 1; done
+    local w; for w in {1..30}; do grep -q '"evt":"default_output_change"' <(tail -c +$((from + 1)) "$TELEMETRY") && break; sleep 1; done
     (( w < 30 )) || log "try $try: no default_output_change line within 30 s of launch; starting playback anyway"
     play_start || log "playback did not start"   # sinks only build with audio flowing
     sleep $(( LIVE_CHECK_S > SECONDS - t0 ? LIVE_CHECK_S - (SECONDS - t0) : 0 ))
@@ -920,9 +928,6 @@ if (( WITH_AIRPLAY )); then
   fi
 fi
 (( ! DRY && ! WITH_AIRPLAY )) && { bt_connect_wait $TOGGLE_ID || true; }
-if [[ $RECONNECT_WAS == off || $RECONNECT_WAS == 0 ]]; then
-  defaults write $BUNDLE_ID $RECONNECT_KEY -bool false; log "set $RECONNECT_KEY back to off"
-fi
 
 # ---- Summary ----------------------------------------------------------------
 "$PYTHON" - "$OUT" "$TELEMETRY" "$JUMP_MS" "$DRY" "$AIRPLAY_NAME" "$LOAD_WARN" "$SMOKE" "$TOGGLE_ID" <<'EOF'

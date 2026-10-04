@@ -14,7 +14,7 @@ plays a 75-minute click file with `afplay`, records the built-in mic, and writes
 
 Selection is by hand: three clicks a night (four with Block C). The app's
 launch-time restore leaves Bluetooth speakers selected but not connected (third
-smoke run, 2026-10-03), so the driver never quits Audiout Dev and needs it open.
+smoke run, 2026-10-03), so the driver itself never quits Audiout Dev and needs it open.
 At each block it stops `afplay`, writes `WAITING <block>` naming the exact rows,
 and waits for Enter or `~/listening/go-block-<a|b|c>` (30 min, then that block is
 aborted). It then plays and, within 35 s, needs the app's selection
@@ -25,7 +25,10 @@ differs and shows `WAITING` again, three times at most.
 ## One-time setup on the second Mac
 
 1. From the repo root, copy the six files side by side into `~/listening/` (not
-   Desktop or Documents; that Mac's Desktop is iCloud-synced):
+   Desktop or Documents; that Mac's Desktop is iCloud-synced). This is the one
+   dev install outside `~/Library/Application Support/AudioutDev/`: the folder is
+   typed by hand in Terminal on the night, and `scripts/purge-dev-installs.sh`
+   removes it along with a night still running.
    ```
    tar -cf - -C dev/listening unattended-night.sh launch-tonight.sh README.md .gitignore \
      -C ../notes/bt-sync-discovery/runbooks click-track-3s.wav click-pair-spacing.py \
@@ -109,8 +112,10 @@ The clicks, each after its `WAITING` line, then Enter in that Terminal or
 `ssh alechamilton@SUMUP-M9Y197RFVG.local touch ~/listening/go-block-a` (`-b`, `-c`):
 
 1. A: select both Moves, nothing else.
-2. B: select the `--c-move` Move (Sonos Move 089E by default) and This Mac (the
-   MacBook Air Speakers row); deselect the Move that Block A disconnected.
+2. B: quit and reopen Audiout Dev first (a Move whose link was dropped stays
+   silent until the app restarts), then select the `--c-move` Move (Sonos Move
+   089E by default) and This Mac (the MacBook Air Speakers row); deselect the
+   Move that Block A disconnected.
 3. C: press the other Move's button for Wi-Fi mode, wait for its AirPlay row, then
    select that row plus the Bluetooth Move, nothing else. A Move is Bluetooth or
    AirPlay, never both. The last line then says to switch it back.

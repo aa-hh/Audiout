@@ -365,21 +365,14 @@ final class BTDelayLine {
     /// the write pointer — the buffered frames, less any shift the control
     /// thread has already asked for and the render thread has not consumed yet
     /// (a fast scrub's shifts accumulate, so ignoring them would let two
-    /// requests each spend the same room). Control thread ONLY, and advisory:
-    /// the producer is adding frames concurrently, so this is a floor, never an
-    /// over-estimate.
+    /// requests each spend the same room). Called by the control thread and by
+    /// the render thread's own re-alignment (the barrier is a fence: no lock,
+    /// no allocation). Advisory: the producer is adding frames concurrently, so
+    /// this is a floor, never an over-estimate.
     func forwardShiftRoomFrames() -> Int {
         OSMemoryBarrier()                       // acquire: see the consumer's word
         let unconsumed = requestedShiftFrames.pointee &- appliedShiftFrames.pointee
         return ring.usedFrames &- unconsumed
-    }
-
-    /// Consumer side: the same room as ``forwardShiftRoomFrames()``, for the
-    /// render thread's own re-alignment. The consumer owns the read pointer, so
-    /// a stale control-side shift word only makes this a floor. Real-time safe:
-    /// counter loads, no allocation, no lock.
-    func consumerForwardShiftRoomFrames() -> Int {
-        ring.usedFrames &- (requestedShiftFrames.pointee &- appliedShiftFrames.pointee)
     }
 
     /// Chunks the producer dropped since the last call. Consumer/control side.
@@ -1471,12 +1464,22 @@ final class BTDeviceSink: @unchecked Sendable {
         framesPulledSinceOrigin += frameCount
         let pending = (t &- origin) &- pulledNanos &- pullRealignedNanos
         guard Double(abs(pending)) >= Self.pullRealignThresholdMs * 1_000_000 else { return }
-        var frames = Int((Double(pending) / 1e9 * renderSampleRate).rounded())
+        let frames = Int((Double(pending) / 1e9 * renderSampleRate).rounded())
         if frames > 0 {
-            // Only `applied` is booked below, so a clamped shortfall stays
-            // pending and is retried as the producer refills the ring.
             let marginFrames = Int((Self.seekSafetyMarginMs / 1_000 * renderSampleRate).rounded())
-            frames = Swift.min(frames, Swift.max(0, delayLine.consumerForwardShiftRoomFrames() - marginFrames))
+            let room = Swift.max(0, delayLine.forwardShiftRoomFrames() - marginFrames)
+            if frames > room {
+                // The capture side writes at the rate the device pulls, so a ring
+                // too short for the move means both stalled together and the
+                // shortfall never refills: take what fits and measure from here
+                // like the stall branch, or the stuck remainder hides the
+                // backward move a later over-pull needs.
+                delayLine.shift(byFrames: room)
+                pullOriginNanos = t
+                framesPulledSinceOrigin = frameCount
+                pullRealignedNanos = 0
+                return
+            }
         }
         let applied = delayLine.shift(byFrames: frames)
         pullRealignedNanos &+= Int64((Double(applied) / renderSampleRate * 1e9).rounded())

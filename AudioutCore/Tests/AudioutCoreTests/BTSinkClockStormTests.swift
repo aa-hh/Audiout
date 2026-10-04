@@ -171,12 +171,40 @@ import Testing
         #expect(out[cycleFrames - 1] > 0, "the gate never opened")
 
         for _ in 0..<15 { writeChunk() }    // 150 ms
-        render(at: host - cyclePeriod + 900_000_000)
+        let stallHost = host - cyclePeriod + 900_000_000
+        render(at: stallHost)
 
         let marginFrames = Int(BTDeviceSink.seekSafetyMarginMs / 1_000 * Self.sampleRate)
-        let last = Int(out[cycleFrames - 1])
+        var last = Int(out[cycleFrames - 1])
         #expect(last > 0, "the re-alignment drained the ring")
         #expect(written - last >= marginFrames - cycleFrames - 8,
                 "the ring kept \(written - last) frames after the cycle")
+
+        // Capture and device stalled together, so capture resumes at wall rate
+        // from the stall while the device runs the storm's fast 92.6 ms second.
+        // Book the clamped shortfall into `pullRealignedNanos` instead of
+        // re-basing the measurement and the stuck forward remainder swallows
+        // this over-pull, the backward move never runs, and the ring drains.
+        let captureBase = stallHost - Double(written) * Self.nsPerFrame
+        let fastPeriod = cyclePeriod * 1_000 / 1_092.6
+        let thresholdFrames = Int(BTDeviceSink.pullRealignThresholdMs / 1_000 * Self.sampleRate)
+        var lowest = Int.max
+        var movedBack = false
+        host = stallHost + fastPeriod
+        while host < stallHost + 1e9 {
+            while captureBase + Double(written) * Self.nsPerFrame <= host { writeChunk() }
+            render(at: host)
+            let now = Int(out[cycleFrames - 1])
+            #expect(out[0] > 0 && now > 0, "the over-pull ran the ring dry")
+            if now < last { movedBack = true }
+            lowest = min(lowest, written - now)
+            last = now
+            host += fastPeriod
+        }
+        // The ring may sag one threshold's worth before the backward move,
+        // plus one cycle and one capture chunk of timing granularity.
+        #expect(lowest >= marginFrames - thresholdFrames - cycleFrames - chunkFrames,
+                "the ring fell to \(lowest) frames during the over-pull")
+        #expect(movedBack, "the over-pull's backward re-alignment never ran")
     }
 }

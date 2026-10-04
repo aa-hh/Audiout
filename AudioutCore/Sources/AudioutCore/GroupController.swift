@@ -13,9 +13,12 @@ import Foundation
 ///    `Main × Group × Device`, multiplied at the backend's write boundary
 ///    (``OutputBackend/setMasterGain(mainOut:group:mirrorToSystemVolume:)``);
 ///    moving Main rewrites nobody's stored level.
-/// 3. **Mute** — volume-based (Q4): mute stores the pre-mute volume and drops
-///    to 0; unmute restores the stashed level. (Solo was removed 2026-07-13 —
-///    confusing jargon for a consumer app; mute is the only per-device silence.)
+/// 3. **Mute** — for every member except the Mac, volume-based: mute stores the
+///    pre-mute volume and drops to 0; unmute restores the stashed level. The
+///    Mac's mute is the system hardware mute, written through
+///    ``OutputBackend/setMuted(_:for:)`` and read back from `Device.isMuted` on
+///    each ``updateDevices(_:)`` push. (Solo was removed 2026-07-13 — confusing
+///    jargon for a consumer app; mute is the only per-device silence.)
 ///
 /// All mutation methods call through to the injected ``OutputBackend`` (real
 /// or mock) via `setVolume`/`setOutputSet`; `GroupController` never invents a
@@ -35,8 +38,9 @@ public final class GroupController {
     // MARK: Mute semantics
     //
     // A member is *effectively silent* when `explicitMute[id] == true`.
-    // Effective silence is realized as volume 0 on the backend; the volume from
-    // just before muting is stashed and restored on unmute. Concretely:
+    // For every member except the Mac, effective silence is realized as volume 0
+    // on the backend; the volume from just before muting is stashed and restored
+    // on unmute. Concretely:
     //
     // - `setMuted(true, id)` sets `explicitMute[id] = true`, stashes the current
     //   volume, and zeroes it on the backend.
@@ -45,6 +49,11 @@ public final class GroupController {
     //
     // The stash is written only on the silence *edge* (a false→true transition),
     // so re-muting an already-muted member doesn't overwrite the original level.
+    //
+    // The Mac is the exception: its mute is the system hardware mute, written
+    // through `backend.setMuted` with no volume stash, and read back from
+    // `Device.isMuted` on each `updateDevices` push, which overwrites the intent
+    // held here. It survives `clearMuteBookkeeping`.
     // (Solo was removed 2026-07-13 — see the type doc.)
 
     private struct MemberState {
@@ -395,6 +404,10 @@ public final class GroupController {
     /// which on `NativeBackend` is a `sync` the main thread would wait on.
     public func updateDevices(_ devices: [Device]) {
         pushedDevices = devices
+        // The Mac's hardware mute flag overwrites any mute intent held here.
+        if let local = devices.first(where: \.isLocalDevice) {
+            memberState[local.id] = MemberState(explicitMute: local.isMuted, priorVolume: nil)
+        }
     }
 
     /// The current device snapshot. Normally whatever the app layer last pushed
@@ -1170,19 +1183,30 @@ public final class GroupController {
         setMain(volume, writeBackToSystem: false)
     }
 
-    // MARK: Mute (Q4 — volume-based; see "Mute semantics" above)
+    // MARK: Mute (volume-based except the Mac's hardware mute; see "Mute semantics" above)
 
     /// Clearing the bookkeeping is an unmute, otherwise the member stays at 0 with no mute to lift.
+    /// The Mac's entry is left alone: its mute is the hardware flag and survives target switches.
     private func clearMuteBookkeeping() {
-        for (id, state) in memberState where state.explicitMute {
+        let local = localDeviceID
+        for (id, state) in memberState where state.explicitMute && id != local {
             var unmuted = state
             unmuted.explicitMute = false
             applySilence(for: id, state: &unmuted, wasSilent: true)
         }
-        memberState.removeAll()
+        memberState = memberState.filter { $0.key == local }
     }
 
     public func setMuted(_ muted: Bool, for id: String) {
+        if id == localDeviceID {
+            // The Mac's mute is the hardware flag: always forwarded, even when the
+            // intent is unchanged, so a mute made outside the app can be lifted here.
+            let wasSilent = isMuted(id)
+            memberState[id] = MemberState(explicitMute: muted, priorVolume: nil)
+            backend.setMuted(muted, for: id)
+            if muted != wasSilent { onStateDidChange?() }
+            return
+        }
         var state = memberState[id] ?? MemberState()
         let wasSilent = state.explicitMute
         state.explicitMute = muted

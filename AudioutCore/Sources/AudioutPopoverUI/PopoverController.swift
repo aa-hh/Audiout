@@ -3214,10 +3214,12 @@ public final class PopoverController: NSObject {
             return
         }
         let selected = controller.isSpeakerSelected(device.id)
-        // Row mute is VOLUME-BASED in `GroupController` (Q4 — `explicitMute`
-        // in memberState; the backend `Device.isMuted` flag is never driven by
-        // the popover's mute path), so overlay the controller's mute truth
-        // onto the snapshot before the row renders (S3): without this the
+        // Except for the Mac, row mute is VOLUME-BASED in `GroupController`
+        // (Q4 — `explicitMute` in memberState), so overlay the controller's
+        // mute truth onto the snapshot before the row renders (S3). The Mac's
+        // mute is the system hardware mute (`backend.setMuted`, read back on
+        // each `updateDevices` push), so both sides agree and the OR changes
+        // nothing there. Without this the
         // engaged pill / dark armed dot / MUTED token would all silently
         // revert on the first model repaint after a mute click.
         var device = device

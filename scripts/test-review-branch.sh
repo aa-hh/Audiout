@@ -218,7 +218,7 @@ review
 grep -q '^Review level: full (20 product lines, risk: AudioutCore/Sources/AudioutCore/LicenseGate.swift)' "$out" \
   && ok "e: risk path forces full" || { fail "e: not full"; show; }
 
-# (f) Scoring: one haiku pass per finding, under 80 dropped and listed apart.
+# (f) Scoring: one haiku pass per finding, under 75 dropped and listed apart.
 # A surviving LOW is posted but does not block.
 # Catches: a low-confidence finding counted, one dropped silently, or a LOW
 # failing the status.

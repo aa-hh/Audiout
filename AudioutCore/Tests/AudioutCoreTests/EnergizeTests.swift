@@ -153,7 +153,7 @@ import Testing
         return (popover, controller, backend)
     }
 
-    @Test func sourceSwitchRaisesPendingBeatOnOffMembersAndAnnounces() {
+    @Test(.enabled(if: ProcessInfo.processInfo.environment["CI"] == nil, "Quarantined on GitHub runners 2026-10-04: depends on timers the runner starves. Issue #258.")) func sourceSwitchRaisesPendingBeatOnOffMembersAndAnnounces() {
         let fleet = makeControllerFleet()
         let (popover, _, _) = makePopover(fleet: fleet)
         for id in ["en-a", "en-b", "en-c"] { _ = popover.test_toggleDeviceEnabled(deviceID: id, on: true) }

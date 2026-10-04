@@ -265,6 +265,24 @@ import AppKit
         #expect(btOnly.test_btWizardView()?.test_bodyText == BTAlignmentWizardView.introCopy)
     }
 
+    /// Red if a sync door under the one-speaker limit opened the wizard (a
+    /// run needs a second speaker playing, which the limit refuses) or said
+    /// nothing at all: the door stays and shows the limit note instead.
+    @Test func aWizardDoorUnderTheOneSpeakerLimitShowsTheLimitNoteInstead() {
+        let fleet = [local(), airplay(), bt()]
+        let (popover, _) = makePopover(fleet: fleet)
+        popover.update(devices: fleet)
+        popover.groupController?.limitsToOneSpeaker = true
+        popover.setUnregisteredNote(.trialEnded)
+        #expect(popover.test_systemAirPlayNoteText == PopoverController.unregisteredTrialEndedNoteText)
+
+        popover.startBTAlignmentWizard(deviceID: "bt-a:output", door: .menu)
+
+        #expect(!popover.test_btWizardIsOpen(), "no wizard under the limit")
+        #expect(popover.test_systemAirPlayNoteText == PopoverController.oneSpeakerLimitNoteText,
+                "the door answers with the limit note")
+    }
+
     // MARK: The wizard's iPhone panel (`shape-mac-invites.md` §2.2)
 
     /// Defect this names: the page showing a QR to someone it cannot help —

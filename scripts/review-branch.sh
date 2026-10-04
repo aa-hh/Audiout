@@ -6,7 +6,7 @@
 # Picks a level from the committed diff against origin/main (fetched first;
 # local main is never used, since nothing updates it any more): skip (no model), cheap
 # (one sonnet pass) or full (four parallel reviewers, then one haiku
-# confidence score per finding, findings under 80 dropped). Prints the
+# confidence score per finding, findings under 75 dropped). Prints the
 # findings and appends one line to <git-common-dir>/audiout-branch-reviews.log.
 # Instruction files: docs/review/<pass>.md.
 #
@@ -49,7 +49,7 @@ set -uo pipefail
 # The one place to edit: thresholds, risk paths, the model each pass runs on.
 SKIP_UNDER_LINES=50
 FULL_OVER_LINES=300
-SCORE_KEEP_AT=80
+SCORE_KEEP_AT=75
 
 CHEAP_MODEL=sonnet
 DEEP_MODEL=opus
@@ -482,5 +482,5 @@ for g in "${groups[@]}"; do
   done
 done
 echo
-echo "Fix every HIGH finding above. Launch one builder subagent (work-order-executor, model opus) per fix group, all in parallel in this worktree; give each its group's finding lines verbatim plus: edit only the named file and its own test file, read the nearest AGENTS.md first, do not commit. Two groups never share a file. When all return, run the tests covering the changed files, commit, push, then run round 2, which reviews only the fix: bash scripts/review-branch.sh"
+echo "Fix every HIGH finding above. Launch one builder subagent (work-order-executor, model opus) per fix group, all in parallel in this worktree; give each its group's finding lines verbatim plus: edit only the named file and its own test file, read the nearest AGENTS.md first, a test you add or move carries one comment sentence naming the code change that turns it red; for any finding about stale wording, grep AudioutCore/Sources, AudioutCore/Tests, DESIGN.md and every *.md for the retired term and fix each hit inside your file, listing hits outside it in your report; do not commit. Two groups never share a file. When all return, run the tests covering the changed files, commit, push, then run round 2, which reviews only the fix: bash scripts/review-branch.sh"
 exit 1

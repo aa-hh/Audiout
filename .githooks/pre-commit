@@ -157,6 +157,29 @@ if [ -f "$g7" ]; then
 fi
 
 # ---------------------------------------------------------------------------
+# GUARD 11 (BLOCKING): test discipline in staged test files.
+#
+# A new @Test needs a comment sentence naming the change that turns it red,
+# no print( in tests, and no new file holding a single test. Written after
+# five review rounds on one branch re-flagged tests without that sentence.
+# Logic in guard-test-discipline.sh; missing helper => silently skip.
+g11="$hook_dir/guard-test-discipline.sh"
+if [ -f "$g11" ]; then
+    sh "$g11" || exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# GUARD 12 (BLOCKING): AGENTS.md / AGENTS-HISTORY.md rules.
+#
+# Blocks ruling phrasing and growth of an over-300-word folder AGENTS.md, and
+# any removed line in an AGENTS-HISTORY.md; warns on a newly added date.
+# Logic in guard-agents-docs.sh; missing helper => silently skip.
+g12="$hook_dir/guard-agents-docs.sh"
+if [ -f "$g12" ]; then
+    sh "$g12" || exit 1
+fi
+
+# ---------------------------------------------------------------------------
 # GUARD 4 (BLOCKING): the tests must pass before Swift code is committed. THE
 # fast check before a commit; the full suite runs on GitHub (the `tests`
 # workflow) for every pull request and again in the merge queue.

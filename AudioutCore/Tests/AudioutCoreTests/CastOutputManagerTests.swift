@@ -209,6 +209,60 @@ import Testing
         #expect(ring.render(frames: 441).contains { $0 != 0 })
     }
 
+    /// Turns red if the served stream stops carrying the 1 s prime, the 500 ms
+    /// cushion, or the applied feed delay as readable numbers.
+    @Test func theServedStreamReportsItsPrimeCushionAndFeedDelay() throws {
+        guard #available(macOS 15, *) else { return }
+        let (fake, endpoint) = try startFake()
+        defer { fake.stop() }
+
+        let manager = makeManager()
+        defer { manager.stopAll() }
+        let log = watch(manager, deviceID: "dev1")
+
+        let feed = manager.feed
+        let writer = DispatchSource.makeTimerSource(queue: DispatchQueue(label: "CastOutputManagerTests.timedFeed"))
+        writer.schedule(deadline: .now(), repeating: 0.020)
+        let block = tone(frames: 882)
+        writer.setEventHandler {
+            // Stamped with the capture time of the block's first frame, 20 ms
+            // before it is handed over, which is what NativeCaptureCoordinator
+            // passes the fan-out.
+            var now = timespec()
+            clock_gettime(CLOCK_MONOTONIC, &now)
+            let pts = SyncTiming.monotonicNanos(now) - 20_000_000
+            feed.write(pcm: block, pts: timespec(tv_sec: Int(pts / 1_000_000_000),
+                                                 tv_nsec: Int(pts % 1_000_000_000)))
+        }
+        writer.resume()
+        defer { writer.cancel() }
+
+        manager.setDevices([record(endpoint)])
+        try #require(waitUntil(timeout: 10) { log.contains(.playing) },
+                     Comment(rawValue: "never reached PLAYING, saw \(log.all)"))
+        _ = waitUntil(timeout: 3.0) { false }
+
+        let ring = try #require(manager.test_ring(forDevice: "dev1"))
+        let timing = ring.timing
+        let stats = ring.stats
+        let last = try #require(timing.lastRender)
+        #expect(last.delayLineMs == 0)
+        #expect((300...1500).contains(last.queueAheadMs), "queueAheadMs \(last.queueAheadMs)")
+        #expect((0...250).contains(last.pacingPhaseMs), "pacingPhaseMs \(last.pacingPhaseMs)")
+        #expect((-1...100).contains(last.ioprocToPushMs), "ioprocToPushMs \(last.ioprocToPushMs)")
+        // The prime, less at most one block pushed between the reset and the
+        // prime render; the top allows a loaded machine.
+        #expect((43_218...88_200).contains(stats.underrunFrames), "underrunFrames \(stats.underrunFrames)")
+        #expect(timing.renderedFramesSinceReset >= 44_100 + 66_150,
+                "renderedFramesSinceReset \(timing.renderedFramesSinceReset)")
+
+        manager.setCastRoomDelayMs(300, forDeviceID: "dev1")
+        _ = waitUntil(timeout: 2.0) { false }
+        let delayed = ring.timing
+        #expect(delayed.lastRender?.delayLineMs == 300)
+        #expect(delayed.delayLineMs == 300)
+    }
+
     @Test func setLevelRoundTrips() throws {
         guard #available(macOS 15, *) else { return }
         let (fake, endpoint) = try startFake()

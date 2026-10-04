@@ -1430,9 +1430,13 @@ public final class PopoverController: NSObject {
 
     /// Push the resolved note — or, with no note, an owed thank-you card — to
     /// the panel. Shared by `applyNoteSlot()` and the tail of `rebuild()`.
+    /// An open rebuild or a shown popover may raise the card; a hidden
+    /// background rebuild may not: it would report, announce, surge, and be
+    /// marked seen unseen.
     private func mountNoteSlot() {
         let note = resolvedSystemAirPlayNote
-        guard note.text == nil, thankYouCardRaised || thankYouCardOwedProvider?() == true else {
+        guard note.text == nil,
+              thankYouCardRaised || ((isRebuildingForOpen || isEffectivelyShown) && thankYouCardOwedProvider?() == true) else {
             panel.setSystemAirPlayNote(note.text, action: note.action,
                                        textAction: note.textAction, severity: note.severity)
             return

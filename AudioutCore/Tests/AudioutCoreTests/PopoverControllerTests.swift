@@ -4342,6 +4342,24 @@ extension SerializedSharedState {
             #expect(owed.shownCalls == 0)
         }
 
+        /// Defect: a rebuild while hidden raised the card offscreen, and
+        /// quitting then marked it seen. Red too if the guard stops letting
+        /// `rebuildForOpen()` raise it, since every real open rebuilds before
+        /// the popover counts as shown. No window is created.
+        @Test func aRebuildWhileHiddenDoesNotRaiseTheCard() {
+            let (popover, _) = makePopover()
+            let owed = Owed()
+            owed.wire(popover)
+            popover.test_isShownOverride = false
+            let hidden = captured { popover.rebuild() }
+            #expect(hidden.names().isEmpty)
+            #expect(!popover.test_noteViewIsThankYouCard)
+            #expect(owed.shownCalls == 0)
+            let opened = captured { popover.test_simulateOpen() }
+            #expect(opened.names() == ["license:thank_you_shown"])
+            #expect(popover.test_noteViewIsThankYouCard)
+        }
+
         /// Red if "Play here" left two speakers selected (the limit
         /// would then be broken by its own offer) or stopped reporting its use.
         @Test func theSwitchOfferLeavesOnlyTheClickedSpeaker() {

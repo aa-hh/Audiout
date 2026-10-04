@@ -1140,12 +1140,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // The one-time thank-you card, owed to a trial that converted to a
         // paid key and has not seen it yet.
         popoverController.thankYouCardOwedProvider = { [settings] in
-            settings.licenseServerURL != nil
-                && settings.licenseStatus == .active
-                && !(settings.licenseKey ?? "").isEmpty
-                && settings.trialStartedAt != nil
-                && settings.trialExpiresAt == nil
-                && !settings.licenseThankYouShown
+            LicenseGate.owesThankYouCard(settings: settings)
         }
         popoverController.onThankYouShown = { [settings] in
             settings.licenseThankYouShown = true
@@ -1408,7 +1403,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // Only an open from closed counts: a tab switch away from the
                 // Mixer retires the card, and switching back must not raise the
                 // ask seconds after the thanks.
-                if openedOntoMixer, settings.licenseThankYouShown { presentConversionConsentAskIfDue() }
+                if openedOntoMixer { presentConversionConsentAskIfDue() }
             }
         }
 
@@ -2644,12 +2639,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @MainActor
     private func presentConversionConsentAskIfDue() {
         guard !HeadlessRuntime.isActive,
-              settings.licenseStatus == .active,
-              !(settings.licenseKey ?? "").isEmpty,
-              settings.trialStartedAt != nil,
-              settings.trialExpiresAt == nil,
-              !settings.telemetryAsked,
-              !settings.telemetryConversionAskShown
+              LicenseGate.owesConversionConsentAsk(settings: settings)
         else { return }
         settings.telemetryConversionAskShown = true
 

@@ -30,8 +30,7 @@ folder renders; routing arithmetic lives in Core.
 - A never-aligned Bluetooth row's chip IS the wizard's door; a measured one opens the drawer.
 - A first-join alignment note is session state: ✕ hides it, nothing is written down.
 - The note may carry one underlined text action left of its button, both centred to the note.
-- The thank-you card is the note slot's only non-banner view; its shown flag is written on Close or on hide, never on raise.
-- The one-speaker limit note is session state (`limitNoteRaised`); a wizard door under the limit shows it instead of the wizard.
+- Under the limit the note is session state (`limitNoteRaised`) and a wizard door shows it, not the wizard; the thank-you card's shown flag is written on Close or hide, never on raise.
 - The header strip is BORDERED `NSToolbarItem`s — every tab and Pin alike — and the
   current screen is AppKit's own `selectedItemIdentifier`, never an authored fill
   (2026-09-05, replacing the custom-drawn capsule that stood here). Two defects killed

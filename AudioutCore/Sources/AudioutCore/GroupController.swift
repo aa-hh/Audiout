@@ -280,6 +280,7 @@ public final class GroupController {
             if case .group = mainOut { isGroup = true }
             if selectedDeviceIDs.count > 1 || isGroup {
                 selectedDeviceIDs = [local.id]
+                pendingBluetoothRestoreIDs.formIntersection(selectedDeviceIDs)
                 mainOut = .selectedDevices
             }
         }
@@ -448,6 +449,24 @@ public final class GroupController {
     /// receiving audio" — routing is decided by Main Out.)
     public func isSpeakerSelected(_ id: String) -> Bool { selectedDeviceIDs.contains(id) }
 
+    /// Replace the whole Selected Devices set with `id` in one routing apply —
+    /// "Play here". A deselect-then-select would apply twice and leave
+    /// This Mac briefly live between them. Always a one-member result, so it
+    /// holds under `limitsToOneSpeaker`. No-op (`.ok`) if unknown.
+    /// Main Out moves to Selected Speakers too: under a scene target the click
+    /// would otherwise change nothing audible.
+    @discardableResult
+    public func switchSelection(to id: String) -> SelectionResult {
+        guard device(id) != nil else { return .ok }
+        selectedDeviceIDs = [id]
+        mainOut = .selectedDevices
+        pushMasterGain(mirrorToSystemVolume: false)
+        applyRouting()
+        persistRouting()
+        onStateDidChange?()
+        return .ok
+    }
+
     /// Add or remove a device from "Selected Speakers" (SPEC §9b). Composes the
     /// persistent set; live-applies the output set when Main Out targets
     /// `.selectedDevices`.
@@ -485,20 +504,6 @@ public final class GroupController {
     ///   removing the last AirPlay device naturally leaves {L} (non-empty), so the
     ///   floor never fires and needs no special case for that path.
     ///
-    /// Replace the whole Selected Devices set with `id` in one routing apply —
-    /// "Play here". A deselect-then-select would apply twice and leave
-    /// This Mac briefly live between them. Always a one-member result, so it
-    /// holds under `limitsToOneSpeaker`. No-op (`.ok`) if unknown.
-    @discardableResult
-    public func switchSelection(to id: String) -> SelectionResult {
-        guard device(id) != nil else { return .ok }
-        selectedDeviceIDs = [id]
-        persistRouting()
-        if mainOut == .selectedDevices { applyRouting() }
-        onStateDidChange?()
-        return .ok
-    }
-
     /// No-op (`.ok`) if unknown / already in state.
     @discardableResult
     public func setDeviceSelected(_ id: String, _ selected: Bool) -> SelectionResult {

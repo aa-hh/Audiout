@@ -191,7 +191,11 @@ public final class CompanionCommandDispatcher {
     public func execute(_ command: CompanionCommand, clientID: UUID?) -> Result {
         switch command {
         case .setDeviceSelected(let id, let selected):
-            return Result(groupController.setDeviceSelected(id, selected))
+            let selection = groupController.setDeviceSelected(id, selected)
+            if selection.refusalReason == GroupController.oneSpeakerLimitReason {
+                return .refused("Audiout plays on one speaker at a time until you buy.")
+            }
+            return Result(selection)
 
         case .retryConnection(let id):
             return Result(groupController.retryConnection(for: id))

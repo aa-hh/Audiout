@@ -14,16 +14,14 @@ import AppKit
     @Test func fittingHeightIs112AtPopoverWidth() {
         let card = ThankYouCardView(width: 625)
         card.layoutSubtreeIfNeeded()
-        #expect(card.fittingSize.height == ThankYouCardView.height)
-        #expect(ThankYouCardView.height == 112)
+        #expect(card.fittingSize.height == 112)
     }
 
     /// Defect: the labels drift from the approved copy.
     @Test func labelsCarryTheApprovedCopy() {
         let card = ThankYouCardView(width: 625)
         #expect(card.test_headlineText == "Thank you for buying Audiout.")
-        #expect(card.test_bodyText == ThankYouCardView.body)
-        #expect(ThankYouCardView.body.hasPrefix("You paid once, and it's yours for good."))
+        #expect(card.test_bodyText == "You paid once, and it's yours for good. Every update is included. Your purchase pays for the work on the next ones, and that means a lot to one small team.")
     }
 
     /// Defect: Close is wired to nothing, so the card never goes and the shown
@@ -40,7 +38,7 @@ import AppKit
     @Test func groupLabelIsHeadlinePlusBody() {
         let card = ThankYouCardView(width: 625)
         #expect(card.accessibilityRole() == .group)
-        #expect(card.accessibilityLabel() == ThankYouCardView.headline + " " + ThankYouCardView.body)
+        #expect(card.accessibilityLabel() == "Thank you for buying Audiout. You paid once, and it's yours for good. Every update is included. Your purchase pays for the work on the next ones, and that means a lot to one small team.")
     }
 
     /// Defect: VoiceOver reads the button as a bare "Close", which says

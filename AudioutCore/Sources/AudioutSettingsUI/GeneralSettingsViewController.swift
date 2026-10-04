@@ -510,8 +510,7 @@ public final class GeneralSettingsViewController: NSViewController {
         guard licenseSheet == nil else { return }
         Analytics.capture("license:enter_sheet_opened", ["source": source])
         let sheet = LicenseSheetViewController(settings: settings,
-                                               transport: licenseTransport,
-                                               openURL: openURL)
+                                               transport: licenseTransport)
         sheet.onComplete = { [weak self] in
             self?.licenseSheet = nil
             self?.refreshLicenseStatus()

@@ -55,12 +55,8 @@ public final class LicenseSheetViewController: NSViewController {
     /// sites reading naturally.
     static let keyFormatHint = LicenseCopy.keyFormatHint
 
-    /// `openURL` is no longer called (the sheet dropped its Buy button); it
-    /// stays in the signature so `GeneralSettingsViewController` and any
-    /// caller keep compiling unchanged.
     public init(settings: AppSettings,
-                transport: LicenseValidator.Transport?,
-                openURL: @escaping (URL) -> Void) {
+                transport: LicenseValidator.Transport?) {
         self.settings = settings
         self.transport = transport
         super.init(nibName: nil, bundle: nil)

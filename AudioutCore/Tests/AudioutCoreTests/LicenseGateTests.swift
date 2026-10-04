@@ -170,6 +170,70 @@ import Testing
             environment: ["AUDIOUT_LICENSE_GATE": "gibberish"]) == .auto)
     }
 
+    // MARK: The thank-you card and the consent ask
+
+    /// A trial that converted to a paid key: started, then cleared of its end
+    /// date when the bought key arrived.
+    private func convert(_ s: AppSettings) {
+        startTrial(s, daysAgo: 3)
+        s.trialExpiresAt = nil
+        s.licenseKey = Self.key
+        s.licenseStatus = .active
+    }
+
+    /// Fails if the card stops being owed to a converted trial, or is owed again once shown.
+    @Test func aConvertedTrialIsOwedTheThankYouCardOnce() {
+        let s = settings()
+        convert(s)
+        #expect(LicenseGate.owesThankYouCard(settings: s))
+        s.licenseThankYouShown = true
+        #expect(!LicenseGate.owesThankYouCard(settings: s))
+    }
+
+    /// Fails if the `licenseServerURL` clause is dropped: a source build has no purchase to thank.
+    @Test func aSourceBuildIsNeverOwedTheThankYouCard() {
+        let s = settings(withServer: false)
+        convert(s)
+        #expect(!LicenseGate.owesThankYouCard(settings: s))
+    }
+
+    /// Fails if the `trialStartedAt` clause is dropped: a direct buyer never had a trial to convert.
+    @Test func aDirectBuyerIsNeverOwedTheThankYouCard() {
+        let s = settings()
+        s.licenseKey = Self.key
+        s.licenseStatus = .active
+        #expect(!LicenseGate.owesThankYouCard(settings: s))
+    }
+
+    /// Fails if the `trialExpiresAt == nil` clause is dropped: a running trial has not converted.
+    @Test func aRunningTrialIsNeverOwedTheThankYouCard() {
+        let s = settings()
+        startTrial(s, daysAgo: 1)
+        s.licenseKey = Self.key
+        s.licenseStatus = .active
+        #expect(!LicenseGate.owesThankYouCard(settings: s))
+    }
+
+    /// Fails if the consent ask comes before the thank-you card, after an
+    /// answer, or a second time.
+    @Test func theConsentAskIsOwedOnlyAfterTheCardAndOnlyOnce() {
+        let s = settings()
+        convert(s)
+        s.licenseThankYouShown = true
+        #expect(LicenseGate.owesConversionConsentAsk(settings: s))
+
+        s.licenseThankYouShown = false
+        #expect(!LicenseGate.owesConversionConsentAsk(settings: s))
+        s.licenseThankYouShown = true
+
+        s.telemetryAsked = true
+        #expect(!LicenseGate.owesConversionConsentAsk(settings: s))
+        s.telemetryAsked = false
+
+        s.telemetryConversionAskShown = true
+        #expect(!LicenseGate.owesConversionConsentAsk(settings: s))
+    }
+
     // MARK: The window
 
     /// Canned-transport helper mirroring `LicenseValidatorTests.Transport`,

@@ -601,8 +601,9 @@ public struct AppSettings {
     /// Why the server gave the verdict it gave, in the server's own words —
     /// `nil` unless the answer carried one. `trial_expired` is the only value
     /// the server sends today, and it is what separates a trial that ran out
-    /// from a key that was refunded: both come back `revoked`, and the gate
-    /// has different words for them. Read through
+    /// from a key that was refunded: both come back `revoked`, and the
+    /// popover's standing note (`PopoverController.unregisteredNote`) and
+    /// `LicenseCopy.statusLine` have different words for them. Read through
     /// ``TrialClock/hasEnded(settings:now:)``: this is the server's half of
     /// that question, ``trialExpiresAt`` the local half, and a Mac whose
     /// stored dates are gone has only this one. Written on every verified

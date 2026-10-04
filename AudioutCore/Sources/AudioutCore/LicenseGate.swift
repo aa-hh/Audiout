@@ -53,6 +53,29 @@ public enum LicenseGate {
         return declined && !trialIsRunningWithoutAKey(settings: settings)
     }
 
+    /// Whether the one-time thank-you card is owed: an official build whose
+    /// trial converted to a paid key that has not seen it. The popover reads it on open.
+    public static func owesThankYouCard(settings: AppSettings) -> Bool {
+        settings.licenseServerURL != nil
+            && settings.licenseStatus == .active
+            && !(settings.licenseKey ?? "").isEmpty
+            && settings.trialStartedAt != nil
+            && settings.trialExpiresAt == nil
+            && !settings.licenseThankYouShown
+    }
+
+    /// Whether the one-time usage-counts ask is owed to a converted trial, on
+    /// the open after its thank-you card. The host reads it on open.
+    public static func owesConversionConsentAsk(settings: AppSettings) -> Bool {
+        settings.licenseStatus == .active
+            && !(settings.licenseKey ?? "").isEmpty
+            && settings.trialStartedAt != nil
+            && settings.trialExpiresAt == nil
+            && settings.licenseThankYouShown
+            && !settings.telemetryAsked
+            && !settings.telemetryConversionAskShown
+    }
+
     /// A trial running on this Mac that the licence server has not yet handed a
     /// key back for.
     ///

@@ -618,6 +618,17 @@ unconnected treatment (`DeviceRowView.swift`). Warm ink means
 `isRouteArmed`; cool means silent. Instruments are flat — no `CALayer`
 blooms.
 
+A speaker that asks for a password, an on-screen code or a Home member
+carries a stock `lock.fill` (10pt semibold, template) 4pt after its name. It
+takes the name's own ink (`rowTextColor`), never gold, and the name truncates
+before the lock gives way. Its spoken label names the kind of lock. Joining a
+password speaker with nothing saved, or the diagnosis panel's
+"Enter Password…" button, raises a sheet on the panel
+(`SpeakerPasswordSheetViewController`): a bold one-line heading, a stock secure
+field, then Cancel and a gold `ProminentButton` Connect, right-aligned. A
+caption-size result line appears only once Connect is pressed: "Connecting…",
+then the reason if the attempt fails. A connect dismisses the sheet.
+
 ### Equalizer Door (Mixer, Mac-only)
 The Mixer carries an equalizer DOOR only — the row button beside mute, and
 the row context menu — plus one mark. When the speaker's curve is not flat

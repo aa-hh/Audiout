@@ -200,6 +200,15 @@ public final class CompanionCommandDispatcher {
         case .retryConnection(let id):
             return Result(groupController.retryConnection(for: id))
 
+        case .submitSpeakerPassword(let id, let password):
+            let trimmed = password.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { return .refused("Enter the speaker's password.") }
+            guard groupController.devices.contains(where: { $0.id == id }) else {
+                return .refused("Unknown speaker.")
+            }
+            groupController.submitAirPlayPassword(trimmed, for: id, source: "phone")
+            return .ok
+
         case .setMainOut(let state):
             return applySetMainOut(state)
 
@@ -352,6 +361,14 @@ public final class CompanionCommandDispatcher {
             // none of which this AppKit-free type owns. A host that does not
             // intercept it refuses, same as any other unhandled command.
             return .refused("This Mac’s Audiout can’t accept a licence from an iPhone. Update Audiout on your Mac.")
+
+        // The Mac does not implement transport control yet; these refusals keep the pre-0.17.0 behaviour.
+        case .transportPlayPause:
+            return .refused("Unknown command: transportPlayPause.")
+        case .transportNext:
+            return .refused("Unknown command: transportNext.")
+        case .transportPrevious:
+            return .refused("Unknown command: transportPrevious.")
 
         case .unknown(let name):
             return .refused("Unknown command: \(name).")

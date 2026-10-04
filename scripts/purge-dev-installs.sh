@@ -16,7 +16,7 @@
 #     long after the app that made it is deleted
 #   - an always-on ROOT PTP-helper launchd daemon
 #   - possibly its own Application Support / Caches / saved-state directories
-#   - a listening night still running (dev/listening) and its install, with
+#   - a listening night still running (dev/listening) and its scripts, never
 #     its results/ recordings
 #
 # It also removes two things that are nobody's build residue but everybody's
@@ -499,9 +499,10 @@ else
 fi
 night_dir="$HOME/Library/Application Support/AudioutDev/listening"
 if [ -f "$night_dir/unattended-night.sh" ]; then
-  echo "    $night_dir (driver install; results/ holds the recordings)"
+  echo "    $night_dir (driver scripts; results/ holds the recordings and is left alone)"
   if [ "$APPLY" -eq 1 ]; then
-    rm -rf "$night_dir"
+    find "$night_dir" -maxdepth 1 -type f -delete
+    rmdir "$night_dir" 2>/dev/null || true
     removed_anything=1
   fi
 fi

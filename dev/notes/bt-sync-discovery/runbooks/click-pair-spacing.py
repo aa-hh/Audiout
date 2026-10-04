@@ -70,6 +70,6 @@ if len(rows) >= 4:
     t = np.array([r[0] for r in rows]); o = np.array([r[1] for r in rows]); oa = np.abs(o)
     slope = np.polyfit(t, o, 1)[0]
     print(f"# linear fit: {slope*60:+.3f} ms/min = {slope*1000:+.1f} ppm over {t[-1]-t[0]:.0f} s "
-          f"(first median {np.median(oa[:5]):+.1f} ms, last median {np.median(oa[-5:]):+.1f} ms)")
+          f"(first median {np.median(oa[:5]):.1f} ms, last median {np.median(oa[-5:]):.1f} ms)")
     wins = [(m, oa[(t >= m*60) & (t < (m+5)*60)]) for m in range(0, int(t[-1]//60) + 1, 5)]
-    print("# median per 5 min: " + " | ".join(f"{m}-{m+5} {np.median(v):+.1f}" for m, v in wins if len(v)))
+    print("# median per 5 min: " + " | ".join(f"{m}-{m+5} {np.median(v):.1f}" for m, v in wins if len(v)))

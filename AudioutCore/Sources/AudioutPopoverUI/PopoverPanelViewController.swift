@@ -246,6 +246,10 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
     /// a regression test for the animated case would pass vacuously.
     var test_reduceMotionOverride: Bool?
 
+    /// The clock this panel's row and subsection folds run on. Always
+    /// `FoldAnimator.shared` in the app; a test swaps in a hand-driven one.
+    var foldAnimator: FoldAnimator = .shared
+
     /// Whether motion should be flattened — System Settings › Accessibility ›
     /// Display › Reduce Motion, through the seam above.
     private var reduceMotion: Bool {
@@ -1117,8 +1121,8 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
         clip.heightConstraint.constant = clip.frame.height
         clip.heightConstraint.isActive = true
         _ = fittingSizeSettled()
-        FoldAnimator.shared.animate(clip.heightConstraint, to: 0,
-                                    follower: self, completion: teardown)
+        foldAnimator.animate(clip.heightConstraint, to: 0,
+                             follower: self, completion: teardown)
     }
 
     /// Unfold a subsection: build its rows so the clip has a natural height,
@@ -1151,8 +1155,8 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
         clip.heightConstraint.constant = 0
         clip.heightConstraint.isActive = true
         _ = fittingSizeSettled()   // commit the START state; the reveal needs the distance
-        FoldAnimator.shared.animate(clip.heightConstraint, to: revealHeight,
-                                    follower: self) {
+        foldAnimator.animate(clip.heightConstraint, to: revealHeight,
+                             follower: self) {
             // Let the rows flex with their own content again once they have
             // arrived — unless a collapse has since begun on this clip, whose
             // height constraint deactivating here would pop the section back open.
@@ -1270,8 +1274,8 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
         // this panel and publishes that size every tick, so the window is never
         // shorter than its content — the unsatisfiable direction of the surplus
         // shield, and the one that deforms the rows.
-        FoldAnimator.shared.animate(clip.heightConstraint, to: revealHeight,
-                                    follower: self) {
+        foldAnimator.animate(clip.heightConstraint, to: revealHeight,
+                             follower: self) {
             // Let the row flex with its own content again once it has arrived
             // (a mounted drawer/panel can re-lay itself out while open) —
             // unless a close has since begun on this clip: deactivating the
@@ -1329,8 +1333,8 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
         stackView.layoutSubtreeIfNeeded()
         // The surface follows the shrinking clip per tick; `detach` publishes
         // the settled height once the row is actually gone.
-        FoldAnimator.shared.animate(clip.heightConstraint, to: 0,
-                                    follower: self, completion: detach)
+        foldAnimator.animate(clip.heightConstraint, to: 0,
+                             follower: self, completion: detach)
     }
 
     /// The **legend voice**: one small caption shared by the card's section
@@ -1615,25 +1619,45 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
     /// the routing-blocked-needs-default note.
     func setSystemAirPlayNote(_ text: String?,
                                action: SystemAirPlayNoteBannerView.Action? = nil,
+                               textAction: SystemAirPlayNoteBannerView.Action? = nil,
                                severity: SystemAirPlayNoteBannerView.Severity = .info) {
-        if let existing = stackView.arrangedSubviews.first(where: { $0 is SystemAirPlayNoteBannerView }) {
+        systemAirPlayNoteLabel = nil
+        systemAirPlayNoteView = nil
+        guard let text else {
+            setNoteView(nil)
+            return
+        }
+        let note = SystemAirPlayNoteBannerView(
+            text: text,
+            maxTextWidth: panelWidth - 28 - 30,
+            action: action,
+            textAction: textAction,
+            severity: severity)
+        setNoteView(note)
+        systemAirPlayNoteLabel = note.label
+        systemAirPlayNoteView = note
+    }
+
+    /// The view currently in the note slot: a note banner or the thank-you card.
+    private weak var mountedNoteView: NSView?
+
+    /// Put `view` in the note slot above every card, replacing whatever was
+    /// there; `nil` empties the slot.
+    func setNoteView(_ view: NSView?) {
+        if let existing = stackView.arrangedSubviews.first(where: {
+            $0 === mountedNoteView || $0 is SystemAirPlayNoteBannerView
+        }) {
             stackView.removeArrangedSubview(existing)
             existing.removeFromSuperview()
         }
         systemAirPlayNoteLabel = nil
         systemAirPlayNoteView = nil
-        guard let text else { return }
-        let note = SystemAirPlayNoteBannerView(
-            text: text,
-            maxTextWidth: panelWidth - 28 - 30,
-            action: action,
-            severity: severity)
-        systemAirPlayNoteLabel = note.label
-        systemAirPlayNoteView = note
-        stackView.insertArrangedSubview(note, at: 0)
+        mountedNoteView = view
+        guard let view else { return }
+        stackView.insertArrangedSubview(view, at: 0)
         NSLayoutConstraint.activate([
-            note.leadingAnchor.constraint(equalTo: stackView.leadingAnchor),
-            note.trailingAnchor.constraint(equalTo: stackView.trailingAnchor),
+            view.leadingAnchor.constraint(equalTo: stackView.leadingAnchor),
+            view.trailingAnchor.constraint(equalTo: stackView.trailingAnchor),
         ])
     }
 
@@ -1643,6 +1667,14 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
     var test_systemAirPlayNoteHasActionButton: Bool { systemAirPlayNoteView?.test_hasActionButton ?? false }
     /// Test-only: simulate a click on the note's action button, if any.
     func test_tapSystemAirPlayNoteAction() { systemAirPlayNoteView?.test_tapActionButton() }
+    /// Test-only: whether the note slot holds the thank-you card.
+    var test_noteViewIsThankYouCard: Bool { mountedNoteView is ThankYouCardView }
+    /// Test-only: the mounted thank-you card, if any.
+    var test_thankYouCard: ThankYouCardView? { mountedNoteView as? ThankYouCardView }
+    /// Test-only: whether the currently-shown note has a text action.
+    var test_systemAirPlayNoteHasTextAction: Bool { systemAirPlayNoteView?.test_hasTextAction ?? false }
+    /// Test-only: simulate a click on the note's text action, if any.
+    func test_tapSystemAirPlayNoteTextAction() { systemAirPlayNoteView?.test_tapTextAction() }
 
     /// Seat the card stack below the surface window's toolbar strip. The
     /// caller republishes the exact-fit size afterward; this only moves the

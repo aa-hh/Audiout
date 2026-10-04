@@ -89,6 +89,36 @@ import Testing
 
     // MARK: Selected Devices + Main Out routing (SPEC §9 2026-07-14b)
 
+    /// Red if "Play here" routed twice (deselect then select leaves
+    /// This Mac briefly live between the two applies) or left a stale member.
+    @Test func switchSelectionReplacesTheSetInOneRoutingApply() async throws {
+        let (controller, backend) = try await makeRecordingController()
+        _ = controller.setDeviceSelected("sonos-move", true)
+        _ = controller.setDeviceSelected("office", true)
+        controller.limitsToOneSpeaker = true
+        backend.reset()
+
+        let result = controller.switchSelection(to: "homepod-bed")
+        #expect(result == .ok)
+        #expect(controller.selectedDeviceIDs == ["homepod-bed"])
+        #expect(backend.outputSetWrites.count == 1, "one routing apply, not two")
+    }
+
+    /// Red if "Play here" left Main Out on a scene: a refused click raises the
+    /// offer and clicking it changes nothing audible.
+    @Test func switchSelectionUnderAGroupTargetMovesMainOutToTheSpeaker() async throws {
+        let (controller, backend) = try await makeRecordingController()
+        try controller.saveGroup(Group(id: "g1", name: "Pair", memberIDs: ["office", "sonos-move"], memberVolumes: [:]))
+        controller.setMainOut(.group(id: "g1"))
+        controller.limitsToOneSpeaker = true
+        backend.reset()
+
+        _ = controller.switchSelection(to: "homepod-bed")
+        #expect(controller.mainOut == .selectedDevices)
+        #expect(controller.selectedDeviceIDs == ["homepod-bed"])
+        #expect(backend.outputSetWrites.count == 1, "one routing apply")
+    }
+
     @Test func setDeviceSelectedComposesSetWithoutRoutingUnderGroupTarget() async throws {
         let (controller, backend) = try await makeController()
         // Point Main Out at a group so composing must not re-route.
@@ -350,12 +380,207 @@ import Testing
         #expect(controller.mainOut == .selectedDevices)
     }
 
+    /// Fails if `ensureDefaultSelection()` stops re-applying a restored Bluetooth id
+    /// once it appears in the snapshot, or stops sending it `retryOutput` after the
+    /// output set that names it (the 2026-10-03 launch that logged `desiredOn: []`).
+    /// `@MainActor` so the restore's main-queue deadline block cannot run mid-test.
+    @MainActor
+    @Test func reconnectAtLaunchAppliesBluetoothIdOnceItAppears() async throws {
+        let bt = "54-2A-1B-79-08-9E:output"
+        let routing = RoutingStore(directory: tempDirectory())
+        try routing.save(.init(selectedDeviceIDs: [bt, "office"], mainOut: .selectedDevices))
+        let settings = AppSettings(defaults: isolatedDefaults)
+        settings.reconnectAtLaunch = true
+        let backend = RecordingBackend(try await makeBackend())
+        let controller = GroupController(backend: backend, store: GroupStore(directory: tempDirectory()),
+                                         routingStore: routing, settings: settings, loadPersisted: false)
+        controller.updateDevices(.demoFleet)
+        controller.ensureDefaultSelection()
+        #expect(backend.outputSetWrites.last == ["office"])
+        #expect(backend.retryWrites.isEmpty)
+
+        controller.updateDevices(.demoFleet + [Device(id: bt, name: "Move", kind: .bluetooth, isAvailable: false)])
+        controller.ensureDefaultSelection()
+        #expect(controller.selectedDeviceIDs == [bt, "office"])
+        #expect(backend.outputSetWrites.last == ["office", bt])
+        #expect(backend.retryWrites == [bt])
+        let lastSet = try #require(backend.callOrder.lastIndex(of: "outputSet"))
+        let retry = try #require(backend.callOrder.lastIndex(of: "retry"))
+        #expect(retry > lastSet, "the output set must name the id before the connect kick")
+    }
+
+    /// Fails if a restored Bluetooth id that never appears stays selected (and on
+    /// disk) past `bluetoothRestoreWindow` instead of being dropped at the bound.
+    /// Also fails if an AirPlay id (colon MAC, also 12 hex digits) is taken for a
+    /// Bluetooth one and dropped at the bound: AirPlay ids stay one-shot.
+    @MainActor
+    @Test func reconnectAtLaunchDropsBluetoothIdThatNeverAppears() async throws {
+        let bt = "54-2A-1B-79-08-9E:output"
+        let airPlay = "AA:BB:CC:DD:EE:01"
+        let routing = RoutingStore(directory: tempDirectory())
+        try routing.save(.init(selectedDeviceIDs: [bt, "office", airPlay], mainOut: .selectedDevices))
+        let settings = AppSettings(defaults: isolatedDefaults)
+        settings.reconnectAtLaunch = true
+        let backend = RecordingBackend(try await makeBackend())
+        let controller = GroupController(backend: backend, store: GroupStore(directory: tempDirectory()),
+                                         routingStore: routing, settings: settings, loadPersisted: false)
+        controller.bluetoothRestoreWindow = 0
+        controller.updateDevices(.demoFleet)
+        controller.ensureDefaultSelection()
+        controller.ensureDefaultSelection()
+        #expect(controller.selectedDeviceIDs == ["office", airPlay])
+        #expect(backend.outputSetWrites.last == ["office"])
+        #expect(backend.retryWrites.isEmpty)
+        controller.flushPendingRoutingSave()
+        #expect(Set(try routing.load()?.selectedDeviceIDs ?? []) == ["office", airPlay])
+    }
+
+    /// Fails if dropping a restored selection made only of a Bluetooth id that
+    /// never appears leaves zero devices selected (and persists that) instead of
+    /// falling back to the local Mac, the floor `setDeviceSelected` keeps.
+    @MainActor
+    @Test func reconnectAtLaunchFallsBackToMacWhenOnlyBluetoothIdNeverAppears() async throws {
+        let bt = "54-2A-1B-79-08-9E:output"
+        let routing = RoutingStore(directory: tempDirectory())
+        try routing.save(.init(selectedDeviceIDs: [bt], mainOut: .selectedDevices))
+        let settings = AppSettings(defaults: isolatedDefaults)
+        settings.reconnectAtLaunch = true
+        let backend = RecordingBackend(try await makeBackend())
+        let controller = GroupController(backend: backend, store: GroupStore(directory: tempDirectory()),
+                                         routingStore: routing, settings: settings, loadPersisted: false)
+        controller.bluetoothRestoreWindow = 0
+        controller.updateDevices(.demoFleet)
+        controller.ensureDefaultSelection()
+        controller.ensureDefaultSelection()
+        #expect(controller.selectedDeviceIDs == ["local-mac"])
+        controller.flushPendingRoutingSave()
+        #expect(try routing.load()?.selectedDeviceIDs == ["local-mac"])
+    }
+
+    /// Fails if a restored Bluetooth id already in the first snapshot but
+    /// unavailable gets the output set and no `retryOutput`, or is dropped at the
+    /// end of `bluetoothRestoreWindow` like an id that never appeared.
+    @MainActor
+    @Test func reconnectAtLaunchRetriesBluetoothIdListedButUnavailable() async throws {
+        let bt = "54-2A-1B-79-08-9E:output"
+        let routing = RoutingStore(directory: tempDirectory())
+        try routing.save(.init(selectedDeviceIDs: [bt, "office"], mainOut: .selectedDevices))
+        let settings = AppSettings(defaults: isolatedDefaults)
+        settings.reconnectAtLaunch = true
+        let backend = RecordingBackend(try await makeBackend())
+        let controller = GroupController(backend: backend, store: GroupStore(directory: tempDirectory()),
+                                         routingStore: routing, settings: settings, loadPersisted: false)
+        controller.bluetoothRestoreWindow = 0
+        controller.updateDevices(.demoFleet + [Device(id: bt, name: "Move", kind: .bluetooth, isAvailable: false)])
+        controller.ensureDefaultSelection()
+        #expect(backend.outputSetWrites.last == ["office", bt])
+        #expect(backend.retryWrites == [bt])
+        let lastSet = try #require(backend.callOrder.lastIndex(of: "outputSet"))
+        let retry = try #require(backend.callOrder.lastIndex(of: "retry"))
+        #expect(retry > lastSet, "the output set must name the id before the connect kick")
+
+        controller.ensureDefaultSelection()
+        #expect(controller.selectedDeviceIDs == [bt, "office"])
+        #expect(backend.retryWrites == [bt])
+    }
+
+    /// Fails if a restored Bluetooth id the user deselected during the restore
+    /// window still gets the connect kick once it appears.
+    @MainActor
+    @Test func reconnectAtLaunchSkipsRetryForBluetoothIdDeselectedBeforeItSettles() async throws {
+        let bt = "54-2A-1B-79-08-9E:output"
+        let routing = RoutingStore(directory: tempDirectory())
+        try routing.save(.init(selectedDeviceIDs: [bt, "office"], mainOut: .selectedDevices))
+        let settings = AppSettings(defaults: isolatedDefaults)
+        settings.reconnectAtLaunch = true
+        let backend = RecordingBackend(try await makeBackend())
+        let controller = GroupController(backend: backend, store: GroupStore(directory: tempDirectory()),
+                                         routingStore: routing, settings: settings, loadPersisted: false)
+        controller.updateDevices(.demoFleet)
+        controller.ensureDefaultSelection()
+
+        controller.updateDevices(.demoFleet + [Device(id: bt, name: "Move", kind: .bluetooth, isAvailable: false)])
+        _ = controller.setDeviceSelected(bt, false)
+        controller.ensureDefaultSelection()
+
+        #expect(!controller.selectedDeviceIDs.contains(bt))
+        #expect(backend.retryWrites.isEmpty)
+    }
+
     @Test func autoSwapDropsLocalWhenSoleMember() async throws {
         let (controller, _) = try await makeController()
         controller.ensureDefaultSelection()                       // set = {local}
         let r = controller.setDeviceSelected("office", true)
         #expect(r.autoSwappedCurrentDevice)
         #expect(controller.selectedDeviceIDs == ["office"], "local dropped, AirPlay added")
+    }
+
+    // MARK: One-speaker limit (unregistered mode, 2026-09-26)
+
+    /// Red if a limited install could add a second AirPlay speaker, or if the
+    /// refusal still persisted or announced a change.
+    @Test func oneSpeakerLimitRefusesASecondAirPlaySpeaker() async throws {
+        let (controller, _) = try await makeController()
+        controller.ensureDefaultSelection()
+        _ = controller.setDeviceSelected("office", true)
+        controller.limitsToOneSpeaker = true
+        var changes = 0
+        controller.onStateDidChange = { changes += 1 }
+        let r = controller.setDeviceSelected("sonos-move", true)
+        #expect(r == .refused(GroupController.oneSpeakerLimitReason))
+        #expect(controller.selectedDeviceIDs == ["office"])
+        #expect(changes == 0)
+    }
+
+    /// Red if the limit blocked the ordinary move from This Mac to one speaker.
+    @Test func oneSpeakerLimitStillSwapsFromThisMac() async throws {
+        let (controller, _) = try await makeController()
+        controller.ensureDefaultSelection()
+        controller.limitsToOneSpeaker = true
+        let r = controller.setDeviceSelected("office", true)
+        #expect(r.autoSwappedCurrentDevice)
+        #expect(controller.selectedDeviceIDs == ["office"])
+    }
+
+    /// Red if This Mac could join a speaker under the limit, making two.
+    @Test func oneSpeakerLimitRefusesThisMacBesideASpeaker() async throws {
+        let (controller, _) = try await makeController()
+        controller.ensureDefaultSelection()
+        _ = controller.setDeviceSelected("office", true)
+        controller.limitsToOneSpeaker = true
+        let r = controller.setDeviceSelected("local-mac", true)
+        #expect(r == .refused(GroupController.oneSpeakerLimitReason))
+        #expect(controller.selectedDeviceIDs == ["office"])
+    }
+
+    /// Red if a limited install could still point Main Out at a group.
+    @Test func oneSpeakerLimitIgnoresAGroupTarget() async throws {
+        let (controller, _) = try await makeController()
+        controller.ensureDefaultSelection()
+        try controller.saveGroup(Group(id: "g1", name: "Pair", memberIDs: ["office", "sonos-move"], memberVolumes: [:]))
+        controller.limitsToOneSpeaker = true
+        controller.setMainOut(.group(id: "g1"))
+        #expect(controller.mainOut == .selectedDevices)
+    }
+
+    /// Red if a limited launch resumed a stored two-speaker set, or still
+    /// opened the Bluetooth link to a stored speaker the limit just dropped.
+    @MainActor
+    @Test func oneSpeakerLimitLaunchesOnThisMacInsteadOfAStoredPair() async throws {
+        let bt = "54-2A-1B-79-08-9E:output"
+        let routing = RoutingStore(directory: tempDirectory())
+        try routing.save(.init(selectedDeviceIDs: ["office", bt], mainOut: .selectedDevices))
+        let settings = AppSettings(defaults: isolatedDefaults)
+        settings.reconnectAtLaunch = true
+        let backend = RecordingBackend(try await makeBackend())
+        let controller = GroupController(backend: backend, store: GroupStore(directory: tempDirectory()),
+                                         routingStore: routing, settings: settings, loadPersisted: false)
+        controller.limitsToOneSpeaker = true
+        controller.updateDevices(.demoFleet + [Device(id: bt, name: "Move", kind: .bluetooth, isAvailable: false)])
+        controller.ensureDefaultSelection()
+        #expect(controller.selectedDeviceIDs == ["local-mac"])
+        #expect(controller.mainOut == .selectedDevices)
+        #expect(backend.retryWrites.isEmpty)
     }
 
     /// REVERSE auto-swap (ahh, live session 2026-07-17b): removing the LAST
@@ -1998,6 +2223,7 @@ private final class RecordingBackend: OutputBackend {
     private(set) var volumeWrites: [(id: String, volume: Int)] = []
     private(set) var gainWrites: [(mainOut: Int, group: Int, mirrorToSystemVolume: Bool)] = []
     private(set) var outputSetWrites: [Set<String>] = []
+    private(set) var retryWrites: [String] = []
     /// Records "gain" / "outputSet" in the order the backend actually saw them —
     /// e.g. proving a group's gain reaches the backend BEFORE its output set does.
     private(set) var callOrder: [String] = []
@@ -2022,6 +2248,7 @@ private final class RecordingBackend: OutputBackend {
     }
 
     func retryOutput(_ id: String) {
+        retryWrites.append(id)
         callOrder.append("retry")
         inner.retryOutput(id)
     }
@@ -2040,7 +2267,7 @@ private final class RecordingBackend: OutputBackend {
     /// Forget everything recorded so far — fixture setup (selection, group
     /// activation) issues its own writes, and only what runs afterwards is
     /// under test.
-    func reset() { volumeWrites = []; gainWrites = []; outputSetWrites = []; callOrder = [] }
+    func reset() { volumeWrites = []; gainWrites = []; outputSetWrites = []; retryWrites = []; callOrder = [] }
 }
 
 private actor CountBox {

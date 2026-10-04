@@ -22,7 +22,7 @@ import CoreAudio
 
     /// Records engine ops — the "no BT id ever reaches the AirPlay engine"
     /// assertions read `addedIDs`/`fedIDs`.
-    private final class RecordingEngine: EngineControlling, @unchecked Sendable {
+    fileprivate final class RecordingEngine: EngineControlling, @unchecked Sendable {
         private let lock = NSLock()
         private var _fed: [OutputID] = []
         private var _added: [OutputID] = []
@@ -52,7 +52,7 @@ import CoreAudio
         var ptpClockAvailable: Bool { get async { true } }
     }
 
-    private final class FakeBTEnumerator: BTDeviceEnumerating, @unchecked Sendable {
+    fileprivate final class FakeBTEnumerator: BTDeviceEnumerating, @unchecked Sendable {
         private let lock = NSLock()
         private var _onSnapshot: (@Sendable ([BTDeviceSnapshot]) -> Void)?
         var onSnapshot: (@Sendable ([BTDeviceSnapshot]) -> Void)? {
@@ -63,14 +63,17 @@ import CoreAudio
         /// How often a user gesture asked for the Bluetooth grant (the ask the
         /// enumerator no longer fires at backend start).
         var userActionAsks: Int { lock.withLock { _userActionAsks } }
-        func start() {}
+        private var _starts = 0
+        /// How often the enumerator was (re)started.
+        var starts: Int { lock.withLock { _starts } }
+        func start() { lock.withLock { _starts += 1 } }
         func stop() {}
         func refresh() {}
         func requestAuthorizationForUserAction() { lock.withLock { _userActionAsks += 1 } }
         func fire(_ snapshots: [BTDeviceSnapshot]) { onSnapshot?(snapshots) }
     }
 
-    private final class FakeDiscovery: DiscoverySource, @unchecked Sendable {
+    fileprivate final class FakeDiscovery: DiscoverySource, @unchecked Sendable {
         var onEvent: (@Sendable (DiscoveryEvent) -> Void)?
         func start() {}
         func stop() {}
@@ -122,7 +125,7 @@ import CoreAudio
     }
 
     /// Records the whole-system capture gate + the BT fan-out attach seam.
-    private final class FakeCapture: CaptureControlling, @unchecked Sendable {
+    fileprivate final class FakeCapture: CaptureControlling, @unchecked Sendable {
         private let lock = NSLock()
         private var _ops: [String] = []
         private var _onLevel: (@Sendable (_ rms: Float) -> Void)?
@@ -174,7 +177,7 @@ import CoreAudio
     }
 
     /// A `BTSyncedSinkControlling` spy recording every call, in order.
-    private final class SpyBTSink: BTSyncedSinkControlling, @unchecked Sendable {
+    fileprivate final class SpyBTSink: BTSyncedSinkControlling, @unchecked Sendable {
         private let lock = NSLock()
         private var _calls: [String] = []
         private var _deviceSets: [[BTSyncedSink.DeviceSpec]] = []
@@ -303,7 +306,7 @@ import CoreAudio
 
     // MARK: Fixtures + helpers
 
-    private let btMove = BTDeviceSnapshot(id: "C4-38-75-0E-BF-4A:output", name: "Move 2", isConnected: true)
+    fileprivate let btMove = BTDeviceSnapshot(id: "C4-38-75-0E-BF-4A:output", name: "Move 2", isConnected: true)
     private let btFlip = BTDeviceSnapshot(id: "70-99-1C-51-8F-A8:output", name: "Flip 5", isConnected: true)
 
     private func ap2Device(id: String = "AA:BB:CC:DD:EE:01", name: String = "Sonos Move") -> DiscoveredDevice {
@@ -389,7 +392,7 @@ import CoreAudio
         AppRoute(bundleID: bundleID, displayName: name, destination: .device(id: deviceID), volume: volume)
     }
 
-    private func makeBackend(
+    fileprivate func makeBackend(
         silenceFallbackDelay: TimeInterval = NativeBackend.defaultSilenceFallbackDelay,
         btConnection: BTConnectionManaging? = nil,
         btRenderStartTimeout: TimeInterval = 6,
@@ -423,13 +426,13 @@ import CoreAudio
         return (backend, engine, discovery, bt, sink, capture)
     }
 
-    private func waitFor(timeout: TimeInterval? = nil,
+    fileprivate func waitFor(timeout: TimeInterval? = nil,
                      sourceLocation: SourceLocation = #_sourceLocation,
                      _ cond: @escaping () -> Bool) {
         SuiteWait.untilOnRunLoop(timeout: timeout, sourceLocation: sourceLocation, cond)
     }
 
-    private func device(_ backend: NativeBackend, _ id: String) -> Device? {
+    fileprivate func device(_ backend: NativeBackend, _ id: String) -> Device? {
         backend.devices.first { $0.id == id }
     }
 
@@ -953,6 +956,131 @@ import CoreAudio
         waitFor { sink.deviceSets.last?.map(\.uid) == [self.btMove.id] }
         #expect(sink.deviceSets.last?.map(\.uid) == [btMove.id],
                 "the reconnect-reapply re-enters the applied set")
+    }
+
+    // MARK: - A per-device sink reports its device dead
+
+    /// A uid no real Mac lists, so a resolver that slips past the seam finds nothing.
+    private let btSinkDeathSpeaker = BTDeviceSnapshot(
+        id: "0A-0B-0C-0D-0E-0F:output", name: "Test Speaker", isConnected: true)
+
+    /// A selected Bluetooth speaker whose sink is rendering, so the row has left
+    /// its connect hold and no timeout can turn it `.failed` mid-test.
+    private func selectedMove(
+        btConnection: BTConnectionManaging? = nil
+    ) -> (NativeBackend, FakeBTEnumerator, SpyBTSink) {
+        let (backend, _, _, bt, sink, _) = makeBackend(btConnection: btConnection)
+        backend.start()
+        bt.fire([btSinkDeathSpeaker])
+        waitFor { self.device(backend, self.btSinkDeathSpeaker.id) != nil }
+        backend.setOutputSet([btSinkDeathSpeaker.id])
+        waitFor { sink.calls.contains("start") }
+        sink.renderingUIDs = [btSinkDeathSpeaker.id]
+        waitFor { self.device(backend, self.btSinkDeathSpeaker.id)?.connectionState == .connected }
+        return (backend, bt, sink)
+    }
+
+    /// Red if a sink death whose UID no longer resolves leaves the row available:
+    /// the speaker would breathe forever with no sink behind it.
+    @Test func btSinkDeath_whenUIDNoLongerResolves_marksDeviceUnavailableAndOff() {
+        let (backend, _, _) = selectedMove()
+        defer { backend.stop() }
+
+        backend.btDeviceIDForUID = { _ in nil }
+        backend.handleBTSinkDead(uid: btSinkDeathSpeaker.id)
+
+        waitFor {
+            let d = self.device(backend, self.btSinkDeathSpeaker.id)
+            return d?.isAvailable == false && d?.connectionState == .off
+        }
+        #expect(device(backend, btSinkDeathSpeaker.id)?.isAvailable == false)
+        #expect(device(backend, btSinkDeathSpeaker.id)?.connectionState == ConnectionState.off)
+    }
+
+    /// Red if a sink death is not followed by a reapply: the manager dropped the dead
+    /// sink, so without one the speaker stays silent although its UID resolves to a live object.
+    @Test func btSinkDeath_whenUIDResolvesToNewID_reappliesWithFreshDeviceID() {
+        let (backend, _, sink) = selectedMove()
+        defer { backend.stop() }
+        let before = sink.deviceSets.count
+        let freshID: AudioObjectID = 4242
+
+        backend.btDeviceIDForUID = { _ in freshID }
+        backend.handleBTSinkDead(uid: btSinkDeathSpeaker.id)
+
+        let id = btSinkDeathSpeaker.id
+        func reappliedWithFreshID() -> Bool {
+            sink.deviceSets.dropFirst(before).contains { specs in
+                specs.contains { $0.uid == id && $0.deviceID == freshID }
+            }
+        }
+        waitFor { reappliedWithFreshID() }
+        #expect(reappliedWithFreshID())
+        #expect(device(backend, btSinkDeathSpeaker.id)?.isAvailable == true)
+    }
+
+    /// Red if repeated sink deaths keep retrying: a device that dies again within
+    /// 10 s must be marked gone, or a zombie object id rebuilds a dying sink in a loop.
+    @Test func secondSinkDeathWithinTenSeconds_marksUnavailableInsteadOfRetrying() {
+        let (backend, _, sink) = selectedMove()
+        defer { backend.stop() }
+
+        let id = btSinkDeathSpeaker.id
+        let initial = sink.deviceSets.count
+        backend.handleBTSinkDead(uid: id)
+        waitFor { sink.deviceSets.count > initial }
+        let beforeSecond = sink.deviceSets.count
+        backend.handleBTSinkDead(uid: id)
+
+        waitFor {
+            let d = self.device(backend, id)
+            return d?.isAvailable == false && d?.connectionState == .off
+        }
+        waitFor { sink.deviceSets.count > beforeSecond }
+        #expect(device(backend, id)?.isAvailable == false)
+        #expect(sink.deviceSets.dropFirst(beforeSecond).allSatisfy { !$0.contains { $0.uid == id } },
+                "a speaker marked gone must not get a fresh sink")
+    }
+
+    /// Red if a speaker marked gone by a sink death is never re-listed: the
+    /// enumerator emits only on a list change, so a speaker macOS still lists
+    /// would stay unavailable until relaunch.
+    @Test func sinkDeathMarkedGone_restartsTheEnumeratorAfterTheRecoveryDelay() {
+        let (backend, bt, _) = selectedMove()
+        defer { backend.stop() }
+        backend.btSinkDeathRecoverySeconds = 0.1
+        let id = btSinkDeathSpeaker.id
+        let startsBefore = bt.starts
+
+        backend.handleBTSinkDead(uid: id)
+        backend.handleBTSinkDead(uid: id)
+
+        waitFor { bt.starts > startsBefore }
+        #expect(bt.starts == startsBefore + 1)
+    }
+
+    /// Red if a manual reconnect that succeeds leaves the row unavailable: after a
+    /// sink death marked it gone, the user's tap is the one way to heal it at once.
+    @Test func manualReconnectAfterSinkDeathMakesTheRowAvailableAgain() {
+        let manager = FakeBTConnectionManager()
+        let (backend, _, sink) = selectedMove(btConnection: manager)
+        defer { backend.stop() }
+        let id = btSinkDeathSpeaker.id
+        backend.handleBTSinkDead(uid: id)
+        backend.handleBTSinkDead(uid: id)
+        waitFor {
+            let d = self.device(backend, id)
+            return d?.isAvailable == false && d?.connectionState == .off
+        }
+        let setsBefore = sink.deviceSets.count
+
+        backend.retryOutput(id)
+
+        waitFor { self.device(backend, id)?.isAvailable == true }
+        #expect(device(backend, id)?.isAvailable == true)
+        waitFor { sink.deviceSets.dropFirst(setsBefore).contains { $0.contains { $0.uid == id } } }
+        #expect(sink.deviceSets.dropFirst(setsBefore).contains { $0.contains { $0.uid == id } },
+                "the healed speaker gets its sink back")
     }
 
     // MARK: - BT-LIFECYCLE: breathing until the music starts
@@ -1510,5 +1638,51 @@ import CoreAudio
                 "the per-app mixed stream must reach the BT sink through the UID-scoped enqueue")
         #expect(!sink.perAppEnqueues.contains { $0.uids.contains(btFlip.id) },
                 "a whole-system-only BT device must never receive frames through the UID-scoped per-app path")
+    }
+}
+
+/// The one case here that captures `Telemetry` lines: the test sink is
+/// process-global, so it runs under `SerializedSharedState` while the suite
+/// above stays parallel. Named to keep `--filter NativeBackendBTSelectionTests`
+/// matching both.
+extension SerializedSharedState {
+
+    @Suite final class NativeBackendBTSelectionTestsTelemetry: IsolatedSuite {
+
+        private final class LineCapture: @unchecked Sendable {
+            private let lock = NSLock()
+            private var lines: [String] = []
+            func append(_ line: String) { lock.withLock { lines.append(line) } }
+            func lines(evt: String) -> [String] {
+                lock.withLock { lines.filter { $0.contains("\"evt\":\"\(evt)\"") } }
+            }
+        }
+
+        /// Red if the availability edge stops writing its line: a selected speaker
+        /// dropping would leave no trace in the log, as on 2026-10-03.
+        @Test func btLossWhileSelectedWritesTheAvailabilityLine() {
+            let capture = LineCapture()
+            Telemetry._installTestSink { capture.append($0) }
+            defer { Telemetry._installTestSink(nil) }
+            let fixtures = NativeBackendBTSelectionTests()
+            let (backend, _, _, bt, sink, _) = fixtures.makeBackend()
+            defer { backend.stop() }
+            let move = fixtures.btMove
+            backend.start()
+            bt.fire([move])
+            fixtures.waitFor { fixtures.device(backend, move.id) != nil }
+            backend.setOutputSet([move.id])
+            fixtures.waitFor { sink.calls.contains("start") }
+
+            bt.fire([BTDeviceSnapshot(id: move.id, name: move.name, isConnected: false)])
+            fixtures.waitFor { fixtures.device(backend, move.id)?.isAvailable == false }
+            fixtures.waitFor { !capture.lines(evt: "bt_device_availability").isEmpty }
+
+            let lines = capture.lines(evt: "bt_device_availability")
+            #expect(lines.count == 1, "\(lines)")
+            let line = lines.first ?? ""
+            #expect(line.contains("\"available\":\"false\""), "\(line)")
+            #expect(line.contains("\"selected\":\"true\""), "\(line)")
+        }
     }
 }

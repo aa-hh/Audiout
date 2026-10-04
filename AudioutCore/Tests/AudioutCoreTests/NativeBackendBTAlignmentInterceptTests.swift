@@ -268,6 +268,11 @@ extension SerializedSharedState {
         func setTrimMs(_ ms: Double, forDeviceUID uid: String) {
             lock.withLock { _trims.append((ms, uid)) }
         }
+        private var _clampChecks: [String] = []
+        func reanchorIfTrimClamped(forDeviceUID uid: String) {
+            lock.withLock { _clampChecks.append(uid) }
+        }
+        var clampChecks: [String] { lock.withLock { _clampChecks } }
         /// Hold every `setGain` on the queue that calls it, so a test can assert
         /// what happens while a Bluetooth hold has not yet reached the sink.
         private let gate = NSCondition()
@@ -345,7 +350,8 @@ extension SerializedSharedState {
         storeDirectory: URL? = nil,
         engine: RecordingEngine? = nil,
         discovery: FakeDiscovery? = nil,
-        perAppCapture: PerAppCaptureCoordinator? = nil
+        perAppCapture: PerAppCaptureCoordinator? = nil,
+        delayClock: @escaping NativeBackend.DelayClock = NativeBackend.dispatchDelayClock
     ) -> (NativeBackend, FakeBTEnumerator, SpyBTSink, EventCollector) {
         let bt = FakeBTEnumerator()
         let backend = NativeBackend(
@@ -357,6 +363,7 @@ extension SerializedSharedState {
             systemVolume: NoOpSystemVolume(),
             ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
             injectedPerAppCapture: perAppCapture,
+            delayClock: delayClock,
             systemDefaultOutputIsAirPlayClass: { false },
             aggregateControl: NoOpAggregateControl(),
             handoffWatcherFactory: { onBlockedAttempt in
@@ -1006,7 +1013,12 @@ extension SerializedSharedState {
     @Test @MainActor func aFailedUserEditDuringCleanupIsNotBlamedOnTheRestoration() async {
         let engine = RecordingEngine()
         let discovery = FakeDiscovery()
-        let (backend, bt, _, _) = makeBackend(engine: engine, discovery: discovery)
+        // The audition's deadlines fire only when the test says. This test is
+        // about whose failure the stop reports, and on the wall clock a loaded
+        // run let the 4 s stop deadline expire while the restoration was held.
+        let deadlines = ManualDelayClock()
+        let (backend, bt, _, _) = makeBackend(engine: engine, discovery: discovery,
+                                              delayClock: deadlines.clock)
         defer { engine.releaseWrites(); backend.stop() }
         backend.captureCoordinator = ProbeStagingCapture()
         backend.start()
@@ -1518,6 +1530,10 @@ extension SerializedSharedState {
         #expect(report()?.staleReason == nil)
         #expect(report()?.clockState == .unknown, "a new link, and no verdict on its clock yet")
         #expect(report()?.settleRemainingSeconds == nil)
+        // `BTSpeakerTiming.noteConnected` writes the report under its lock and
+        // fires the change after releasing it, so the report can read
+        // `.fromLastTime` before the callback has run.
+        waitFor { changes.value == base + 2 }
         #expect(changes.value == base + 2)
 
         backend.endBTWizardLatencyPreview(forDevice: uid, keepMs: 300)
@@ -1636,6 +1652,51 @@ extension SerializedSharedState {
                 "…and only the selected ones count")
     }
 
+    /// A negative trim is a speaker asking to play earlier, which on the
+    /// speaker that sets the floor only "every other speaker later" can give:
+    /// it counts as extra latency when the floor is chosen.
+    @Test func aNegativeTrimRaisesTheBTOnlyReferenceLikeLatency() {
+        let latencies = ["move2": 483.0, "move": 295.0]
+        #expect(NativeBackend.btOnlyReferenceMs(latencies: latencies, trims: ["move2": -10],
+                                                uids: ["move2", "move"]) == 593)
+        #expect(NativeBackend.btOnlyReferenceMs(latencies: latencies, trims: ["move2": 40],
+                                                uids: ["move2", "move"]) == 583,
+                "a positive trim plays later — it never needs the floor to move")
+        #expect(NativeBackend.btOnlyReferenceMs(latencies: latencies, trims: ["move": -150],
+                                                uids: ["move2", "move"]) == 583,
+                "a speaker still inside the floor leaves it alone")
+    }
+
+    /// DEFECT (customer, 1.2.0): Move 2 set the floor (483 + 100 = 583), sat
+    /// 100 ms behind it, and every committed −10 ms was stored while the sink
+    /// applied none of it. The commit must raise the floor so the trim plays.
+    /// A speaker whose trim leaves the floor where it is gets the sink's own
+    /// clamp check instead; the one that moved the floor does not need it — a
+    /// floor move re-anchors every sink already.
+    @Test func aCommittedNegativeTrimOnTheFloorSpeakerRaisesTheReference() throws {
+        let dir = scratchDir
+        try BTTrimStore(directory: dir).saveLatencies([btMove.id: 483, btFlip.id: 295])
+        let (backend, bt, sink, _) = makeBackend(storeDirectory: dir)
+        defer { backend.stop() }
+        backend.start()
+        bt.fire([btMove, btFlip])
+        waitFor { self.device(backend, self.btMove.id) != nil
+            && self.device(backend, self.btFlip.id) != nil }
+        backend.setOutputSet([btMove.id, btFlip.id])
+        waitFor { sink.buffers.last == 583 }
+
+        backend.setBTSyncTrim(-10, forDevice: btMove.id, persist: false)
+        backend.setBTSyncTrim(-10, forDevice: btMove.id, persist: true)
+        waitFor { sink.buffers.last == 593 }
+        #expect(sink.buffers.last == 593, "483 + 10 + 100: the other speaker plays 10 ms later")
+
+        backend.setBTSyncTrim(-20, forDevice: btFlip.id, persist: true)
+        waitFor { sink.clampChecks.contains(self.btFlip.id) }
+        #expect(sink.clampChecks == [btFlip.id],
+                "only the commit that left the floor alone asks the sink")
+        #expect(sink.buffers.last == 593)
+    }
+
     // MARK: - Passive drift tracking (roadmap 085 ticket 05)
 
     /// DEFECT: the baseline guard asked `btStoredAlignmentOffsetMs`, which
@@ -1723,7 +1784,10 @@ extension SerializedSharedState {
         try BTTrimStore(directory: dir).saveLatencies([btMove.id: 583, btFlip.id: 527])
         let (backend, bt, _, _) = makeBackend(storeDirectory: dir)
         defer { backend.stop() }
-        let real = BTSyncedSink(renderSampleRate: 48_000, channelCount: 1, presentationDelayMs: { 100 })
+        // Object id 0 is not a live HAL device; without this the alive check at
+        // first start would drop both sinks before the reference could move.
+        let real = BTSyncedSink(renderSampleRate: 48_000, channelCount: 1, presentationDelayMs: { 100 },
+                                deviceIsAlive: { _ in true })
         backend.btSyncedSinkFactory = { real }
         backend.btDeviceIDForUID = { _ in AudioObjectID(0) }
         backend.start()
@@ -1923,6 +1987,47 @@ extension SerializedSharedState {
         backend.setBTWizardTickActive(false, btTargetDeviceID: btMove.id, btReferenceDeviceID: nil)
     }
 
+    /// THE DEFECT (live, freshly connected speaker: the sweeps never came out
+    /// until music had played once). The bed floor used to be counted from the
+    /// gate opening, and a sink plays nothing until its delay gate releases —
+    /// most of two seconds under the wizard's raised reference. So the floor
+    /// had always run out before release and the sweeps followed half a second
+    /// after the first audible frame, into a link and amp still waking up. The
+    /// floor now runs from the release, however long the gate waited for it.
+    @Test func theBedFloorIsTimedFromTheReleaseNotTheGateOpening() {
+        let capture = LineCapture()
+        let (backend, bt, sink, _) = makeBackend()
+        defer { backend.stop(); Telemetry._installTestSink(nil) }
+        backend.wizardArmPollInterval = 0.01
+        backend.wizardArmMinimumBedSeconds = 0.4
+        backend.wizardArmCeilingSeconds = 60
+        backend.start()
+        bt.fire([btMove])
+        waitFor { self.device(backend, self.btMove.id) != nil }
+        backend.setOutputSet([btMove.id])
+        waitFor { !sink.buffers.isEmpty }
+
+        Telemetry._installTestSink { capture.append($0) }
+        backend.setBTWizardTickActive(true, btTargetDeviceID: btMove.id, btReferenceDeviceID: nil)
+        // The gate waits longer than the whole floor with nothing released.
+        waitFor(timeout: 0.6) { !capture.armedLines().isEmpty }
+        #expect(capture.armedLines().isEmpty, "no tick while the speaker is silent")
+
+        let releasedAt = Date()
+        sink.rendering = [btMove.id]
+        waitFor { !capture.armedLines().isEmpty }
+        let bedHeard = Date().timeIntervalSince(releasedAt)
+        #expect(bedHeard >= 0.4,
+                "the arm waited a full floor after the release, not after the gate: \(bedHeard) s")
+        let line = capture.armedLines().first ?? ""
+        #expect(line.contains("\"timedOut\":\"0\""), "\(line)")
+        let bedMs = line.range(of: #""bedMs":"(\d+)""#, options: .regularExpression)
+            .map { String(line[$0]).filter(\.isNumber) }.flatMap { Int($0) }
+        #expect((bedMs ?? 0) >= 400, "the line records the audible bed: \(line)")
+
+        backend.setBTWizardTickActive(false, btTargetDeviceID: btMove.id, btReferenceDeviceID: nil)
+    }
+
     /// A speaker that never reports rendering must not stall the run: the
     /// ceiling arms it anyway, and says so.
     @Test func theArmGateHasACeiling() {
@@ -2108,8 +2213,9 @@ extension SerializedSharedState {
     /// A customer's 1.2.0 session (two Sonos Moves) replayed: deselecting and
     /// reselecting a speaker keeps both stored halves, and the reselected sink
     /// is handed reference − latency + trim. That trim was −205, reached by 76
-    /// persisted steps the live sink refused, so the reselect anchored at 0 —
-    /// the formula doing its job on a trim nobody heard.
+    /// persisted steps the live sink refused, and the reselect anchored it at
+    /// 0. A negative trim now counts as latency when the floor is chosen, so
+    /// the floor rises to 295 + 205 + 100 and the speaker keeps a 100 ms delay.
     @Test @MainActor func aReselectedSpeakerKeepsItsStoredAlignment() async throws {
         let dir = scratchDir
         let sonos = BTDeviceSnapshot(id: "54-2A-1B-79-08-9E:output", name: "Sonos Move", isConnected: true)
@@ -2140,13 +2246,13 @@ extension SerializedSharedState {
         let offset = try #require(sink.offsets.last { $0.uid == sonos.id }?.ms)
         let trim = try #require(sink.trims.last { $0.uid == sonos.id }?.ms)
         let buffer = try #require(sink.buffers.last)
-        #expect((offset, trim, buffer) == (295, -205, 500))
-        // 500 − 295 + (−205): the stored trim is honoured, and it lands on 0.
+        #expect((offset, trim, buffer) == (295, -205, 600))
+        // 600 − 295 + (−205): the stored trim is honoured with headroom left.
         let delay = BTReferenceTimeline.delayNanos(
             composition: BTGroupComposition(airPlayPresent: false, macLocalPresent: false),
             presentationDelayMs: 0, btOnlyBufferMs: buffer,
             deviceOffsetMs: offset, trimMs: trim)
-        #expect(delay == 0)
+        #expect(delay == 100_000_000)
     }
 
     /// A Reset on a playing speaker left no line at all (both of its seeks run

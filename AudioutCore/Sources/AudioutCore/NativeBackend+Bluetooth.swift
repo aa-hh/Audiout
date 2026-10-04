@@ -9,8 +9,12 @@ extension NativeBackend {
     /// UID → live `AudioObjectID` at USE time, never cached: BT object ids go
     /// stale across a disconnect/rejoin while UIDs don't (see
     /// ``btDeviceIDForUID``). On `stateQueue`.
+    /// The hardware-volume path keeps the HAL's single UID translation: it runs
+    /// on `stateQueue` (the exception AGENTS.md records), where a walk of every
+    /// device would lengthen the stall a slow coreaudiod already causes.
     private func liveBTDeviceIDLocked(_ uid: String) -> AudioObjectID? {
-        btDeviceIDForUID?(uid) ?? aggregateControl.resolveDeviceID(forUID: uid)
+        if let seam = btDeviceIDForUID { return seam(uid) }
+        return aggregateControl.resolveDeviceID(forUID: uid)
     }
 
     /// (Re)decide whether `uid`'s slider writes hardware volume, on any input
@@ -175,8 +179,16 @@ extension NativeBackend {
     /// its delay does not hit `SyncTiming.totalDelayNanos`'s ≥ 0 clamp. Devices
     /// with no measurement contribute nothing — an unknown latency is treated
     /// as within the floor until the wizard says otherwise.
-    static func btOnlyReferenceMs(latencies: [String: Double], uids: [String]) -> Int {
-        let slowest = uids.compactMap { latencies[$0] }.max() ?? 0
+    ///
+    /// A NEGATIVE trim counts as latency. It asks the speaker to play earlier,
+    /// and on the speaker that sets the floor the only way to give that is to
+    /// play every other output later. Left out, the trim shortened that
+    /// speaker's delay below the live seek's safety margin
+    /// (`BTDeviceSink.seekSafetyMarginMs`), the seek applied nothing, and the
+    /// stored value then re-anchored it at a delay of 0 on the next reselect.
+    static func btOnlyReferenceMs(latencies: [String: Double], trims: [String: Double] = [:],
+                                  uids: [String]) -> Int {
+        let slowest = uids.map { (latencies[$0] ?? 0) - Swift.min(0, trims[$0] ?? 0) }.max() ?? 0
         return Swift.max(BTSyncedSink.defaultBTOnlyBufferMs,
                          Int(slowest.rounded()) + btReferenceHeadroomMs)
     }
@@ -193,11 +205,11 @@ extension NativeBackend {
     /// speaker's sink too.
     @discardableResult
     func updateBTReferenceBufferLocked(pushToSink: Bool = true) -> Int {   // on stateQueue
-        let latencies = btTrimLock.withLock { btLatencyMsByUID }
+        let (latencies, trims) = btTrimLock.withLock { (btLatencyMsByUID, btTrimsByUID) }
         // Same inputs, other composition: with AirPlay or Cast in the room the
         // buffer below is not the reference, the room delay is, and the
         // slowest speaker has to be able to raise THAT.
-        if updateBTRoomTermLocked(latencies: latencies) {
+        if updateBTRoomTermLocked(latencies: latencies, trims: trims) {
             if pushToSink {
                 roomDelayChangedLocked(cause: "bt_latency")
             } else {
@@ -209,7 +221,7 @@ extension NativeBackend {
         }
         let desired = btWizardReferenceRaised
             ? Self.btWizardReferenceBufferMs
-            : Self.btOnlyReferenceMs(latencies: latencies, uids: btSelectedUIDs)
+            : Self.btOnlyReferenceMs(latencies: latencies, trims: trims, uids: btSelectedUIDs)
         guard desired != btReferenceBufferMs else { return desired }
         btReferenceBufferMs = desired
         let localRides =
@@ -232,7 +244,7 @@ extension NativeBackend {
     /// BT-only buffer above already sits past the slowest speaker, and a
     /// per-app-only speaker never sets the room's timing
     /// (``NativeBackend/btPerAppClaimedUIDs``). It is the same number the
-    /// BT-only buffer would be — slowest measured latency plus headroom — and
+    /// BT-only buffer would be — slowest measured latency plus headroom, a negative trim counting as latency as it does for the buffer — and
     /// it counts only when that exceeds the start buffer: a speaker that fits
     /// under the buffer was never held back, so the `nil` keeps every room
     /// that ships today on today's exact delays, by construction rather than
@@ -243,9 +255,15 @@ extension NativeBackend {
     /// the start buffer: the room delay then falls back to the buffer, with
     /// one gap. On `stateQueue`.
     @discardableResult
-    func updateBTRoomTermLocked(latencies: [String: Double]? = nil) -> Bool {   // on stateQueue
-        let latencies = latencies ?? btTrimLock.withLock { btLatencyMsByUID }
-        let candidate = Self.btOnlyReferenceMs(latencies: latencies, uids: btSelectedUIDs)
+    func updateBTRoomTermLocked(latencies: [String: Double]? = nil,
+                                trims: [String: Double]? = nil) -> Bool {   // on stateQueue
+        var latencies = latencies, trims = trims
+        if latencies == nil || trims == nil {
+            let (storedLatencies, storedTrims) = btTrimLock.withLock { (btLatencyMsByUID, btTrimsByUID) }
+            latencies = latencies ?? storedLatencies
+            trims = trims ?? storedTrims
+        }
+        let candidate = Self.btOnlyReferenceMs(latencies: latencies!, trims: trims!, uids: btSelectedUIDs)
         let wanted: Int?
         if btSinkEnabled, btComposition.usesPresentationReference, candidate > _startBufferMs {
             wanted = Swift.max(btRoomTermMs ?? 0, candidate)
@@ -270,11 +288,16 @@ extension NativeBackend {
     ///
     /// `btSinkEnabled` deliberately keeps its narrower whole-system-only
     /// meaning: it is what ``roomDelayLocked()`` branches on, and widening it
-    /// would put a per-app destination in charge of the room's timing. On
-    /// `stateQueue`.
+    /// would put a per-app destination in charge of the room's timing.
+    ///
+    /// Selection is intent, so a claimed speaker marked unavailable is left out
+    /// of `uids`: it gets no sink, or a zombie id that still resolves would be
+    /// rebuilt to die again. A return commits `isAvailable = true` before it
+    /// reapplies. On `stateQueue`.
     func btArmingLocked() -> (enable: Bool, uids: [String]) {   // on stateQueue
         (btSinkEnabled || !btPerAppClaimedUIDs.isEmpty,
-         Set(btSelectedUIDs).union(btPerAppClaimedUIDs).sorted())
+         Set(btSelectedUIDs).union(btPerAppClaimedUIDs)
+            .filter { known[$0]?.isAvailable != false }.sorted())
     }
 
     /// Wave-4 reconnect-reapply: re-run the CURRENT BT sink decision so a
@@ -472,10 +495,11 @@ extension NativeBackend {
             }
             // UID → live AudioObjectID, resolved fresh per apply. A uid that no
             // longer resolves (the speaker dropped between selection and apply)
-            // contributes no sink; it re-resolves on the next selection change
-            // (reconnect-driven re-application is BT-RECONNECT's, Wave 4).
+            // contributes no sink; it re-resolves through `resolveBTDeviceID`
+            // on the next reapply: a selection change, a reconnect, or a sink
+            // death (`handleBTSinkDead`).
             let specs = uids.compactMap { uid in
-                let deviceID = btDeviceIDForUID?(uid) ?? aggregateControl.resolveDeviceID(forUID: uid)
+                let deviceID = resolveBTDeviceID(forUID: uid)
                 return deviceID.map { BTSyncedSink.DeviceSpec(deviceID: $0, uid: uid) }
             }
             // Departing speakers leave BEFORE the reference moves: a composition
@@ -679,6 +703,79 @@ extension NativeBackend {
         btLastUsedLock.withLock { btLastUsed }
     }
 
+    /// A per-device sink tore itself down: its device object died, or its
+    /// render callback stalled while fed. A UID that still resolves gets one
+    /// rebuild on the fresh object id; one that does not, or a second death
+    /// within 10 s, is a speaker that is gone, and its row says so. A gone
+    /// speaker gets an enumerator restart after `btSinkDeathRecoverySeconds`:
+    /// the enumerator emits only on a list change, so the full re-emit is what
+    /// returns a speaker macOS still lists. Callable from any queue.
+    /// The device lookup and enumerator refresh are Core Audio calls, so they
+    /// run on `captureControlQueue` and only the decision runs on `stateQueue`.
+    func handleBTSinkDead(uid: String) {
+        captureControlQueue.async { [weak self] in
+            guard let self else { return }
+            let resolves = self.resolveBTDeviceID(forUID: uid) != nil
+            self.btEnumerator?.refresh()
+            self.stateQueue.async { [weak self] in
+                guard let self else { return }
+                let now = Date()
+                let diedRecently = self.btSinkDeathAt[uid].map { now.timeIntervalSince($0) < 10 } ?? false
+                if resolves && !diedRecently {
+                    self.btSinkDeathAt[uid] = now
+                    self.reapplyBTSinkLocked()
+                    return
+                }
+                self.markBTDeviceLostLocked(uid)
+                self.stateQueue.asyncAfter(deadline: .now() + self.btSinkDeathRecoverySeconds) { [weak self] in
+                    self?.captureControlQueue.async { [weak self] in
+                        self?.btEnumerator?.stop()
+                        self?.btEnumerator?.start()
+                    }
+                }
+                self.reconcileSilenceWatchdog()
+                self.reapplyBTSinkLocked()
+            }
+        }
+    }
+
+    /// UID → the live object id for a Bluetooth speaker. A set ``btDeviceIDForUID``
+    /// owns the answer, nil included, so a test never reaches Core Audio.
+    private func resolveBTDeviceID(forUID uid: String) -> AudioObjectID? {
+        if let seam = btDeviceIDForUID { return seam(uid) }
+        return BTDeviceEnumerator.liveDeviceID(forUID: uid)
+    }
+
+    /// The per-device steps of a Bluetooth link loss: the row goes unavailable
+    /// and `.off` (a `.failed` story survives until retry or return), the
+    /// connect hold ends, and the hardware-volume watch drops. On `stateQueue`.
+    private func markBTDeviceLostLocked(_ id: String) {
+        guard var device = known[id] else { return }
+        if device.isAvailable {
+            device.isAvailable = false
+            commitKnownDevice(id, device)
+        }
+        btSpeakerTiming.noteDisconnected(uid: id)
+        btConnectingDeadlines[id] = nil
+        if case .failed = device.connectionState {
+            // keep the failure story
+        } else {
+            setConnectionState(.off, for: id)
+        }
+        reevaluateBTHardwareControlLocked(id)
+        logBTAvailabilityLocked(id)
+    }
+
+    /// Local-only: without it a speaker dropping while selected leaves no
+    /// trace of the edge in the log. On `stateQueue`.
+    func logBTAvailabilityLocked(_ id: String) {
+        Telemetry.log(.localPlayback, "bt_device_availability", [
+            "uid": id,
+            "available": known[id]?.isAvailable == true ? "true" : "false",
+            "selected": expectedSelected.contains(id) ? "true" : "false",
+        ])
+    }
+
     /// Fold a full BT enumeration into the model, through the same
     /// `known`/`order`/`emit` flow AirPlay discovery uses. A BT device that
     /// leaves the merged list entirely (unpaired mid-session) goes unavailable
@@ -747,19 +844,14 @@ extension NativeBackend {
                             } else {
                                 setConnectionState(.off, for: id)
                             }
+                            // Availability is an input to the hardware-volume
+                            // decision (BT-HW-VOL): a link-up re-enters control
+                            // with a fresh device id, a link-down drops the watch.
+                            reevaluateBTHardwareControlLocked(id)
+                            logBTAvailabilityLocked(id)
                         } else {
-                            btSpeakerTiming.noteDisconnected(uid: id)
-                            btConnectingDeadlines[id] = nil
-                            if case .failed = existing.connectionState {
-                                // keep the failure story
-                            } else {
-                                setConnectionState(.off, for: id)
-                            }
+                            markBTDeviceLostLocked(id)
                         }
-                        // Availability is an input to the hardware-volume
-                        // decision (BT-HW-VOL): a link-up re-enters control
-                        // with a fresh device id, a link-down drops the watch.
-                        reevaluateBTHardwareControlLocked(id)
                     }
                 }
             } else {
@@ -795,6 +887,7 @@ extension NativeBackend {
             if expectedSelected.contains(id) { desiredAvailabilityMoved = true }
             commitKnownDevice(id, device)
             reevaluateBTHardwareControlLocked(id)
+            logBTAvailabilityLocked(id)
         }
         // BT-BACKEND: a SELECTED BT id's availability is its audible fact for
         // the silence fallback (`desiredDeviceAudibleLocked` — BT ids never
@@ -1353,6 +1446,11 @@ extension NativeBackend: BTOutputControlling {
             btTrimsByUID[id] = value
             return btTrimsByUID
         }
+        // Enqueued before the commit's hop below, which queues its clamp check
+        // behind this on the same serial queue.
+        captureControlQueue.async { [weak self] in
+            self?.btSink?.setTrimMs(value, forDeviceUID: id)
+        }
         // The in-memory map updates on a scrub too — only the DISK write is
         // skipped. `btSyncTrim`/`btHasSyncTrim` are read-back seams, and a
         // reader mid-drag should see what the user is hearing.
@@ -1365,10 +1463,25 @@ extension NativeBackend: BTOutputControlling {
             // tracker expects to hear it at moved with it. A drift correction
             // never comes through here — it moves the MEASURED LATENCY, which
             // the baselines do not contain, so it leaves them alone.
-            stateQueue.async { self.refreshDriftTrackingLocked() }
-        }
-        captureControlQueue.async { [weak self] in
-            self?.btSink?.setTrimMs(value, forDeviceUID: id)
+            //
+            // A negative trim can move the floor (`btOnlyReferenceMs`), and a
+            // floor move re-anchors every sink on the new delays. When it does
+            // not move, the live seek may still have fallen short, so the sink
+            // re-anchors that one speaker if it did: the stored trim is then
+            // the one playing. Commits only — a held stepper's ticks would
+            // each cost a full-delay silence.
+            stateQueue.async {
+                let before = self.btReferenceBufferMs
+                self.updateBTReferenceBufferLocked()
+                let floorRebuilt = self.btReferenceBufferMs != before
+                    && !self.btComposition.usesPresentationReference
+                if !floorRebuilt {
+                    self.captureControlQueue.async { [weak self] in
+                        self?.btSink?.reanchorIfTrimClamped(forDeviceUID: id)
+                    }
+                }
+                self.refreshDriftTrackingLocked()
+            }
         }
     }
 
@@ -1892,14 +2005,14 @@ extension NativeBackend: BTOutputControlling {
                 return
             }
             let preparationSeconds = self.companionAuditionPreparationSeconds
-            DispatchQueue.main.asyncAfter(deadline: .now() + preparationSeconds) { [weak self] in
+            self.delayClock(preparationSeconds, .main, DispatchWorkItem { [weak self] in
                 self?.failCompanionAuditionPreparation(id: id,
                     reason: "Starting the speaker clicks took too long. Try again.")
-            }
-            DispatchQueue.main.asyncAfter(deadline: .now() + self.companionAuditionLeaseSeconds) {
+            })
+            self.delayClock(self.companionAuditionLeaseSeconds, .main, DispatchWorkItem {
                 [weak self] in self?.beginCompanionAuditionCleanup(id: id,
                     reason: "The speaker click session ended.")
-            }
+            })
             self.stateQueue.async {
                 self.companionTickParticipants = [targetID, referenceID]
                 let btUIDs = Array(self.btSelectedUIDs)
@@ -2147,9 +2260,9 @@ extension NativeBackend: BTOutputControlling {
         setBTWizardTickActive(false, btTargetDeviceID: nil, btReferenceDeviceID: nil)
         endBTWizardRun()
         btTrimLock.withLock { companionProgramSuppressed = false }
-        DispatchQueue.main.asyncAfter(deadline: .now() + companionAuditionStopSeconds) { [weak self] in
+        delayClock(companionAuditionStopSeconds, .main, DispatchWorkItem { [weak self] in
             self?.timeoutCompanionAuditionStop(id: id)
-        }
+        })
         stateQueue.async {
             self.companionTickParticipants = nil
             for uid in self.btSelectedUIDs { self.pushBTSinkGainLocked(uid) }
@@ -2690,7 +2803,7 @@ extension NativeBackend: BTOutputControlling {
     /// `captureControlQueue`.
     private func beginWizardArmGate(expecting uids: Set<String>) {   // captureControlQueue
         cancelWizardArmGate()
-        scheduleWizardArmPoll(started: Date(), expecting: uids)
+        scheduleWizardArmPoll(started: Date(), releasedAt: nil, expecting: uids)
     }
 
     /// `captureControlQueue`. Idempotent.
@@ -2699,9 +2812,10 @@ extension NativeBackend: BTOutputControlling {
         wizardArmPollWork = nil
     }
 
-    private func scheduleWizardArmPoll(started: Date, expecting uids: Set<String>) {
+    private func scheduleWizardArmPoll(started: Date, releasedAt: Date?,
+                                       expecting uids: Set<String>) {
         let work = DispatchWorkItem { [weak self] in
-            self?.pollWizardArmGate(started: started, expecting: uids)
+            self?.pollWizardArmGate(started: started, releasedAt: releasedAt, expecting: uids)
         }
         wizardArmPollWork = work
         captureControlQueue.asyncAfter(
@@ -2711,9 +2825,11 @@ extension NativeBackend: BTOutputControlling {
     /// One arm-gate poll. `captureControlQueue`, which owns both sinks — and is
     /// not a render or tap thread, so the one telemetry line at the end is
     /// emitted where it belongs.
-    private func pollWizardArmGate(started: Date, expecting uids: Set<String>) {
+    private func pollWizardArmGate(started: Date, releasedAt: Date?,
+                                   expecting uids: Set<String>) {
         wizardArmPollWork = nil
-        let waited = Date().timeIntervalSince(started)
+        let now = Date()
+        let waited = now.timeIntervalSince(started)
         let rendering = btSink?.renderingDeviceUIDs() ?? []
         // `true` when there is no local sink at all: nothing to wait for.
         let localReleased = syncedLocalSink?.hasStartedRendering ?? true
@@ -2721,14 +2837,33 @@ extension NativeBackend: BTOutputControlling {
         // A minimum stretch of bed regardless (the Sonos Move power-gates its
         // amplifier and swallows the first transients after silence), and a
         // ceiling so a speaker that never releases cannot stall the run.
-        let ready = everyoneReleased && waited >= wizardArmMinimumBedSeconds
-        guard ready || waited >= wizardArmCeilingSeconds else {
-            scheduleWizardArmPoll(started: started, expecting: uids)
+        //
+        // The bed is timed from the RELEASE, never from the gate opening. A
+        // sink plays nothing until its delay gate opens, which under the
+        // wizard's raised reference is most of two seconds after the gate
+        // starts, so a floor counted from the start runs out before a single
+        // bed frame is audible. A speaker that has not played since it
+        // connected needs that stretch to start its link and wake its amp;
+        // without it the sweeps land on a speaker that is still waking and
+        // nothing comes out, while one that played music a moment earlier is
+        // still awake. A release seen between two polls is dated to the poll
+        // that saw it, which errs long by at most one interval.
+        let releasedAt = releasedAt ?? (everyoneReleased ? now : nil)
+        let bedSeconds = releasedAt.map { now.timeIntervalSince($0) } ?? 0
+        let ready = everyoneReleased && bedSeconds >= wizardArmMinimumBedSeconds
+        // The ceiling is for a speaker that never releases. One that has
+        // released is owed its bed however late it got there.
+        let timedOut = !everyoneReleased && waited >= wizardArmCeilingSeconds
+        guard ready || timedOut else {
+            scheduleWizardArmPoll(
+                started: started, releasedAt: everyoneReleased ? releasedAt : nil,
+                expecting: uids)
             return
         }
         captureCoordinator?.armWizardTicks()
         Telemetry.log(.localPlayback, "wizard_ticks_armed", [
             "waitedMs": String(Int((waited * 1_000).rounded())),
+            "bedMs": String(Int((bedSeconds * 1_000).rounded())),
             "released": rendering.sorted().joined(separator: " "),
             "localReleased": localReleased ? "1" : "0",
             "timedOut": ready ? "0" : "1",

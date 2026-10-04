@@ -198,6 +198,13 @@ let package = Package(
         .target(
             name: "ObjCExceptionShim"
         ),
+        // Test-only: silences AppKit's "no one handled this key" alert sound
+        // for every test (Sources/TestKeySilencer/include/TestKeySilencer.h).
+        // Never add it to an app or tool target.
+        .target(
+            name: "TestKeySilencer",
+            linkerSettings: [.linkedFramework("AppKit")]
+        ),
         .target(
             name: "AudioutCore",
             dependencies: [
@@ -455,6 +462,7 @@ let package = Package(
                 "AudioutOnboardingUI",
                 "CastSender",
                 "CastFakeReceiver",
+                "TestKeySilencer",
                 .product(name: "ProbeKit", package: "audiout-shared"),
                 // `RemoteInviteViewTests` pins the UI's `BTOffsetSource`
                 // against `AlignmentSource`, the wire's own vocabulary, so a

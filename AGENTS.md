@@ -201,17 +201,12 @@ repo. `AudioutCore` pins it by version.
   changed once; Guard 4 at commit reuses it. `bash scripts/test-suite-cache.sh`
   and `bash scripts/test-guard-test-scope.sh` self-test the cache and the
   commit-time scoping.
-- **A merge onto `main` runs the full suite uncached, even a clean one,**
-  unless `/tmp/audiout-suite-cache` holds a full-suite pass (`<hash>.full`)
-  for the identical staged merged tree; then it prints one line naming that
-  pass and skips. A filtered pass never counts.
-  `.githooks/pre-merge-commit` runs for a merge without conflicts and calls
-  `pre-commit` with `AUDIOUT_IN_MERGE=1`; `pre-commit` sets the same flag itself
-  when `MERGE_HEAD` exists. Guards test that flag, never `MERGE_HEAD` alone,
-  because git writes `MERGE_HEAD` only after `pre-merge-commit` returns. Guard 7
-  skips its self-review record check on merges. A fast-forward creates no
-  commit and runs no hook: land branches with `git merge --no-ff`.
-  `bash scripts/test-pre-merge-hook.sh` self-tests the hook.
+- **The full suite runs on GitHub, not at a local merge.** The `tests`
+  workflow runs it on every pull request and again in the merge queue; it and
+  the `review` status are the two checks `main` requires. A test that fails in
+  the queue and passes on rerun is quarantined: skipped with a dated reason
+  and a GitHub issue. `AUDIOUT_TEST_MODE=serial` is for flake hunting only,
+  never for a gate.
 - **Hold the live-test slot before building or launching the shared dev id.**
   Only one native Audiout can run at a time (the PTP helper binds UDP 319/320
   exclusively) and the dev loop reuses one bundle id,
@@ -274,12 +269,27 @@ repo. `AudioutCore` pins it by version.
   inside the app's own Application Support directory, and (c) be added to
   `scripts/purge-dev-installs.sh` in the same change that introduces it.
 
-## `main` is MERGE-ONLY (HARD RULE)
+## `main` accepts nothing but the merge queue (HARD RULE)
 
-**Never `git commit` while standing on `main`.** Everything — code, docs,
+**Never commit, merge or push onto `main` yourself.** Everything — code, docs,
 one-line fixes — is authored and committed in your own worktree and reaches
-`main` only as a **merge**. Guard 1 enforces exactly this: merges pass, a bare
-commit on `main` is refused.
+`main` only through a pull request and GitHub's merge queue. Guard 1 refuses
+any commit on `main`; GitHub's ruleset refuses a push. End every task with:
+
+```bash
+git push -u origin HEAD
+gh pr create --fill
+bash scripts/review-branch.sh   # run the passes it prints as subagents, then: bash scripts/review-branch.sh --continue
+gh pr merge --merge --auto
+```
+
+Local `main` is a fast-forward mirror of `origin/main`, kept by
+`scripts/sync-main.sh` on a 2-minute launchd timer; never commit on it (Guard 1
+still refuses), and cut worktrees from `origin/main` after `git fetch`.
+
+`tests` (the full suite, on GitHub) and `review` (the status
+`review-branch.sh --continue` posts) are the two required checks; `--auto`
+queues the PR once both are green, and the session does not wait for it.
 
 **Do not work in the `main` checkout at all.** Merely *editing* it starts the
 accident, even if you never commit.
@@ -299,29 +309,62 @@ The code survived only as a dropped stash; recovering it cost a full session.
 **The half-save was the shape of the accident, not anyone's intent — committing
 loose edits looks like helpfulness.**
 
-Merge-only makes docs-ahead-of-code structurally impossible: a doc and its code
-ride the same branch and become true on `main` in the same instant.
+Landing only through the queue makes docs-ahead-of-code structurally
+impossible: a doc and its code ride the same branch and become true on `main`
+in the same instant.
 
 **Pre-commit guards** (`.githooks/pre-commit`; enable once per clone with
 `git config core.hooksPath .githooks`, override once with `--no-verify`). The
-two that shape how you work, plus the review gate; the rest (test suites 4/6,
+ones that shape how you work, plus the review; the rest (test suites 4/6,
 warn-only 3/5) are documented in the hook file itself:
 
-- **Guard 1 blocks** a direct commit on `main`. Merges are unaffected; it never
-  fires in a worktree.
+- **Guard 1 blocks** any commit on `main`, merges included; it never fires in a
+  worktree.
 - **Guard 2 warns** when an AGENTS.md names a symbol absent from that commit's
   own source — catching a name wrong from birth (`d033466`) or a doc left stale
   after a deletion. It checks the commit you are creating: not `main` (unmerged
   truth is still true) and not the working tree (which would have let `f1f3e94`
   through). Known false positives: AppKit types named as design guidance but used
   nowhere.
-- **Guard 7 blocks** a Swift commit until the staged-diff readability
-  self-review has run: `scripts/self-review.sh` shows the checklist and writes
-  a receipt keyed to the exact staged bytes — READ your staged diff against
-  [docs/REVIEW-RUBRIC.md](docs/REVIEW-RUBRIC.md) (change-log narration, stale
-  claims, misleading names, reviewer-speak) before committing; restaging
-  invalidates the receipt on purpose. It also hard-blocks near-certain slop
-  patterns in added comments (trailing `slop-ok` exempts a legitimate line).
+- **Guard 7 blocks** a Swift commit whose added comments match near-certain
+  slop patterns (`slop-ok` exempts a line; rubric
+  [docs/REVIEW-RUBRIC.md](docs/REVIEW-RUBRIC.md)).
+- **Guard 11 blocks** a commit whose new `@Test` has no comment sentence naming
+  the code change that turns it red, a `print(` in a test (`print-ok` exempts),
+  or a new test file holding one test (`new-suite-ok` exempts);
+  `bash scripts/test-guard-test-discipline.sh` self-tests it.
+- **Guard 12 blocks** a folder AGENTS.md that gains ruling phrasing or grows
+  while over its 300-word budget, and any removed line in an AGENTS-HISTORY.md;
+  it warns on a new date. Root `AGENTS.md` and merges are exempt;
+  `bash scripts/test-guard-agents-docs.sh` self-tests it.
+- **The review** (`scripts/review-branch.sh`, not a hook) posts the `review`
+  status. It picks skip, cheap (one sonnet pass) or full (four parallel
+  reviewers plus a confidence scorer, instructions in `docs/review/`) from the
+  diff, thresholds and risk paths at the top of the script. The reviewers run
+  as subagents of the session, because headless `claude -p` is refused on this
+  account: the script prints each pass's model, prompt file and reply path,
+  the session runs them and saves the replies, and `--continue` reads them
+  (exit 3 means more passes to run). It then logs one line to
+  `.git/audiout-branch-reviews.log`, posts one PR comment with the findings
+  grouped HIGH, MEDIUM, LOW, and sets the status on HEAD. Only a surviving HIGH
+  fails it (exit 1, with fix groups, one per file, for builder subagents);
+  fix, commit, push and run it again, and round 2 reviews only the fix. A
+  third run refuses. The round is read from a marker line at the top of the
+  script's own PR comments, not from local files, so a fresh checkout counts
+  the same. A push clears the status, since a status belongs to one commit;
+  run the script again, and if the branch's own non-Markdown lines are
+  unchanged (the marker's `changes=` patch id, e.g. after merging main in) it
+  re-posts the last round's status on the new HEAD without using a round. `bash scripts/test-review-branch.sh` self-tests it.
+- **A change inside a review risk path is scoped before it is built.** The
+  paths are the `is_risk_path` list at the top of `scripts/review-branch.sh`
+  (the Bluetooth sinks, the sync and drift code, `NativeBackend*`, the capture
+  coordinators, the stores, licence and trial, AirPlayEngine). However small
+  the finding reads, the first launch is a scoper (`fable-scoper` or
+  `/scope-and-run`) that states the function's invariants and enumerates the
+  cases; the builder writes those cases as tests first, then the code. On
+  2026-10-04 a "one-line" safety-margin clamp in `BTSyncedSink` took six
+  builder rounds and six reviews because each review's smallest fix became
+  the next spec instead of one design pass up front.
 
 ## UI / Design Conventions (all targets)
 
@@ -357,8 +400,9 @@ This app must feel like a native macOS citizen, not a cross-platform port.
 - **`DESIGN.md` records the shipped design; nothing mirrors it elsewhere.**
   The Figma design system was abandoned on 2026-09-03. When a change to
   `Tokens`, `PopoverColumnGrid`, a custom-drawn view, or a screen lands, the
-  record is regenerated from the code by the `impeccable-documenter` agent
-  (`.claude/agents/impeccable-documenter.md`), never hand-mirrored.
+  same commit updates the sections of `DESIGN.md` that describe it, written
+  from the code as shipped; it never describes a planned change, and never
+  restates a rule into a folder AGENTS.md.
 - Deviating is fine when the system has no equivalent — but note *why* in the
   nearest AGENTS.md, so the next agent doesn't "fix" it back to a system control
   that doesn't fit.

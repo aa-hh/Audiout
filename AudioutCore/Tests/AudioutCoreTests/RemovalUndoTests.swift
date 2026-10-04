@@ -66,6 +66,57 @@ import Testing
         #expect(spy.undoRequests == 1, "the real NSButton click reaches the delegate")
     }
 
+    /// Red if the row raised "Play here" on its own, or stopped
+    /// handing the click to the host: the row draws the offer, the host decides.
+    @Test func switchOfferRendersOnlyWhenRaisedAndDrivesTheDelegate() {
+        final class Spy: DeviceRowView.Delegate {
+            var switchRequests = 0
+            func deviceRow(_ row: DeviceRowView, didSetVolume volume: Int, for id: String) {}
+            func deviceRow(_ row: DeviceRowView, didToggleMute muted: Bool, for id: String) {}
+            func deviceRowDidRequestSwitchHere(_ row: DeviceRowView) { switchRequests += 1 }
+        }
+        let row = makeBusRow(makeDevice())
+        let spy = Spy()
+        row.delegate = spy
+        row.apply(makeDevice(), selected: false)
+        #expect(!row.test_switchOfferOffered, "no offer unless the host raises it")
+
+        row.apply(makeDevice(), selected: false, switchOfferOffered: true)
+        #expect(row.test_switchOfferOffered)
+        row.test_clickSwitchOffer()
+        #expect(spy.switchRequests == 1, "the real NSButton click reaches the delegate")
+    }
+
+    /// Red if either offer drifted back under the "Source" title (left-aligned
+    /// on the FEED column's leading edge, the placement the owner rejected on
+    /// 2026-10-04) or spilled left past the trailing column into the readout,
+    /// which a long name must not cause.
+    @Test func bothRowOffersRightAlignOnTheTrailingInset() {
+        let device = Device(id: "undo-dev", name: "Downstairs Living Room HomePod Stereo Pair",
+                            kind: .homePod, connectionState: .connected)
+        let row = makeBusRow(device)
+        row.frame = NSRect(x: 0, y: 0, width: 640, height: PopoverColumnGrid.bodyRowHeight)
+        for (name, offered, view) in [
+            ("Undo", (true, false), row.removalUndoButton as NSView),
+            ("Removed:", (true, false), row.removalUndoStack.arrangedSubviews[0]),
+            ("Play here", (false, true), row.switchOfferButton as NSView),
+        ] {
+            row.apply(device, selected: false,
+                      removalUndoOffered: offered.0, switchOfferOffered: offered.1)
+            row.layoutSubtreeIfNeeded()
+            let frame = view.convert(view.bounds, to: row)
+            let trailingX = row.bounds.width - PopoverColumnGrid.trailingControlTrailing
+            let columnLeadingX = row.bounds.width - PopoverColumnGrid.feedColumnLeadingFromTrailing
+            if view is NSButton {
+                #expect(abs(frame.maxX - trailingX) <= 1,
+                        "\(name) ends at \(frame.maxX), the trailing inset is \(trailingX)")
+                #expect(frame.height >= PopoverColumnGrid.removalUndoButtonHeight)
+            }
+            #expect(frame.minX >= columnLeadingX,
+                    "\(name) starts at \(frame.minX), left of the trailing column at \(columnLeadingX)")
+        }
+    }
+
     // MARK: Controller level
 
     private func waitFleet(_ backend: MockBackend, count: Int,

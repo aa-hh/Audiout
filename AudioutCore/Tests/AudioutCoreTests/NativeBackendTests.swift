@@ -68,6 +68,11 @@ private final class SpyEngine: EngineControlling, @unchecked Sendable {
     /// connect path surfaces `.authRequired` instead of flattening to
     /// `.unknown`.
     var addFailureError: AirPlayEngineError = .sessionFailed
+    /// When set, an `addFailures` add also reports its failure on the state
+    /// stream, as the real engine does (shims/outputs.c fires the completion
+    /// hook, then the state hook). The hook is awaited after that report and
+    /// before the add throws, so a test can let the backend apply it first.
+    var onMirroredAddFailure: (@Sendable (OutputID) async -> Void)?
     /// Ids whose `setVolume` should THROW (still recording the call) — a
     /// receiver that refuses the write, which the fader must not keep lying about.
     var volumeFailures: Set<UInt64> = []
@@ -179,7 +184,7 @@ private final class SpyEngine: EngineControlling, @unchecked Sendable {
             hook?(id)
             let hold = self.lock.withLock { self.onAddOutputHold }
             if let hold { await hold(id, 0) }
-            if self.addFailures.contains(id.rawValue) { throw self.addFailureError }
+            try await self.failScriptedAdd(id)
             // Engine idempotency: an already-live session is NOT re-bound.
             self.lock.withLock { if self.liveStreams[id.rawValue] == nil { self.liveStreams[id.rawValue] = 0 } }
         }
@@ -277,7 +282,7 @@ private final class SpyEngine: EngineControlling, @unchecked Sendable {
             hook?(id)
             let hold = self.lock.withLock { self.onAddOutputHold }
             if let hold { await hold(id, streamId) }
-            if self.addFailures.contains(id.rawValue) { throw self.addFailureError }
+            try await self.failScriptedAdd(id)
             // Engine idempotency: an already-live session is NOT re-bound to
             // `streamId` — that silent no-op is exactly defect B.
             self.lock.withLock {
@@ -309,6 +314,17 @@ private final class SpyEngine: EngineControlling, @unchecked Sendable {
         lock.withLock { cadenceSnapshotToReturn = snapshot }
     }
     func writeCadenceSnapshot() -> WriteCadenceSnapshot { lock.withLock { cadenceSnapshotToReturn } }
+
+    /// Throw the scripted add failure for `id`, mirrored onto the state stream
+    /// when `onMirroredAddFailure` is set.
+    private func failScriptedAdd(_ id: OutputID) async throws {
+        guard addFailures.contains(id.rawValue) else { return }
+        if let mirror = lock.withLock({ onMirroredAddFailure }) {
+            pushState(id, addFailureError == .passwordRequired ? .passwordRequired : .failed)
+            await mirror(id)
+        }
+        throw addFailureError
+    }
 
     /// Run a device op, tracking concurrent-in-flight-per-device (to catch
     /// overlapping ops) and applying the artificial latency. The body is
@@ -3275,6 +3291,56 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         await pollUntil { backend.devices.first { $0.id == device.id }?.connectionState == .connected }
         #expect(backend.devices.first { $0.id == device.id }?.connectionState == .connected)
         #expect(engine.fedDescriptorList.last?.password == "secret")
+    }
+
+    /// Parking the speaker or showing it refused when the state stream reports
+    /// the failed connect before the catch runs (so the typed password never
+    /// reaches the receiver) turns it red.
+    @Test func passwordSubmittedDuringAFailingConnectSurvivesTheStateStreamReport() async {
+        let store = InMemoryAirPlayPasswordStore()
+        let (backend, engine, discovery) = makeBackend(passwordStore: store)
+        defer { backend.stop() }
+        let device = ap2Device(access: .password)
+        await startAndDiscover(backend, engine, discovery, device)
+        final class StateLog: @unchecked Sendable {
+            private let lock = NSLock()
+            private var states: [ConnectionState] = []
+            func append(_ state: ConnectionState) { lock.withLock { states.append(state) } }
+            var all: [ConnectionState] { lock.withLock { states } }
+        }
+        let log = StateLog()
+        let stream = backend.makeEventStream()
+        let task = Task {
+            for await event in stream {
+                if case .deviceUpdated(let d) = event, d.id == device.id { log.append(d.connectionState) }
+            }
+        }
+        defer { task.cancel() }
+        let addHold = HoldPoint()
+        let secondAdd = OnceFlag()
+        engine.addFailures = [device.outputID.rawValue]
+        engine.onAddOutputHold = { id, _ in
+            guard id == device.outputID else { return }
+            if secondAdd.testAndSet() { engine.addFailures = [] } else { await addHold.hold() }
+        }
+        engine.onMirroredAddFailure = { _ in
+            await pollUntil {
+                guard let row = backend.devices.first(where: { $0.id == device.id }) else { return false }
+                if case .failed = row.connectionState { return true }
+                return !row.isAvailable
+            }
+        }
+
+        backend.setOutputSet([device.id])
+        await pollUntil { addHold.entered }
+        backend.submitAirPlayPassword("secret", for: device.id, source: "mac")
+        backend.retryOutput(device.id)
+        addHold.open()
+
+        await pollUntil { log.all.contains(.connected) }
+        #expect(log.all.contains(.connected))
+        #expect(engine.fedDescriptorList.last?.password == "secret")
+        #expect(!log.all.contains { if case .failed = $0 { return true } else { return false } })
     }
 
     /// Marking a password speaker unavailable before anyone supplied a

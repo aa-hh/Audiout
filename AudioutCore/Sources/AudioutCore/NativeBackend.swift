@@ -3599,16 +3599,15 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                     // password. Because that is a guess, the stored password is
                     // kept; only an engine `.passwordRequired` deletes it. PR 2's
                     // authorize path is where the engine can say more.
-                    //
-                    // Read off `stateQueue`: a Keychain read can wait on an
-                    // access prompt.
-                    let storedPassword = self.passwordStore.password(for: id)
                     let cause: ConnectionFailure.Cause? = stateQueue.sync {
                         // A password typed while this attempt was in flight never
                         // reached it: loop once more so the next attempt feeds it,
                         // instead of showing this attempt's failure as a refusal.
-                        let resubmitted = self.passwordResubmitted.remove(id) != nil
-                        if resubmitted, storedPassword != self.fedDescriptors[id]?.password {
+                        // The state stream reports the same failure, and if that
+                        // report landed before the password was typed it parked
+                        // the id, so the extra attempt lifts the park.
+                        if self.awaitsResubmittedPassword(id) {
+                            self.failedGate.remove(id)
                             return nil
                         }
                         let access = self.known[id]?.airPlayAccess
@@ -3687,10 +3686,14 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// The descriptor to feed the engine before an addOutput, or `nil` if the
     /// engine already knows an identical descriptor for this id (root cause 2:
     /// avoid the per-toggle re-feed storm). On `stateQueue`-read but callable off
-    /// it (reads are snapshotted under `sync`).
+    /// it (reads are snapshotted under `sync`). Every connect attempt passes here
+    /// once, so it also spends a typed password's one extra attempt.
     private func descriptorToFeed(id: String) -> DeviceDescriptor? {
         let password = passwordStore.password(for: id)
         return stateQueue.sync {
+            // This attempt feeds whatever is stored now, so a password typed
+            // before this point reaches it; one typed after survives to the catch.
+            self.passwordResubmitted[id] = nil
             guard let last = self.lastDescriptors[id] else { return nil }
             let current = Self.withPassword(last, password)
             if let fed = self.fedDescriptors[id], Self.descriptorsEqual(fed, current) {
@@ -5190,7 +5193,12 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 device.isSelected = false
                 let wasStreaming = self.added.remove(id) != nil
                 eqNeedsReconcile = wasStreaming
-                if self.desiredOn[id] == true {
+                if self.awaitsResubmittedPassword(id) {
+                    // A password typed while this connect was in flight has not
+                    // reached the engine: the converge catch gives it one more
+                    // attempt, so this report is not the receiver's answer to it.
+                    // No park, no `.failed`, no password outcome.
+                } else if self.desiredOn[id] == true {
                     self.failedGate.insert(id)
                     // `.passwordRequired` is the one engine failure with a KNOWN,
                     // actionable cause — don't flatten it to `.unknown` (live
@@ -5204,18 +5212,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                             ? Self.accessCause(device.airPlayAccess, passwordRequired: true)
                             : (wasStreaming ? .droppedMidStream
                                 : Self.accessCause(device.airPlayAccess, passwordRequired: false))
-                    // Only the engine's own password demand proves the stored
-                    // password wrong; a plain failure keeps it.
-                    if state == .passwordRequired, self.fedDescriptors[id]?.password != nil {
-                        self.passwordStore.removePassword(for: id)
-                        device.hasStoredPassword = false
-                    }
-                    // A password speaker nobody gave a password yet stays
-                    // available, so it still offers "Enter password"; only a
-                    // refused password makes it unavailable.
-                    if Self.waitsForPassword(cause, fedPassword: self.fedDescriptors[id]?.password) {
-                        device.isAvailable = true
-                    }
+                    self.applyPasswordFailureLocked(state: state, cause: cause, device: &device)
                     device.connectionState = .failed(
                         ConnectionFailure(cause: cause, detail: "engine state: \(state)")
                     )
@@ -5244,18 +5241,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                             ? Self.accessCause(device.airPlayAccess, passwordRequired: true)
                             : (wasConnected ? .droppedMidStream
                                 : Self.accessCause(device.airPlayAccess, passwordRequired: false))
-                    // Only the engine's own password demand proves the stored
-                    // password wrong; a plain failure keeps it.
-                    if state == .passwordRequired, self.fedDescriptors[id]?.password != nil {
-                        self.passwordStore.removePassword(for: id)
-                        device.hasStoredPassword = false
-                    }
-                    // A password speaker nobody gave a password yet stays
-                    // available, so it still offers "Enter password"; only a
-                    // refused password makes it unavailable.
-                    if Self.waitsForPassword(cause, fedPassword: self.fedDescriptors[id]?.password) {
-                        device.isAvailable = true
-                    }
+                    self.applyPasswordFailureLocked(state: state, cause: cause, device: &device)
                     device.connectionState = .failed(
                         ConnectionFailure(cause: cause, detail: "engine state: \(state)")
                     )
@@ -5850,15 +5836,39 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// `"phone"`), until that attempt ends. Read by ``notePasswordOutcome``.
     private var pendingPasswordOutcome: [String: String] = [:]
 
-    /// Ids with a password submitted since their last connect failure. The
-    /// converge catch consumes it, so a submit buys at most one extra attempt.
-    private var passwordResubmitted: Set<String> = []
+    /// The password submitted per id since that id's last connect attempt
+    /// read its descriptor (`descriptorToFeed` clears it), so a submit buys at
+    /// most one extra attempt.
+    private var passwordResubmitted: [String: String] = [:]
+
+    /// Whether a password typed during the in-flight connect has not reached
+    /// the engine yet, so a failure now says nothing about it. On `stateQueue`.
+    private func awaitsResubmittedPassword(_ id: String) -> Bool {
+        guard let typed = passwordResubmitted[id] else { return false }
+        return typed != fedDescriptors[id]?.password
+    }
+
+    /// The password side of a state-stream failure. Only the engine's own
+    /// password demand proves the fed password wrong, so only it deletes the
+    /// stored one; a plain failure keeps it. A password speaker nobody gave a
+    /// password yet stays available, so it still offers "Enter password".
+    /// On `stateQueue`.
+    private func applyPasswordFailureLocked(state: OutputState, cause: ConnectionFailure.Cause, device: inout Device) {
+        let fedPassword = fedDescriptors[device.id]?.password
+        if state == .passwordRequired, fedPassword != nil {
+            passwordStore.removePassword(for: device.id)
+            device.hasStoredPassword = false
+        }
+        if Self.waitsForPassword(cause, fedPassword: fedPassword) {
+            device.isAvailable = true
+        }
+    }
 
     public func submitAirPlayPassword(_ password: String, for id: String, source: String) {
         passwordStore.setPassword(password, for: id)
         stateQueue.async {
             self.pendingPasswordOutcome[id] = source
-            self.passwordResubmitted.insert(id)
+            self.passwordResubmitted[id] = password
             self.applyLocal(id) { $0.hasStoredPassword = true }
         }
     }
@@ -5881,6 +5891,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     public func forgetAirPlayPassword(for id: String) {
         passwordStore.removePassword(for: id)
         stateQueue.async {
+            self.passwordResubmitted[id] = nil
             self.applyLocal(id) { $0.hasStoredPassword = false }
         }
         Analytics.capture("airplay:code_forgotten", ["kind": "password"])

@@ -292,7 +292,10 @@ still refuses), and cut worktrees from `origin/main` after `git fetch`.
 `tests` (the full suite, on GitHub) and `review` (the status
 `review-branch.sh --continue` posts) are the two required checks; `--auto`
 queues the PR to land on its own once both are green, which is why it waits for
-the owner's yes. The merge-approval hook asks on `gh pr merge` either way.
+the owner's yes. The owner's merge-approval hook blocks `gh pr merge` unless the
+owner typed a message containing "merge" in this session within the last 30
+minutes; a bare "yes" does not count. If it blocks you, ask the owner to say
+"merge" and never write its approval file yourself.
 
 **Do not work in the `main` checkout at all.** Merely *editing* it starts the
 accident, even if you never commit.

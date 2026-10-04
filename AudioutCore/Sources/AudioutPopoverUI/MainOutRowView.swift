@@ -58,10 +58,19 @@ public final class MainOutRowView: NSView {
         /// (The host currently passes none: "Selected Speakers" is count-free —
         /// Warm Signal decision m — and the column is sized to fit it.)
         public let buttonTitle: String?
+        /// Drawn in secondary ink but still enabled and dispatched, so the host
+        /// can answer the click (a group under the one-speaker limit).
+        public let isDimmed: Bool
+        /// A disabled line of explanation under a header, never a choice
+        /// (the one-speaker limit's "Buy Audiout to use scenes.").
+        public let isCaption: Bool
         public init(title: String, target: MainOutTarget = .selectedDevices,
-                    isHeader: Bool = false, buttonTitle: String? = nil) {
+                    isHeader: Bool = false, buttonTitle: String? = nil,
+                    isDimmed: Bool = false, isCaption: Bool = false) {
             self.title = title; self.target = target; self.isHeader = isHeader
             self.buttonTitle = buttonTitle
+            self.isDimmed = isDimmed
+            self.isCaption = isCaption
         }
     }
 
@@ -285,6 +294,14 @@ public final class MainOutRowView: NSView {
                 menu.addItem(.sectionHeader(title: option.title))
                 continue
             }
+            if option.isCaption {
+                // No action, so AppKit disables and greys it: read, never picked.
+                let caption = NSMenuItem(title: option.title, action: nil, keyEquivalent: "")
+                caption.isEnabled = false
+                caption.indentationLevel = sawHeader ? 1 : 0
+                menu.addItem(caption)
+                continue
+            }
             let item = NSMenuItem(title: option.title, action: nil, keyEquivalent: "")
             // One step in from the section header above it — see
             // `AppRowView.addEntries` for why the indentation is there and what
@@ -293,6 +310,12 @@ public final class MainOutRowView: NSView {
             item.target = self
             item.action = #selector(selectionChanged(_:))
             item.representedObject = option.target
+            if option.isDimmed {
+                item.attributedTitle = NSAttributedString(string: option.title, attributes: [
+                    .font: menu.font ?? NSFont.menuFont(ofSize: 0),
+                    .foregroundColor: Tokens.Color.label2,
+                ])
+            }
             let isCurrent = option.target == current
             item.state = isCurrent ? .on : .off
             if isCurrent {

@@ -102,8 +102,10 @@ run_guard; expect "new-suite-ok exempts" 0
 
 # (h) merge exemption with (c) staged
 reset; write "$NEW" "$BAD_C"
-ERR="$(cd "$CLONE" && AUDIOUT_IN_MERGE=1 sh "$GUARD" 2>&1 >/dev/null)"; RC=$?
-expect "AUDIOUT_IN_MERGE exempts" 0
+git -C "$CLONE" rev-parse HEAD > "$CLONE/.git/MERGE_HEAD"
+ERR="$(cd "$CLONE" && sh "$GUARD" 2>&1 >/dev/null)"; RC=$?
+rm -f "$CLONE/.git/MERGE_HEAD"
+expect "a merge commit (MERGE_HEAD) is exempt" 0
 
 # (i) non-test Swift file with print(
 reset; printf '\nprint("x")\n' >> "$CLONE/AudioutCore/Sources/AudioutCore/Analytics.swift"

@@ -70,8 +70,10 @@ run_guard; expect "root AGENTS.md exempt" 0
 
 # (i) merge exemption
 reset; sed -i.bak '5d' "$CLONE/$HIST"; rm -f "$CLONE/$HIST.bak"; stage "$HIST"
-ERR="$(cd "$CLONE" && AUDIOUT_IN_MERGE=1 sh "$GUARD" 2>&1 >/dev/null)"; RC=$?
-expect "AUDIOUT_IN_MERGE exempts" 0
+git -C "$CLONE" rev-parse HEAD > "$CLONE/.git/MERGE_HEAD"
+ERR="$(cd "$CLONE" && sh "$GUARD" 2>&1 >/dev/null)"; RC=$?
+rm -f "$CLONE/.git/MERGE_HEAD"
+expect "a merge commit (MERGE_HEAD) is exempt" 0
 
 # (j) deleting a history file blocks
 reset; git -C "$CLONE" rm -q -- "$HIST"

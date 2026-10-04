@@ -8,9 +8,7 @@
 #   anything else                      -> <src>.<hash of the argument string>
 # A .full stamp satisfies every later run. A plain-name filter is satisfied
 # when every name has a stamp; when only some do, the caller narrows the
-# filter to the rest. Only a .full stamp satisfies the merge gate in
-# .githooks/pre-commit: per-name stamps never count there, even when they
-# name every suite.
+# filter to the rest.
 #
 # The stamps live in /tmp so every worktree and clone on this machine shares
 # them. AUDIOUT_TEST_CACHE_DIR points them somewhere else (the self-test uses
@@ -54,25 +52,6 @@ suite_cache_source_hash() {
         } | awk '{print $1}' | sort
         echo "package $2"
     } | shasum -a 256 | awk '{print $1}'
-}
-
-# suite_cache_staged_hash <repo_root> <package>
-# suite_cache_source_hash over the files staged in git's index instead of the
-# files on disk: the same paths are copied out of the index into a scratch
-# folder and hashed there, so a stamp written by a working-tree run matches
-# exactly when the staged bytes are the bytes that passed. The merge gate uses
-# this because the working tree can hold untracked or unstaged files the
-# merge commit leaves out. Prints nothing when the copy fails.
-suite_cache_staged_hash() {
-    _sc_tmp=$(mktemp -d "${TMPDIR:-/tmp}/suite-cache-index.XXXXXX") || return 1
-    if ( cd "$1" && git ls-files -z -- AudioutCore/Sources AudioutCore/Tests \
-             AirPlayEngine/Sources AirPlayEngine/Tests \
-             AudioutCore/Package.swift AirPlayEngine/Package.swift \
-             AudioutCore/Package.resolved AirPlayEngine/Package.resolved \
-         | git checkout-index -z --stdin --prefix="$_sc_tmp/" ); then
-        suite_cache_source_hash "$_sc_tmp" "$2"
-    fi
-    rm -rf "$_sc_tmp"
 }
 
 # suite_cache_classify [swift-test args...]

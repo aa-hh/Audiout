@@ -3584,7 +3584,9 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         await pollUntil { backend.devices.first { $0.id == marker.id }?.isAvailable == false }
         secondAdd.open()
 
-        await pollUntil { backend.devices.first { $0.id == device.id }?.connectionState == .connected }
+        // Wait on the log, not `backend.devices`: the log's consumer task can
+        // trail the backend's own state on a loaded machine.
+        await pollUntil { log.all.contains(.connected) }
         #expect(log.all.contains(.connected))
         #expect(!log.all.contains { if case .failed = $0 { return true } else { return false } })
 

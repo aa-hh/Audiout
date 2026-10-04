@@ -67,7 +67,9 @@ import Testing
     /// let the offset build up. The 60 ms row is red if the forward clamp
     /// keeps a fixed 100 ms margin instead of min(100 ms, anchored delay): the
     /// first 42 ms under-pull then moves 2 ms and the Move stays 40 ms late.
-    @Test(arguments: [Self.delayMs, 60])
+    /// The 400 ms row pins that a margin of 100 ms under a larger holding
+    /// still lands the full under-pull.
+    @Test(arguments: [Self.delayMs, 60, 400])
     func aSteppingClockDoesNotMoveThePlayoutOffset(delayMs: Int64) throws {
         let worst = try Self.worstStormOffsetMs(anchoredDelayMs: delayMs)
         #expect(abs(worst) <= 25,
@@ -203,16 +205,23 @@ import Testing
         return worst
     }
 
-    /// A cycle that arrives 900 ms after the last one (just under the stall
-    /// bound) while the capture side delivered only 150 ms: the re-alignment
-    /// asks for ~890 ms forward from a ring holding ~250 ms. Drop the
-    /// `seekSafetyMarginMs` clamp from the forward branch of
-    /// `realignToDevicePulls` and the seek drains the ring to the write
-    /// pointer, so this cycle ends in silence and this test goes red.
-    @Test func aForwardRealignmentStopsTheSafetyMarginShortOfTheWritePointer() throws {
+    /// A cycle that arrives `stallMs` after the last one while the capture
+    /// side delivered only 150 ms: the re-alignment asks for far more forward
+    /// than the ring holds. Drop the `seekSafetyMarginMs` clamp from the
+    /// forward branch of `realignToDevicePulls` and the seek drains the ring
+    /// to the write pointer, so this cycle ends in silence and this test goes
+    /// red. Three rows: at 100 ms the margin and the holding coincide; at
+    /// 400 ms it is red if the clamped stall branch keeps the 100 ms margin
+    /// instead of the holding (the ring ends near 4288 frames against the
+    /// 18168 bound); the 1.1 s row pins that the path for a stall of a second
+    /// or more keeps the same holding.
+    @Test(arguments: [(delayMs: Int64(100), stallMs: 900), (400, 900), (400, 1_100)])
+    func aForwardRealignmentStopsTheSafetyMarginShortOfTheWritePointer(
+        delayMs: Int64, stallMs: Int
+    ) throws {
         let manager = BTSyncedSink(
             renderSampleRate: Self.sampleRate, channelCount: 1,
-            presentationDelayMs: { Int(Self.delayMs) })
+            presentationDelayMs: { Int(delayMs) })
         manager.setComposition(BTGroupComposition(airPlayPresent: true, macLocalPresent: false))
         manager.setDevices([.init(deviceID: 0, uid: "move-2")])
         defer { manager.stop() }
@@ -253,15 +262,13 @@ import Testing
         #expect(out[cycleFrames - 1] > 0, "the gate never opened")
 
         for _ in 0..<15 { writeChunk() }    // 150 ms
-        let stallHost = host - cyclePeriod + 900_000_000
+        let stallHost = host - cyclePeriod + Double(stallMs) * 1_000_000
         render(at: stallHost)
 
-        let marginFrames = Int(BTDeviceSink.seekSafetyMarginMs / 1_000 * Self.sampleRate)
+        let delayFrames = Int(delayMs) * Int(Self.sampleRate) / 1_000
         var last = Int(out[cycleFrames - 1])
         #expect(last > 0, "the re-alignment drained the ring")
-        // The margin is the ring's room at release less one cycle (the sink's
-        // stand-in for a capture chunk), so it sits up to a cycle under 100 ms.
-        #expect(written - last >= marginFrames - 2 * cycleFrames - 8,
+        #expect(written - last >= delayFrames - 2 * cycleFrames - 8,
                 "the ring kept \(written - last) frames after the cycle")
 
         // Capture and device stalled together, so capture resumes at wall rate
@@ -288,7 +295,7 @@ import Testing
         }
         // The ring may sag one threshold's worth before the backward move,
         // plus one cycle and one capture chunk of timing granularity.
-        #expect(lowest >= marginFrames - thresholdFrames - cycleFrames - chunkFrames,
+        #expect(lowest >= delayFrames - 2 * cycleFrames - thresholdFrames - cycleFrames - chunkFrames,
                 "the ring fell to \(lowest) frames during the over-pull")
         #expect(movedBack, "the over-pull's backward re-alignment never ran")
     }

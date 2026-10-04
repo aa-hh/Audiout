@@ -1463,9 +1463,10 @@ final class BTDeviceSink: @unchecked Sendable {
     /// ``pullRealignThresholdMs``, the read position moves by it behind the
     /// trim crossfade; a forward re-alignment is clamped like a trim seek,
     /// ``seekSafetyMarginMs`` (or what the ring holds between deliveries, if
-    /// smaller) short of the write pointer. Measured from the render cycles,
-    /// never from `BTClockWatcher`: a pacing clock that steps while the cycles
-    /// stay even moves nothing.
+    /// smaller) short of the write pointer; after a device gap the move is cut
+    /// to the ring's steady holding and the measurement restarts. Measured from
+    /// the render cycles, never from `BTClockWatcher`: a pacing clock that steps
+    /// while the cycles stay even moves nothing.
     private func realignToDevicePulls(cycleStartMonotonicNanos t: Int64, frameCount: Int) {
         guard let origin = pullOriginNanos else { return }
         let gap = t &- lastCycleStartNanos
@@ -1496,14 +1497,17 @@ final class BTDeviceSink: @unchecked Sendable {
                 steadyRoomFramesPtr.pointee)
             let room = Swift.max(0, held - marginFrames)
             if frames > room {
-                // A ring short after a device gap of a threshold or more beyond
-                // the cycle's own length means capture stalled with the device
-                // and the shortfall never refills, so take what fits and measure
-                // from here. A ring short with even cycles is a late capture
-                // chunk, so take what fits and leave the remainder pending.
+                // After a device gap of a threshold or more beyond the cycle's
+                // own length, capture stalled with the device and the shortfall
+                // never refills, so cut the ring to what it holds between
+                // deliveries (not to the margin, which would leave a speaker
+                // whose delay is above 100 ms playing early until the next
+                // re-anchor) and measure from here. A ring short with even
+                // cycles is a late chunk, so take what fits and leave the
+                // remainder pending.
                 let excess = gap - Int64(Double(frameCount) / renderSampleRate * 1e9)
                 guard Double(excess) < Self.pullRealignThresholdMs * 1_000_000 else {
-                    delayLine.shift(byFrames: room)
+                    delayLine.shift(byFrames: Swift.max(0, held - steadyRoomFramesPtr.pointee))
                     pullOriginNanos = t
                     framesPulledSinceOrigin = frameCount
                     pullRealignedNanos = 0

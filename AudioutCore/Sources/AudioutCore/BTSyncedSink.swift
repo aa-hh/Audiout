@@ -581,6 +581,9 @@ final class BTDeviceSink: @unchecked Sendable {
     /// that reaches the write pointer leaves the ring dry with no way back —
     /// the wizard's permanent silence (roadmap 056). 100 ms is a few render
     /// cycles' worth of headroom, well below the smallest reference.
+    /// The render thread's own re-alignment caps this margin at the ring's
+    /// steady holding (`steadyRoomFramesPtr`), so a speaker anchored under
+    /// 100 ms still gets its full correction.
     static let seekSafetyMarginMs: Double = 100
 
     /// How far the device's pulls may run behind or ahead of wall time before

@@ -207,15 +207,14 @@ import Testing
 
     /// A cycle that arrives `stallMs` after the last one while the capture
     /// side delivered only 150 ms: the re-alignment asks for far more forward
-    /// than the ring holds. Drop the `seekSafetyMarginMs` clamp from the
-    /// forward branch of `realignToDevicePulls` and the seek drains the ring
-    /// to the write pointer, so this cycle ends in silence and this test goes
-    /// red. Two rows: at 100 ms the margin and the holding coincide; at
-    /// 400 ms it is red if the clamped stall branch keeps the 100 ms margin
+    /// than the ring holds. Red if the `if frames > 0` block in
+    /// `realignToDevicePulls` is removed (the gap branch then never runs and
+    /// the full move drains the ring). Two rows: at 100 ms the margin and the
+    /// holding coincide; at 400 ms it is red if the clamped stall branch keeps the 100 ms margin
     /// instead of the holding (the ring ends near 4288 frames against the
     /// 18656 bound), and for a cut one render cycle below the holding.
     @Test(arguments: [(delayMs: Int64(100), stallMs: 900), (400, 900)])
-    func aForwardRealignmentStopsTheSafetyMarginShortOfTheWritePointer(
+    func aDeviceGapCutsTheRingToItsHoldingAtRelease(
         delayMs: Int64, stallMs: Int
     ) throws {
         let manager = BTSyncedSink(

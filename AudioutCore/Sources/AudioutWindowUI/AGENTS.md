@@ -26,7 +26,7 @@ Configuration-only Speakers and Scenes content. Owns no window; never talks to a
 
 - `MixerWindowController` → Scenes and Speakers content and navigation.
 - `ContentPaneHostViewController` → Swapped content and footer.
-- `SpeakersPageViewController` → Speakers landing: discovery, Bluetooth access, lost speakers, Pair.
+- `SpeakersPageViewController` → Speakers landing: search result, kinds, Bluetooth, lost, Pair.
 - `ListRowView` → one outlined-list row: glyph, title, caption, accessory.
 - `GroupsOverviewViewController` → Saved-scene cards.
 - `SidebarViewController` → Speaker list: presence dots, two visibility groups, menu, drag.

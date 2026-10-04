@@ -375,6 +375,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Shared speaker identity and Mixer visibility, loaded after app startup.
     private lazy var speakerLibrary = SpeakerLibraryController()
     private var updatingSpeakerSnapshot = false
+    /// Built at launch, not with the Speakers page, so its once-per-launch
+    /// counts event fires for people who never open that page.
+    private lazy var speakerSearch = SpeakerSearch(library: speakerLibrary)
     private var primingSpeakerBluetooth = false
 
     /// The app's device model, kept as a pure function of backend events. Keyed
@@ -1094,6 +1097,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.popoverController.refreshSpeakerPresentation()
             self.mixerWindowController?.refreshSpeakerPresentation()
         }
+        speakerSearch.onDone = { [weak self] in self?.mixerWindowController?.speakersPage.isSearchDone = true }
         popoverController.onSpeakerRecoveryChanged = { [weak self] in
             self?.updateSpeakerLibrary()
         }
@@ -2412,6 +2416,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.requestSpeakerBluetoothAccess()
         }
         controller.speakersPage.onPairBluetooth = Self.openBluetoothPairing
+        controller.speakersPage.isSearchDone = speakerSearch.isDone
         // A speaker the Mac can't find has no backend entry to ask, so its
         // saved tone is read from the same store the backend writes.
         controller.storedDeviceEQ = { id in (try? DeviceEQStore().load())?.devices[id] }
@@ -3051,6 +3056,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             appRouteDestinations: appRouting.appRoutes.map(\.destination),
             routedAppNamesByDeviceID: routedAppNamesByDeviceID,
             recoveryIDs: popoverController?.speakerRecoveryIDs ?? [])
+        speakerSearch.libraryDidChange()
     }
 
     @MainActor

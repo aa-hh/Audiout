@@ -4,11 +4,99 @@ import AppKit
 import AudioutCore
 import AudioutSharedUI
 
+/// Every kept speaker counted by kind and by whether the Mac can reach it.
+/// The Speakers page draws these and `SpeakerSearch` reports them once.
+struct SpeakerLibraryCounts: Equatable {
+    var airplay = 0, bluetooth = 0, cast = 0, mac = 0, unknown = 0
+    /// Speakers other than this Mac: seen and reachable, seen but away, or
+    /// not seen at all this launch.
+    var found = 0, away = 0, lost = 0
+    var total = 0
+
+    init(_ records: [SpeakerPresentationRecord]) {
+        total = records.count
+        for record in records {
+            switch record.kind {
+            case nil: unknown += 1
+            case .localMac: mac += 1
+            case .bluetooth: bluetooth += 1
+            case .cast: cast += 1
+            case .homePod, .appleTV, .airportExpress, .sonos, .generic: airplay += 1
+            }
+            guard !record.isLocalDevice else { continue }
+            if record.liveDevice == nil { lost += 1 } else if record.isAvailable { found += 1 } else { away += 1 }
+        }
+    }
+
+    var analyticsProperties: [String: String] {
+        ["airplay": String(airplay), "bluetooth": String(bluetooth), "cast": String(cast), "mac": String(mac),
+         "unknown": String(unknown), "found": String(found), "away": String(away), "lost": String(lost),
+         "total": String(total)]
+    }
+}
+
+/// Decides, once per launch, when the search for speakers is done: the list
+/// of speakers the Mac can see has stopped changing for the quiet window, or
+/// the ceiling ran out on a network that never goes quiet. Reaching every
+/// speaker is not required. The app builds it at launch, so the counts event
+/// fires whether or not anyone opens the Speakers page.
+@MainActor
+public final class SpeakerSearch {
+
+    /// The quiet window the popover's first open waits on
+    /// (`AppSurfaceController.revealQuietWindow`).
+    public static let quietWindow: TimeInterval = 0.5
+    /// razor: a fixed backstop from the first speaker seen; tune it if a real
+    /// network's discovery routinely outlasts it.
+    public static let ceiling: TimeInterval = 10
+
+    public private(set) var isDone = false
+    public var onDone: (() -> Void)?
+
+    private let library: SpeakerLibraryController
+    private let tracker: DiscoverySettleTracker
+    private let schedule: (_ delay: TimeInterval, _ fire: @escaping () -> Void) -> Void
+    private var ceilingArmed = false
+
+    public init(library: SpeakerLibraryController,
+                schedule: @escaping (_ delay: TimeInterval, _ fire: @escaping () -> Void) -> Void = { delay, fire in
+                    Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { _ in
+                        MainActor.assumeIsolated { fire() }
+                    }
+                }) {
+        self.library = library
+        self.schedule = schedule
+        tracker = DiscoverySettleTracker(quietWindow: Self.quietWindow, schedule: schedule)
+        tracker.onSettled = { [weak self] in self?.finish() }
+    }
+
+    /// Call after every library update. An empty list is not fed: discovery
+    /// starts empty, and an empty list would settle before anything arrived.
+    public func libraryDidChange() {
+        guard !isDone else { return }
+        let ids = Set(library.records.filter { $0.liveDevice != nil }.map(\.id))
+        guard !ids.isEmpty else { return }
+        if !ceilingArmed {
+            ceilingArmed = true
+            schedule(Self.ceiling) { [weak self] in self?.finish() }
+        }
+        tracker.note(deviceIDs: ids)
+    }
+
+    private func finish() {
+        guard !isDone else { return }
+        isDone = true
+        Analytics.capture("speaker:library_counted", SpeakerLibraryCounts(library.records).analyticsProperties)
+        onDone?()
+    }
+}
+
 /// The Speakers landing page, behind the sidebar's Speakers plate. It lists no
-/// speakers — the sidebar is the speaker list — and shows only the rows that
-/// are true right now: whether every speaker has been found, Bluetooth access,
-/// speakers the Mac can't find, and Pair. It changes nothing itself; every
-/// action is reported out for the host to perform.
+/// speakers (the sidebar is the speaker list). Its caption line is the search
+/// result, and one card holds the speakers counted by kind and then only the
+/// rows that are true right now: Bluetooth access, speakers the Mac can't
+/// find, and Pair. It changes nothing itself; every action is reported out for
+/// the host to perform.
 @MainActor
 public final class SpeakersPageViewController: NSViewController {
 
@@ -21,9 +109,15 @@ public final class SpeakersPageViewController: NSViewController {
     public var onForget: ((Set<String>) -> Void)?
 
     private var bluetoothAccess: SpeakerBluetoothAccessPresentation?
+    /// Whether the host's `SpeakerSearch` has finished. Until then the caption
+    /// says it is still looking and the lost-speaker row waits, so a cold
+    /// launch never flashes every remembered speaker as lost.
+    public var isSearchDone = false {
+        didSet { if isSearchDone != oldValue { reload() } }
+    }
     private let iconWell = DeviceIconWellView()
     private let titleLabel = NSTextField(labelWithString: "Speakers")
-    private let subtitleLabel = NSTextField(labelWithString: "")
+    private let subtitleStack = NSStackView()
     private let listWell = GroupedSectionView()
     private let listStack = NSStackView()
     private let spinner = NSProgressIndicator()
@@ -51,16 +145,19 @@ public final class SpeakersPageViewController: NSViewController {
         titleLabel.translatesAutoresizingMaskIntoConstraints = false
         titleLabel.font = Tokens.Font.heading
         titleLabel.lineBreakMode = .byTruncatingTail
-        subtitleLabel.translatesAutoresizingMaskIntoConstraints = false
-        subtitleLabel.font = Tokens.Font.caption
-        subtitleLabel.textColor = Tokens.Color.label2
-        subtitleLabel.lineBreakMode = .byTruncatingTail
-        subtitleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        subtitleStack.translatesAutoresizingMaskIntoConstraints = false
+        subtitleStack.orientation = .horizontal
+        subtitleStack.alignment = .centerY
+        subtitleStack.spacing = 5
+        subtitleStack.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         spinner.style = .spinning
         spinner.controlSize = .small
         spinner.isDisplayedWhenStopped = false
         spinner.setAccessibilityElement(false)
+        spinner.translatesAutoresizingMaskIntoConstraints = false
+        spinner.widthAnchor.constraint(equalToConstant: 12).isActive = true
+        spinner.heightAnchor.constraint(equalToConstant: 12).isActive = true
 
         // The scene editor's outlined membership list.
         listWell.style = .card
@@ -70,8 +167,10 @@ public final class SpeakersPageViewController: NSViewController {
         listStack.orientation = .vertical
         listStack.alignment = .leading
         listStack.spacing = 0
+        // The card ends at its last row; the pane below it stays empty.
+        listStack.setHuggingPriority(.defaultHigh, for: .vertical)
 
-        for v in [listWell, iconWell, titleLabel, subtitleLabel, listStack] {
+        for v in [listWell, iconWell, titleLabel, subtitleStack, listStack] {
             column.addSubview(v)
         }
 
@@ -100,9 +199,9 @@ public final class SpeakersPageViewController: NSViewController {
             titleLabel.centerYAnchor.constraint(equalTo: iconWell.centerYAnchor),
             titleLabel.trailingAnchor.constraint(lessThanOrEqualTo: column.trailingAnchor,
                                                  constant: -GroupsPaneLayout.contentTrailingInset),
-            subtitleLabel.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 2),
-            subtitleLabel.leadingAnchor.constraint(equalTo: titleLabel.leadingAnchor),
-            subtitleLabel.trailingAnchor.constraint(lessThanOrEqualTo: column.trailingAnchor,
+            subtitleStack.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 2),
+            subtitleStack.leadingAnchor.constraint(equalTo: titleLabel.leadingAnchor),
+            subtitleStack.trailingAnchor.constraint(lessThanOrEqualTo: column.trailingAnchor,
                                                     constant: -GroupsPaneLayout.contentTrailingInset),
 
             listStack.topAnchor.constraint(equalTo: iconWell.bottomAnchor,
@@ -129,51 +228,38 @@ public final class SpeakersPageViewController: NSViewController {
     public func reload() {
         guard isViewLoaded else { return }
         let records = library.records
-        let n = records.count
-        let hidden = records.filter { $0.visibility == .hideWhenNotInUse && !$0.isLocalDevice }.count
-        subtitleLabel.stringValue =
-            "\(n == 1 ? "1 speaker" : "\(n) speakers"): \(n - hidden) in the Mixer, \(hidden) hidden"
+        let counts = SpeakerLibraryCounts(records)
+        reloadSubtitle(counts)
 
         for row in listStack.arrangedSubviews {
             listStack.removeArrangedSubview(row)
             row.removeFromSuperview()
         }
-        var rows: [NSView] = []
-
-        let speakers = records.filter { !$0.isLocalDevice }
-        if speakers.allSatisfy(\.isAvailable) {
-            spinner.stopAnimation(nil)
-            spinner.removeFromSuperview()
-            rows.append(ListRowView(
-                glyph: ListRowView.glyph("checkmark.circle.fill", tint: .systemGreen),
-                title: n == 1 ? "1 speaker found on your network" : "All \(n) speakers found on your network"))
-        } else {
-            spinner.startAnimation(nil)
-            rows.append(ListRowView(glyph: spinner, title: "Looking for speakers on your network\u{2026}"))
-        }
+        var rows: [NSView] = [makeKindsRow(counts)]
 
         if let access = bluetoothAccess, let explanation = access.explanation {
-            rows.append(ListRowView(
+            rows.append(makeRow(
                 glyph: ListRowView.glyph(Device.Kind.bluetooth.symbolName),
-                title: "Bluetooth access is off", caption: explanation,
+                title: "Bluetooth access is off", help: explanation,
                 accessory: access.actionTitle.map { makeButton($0, action: #selector(bluetoothAccessTapped(_:))) }))
         }
 
-        lostIDs = Set(speakers.filter { $0.liveDevice == nil }.map(\.id))
+        let lost = records.filter { !$0.isLocalDevice && $0.liveDevice == nil }
+        lostIDs = isSearchDone ? Set(lost.map(\.id)) : []
         if !lostIDs.isEmpty {
             let k = lostIDs.count
             let m = groupController.groups.filter { !Set($0.memberIDs).isDisjoint(with: lostIDs) }.count
-            let caption: String
+            let help: String
             switch (k == 1, m) {
-            case (true, 0): caption = "It isn\u{2019}t in any scene."
-            case (false, 0): caption = "They aren\u{2019}t in any scene."
-            case (true, _): caption = "Forgetting it takes it out of \(m == 1 ? "1 scene" : "\(m) scenes")."
-            case (false, _): caption = "Forgetting them takes them out of \(m == 1 ? "1 scene" : "\(m) scenes")."
+            case (true, 0): help = "It isn\u{2019}t in any scene."
+            case (false, 0): help = "They aren\u{2019}t in any scene."
+            case (true, _): help = "Forgetting it takes it out of \(m == 1 ? "1 scene" : "\(m) scenes")."
+            case (false, _): help = "Forgetting them takes them out of \(m == 1 ? "1 scene" : "\(m) scenes")."
             }
-            rows.append(ListRowView(
+            rows.append(makeRow(
                 glyph: ListRowView.glyph("exclamationmark.triangle", tint: Tokens.Color.failure),
                 title: k == 1 ? "1 speaker can\u{2019}t be found" : "\(k) speakers can\u{2019}t be found",
-                caption: caption,
+                help: help,
                 accessory: makeButton(k == 1 ? "Forget 1 speaker\u{2026}" : "Forget \(k) speakers\u{2026}",
                                       action: #selector(forgetTapped(_:)))))
         }
@@ -185,6 +271,121 @@ public final class SpeakersPageViewController: NSViewController {
             row.widthAnchor.constraint(equalTo: listStack.widthAnchor).isActive = true
         }
         listWell.rows = rows
+    }
+
+    /// The caption line under the title is the search result.
+    private func reloadSubtitle(_ counts: SpeakerLibraryCounts) {
+        for part in subtitleStack.arrangedSubviews {
+            subtitleStack.removeArrangedSubview(part)
+            part.removeFromSuperview()
+        }
+        var parts: [NSView] = []
+        if !isSearchDone {
+            spinner.startAnimation(nil)
+            parts = [spinner, captionField("Looking for speakers on your network\u{2026}"), captionField("\u{00B7}"),
+                     captionField("\(counts.found + counts.away) found so far")]
+        } else {
+            spinner.stopAnimation(nil)
+            let check = ListRowView.glyph("checkmark.circle.fill", tint: .systemGreen)
+            parts = [check]
+            if counts.away == 0 && counts.lost == 0 {
+                parts.append(captionField(counts.total == 1 ? "1 speaker found" : "All \(counts.total) speakers found"))
+            } else {
+                parts += [captionField("Done looking"), captionField("\u{00B7}"), presenceDot(.found),
+                          captionField("\(counts.found) found")]
+                if counts.away > 0 {
+                    parts += [captionField("\u{00B7}"), presenceDot(.away), captionField("\(counts.away) away")]
+                }
+            }
+        }
+        for part in parts {
+            if part is NSImageView {
+                part.translatesAutoresizingMaskIntoConstraints = false
+                part.widthAnchor.constraint(equalToConstant: 12).isActive = true
+                part.heightAnchor.constraint(equalToConstant: 12).isActive = true
+            }
+            subtitleStack.addArrangedSubview(part)
+        }
+    }
+
+    private func captionField(_ text: String) -> NSTextField {
+        let field = NSTextField(labelWithString: text)
+        field.font = Tokens.Font.caption
+        field.textColor = Tokens.Color.label2
+        field.lineBreakMode = .byTruncatingTail
+        field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        return field
+    }
+
+    /// The sidebar's own presence dot, drawn small beside its count.
+    private func presenceDot(_ state: SidebarPresenceDotView.State) -> SidebarPresenceDotView {
+        let dot = SidebarPresenceDotView()
+        dot.state = state
+        dot.widthAnchor.constraint(equalToConstant: 7).isActive = true
+        dot.heightAnchor.constraint(equalToConstant: 7).isActive = true
+        return dot
+    }
+
+    /// The card's first row: a glyph, a count and a label for each kind of
+    /// speaker kept, leaving out the kinds with none.
+    private func makeKindsRow(_ counts: SpeakerLibraryCounts) -> NSView {
+        let kinds: [(symbol: String, count: Int, label: String)] = [
+            ("airplayaudio", counts.airplay, "AirPlay"),
+            (Device.Kind.bluetooth.symbolName, counts.bluetooth, "Bluetooth"),
+            (Device.Kind.cast.symbolName, counts.cast, "Cast"),
+            (Device.Kind.localMac.symbolName, counts.mac, "This Mac"),
+            ("questionmark.circle", counts.unknown, "Unknown"),
+        ].filter { $0.count > 0 }
+
+        let strip = NSStackView()
+        strip.orientation = .horizontal
+        strip.distribution = .fillEqually
+        strip.alignment = .top
+        strip.spacing = 0
+        strip.translatesAutoresizingMaskIntoConstraints = false
+        for kind in kinds {
+            let glyph = ListRowView.glyph(kind.symbol)
+            glyph.translatesAutoresizingMaskIntoConstraints = false
+            glyph.widthAnchor.constraint(equalToConstant: 16).isActive = true
+            glyph.heightAnchor.constraint(equalToConstant: 16).isActive = true
+            let count = NSTextField(labelWithString: "\(kind.count)")
+            count.font = Tokens.Font.heading
+            count.textColor = Tokens.Color.label
+            count.setAccessibilityElement(false)
+            let top = NSStackView(views: [glyph, count])
+            top.orientation = .horizontal
+            top.alignment = .centerY
+            top.spacing = 6
+            let label = captionField(kind.label)
+            label.setAccessibilityElement(false)
+            let item = NSStackView(views: [top, label])
+            item.orientation = .vertical
+            item.alignment = .leading
+            item.spacing = 1
+            item.setAccessibilityElement(true)
+            item.setAccessibilityRole(.staticText)
+            item.setAccessibilityLabel("\(kind.count) \(kind.label)")
+            strip.addArrangedSubview(item)
+        }
+
+        let row = NSView()
+        row.translatesAutoresizingMaskIntoConstraints = false
+        row.addSubview(strip)
+        NSLayoutConstraint.activate([
+            strip.topAnchor.constraint(equalTo: row.topAnchor, constant: 12),
+            strip.bottomAnchor.constraint(equalTo: row.bottomAnchor, constant: -11),
+            strip.leadingAnchor.constraint(equalTo: row.leadingAnchor, constant: ListRowView.leadingInset),
+            strip.trailingAnchor.constraint(equalTo: row.trailingAnchor, constant: -10),
+        ])
+        return row
+    }
+
+    /// A one-line row whose longer sentence is its tooltip and VoiceOver hint.
+    private func makeRow(glyph: NSView, title: String, help: String, accessory: NSView?) -> ListRowView {
+        let row = ListRowView(glyph: glyph, title: title, accessory: accessory)
+        row.toolTip = help
+        row.titleLabel.setAccessibilityHelp(help)
+        return row
     }
 
     private func makeButton(_ title: String, action: Selector) -> NSButton {
@@ -208,12 +409,12 @@ public final class SpeakersPageViewController: NSViewController {
         let caption = "Opens Bluetooth settings to pair a new speaker."
         button.setAccessibilityLabel(title)
         button.setAccessibilityHelp(caption)
+        button.toolTip = caption
 
         let chevron = ClickThroughImageView()
         chevron.image = DeviceIcon.image("chevron.right")
         chevron.contentTintColor = Tokens.Color.label2
-        let row = ListRowView(glyph: ListRowView.glyph("plus.circle"), title: title, caption: caption,
-                              accessory: chevron)
+        let row = ListRowView(glyph: ListRowView.glyph("plus.circle"), title: title, accessory: chevron)
         row.isClickThrough = true
         button.addSubview(row)
         NSLayoutConstraint.activate([
@@ -231,9 +432,31 @@ public final class SpeakersPageViewController: NSViewController {
 
     // MARK: Test-support hooks
 
+    /// The caption line read left to right, the presence dots drawn as
+    /// "\u{25CF}" (found) and "\u{25CB}" (away).
     public var test_subtitleText: String {
         loadViewIfNeeded()
-        return subtitleLabel.stringValue
+        return subtitleStack.arrangedSubviews.compactMap { part -> String? in
+            if let field = part as? NSTextField { return field.stringValue }
+            if let dot = part as? SidebarPresenceDotView { return dot.state == .found ? "\u{25CF}" : "\u{25CB}" }
+            return nil
+        }.joined(separator: " ")
+    }
+
+    /// The kinds row's items as VoiceOver reads them, left to right.
+    public var test_kinds: [String] {
+        loadViewIfNeeded()
+        guard let strip = listStack.arrangedSubviews.first?.subviews.first as? NSStackView else { return [] }
+        return strip.arrangedSubviews.map { $0.accessibilityLabel() ?? "" }
+    }
+
+    /// The card's height and the height its rows need, after laying out the
+    /// page at `size`.
+    public func test_cardHeights(laidOutAt size: NSSize) -> (card: CGFloat, rows: CGFloat) {
+        loadViewIfNeeded()
+        view.frame = NSRect(origin: .zero, size: size)
+        view.layoutSubtreeIfNeeded()
+        return (listWell.frame.height, listStack.arrangedSubviews.map(\.fittingSize.height).reduce(0, +))
     }
 
     /// The rows' titles, top to bottom.
@@ -251,10 +474,11 @@ public final class SpeakersPageViewController: NSViewController {
         rowButton(forRowTitled: title)?.title
     }
 
-    public func test_rowCaption(forRowTitled title: String) -> String? {
+    /// The row's tooltip, which is also its VoiceOver hint.
+    public func test_rowHelp(forRowTitled title: String) -> String? {
         loadViewIfNeeded()
-        return listStack.arrangedSubviews.compactMap { Self.listRow(in: $0) }
-            .first { $0.titleLabel.stringValue == title }?.caption
+        return listStack.arrangedSubviews.first { Self.listRow(in: $0)?.titleLabel.stringValue == title }
+            .flatMap { $0.toolTip }
     }
 
     public func test_clickRowButton(forRowTitled title: String) {

@@ -146,13 +146,34 @@ private func makeParkedWindow(height: CGFloat = 400) -> NSWindow {
             }
             #expect(current.frame.width > SurfaceToolbarSeat.size.width,
                     Comment(rawValue: "\(selected.label) opened — it is \(current.frame.width) pt against a collapsed \(SurfaceToolbarSeat.size.width)"))
-            #expect(current.frame.width == SurfaceToolbarSeat.tabWidth(nameWidth: current.nameWidth),
+            #expect(current.frame.width == SurfaceToolbarSeat.tabWidth(nameWidth: current.nameWidth,
+                                                                       glyphWidth: current.glyphWidth),
                     Comment(rawValue: "and opened by exactly its own name's width"))
             for other in SurfaceScreen.allCases where other != selected {
                 guard let tab = controller.test_tabButton(other) else { continue }
                 #expect(tab.frame.width == SurfaceToolbarSeat.size.width,
                         Comment(rawValue: "\(other.label) stayed collapsed at \(tab.frame.width) pt"))
             }
+        }
+    }
+
+    // Turns red if a revealed tab's name goes back to a fixed offset past a 30 pt glyph slot, so a wider glyph squeezes its own padding.
+    @Test func everyOpenTabCarriesMixersPaddingAroundItsGlyph() throws {
+        let (controller, window) = makeAttached()
+        var gaps: [SurfaceScreen: (inset: CGFloat, gap: CGFloat)] = [:]
+        for screen in SurfaceScreen.allCases {
+            controller.setSelectedScreen(screen)
+            FoldAnimator.shared.test_settleNow()
+            window.layoutIfNeeded()
+            let tab = try #require(controller.test_tabButton(screen))
+            let glyph = try #require(tab.test_glyphFrame)
+            gaps[screen] = (glyph.minX, tab.test_nameFrame.minX - glyph.maxX)
+        }
+        let mixer = try #require(gaps[.mixer])
+        for screen in SurfaceScreen.allCases {
+            let open = try #require(gaps[screen])
+            #expect(abs(open.inset - mixer.inset) <= 0.5 && abs(open.gap - mixer.gap) <= 0.5,
+                    Comment(rawValue: "\(screen.label) open: glyph \(open.inset) pt in, name \(open.gap) pt after it, against Mixer's \(mixer.inset) and \(mixer.gap)"))
         }
     }
 
@@ -206,7 +227,7 @@ private func makeParkedWindow(height: CGFloat = 400) -> NSWindow {
         let capsule = SurfaceToolbarTabCapsule(tabs: [tab] + (0..<(SurfaceScreen.allCases.count - 1)).map { _ in
             SurfaceToolbarSeatButton(frame: NSRect(origin: .zero, size: SurfaceToolbarSeat.size))
         })
-        #expect(capsule.fittingSize.width == SurfaceToolbarSeat.widestCapsuleWidth,
+        #expect(capsule.fittingSize.width <= SurfaceToolbarSeat.widestCapsuleWidth,
                 "and the capsule around it stops at its widest — \(capsule.fittingSize.width) pt")
     }
 
@@ -315,7 +336,8 @@ private func makeParkedWindow(height: CGFloat = 400) -> NSWindow {
             window.layoutIfNeeded()
             guard let open = controller.test_tabButton(screen) else { continue }
             #expect(capsule.fittingSize.width
-                        == SurfaceToolbarSeat.capsuleWidth(nameWidth: open.nameWidth),
+                        == SurfaceToolbarSeat.capsuleWidth(nameWidth: open.nameWidth,
+                                                           glyphWidth: open.glyphWidth),
                     Comment(rawValue: "with \(screen.label) open the capsule is exactly that name wider — \(capsule.fittingSize.width) pt"))
             heights.insert(capsule.frame.height)
             origins.insert(capsule.frame.minX)
@@ -351,7 +373,8 @@ private func makeParkedWindow(height: CGFloat = 400) -> NSWindow {
             Issue.record("the tabs have no seat buttons")
             return
         }
-        #expect(groups.test_width == SurfaceToolbarSeat.tabWidth(nameWidth: groups.nameWidth),
+        #expect(groups.test_width == SurfaceToolbarSeat.tabWidth(nameWidth: groups.nameWidth,
+                                                                 glyphWidth: groups.glyphWidth),
                 "Groups is fully open already — \(groups.test_width) pt")
         #expect(mixer.test_width == SurfaceToolbarSeat.size.width,
                 "and Mixer is fully closed already — \(mixer.test_width) pt")
@@ -376,7 +399,8 @@ private func makeParkedWindow(height: CGFloat = 400) -> NSWindow {
             Issue.record("Settings has no seat button")
             return
         }
-        let open = SurfaceToolbarSeat.tabWidth(nameWidth: settings.nameWidth)
+        let open = SurfaceToolbarSeat.tabWidth(nameWidth: settings.nameWidth,
+                                               glyphWidth: settings.glyphWidth)
         #expect(settings.test_width < open,
                 "the seat has not jumped to its open width — \(settings.test_width) of \(open) pt")
         #expect(FoldAnimator.shared.isFolding, "it is travelling there")

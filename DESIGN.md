@@ -494,6 +494,26 @@ editor, with no sidebar. The Speakers root is a sidebar split that must never
 collapse: the sidebar is the only speaker list, beside the Speakers page, a
 speaker's page or Main Audio. Selection on either is never activation.
 
+The **Speakers page** (`SpeakersPageViewController`) lists no speakers. Its
+column sits at the top of the pane on `GroupsPaneLayout` insets: the 48 pt
+icon well, the title, and one caption line in `Tokens.Font.caption` /
+`Tokens.Color.label2` that reports the search for speakers. While looking it
+reads a small spinner, "Looking for speakers on your network…" and "· N found
+so far". Once `SpeakerSearch` decides the search is done (the list of speakers
+the Mac can see has not changed for 0.5 s, the popover's first-open quiet
+window, or a 10 s ceiling ran out; once per launch) it shows an
+`NSColor.systemGreen` check and either "All N speakers found" or "Done
+looking · ● F found · ○ A away", the dots drawn by the sidebar's own
+`SidebarPresenceDotView` at 7 pt. Below it, one `GroupedSectionView` card
+ends at its last row. Its first row counts every kept speaker by kind
+(AirPlay, Bluetooth, Cast, This Mac, Unknown; a kind with none is left out):
+a 16 pt glyph, the count in `Tokens.Font.heading`, the label in caption ink.
+Then one-line `ListRowView` rows, each only when true: "Bluetooth access is
+off" with its action button, "N speakers can't be found" with "Forget N
+speakers…" (only after the search is done), and "Pair Bluetooth speaker…"
+with a chevron, always last. Each row's longer sentence is its tooltip and
+VoiceOver hint.
+
 **Onboarding** is a floating first-run window: a spine of status rows beside
 one hero panel, gating Done until every check passes.
 

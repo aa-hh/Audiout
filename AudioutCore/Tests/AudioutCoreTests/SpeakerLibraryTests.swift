@@ -432,7 +432,7 @@ private final class RecoveryClock {
     func fire(_ index: Int) { actions[index]() }
 }
 
-private final class CapturedEvents: @unchecked Sendable {
+final class CapturedEvents: @unchecked Sendable {
     private let lock = NSLock()
     private var items: [(String, [String: String])] = []
     func append(_ name: String, _ props: [String: String]) { lock.withLock { items.append((name, props)) } }

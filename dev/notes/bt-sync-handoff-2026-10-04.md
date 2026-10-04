@@ -140,10 +140,15 @@ before the gate means anything.
 - Mule: `alechamilton@SUMUP-M9Y197RFVG.local`. Permits `audiout.remoteSlots=2`,
   `audiout.testPrefer=remote` (Alec's choice 2026-10-04). Set remoteSlots to 0
   only AFTER a listening driver has started, never before, and restore after.
-- Driver: `~/listening/unattended-night.sh` on the mule = branch
-  `claude/unattended-listening-driver` (PR #247, d76ee532, worktree
-  `.claude/worktrees/listening-driver`). Run it from the mule's own Terminal
-  (processes started over ssh get no microphone). Flags: `--only-c`,
+- Driver: `~/Library/Application Support/AudioutDev/listening/unattended-night.sh`
+  on the mule (moved there 2026-10-04 05:30; `~/listening` is gone) = main after
+  PR #247 (853d5e6e). Run it from the mule's own Terminal: processes started
+  over ssh get no microphone and no Bluetooth, and an Apple-events call from
+  ssh to Terminal hangs on a permission prompt. Never compile or test on the
+  mule while a run is on: the 05:38 smoke died silently under a load average
+  of 80 from a build sent there. `builds/main/` and `builds/pr228/` beside it
+  hold the two Audiout Dev builds; `builds/pr228` (ea78f3e7) is the one
+  installed in `~/Applications` since 05:55. Flags: `--only-c`,
   `--c-move <bt id>`, `--airplay-id <id>`, `--move1/--move2` (all four ids are
   required even for `--only-c`), `--smoke`, `--dry-run`, `--list-devices`.
   Manual selection mode: at each `WAITING` line, deselect and reselect the
@@ -152,24 +157,55 @@ before the gate means anything.
   failed tries abort the block.
 - Ids: Move 089E `54-2A-1B-79-08-9E:output`; Move 2 BF4A
   `C4-38-75-0E-BF-4A:output` (Bluetooth) / `C4:38:75:0E:BF:4A` (AirPlay, in
-  Wi-Fi mode); This Mac `local-mac`. Move 2 was left in Wi-Fi mode at 23:14.
+  Wi-Fi mode); This Mac `local-mac`. Move 2 was left in Wi-Fi mode at 06:05
+  on 2026-10-04.
 - Stores: `~/Library/Application Support/com.audiout.Audiout.dev/bt-sync-trims.json`
-  (`latencyMs` 286 and 435 for the two Moves), `routing.json`. Telemetry
+  (`latencyMs` 259 and 435 for the two Moves after the 06:03 wizard run,
+  trim +27 on 089E), `routing.json` (holds 089E + the AirPlay Move 2). The
+  reconnect-at-launch setting is on. Telemetry
   `~/Library/Logs/Audiout/telemetry.jsonl`, UTC timestamps.
+
+## 2026-10-04 05:00 to 06:05: three owed items closed
+
+- PR #247 MERGED (853d5e6e). The analyzer drops a second peak at or past
+  500 ms as the neighbouring click and reports medians of the unsigned
+  spacing per 5 minutes (the fit keeps the sign); on the night's recordings
+  Block A reads 29 / 50 / 22 / 22 ms and Block C 23 / 27 / 28 / 20 / 19 ms,
+  the hand count. The review rounds also moved the LaunchAgent label to
+  `com.audiout.dev.listening-night`, the install to the folder above, added
+  the purge entry, and made the driver clean up on a signal (zsh runs no EXIT
+  trap on TERM or HUP; `set -e` ends the script on a failed `$(...)` with no
+  log line).
+- PR #250 live-tested (`results/2026-10-04_0545-smoke`, build main ef56d711):
+  reconnect-at-launch restored the selection 3 of 3 times. On the link drop
+  the sink reported `bt_sink:dead reason=device_gone` in the same second (no
+  zombie), but the app removed the Move from the selection at once and did
+  not re-add it when it returned 16 s later: issue #263.
+- #228 merged with main on its branch (ea78f3e7): one conflict in
+  `updateBTReferenceBufferLocked`; the room term now counts a negative trim
+  as latency, as the Bluetooth-only reference has since fix 2. Listen: with
+  089E's stored latency set to 950 and the AirPlay Move 2 selected,
+  `bt_room_term_changed nil→1050` and `room_delay_changed airplay_pre_ms 50`;
+  a −100 ms trim press raised the term to 1150 (the case the scoper flagged
+  for the owner); the wizard re-run (259 ms) cleared it; the regression check
+  passed by ear. Runbook Part 3's "all in sync" criterion cannot hold with a
+  faked latency (the Move plays about 660 ms early by construction); only the
+  telemetry and step 5 are testable on these Moves. Smoke Block A still shows
+  18 to 24 ms second arrivals with one Move playing, so that spacing is likely
+  a room reflection and the two Moves may be merged within 15 ms.
 
 ## Still owed, in order
 
 1. Issue #261: the two open re-alignment findings, as ONE scoped round (the
    scoper's case table is in the PR 256 conversation), plus fix 2's doc debt.
-2. Live test of #250: build Audiout Dev from main, repeat Block A's link drop
-   (`--smoke` reproduces it in two minutes) and watch for `bt_sink_dead` /
-   `bt_sink_health`; also quit and relaunch with reconnect-at-launch on.
-3. #228's own listen: runbook `bt-sync-discovery/runbooks/00-listening-evening-m1.md`
-   Part 3 (stored latency 950 ms on one Move, music, by ear, five minutes). Then
-   merge #228; expect the `updateBTRoomTermLocked()` conflict noted in the
-   workstream note.
-4. #247: analyzer fix (drop |offset| >= 500 ms, medians), then merge.
-5. Direction (Alec, 2026-10-03): PostHog shows 11 production Macs in 90 days,
+2. Merge #228 on the owner's go: mark ready, one review round (Bluetooth
+   backend, a risk path), CI, queue. Rulings owed from runbook Part 3: (a)
+   fall back or hold when a slow speaker is re-measured lower; (b) with two
+   slow Moves, keep the delay of the deselected slower one or drop to the
+   other's. Then fix runbook Part 3's pass criterion.
+3. Issue #263: keep a Bluetooth speaker through a short link drop, or re-add
+   it when it returns within a grace window.
+4. Direction (Alec, 2026-10-03): PostHog shows 11 production Macs in 90 days,
    7 of them Alec's or agents'; the 4 outside Macs never selected Bluetooth or
    ran the wizard; `bt_sync:drift_corrected` fired twice, dev build only. Alec:
    absence of users is not absence of demand; if this works it is a marketing

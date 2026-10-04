@@ -26,6 +26,9 @@ both meanings at once.
   unregistered.
 - **Trial**: the 14 clean days a new install gets before it is unregistered. Ends
   by the calendar, never by use. One per Mac.
+- **Scene**: a saved, named set of speakers Main Out can play to. The user-facing
+  word, in every label, note, caption and refusal; "group" survives only in code
+  names (`GroupController`, `groups.json`) and analytics property values.
 - **Selected Speakers**: the set of destinations the mixer's Main Out plays to when
   it targets them. This Mac's own output is a member like any other. Membership is
   not the same as receiving audio: routing is decided by Main Out.

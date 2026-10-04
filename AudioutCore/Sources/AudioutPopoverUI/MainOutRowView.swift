@@ -61,12 +61,16 @@ public final class MainOutRowView: NSView {
         /// Drawn in secondary ink but still enabled and dispatched, so the host
         /// can answer the click (a group under the one-speaker limit).
         public let isDimmed: Bool
+        /// A disabled line of explanation under a header, never a choice
+        /// (the one-speaker limit's "Buy Audiout to use scenes.").
+        public let isCaption: Bool
         public init(title: String, target: MainOutTarget = .selectedDevices,
                     isHeader: Bool = false, buttonTitle: String? = nil,
-                    isDimmed: Bool = false) {
+                    isDimmed: Bool = false, isCaption: Bool = false) {
             self.title = title; self.target = target; self.isHeader = isHeader
             self.buttonTitle = buttonTitle
             self.isDimmed = isDimmed
+            self.isCaption = isCaption
         }
     }
 
@@ -289,6 +293,14 @@ public final class MainOutRowView: NSView {
                     menu.addItem(.separator())
                 }
                 menu.addItem(.sectionHeader(title: option.title))
+                continue
+            }
+            if option.isCaption {
+                // No action, so AppKit disables and greys it: read, never picked.
+                let caption = NSMenuItem(title: option.title, action: nil, keyEquivalent: "")
+                caption.isEnabled = false
+                caption.indentationLevel = sawHeader ? 1 : 0
+                menu.addItem(caption)
                 continue
             }
             let item = NSMenuItem(title: option.title, action: nil, keyEquivalent: "")

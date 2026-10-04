@@ -133,7 +133,8 @@ import AppKit
         row.delegate = delegate
         row.apply(options: [
             .init(title: "Selected Speakers", target: .selectedDevices),
-            .init(title: "Groups need more than one speaker. Buy Audiout to use them.", isHeader: true),
+            .init(title: "Scenes", isHeader: true),
+            .init(title: "Buy Audiout to use scenes.", isCaption: true),
             .init(title: "tester", target: .group(id: "g1"), isDimmed: true),
         ], current: .selectedDevices, master: 50)
         guard let item = row.test_menuItem(for: .group(id: "g1")) else {

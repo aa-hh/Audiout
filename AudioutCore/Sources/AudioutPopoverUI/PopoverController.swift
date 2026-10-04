@@ -1319,14 +1319,37 @@ public final class PopoverController: NSObject {
     public enum UnregisteredNote: Equatable {
         case trialEnded
         case keyRefused(reason: String?)
+        /// The server does not know the key (`unknown`) or it is not shaped
+        /// like one (`invalid`): typically a mistyped key saved from the sheet.
+        case keyUnrecognized
+        /// No key and no trial at all.
+        case noKey
+
+        /// Which note a limited install shows, from what is stored; `nil` when
+        /// the install is not limited. An ended trial wins over the verdict it
+        /// left behind (the server answers one with `revoked`).
+        public static func resolve(settings: AppSettings) -> UnregisteredNote? {
+            guard LicenseGate.limitsToOneSpeaker(settings: settings) else { return nil }
+            if TrialClock.hasEnded(settings: settings) { return .trialEnded }
+            if (settings.licenseKey ?? "").isEmpty { return .noKey }
+            switch settings.licenseStatus {
+            case .revoked: return .keyRefused(reason: settings.licenseReason)
+            case .unknown, .invalid: return .keyUnrecognized
+            case .active, nil: return .trialEnded
+            }
+        }
     }
 
     static let unregisteredTrialEndedNoteText = "Your trial has ended. Audiout plays on one speaker at a time until you buy."
+    static let unregisteredKeyUnrecognizedNoteText = "This key isn\u{2019}t recognized, so Audiout plays on one speaker at a time."
+    static let unregisteredNoKeyNoteText = "Audiout plays on one speaker at a time until it has a license key."
     /// A refused key's note names what happened to it: a refund, a reversed
     /// payment, or, for any other or no reason, a revoke.
     static func unregisteredKeyRefusedNoteText(reason: String?) -> String {
         LicenseCopy.oneSpeakerKeyRefusedLine(reason: reason)
     }
+    /// The Main Out menu's one line under "Scenes" while the limit holds.
+    static let scenesLimitCaption = "Buy Audiout to use scenes."
     /// Shown for the rest of an open once a trial-ended install hits the limit.
     static let oneSpeakerLimitNoteText = "Your trial has ended, so Audiout plays on one speaker at a time."
 
@@ -1583,8 +1606,8 @@ public final class PopoverController: NSObject {
     }
 
     /// The one-speaker note's words, or `nil` when the install is not limited.
-    /// A refused-key install keeps its standing text when it hits the limit:
-    /// the spec gives no refused-key limit copy.
+    /// Only a trial-ended install changes its words when it hits the limit;
+    /// every other state's standing text already says why.
     private var unregisteredNoteText: String? {
         switch unregisteredNote {
         case nil: return nil
@@ -1592,6 +1615,10 @@ public final class PopoverController: NSObject {
             return limitNoteRaised ? Self.oneSpeakerLimitNoteText : Self.unregisteredTrialEndedNoteText
         case .keyRefused(let reason):
             return Self.unregisteredKeyRefusedNoteText(reason: reason)
+        case .keyUnrecognized:
+            return Self.unregisteredKeyUnrecognizedNoteText
+        case .noKey:
+            return Self.unregisteredNoKeyNoteText
         }
     }
 
@@ -2573,13 +2600,15 @@ public final class PopoverController: NSObject {
         // filtered here defensively rather than shown as a dead entry).
         let routableGroups = controller.groups.filter { !$0.memberIDs.isEmpty }
         if !routableGroups.isEmpty {
-            // Under the one-speaker limit the groups stay listed, dimmed, under a
-            // header that says why; a click is answered in `mainOutRow(_:didSelect:)`.
+            // Under the one-speaker limit the scenes stay listed and dimmed under
+            // the same heading, with one dimmed caption saying how to get them
+            // back (owner's call, 2026-10-04); a click is answered in
+            // `mainOutRow(_:didSelect:)`.
             let limited = controller.limitsToOneSpeaker
-            options.append(.init(title: limited
-                                    ? "Groups need more than one speaker. Buy Audiout to use them."
-                                    : "Scenes",
-                                 isHeader: true))
+            options.append(.init(title: "Scenes", isHeader: true))
+            if limited {
+                options.append(.init(title: Self.scenesLimitCaption, isCaption: true))
+            }
             for group in routableGroups {
                 // A saved GROUP names ITSELF on the collapsed button ("→ Kitchen"),
                 // never its member devices — shorter, never truncates, and matches

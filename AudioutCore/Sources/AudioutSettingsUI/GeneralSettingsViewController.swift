@@ -132,7 +132,7 @@ public final class GeneralSettingsViewController: NSViewController {
     ///     value in tests so the rendered version string never depends on how
     ///     the test binary was built.
     ///   - openURL: opens the About window's "View Source Code…" link and the
-    ///     "Buy Audiout…" button's purchase page; defaults to `NSWorkspace`,
+    ///     "Buy Audiout" button's purchase page; defaults to `NSWorkspace`,
     ///     injected as a recording closure in tests so a test run never
     ///     actually launches a browser.
     ///   - approvals: the per-phone approval model (T24) backing the
@@ -275,7 +275,7 @@ public final class GeneralSettingsViewController: NSViewController {
         enterLicenseButton.target = self
         enterLicenseButton.action = #selector(enterLicenseTapped)
 
-        buyButton.title = "Buy Audiout…"
+        buyButton.title = "Buy Audiout"
         buyButton.bezelStyle = .rounded
         buyButton.target = self
         buyButton.action = #selector(buyTapped)
@@ -936,7 +936,7 @@ public final class GeneralSettingsViewController: NSViewController {
         return licenseStatusHint.isHidden ? nil : licenseStatusHint.stringValue
     }
 
-    /// Whether "Buy Audiout…" is on screen.
+    /// Whether "Buy Audiout" is on screen.
     public var test_buyButtonIsVisible: Bool {
         _ = view
         return !buyButton.isHidden

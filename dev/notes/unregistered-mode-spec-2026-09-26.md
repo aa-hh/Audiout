@@ -31,7 +31,7 @@ While unregistered:
 
 - The app runs, with every feature, on **one speaker at a time**: the Selected
   Speakers set holds at most one member. This Mac's own output counts as a member.
-- **Groups are off.** A saved group has two or more members.
+- **Scenes are off.** A saved scene has two or more members.
 - **Bluetooth sync is off.** It aligns two outputs.
 - **Per-app routes are free.** Any app may be routed to any speaker.
 - Nothing else changes: volume, mute, EQ, the sync drawer's read-only chip,
@@ -59,6 +59,17 @@ Copy, key refunded or revoked:
 
 > This key was refunded or revoked, so Audiout plays on one speaker at a time.
 
+Since 2026-10-04 the refused-key note names the server's reason (refunded,
+payment reversed, otherwise revoked), and two more states get their own words:
+
+> This key isn’t recognized, so Audiout plays on one speaker at a time.
+
+for a key the server does not know or that is not shaped like one, and
+
+> Audiout plays on one speaker at a time until it has a license key.
+
+for a Mac with no key and no trial.
+
 Actions, right-aligned, vertically centred to the note even when the text wraps
 to two lines: an underlined text action **I have a key** to the left, then the
 button **Buy Audiout**. No price on the note.
@@ -85,13 +96,20 @@ click does not take. Two things happen:
 Refusal travels through `GroupController.SelectionResult.refused(reason)`, which
 already exists; the mixer never learns a new way to say no.
 
-### J4. Groups and sync
+### J4. Scenes and sync
 
-Groups in the sidebar stay visible, greyed, under one caption:
+The Main Out menu keeps its "Scenes" heading and lists every scene, greyed,
+with one greyed caption line under the heading (owner's call 2026-10-04,
+replacing the 2026-09-26 caption "Groups need more than one speaker. Buy
+Audiout to use them."):
 
-> Groups need more than one speaker. Buy Audiout to use them.
+> Buy Audiout to use scenes.
 
-Clicking a greyed group shows the J3 note. Sync entry points (the untuned
+The phone's refusal for a scene reads "Scenes need more than one speaker. Buy
+Audiout to use them." The user-facing word is "scenes", never "groups"; code
+names keep "group".
+
+Clicking a greyed scene shows the J3 note. Sync entry points (the untuned
 Bluetooth chip, the "Align by ear…" menu item, the wizard doors) stay visible;
 using one shows the J3 note instead of the wizard.
 
@@ -138,7 +156,7 @@ consent ask (ADR 0002). After that the note slot is empty for a registered insta
 ### J8. Someone with a key
 
 Bought on the website or another Mac: **I have a key** on the note, or Settings.
-The Settings licence row shows "Buy Audiout…" whenever the install is limited or
+The Settings licence row shows "Buy Audiout" (no ellipsis: it opens the browser, no dialog follows; owner's call 2026-10-04) whenever the install is limited or
 unregistered. When a trial has ended but the last server answer was still
 "active" (it ran out offline), the row's status reads the J2 sentence, "Your
 trial has ended. Audiout plays on one speaker at a time until you buy.", so it

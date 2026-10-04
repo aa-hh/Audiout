@@ -41,11 +41,17 @@ applies it. The spec's rulings stand; nothing here reopens one.
    message" (harden). "I have a key" shows the arrow cursor: give it the
    pointing hand (polish).
 
-## Needs the owner, not applied
+## Needs the owner: ruled 2026-10-04
 
-- The group caption replaces the Main Out menu's section heading (the spec
-  rules that caption).
-- "Scenes" vs "Groups" as that heading when the install is not limited
-  (separate change).
-- The ellipsis on Settings' "Buy Audiout…".
-- The card appearing in the same open the key lands in.
+These override the spec where they differ; the spec, CONTEXT.md and PRODUCT.md
+now say the same.
+
+- The Main Out menu keeps its "Scenes" heading under the limit, lists the
+  scenes dimmed, and adds one dimmed caption under the heading: "Buy Audiout to
+  use scenes." The click still answers with the note.
+- The user-facing word is "scenes", never "groups", in every label, note,
+  caption and refusal. Analytics property values and code names keep "group".
+- "Buy Audiout" drops its ellipsis wherever it opens the browser; an ellipsis
+  stays only where a dialog follows.
+- The thank-you card may appear in the same open the key lands in: kept as
+  built.

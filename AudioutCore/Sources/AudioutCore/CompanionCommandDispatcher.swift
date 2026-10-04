@@ -587,7 +587,7 @@ public final class CompanionCommandDispatcher {
                 return .refused("Unknown scene.")
             }
             if groupController.limitsToOneSpeaker {
-                return .refused("Groups need more than one speaker. Buy Audiout to use them.")
+                return .refused("Scenes need more than one speaker. Buy Audiout to use them.")
             }
             groupController.setMainOut(.group(id: groupID))
             return .ok

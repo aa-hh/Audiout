@@ -3582,6 +3582,44 @@ import AudioutProtocol
         #expect(popover.test_systemAirPlayNoteHasTextAction)
     }
 
+    /// Red if a limited install's note said something untrue about it: a
+    /// mistyped key read "revoked", a Mac with no key and no trial read "Your
+    /// trial has ended", or an ended trial (which the server answers with
+    /// `revoked`) read as a refused key. Driven from stored settings through
+    /// the same resolver the app uses.
+    @Test(arguments: [
+        ("no key, no trial", PopoverController.unregisteredNoKeyNoteText),
+        ("unknown key", PopoverController.unregisteredKeyUnrecognizedNoteText),
+        ("invalid key", PopoverController.unregisteredKeyUnrecognizedNoteText),
+        ("refunded key", "This key was refunded, so Audiout plays on one speaker at a time."),
+        ("ended trial", PopoverController.unregisteredTrialEndedNoteText),
+    ])
+    func eachLimitedStateGetsItsOwnNote(state: String, expected: String) async throws {
+        let settings = AppSettings(defaults: TestIsolation(owner: "PopoverControllerTests").makeDefaults(),
+                                   licenseServerURL: URL(string: "https://license.example.invalid")!)
+        switch state {
+        case "unknown key":
+            settings.licenseKey = "AUDT-AAAAA-BBBBB-CCCCC-DDDDD"
+            settings.licenseStatus = .unknown
+        case "invalid key":
+            settings.licenseKey = "nonsense"
+            settings.licenseStatus = .invalid
+        case "refunded key":
+            settings.licenseKey = "AUDT-AAAAA-BBBBB-CCCCC-DDDDD"
+            settings.licenseStatus = .revoked
+            settings.licenseReason = "refund"
+        case "ended trial":
+            settings.licenseKey = "AUDT-AAAAA-BBBBB-CCCCC-DDDDD"
+            settings.licenseStatus = .revoked
+            settings.licenseReason = "trial_expired"
+        default:
+            break
+        }
+        let (popover, _, _) = try await makePopover()
+        popover.setUnregisteredNote(.resolve(settings: settings))
+        #expect(popover.test_systemAirPlayNoteText == expected)
+    }
+
     /// Leaves exactly "office" selected with the limit on and the trial-ended
     /// note standing.
     private func limitToOffice(_ popover: PopoverController, _ controller: GroupController) {
@@ -3637,6 +3675,8 @@ import AudioutProtocol
         #expect(popover.test_deviceRow(for: "homepod-bed")?.test_switchOfferOffered == true)
         #expect(popover.test_mainOutRow.test_menuItem(for: .group(id: group.id))?.attributedTitle != nil,
                 "dimmed under the limit")
+        let caption = popover.test_mainOutRow.test_menuItem(titled: PopoverController.scenesLimitCaption)
+        #expect(caption?.isEnabled == false, "the limit's caption is read, never picked")
 
         controller.limitsToOneSpeaker = false
         popover.setUnregisteredNote(nil)
@@ -3645,6 +3685,9 @@ import AudioutProtocol
                 "the offer goes with the limit")
         #expect(popover.test_mainOutRow.test_menuItem(for: .group(id: group.id))?.attributedTitle == nil,
                 "the scene reads normally again")
+        #expect(popover.test_mainOutRow.test_menuItem(titled: PopoverController.scenesLimitCaption) == nil,
+                "the caption goes with the limit")
+        #expect(popover.test_mainOutRow.test_menuItem(titled: "Scenes") != nil, "the heading stays")
         #expect(popover.test_systemAirPlayNoteText == nil)
     }
 

@@ -723,7 +723,7 @@ public struct AppSettings {
         licenseServerURLOverride ?? Self.bundleURL(forInfoDictionaryKey: "AudioutLicenseServerURL")
     }
 
-    /// Where "Buy Audiout…" sends the user, from the bundle's
+    /// Where "Buy Audiout" sends the user, from the bundle's
     /// `AudioutBuyURL` (written by `scripts/make-app.sh` from
     /// `AUDIOUT_BUY_URL`). `nil` in a build that carries no such key, which
     /// is what hides every buy affordance — the Settings button and the

@@ -98,7 +98,7 @@ public final class LicenseSheetViewController: NSViewController {
         resultLine.isHidden = true
         resultLine.preferredMaxLayoutWidth = Self.sheetContentWidth
 
-        buyButton.title = "Buy Audiout…"
+        buyButton.title = "Buy Audiout"
         buyButton.bezelStyle = .rounded
         buyButton.controlSize = .small
         buyButton.target = self
@@ -351,7 +351,7 @@ public final class LicenseSheetViewController: NSViewController {
         return !removeButton.isHidden
     }
 
-    /// Whether "Buy Audiout…" is offered (a registered customer never sees it).
+    /// Whether "Buy Audiout" is offered (a registered customer never sees it).
     public var test_buyIsVisible: Bool {
         _ = view
         return !buyButton.isHidden

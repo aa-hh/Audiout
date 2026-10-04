@@ -2596,16 +2596,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let status = settings.licenseStatus
         let limited = LicenseGate.limitsToOneSpeaker(settings: settings)
         groupController?.limitsToOneSpeaker = limited
-        let note: PopoverController.UnregisteredNote?
-        if !limited {
-            note = nil
-        } else if (status == .revoked || status == .unknown || status == .invalid),
-                  !TrialClock.hasEnded(settings: settings) {
-            note = .keyRefused(reason: settings.licenseReason)
-        } else {
-            note = .trialEnded
-        }
-        popoverController?.setUnregisteredNote(note)
+        popoverController?.setUnregisteredNote(.resolve(settings: settings))
         updaterController?.updater.httpHeaders = key.isEmpty ? nil : ["Authorization": "Bearer \(key)"]
 
         // A licence that lands while phones are connected: push the token

@@ -192,7 +192,7 @@ import AudioutProtocol
         ctx.groupController.limitsToOneSpeaker = true
         let result = ctx.dispatcher.execute(.setMainOut(MainOutState(kind: "group", groupID: "g1")))
         #expect(!result.applied)
-        #expect(result.refusalReason == "Groups need more than one speaker. Buy Audiout to use them.")
+        #expect(result.refusalReason == "Scenes need more than one speaker. Buy Audiout to use them.")
         #expect(ctx.groupController.mainOut == .selectedDevices)
     }
 

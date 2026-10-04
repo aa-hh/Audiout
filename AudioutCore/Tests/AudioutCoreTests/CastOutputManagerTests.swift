@@ -509,6 +509,8 @@ import Testing
     /// app would then relaunch it or hold the app's audio back by the room.
     /// Also red if `setCastRoomDelayMs` stops storing a value pushed while
     /// app-owned, or the hand-back to the whole system stops applying it.
+    /// Red too if `setDevices(_:sources:)` stops zeroing the stored room delay
+    /// when a receiver goes app-owned, so a later hand-back with no push re-applies it.
     @Test func handingAReceiverBetweenProducersKeepsTheSessionAndDropsTheRoomDelay() throws {
         guard #available(macOS 15, *) else { return }
         let (fake, endpoint) = try startFake()
@@ -555,7 +557,15 @@ import Testing
         let released = manager.castFeedStats(forDevice: "dev1")?.achievedDelayMs ?? .max
         #expect(released <= 2000, Comment(rawValue: "the room delay outlived the hand-back (held \(released) ms)"))
 
-        // One session through all three hand-overs.
+        // Claimed by the whole system again, with no push in between: the
+        // 3000 ms from the earlier whole-system stretch must not come back.
+        manager.setDevices([record(endpoint)], sources: ["dev1": .wholeSystem])
+        _ = manager.castFeedStats(forDevice: "dev1")
+        manager.feed.write(pcm: block, pts: pts)
+        let reclaimed = manager.castFeedStats(forDevice: "dev1")?.achievedDelayMs ?? .max
+        #expect(reclaimed <= 2000, Comment(rawValue: "a stale room delay came back on hand-back (held \(reclaimed) ms)"))
+
+        // One session through all four hand-overs.
         let events = fake.events
         #expect(events.filter { $0 == "LAUNCH" }.count == 1, Comment(rawValue: "relaunched: \(events)"))
         #expect(!events.contains("STOP"), Comment(rawValue: "stopped: \(events)"))

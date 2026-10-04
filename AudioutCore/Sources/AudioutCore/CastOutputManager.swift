@@ -620,6 +620,12 @@ final class CastOutputManager: CastOutputControlling, @unchecked Sendable {
                 guard session.source != source else { continue }
                 session.source = source
                 session.ring.setSource(source)
+                if source == .perApp {
+                    // Nothing refreshes these while an app owns the receiver,
+                    // so a value kept from now would come back stale on hand-back.
+                    session.roomDelayMs = 0
+                    session.userOffsetMs = 0
+                }
                 self.applyFeedDelay(session)
                 Telemetry.log(.cast, "cast_feed_source", [
                     "device": record.id,
@@ -674,9 +680,11 @@ final class CastOutputManager: CastOutputControlling, @unchecked Sendable {
 
     /// Both delay setters take the ``setLevel(_:forDevice:)`` posture: an id
     /// with no session is ignored, and the value lives on the session, so it
-    /// survives a drop-and-reconnect, and a spell owned by one app, without
-    /// being re-pushed. A `.perApp` session stores both but applies neither:
-    /// it is not part of the room's timing.
+    /// survives a drop-and-reconnect without being re-pushed. A `.perApp`
+    /// session applies neither: it is not part of the room's timing. Going
+    /// `.perApp` zeroes both stored values, so a hand-back never applies one
+    /// left over from the earlier whole-system stretch; a value pushed while
+    /// `.perApp` is stored, and the hand-back to `.wholeSystem` applies it.
     func setCastRoomDelayMs(_ ms: Int, forDeviceID id: String) {
         queue.async { [weak self] in
             guard let self, let session = self.sessions[id] else { return }

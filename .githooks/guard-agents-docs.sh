@@ -9,7 +9,9 @@
 #   4. folder AGENTS.md over 300 words must not grow (blocks)
 # The root AGENTS.md is exempt from 2-4.
 
-[ -n "$AUDIOUT_IN_MERGE" ] && exit 0
+# A conflict-resolution merge commit (MERGE_HEAD present) carries other
+# people's lines; a clean merge never runs pre-commit at all.
+[ -f "$(git rev-parse --git-dir 2>/dev/null)/MERGE_HEAD" ] && exit 0
 
 staged=$(git diff --cached --no-renames --name-only --diff-filter=AM 2>/dev/null | grep -E '(^|/)AGENTS(-HISTORY)?\.md$')
 # Deleted/renamed-away lines in a history file still count: include all statuses for history.

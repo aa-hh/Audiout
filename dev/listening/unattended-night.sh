@@ -963,7 +963,7 @@ def rows_of(txt):
 
 def median(v):
     v = [x for x in v if x is not None]
-    return f"{statistics.median(v):+.1f} ms" if v else "no separate second click"
+    return f"{statistics.median(abs(x) for x in v):.1f} ms" if v else "no separate second click"
 
 def deviation_slopes(lines):
     by = {}

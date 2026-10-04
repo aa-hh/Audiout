@@ -13,6 +13,8 @@ Bluetooth-vs-host rate drift; a sudden change is a latency step.
 A second peak at --max-offset-ms or beyond is the neighbouring click (one speaker
 silent or merged), so that row prints as neighbour and is left out of the fit.
 The summary lines report medians: first and last five periods, and per 5 minutes.
+They and the fit use the unsigned spacing, because with two similar speakers the
+loudest click alternates and the sign only says which one the mic heard first.
 
 Convert a QuickTime .m4a first:  afconvert -f WAVE -d LEI16 rec.m4a rec.wav
 Needs numpy (python3 -c "import numpy" to check).
@@ -64,7 +66,7 @@ for k in range((len(env) - start)//P):
     print(f"{t1:10.3f}  {off:+10.2f}   ({v1/v2:.1f})"); rows.append((t1, off))
 print(f"# clean: {len(rows)} of {seen} periods (merged + offset within {a.max_offset_ms:g} ms)")
 if len(rows) >= 4:
-    t = np.array([r[0] for r in rows]); o = np.array([r[1] for r in rows])
+    t = np.array([r[0] for r in rows]); o = np.abs(np.array([r[1] for r in rows]))
     slope = np.polyfit(t, o, 1)[0]
     print(f"# linear fit: {slope*60:+.3f} ms/min = {slope*1000:+.1f} ppm over {t[-1]-t[0]:.0f} s "
           f"(first median {np.median(o[:5]):+.1f} ms, last median {np.median(o[-5:]):+.1f} ms)")

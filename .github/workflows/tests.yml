@@ -73,9 +73,7 @@ jobs:
       - name: Restore SwiftPM build caches
         uses: actions/cache/restore@v4
         with:
-          path: |
-            AudioutCore/.build
-            AirPlayEngine/.build
+          path: AudioutCore/.build
           key: ${{ runner.os }}-${{ runner.arch }}-xcode26.6-spm-${{ hashFiles('**/Package.resolved') }}-${{ github.sha }}
           restore-keys: |
             ${{ runner.os }}-${{ runner.arch }}-xcode26.6-spm-${{ hashFiles('**/Package.resolved') }}-
@@ -97,9 +95,7 @@ jobs:
         if: ${{ !cancelled() && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && strategy.job-index == 0 }}
         uses: actions/cache/save@v4
         with:
-          path: |
-            AudioutCore/.build
-            AirPlayEngine/.build
+          path: AudioutCore/.build
           key: ${{ runner.os }}-${{ runner.arch }}-xcode26.6-spm-${{ hashFiles('**/Package.resolved') }}-${{ github.sha }}
 
   airplayengine:
@@ -117,20 +113,26 @@ jobs:
           echo "missing:${missing:- none}"
           [ -z "$missing" ] || brew install $missing
 
-      - name: Restore SwiftPM build caches
+      # Its own cache: the suite jobs never build AirPlayEngine/.build.
+      - name: Restore AirPlayEngine build cache
         uses: actions/cache/restore@v4
         with:
-          path: |
-            AudioutCore/.build
-            AirPlayEngine/.build
-          key: ${{ runner.os }}-${{ runner.arch }}-xcode26.6-spm-${{ hashFiles('**/Package.resolved') }}-${{ github.sha }}
+          path: AirPlayEngine/.build
+          key: ${{ runner.os }}-${{ runner.arch }}-xcode26.6-airplayengine-${{ hashFiles('AirPlayEngine/Package.swift', 'AirPlayEngine/Package.resolved') }}-${{ github.sha }}
           restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-xcode26.6-spm-${{ hashFiles('**/Package.resolved') }}-
-            ${{ runner.os }}-${{ runner.arch }}-xcode26.6-spm-
+            ${{ runner.os }}-${{ runner.arch }}-xcode26.6-airplayengine-${{ hashFiles('AirPlayEngine/Package.swift', 'AirPlayEngine/Package.resolved') }}-
+            ${{ runner.os }}-${{ runner.arch }}-xcode26.6-airplayengine-
 
       # Guard 6's suite, through the same runner (it takes the package name).
       - name: AirPlayEngine suite
         run: AUDIOUT_TEST_PACKAGE=AirPlayEngine bash scripts/run-tests.sh --disable-index-store -Xswiftc -enable-incremental-file-hashing -Xswiftc -driver-show-incremental
+
+      - name: Save AirPlayEngine build cache
+        if: ${{ !cancelled() && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') }}
+        uses: actions/cache/save@v4
+        with:
+          path: AirPlayEngine/.build
+          key: ${{ runner.os }}-${{ runner.arch }}-xcode26.6-airplayengine-${{ hashFiles('AirPlayEngine/Package.swift', 'AirPlayEngine/Package.resolved') }}-${{ github.sha }}
 
   # The one required check the ruleset names.
   tests:

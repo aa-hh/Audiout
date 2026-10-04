@@ -418,9 +418,12 @@ public protocol OutputBackend: AnyObject {
     /// attempts). Don't tighten either direction without checking both.
     func retryOutput(_ id: String)
 
-    /// Store `password` as speaker `id`'s AirPlay password. The caller retries
-    /// the speaker. `source` is `"mac"` or `"phone"` and only feeds analytics.
-    func submitAirPlayPassword(_ password: String, for id: String, source: String)
+    /// Store `password` as speaker `id`'s AirPlay password, then call
+    /// `completion` on the main thread; the caller retries the speaker from it,
+    /// so the retry reads the new password. `source` is `"mac"` or `"phone"` and
+    /// only feeds analytics.
+    func submitAirPlayPassword(_ password: String, for id: String, source: String,
+                               completion: @escaping @Sendable () -> Void)
 
     /// Delete speaker `id`'s stored AirPlay password.
     func forgetAirPlayPassword(for id: String)
@@ -460,7 +463,8 @@ public extension OutputBackend {
     func stopAndWait(timeout: Duration) async {}
 
     /// Only ``NativeBackend`` feeds a password to a receiver.
-    func submitAirPlayPassword(_ password: String, for id: String, source: String) {}
+    func submitAirPlayPassword(_ password: String, for id: String, source: String,
+                               completion: @escaping @Sendable () -> Void) { completion() }
     func forgetAirPlayPassword(for id: String) {}
 
     /// Backends with no real streaming sessions (the mock) have nothing to

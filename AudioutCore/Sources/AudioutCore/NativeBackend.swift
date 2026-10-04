@@ -3294,25 +3294,6 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
 
     // MARK: Per-device serial converge (best-effort, D4; coalesced, root cause 1)
 
-    /// Drive ONE device toward its latest `desiredOn` target, one engine op at a
-    /// time. Re-reads the coalesced target after each op completes, so rapid
-    /// toggle spam that flipped the target mid-op converges to the FINAL value with
-    /// no overlapping add/removeOutput for the same device.
-    ///
-    /// Invariant on entry: `converging` already contains `id` (the caller claimed
-    /// the slot under `stateQueue`). On exit the slot is released.
-    ///
-    /// D4 best-effort: a failed op marks the device unavailable + parks it in
-    /// `failedGate` (so we don't keep issuing sessions post-failure — root cause 5)
-    /// and stops the loop; the park is cleared only on a genuine edge (storm fix,
-    /// 2026-08-06): a came-back discovery edge (changed descriptor, or reappearing
-    /// after a `disappeared`), an engine good-state transition, a membership edge
-    /// for this id, or the user's "Try again" (`retryOutput`) — never by a mere
-    /// same-descriptor re-announce. Two password exceptions: a password or code
-    /// demand with no password fed parks but keeps the device available
-    /// (`waitsForPassword`), so it still offers "Enter password"; and a password
-    /// typed during the failing attempt (`awaitsResubmittedPassword`) lifts the
-    /// park and loops once more so the next attempt feeds it.
     /// Release the `converging` slot for `id` and, if the coalesced target moved
     /// while the slot was held (a toggle — or a whole-system rebind recovery,
     /// below — landed mid-op), reclaim the slot and return the output id to kick
@@ -3430,6 +3411,25 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         return action
     }
 
+    /// Drive ONE device toward its latest `desiredOn` target, one engine op at a
+    /// time. Re-reads the coalesced target after each op completes, so rapid
+    /// toggle spam that flipped the target mid-op converges to the FINAL value with
+    /// no overlapping add/removeOutput for the same device.
+    ///
+    /// Invariant on entry: `converging` already contains `id` (the caller claimed
+    /// the slot under `stateQueue`). On exit the slot is released.
+    ///
+    /// D4 best-effort: a failed op marks the device unavailable + parks it in
+    /// `failedGate` (so we don't keep issuing sessions post-failure — root cause 5)
+    /// and stops the loop; the park is cleared only on a genuine edge (storm fix,
+    /// 2026-08-06): a came-back discovery edge (changed descriptor, or reappearing
+    /// after a `disappeared`), an engine good-state transition, a membership edge
+    /// for this id, or the user's "Try again" (`retryOutput`) — never by a mere
+    /// same-descriptor re-announce. Two password exceptions: a password or code
+    /// demand with no password fed parks but keeps the device available
+    /// (`waitsForPassword`), so it still offers "Enter password"; and a password
+    /// typed during the failing attempt (`awaitsResubmittedPassword`) lifts the
+    /// park and loops once more so the next attempt feeds it.
     func convergeDevice(id: String, outputID: OutputID) async {
         defer {
             // Release the in-flight slot. If the target moved again while we were
@@ -3616,10 +3616,12 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                         // report landed before the password was typed it parked
                         // the id, so the extra attempt lifts the park. The mark is
                         // spent here, whatever the store returns next, so a submit
-                        // buys exactly one extra attempt.
+                        // buys exactly one extra attempt; the typed password moves
+                        // to `passwordForNextFeed`, so that attempt carries it even
+                        // if the store write has not landed yet.
                         if self.awaitsResubmittedPassword(id) {
                             self.failedGate.remove(id)
-                            self.passwordResubmitted[id] = nil
+                            self.passwordForNextFeed[id] = self.passwordResubmitted.removeValue(forKey: id)
                             // An armed completion is always echoed on the state
                             // stream, after it. If that echo has not landed yet it
                             // would arrive with the mark spent and read as a
@@ -3649,10 +3651,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                         // it rather than retry it.
                         let rejectedStored = (error as? AirPlayEngineError) == .passwordRequired
                             && self.fedDescriptors[id]?.password != nil
-                        // Deletes are exempt from the off-`stateQueue` Keychain rule: they target
-                        // an item this app's own signature created, so a Developer ID build
-                        // raises no access prompt, and running them synchronously is what stops
-                        // a background delete from erasing a password the user types right after.
+                        // Deletes are exempt from the off-`stateQueue` Keychain rule (AGENTS-HISTORY.md,
+                        // 2026-10-04 AirPlay passwords): they target an item this app's own signature
+                        // created, so a Developer ID build raises no access prompt, and running them
+                        // synchronously is what stops a background delete from erasing a password
+                        // the user types right after.
                         if rejectedStored { self.passwordStore.removePassword(for: id) }
                         self.removeFromAddedLocked(id)
                         self.failedGate.insert(id)
@@ -3716,10 +3719,13 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// it (reads are snapshotted under `sync`). Every connect attempt passes here
     /// once, so it also spends a typed password's one extra attempt.
     private func descriptorToFeed(id: String) -> DeviceDescriptor? {
-        let password = passwordStore.password(for: id)
+        let stored = passwordStore.password(for: id)
         return stateQueue.sync {
-            // This attempt feeds whatever is stored now, so a password typed
-            // before the read reaches it; one typed after survives to the catch.
+            // A typed password beats the store, which may not hold it yet: the
+            // one the catch handed this attempt first, then the mark. A password
+            // typed after this read survives to the catch.
+            let password = self.passwordForNextFeed.removeValue(forKey: id)
+                ?? self.passwordResubmitted[id] ?? stored
             if self.passwordResubmitted[id] == password { self.passwordResubmitted[id] = nil }
             self.failureEchoSeen.remove(id)
             guard let last = self.lastDescriptors[id] else { return nil }
@@ -5893,6 +5899,10 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// it), so a submit buys at most one extra attempt.
     private var passwordResubmitted: [String: String] = [:]
 
+    /// The typed password the converge catch spent its mark on, for exactly
+    /// the extra attempt it grants; `descriptorToFeed` consumes it.
+    private var passwordForNextFeed: [String: String] = [:]
+
     /// Ids whose failed add the converge catch looped past before the state
     /// stream's echo of that failure arrived; the failure arm drops one report
     /// for each. On `stateQueue`.
@@ -5914,6 +5924,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         guard let typed = passwordResubmitted[id] else { return false }
         guard converging.contains(id), !rebindConverging.contains(id) else {
             passwordResubmitted[id] = nil
+            passwordForNextFeed[id] = nil
             return false
         }
         return typed != fedDescriptors[id]?.password
@@ -5927,10 +5938,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     private func applyPasswordFailureLocked(state: OutputState, cause: ConnectionFailure.Cause, device: inout Device) {
         let fedPassword = fedDescriptors[device.id]?.password
         if state == .passwordRequired, fedPassword != nil {
-            // Deletes are exempt from the off-`stateQueue` Keychain rule: they target
-            // an item this app's own signature created, so a Developer ID build
-            // raises no access prompt, and running them synchronously is what stops
-            // a background delete from erasing a password the user types right after.
+            // Deletes are exempt from the off-`stateQueue` Keychain rule (AGENTS-HISTORY.md,
+            // 2026-10-04 AirPlay passwords): they target an item this app's own signature
+            // created, so a Developer ID build raises no access prompt, and running them
+            // synchronously is what stops a background delete from erasing a password
+            // the user types right after.
             passwordStore.removePassword(for: device.id)
             device.hasStoredPassword = false
         }
@@ -5939,16 +5951,23 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         }
     }
 
-    public func submitAirPlayPassword(_ password: String, for id: String, source: String) {
-        // Mark first: a converge catch running before the store write would
-        // otherwise read the old fed password as refused and delete this one.
-        // This sync only inserts into a dictionary (microseconds), so the
-        // main-thread rule about slow calls on `stateQueue` does not apply.
-        stateQueue.sync { self.passwordResubmitted[id] = password }
-        passwordStore.setPassword(password, for: id)
+    public func submitAirPlayPassword(_ password: String, for id: String, source: String,
+                                      completion: @escaping @Sendable () -> Void) {
+        // Mark, write, then `completion`, in that order and never waiting on
+        // the main thread. A `.passwordRequired` catch queued ahead of the mark
+        // runs while the store still holds the old password, so its delete
+        // cannot remove this one; a catch after the mark loops instead. The
+        // Keychain write runs off `stateQueue`, and `completion` (the caller's
+        // retry) runs on main after it, so the retry reads the new password.
         stateQueue.async {
+            self.passwordResubmitted[id] = password
             self.pendingPasswordOutcome[id] = source
             self.applyLocal(id) { $0.hasStoredPassword = true }
+            let store = self.passwordStore
+            DispatchQueue.global().async {
+                store.setPassword(password, for: id)
+                DispatchQueue.main.async(execute: completion)
+            }
         }
     }
 
@@ -5971,6 +5990,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         passwordStore.removePassword(for: id)
         stateQueue.async {
             self.passwordResubmitted[id] = nil
+            self.passwordForNextFeed[id] = nil
             self.expectStaleFailure.remove(id)
             self.failureEchoSeen.remove(id)
             self.applyLocal(id) { $0.hasStoredPassword = false }

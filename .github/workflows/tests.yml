@@ -1,48 +1,142 @@
 name: Tests
 
-# The full suite on a GitHub-hosted Mac, once per PR and once more in the
-# merge queue. No path filter on purpose: a required check that does not run
-# leaves the PR stuck at "expected". Free on this public repo, same as the
-# licence gate's macOS job.
+# The full suite on GitHub-hosted Macs, once per PR and once more in the merge
+# queue. No path filter on purpose: a required check that does not run leaves
+# the PR stuck at "expected". Free on this public repo, same as the licence
+# gate's macOS job.
+#
+# Caches: a cache saved by a pull_request run is visible only to that PR's
+# merge ref, and a merge_group run can only read caches saved on main. So
+# only push-to-main and workflow_dispatch save; PR and queue runs restore.
 
 on:
   pull_request:
   merge_group:
+  push:
+    branches: [main]
   workflow_dispatch:
 
 concurrency:
   group: tests-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+  HOMEBREW_NO_AUTO_UPDATE: "1"
+  HOMEBREW_NO_INSTALL_CLEANUP: "1"
+  HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK: "1"
+  HOMEBREW_NO_INSTALL_UPGRADE: "1"
+  # The runner has neither of the owner's Macs: no mule probe (no
+  # audiout.remoteHost either), no /tmp pass cache, and the permit pool in
+  # /tmp is empty on a fresh runner.
+  AUDIOUT_BUILD_LOCAL: "1"
+  AUDIOUT_TEST_PREFER: local
+  AUDIOUT_TEST_NO_CACHE: "1"
+
 jobs:
-  tests:
+  suite:
     runs-on: macos-26
     timeout-minutes: 30
+    name: suite (shard ${{ matrix.shard }})
+    strategy:
+      fail-fast: false
+      matrix:
+        # Shard 1 is the suites whose files still hold blocking waits
+        # (Thread.sleep, RunLoop.run(until:), .wait(timeout:)); those hold a
+        # cooperative thread and starve Swift concurrency process-wide (see
+        # SuiteWait.swift and 8a1016d9), so they get a process of their own.
+        # Shards 2 and 3 are every other suite file, split in half
+        # alphabetically by file. Each regex names whole suite types after
+        # `.` (top level) or `/` (nested, e.g. under SerializedSharedState).
+        # A new suite file must be added to shard 2 or 3 or it will not run.
+        include:
+          - shard: 1
+            filter: '[./](AggregateOutputDeviceIdentityTests|AggregateOutputDeviceTests|AggregateOutputDeviceWiringTests|AppRouteMixerTests|CastFakeReceiverLoopTests|CastLiveAudioServerRefusalTests|CastLiveAudioServerTests|CastOutputManagerTests|CompanionEndToEndTests|CompanionServerTests|DACPServerTests|DriftCorrectionApplierAnalyticsTests|DriftCorrectionApplierSinkTests|DriftCorrectionApplierTests|LeveledAppInjectorTests|NativeBackendGlobalStateTests|NativeBackendTests|NativeCaptureCoordinatorTests|NativeDiscoveryLiveTests|NativeDiscoveryTests|PassiveDriftSamplerAnalyticsTests|PassiveDriftSamplerTests|PassiveDriftTrackerTests|PerAppCaptureCoordinatorTests|PermissionStateObserverTests|SyncDrawerCloseVetoTests|SyncDrawerMountedKeyTests)\b'
+          - shard: 2
+            filter: '[./](AboutSectionTests|AccessibilitySignalSweepTests|AirPlayHandoffWatcherTests|AlignmentPlateCellTests|AlignmentStageViewTests|AlignmentTickInjectorTests|AlignmentTokenContrastTests|AnalyticsTests|AppIconCacheTests|AppRelaunchCommandTests|AppRouteStoreTests|AppRouteTargetEligibilityTests|AppRoutingControllerTests|AppRowViewTests|AppSettingsTests|AppSurfaceControllerTests|AppTranslocationTests|AudioCapturePermissionProbeTests|AudioDiagTests|AudioProcessResolverTests|AudioSettingsLatencyTests|AudioSettingsRemoteReloadTests|AudioSettingsWakeRestoreTests|BTAlignmentPosteriorTests|BTAlignmentWizardProposalTelemetryTests|BTAlignmentWizardSessionTests|BTClockStabilityTests|BTConnectionManagerTests|BTDeviceEnumeratorTests|BTDeviceRowTests|BTFanoutTests|BTHardwareVolumeStoreTests|BTHardwareVolumeTests|BTPopoverRowsTests|BTSinkClockStormTests|BTSpeakerTimingTests|BTSyncDrawerAccordionTests|BTSyncDrawerLayoutTests|BTSyncDrawerViewTests|BTSyncedSinkProtocolWitnessTests|BTSyncedSinkTests|BTSyncedSinkTestsRebuildTelemetry|BTTrimStoreTests|BackendKindResolutionTests|BrandMarkTests|BusRailCollapseResolveTests|CardViewCollapseTrajectoryTests|CastBrowserTests|CastFeedDelayTests|CastMessageCodecTests|CastRoomDelayTests|CastVolumePendingTests|CompanionAlignmentOwnershipTests|CompanionApprovalStoreTests|CompanionCommandDispatcherTests|CompanionCommandRateLimiterTests|CompanionCopyTripwireTests|CompanionLicenseActivationTests|CompanionSnapshotBuilderTests|CompanionWiringTests|CompositedTokenContrastTests|ConnectionDiagnosisViewTests|ConnectionDiagnosticsTests|ConnectionStateTests|ControlPanelBackingViewTests|ControlPanelWindowControllerTests|DefaultOutputDeviceMonitorTests|DefaultOutputSwitcherTests|DeviceBluetoothKindTests|DeviceCastKindTests|DeviceDetailViewTests|DeviceEQStoreTests|DeviceEQTests|DeviceIconResolverTests|DeviceIconStoreTests|DeviceIconWellViewTests|DeviceIdentityTests|DeviceLocalNetworkProofTests|DeviceRowAirPlay1LiveTests|DeviceRowConnectBrightenTests|DeviceRowConnectionStateTests|DeviceRowMutedStateTests|DiagnosticsBundleTests|DiscoverySettleTrackerTests|DriftCorrectionPolicyTests|EQEditorViewTests|EQProcessorTests|EQResponseCurveTests|EmitterFieldTests|EnergizeTests|EqualizerEngagedMarkTests|ExcludedAppsTests|FeedColumnTests|FoldAnimatorTests|GeneralSettingsCompanionTests|GeneralSettingsRememberedPhonesTests|GroupControllerSyncedLocalFlipTests|GroupControllerTests|GroupEditorClickTargetTests|GroupIconPersistenceTests|GroupIdentityGlowViewTests|GroupMasterVolumePersistenceTests)\b'
+          - shard: 3
+            filter: '[./](GroupRenameFieldTests|GroupsHeaderParityTests|GroupsInkTemperatureTests|GroupsOverviewViewControllerTests|HaloRingGapTests|HeadlessRuntimeTests|IconPickerTests|IncreaseContrastLiveReconcileTests|LevelMeterViewTests|LicenseCheckInTests|LicenseDeepLinkTests|LicenseGateTests|LicenseGateTrialAnalyticsTests|LicenseValidatorTests|LocalNetworkPrimerTests|LocalOutputLatencyTests|LocalPlaybackEngineTests|MainOutRowMenuDispatchTests|MainOutRowRingTests|MembershipBusTests|MembershipRailTests|MembershipWellContrastTests|MenuBarStatusTests|MicProbeSessionTests|MixerWindowControllerTests|MockBackendTests|NativeBackendBTAlignmentInterceptTests|NativeBackendBTDevicesTests|NativeBackendBTHardwareVolumeTests|NativeBackendBTSelectionTests|NativeBackendBTSelectionTestsTelemetry|NativeBackendCastTests|NativeBackendSyncedLocalSelectionTests|NoteBannerColorTests|ObjCExceptionCatchingTests|OnboardingPermissionColorTests|OnboardingUITests|OnboardingWindowLevelTests|OutputSelectorGuardTests|PCMDelayLineTests|PTPHelperActivationTests|PTPHelperReconcilerTests|PermissionModeTests|PhaseControllerTests|PopoverBTAlignmentUITests|PopoverCastSyncOffsetTests|PopoverConnectionAnalyticsTests|PopoverControllerRowRevealMotionTests|PopoverControllerRowRevealTests|PopoverControllerTests|PopoverDeviceListOverflowTests|PopoverDeviceVisibilityTests|PopoverEqualizerEntryTests|PopoverExcludedAppsTests|PopoverIconTests|PopoverLocalSyncTrimTests|PopoverPanelHeaderTests|PreviewPaletteTokenPinTests|RailConnectPulseControllerTests|RailConnectPulseTests|ReferenceAudioRingTests|RemoteInviteViewTests|RemovalUndoTests|RingRailToneLockTests|RouteArmedSignalTests|RowAccessorySymbolTests|SettingsAccentAndHintsTests|SettingsRootViewControllerTests|SettledLightLayerTests|SetupFlowModelTests|SetupModelTests|SetupTelemetryTests|SetupUsageStatsTests|SidebarActionsTests|StatusItemIconTests|StatusRoutingIndicatorTests|StoreRecoveryTests|StructuralStateGateTests|SurfaceScreenSwitchCostTests|SurfaceToolbarRevealedTabHitArea|SurfaceToolbarTests|SyncValueFieldLiveKeyTests|SyncedLocalFanoutTests|SyncedLocalFanoutTestsFeedGapTelemetry|SyncedLocalSinkRingOverflowTelemetryTests|SyncedLocalSinkTests|SyncedLocalSinkTestsAnchorTelemetry|SystemAudioCaptureTCCTests|TCCProbeRunnerTests|TapRebuildLifecycleTests|TelemetryTests|TestKeySilencerTests|TokenContrastMatrixTests|TrialClockTests|TrialReachabilityTests|TrialRegistrarTests|VolumeHUDPanelTests|VolumeKeyInterceptionTests|WarmFaderCellTests|WizardDoorAnalyticsTests|WizardMeasuredProposalTests|WorkgroupLifecycleTests)\b'
     steps:
       - uses: actions/checkout@v4
 
-      # Same list as license-gate.yml's build-invariants job; the packages are
-      # named in AudioutCore/Package.swift.
-      - name: Install build dependencies
-        run: brew install libevent libsodium libgcrypt libgpg-error libplist ffmpeg
+      # AirPlayEngine/Package.swift names these; ffmpeg too, because the
+      # gitignored vendor/ffmpeg-min is absent here so it links Homebrew's.
+      - name: Install missing build dependencies
+        run: |
+          missing=
+          for f in libevent libsodium libgcrypt libgpg-error libplist ffmpeg; do
+            brew list --versions "$f" >/dev/null 2>&1 || missing="$missing $f"
+          done
+          echo "missing:${missing:- none}"
+          [ -z "$missing" ] || brew install $missing
 
       - name: Restore SwiftPM build caches
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: |
             AudioutCore/.build
             AirPlayEngine/.build
-          key: swiftpm-${{ runner.os }}-${{ hashFiles('AudioutCore/Package.resolved', 'AudioutCore/Package.swift', 'AirPlayEngine/Package.swift') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-xcode26.6-spm-${{ hashFiles('**/Package.resolved') }}-${{ github.sha }}
           restore-keys: |
-            swiftpm-${{ runner.os }}-
+            ${{ runner.os }}-${{ runner.arch }}-xcode26.6-spm-${{ hashFiles('**/Package.resolved') }}-
+            ${{ runner.os }}-${{ runner.arch }}-xcode26.6-spm-
 
-      # The runner has neither of the owner's Macs: AUDIOUT_TEST_PREFER=local
-      # and no audiout.remoteHost mean no mule probe, AUDIOUT_TEST_NO_CACHE=1
-      # skips the /tmp pass cache, and the permit pool is empty on a fresh
-      # runner so the first permit is free.
+      - name: Check the compiler knows file hashing
+        run: |
+          swiftc --version
+          echo "in -help: $(swiftc -help | grep -c file-hashing || true)"
+          echo "in -help-hidden: $(swiftc -help-hidden | grep -c file-hashing || true)"
+
       - name: AudioutCore suite
-        run: AUDIOUT_BUILD_LOCAL=1 AUDIOUT_TEST_PREFER=local AUDIOUT_TEST_NO_CACHE=1 bash scripts/run-tests.sh
+        run: bash scripts/run-tests.sh --filter '${{ matrix.filter }}' --disable-index-store -Xswiftc -enable-incremental-file-hashing -Xswiftc -driver-show-incremental
+
+      # One saver, so three shards do not race on one key.
+      - name: Save SwiftPM build caches
+        if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && strategy.job-index == 0
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            AudioutCore/.build
+            AirPlayEngine/.build
+          key: ${{ runner.os }}-${{ runner.arch }}-xcode26.6-spm-${{ hashFiles('**/Package.resolved') }}-${{ github.sha }}
+
+  airplayengine:
+    runs-on: macos-26
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install missing build dependencies
+        run: |
+          missing=
+          for f in libevent libsodium libgcrypt libgpg-error libplist ffmpeg; do
+            brew list --versions "$f" >/dev/null 2>&1 || missing="$missing $f"
+          done
+          echo "missing:${missing:- none}"
+          [ -z "$missing" ] || brew install $missing
+
+      - name: Restore SwiftPM build caches
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            AudioutCore/.build
+            AirPlayEngine/.build
+          key: ${{ runner.os }}-${{ runner.arch }}-xcode26.6-spm-${{ hashFiles('**/Package.resolved') }}-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-xcode26.6-spm-${{ hashFiles('**/Package.resolved') }}-
+            ${{ runner.os }}-${{ runner.arch }}-xcode26.6-spm-
 
       # Guard 6's suite, through the same runner (it takes the package name).
       - name: AirPlayEngine suite
-        run: AUDIOUT_TEST_PACKAGE=AirPlayEngine AUDIOUT_BUILD_LOCAL=1 AUDIOUT_TEST_PREFER=local AUDIOUT_TEST_NO_CACHE=1 bash scripts/run-tests.sh
+        run: AUDIOUT_TEST_PACKAGE=AirPlayEngine bash scripts/run-tests.sh --disable-index-store -Xswiftc -enable-incremental-file-hashing -Xswiftc -driver-show-incremental
+
+  # The one required check the ruleset names.
+  tests:
+    runs-on: ubuntu-latest
+    needs: [suite, airplayengine]
+    if: always()
+    steps:
+      - name: Every suite job passed
+        run: |
+          echo "suite=${{ needs.suite.result }} airplayengine=${{ needs.airplayengine.result }}"
+          [ "${{ needs.suite.result }}" = success ] && [ "${{ needs.airplayengine.result }}" = success ]

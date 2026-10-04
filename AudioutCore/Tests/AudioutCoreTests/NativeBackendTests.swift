@@ -3343,6 +3343,24 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         #expect(!log.all.contains { if case .failed = $0 { return true } else { return false } })
     }
 
+    /// Letting a password typed with no connect in progress hide a live
+    /// session's drop (no `.failed`, no park) turns it red.
+    @Test func pendingPasswordWithNoConnectInProgressStillReportsADroppedSession() async {
+        let store = InMemoryAirPlayPasswordStore()
+        let (backend, engine, discovery) = makeBackend(passwordStore: store)
+        defer { backend.stop() }
+        let device = ap2Device(access: .password)
+        await startAndDiscover(backend, engine, discovery, device)
+        backend.setOutputSet([device.id])
+        await pollUntil { backend.devices.first { $0.id == device.id }?.connectionState == .connected }
+
+        backend.submitAirPlayPassword("secret", for: device.id, source: "mac")
+        engine.pushState(device.outputID, .failed)
+
+        await pollUntil { self.failureCause(backend, device.id) != nil }
+        #expect(failureCause(backend, device.id) == .droppedMidStream)
+    }
+
     /// Marking a password speaker unavailable before anyone supplied a
     /// password (hiding its "Enter password" offer) turns it red.
     @Test func passwordDemandLeavesSpeakerAvailableUntilAPasswordIsRefused() async {

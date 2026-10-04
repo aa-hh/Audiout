@@ -5842,9 +5842,17 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     private var passwordResubmitted: [String: String] = [:]
 
     /// Whether a password typed during the in-flight connect has not reached
-    /// the engine yet, so a failure now says nothing about it. On `stateQueue`.
+    /// the engine yet, so a failure now says nothing about it. Only a
+    /// whole-system connect (a `converging` slot that is not a rebind
+    /// recovery's) has a catch to give that password its extra attempt;
+    /// outside one the mark would hide the failure for good, so it is dropped.
+    /// On `stateQueue`.
     private func awaitsResubmittedPassword(_ id: String) -> Bool {
         guard let typed = passwordResubmitted[id] else { return false }
+        guard converging.contains(id), !rebindConverging.contains(id) else {
+            passwordResubmitted[id] = nil
+            return false
+        }
         return typed != fedDescriptors[id]?.password
     }
 

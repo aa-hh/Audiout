@@ -165,12 +165,12 @@ import AppKit
         let detail = DeviceDetailViewController(groupController: makeController(),
                                             settings: AppSettings(defaults: isolation.isolatedDefaults))
         detail.show(device: makeDevice())
-        #expect(detail.test_metadataStrings["Password"] == nil)
+        #expect(detail.test_metadataStrings["password"] == nil)
 
         var device = makeDevice()
         device.hasStoredPassword = true
         detail.show(device: device)
-        #expect(detail.test_metadataStrings["Password"] == "Saved")
+        #expect(detail.test_metadataStrings["password"] == "Saved")
 
         var forgotten: [String] = []
         detail.onForgetPassword = { forgotten.append($0) }

@@ -3216,6 +3216,90 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         #expect(failureCause(backend, device.id) == .codeRequired)
     }
 
+    /// Deleting the stored password on a plain `sessionFailed` (a guessed
+    /// refusal, which a Wi-Fi blip also produces) turns it red.
+    @Test func sessionFailedOnPasswordSpeakerKeepsTheStoredPassword() async {
+        let store = InMemoryAirPlayPasswordStore()
+        let device = ap2Device(access: .password)
+        store.setPassword("right", for: device.id)
+        let (backend, engine, discovery) = makeBackend(passwordStore: store)
+        defer { backend.stop() }
+        engine.addFailures = [device.outputID.rawValue]
+        engine.addFailureError = .sessionFailed
+        await startAndDiscover(backend, engine, discovery, device)
+
+        backend.setOutputSet([device.id])
+        await pollUntil { self.failureCause(backend, device.id) != nil }
+        #expect(failureCause(backend, device.id) == .authRequired)
+        #expect(backend.devices.first { $0.id == device.id }?.hasStoredPassword == true)
+        #expect(store.password(for: device.id) == "right")
+    }
+
+    /// Reading any connect error on a password speaker as a refused password
+    /// (instead of only `sessionFailed`) turns it red.
+    @Test func operationRejectedOnPasswordSpeakerReadsAsUnknown() async {
+        let (backend, engine, discovery) = makeBackend()
+        defer { backend.stop() }
+        let device = ap2Device(access: .password)
+        engine.addFailures = [device.outputID.rawValue]
+        engine.addFailureError = .operationRejected
+        await startAndDiscover(backend, engine, discovery, device)
+
+        backend.setOutputSet([device.id])
+        await pollUntil { self.failureCause(backend, device.id) != nil }
+        #expect(failureCause(backend, device.id) == .unknown)
+    }
+
+    /// Parking the speaker when a password arrives while its connect is still
+    /// failing (so the typed password never reaches the receiver) turns it red.
+    @Test func passwordSubmittedDuringAFailingConnectReachesTheNextAttempt() async {
+        let store = InMemoryAirPlayPasswordStore()
+        let (backend, engine, discovery) = makeBackend(passwordStore: store)
+        defer { backend.stop() }
+        let device = ap2Device(access: .password)
+        await startAndDiscover(backend, engine, discovery, device)
+        let addHold = HoldPoint()
+        let secondAdd = OnceFlag()
+        engine.addFailures = [device.outputID.rawValue]
+        engine.onAddOutputHold = { id, _ in
+            guard id == device.outputID else { return }
+            if secondAdd.testAndSet() { engine.addFailures = [] } else { await addHold.hold() }
+        }
+
+        backend.setOutputSet([device.id])
+        await pollUntil { addHold.entered }
+        backend.submitAirPlayPassword("secret", for: device.id, source: "mac")
+        backend.retryOutput(device.id)
+        addHold.open()
+
+        await pollUntil { backend.devices.first { $0.id == device.id }?.connectionState == .connected }
+        #expect(backend.devices.first { $0.id == device.id }?.connectionState == .connected)
+        #expect(engine.fedDescriptorList.last?.password == "secret")
+    }
+
+    /// Marking a password speaker unavailable before anyone supplied a
+    /// password (hiding its "Enter password" offer) turns it red.
+    @Test func passwordDemandLeavesSpeakerAvailableUntilAPasswordIsRefused() async {
+        let store = InMemoryAirPlayPasswordStore()
+        let (backend, engine, discovery) = makeBackend(passwordStore: store)
+        defer { backend.stop() }
+        let device = ap2Device(access: .password)
+        engine.addFailures = [device.outputID.rawValue]
+        engine.addFailureError = .passwordRequired
+        await startAndDiscover(backend, engine, discovery, device)
+
+        backend.setOutputSet([device.id])
+        await pollUntil { self.failureCause(backend, device.id) == .authRequired }
+        #expect(backend.devices.first { $0.id == device.id }?.isAvailable == true)
+
+        backend.submitAirPlayPassword("wrong", for: device.id, source: "mac")
+        backend.retryOutput(device.id)
+        await pollUntil { backend.devices.first { $0.id == device.id }?.isAvailable == false }
+        #expect(engine.fedDescriptorList.last?.password == "wrong")
+        #expect(backend.devices.first { $0.id == device.id }?.isAvailable == false)
+        #expect(failureCause(backend, device.id) == .authRequired)
+    }
+
     /// A MUTED AirPlay-1 receiver that drops and reconnects must come back TRULY
     /// silent (the −144 dB sentinel), not at the AP1 curve's −30 dB floor.
     /// `connectVolumeSeed`'s muted branch used to push the AP2-only

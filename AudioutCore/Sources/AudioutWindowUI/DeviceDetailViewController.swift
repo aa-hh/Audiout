@@ -1059,7 +1059,7 @@ public final class DeviceDetailViewController: NSViewController {
             "kind": kindValueLabel.stringValue,
         ]
         if !airPlayRow.isHidden { strings["airplay"] = airPlayValueLabel.stringValue }
-        if !passwordRow.isHidden { strings["Password"] = passwordValueLabel.stringValue }
+        if !passwordRow.isHidden { strings["password"] = passwordValueLabel.stringValue }
         return strings
     }
 

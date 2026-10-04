@@ -213,7 +213,7 @@ import Testing
     /// red. Two rows: at 100 ms the margin and the holding coincide; at
     /// 400 ms it is red if the clamped stall branch keeps the 100 ms margin
     /// instead of the holding (the ring ends near 4288 frames against the
-    /// 18168 bound).
+    /// 18656 bound), and for a cut one render cycle below the holding.
     @Test(arguments: [(delayMs: Int64(100), stallMs: 900), (400, 900)])
     func aForwardRealignmentStopsTheSafetyMarginShortOfTheWritePointer(
         delayMs: Int64, stallMs: Int
@@ -267,7 +267,7 @@ import Testing
         let delayFrames = Int(delayMs) * Int(Self.sampleRate) / 1_000
         var last = Int(out[cycleFrames - 1])
         #expect(last > 0, "the re-alignment drained the ring")
-        #expect(written - last >= delayFrames - 2 * cycleFrames - 8,
+        #expect(written - last >= delayFrames - cycleFrames - 32,
                 "the ring kept \(written - last) frames after the cycle")
 
         // Capture and device stalled together, so capture resumes at wall rate

@@ -631,7 +631,7 @@ final class BTDeviceSink: @unchecked Sendable {
     private let lastEnqueueNanosPtr = UnsafeMutablePointer<Int64>.allocate(capacity: 1)
     /// Frames the ring holds between capture deliveries once released: its room
     /// right after `catchUpToTargetLocked`, less one render cycle (the sink's stand-in for a capture chunk),
-    /// moved by every applied trim since. A forward re-alignment's margin never
+    /// moved by every requested trim since. A forward re-alignment's margin never
     /// exceeds it. Written under `stateLock` (release on the render thread,
     /// trims on the control thread) and read lock-free by the render thread, so
     /// a trim publishes it with a barrier the way ``BTDelayLine/requestShift(frames:)``
@@ -1499,15 +1499,16 @@ final class BTDeviceSink: @unchecked Sendable {
             if frames > room {
                 // After a device gap of a threshold or more beyond the cycle's
                 // own length, capture stalled with the device and the shortfall
-                // never refills, so cut the ring to what it holds between
-                // deliveries (not to the margin, which would leave a speaker
+                // never refills, so cut the ring to what it held at release
+                // (the holding word plus the cycle it was lowered by for the
+                // margin; not to the margin, which would leave a speaker
                 // whose delay is above 100 ms playing early until the next
                 // re-anchor) and measure from here. A ring short with even
                 // cycles is a late chunk, so take what fits and leave the
                 // remainder pending.
                 let excess = gap - Int64(Double(frameCount) / renderSampleRate * 1e9)
                 guard Double(excess) < Self.pullRealignThresholdMs * 1_000_000 else {
-                    delayLine.shift(byFrames: Swift.max(0, held - steadyRoomFramesPtr.pointee))
+                    delayLine.shift(byFrames: Swift.max(0, held - (steadyRoomFramesPtr.pointee + frameCount)))
                     pullOriginNanos = t
                     framesPulledSinceOrigin = frameCount
                     pullRealignedNanos = 0

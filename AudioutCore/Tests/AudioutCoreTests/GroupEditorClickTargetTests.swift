@@ -33,7 +33,7 @@ struct GroupEditorClickTargetTests {
         pane.show(groupID: "g", devices: [bt])
         #expect(pane.test_candidateDeviceIDs.contains("missing"))
         #expect(pane.test_presentationText(for: "bt") == "Not connected\nHidden from Mixer")
-        #expect(pane.test_reassuranceText == "Scene membership only. Mixer visibility is managed in Speakers.")
+        #expect(pane.test_reassuranceText == "Saved as you go. Mixer visibility is managed in Speakers.")
         pane.test_setMembership(false, for: "missing")
         #expect(groups.groups.first?.memberIDs == ["bt"])
         #expect(library.visibility(for: "bt") == .hideWhenNotInUse)

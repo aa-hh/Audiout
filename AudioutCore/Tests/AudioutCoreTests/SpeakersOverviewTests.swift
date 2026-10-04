@@ -89,7 +89,7 @@ import Testing
         pane.reload()
         pane.setBluetoothAccessExplanation(
             "Allow Bluetooth access in System Settings to see paired speakers that are not connected.",
-            actionTitle: "Open Bluetooth Privacy…")
+            actionTitle: "Open Bluetooth privacy…")
         let scroll = try #require(pane.view.subviews.compactMap { $0 as? NSScrollView }.first)
         scroll.scrollerStyle = .legacy
         scroll.autohidesScrollers = false

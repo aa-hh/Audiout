@@ -3007,60 +3007,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @MainActor
     private func updateSpeakerLibrary() {
-        let devices = Array(devicesByID.values)
-        let mainMembers: Set<String>
-        switch groupController.mainOut {
-        case .selectedDevices:
-            mainMembers = groupController.selectedDeviceIDs
-        case .group(let id):
-            mainMembers = Set(groupController.groups.first { $0.id == id }?.memberIDs ?? [])
-        }
-        let liveFeeds = Set(routedAppNamesByDeviceID.compactMap { id, names in
-            !names.isEmpty && devicesByID[id] != nil ? id : nil
-        })
-        let connectedMembers = Set(devices.compactMap { device in
-            mainMembers.contains(device.id) && device.connectionState == .connected ? device.id : nil
-        })
-        speakerLibrary.update(liveDevices: devices, groups: groupController.groups,
-            confirmedUsedIDs: connectedMembers.union(liveFeeds),
-            currentUse: SpeakerCurrentUse(mainAudioMemberIDs: mainMembers,
-                appRouteDestinations: appRouting.appRoutes.map(\.destination),
-                liveFeedIDs: liveFeeds, recoveryIDs: popoverController?.speakerRecoveryIDs ?? []))
+        speakerLibrary.update(liveDevices: Array(devicesByID.values), groups: groupController.groups,
+            mainOut: groupController.mainOut, selectedDeviceIDs: groupController.selectedDeviceIDs,
+            appRouteDestinations: appRouting.appRoutes.map(\.destination),
+            routedAppNamesByDeviceID: routedAppNamesByDeviceID,
+            recoveryIDs: popoverController?.speakerRecoveryIDs ?? [])
     }
 
     @MainActor
     private func refreshSpeakerBluetoothAccess() {
-        let status = permissionProviders.bluetoothReader.currentStatus()
-        let explanation: String?
-        let actionTitle: String?
-        switch status {
-        case .granted:
-            explanation = nil
-            actionTitle = nil
-        case .denied:
-            explanation = "Allow Bluetooth access in System Settings to see paired speakers that are not connected."
-            actionTitle = "Open Bluetooth Privacy…"
-        case .unsupported:
-            explanation = "Bluetooth access is unavailable on this Mac."
-            actionTitle = nil
-        case .unknown, .requested:
-            explanation = "Allow Bluetooth access to see paired speakers that are not connected."
-            actionTitle = primingSpeakerBluetooth ? nil : "Allow Bluetooth…"
-        }
-        mixerWindowController?.speakersOverview.setBluetoothAccessExplanation(explanation, actionTitle: actionTitle)
+        let access = SpeakerBluetoothAccessPresentation(status: permissionProviders.bluetoothReader.currentStatus(),
+                                                        priming: primingSpeakerBluetooth)
+        mixerWindowController?.speakersOverview.setBluetoothAccessExplanation(access.explanation,
+                                                                              actionTitle: access.actionTitle)
         popoverController?.refreshSpeakerPresentation()
     }
 
     @MainActor
     private func requestSpeakerBluetoothAccess() {
-        switch permissionProviders.bluetoothReader.currentStatus() {
-        case .granted:
-            NSWorkspace.shared.open(SystemSettingsPane.bluetooth.url)
-        case .denied:
-            NSWorkspace.shared.open(SystemSettingsPane.bluetoothPrivacy.url)
-        case .unsupported:
-            break
-        case .unknown, .requested:
+        let access = SpeakerBluetoothAccessPresentation(status: permissionProviders.bluetoothReader.currentStatus(),
+                                                        priming: primingSpeakerBluetooth)
+        switch access.action {
+        case .openSettings(let pane):
+            NSWorkspace.shared.open(pane.url)
+        case .none:
+            return
+        case .prime:
             guard !primingSpeakerBluetooth else { return }
             primingSpeakerBluetooth = true
             surface.shell.setPermissionPromptInFlight(true)

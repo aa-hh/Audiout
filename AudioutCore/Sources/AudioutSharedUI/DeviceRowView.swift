@@ -828,7 +828,8 @@ public final class DeviceRowView: NSView {
         updateBus()
 
         let showUnavailableStatus = !hasLiveConnection && device.connectionState == .off && unavailableStatus != nil
-        unavailableStatusLabel.isHidden = !showUnavailableStatus
+        let offerStands = removalUndoOffered || switchOfferOffered
+        unavailableStatusLabel.isHidden = !showUnavailableStatus || offerStands
         unavailableStatusLabel.stringValue = showUnavailableStatus ? (unavailableStatus ?? "") : ""
         unavailableStatusLabel.toolTip = unavailableHelp
         for control in [slider, muteButton, readoutLabel, eqButton] as [NSView] {
@@ -838,10 +839,10 @@ public final class DeviceRowView: NSView {
             hideSublabel()
             syncChipButton.isHidden = true
             feedStack.isHidden = true
-            removalUndoStack.isHidden = true
         }
         nameLabel.onPress = { [weak self] in self?.performNameAction() }
         nameLabel.recoveryEnabled = canRecoverByName
+        nameLabel.toggleEnabled = enableCheckbox.isEnabled
         configureAccessibility()
         setNeedsDisplay(bounds)
     }
@@ -2398,11 +2399,12 @@ public final class DeviceRowView: NSView {
         delegate?.deviceRow(self, didToggleEnabled: sender.state == .on, for: device.id)
     }
 
-    /// Clicking the device NAME toggles the ENABLED checkbox (2026-07-17), firing
-    /// the SAME delegate path as the checkbox itself. A disabled checkbox (an
-    /// unavailable device) keeps the click a no-op — the same conditions
-    /// `enableCheckbox.isEnabled` uses. For a `.failed` device this re-enables
-    /// it (= retry), which is intended.
+    /// A name click first asks the host to recover when `canRecoverByName` (an
+    /// unavailable Bluetooth row, or an unavailable AirPlay/Cast row the host
+    /// marked `nameRecoveryEnabled`), without touching membership. Otherwise it
+    /// toggles the ENABLED checkbox through the same delegate path as the
+    /// checkbox itself: a disabled checkbox keeps it a no-op, and a `.failed`
+    /// device re-enables (= retry), which is intended.
     @objc private func nameClicked(_ sender: NSClickGestureRecognizer) {
         performNameAction()
     }
@@ -3113,15 +3115,26 @@ public final class InvisibleSwitchCell: NSButtonCell {
 final class DeviceNameLabel: NSTextField {
     var onPress: (() -> Void)?
     var recoveryEnabled = false
-    override var acceptsFirstResponder: Bool { recoveryEnabled }
+    var toggleEnabled = false
+    private var isPressable: Bool { recoveryEnabled || toggleEnabled }
+    // NSButton's own rule: with keyboard navigation off a click must not leave a focus ring on the name.
+    override var acceptsFirstResponder: Bool { isPressable && (NSApp?.isFullKeyboardAccessEnabled ?? false) }
+    override func drawFocusRingMask() { bounds.fill() }
+    override var focusRingMaskBounds: NSRect { bounds }
     override func accessibilityPerformPress() -> Bool {
-        guard recoveryEnabled else { return false }
+        guard isPressable else { return false }
         onPress?()
         return true
     }
     override func keyDown(with event: NSEvent) {
-        if recoveryEnabled, event.keyCode == 36 || event.keyCode == 49 {
+        if isPressable, event.keyCode == 36 || event.keyCode == 49 {
             onPress?()
+        } else if event.keyCode == 48 {
+            if event.modifierFlags.contains(.shift) {
+                window?.selectPreviousKeyView(nil)
+            } else {
+                window?.selectNextKeyView(nil)
+            }
         } else {
             super.keyDown(with: event)
         }

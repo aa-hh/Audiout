@@ -266,6 +266,41 @@ import AppKit
                 "…and the screen caps it (got \(window.frame.height), cap \(visible - 16))")
     }
 
+    // Removing the guarded seed at the end of `AppSurfaceController.mount` leaves the Mixer tab unfocused after a swap with keyboard navigation on; reverting it to `selectNextKeyView(nil)` drops focus into the stub text field with it off, so this test turns red.
+    @Test func screenSwapSeedsAFirstResponderForTab() throws {
+        let backend = MockBackend(fleet: .demoFleet, staggerDiscovery: false,
+                                  emitsLevels: false, simulatesDropouts: false)
+        backend.start()
+        let popover = PopoverController(
+            appRouting: AppRoutingController(store: AppRouteStore(directory: scratchDir),
+                                             loadPersisted: false),
+            runningAppsProvider: { [] })
+        popover.test_isShownOverride = true
+        popover.update(devices: backend.devices)
+        let field = NSTextField(frame: NSRect(x: 10, y: 10, width: 200, height: 24))
+        let surface = AppSurfaceController(
+            popoverController: popover,
+            settings: AppSettings(defaults: isolatedDefaults),
+            groupsContent: {
+                let vc = NSViewController()
+                vc.view = NSView(frame: NSRect(x: 0, y: 0, width: SurfaceLayout.width, height: 464))
+                vc.view.addSubview(field)
+                return vc
+            },
+            settingsContent: { [self] in makeSettingsRoot() },
+            frameAutosaveName: NSWindow.FrameAutosaveName(uniqueName("SurfaceTests")))
+
+        surface.show(anchorRect: nil)
+        let window = try #require(surface.shell.window)
+        #expect(window.initialFirstResponder === surface.test_toolbarController.test_tabButton(.mixer))
+        let mixerTab = surface.test_toolbarController.test_tabButton(.mixer)
+        let keyboardNavigation = NSApplication.shared.isFullKeyboardAccessEnabled
+        #expect(window.firstResponder === (keyboardNavigation ? mixerTab : window))
+        surface.select(.groups)
+        #expect(window.firstResponder === (keyboardNavigation ? mixerTab : window))
+        #expect((window.firstResponder as? NSTextView)?.delegate !== field, "a swap never drops focus into content")
+    }
+
     // MARK: Mixer show/hide lifecycle (U2 seams)
 
     @Test func mixerLifecycleDrivesMeteringAndRebuild() {

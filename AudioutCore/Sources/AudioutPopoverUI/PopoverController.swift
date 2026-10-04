@@ -1927,6 +1927,9 @@ public final class PopoverController: NSObject {
         }
         // Pairing stays outside the Bluetooth collapse body.
         panel.endSubsection()
+        if let unknown = sections.first(where: { $0.title == Self.unknownSpeakersSectionTitle }) {
+            for device in unknown.devices { panel.addRow(makeDeviceRow(device, indented: false)) }
+        }
         let pairRow = makePairBluetoothRow()
         panel.addRow(pairRow)
         // Set each row's rail extent + feed the continuous rail overlay: the
@@ -2028,6 +2031,9 @@ public final class PopoverController: NSObject {
     static let airPlaySubsectionTitle = "AirPlay Speakers"
     static let bluetoothSubsectionTitle = "Bluetooth Speakers"
     static let castSubsectionTitle = "Cast Speakers"
+    /// Grouping key only, like "This Mac": speakers with no library metadata
+    /// ("Missing speaker") sit after the Bluetooth rows under no heading.
+    static let unknownSpeakersSectionTitle = "Unknown speakers"
 
     /// One device-type subsection and the rows it would render, the Bluetooth
     /// connected-only filter already applied.
@@ -2038,7 +2044,8 @@ public final class PopoverController: NSObject {
 
     /// Collapse and structure comparisons share the same empty-section policy.
     private func rendersHeader(_ section: DeviceSection) -> Bool {
-        if section.title == Self.thisMacSubsectionTitle { return false }
+        if section.title == Self.thisMacSubsectionTitle
+            || section.title == Self.unknownSpeakersSectionTitle { return false }
         if !section.devices.isEmpty { return true }
         if section.title == Self.bluetoothSubsectionTitle { return bluetoothAccessExplanation != nil }
         return section.title == Self.airPlaySubsectionTitle && speakerSearchState() != nil
@@ -2261,13 +2268,14 @@ public final class PopoverController: NSObject {
             .map(\.renderingDevice).sorted { ($0.name, $0.id) < ($1.name, $1.id) }
         return [
             DeviceSection(title: Self.thisMacSubsectionTitle,
-                          devices: visible.filter(\.isLocalDevice)
-                              + visible.filter { speakerLibrary.record(for: $0.id)?.kind == nil }),
+                          devices: visible.filter(\.isLocalDevice)),
             DeviceSection(title: Self.airPlaySubsectionTitle,
                           devices: visible.filter { !$0.isLocalDevice && !$0.isBluetooth && !$0.isCast
                               && speakerLibrary.record(for: $0.id)?.kind != nil }),
             DeviceSection(title: Self.castSubsectionTitle, devices: visible.filter(\.isCast)),
             DeviceSection(title: Self.bluetoothSubsectionTitle, devices: orderedBluetoothDevices(in: visible)),
+            DeviceSection(title: Self.unknownSpeakersSectionTitle,
+                          devices: visible.filter { speakerLibrary.record(for: $0.id)?.kind == nil }),
         ]
     }
 
@@ -3055,7 +3063,10 @@ public final class PopoverController: NSObject {
     private func membershipHintShouldShow(sections: [DeviceSection]) -> Bool {
         guard membershipHintShownProvider?() == true else { return false }
         guard devicesCardNoteText() == nil else { return false }
-        return sections.contains { $0.title != Self.thisMacSubsectionTitle && !$0.devices.isEmpty }
+        return sections.contains {
+            $0.title != Self.thisMacSubsectionTitle && $0.title != Self.unknownSpeakersSectionTitle
+                && !$0.devices.isEmpty
+        }
     }
 
     /// In-place device-section repaint that escalates to a full `rebuild()` when
@@ -3312,9 +3323,8 @@ public final class PopoverController: NSObject {
     @objc private func changeSpeakerVisibility(_ sender: NSMenuItem) {
         guard let id = sender.representedObject as? String else { return }
         let visibility: SpeakerMixerVisibility = sender.tag == 1 ? .always : .hideWhenNotInUse
-        let rebuildCount = test_rebuildCount
         guard speakerLibrary.setVisibility(visibility, for: id) else { return }
-        if test_rebuildCount == rebuildCount { refreshSpeakerPresentation() }
+        if speakerLibrary.onChange == nil { refreshSpeakerPresentation() }
     }
 
     /// A non-interactive placeholder body row (V2 Devices empty state / V11

@@ -151,3 +151,5 @@ or `GroupController`.
 - `ControlPanelBackingView` → custom-drawn panel background with the menu-bar beak.
 - `ProminentButton` → the gold call-to-action button, `inkOnFill` ink.
 - `RemoteInviteView` → the one QR-and-address invitation, hosted by three surfaces.
+- 2026-10-04: Keyboard traversal probes. A code-built `NSWindow` has `autorecalculatesKeyViewLoop` off. An `NSWindow` that is its own first responder ignores Tab even with `initialFirstResponder` set. A non-editable `NSTextField` first responder swallows Tab (`interpretKeyEvents` on it raises unrecognized selector `insertTab:`). `isFullKeyboardAccessEnabled` cannot be turned on inside a test process through `AppleKeyboardUIMode` in any defaults domain, so Tab through buttons is checked live only.
+- 2026-10-04: `makeFirstResponder(_:)` leaves the window first responder when the view's `acceptsFirstResponder` is false (it returns true regardless). A name label is a key stop only under Full Keyboard Access, like NSButton. The shell seeds focus only onto `initialFirstResponder`, and only when it `canBecomeKeyView`.

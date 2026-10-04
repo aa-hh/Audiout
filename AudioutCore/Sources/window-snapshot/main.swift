@@ -608,7 +608,7 @@ func snapshotSpeakerManagement(appearanceName: NSAppearance.Name, outDir: URL) {
         if variant == "denied" {
             window.speakersOverview.setBluetoothAccessExplanation(
                 "Allow Bluetooth access in System Settings to see paired speakers that are not connected.",
-                actionTitle: "Open Bluetooth Privacy…")
+                actionTitle: "Open Bluetooth privacy…")
         }
         let surface = AppSurfaceController(popoverController: popover, settings: settings,
             groupsContent: { window.contentController },

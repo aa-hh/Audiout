@@ -3407,6 +3407,38 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         #expect(backend.devices.first { $0.id == device.id }?.isAvailable == false)
     }
 
+    /// Leaving `expectStaleFailure` set after the engine's good report for the
+    /// extra attempt (so a later genuine failure is dropped) turns it red.
+    @Test func goodStateReportClearsAnUnspentStaleFailureExpectation() async {
+        let store = InMemoryAirPlayPasswordStore()
+        let (backend, engine, discovery) = makeBackend(passwordStore: store)
+        defer { backend.stop() }
+        let device = ap2Device(access: .password)
+        await startAndDiscover(backend, engine, discovery, device)
+        // The scripted add failure throws with no state report, so the catch
+        // expects one that never comes.
+        let firstAdd = HoldPoint()
+        let sawFirst = OnceFlag()
+        engine.addFailures = [device.outputID.rawValue]
+        engine.onAddOutputHold = { id, _ in
+            guard id == device.outputID else { return }
+            if sawFirst.testAndSet() { engine.addFailures = [] } else { await firstAdd.hold() }
+        }
+
+        backend.setOutputSet([device.id])
+        await pollUntil { firstAdd.entered }
+        backend.submitAirPlayPassword("secret", for: device.id, source: "mac")
+        backend.retryOutput(device.id)
+        firstAdd.open()
+        await pollUntil { backend.devices.first { $0.id == device.id }?.connectionState == .connected }
+
+        engine.pushState(device.outputID, .connected)
+        engine.pushState(device.outputID, .failed)
+        await pollUntil { self.failureCause(backend, device.id) != nil }
+        #expect(failureCause(backend, device.id) == .droppedMidStream)
+        #expect(backend.devices.first { $0.id == device.id }?.isAvailable == false)
+    }
+
     /// Letting a password typed with no connect in progress hide a live
     /// session's drop (no `.failed`, no park) turns it red.
     @Test func pendingPasswordWithNoConnectInProgressStillReportsADroppedSession() async {

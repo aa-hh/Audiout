@@ -2711,6 +2711,8 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             self.streamReleaseOnSettle.removeAll()
             self.failedGate.removeAll()
             self.fedDescriptors.removeAll()
+            self.expectStaleFailure.removeAll()
+            self.failureEchoSeen.removeAll()
             self.muted.removeAll()
             self.stashedVolume.removeAll()
             // Per-app routing state (T6): reset so a later start() re-decides from a
@@ -4851,6 +4853,8 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // A future re-add must re-feed the engine's discovery (the descriptor is
             // being deregistered), so forget the fed memo regardless of add state.
             self.fedDescriptors[id] = nil
+            self.expectStaleFailure.remove(id)
+            self.failureEchoSeen.remove(id)
             guard self.removeFromAddedLocked(id) else { return nil }
             return self.outputIDs[id]
         }
@@ -4951,6 +4955,8 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // engine descriptor will be removed, so a future re-add must re-feed.
             // Drop the fed-descriptor memo.
             self.fedDescriptors[id] = nil
+            self.expectStaleFailure.remove(id)
+            self.failureEchoSeen.remove(id)
         }
 
         let mapped = mapDiscovered(discovered, hasStoredPassword: hasStoredPassword)
@@ -5073,6 +5079,8 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         // The engine descriptor is deregistered on disappear; a future re-add must
         // re-feed it. Clear the fed memo so `descriptorToFeed` doesn't skip it.
         self.fedDescriptors[id] = nil
+        self.expectStaleFailure.remove(id)
+        self.failureEchoSeen.remove(id)
         // A full disappear ends any failure episode (the state clears to `.off`
         // below), so drop the park with it — a later re-appearance is then a
         // clean `desiredOn`-driven auto-reconnect in `addOrUpdate` even when the
@@ -5179,6 +5187,9 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 // Recovery (root cause 4): a good transition clears any failure
                 // park so the device is re-enableable / stays converged.
                 self.failedGate.remove(id)
+                // A good report proves no failure report is still on its way.
+                self.expectStaleFailure.remove(id)
+                self.failureEchoSeen.remove(id)
                 // A (re)connect the engine reported out-of-band — e.g. an
                 // auto-recovery it drove itself — never went through convergeDevice's
                 // add path, so it too lands at engine volume 0 = ≈ −30 dB (silent).
@@ -5874,6 +5885,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// Ids whose failed add the converge catch looped past before the state
     /// stream's echo of that failure arrived; the failure arm drops one report
     /// for each. On `stateQueue`.
+    /// razor: a different failure report landing before the catch counts as the echo, so the real echo then parks; tag reports with their add to close it.
     private var expectStaleFailure: Set<String> = []
 
     /// Ids the failure arm has seen a failure report for since their last
@@ -5940,6 +5952,8 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         passwordStore.removePassword(for: id)
         stateQueue.async {
             self.passwordResubmitted[id] = nil
+            self.expectStaleFailure.remove(id)
+            self.failureEchoSeen.remove(id)
             self.applyLocal(id) { $0.hasStoredPassword = false }
         }
         Analytics.capture("airplay:code_forgotten", ["kind": "password"])

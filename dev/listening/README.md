@@ -143,9 +143,11 @@ Then, and never before the driver starts, on the development Mac:
 ## The results folder
 
 - `results/<date>_<time>/summary.md`: per block, the `click-pair-spacing.py`
-  offsets (B: before the pause, right after resume, one minute after; A and C:
-  linear fit and jumps), telemetry line counts, `bt_clock_deviation` slope per
-  speaker, load, and runbook 2's interpretation table.
+  offsets (B: median before the pause, right after resume, one minute after; A
+  and C: linear fit, median per 5 min and jumps), telemetry line counts,
+  `bt_clock_deviation` slope per speaker, load, and runbook 2's interpretation
+  table. Rows whose second peak is 500 ms or more away are the neighbouring
+  click and are dropped first.
 - `blocks.tsv` (telemetry byte offsets, marks, ids per block); `block<X>-raw.wav`,
   `block<X>.wav` (16-bit), `block<X>.txt`, `block<X>-telemetry.jsonl`
   (the block's lines matching `bt_clock_jump|bt_sink_anchored|bt_sink_release_overshoot|bt_sink_seek_clamped|tap_feed_gap|bt_clock_deviation|drift_window_result|drift_window_dropped|drift_correction|bt_room_term_changed|room_delay_changed`).

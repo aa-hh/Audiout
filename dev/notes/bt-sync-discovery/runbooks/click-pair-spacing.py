@@ -10,6 +10,9 @@ each period the script prints the time of the loudest peak and the offset of
 the second-loudest peak relative to it, in ms. In sync => one merged peak
 (offset ~0 or missing). Over an hour, a steady change in the offset is the
 Bluetooth-vs-host rate drift; a sudden change is a latency step.
+A second peak at --max-offset-ms or beyond is the neighbouring click (one speaker
+silent or merged), so that row prints as neighbour and is left out of the fit.
+The summary lines report medians: first and last five periods, and per 5 minutes.
 
 Convert a QuickTime .m4a first:  afconvert -f WAVE -d LEI16 rec.m4a rec.wav
 Needs numpy (python3 -c "import numpy" to check).
@@ -23,6 +26,7 @@ except ImportError:
 ap = argparse.ArgumentParser()
 ap.add_argument("wav"); ap.add_argument("--period", type=float, default=3.0)
 ap.add_argument("--min-sep-ms", type=float, default=15.0, help="two peaks closer than this are one arrival")
+ap.add_argument("--max-offset-ms", type=float, default=500.0, help="a second peak farther than this from the loudest is the neighbouring click, not the second arrival")
 a = ap.parse_args()
 
 w = wave.open(a.wav, "rb"); sr = w.getframerate(); ch = w.getnchannels(); sw = w.getsampwidth()
@@ -42,10 +46,11 @@ P = int(a.period * sr); minsep = int(a.min_sep_ms/1000*sr)
 first = int(np.argmax(env[:P])); start = max(0, first - P//4)
 print(f"# sr={sr} period={a.period}s frames={len(env)//P}")
 print("# t_loudest_s  offset_second_ms  (loud/second ratio)")
-rows = []
+rows = []; seen = 0
 for k in range((len(env) - start)//P):
     seg = env[start + k*P : start + (k+1)*P]
     if seg.max() < floor: continue
+    seen += 1
     i1 = int(np.argmax(seg)); v1 = seg[i1]
     mask = np.ones_like(seg, dtype=bool); mask[max(0,i1-minsep):i1+minsep] = False
     seg2 = np.where(mask, seg, 0.0)
@@ -54,9 +59,14 @@ for k in range((len(env) - start)//P):
     if v2 < floor or v2 < 0.05*v1:
         print(f"{t1:10.3f}  {'merged':>10}"); rows.append((t1, 0.0)); continue
     off = (i2 - i1)/sr*1000
+    if abs(off) >= a.max_offset_ms:
+        print(f"{t1:10.3f}  {'neighbour':>10}"); continue
     print(f"{t1:10.3f}  {off:+10.2f}   ({v1/v2:.1f})"); rows.append((t1, off))
+print(f"# clean: {len(rows)} of {seen} periods (merged + offset within {a.max_offset_ms:g} ms)")
 if len(rows) >= 4:
     t = np.array([r[0] for r in rows]); o = np.array([r[1] for r in rows])
     slope = np.polyfit(t, o, 1)[0]
     print(f"# linear fit: {slope*60:+.3f} ms/min = {slope*1000:+.1f} ppm over {t[-1]-t[0]:.0f} s "
-          f"(first {o[:5].mean():+.1f} ms, last {o[-5:].mean():+.1f} ms)")
+          f"(first median {np.median(o[:5]):+.1f} ms, last median {np.median(o[-5:]):+.1f} ms)")
+    wins = [(m, o[(t >= m*60) & (t < (m+5)*60)]) for m in range(0, int(t[-1]//60) + 1, 5)]
+    print("# median per 5 min: " + " | ".join(f"{m}-{m+5} {np.median(v):+.1f}" for m, v in wins if len(v)))

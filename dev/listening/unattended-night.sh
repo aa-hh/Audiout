@@ -925,7 +925,7 @@ fi
 
 # ---- Summary ----------------------------------------------------------------
 "$PYTHON" - "$OUT" "$TELEMETRY" "$JUMP_MS" "$DRY" "$AIRPLAY_NAME" "$LOAD_WARN" "$SMOKE" "$TOGGLE_ID" <<'EOF'
-import sys, os, re, json, datetime
+import sys, os, re, json, datetime, statistics
 out, tel, jump_ms, dry, airplay = sys.argv[1], sys.argv[2], float(sys.argv[3]), sys.argv[4] == "1", sys.argv[5]
 load_warn = float(sys.argv[6]); smoke = sys.argv[7] == "1"; toggle = sys.argv[8]
 loads = {}
@@ -951,17 +951,19 @@ def tel_slice(a, b):
     return read(tel + ".1", a) + read(tel, 0, b), True
 
 def rows_of(txt):
-    rows, fit = [], None
+    rows, fit, clean, per5 = [], None, None, None
     for line in open(txt):
         if line.startswith("# linear fit: "): fit = line[14:].strip(); continue
+        if line.startswith("# clean: "): clean = line[9:].strip(); continue
+        if line.startswith("# median per 5 min: "): per5 = line[20:].strip(); continue
         if line.startswith("#"): continue
         p = line.split()
-        if len(p) >= 2: rows.append((float(p[0]), None if p[1] == "merged" else float(p[1])))
-    return rows, fit
+        if len(p) >= 2 and p[1] != "neighbour": rows.append((float(p[0]), None if p[1] == "merged" else float(p[1])))
+    return rows, fit, clean, per5
 
-def mean(v):
+def median(v):
     v = [x for x in v if x is not None]
-    return f"{sum(v)/len(v):+.1f} ms" if v else "no separate second click"
+    return f"{statistics.median(v):+.1f} ms" if v else "no separate second click"
 
 def deviation_slopes(lines):
     by = {}
@@ -1002,7 +1004,7 @@ for line in list(open(f"{out}/blocks.tsv"))[1:]:
            + (" (the file rotated during the block; the tail of telemetry.jsonl.1 is included)" if rotated else "") + ".", ""]
     if marks: md += ["Marks, in seconds into the recording: " + ", ".join(f"{k} {v:.0f} s" for k, v in marks.items()), ""]
     txt = f"{out}/block{name}.txt"
-    rows, fit = rows_of(txt) if os.path.exists(txt) else ([], None)
+    rows, fit, clean, per5 = rows_of(txt) if os.path.exists(txt) else ([], None, None, None)
     merged = sum(1 for _, o in rows if o is None)
     md += [f"Click periods measured: {len(rows)} ({merged} with one merged arrival)."]
     if name == "A":
@@ -1022,13 +1024,15 @@ for line in list(open(f"{out}/blocks.tsv"))[1:]:
         before = [o for t, o in rows if t < marks["pause"]][-5:]
         after = [o for t, o in rows if t > marks["resume"]]
         md += ["", "| | offset of the second arrival |", "|---|---|",
-               f"| before the pause (last 5 periods) | {mean(before)} |",
-               f"| right after resume (first 3 periods) | {mean(after[:3])} |",
-               f"| one minute after resume (last 3 periods) | {mean(after[-3:])} |"]
+               f"| before the pause (last 5 periods) | {median(before)} |",
+               f"| right after resume (first 3 periods) | {median(after[:3])} |",
+               f"| one minute after resume (last 3 periods) | {median(after[-3:])} |"]
     else:
         offs = [o if o is not None else 0.0 for _, o in rows]
         jumps = sum(1 for x, y in zip(offs, offs[1:]) if abs(y - x) > jump_ms)
         md += ["", f"Linear fit: {fit or 'fewer than 4 periods, no fit'}",
+               f"Clean periods: {clean or 'not reported'}",
+               f"Median offset per 5 min: {per5 or 'not reported'}",
                f"Jumps (offset change over {jump_ms:g} ms between neighbouring 3 s periods): {jumps}"]
     counts = {e: sum(1 for r in lines if str(r.get("evt", "")).startswith(e)) for e in EVTS}
     md += ["", "| telemetry line | count |", "|---|---|"] + [f"| `{e}` | {c} |" for e, c in counts.items()]
@@ -1052,7 +1056,7 @@ md += ["## Reading Blocks A and C (table from runbook 2)", "",
 "| ≥ ~0.3 ms/min | flat (< 2 ppm) | The speaker's own buffer or clock is doing it, invisibly to the host | Rate is a microphone problem: event-driven acoustic re-checks plus a slow correction, no host servo for rate |",
 "| flat (< 0.2 ms/min, < 3 ms over the hour) | flat | No common-mode drift in this setup | The servo still earns its place for pulls, lock misses and pauses (Runbook 1), but rate is not the field problem; the 1.2.0 creep came from something else |",
 "| steps, not a line | `jumps` > 0 at the same times | Latency events, not drift | The event-driven design is right; check that a mic window fires on each |",
-"", "Block A has two identical Moves, so a pass for fix 1 is an offset that stays flat (mostly merged arrivals); a step at the reconnect that stays is a fail.",
+"", "Block A has two identical Moves, so a pass for fix 1 is an offset that stays flat (mostly merged arrivals); a step at the reconnect that stays is a fail. Offsets at or beyond 500 ms are neighbouring clicks and are dropped before the fit and the medians.",
 "", "Block B (runbook 1): the same offset before and after within ~5 ms means a pause does not lose time; a jump that stays means the drain is real; a jump that walks back over seconds means something re-anchors.", ""]
 open(f"{out}/summary.md", "w").write("\n".join(md))
 print(f"{out}/summary.md")

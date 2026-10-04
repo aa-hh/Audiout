@@ -679,7 +679,7 @@ public final class PopoverController: NSObject {
     /// How long the live-removal offer stands before it retires itself.
     private static let removalUndoWindow: TimeInterval = 5
 
-    /// The "Play here instead" offer: the row whose selection the one-speaker
+    /// The "Play here" offer: the row whose selection the one-speaker
     /// limit just refused, and the timer that retires the offer. Host state,
     /// the same shape as the removal undo above.
     var switchOfferDeviceID: String?
@@ -1373,7 +1373,7 @@ public final class PopoverController: NSObject {
     /// `GroupController`. Idempotent: a repeat is a no-op.
     ///
     /// A change retires everything the old licence state raised in this open:
-    /// the limit text, "Play here instead" (clicked after a purchase it would
+    /// the limit text, "Play here" (clicked after a purchase it would
     /// cut a legal multi-speaker selection to one) and the Main Out menu's
     /// dimmed scenes.
     public func setUnregisteredNote(_ note: UnregisteredNote?) {
@@ -2840,7 +2840,7 @@ public final class PopoverController: NSObject {
         removalUndoDeviceID = nil
     }
 
-    /// Raise "Play here instead" on `id` for the same 5 s window.
+    /// Raise "Play here" on `id` for the same 5 s window.
     private func offerSwitch(for id: String) {
         switchOfferTimer?.invalidate()
         switchOfferDeviceID = id
@@ -3809,7 +3809,7 @@ extension PopoverController: DeviceRowView.Delegate {
             clearRemovalUndo()
         }
         // A second speaker refused by the one-speaker limit raises the limit
-        // note and the row's "Play here instead"; any other edit retires it.
+        // note and the row's "Play here"; any other edit retires it.
         if on && result.refusalReason == GroupController.oneSpeakerLimitReason {
             Analytics.capture("license:limit_hit", ["attempted": "speaker"])
             limitNoteRaised = true
@@ -3824,7 +3824,7 @@ extension PopoverController: DeviceRowView.Delegate {
         handleSelection(result, deviceID: id)
     }
 
-    /// "Play here instead": the clicked speaker replaces the whole selection
+    /// "Play here": the clicked speaker replaces the whole selection
     /// in one routing apply (`GroupController.switchSelection(to:)`).
     public func deviceRowDidRequestSwitchHere(_ row: DeviceRowView) {
         Analytics.capture("license:switch_offer_used")

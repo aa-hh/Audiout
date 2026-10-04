@@ -416,7 +416,7 @@ public final class GroupController {
     ///   floor never fires and needs no special case for that path.
     ///
     /// Replace the whole Selected Devices set with `id` in one routing apply —
-    /// "Play here instead". A deselect-then-select would apply twice and leave
+    /// "Play here". A deselect-then-select would apply twice and leave
     /// This Mac briefly live between them. Always a one-member result, so it
     /// holds under `limitsToOneSpeaker`. No-op (`.ok`) if unknown.
     @discardableResult

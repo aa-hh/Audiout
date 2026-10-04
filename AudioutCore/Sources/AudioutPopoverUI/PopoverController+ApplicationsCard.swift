@@ -724,7 +724,7 @@ extension PopoverController: AppRowView.Delegate {
         selectedAppBundleID = nil
         // The live-removal offer never outlives the surface it was made on.
         clearRemovalUndo()
-        // Nor do "Play here instead" and the one-speaker limit text.
+        // Nor do "Play here" and the one-speaker limit text.
         clearSwitchOffer()
         limitNoteRaised = false
         // A thank-you card up at hide counts as seen (no closed event).

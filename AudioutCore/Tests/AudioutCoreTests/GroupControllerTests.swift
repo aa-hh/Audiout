@@ -89,7 +89,7 @@ import Testing
 
     // MARK: Selected Devices + Main Out routing (SPEC §9 2026-07-14b)
 
-    /// Red if "Play here instead" routed twice (deselect then select leaves
+    /// Red if "Play here" routed twice (deselect then select leaves
     /// This Mac briefly live between the two applies) or left a stale member.
     @Test func switchSelectionReplacesTheSetInOneRoutingApply() async throws {
         let (controller, backend) = try await makeRecordingController()

@@ -3643,7 +3643,7 @@ import AudioutProtocol
         #expect(!controller.isSpeakerSelected("homepod-bed"), "the limit refused the second speaker")
         #expect(popover.test_systemAirPlayNoteText == PopoverController.oneSpeakerLimitNoteText)
         #expect(popover.test_deviceRow(for: "homepod-bed")?.test_switchOfferOffered == true,
-                "the refused row offers Play here instead")
+                "the refused row offers Play here")
 
         popover.test_simulateOpen()
         #expect(popover.test_systemAirPlayNoteText == PopoverController.unregisteredTrialEndedNoteText,
@@ -3663,7 +3663,7 @@ import AudioutProtocol
     }
 
     /// Red if a licence landing mid-open left the old limit's leftovers up:
-    /// clicking a stale "Play here instead" after buying would cut a legal
+    /// clicking a stale "Play here" after buying would cut a legal
     /// multi-speaker selection to one, and the Main Out menu would keep its
     /// scenes dimmed until the next open.
     @Test func liftingTheLimitMidOpenRetiresTheOfferAndUndimsTheScenes() async throws {
@@ -4342,7 +4342,7 @@ extension SerializedSharedState {
             #expect(owed.shownCalls == 0)
         }
 
-        /// Red if "Play here instead" left two speakers selected (the limit
+        /// Red if "Play here" left two speakers selected (the limit
         /// would then be broken by its own offer) or stopped reporting its use.
         @Test func theSwitchOfferLeavesOnlyTheClickedSpeaker() {
             let (popover, controller) = makePopover()

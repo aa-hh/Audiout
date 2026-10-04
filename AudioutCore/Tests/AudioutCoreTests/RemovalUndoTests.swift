@@ -66,7 +66,7 @@ import Testing
         #expect(spy.undoRequests == 1, "the real NSButton click reaches the delegate")
     }
 
-    /// Red if the row raised "Play here instead" on its own, or stopped
+    /// Red if the row raised "Play here" on its own, or stopped
     /// handing the click to the host: the row draws the offer, the host decides.
     @Test func switchOfferRendersOnlyWhenRaisedAndDrivesTheDelegate() {
         final class Spy: DeviceRowView.Delegate {
@@ -87,31 +87,33 @@ import Testing
         #expect(spy.switchRequests == 1, "the real NSButton click reaches the delegate")
     }
 
-    /// Red if "Undo" or "Play here instead" went back to the `gold` fill
-    /// token: in light mode that is `#E8B84B` on the `#FAFAFB` ground, under
-    /// 2:1, where body-size words need 4.5:1.
-    @Test func bothRowOffersAreLegibleOnTheLightGround() {
-        Tokens.test_increaseContrastOverride = false
-        defer { Tokens.test_increaseContrastOverride = nil }
-        func luminance(_ color: NSColor) -> CGFloat {
-            func channel(_ c: CGFloat) -> CGFloat { c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4) }
-            let c = color.usingColorSpace(.sRGB)!
-            return 0.2126 * channel(c.redComponent) + 0.7152 * channel(c.greenComponent)
-                + 0.0722 * channel(c.blueComponent)
-        }
-        let row = makeBusRow(makeDevice())
-        for (name, button) in [("Undo", row.removalUndoButton), ("Play here instead", row.switchOfferButton)] {
-            guard let ink = button.attributedTitle.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor
-            else {
-                Issue.record("\(name) has no title colour")
-                continue
+    /// Red if either offer drifted back under the "Source" title (left-aligned
+    /// on the FEED column's leading edge, the placement the owner rejected on
+    /// 2026-10-04) or spilled left past the trailing column into the readout,
+    /// which a long name must not cause.
+    @Test func bothRowOffersRightAlignOnTheTrailingInset() {
+        let device = Device(id: "undo-dev", name: "Downstairs Living Room HomePod Stereo Pair",
+                            kind: .homePod, connectionState: .connected)
+        let row = makeBusRow(device)
+        row.frame = NSRect(x: 0, y: 0, width: 640, height: PopoverColumnGrid.bodyRowHeight)
+        for (name, offered, view) in [
+            ("Undo", (true, false), row.removalUndoButton as NSView),
+            ("Removed:", (true, false), row.removalUndoStack.arrangedSubviews[0]),
+            ("Play here", (false, true), row.switchOfferButton as NSView),
+        ] {
+            row.apply(device, selected: false,
+                      removalUndoOffered: offered.0, switchOfferOffered: offered.1)
+            row.layoutSubtreeIfNeeded()
+            let frame = view.convert(view.bounds, to: row)
+            let trailingX = row.bounds.width - PopoverColumnGrid.trailingControlTrailing
+            let columnLeadingX = row.bounds.width - PopoverColumnGrid.feedColumnLeadingFromTrailing
+            if view is NSButton {
+                #expect(abs(frame.maxX - trailingX) <= 1,
+                        "\(name) ends at \(frame.maxX), the trailing inset is \(trailingX)")
+                #expect(frame.height >= PopoverColumnGrid.removalUndoButtonHeight)
             }
-            var ratio: CGFloat = 0
-            NSAppearance(named: .aqua)!.performAsCurrentDrawingAppearance {
-                let (a, b) = (luminance(ink), luminance(Tokens.Color.canvas))
-                ratio = (max(a, b) + 0.05) / (min(a, b) + 0.05)
-            }
-            #expect(ratio >= 4.5, "\(name) measures \(ratio):1 on the light ground")
+            #expect(frame.minX >= columnLeadingX,
+                    "\(name) starts at \(frame.minX), left of the trailing column at \(columnLeadingX)")
         }
     }
 

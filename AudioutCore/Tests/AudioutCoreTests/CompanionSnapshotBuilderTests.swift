@@ -179,6 +179,29 @@ import AudioutProtocol
         #expect(after.devices.first { $0.id == "speaker-b" }?.isMuted == true)
     }
 
+    // Turns red if `GroupController.setMuted` stops forwarding the Mac to `backend.setMuted`, or the phone snapshot stops reporting the Mac's mute.
+    @Test func macRowIsMutedFollowsTheHardwareMute() async throws {
+        let backend = try await makeBackend()
+        let controller = makeGroupController(backend: backend)
+        let appRouting = makeAppRouting()
+
+        controller.setMuted(true, for: "local")
+        await SuiteWait.until("local to read muted on the backend") {
+            backend.devices.first { $0.id == "local" }?.isMuted == true
+        }
+        let snapshot = CompanionSnapshotBuilder.build(
+            devices: backend.devices, groupController: controller, appRouting: appRouting,
+            excludedBundleIDs: noExcludedBundleIDs, iconFor: iconFor, addableApps: noAddableApps,
+            runningRouted: noRunningRouted, liveRoutedAppNames: noLiveRoutedAppNames,
+            localFallbackActive: false, takeoverStatus: nil, serverName: defaultServerName,
+            connectVolume: defaultConnectVolume, connectVolumeMin: defaultConnectVolumeMin,
+            connectVolumeMax: defaultConnectVolumeMax, startBufferMs: defaultStartBufferMs,
+            startBufferOptionsMs: defaultStartBufferOptionsMs
+        )
+        let mac = try #require(snapshot.devices.first { $0.id == "local" })
+        #expect(mac.isMuted == true)
+    }
+
     // MARK: Trap 3 — isMainOutMember
 
     @Test func deviceIsMainOutMemberComesFromGroupControllerIsMainOutMemberNotSelectedDevices() async throws {

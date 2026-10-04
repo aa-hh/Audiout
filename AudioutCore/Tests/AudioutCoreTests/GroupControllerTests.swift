@@ -1429,22 +1429,91 @@ import Testing
         #expect(volume("sonos-move", in: backend) == 70, "unmute restores the original level, not 0")
     }
 
-    // Turns red if a `memberState.removeAll()` drops the stash without restoring the volume (the Mac stays at 0).
+    // Turns red if `clearMuteBookkeeping` drops or unmutes the Mac's entry, or if the Mac's mute goes back to `setVolume(0)`.
     @Test func switchingMainOutAwayAndBackRestoresAMutedMacInsteadOfLeavingItAtZero() async throws {
         let (controller, backend) = try await makeController()
         try controller.saveGroup(Group(id: "g1", name: "Mac + Office", memberIDs: ["local-mac", "office"], memberVolumes: [:]))
         controller.setMainOut(.group(id: "g1"))
         await SuiteWait.until("g1 to become active") { controller.activeGroupID == "g1" }
         controller.setMuted(true, for: "local-mac")
-        await SuiteWait.until("local-mac to sit at zero") { volume("local-mac", in: backend) == 0 }
+        await SuiteWait.until("local-mac to be hardware-muted") {
+            backend.devices.first { $0.id == "local-mac" }?.isMuted == true
+        }
+        #expect(volume("local-mac", in: backend) == 65, "the Mac's mute leaves its volume untouched")
 
         controller.setMainOut(.selectedDevices)
         controller.setMainOut(.group(id: "g1"))
-        await SuiteWait.until("local-mac to come back at 65") { volume("local-mac", in: backend) == 65 }
+        try await Task.sleep(nanoseconds: 100_000_000)
 
-        #expect(volume("local-mac", in: backend) == 65)
+        #expect(controller.isMuted("local-mac"))
+        #expect(backend.devices.first { $0.id == "local-mac" }?.isMuted == true)
+    }
+
+    // Turns red if a `memberState.removeAll()` drops the stash without restoring the speaker's volume (it stays at 0).
+    @Test func switchingMainOutAwayAndBackRestoresAMutedSpeakerInsteadOfLeavingItAtZero() async throws {
+        let (controller, backend) = try await makeController()
+        try controller.saveGroup(Group(id: "g1", name: "Move + Office", memberIDs: ["sonos-move", "office"], memberVolumes: [:]))
+        controller.setMainOut(.group(id: "g1"))
+        await SuiteWait.until("g1 to become active") { controller.activeGroupID == "g1" }
+        controller.setMuted(true, for: "sonos-move")
+        await SuiteWait.until("sonos-move to sit at zero") { volume("sonos-move", in: backend) == 0 }
+
+        controller.setMainOut(.selectedDevices)
+        controller.setMainOut(.group(id: "g1"))
+        await SuiteWait.until("sonos-move to come back at 40") { volume("sonos-move", in: backend) == 40 }
+
+        #expect(volume("sonos-move", in: backend) == 40)
+        #expect(!controller.isMuted("sonos-move"))
+        #expect(!controller.isMainOutMuted)
+    }
+
+    // Turns red if the local id falls back into `applySilence` (volume 0 instead of a mute write).
+    @Test func macMuteSurvivesTheLastSpeakerLeavingAndCanBeLiftedFromTheApp() async throws {
+        let (controller, backend) = try await makeRecordingController()
+        _ = controller.setDeviceSelected("office", true)
+        _ = controller.setDeviceSelected("local-mac", true)
+        #expect(controller.isSpeakerSelected("local-mac") && controller.isSpeakerSelected("office"))
+
+        controller.setMuted(true, for: "local-mac")
+        #expect(backend.muteWrites.last?.id == "local-mac" && backend.muteWrites.last?.muted == true)
+        #expect(!backend.volumeWrites.contains { $0.id == "local-mac" })
+        #expect(controller.isMuted("local-mac"))
+
+        _ = controller.setDeviceSelected("office", false)
+        #expect(controller.localRowDrivesMain)
+        #expect(controller.isMuted("local-mac"))
+        #expect(controller.isMainOutMuted)
+
+        controller.setMuted(false, for: "local-mac")
+        #expect(backend.muteWrites.last?.id == "local-mac" && backend.muteWrites.last?.muted == false)
         #expect(!controller.isMuted("local-mac"))
         #expect(!controller.isMainOutMuted)
+        await SuiteWait.until("local-mac to be hardware-unmuted") {
+            backend.devices.first { $0.id == "local-mac" }?.isMuted == false
+        }
+    }
+
+    // Turns red if `updateDevices` stops reconciling the Mac's mute from `Device.isMuted`, or `setMuted(false)` becomes a no-op when the controller never muted.
+    @Test func keyboardMuteOfTheMacIsReadBackAndCanBeLiftedFromTheApp() async throws {
+        let (controller, backend) = try await makeRecordingController()
+        func snapshot(macMuted: Bool) -> [Device] {
+            backend.devices.map { device in
+                var device = device
+                if device.isLocalDevice { device.isMuted = macMuted }
+                return device
+            }
+        }
+
+        controller.updateDevices(snapshot(macMuted: true))
+        #expect(controller.isMuted("local-mac"))
+        #expect(backend.muteWrites.isEmpty)
+
+        controller.setMuted(false, for: "local-mac")
+        #expect(backend.muteWrites.map(\.id) == ["local-mac"] && backend.muteWrites.map(\.muted) == [false])
+        #expect(!controller.isMuted("local-mac"))
+
+        controller.updateDevices(snapshot(macMuted: false))
+        #expect(!controller.isMuted("local-mac"))
     }
 
     // Turns red if `saveGroup` stops calling `setOutputSet` for the active group, or starts routing through `activateGroup` (which would lift the mute).
@@ -2282,6 +2351,7 @@ private final class RecordingBackend: OutputBackend {
     private(set) var gainWrites: [(mainOut: Int, group: Int, mirrorToSystemVolume: Bool)] = []
     private(set) var outputSetWrites: [Set<String>] = []
     private(set) var retryWrites: [String] = []
+    private(set) var muteWrites: [(id: String, muted: Bool)] = []
     /// Records "gain" / "outputSet" in the order the backend actually saw them —
     /// e.g. proving a group's gain reaches the backend BEFORE its output set does.
     private(set) var callOrder: [String] = []
@@ -2297,7 +2367,10 @@ private final class RecordingBackend: OutputBackend {
     func start() { inner.start() }
     func stop() { inner.stop() }
     func makeEventStream() -> AsyncStream<BackendEvent> { inner.makeEventStream() }
-    func setMuted(_ muted: Bool, for id: String) { inner.setMuted(muted, for: id) }
+    func setMuted(_ muted: Bool, for id: String) {
+        muteWrites.append((id: id, muted: muted))
+        inner.setMuted(muted, for: id)
+    }
 
     func setOutputSet(_ ids: Set<String>) {
         outputSetWrites.append(ids)
@@ -2325,7 +2398,7 @@ private final class RecordingBackend: OutputBackend {
     /// Forget everything recorded so far — fixture setup (selection, group
     /// activation) issues its own writes, and only what runs afterwards is
     /// under test.
-    func reset() { volumeWrites = []; gainWrites = []; outputSetWrites = []; retryWrites = []; callOrder = [] }
+    func reset() { volumeWrites = []; gainWrites = []; outputSetWrites = []; retryWrites = []; muteWrites = []; callOrder = [] }
 }
 
 private actor CountBox {

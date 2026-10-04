@@ -374,6 +374,14 @@ final class BTDelayLine {
         return ring.usedFrames &- unconsumed
     }
 
+    /// Consumer side: the same room as ``forwardShiftRoomFrames()``, for the
+    /// render thread's own re-alignment. The consumer owns the read pointer, so
+    /// a stale control-side shift word only makes this a floor. Real-time safe:
+    /// counter loads, no allocation, no lock.
+    func consumerForwardShiftRoomFrames() -> Int {
+        ring.usedFrames &- (requestedShiftFrames.pointee &- appliedShiftFrames.pointee)
+    }
+
     /// Chunks the producer dropped since the last call. Consumer/control side.
     func takeDroppedChunks() -> Int {
         let total = ring.droppedChunks
@@ -1443,9 +1451,10 @@ final class BTDeviceSink: @unchecked Sendable {
     /// writes on wall time, so a second in which the device pulls 958 ms leaves
     /// 42 ms more between read and write. Once that passes
     /// ``pullRealignThresholdMs``, the read position moves by it behind the
-    /// trim crossfade. Measured from the render cycles, never from
-    /// `BTClockWatcher`: a pacing clock that steps while the cycles stay even
-    /// moves nothing.
+    /// trim crossfade; a forward re-alignment is clamped like a trim seek,
+    /// ``seekSafetyMarginMs`` short of the write pointer. Measured from the
+    /// render cycles, never from `BTClockWatcher`: a pacing clock that steps
+    /// while the cycles stay even moves nothing.
     private func realignToDevicePulls(cycleStartMonotonicNanos t: Int64, frameCount: Int) {
         guard let origin = pullOriginNanos else { return }
         let gap = t &- lastCycleStartNanos
@@ -1462,7 +1471,14 @@ final class BTDeviceSink: @unchecked Sendable {
         framesPulledSinceOrigin += frameCount
         let pending = (t &- origin) &- pulledNanos &- pullRealignedNanos
         guard Double(abs(pending)) >= Self.pullRealignThresholdMs * 1_000_000 else { return }
-        let applied = delayLine.shift(byFrames: Int((Double(pending) / 1e9 * renderSampleRate).rounded()))
+        var frames = Int((Double(pending) / 1e9 * renderSampleRate).rounded())
+        if frames > 0 {
+            // Only `applied` is booked below, so a clamped shortfall stays
+            // pending and is retried as the producer refills the ring.
+            let marginFrames = Int((Self.seekSafetyMarginMs / 1_000 * renderSampleRate).rounded())
+            frames = Swift.min(frames, Swift.max(0, delayLine.consumerForwardShiftRoomFrames() - marginFrames))
+        }
+        let applied = delayLine.shift(byFrames: frames)
         pullRealignedNanos &+= Int64((Double(applied) / renderSampleRate * 1e9).rounded())
     }
 

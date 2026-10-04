@@ -121,4 +121,62 @@ import Testing
         #expect(abs(worst) <= 25,
                 "the Move's playout offset built up to \(String(format: "%+.1f", worst)) ms (positive = late)")
     }
+
+    /// A cycle that arrives 900 ms after the last one (just under the stall
+    /// bound) while the capture side delivered only 150 ms: the re-alignment
+    /// asks for ~890 ms forward from a ring holding ~250 ms. Drop the
+    /// `seekSafetyMarginMs` clamp from the forward branch of
+    /// `realignToDevicePulls` and the seek drains the ring to the write
+    /// pointer, so this cycle ends in silence and this test goes red.
+    @Test func aForwardRealignmentStopsTheSafetyMarginShortOfTheWritePointer() throws {
+        let manager = BTSyncedSink(
+            renderSampleRate: Self.sampleRate, channelCount: 1,
+            presentationDelayMs: { Int(Self.delayMs) })
+        manager.setComposition(BTGroupComposition(airPlayPresent: true, macLocalPresent: false))
+        manager.setDevices([.init(deviceID: 0, uid: "move-2")])
+        defer { manager.stop() }
+        let sink = try #require(manager.sinkForTesting(uid: "move-2"))
+
+        let chunkFrames = 480
+        let cycleFrames = 512
+        var written = 0         // frame i carries value i + 1
+        var chunk = [Float](repeating: 0, count: chunkFrames)
+        var out = [Float](repeating: 0, count: cycleFrames)
+        func writeChunk() {
+            for i in 0..<chunkFrames { chunk[i] = Float(written + i + 1) }
+            let ptsNanos = Self.anchorNanos + Int64((Double(written) * Self.nsPerFrame).rounded())
+            chunk.withUnsafeBufferPointer {
+                sink.enqueue(
+                    interleavedFrames: $0.baseAddress!, frameCount: chunkFrames,
+                    pts: timespec(tv_sec: Int(ptsNanos / 1_000_000_000),
+                                  tv_nsec: Int(ptsNanos % 1_000_000_000)))
+            }
+            written += chunkFrames
+        }
+        func render(at host: Double) {
+            out.withUnsafeMutableBufferPointer {
+                _ = sink.renderInterleaved(
+                    into: $0, frameCount: cycleFrames, cycleStartMonotonicNanos: Int64(host))
+            }
+        }
+
+        // One second of even pulls: the gate opens and the ring settles at the delay.
+        let cyclePeriod = Double(cycleFrames) * Self.nsPerFrame
+        var host = Double(Self.anchorNanos)
+        while host < Double(Self.anchorNanos) + 1e9 {
+            while Double(Self.anchorNanos) + Double(written) * Self.nsPerFrame <= host { writeChunk() }
+            render(at: host)
+            host += cyclePeriod
+        }
+        #expect(out[cycleFrames - 1] > 0, "the gate never opened")
+
+        for _ in 0..<15 { writeChunk() }    // 150 ms
+        render(at: host - cyclePeriod + 900_000_000)
+
+        let marginFrames = Int(BTDeviceSink.seekSafetyMarginMs / 1_000 * Self.sampleRate)
+        let last = Int(out[cycleFrames - 1])
+        #expect(last > 0, "the re-alignment drained the ring")
+        #expect(written - last >= marginFrames - cycleFrames - 8,
+                "the ring kept \(written - last) frames after the cycle")
+    }
 }

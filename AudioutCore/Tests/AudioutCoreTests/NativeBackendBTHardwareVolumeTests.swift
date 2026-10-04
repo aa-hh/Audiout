@@ -159,17 +159,41 @@ import CoreAudio
         }
     }
 
+    /// A `BTConnectionManaging` fake with a scriptable outcome, copied from
+    /// `NativeBackendBTSelectionTests`.
+    private final class FakeBTConnectionManager: BTConnectionManaging, @unchecked Sendable {
+        private let lock = NSLock()
+        private var _outcome: BTConnectOutcome = .connected
+        private var _connects: [String] = []
+        var onConnectionsChanged: (@Sendable () -> Void)?
+        var onFallbackSuggested: (@Sendable (String) -> Void)?
+        var outcome: BTConnectOutcome {
+            get { lock.withLock { _outcome } }
+            set { lock.withLock { _outcome = newValue } }
+        }
+        var connects: [String] { lock.withLock { _connects } }
+        func connect(address: String) async -> BTConnectOutcome {
+            lock.withLock { _connects.append(address) }
+            return outcome
+        }
+        func disconnect(address: String) {}
+        func startObservingConnections() {}
+        func stopObservingConnections() {}
+    }
+
     // MARK: Helpers
 
     private func makeBackend(hardware: FakeBTHardwareVolume,
                              store: BTHardwareVolumeStore? = nil,
-                             sdpClaim: (@Sendable (String) -> Bool?)? = nil)
+                             sdpClaim: (@Sendable (String) -> Bool?)? = nil,
+                             btConnection: BTConnectionManaging? = nil)
         -> (NativeBackend, FakeBTEnumerator, SpyBTSink) {
         let bt = FakeBTEnumerator()
         let backend = NativeBackend(
             engineControl: NoOpEngine(),
             discoverySource: NoOpDiscovery(),
             btEnumerator: bt,
+            btConnectionManager: btConnection,
             btHardwareVolumeStore: store,
             btHardwareVolumeControl: hardware,
             btAbsoluteVolumeClaim: sdpClaim,
@@ -401,5 +425,34 @@ import CoreAudio
         SuiteWait.settle(0.3)  // give a second probe time to run if one was queued
 
         #expect(callCount.value == 1)
+    }
+
+    /// A sink death that marks the speaker lost unwatches its hardware
+    /// volume; a manual reconnect must arm the watch again. Red if a reconnect
+    /// restores availability without re-entering hardware volume control: the
+    /// enumerator sees no availability edge, so the speaker's own buttons and
+    /// the slider's hardware write stay dead for the rest of the session.
+    @Test func reconnectAfterSinkDeathReArmsHardwareVolumeWatch() {
+        let hardware = FakeBTHardwareVolume()
+        let manager = FakeBTConnectionManager()
+        let (backend, bt, sink) = makeBackend(hardware: hardware, btConnection: manager)
+        defer { backend.stop() }
+        connect(backend, bt, hardware)
+        backend.setOutputSet([speaker.id])
+        waitFor { sink.calls.contains("start") }
+
+        // The first death inside the window only rebuilds; the second marks the row lost.
+        backend.handleBTSinkDead(uid: speaker.id)
+        backend.handleBTSinkDead(uid: speaker.id)
+        waitFor { self.device(backend, self.speaker.id)?.isAvailable == false }
+        waitFor { !hardware.hasWatch(self.speaker.id) }
+        waitFor { self.device(backend, self.speaker.id)?.connectionState != .connecting }
+
+        backend.retryOutput(speaker.id)
+        waitFor { self.device(backend, self.speaker.id)?.isAvailable == true }
+        waitFor { hardware.hasWatch(self.speaker.id) }
+        #expect(manager.connects == ["C4-38-75-0E-BF-4A"])
+        #expect(hardware.hasWatch(speaker.id),
+                "the reconnect must re-arm the hardware volume watch the loss dropped")
     }
 }

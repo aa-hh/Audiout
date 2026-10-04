@@ -365,6 +365,133 @@ import Testing
         #expect(controller.mainOut == .selectedDevices)
     }
 
+    /// Fails if `ensureDefaultSelection()` stops re-applying a restored Bluetooth id
+    /// once it appears in the snapshot, or stops sending it `retryOutput` after the
+    /// output set that names it (the 2026-10-03 launch that logged `desiredOn: []`).
+    /// `@MainActor` so the restore's main-queue deadline block cannot run mid-test.
+    @MainActor
+    @Test func reconnectAtLaunchAppliesBluetoothIdOnceItAppears() async throws {
+        let bt = "54-2A-1B-79-08-9E:output"
+        let routing = RoutingStore(directory: tempDirectory())
+        try routing.save(.init(selectedDeviceIDs: [bt, "office"], mainOut: .selectedDevices))
+        let settings = AppSettings(defaults: isolatedDefaults)
+        settings.reconnectAtLaunch = true
+        let backend = RecordingBackend(try await makeBackend())
+        let controller = GroupController(backend: backend, store: GroupStore(directory: tempDirectory()),
+                                         routingStore: routing, settings: settings, loadPersisted: false)
+        controller.updateDevices(.demoFleet)
+        controller.ensureDefaultSelection()
+        #expect(backend.outputSetWrites.last == ["office"])
+        #expect(backend.retryWrites.isEmpty)
+
+        controller.updateDevices(.demoFleet + [Device(id: bt, name: "Move", kind: .bluetooth, isAvailable: false)])
+        controller.ensureDefaultSelection()
+        #expect(controller.selectedDeviceIDs == [bt, "office"])
+        #expect(backend.outputSetWrites.last == ["office", bt])
+        #expect(backend.retryWrites == [bt])
+        let lastSet = try #require(backend.callOrder.lastIndex(of: "outputSet"))
+        let retry = try #require(backend.callOrder.lastIndex(of: "retry"))
+        #expect(retry > lastSet, "the output set must name the id before the connect kick")
+    }
+
+    /// Fails if a restored Bluetooth id that never appears stays selected (and on
+    /// disk) past `bluetoothRestoreWindow` instead of being dropped at the bound.
+    /// Also fails if an AirPlay id (colon MAC, also 12 hex digits) is taken for a
+    /// Bluetooth one and dropped at the bound: AirPlay ids stay one-shot.
+    @MainActor
+    @Test func reconnectAtLaunchDropsBluetoothIdThatNeverAppears() async throws {
+        let bt = "54-2A-1B-79-08-9E:output"
+        let airPlay = "AA:BB:CC:DD:EE:01"
+        let routing = RoutingStore(directory: tempDirectory())
+        try routing.save(.init(selectedDeviceIDs: [bt, "office", airPlay], mainOut: .selectedDevices))
+        let settings = AppSettings(defaults: isolatedDefaults)
+        settings.reconnectAtLaunch = true
+        let backend = RecordingBackend(try await makeBackend())
+        let controller = GroupController(backend: backend, store: GroupStore(directory: tempDirectory()),
+                                         routingStore: routing, settings: settings, loadPersisted: false)
+        controller.bluetoothRestoreWindow = 0
+        controller.updateDevices(.demoFleet)
+        controller.ensureDefaultSelection()
+        controller.ensureDefaultSelection()
+        #expect(controller.selectedDeviceIDs == ["office", airPlay])
+        #expect(backend.outputSetWrites.last == ["office"])
+        #expect(backend.retryWrites.isEmpty)
+        controller.flushPendingRoutingSave()
+        #expect(Set(try routing.load()?.selectedDeviceIDs ?? []) == ["office", airPlay])
+    }
+
+    /// Fails if dropping a restored selection made only of a Bluetooth id that
+    /// never appears leaves zero devices selected (and persists that) instead of
+    /// falling back to the local Mac, the floor `setDeviceSelected` keeps.
+    @MainActor
+    @Test func reconnectAtLaunchFallsBackToMacWhenOnlyBluetoothIdNeverAppears() async throws {
+        let bt = "54-2A-1B-79-08-9E:output"
+        let routing = RoutingStore(directory: tempDirectory())
+        try routing.save(.init(selectedDeviceIDs: [bt], mainOut: .selectedDevices))
+        let settings = AppSettings(defaults: isolatedDefaults)
+        settings.reconnectAtLaunch = true
+        let backend = RecordingBackend(try await makeBackend())
+        let controller = GroupController(backend: backend, store: GroupStore(directory: tempDirectory()),
+                                         routingStore: routing, settings: settings, loadPersisted: false)
+        controller.bluetoothRestoreWindow = 0
+        controller.updateDevices(.demoFleet)
+        controller.ensureDefaultSelection()
+        controller.ensureDefaultSelection()
+        #expect(controller.selectedDeviceIDs == ["local-mac"])
+        controller.flushPendingRoutingSave()
+        #expect(try routing.load()?.selectedDeviceIDs == ["local-mac"])
+    }
+
+    /// Fails if a restored Bluetooth id already in the first snapshot but
+    /// unavailable gets the output set and no `retryOutput`, or is dropped at the
+    /// end of `bluetoothRestoreWindow` like an id that never appeared.
+    @MainActor
+    @Test func reconnectAtLaunchRetriesBluetoothIdListedButUnavailable() async throws {
+        let bt = "54-2A-1B-79-08-9E:output"
+        let routing = RoutingStore(directory: tempDirectory())
+        try routing.save(.init(selectedDeviceIDs: [bt, "office"], mainOut: .selectedDevices))
+        let settings = AppSettings(defaults: isolatedDefaults)
+        settings.reconnectAtLaunch = true
+        let backend = RecordingBackend(try await makeBackend())
+        let controller = GroupController(backend: backend, store: GroupStore(directory: tempDirectory()),
+                                         routingStore: routing, settings: settings, loadPersisted: false)
+        controller.bluetoothRestoreWindow = 0
+        controller.updateDevices(.demoFleet + [Device(id: bt, name: "Move", kind: .bluetooth, isAvailable: false)])
+        controller.ensureDefaultSelection()
+        #expect(backend.outputSetWrites.last == ["office", bt])
+        #expect(backend.retryWrites == [bt])
+        let lastSet = try #require(backend.callOrder.lastIndex(of: "outputSet"))
+        let retry = try #require(backend.callOrder.lastIndex(of: "retry"))
+        #expect(retry > lastSet, "the output set must name the id before the connect kick")
+
+        controller.ensureDefaultSelection()
+        #expect(controller.selectedDeviceIDs == [bt, "office"])
+        #expect(backend.retryWrites == [bt])
+    }
+
+    /// Fails if a restored Bluetooth id the user deselected during the restore
+    /// window still gets the connect kick once it appears.
+    @MainActor
+    @Test func reconnectAtLaunchSkipsRetryForBluetoothIdDeselectedBeforeItSettles() async throws {
+        let bt = "54-2A-1B-79-08-9E:output"
+        let routing = RoutingStore(directory: tempDirectory())
+        try routing.save(.init(selectedDeviceIDs: [bt, "office"], mainOut: .selectedDevices))
+        let settings = AppSettings(defaults: isolatedDefaults)
+        settings.reconnectAtLaunch = true
+        let backend = RecordingBackend(try await makeBackend())
+        let controller = GroupController(backend: backend, store: GroupStore(directory: tempDirectory()),
+                                         routingStore: routing, settings: settings, loadPersisted: false)
+        controller.updateDevices(.demoFleet)
+        controller.ensureDefaultSelection()
+
+        controller.updateDevices(.demoFleet + [Device(id: bt, name: "Move", kind: .bluetooth, isAvailable: false)])
+        _ = controller.setDeviceSelected(bt, false)
+        controller.ensureDefaultSelection()
+
+        #expect(!controller.selectedDeviceIDs.contains(bt))
+        #expect(backend.retryWrites.isEmpty)
+    }
+
     @Test func autoSwapDropsLocalWhenSoleMember() async throws {
         let (controller, _) = try await makeController()
         controller.ensureDefaultSelection()                       // set = {local}
@@ -2076,6 +2203,7 @@ private final class RecordingBackend: OutputBackend {
     private(set) var volumeWrites: [(id: String, volume: Int)] = []
     private(set) var gainWrites: [(mainOut: Int, group: Int, mirrorToSystemVolume: Bool)] = []
     private(set) var outputSetWrites: [Set<String>] = []
+    private(set) var retryWrites: [String] = []
     /// Records "gain" / "outputSet" in the order the backend actually saw them —
     /// e.g. proving a group's gain reaches the backend BEFORE its output set does.
     private(set) var callOrder: [String] = []
@@ -2100,6 +2228,7 @@ private final class RecordingBackend: OutputBackend {
     }
 
     func retryOutput(_ id: String) {
+        retryWrites.append(id)
         callOrder.append("retry")
         inner.retryOutput(id)
     }
@@ -2118,7 +2247,7 @@ private final class RecordingBackend: OutputBackend {
     /// Forget everything recorded so far — fixture setup (selection, group
     /// activation) issues its own writes, and only what runs afterwards is
     /// under test.
-    func reset() { volumeWrites = []; gainWrites = []; outputSetWrites = []; callOrder = [] }
+    func reset() { volumeWrites = []; gainWrites = []; outputSetWrites = []; retryWrites = []; callOrder = [] }
 }
 
 private actor CountBox {

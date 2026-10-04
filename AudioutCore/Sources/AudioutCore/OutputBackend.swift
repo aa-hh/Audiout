@@ -814,7 +814,10 @@ public func makeBackend(
                 presentationDelayMs: { [weak nativeBackend] in
                     nativeBackend?.btReferenceDelayMs() ?? startBufferMs
                 },
-                clockObserver: clockObserver)
+                clockObserver: clockObserver,
+                sinkDeathObserver: { [weak nativeBackend] uid in
+                    nativeBackend?.handleBTSinkDead(uid: uid)
+                })
         }
         return nativeBackend
     }

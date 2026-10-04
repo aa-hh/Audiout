@@ -69,6 +69,42 @@ import Testing
     /// first 42 ms under-pull then moves 2 ms and the Move stays 40 ms late.
     @Test(arguments: [Self.delayMs, 60])
     func aSteppingClockDoesNotMoveThePlayoutOffset(delayMs: Int64) throws {
+        let worst = try Self.worstStormOffsetMs(anchoredDelayMs: delayMs)
+        #expect(abs(worst) <= 25,
+                "the Move's playout offset built up to \(String(format: "%+.1f", worst)) ms (positive = late)")
+    }
+
+    /// A real tap hands over each 10 ms chunk once it is complete, so the ring
+    /// holds the anchored delay less up to one chunk. Red if the margin cap is
+    /// the anchored delay rather than the ring's room at release less one chunk.
+    @Test func aCaptureThatDeliversOneChunkLateDoesNotMoveThePlayoutOffset() throws {
+        let worst = try Self.worstStormOffsetMs(anchoredDelayMs: Self.delayMs, captureLagFrames: 480)
+        #expect(abs(worst) <= 25,
+                "the Move's playout offset built up to \(String(format: "%+.1f", worst)) ms (positive = late)")
+    }
+
+    /// A −115 ms trim committed at 200 ms while the first 42 ms under-pull is
+    /// still below the re-alignment threshold spends that pending under-pull as
+    /// room, so the ring settles at 85 ms, under the 100 ms margin. (At an
+    /// anchored 100 ms a live trim can shorten the delay only by the pending
+    /// under-pull, too little to tell the two caps apart.) Red if the margin cap
+    /// is frozen at release and ignores the later trim.
+    @Test func aTrimThatShortensTheDelayAfterReleaseDoesNotMoveThePlayoutOffset() throws {
+        let worst = try Self.worstStormOffsetMs(anchoredDelayMs: 200, trim: (3.45, -115))
+        #expect(abs(worst) <= 25,
+                "the Move's playout offset built up to \(String(format: "%+.1f", worst)) ms (positive = late)")
+    }
+
+    /// Replays the storm against a sink anchored at `anchoredDelayMs` and
+    /// returns the worst 5 s median of (playout − pts − delay), positive =
+    /// late. The capture side hands over each chunk once `captureLagFrames`
+    /// past its start pts have gone by on wall time; `trim`, if any, is applied
+    /// and committed `atSecond` seconds after the anchor, and the offset is then
+    /// measured against the trimmed delay.
+    static func worstStormOffsetMs(
+        anchoredDelayMs delayMs: Int64, captureLagFrames: Int = 0,
+        trim: (atSecond: Double, ms: Double)? = nil
+    ) throws -> Double {
         let manager = BTSyncedSink(
             renderSampleRate: Self.sampleRate, channelCount: 1,
             presentationDelayMs: { Int(delayMs) })
@@ -84,6 +120,8 @@ import Testing
         var out = [Float](repeating: 0, count: cycleFrames)
         var host = Double(Self.anchorNanos)
         var errorsBySecond: [[Double]] = []
+        var targetDelayMs = Double(delayMs)
+        var pendingTrim = trim
 
         for (second, ms) in Self.stepPerSecond().enumerated() {
             let secondEnd = Double(Self.anchorNanos) + Double(second + 1) * 1e9
@@ -91,7 +129,7 @@ import Testing
             var errors: [Double] = []
             while host < secondEnd {
                 // The capture tap runs on wall time: everything captured by now.
-                while Double(Self.anchorNanos) + Double(written) * Self.nsPerFrame <= host {
+                while Double(Self.anchorNanos) + Double(written + captureLagFrames) * Self.nsPerFrame <= host {
                     for i in 0..<chunkFrames { chunk[i] = Float(written + i + 1) }
                     let ptsNanos = Self.anchorNanos + Int64((Double(written) * Self.nsPerFrame).rounded())
                     chunk.withUnsafeBufferPointer {
@@ -102,13 +140,21 @@ import Testing
                     }
                     written += chunkFrames
                 }
+                if let move = pendingTrim, host >= Double(Self.anchorNanos) + move.atSecond * 1e9 {
+                    manager.setTrimMs(move.ms, forDeviceUID: "move-2")
+                    manager.reanchorIfTrimClamped(forDeviceUID: "move-2")
+                    sink.test_waitForPendingRebuild()
+                    #expect(sink.hasStartedRendering, "the trim was clamped, so the commit re-anchored")
+                    targetDelayMs += move.ms
+                    pendingTrim = nil
+                }
                 out.withUnsafeMutableBufferPointer {
                     _ = sink.renderInterleaved(
                         into: $0, frameCount: cycleFrames, cycleStartMonotonicNanos: Int64(host))
                 }
                 if out[0] > 0 {
                     let pts = Double(Self.anchorNanos) + Double(out[0] - 1) * Self.nsPerFrame
-                    errors.append((host - pts) / 1e6 - Double(delayMs))
+                    errors.append((host - pts) / 1e6 - targetDelayMs)
                 }
                 host += cyclePeriod
             }
@@ -121,8 +167,7 @@ import Testing
             let median = window[window.count / 2]
             if abs(median) > abs(worst) { worst = median }
         }
-        #expect(abs(worst) <= 25,
-                "the Move's playout offset built up to \(String(format: "%+.1f", worst)) ms (positive = late)")
+        return worst
     }
 
     /// A cycle that arrives 900 ms after the last one (just under the stall
@@ -180,7 +225,9 @@ import Testing
         let marginFrames = Int(BTDeviceSink.seekSafetyMarginMs / 1_000 * Self.sampleRate)
         var last = Int(out[cycleFrames - 1])
         #expect(last > 0, "the re-alignment drained the ring")
-        #expect(written - last >= marginFrames - cycleFrames - 8,
+        // The margin is the ring's room at release less one cycle (the sink's
+        // stand-in for a capture chunk), so it sits up to a cycle under 100 ms.
+        #expect(written - last >= marginFrames - 2 * cycleFrames - 8,
                 "the ring kept \(written - last) frames after the cycle")
 
         // Capture and device stalled together, so capture resumes at wall rate

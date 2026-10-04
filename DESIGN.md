@@ -764,7 +764,13 @@ silent or muted, and hollow `spineTone` on Main Audio. Playing, it is a
 light `gold` alone measures 1.77:1 against the ground. A device row's dot
 turns gold only while the row is route-armed AND its speaker is connected
 (`DeviceRowView.apply`): a per-app feed arms a row whose speaker is still
-connecting, and that dot stays hollow `ember`. Main Audio's dot is gold
+connecting, and that dot stays hollow `ember`. The backend reports a
+speaker fed only by a per-app route `.connecting` while its leg starts,
+`.connected` once it streams (AirPlay when the bind returns, Bluetooth when
+the sink reports it rendering), `.failed` when the bind fails, and `.off`
+when the route is removed, unless the speaker's own failure dropped the
+route, which keeps `.failed`, so its row draws the same ring and dot as a
+member while its rail node stays hollow. Main Audio's dot is gold
 while the spine is live, a connected member playing unmuted or the Mac
 playing on its own. Subtle dark `ember` is `#7D6B44` so the hollow 1.5 pt
 connecting dot clears 3:1 on `raised`, the brighter ground (3.47:1 on
@@ -830,7 +836,8 @@ speaker whose node is a member, connecting, or the origin
    the header's own text line (`headerDotY`), the vertical centre of the
    header row. That covers each collapsed subsection whose header is fully
    in view, and the Output Speakers card while a collapse is actually hiding
-   a reached speaker, never just because its collapse flag is set. While the
+   a reached speaker, never just because its collapse flag is set. A collapsing
+   card hides a speaker once its centre passes the shrinking floor. While the
    body is still closing, the dot sits the same distance above the
    shrinking floor that the header's centre sits above the band's top, so it
    lands on the centre as the body shuts.
@@ -845,7 +852,7 @@ speaker whose node is a member, connecting, or the origin
 7. The rail never draws outside the scrolling list's visible band, top or
    bottom. When a reached speaker or a dotted header lies below the visible
    bottom edge and the card is not collapsing, the rail ends on the lowest
-   fully visible row on the spine: its own circle is the end, with no extra
+   fully visible reached row: its own circle is the end, with no extra
    dot. When reached speakers exist but none is visible and no dot shows,
    the line runs to the edge they lie past, with no dot.
 8. Dormant changes only the colour (to `railDormant`), never where the rail

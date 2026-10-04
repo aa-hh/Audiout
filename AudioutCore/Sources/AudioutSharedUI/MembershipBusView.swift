@@ -98,7 +98,7 @@ public final class MembershipBusView: NSView {
     /// (the Groups editor showing a group that is NOT the active Main Out — pure
     /// configuration, no audio moving) renders its `.member` discs in the quiet
     /// `ember` idle tone instead. This is the NODE's tone only: the wire is
-    /// always gold (`Tokens.Color.spineTone`, owner's ruling 2026-10-04).
+    /// gold except where a host sets `unarmedLineTone` (`Tokens.Color.spineTone`).
     /// Defaults to true: the popover's rows ARE the live signal path and keep
     /// their gold unchanged.
     private var armed = true
@@ -261,7 +261,7 @@ public final class MembershipBusView: NSView {
             let rect = NSRect(x: cx - r, y: cy - r, width: 2 * r, height: 2 * r)
             if node == .member {
                 // Rim gold while armed, ember while idle (a node state; the
-                // wire itself is always gold). The fill is the same tone, or
+                // wire is gold except where a host sets `unarmedLineTone`). The fill is the same tone, or
                 // the unlit `socket` seat when dimmed — see `dimmed`.
                 let rim = armed ? Tokens.Color.gold : Tokens.Color.ember
                 let fill = dimmed ? Tokens.Color.socket : rim

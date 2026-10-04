@@ -385,8 +385,8 @@ extension DeviceRowView {
     // MARK: Route-armed dot (spec §3.3) test hooks
 
     /// Whether the gold route-armed corner dot is currently LIT — reads the
-    /// dot view's rendered state (the §3.3 predicate's outcome), so it can't
-    /// drift from the pixels.
+    /// dot view's rendered state, which is the §3.3 predicate AND a connected
+    /// speaker, so it is false for a fed speaker that is still connecting.
     public var test_routeArmed: Bool { armedDotView.test_isLit }
 
     /// The dot's current fill color (resolved) — gold when armed, `nil`

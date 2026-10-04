@@ -202,7 +202,10 @@ public final class DeviceRowView: NSView {
     /// Whether the row's live-feed set (`liveAppNames`) was non-empty at the
     /// last `apply` — picks the "playing here" vs "armed" VoiceOver wording.
     private var hasLiveFeeds = false
-    /// The armed predicate's last computed value (what the dot renders).
+    /// The armed predicate's last computed value. The dot draws gold only when
+    /// this is true AND the speaker is connected (`apply` passes
+    /// `isRouteArmed && isConnected`); the fader fill and VoiceOver read the
+    /// predicate alone.
     private var isRouteArmed = false {
         didSet { armedDotView.rowWash = rowWash }
     }
@@ -613,9 +616,11 @@ public final class DeviceRowView: NSView {
 
         // Connection halo ring: driven off `connectionState` ALONE (spec §3.2 /
         // §3.1 — the ring is the connection channel; teal is retired, so a live
-        // per-app redirect no longer tints the ring). A redirect-only device
-        // reads via its gold route-armed dot + sublabel + bus node, never the
-        // ring. `liveAppNames` still feeds the routing sublabel below.
+        // per-app redirect no longer tints the ring). A speaker fed only by a
+        // per-app route is reported connecting and then connected by the
+        // backend while its feed session is up, so it draws the same ring and
+        // dot as a member; only its rail node stays hollow, because it is not
+        // in the main output. `liveAppNames` still feeds the routing sublabel below.
         haloRingView.apply(device.connectionState)
 
         // Route-armed corner dot (spec §3.3) — the normative predicate,

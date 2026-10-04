@@ -235,6 +235,26 @@ import Testing
                 "a hidden member is hidden signal — the rail runs on to the card's dot")
     }
 
+    // Turns red if the collapsing card's dot appears while the member's centre is still inside the band.
+    @Test func aCollapsingCardKeepsAMemberWhoseCentreIsStillInTheBand() {
+        var input = expandedInput()
+        input.deviceSectionCollapsed = true
+        input.stops = [.init(y: 420, node: .member, halfHeight: 14),
+                       .init(y: 380, node: .member, halfHeight: 14),
+                       .init(y: 340, node: .member, halfHeight: 14),
+                       .init(y: 300, node: .nonMember, halfHeight: 14)]
+        input.listBand = 335...440
+        input.listHeaderDotY = 343
+        var plan = RailPlan.resolve(input)
+        #expect(plan.signalTerminusIndex == 2, "the member's centre (340) is in the band, so it ends the rail")
+        #expect(plan.headerDotYs.isEmpty && plan.lineEndY == nil, "no card dot yet")
+
+        input.listBand = 345...440
+        input.listHeaderDotY = 353
+        plan = RailPlan.resolve(input)
+        #expect(plan.terminusDotY == 353, "the centre has passed the floor, so the card dot appears")
+    }
+
     @Test func collapsingTheCardDotsAReachedSpeakerScrolledAboveTheList() throws {
         // The only reached speaker sits above the list's top edge (440); the
         // card's collapse hides it all the same, so the header gets its dot.
@@ -446,7 +466,7 @@ import Testing
     }
 
     /// S16/S18: a reached speaker (and a dotted header) scrolled below the
-    /// list's visible edge. The rail ends on the lowest FULLY visible on-spine
+    /// list's visible edge. The rail ends on the lowest FULLY visible reached
     /// row with no dot, and no ink — line or detour arc — lands below the
     /// list's bottom edge (y = 40), where the old code ran the line and arcs
     /// over whatever card sat below.
@@ -489,5 +509,16 @@ import Testing
         let plan = RailPlan.resolve(input)
         #expect(plan.signalTerminusIndex == 0, "the straddling member ends the rail")
         #expect(plan.lineEndY == nil, "no line runs to the top edge instead")
+    }
+
+    // Turns red if the scrolled rail ends inside a failed speaker's node again.
+    @Test func aScrolledRailNeverEndsOnAFailedNode() {
+        var input = expandedInput()
+        input.stops = [.init(y: 420, node: .member, halfHeight: 14),
+                       .init(y: 380, node: .failed, halfHeight: 14),
+                       .init(y: 250, node: .member, halfHeight: 14)]    // below the band 260...440
+        let plan = RailPlan.resolve(input)
+        #expect(plan.signalTerminusIndex == 0, "the lowest fully visible reached row ends the rail, not the failed node")
+        #expect(plan.lineEndY == nil, "no line runs on past the end node")
     }
 }

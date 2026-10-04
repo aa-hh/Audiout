@@ -706,7 +706,8 @@ public enum Tokens {
 
         /// **The membership rail's SPINE TONE** — always `gold` (owner's
         /// ruling, 2026-10-04). The system is always connected to at least Main
-        /// Audio, so an idle rail never occurs, and the old `ember` idle line
+        /// Audio, so an idle rail never occurs in the Mixer (the Groups editor shows an inactive
+        /// group's line in `ember` through `BusRailOverlayView.unarmedLineTone`), and the old `ember` idle line
         /// read as a connecting state that wasn't one. A DORMANT rail still
         /// takes `railDormant`; that choice lives in `BusRailOverlayView`.
         ///

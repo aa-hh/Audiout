@@ -162,7 +162,7 @@ extension SerializedSharedState {
     /// The whole matrix. For each accent-dial position and each appearance, the
     /// ring's stamped stroke must equal the rail's drawn ink and both must be
     /// `gold` — armed, muted, and for the RESTING ring as well as the connected
-    /// one. There is no idle line (owner's ruling, 2026-10-04): an `ember`
+    /// one. The Mixer has no idle line: an `ember`
     /// line read as a connecting state that wasn't one. The resting ring used
     /// to be stamped a flat grey `rim` while the wire curving into it was gold.
     @Test func ringStrokeMatchesRailInkAcrossEveryDialPositionAndAppearance() throws {

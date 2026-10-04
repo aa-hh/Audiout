@@ -7728,6 +7728,213 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
                              "a redirect-only device must receive a .level from its per-app stream")
     }
 
+    // MARK: - Per-app-only target connection state
+    //
+    // A speaker fed only by a per-app route is not a Selected Device, but its
+    // row draws the ring and dot from `connectionState`, so the per-app bind
+    // path reports that state while whole-system routing does not claim it.
+
+    private func connectionState(_ backend: NativeBackend, _ id: String) -> ConnectionState? {
+        backend.devices.first { $0.id == id }?.connectionState
+    }
+
+    /// Turns red if a per-app bind stops reporting `.connecting` while the op is in flight and `.connected` after it returns, or starts writing selection.
+    @Test func perAppOnlyBindReportsConnectingThenConnected() async {
+        let (backend, engine, discovery) = makeBackend(
+            injectedPerAppCapture: workingPerAppCapture(bundleIDs: ["com.foo"]))
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:C1", name: "Per-App Only")
+        await startAndDiscover(backend, engine, discovery, device)
+
+        let addHold = HoldPoint()
+        engine.onAddOutputHold = { id, _ in
+            if id == device.outputID { await addHold.hold() }
+        }
+        backend.updateAppRoutes([route("com.foo", name: "Foo", toDevice: device.id)])
+        await pollUntil { addHold.entered }
+        #expect(connectionState(backend, device.id) == .connecting,
+                "the leg is starting: the row breathes before the bind returns")
+
+        addHold.open()
+        await pollUntil { self.connectionState(backend, device.id) == .connected }
+        #expect(connectionState(backend, device.id) == .connected)
+        #expect(backend.devices.first { $0.id == device.id }?.isSelected == false,
+                "a per-app target never joins the output set")
+        #expect(backend.stateQueue.sync { backend.added.isEmpty },
+                "a per-app session is not a whole-system session")
+    }
+
+    /// Turns red if a thrown per-app bind stops reporting `.failed(.unknown)`.
+    @Test func perAppOnlyBindThatThrowsReportsFailed() async {
+        let (backend, engine, discovery) = makeBackend(
+            injectedPerAppCapture: workingPerAppCapture(bundleIDs: ["com.foo"]))
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:C2", name: "Refusing Receiver")
+        await startAndDiscover(backend, engine, discovery, device)
+        engine.addFailures = [device.outputID.rawValue]
+
+        backend.updateAppRoutes([route("com.foo", name: "Foo", toDevice: device.id)])
+        await pollUntil {
+            if case .failed = self.connectionState(backend, device.id) { return true }; return false
+        }
+        guard case .failed(let failure) = connectionState(backend, device.id) else {
+            Issue.record("a failed per-app bind must leave the row failed"); return
+        }
+        #expect(failure.cause == .unknown)
+    }
+
+    /// Turns red if a per-app bind refused for want of a clock stops reporting `.failed(.timingUnavailable)`, or if removing that route leaves the row `.failed` instead of `.off`.
+    @Test func perAppOnlyBindRefusedByThePTPGateReportsTimingUnavailable() async {
+        let activator = ScriptedPTPHelperActivator(
+            willWaitForClock: false, outcome: .needsApproval(.requiresApproval))
+        let (backend, engine, discovery) = makeBackend(
+            ptpHelperActivator: activator,
+            injectedPerAppCapture: workingPerAppCapture(bundleIDs: ["com.foo"]))
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:C3", name: "Clockless")
+        await startAndDiscover(backend, engine, discovery, device)
+
+        backend.updateAppRoutes([route("com.foo", name: "Foo", toDevice: device.id)])
+        await pollUntil {
+            if case .failed = self.connectionState(backend, device.id) { return true }; return false
+        }
+        guard case .failed(let failure) = connectionState(backend, device.id) else {
+            Issue.record("a clockless per-app bind must leave the row failed"); return
+        }
+        #expect(failure.cause == .timingUnavailable)
+
+        // The refusal dropped the device's stream slot; the route's removal must still reach it.
+        backend.updateAppRoutes([])
+        await pollUntil { self.connectionState(backend, device.id) == .off }
+        #expect(connectionState(backend, device.id) == .off,
+                "a removed route must clear the refused bind's failed ring")
+    }
+
+    /// Turns red if a bind that outlives its route writes `.connecting` or `.connected` back.
+    @Test func aBindThatOutlivesItsRouteLeavesTheRowOff() async {
+        let (backend, engine, discovery) = makeBackend(
+            injectedPerAppCapture: workingPerAppCapture(bundleIDs: ["com.foo"]))
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:C8", name: "Outlived")
+        await startAndDiscover(backend, engine, discovery, device)
+
+        let addHold = HoldPoint()
+        engine.onAddOutputHold = { id, _ in
+            if id == device.outputID { await addHold.hold() }
+        }
+        defer { addHold.open() }
+        backend.updateAppRoutes([route("com.foo", name: "Foo", toDevice: device.id)])
+        await pollUntil { addHold.entered }
+        backend.updateAppRoutes([])
+        await pollUntil { self.connectionState(backend, device.id) == .off }
+
+        addHold.open()
+        // The queued unbind runs after the bind returns, so its remove marks
+        // the moment any write from the bind's tail has already landed.
+        await pollUntil { engine.removed.contains(device.outputID) }
+        #expect(connectionState(backend, device.id) == .off,
+                "the route is gone: the late bind return must not light the row")
+    }
+
+    /// Turns red if removing the route stops returning a per-app-only target to `.off`, including from `.failed`.
+    @Test func removingThePerAppRouteReportsOffEvenFromFailed() async {
+        let (backend, engine, discovery) = makeBackend(
+            injectedPerAppCapture: workingPerAppCapture(bundleIDs: ["com.foo"]))
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:C4", name: "Route Removed")
+        await startAndDiscover(backend, engine, discovery, device)
+
+        backend.updateAppRoutes([route("com.foo", name: "Foo", toDevice: device.id)])
+        await pollUntil { self.connectionState(backend, device.id) == .connected }
+        backend.updateAppRoutes([])
+        await pollUntil { self.connectionState(backend, device.id) == .off }
+        #expect(connectionState(backend, device.id) == .off)
+
+        engine.addFailures = [device.outputID.rawValue]
+        backend.updateAppRoutes([route("com.foo", name: "Foo", toDevice: device.id)])
+        await pollUntil {
+            if case .failed = self.connectionState(backend, device.id) { return true }; return false
+        }
+        backend.updateAppRoutes([])
+        await pollUntil { self.connectionState(backend, device.id) == .off }
+        #expect(connectionState(backend, device.id) == .off,
+                "a removed route leaves nothing to fail: the failure story ends with it")
+    }
+
+    /// Turns red if the per-app path writes connection state for a device whole-system routing has claimed.
+    @Test func selectingARoutedDeviceLeavesItsStateToTheWholeSystemPath() async {
+        let (backend, engine, discovery) = makeBackend(
+            injectedPerAppCapture: workingPerAppCapture(bundleIDs: ["com.foo"]))
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:C5", name: "Contested")
+        await startAndDiscover(backend, engine, discovery, device)
+        let (routedApps, sub) = subscribeRoutedApps(backend, deviceID: device.id)
+        defer { sub.cancel() }
+
+        backend.updateAppRoutes([route("com.foo", name: "Foo", toDevice: device.id)])
+        await pollUntil { self.connectionState(backend, device.id) == .connected }
+
+        backend.setOutputSet([device.id])
+        await pollUntil { onAWholeSystemStream(engine, device.outputID) }
+        await pollUntil { routedApps.last?.isEmpty == true }
+        await pollUntil { self.connectionState(backend, device.id) == .connected }
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        #expect(connectionState(backend, device.id) == .connected,
+                "the demoted route's unbind must not turn a whole-system speaker off")
+        #expect(backend.devices.first { $0.id == device.id }?.isSelected == true)
+    }
+
+    /// Turns red if a route dropped by the speaker's own failure writes `.off` over the engine's `.failed`.
+    @Test func perAppSessionFailingOutOfBandReportsFailed() async {
+        let (backend, engine, discovery) = makeBackend(
+            injectedPerAppCapture: workingPerAppCapture(bundleIDs: ["com.foo", "com.bar"]))
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:C6", name: "Dropped")
+        await startAndDiscover(backend, engine, discovery, device)
+
+        backend.updateAppRoutes([route("com.foo", name: "Foo", toDevice: device.id)])
+        await pollUntil { self.connectionState(backend, device.id) == .connected }
+        engine.pushState(device.outputID, .failed)
+        await pollUntil { engine.removed.contains(device.outputID) }
+        let dropped = ConnectionState.failed(
+            ConnectionFailure(cause: .droppedMidStream, detail: "engine state: failed"))
+        let row = backend.devices.first { $0.id == device.id }
+        #expect(row?.connectionState == dropped,
+                "the route the failure dropped must not write `.off` over the engine's cause")
+        #expect(row?.isAvailable == false)
+        #expect(row?.isSelected == false)
+        #expect(backend.stateQueue.sync { backend.routedAppNames[device.id] ?? [] }.isEmpty,
+                "a dropped route leaves no routed apps on the row")
+
+        // The user removing the route later still leaves `.failed`: the speaker is unavailable.
+        backend.updateAppRoutes([])
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        #expect(connectionState(backend, device.id) == dropped,
+                "removing a route the speaker's failure already dropped must keep the failure")
+
+        // A session that never connected reads `.unknown`.
+        let fresh = ap2Device(id: "AA:BB:CC:DD:EE:C7", name: "Never Connected")
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == fresh.id } else { return false } }
+        } after: { discovery.fire(.appeared(fresh)) }
+        await pollUntil { engine.fedIDs.contains(fresh.outputID) }
+        let addHold = HoldPoint()
+        engine.onAddOutputHold = { id, _ in
+            if id == fresh.outputID { await addHold.hold() }
+        }
+        defer { addHold.open() }
+        backend.updateAppRoutes([route("com.bar", name: "Bar", toDevice: fresh.id)])
+        await pollUntil { addHold.entered }
+        engine.pushState(fresh.outputID, .failed)
+        await pollUntil {
+            if case .failed = self.connectionState(backend, fresh.id) { return true }; return false
+        }
+        guard case .failed(let neverUp) = connectionState(backend, fresh.id) else {
+            Issue.record("an engine failure on a starting per-app session must fail the row"); return
+        }
+        #expect(neverUp.cause == .unknown)
+    }
+
     /// A group route names a SET of speakers. The device meter's source
     /// contribution fans out from the app's PRE-volume level; if that fan-out
     /// matches `.device` routes only, a group-routed app plays out of every

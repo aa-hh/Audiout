@@ -617,10 +617,10 @@ func snapshotConnectionStates(appearanceName: NSAppearance.Name, label: String, 
 /// label. Two app routes are seeded so the two rungs are visible side by
 /// side in one panel:
 ///   - "office": redirected to Music AND given a live `.routedApps` event ⇒
-///     its row shows the CONFIRMED label ("Music") — and (S2, spec §3.3) its
-///     GOLD route-armed corner dot, lit via the `liveAppNames` branch on an
-///     UNCHECKED row (redirect-only: hollow bus node + gold dot + bright feed
-///     token).
+///     its row shows the CONFIRMED label ("Music"): the mock marks a device
+///     with a live `.routedApps` feed connected, so the unchecked row shows
+///     the connected ring and the gold dot (redirect-only: hollow bus node,
+///     gold dot, bright feed token).
 ///   - "homepod-bed": redirected to Safari but given NO live event ⇒ its row
 ///     falls back to the INTENT-based label ("Safari"), demonstrating the
 ///     "routed but not yet confirmed streaming" fallback case.

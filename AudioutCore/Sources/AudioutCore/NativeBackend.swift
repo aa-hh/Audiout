@@ -5128,6 +5128,16 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                                        "cause": "\(cause)",
                                        "wasStreaming": wasStreaming ? "true" : "false",
                                    ])
+                } else if self.streamBindings[id] != nil, !self.isWholeSystemOperationallyClaimedLocked(id) {
+                    // A per-app-only session never joins `added`, so whether it
+                    // was streaming reads off the state the bind path reported.
+                    let cause: ConnectionFailure.Cause =
+                        state == .passwordRequired
+                            ? .authRequired
+                            : (device.connectionState == .connected ? .droppedMidStream : .unknown)
+                    device.connectionState = .failed(
+                        ConnectionFailure(cause: cause, detail: "engine state: \(state)")
+                    )
                 }
             case .stopped:
                 device.isSelected = false

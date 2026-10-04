@@ -14,8 +14,9 @@ import AppKit
 /// non-interactive (`hitTest` returns `nil`).
 ///
 /// **One wire, one tone.** The rail is a single stroked line — no channel, no
-/// pad, nothing under it: gold (owner's ruling, 2026-10-04 — there is no idle
-/// line), or one quiet tone end to end while it is dormant. It runs from the origin hook
+/// pad, nothing under it: gold, except where a host sets `unarmedLineTone` (the
+/// Groups editor, `ember` for an inactive group), or one quiet tone end to end
+/// while it is dormant. It runs from the origin hook
 /// to its end, detouring around every off-spine node it passes on the way. Rows
 /// below the end draw their node disc and no line — a FAILED room is one of
 /// them, never reached. With nothing to reach there is no wire and no hook at
@@ -942,7 +943,7 @@ public struct RailPlan: Equatable {
     /// Index into `stops` of the node the line ends on, when it ends on a node:
     /// the lowest node the wire REACHES (``BusRailOverlayView/railReaches(_:)``),
     /// or, when a reached speaker is scrolled below the list's edge, the lowest
-    /// fully visible on-spine row. `nil` when the line ends at `lineEndY`.
+    /// fully visible reached row. `nil` when the line ends at `lineEndY`.
     public var signalTerminusIndex: Int?
     /// The y the line runs down to when it ends where there is no node: the
     /// lowest dotted header, or the list's edge when no visible node can end
@@ -1055,7 +1056,7 @@ public struct RailPlan: Equatable {
     /// ends at the lower of the lowest visible reached node and the lowest dot,
     /// passing straight through any dot above that. When a reached speaker or a
     /// folded header lies below the list's visible edge and the card is NOT
-    /// collapsing, the rail ends on the lowest fully visible on-spine row
+    /// collapsing, the rail ends on the lowest fully visible reached row
     /// instead — its own node is the end, no dot. Nothing is drawn outside the
     /// list's band.
     ///
@@ -1097,12 +1098,17 @@ public struct RailPlan: Equatable {
             return stop.y - stop.halfHeight >= band.lowerBound - tolerance
                 && stop.y + stop.halfHeight <= band.upperBound + tolerance
         }
-        // Something reached lies below the list's visible bottom edge.
+        // Something reached lies below the list's visible bottom edge. A
+        // collapsing card hides a row once its centre passes the floor (the
+        // complement of the `stops` filter); a scrolled list counts a row the
+        // edge cuts.
         let reachedBelowEdge: Bool = {
             guard let band else { return false }
             return input.stops.contains {
                 BusRailOverlayView.railReaches($0.node)
-                    && $0.y - $0.halfHeight < band.lowerBound - tolerance
+                    && (input.deviceSectionCollapsed
+                        ? $0.y <= band.lowerBound
+                        : $0.y - $0.halfHeight < band.lowerBound - tolerance)
             } || input.folds.contains { $0.headerSpan.lowerBound < band.lowerBound - tolerance }
         }()
         // Something reached lies above the list's visible top edge, scrolled up
@@ -1129,7 +1135,7 @@ public struct RailPlan: Equatable {
         dots.sort(by: >)
 
         // Which nodes may end the rail. Scrolled (not collapsing) with a reached
-        // speaker below the edge: the lowest fully visible on-spine row, since
+        // speaker below the edge: the lowest fully visible reached row, since
         // the line runs on past the edge. Otherwise the lowest visible reached
         // node — visible meaning its centre is in the band, as every entry of
         // `stops` already is, so a reached row the top edge cuts through still
@@ -1137,7 +1143,7 @@ public struct RailPlan: Equatable {
         let scrolledPast = reachedBelowEdge && !cardCollapsing
         let endStop = stops.lastIndex { stop in
             scrolledPast
-                ? fullyVisible(stop) && BusRailOverlayView.onSpine(stop.node)
+                ? fullyVisible(stop) && BusRailOverlayView.railReaches(stop.node)
                 : BusRailOverlayView.railReaches(stop.node)
         }
 

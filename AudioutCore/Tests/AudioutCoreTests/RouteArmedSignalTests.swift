@@ -168,10 +168,32 @@ import AudioutCore
         #expect(!off.test_dotIsShown, "no ring, no dot")
     }
 
+    /// Turns red if a per-app-fed connected speaker loses its gold dot, a fed-then-silent one loses its hollow rim dot, or a dot survives the ring going.
+    @Test func perAppFedConnectedSpeakerDrawsRingAndGoldDot() {
+        let row = DeviceRowView(device: makeDevice())
+        row.apply(makeDevice(), selected: false, liveAppNames: ["Spotify"])
+        #expect(row.test_dotIsShown, "a fed connected speaker holds the dot")
+        assertSameHue(row.test_dotFillColor, Tokens.Color.gold, "the feed lights the dot gold")
+        assertSameHue(row.test_ringStrokeColor, Tokens.Color.rim, "the ring is the connected ring")
+        #expect(row.test_accessibilityValue?.contains("playing here") == true, "VoiceOver says it plays here")
+
+        row.apply(makeDevice(), selected: false, liveAppNames: [])
+        #expect(row.test_dotIsShown, "fed then silent keeps the ring's dot")
+        #expect(row.test_dotFillColor == nil, "the dot is hollow again")
+        assertSameHue(row.test_dotStrokeColor, Tokens.Color.rim, "the hollow dot wears the rim token")
+
+        let off = DeviceRowView(device: makeDevice(connectionState: .off))
+        off.apply(makeDevice(connectionState: .off), selected: false, liveAppNames: [])
+        #expect(!off.test_dotIsShown, "no ring, no dot")
+    }
+
     /// The dot's cut-out carries the row's gold wash whenever the row paints
     /// it, including a connecting speaker with a per-app feed, whose dot stays
-    /// hollow ember while the row washes gold.
-    @Test func connectingRowWithALiveFeedWashesTheDotsCutOut() {
+    /// hollow ember while the row washes gold; pointer-over a connected row
+    /// that is not playing paints the neutral hover wash, and the cut-out
+    /// wears that same wash, not a plain panel disc.
+    /// Turns red if the cut-out stops taking `rowWash`, or the connecting dot turns gold.
+    @Test func dotsCutOutTakesTheLiveWashOnAConnectingFeedAndTheHoverWashOnAnIdleRow() {
         let row = DeviceRowView(device: makeDevice(connectionState: .connecting))
         row.apply(makeDevice(connectionState: .connecting), selected: true, liveAppNames: ["Spotify"])
         #expect(row.test_isShowingLiveWash, "a per-app feed washes the row")
@@ -182,23 +204,19 @@ import AudioutCore
 
         row.apply(makeDevice(connectionState: .connecting), selected: true, liveAppNames: [])
         #expect(row.armedDotView.test_cutoutWashColor == nil, "no wash on the row, none in the cut-out")
-    }
 
-    /// Pointer-over a connected row that is not playing paints the neutral
-    /// hover wash; the cut-out wears that same wash, not a plain panel disc.
-    @Test func hoveringANonPlayingRowWashesTheDotsCutOut() {
-        let row = DeviceRowView(device: makeDevice(isMuted: true))
-        row.apply(makeDevice(isMuted: true), selected: true)
-        #expect(!row.test_isShowingLiveWash, "a muted row does not play")
-        row.test_setHovered(true)
+        let hoverRow = DeviceRowView(device: makeDevice(isMuted: true))
+        hoverRow.apply(makeDevice(isMuted: true), selected: true)
+        #expect(!hoverRow.test_isShowingLiveWash, "a muted row does not play")
+        hoverRow.test_setHovered(true)
         let hover = Tokens.Color.engagedChrome.withAlphaComponent(PopoverColumnGrid.rowHoverWashAlpha)
-        assertSameHue(row.armedDotView.test_cutoutWashColor, hover, "the cut-out matches the hovered row")
-        let cutAlpha = row.armedDotView.test_cutoutWashColor?.usingColorSpace(.sRGB)?.alphaComponent ?? -1
+        assertSameHue(hoverRow.armedDotView.test_cutoutWashColor, hover, "the cut-out matches the hovered row")
+        let cutAlpha = hoverRow.armedDotView.test_cutoutWashColor?.usingColorSpace(.sRGB)?.alphaComponent ?? -1
         let hoverAlpha = hover.usingColorSpace(.sRGB)?.alphaComponent ?? -2
         #expect(abs(cutAlpha - hoverAlpha) < 0.01, "at the hover wash's strength")
 
-        row.test_setHovered(false)
-        #expect(row.armedDotView.test_cutoutWashColor == nil, "the pointer left, the cut-out is plain again")
+        hoverRow.test_setHovered(false)
+        #expect(hoverRow.armedDotView.test_cutoutWashColor == nil, "the pointer left, the cut-out is plain again")
     }
 
     /// Turns red if a connected speaker that is in the mix but not playing

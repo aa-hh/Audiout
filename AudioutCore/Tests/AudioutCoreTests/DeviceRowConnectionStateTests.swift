@@ -149,8 +149,8 @@ import AudioutCore
         #expect(f?.redComponent != c?.redComponent, "failed red ≠ the connected ring")
     }
 
+    /// Turns red if any ring form goes back to its own stroke width.
     @Test func everyRingFormStrokesAtTheOneSharedWidth() {
-        // Owner's ruling 2026-10-03: one ring thickness; weight never carries state.
         for state: ConnectionState in [.connecting, .connected, .failed(.init(cause: .notResponding))] {
             let row = DeviceRowView(device: makeDevice(connectionState: state))
             #expect(row.test_ringLineWidth == PopoverColumnGrid.ringStrokeWidth, "\(state)")

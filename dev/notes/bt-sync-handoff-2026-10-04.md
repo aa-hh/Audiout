@@ -57,59 +57,59 @@ Two live product bugs found, both now fixed in #250 but NOT live-tested:
 Also seen: QuickTime's player rebuild at a loop boundary escapes the capture
 aggregate; the driver uses afplay for that reason.
 
-## Review debt (found by the Guard 10 reviewers, dropped by the scorer, not fixed)
+## Review debt: what happened to it (2026-10-04, 00:30 to 04:30)
 
-Guard 10 ran four reviewer passes on #239 and #240. Fifteen findings came back;
-the Haiku scorer gave every one 65 to 75 and the gate drops anything under 80,
-so none blocked and none were fixed. Three matter:
+PR #256 (`claude/btfix-1-seek-margin`) MERGED at ef56d711 via the merge queue.
+It took eleven Guard 10 rounds, which is why the root `AGENTS.md` now says a
+change inside a Guard 10 risk path is scoped before it is built. What landed in
+`BTDeviceSink.realignToDevicePulls`:
 
-1. **Fix 1, forward re-alignment has no safety margin.**
-   `AudioutCore/Sources/AudioutCore/BTSyncedSink.swift`,
-   `realignToDevicePulls(cycleStartMonotonicNanos:frameCount:)` (near line
-   1449) calls `delayLine.shift(byFrames: +n)` with no clamp, while
-   `applyTrimDelta(ms:)` (near line 1253) stops every forward seek
-   `seekSafetyMarginMs` (100 ms) short of the write pointer because reaching it
-   empties the ring. After a stall just under
-   `BTClockStability.lostBaselineThresholdMs` the re-alignment can ask for up to
-   ~1 s forward. Two reviewers found it independently. IN PROGRESS on branch
-   `claude/btfix-1-seek-margin` (worktree `.claude/worktrees/btfix-1-seek-margin`,
-   forked from 997090ea): clamp the positive branch to room minus margin with a
-   consumer-side room helper on `BTDelayLine`, one red-then-green test in
-   `BTSinkClockStormTests.swift`. Check that branch's state before starting.
-2. **Fix 1 keeps re-aligning on an empty ring.** Same function. With the ring
-   empty (music paused, capture tap asleep, which the keep-alive path treats as
-   normal) a device pulling 20 ms or more ahead of wall time seeks backward into
-   played history and replays it during the silence; an under-pull's forward
-   shift applies 0 frames, is never booked, and later skips that much of the
-   resumed audio. Proposed fix: when the ring holds no frames, re-base
-   (`pullOriginNanos = t`, `framesPulledSinceOrigin = frameCount`,
-   `pullRealignedNanos = 0`) instead of shifting; add a test that drains the ring
-   under an over-pulling device and asserts no non-zero frame comes out. Related:
-   a render cycle turned away by `stateLock.try()` drains nothing but is booked
-   as pulled (near line 1235); take it back out in the lock-fail branch.
-   Block B's 90 s pause showed neither symptom on the Moves.
-3. **Fix 2 contradicts the folder rule and leaves stale links.**
-   `AudioutCore/Sources/AudioutCore/AGENTS.md` line 17 says "A Bluetooth trim is
-   a ring seek and must never clear session state", but
-   `reanchorIfTrimClamped()` (BTSyncedSink.swift near line 1120) rebuilds on a
-   clamped commit, and a negative trim that moves the Bluetooth-only floor
-   re-anchors every sink (`NativeBackend+Bluetooth.swift` near line 1340).
-   Amend the rule: a live trim is a seek; a COMMITTED trim may re-anchor when its
-   seek was clamped or when it moves the floor, with the reason in one clause.
-   Doc links to ``btOnlyReferenceMs(latencies:uids:)`` at `NativeBackend.swift`
-   lines 624 and 636 and `NativeBackend+Bluetooth.swift` line 1167 point at a
-   signature that is now `latencies:trims:uids:`; line 854 still says the floor
-   is "slowest measured latency + headroom" (add the negative trim); the
-   `setBTSyncTrim` doc comment (near line 1331) still promises "no silence" on a
-   committed trim. Test `theReplayedPullsAreTheLoggedJumps` in
-   `BTSinkClockStormTests.swift` names no defect; fold it into the storm test
-   as a precondition or delete it.
+- a forward re-alignment is clamped like a trim seek, margin = min(100 ms, the
+  ring's steady holding), where the holding is a lock-free word
+  (`steadyRoomFramesPtr`) set at release from the ring's room less one render
+  cycle, moved by every requested trim, cleared with the session;
+- when the move is clamped and the cycle followed a device gap of at least the
+  20 ms threshold beyond the cycle's own length (a joint stall), the ring is
+  cut to its release holding and the measurement restarts; any other clamped
+  shortfall takes what fits, books it, and stays pending for a later cycle;
+- tests in `BTSinkClockStormTests.swift`: storm rows at 60/100/400 ms, late
+  chunks at 752/1680 frames (512-frame cycle) and 2400 (1024), a trim after
+  release, the 900 ms joint stall at 100 and 400 ms; the storm fixture drains
+  `graphQueue` before each render (a telemetry block holding `stateLock` made
+  one cycle silent at random).
 
-Product call the deep reviewer raised, not a bug: with fix 2, every committed
-negative trim on the floor-setting speaker rebuilds every Bluetooth sink and
-re-anchors the Mac's own sink, a group-wide gap of about the full delay
-(~0.6 s) per stepper click. Only the owner's ears can say whether that is
-acceptable. Owner (Alec) has not ruled.
+Still open, in GitHub issue #261 (both scored at or above 75 and were
+overridden by the owner to land the rest): a sub-second joint stall that still
+fits the room shifts the full move and leaves the speaker early until the next
+re-anchor (take the gap branch on `excess` alone); a forward trim publishes its
+holding before posting its shift, so a re-alignment in that window over-cuts
+(post the shift first, read the holding word before the room). Fix 2's doc
+debt (the AGENTS.md trim rule and the three stale `btOnlyReferenceMs` links)
+is untouched; the folder `AGENTS.md` is over budget and Guard 12 now checks it,
+so the rule change needs a trim elsewhere in the same file.
+
+Gate defects seen: passes have no memory across rounds (a declined item came
+back as a MEDIUM three rounds later; the rules pass demanded removing an
+AGENTS.md clause that the comments pass later demanded adding); the Haiku
+scorer, recalibrated at 8ef9797c (keep line 75, evidence sentence, examples),
+kept 9 of 12 findings afterwards. A per-branch review ledger fed into every
+rerun is the proposed fix (#261). Guard 4's name mapping misses
+`BTSinkClockStormTests` for `BTSyncedSink.swift` (a commit there ran 2 tests).
+
+## Landing a branch now (main is GitHub-protected since 02:36, PR #255)
+
+`git push origin main` is REJECTED by the ruleset "Main via PR checks". The
+local hooks still run on `git merge --no-ff` in the main checkout, but the
+result cannot be pushed; do not merge locally any more. Flow: push the branch;
+the `tests` workflow runs (three macOS suite shards plus AirPlayEngine, about
+20 to 40 minutes, no path filter, so docs PRs pay it too); after the local
+Guard 10 run, post the `review` commit status on the PR head by hand:
+
+    gh api repos/aa-hh/Audiout/statuses/<head sha> -f context=review -f state=success -f description="<what the review found>"
+
+then `gh pr merge <n> --merge --auto`. The merge queue's `review-relay` job
+copies the status onto the queue commit. Afterwards `git fetch` and
+`git merge --ff-only origin/main` in the main checkout.
 
 ## Guard 10 flow that worked (merging onto main)
 
@@ -159,8 +159,8 @@ before the gate means anything.
 
 ## Still owed, in order
 
-1. Finish `claude/btfix-1-seek-margin` (review debt 1), fold in 2 and 3, Guard 10,
-   ask Alec for the merge go.
+1. Issue #261: the two open re-alignment findings, as ONE scoped round (the
+   scoper's case table is in the PR 256 conversation), plus fix 2's doc debt.
 2. Live test of #250: build Audiout Dev from main, repeat Block A's link drop
    (`--smoke` reproduces it in two minutes) and watch for `bt_sink_dead` /
    `bt_sink_health`; also quit and relaunch with reconnect-at-launch on.

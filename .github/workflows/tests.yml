@@ -36,7 +36,7 @@ env:
 jobs:
   suite:
     runs-on: macos-26
-    timeout-minutes: 30
+    timeout-minutes: 60
     name: suite (shard ${{ matrix.shard }})
     strategy:
       fail-fast: false
@@ -92,7 +92,9 @@ jobs:
 
       # One saver, so three shards do not race on one key.
       - name: Save SwiftPM build caches
-        if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && strategy.job-index == 0
+        # !cancelled(): the build products are valid whether or not a test
+        # failed, and a cache that saves only on green never warms up.
+        if: ${{ !cancelled() && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && strategy.job-index == 0 }}
         uses: actions/cache/save@v4
         with:
           path: |

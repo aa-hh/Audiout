@@ -20,7 +20,7 @@
 # Config (git config, NOT a committed file or a shell export — see the
 # audiout.remoteHost note in AudioutCore/AGENTS.md for why):
 #   git config --local audiout.remoteHost 'user@host.local'
-#   git config --local audiout.testPrefer permits # local (default) | remote | cpu | permits
+#   git config --local audiout.testPrefer remote  # local (default) | remote | cpu | permits
 #   git config --local audiout.testRemoteBias 40  # cpu mode only
 #
 # What each testPrefer value means:

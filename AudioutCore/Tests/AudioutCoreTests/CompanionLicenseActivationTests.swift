@@ -64,12 +64,12 @@ import Testing
     @Test func aRevokedAnswerRefusesWithTheSharedStatusLineAndLeavesTheKeyStored() async {
         let settings = AppSettings(defaults: defaults, licenseServerURL: Self.server)
         let transport = Transport()
-        transport.stub(status: 200, json: #"{"status":"revoked"}"#)
+        transport.stub(status: 200, json: #"{"status":"revoked","reason":"refund"}"#)
 
         let result = await activate(settings, Self.key, transport)
 
         #expect(result == CompanionServer.CommandResult(
-            applied: false, refusalReason: LicenseCopy.statusLine(for: .revoked)))
+            applied: false, refusalReason: LicenseCopy.statusLine(for: .revoked, reason: "refund")))
         #expect(settings.licenseKey == Self.key, "the sheet and the gate both keep a rejected key on file")
     }
 

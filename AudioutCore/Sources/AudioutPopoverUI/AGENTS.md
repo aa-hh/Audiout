@@ -29,6 +29,8 @@ folder renders; routing arithmetic lives in Core.
 - The Mixer carries an equalizer DOOR (the row button beside mute, and the row menu) and one mark (magenta border when the curve is not flat). No editor, no curve, no tone control on the Mixer (2026-08-22, amended 2026-09-03).
 - A never-aligned Bluetooth row's chip IS the wizard's door; a measured one opens the drawer.
 - A first-join alignment note is session state: ✕ hides it, nothing is written down.
+- The note may carry one underlined text action left of its button, both centred to the note.
+- Under the limit the note is session state (`limitNoteRaised`) and a wizard door shows it, not the wizard; the thank-you card's shown flag is written on Close or hide, never on raise.
 - The header strip is BORDERED `NSToolbarItem`s — every tab and Pin alike — and the
   current screen is AppKit's own `selectedItemIdentifier`, never an authored fill
   (2026-09-05, replacing the custom-drawn capsule that stood here). Two defects killed

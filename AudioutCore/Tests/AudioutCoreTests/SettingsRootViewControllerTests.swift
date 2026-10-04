@@ -191,7 +191,7 @@ import AudioutSharedUI
                                                     settings: settings)
         general.licenseTransport = transport.closure
 
-        #expect(general.test_licenseStatusText == "Unregistered. Audiout keeps working for this session, and asks for a license key the next time it opens.")
+        #expect(general.test_licenseStatusText == "Unregistered. Audiout keeps working, on one speaker at a time, until it has a license key.")
         #expect(general.test_enterLicenseButtonTitle == "Enter license…")
 
         transport.replies(#"{"status":"active"}"#)
@@ -200,10 +200,22 @@ import AudioutSharedUI
         #expect(general.test_licenseStatusText == "Registered. Thank you for supporting Audiout.")
         #expect(general.test_enterLicenseButtonTitle == "Change…")
 
-        transport.replies(#"{"status":"revoked"}"#)
-        general.test_setLicenseKey("AUDT-AAAAA-BBBBB-CCCCC-DDDDD")
-        await drainMainQueue()
-        #expect(general.test_licenseStatusText == "This key was refunded or revoked. Buy a new one to keep using Audiout.")
+        // A revoked answer limits the install to one speaker, and the line
+        // names the server's reason; a reason the app does not know, or none,
+        // reads as a plain revocation.
+        let revokedLines: [(reason: String?, line: String)] = [
+            ("trial_expired", "Your trial has ended. Audiout plays on one speaker at a time until you buy."),
+            ("refund", "This key was refunded, so Audiout plays on one speaker at a time."),
+            ("chargeback", "This key’s payment was reversed, so Audiout plays on one speaker at a time."),
+            ("manual", "This key was revoked, so Audiout plays on one speaker at a time."),
+            (nil, "This key was revoked, so Audiout plays on one speaker at a time."),
+        ]
+        for (reason, line) in revokedLines {
+            transport.replies(reason.map { #"{"status":"revoked","reason":"\#($0)"}"# } ?? #"{"status":"revoked"}"#)
+            general.test_setLicenseKey("AUDT-AAAAA-BBBBB-CCCCC-DDDDD")
+            await drainMainQueue()
+            #expect(general.test_licenseStatusText == line, Comment(rawValue: "reason \(reason ?? "nil")"))
+        }
 
         transport.replies(#"{"status":"unknown"}"#)
         general.test_setLicenseKey("AUDT-AAAAA-BBBBB-CCCCC-DDDDD")
@@ -263,6 +275,42 @@ import AudioutSharedUI
         general.test_setLicenseKey("AUDT-AAAAA-BBBBB-CCCCC-DDDDD")
         await drainMainQueue()
         #expect(general.test_buyButtonIsVisible, "a key the server won’t honour is worth re-buying")
+    }
+
+    /// Red if a trial that ran out with an active verdict cached (offline, or
+    /// before the launch check answers) hid Buy and called the key active
+    /// while the app plays on one speaker.
+    @Test func anExpiredTrialWithACachedActiveVerdictShowsBuyAndTheTrialEndedLine() {
+        let settings = makePaidBuildSettings()
+        settings.licenseKey = "AUDT-AAAAA-BBBBB-CCCCC-DDDDD"
+        settings.licenseStatus = .active
+        settings.trialStartedAt = Date().addingTimeInterval(-20 * 86_400)
+        settings.trialExpiresAt = Date().addingTimeInterval(-6 * 86_400)
+        let general = GeneralSettingsViewController(loginItem: FakeLoginItem(enabled: false),
+                                                    settings: settings)
+        #expect(general.test_buyButtonIsVisible)
+        #expect(general.test_licenseStatusText
+                == "Your trial has ended. Audiout plays on one speaker at a time until you buy.")
+    }
+
+    /// Red if Settings told a limited install something untrue: an ended
+    /// trial, which the server answers with `revoked` and reason
+    /// `trial_expired`, read "refunded or revoked", or a refused key stopped
+    /// naming the server's reason the way the popover note does.
+    @Test(arguments: [
+        ("trial_expired", "Your trial has ended. Audiout plays on one speaker at a time until you buy."),
+        ("refund", "This key was refunded, so Audiout plays on one speaker at a time."),
+        ("chargeback", "This key\u{2019}s payment was reversed, so Audiout plays on one speaker at a time."),
+        (nil, "This key was revoked, so Audiout plays on one speaker at a time."),
+    ] as [(String?, String)])
+    func aRevokedKeyNamesTheServersReason(reason: String?, expected: String) {
+        let settings = makePaidBuildSettings()
+        settings.licenseKey = "AUDT-AAAAA-BBBBB-CCCCC-DDDDD"
+        settings.licenseStatus = .revoked
+        settings.licenseReason = reason
+        let general = GeneralSettingsViewController(loginItem: FakeLoginItem(enabled: false),
+                                                    settings: settings)
+        #expect(general.test_licenseStatusText == expected)
     }
 
     /// The sheet is the ONE commit path, and its edges hold: Cancel discards
@@ -412,19 +460,56 @@ import AudioutSharedUI
                 "the in-flight key stands — the second link never committed")
     }
 
-    /// A paying customer opening Change… is not a sales prospect.
-    @Test func aRegisteredSheetDoesNotOfferToSell() async {
+    /// The owner's 2026-09-26 screenshot: a revoked key shows the longest
+    /// verdict sentence AND Remove, and the old one-row strip of four buttons
+    /// squeezed Register to "Re" (which button AppKit squeezes is arbitrary
+    /// when they tie, so every button is checked). Putting a third button back
+    /// in the Cancel/Register row turns this red; so does a result line that
+    /// stops wrapping and widens the sheet.
+    @Test func revokedKeySheetNeverClipsRegister() async throws {
         let transport = StubTransport()
         let general = GeneralSettingsViewController(loginItem: FakeLoginItem(enabled: false),
                                                     settings: makePaidBuildSettings())
         general.licenseTransport = transport.closure
-
-        transport.replies(#"{"status":"active"}"#)
-        general.test_setLicenseKey("AUDT-AAAAA-BBBBB-CCCCC-DDDDD")
-        await drainMainQueue()
+        transport.replies(#"{"status":"revoked"}"#)
 
         general.test_tapEnterLicense()
-        #expect(general.test_licenseSheet?.test_buyIsVisible == false)
+        let sheet = try #require(general.test_licenseSheet)
+        sheet.test_setKeyText("AUDT-AAAAA-BBBBB-CCCCC-DDDDD")
+        sheet.test_tapRegister()
+        await drainMainQueue()
+        #expect(sheet.test_removeIsVisible)
+        #expect(sheet.test_resultText == LicenseCopy.statusLine(for: .revoked, reason: nil))
+
+        let container = sheet.view
+        container.layoutSubtreeIfNeeded()
+        let fitting = container.fittingSize
+        #expect(abs(fitting.width - 360) <= 1,
+                Comment(rawValue: "the sheet must stay 320pt of content plus 20pt insets, got \(fitting.width)"))
+        container.setFrameSize(fitting)
+        container.layoutSubtreeIfNeeded()
+
+        let register = sheet.test_registerButton
+        #expect(register.frame.width >= register.intrinsicContentSize.width - 0.5,
+                Comment(rawValue: "Register is \(register.frame.width)pt wide, needs \(register.intrinsicContentSize.width)"))
+        let inContainer = register.convert(register.bounds, to: container)
+        #expect(container.bounds.insetBy(dx: -0.5, dy: -0.5).contains(inContainer),
+                Comment(rawValue: "Register at \(inContainer) falls outside the sheet's \(container.bounds)"))
+
+        func visibleButtons(in view: NSView) -> [NSButton] {
+            view.subviews.filter { !$0.isHidden }.flatMap { sub in
+                (sub as? NSButton).map { [$0] } ?? visibleButtons(in: sub)
+            }
+        }
+        let buttons = visibleButtons(in: container)
+        #expect(buttons.count == 3, "Remove, Cancel, Register")
+        for button in buttons {
+            #expect(button.frame.width >= button.intrinsicContentSize.width - 0.5,
+                    Comment(rawValue: "\(button.title) is \(button.frame.width)pt wide, needs \(button.intrinsicContentSize.width)"))
+        }
+        let rows = Dictionary(grouping: buttons) { Int(($0.convert($0.bounds, to: container).midY).rounded()) }
+        #expect(rows.values.allSatisfy { $0.count <= 2 },
+                Comment(rawValue: "no row may hold more than two buttons: \(rows.values.map { $0.map(\.title) })"))
     }
 
     /// `SMAppService.register()` succeeds into `.requiresApproval` without
@@ -667,5 +752,53 @@ import AudioutSharedUI
         appearance.test_selectTheme(.dark)
         #expect(appearance.test_isTileAccessibilitySelected(.dark))
         #expect(!appearance.test_isTileAccessibilitySelected(.light))
+    }
+}
+
+/// `license:enter_sheet_opened` says which door opened the sheet. Nested under
+/// `SerializedSharedState` because `Analytics.install` mutates process-global
+/// state — the rule in `SerializedSharedStateSuite.swift`.
+extension SerializedSharedState {
+    @MainActor
+    @Suite struct SettingsRootViewControllerTests_LicenseSheetSource {
+
+        private final class StillLoginItem: LoginItemManaging {
+            var isEnabled: Bool { false }
+            func setEnabled(_ newValue: Bool) throws {}
+        }
+
+        private final class Captured: @unchecked Sendable {
+            private let lock = NSLock()
+            private var items: [(String, [String: String])] = []
+            func append(_ name: String, _ props: [String: String]) {
+                lock.withLock { items.append((name, props)) }
+            }
+            func properties(of event: String) -> [[String: String]] {
+                lock.withLock { items.filter { $0.0 == event }.map(\.1) }
+            }
+        }
+
+        private let isolation = TestIsolation(owner: "SettingsRootViewControllerTests_LicenseSheetSource")
+
+        /// Red if the Settings button and the Mixer note's "I have a key" stop
+        /// being told apart, so the funnel cannot say which door sells keys.
+        @Test func theSheetReportsWhichDoorOpenedIt() {
+            let captured = Captured()
+            Analytics.install(Analytics.Sink(capture: { captured.append($0, $1) },
+                                             captureError: { _, _ in },
+                                             consentChanged: { _ in }), consent: true)
+            defer { Analytics.install(nil, consent: false) }
+
+            let settings = AppSettings(defaults: isolation.makeDefaults(),
+                                       licenseServerURL: URL(string: "https://license.example.com"))
+            let fromButton = GeneralSettingsViewController(loginItem: StillLoginItem(), settings: settings)
+            fromButton.test_tapEnterLicense()
+            let fromNote = GeneralSettingsViewController(loginItem: StillLoginItem(), settings: settings)
+            _ = fromNote.view
+            fromNote.presentLicenseSheetFromNote()
+
+            #expect(captured.properties(of: "license:enter_sheet_opened")
+                    == [["source": "settings"], ["source": "note"]])
+        }
     }
 }

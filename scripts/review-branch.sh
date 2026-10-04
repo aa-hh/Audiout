@@ -386,5 +386,5 @@ for g in "${groups[@]}"; do
   done
 done
 echo
-echo "Fix every finding above. Launch one builder subagent (work-order-executor, model opus) per fix group, all in parallel in this worktree; give each its group's finding lines verbatim plus: edit only the named file and its own test file, read the nearest AGENTS.md first, do not commit. Two groups never share a file. When all return, run the tests covering the changed files, commit, then start a fresh review: bash scripts/review-branch.sh"
+echo "Fix every finding above. Launch one builder subagent (work-order-executor, model opus) per fix group, all in parallel in this worktree; give each its group's finding lines verbatim plus: edit only the named file and its own test file, read the nearest AGENTS.md first, a test you add or move carries one comment sentence naming the code change that turns it red; for any finding about stale wording, grep AudioutCore/Sources, AudioutCore/Tests, DESIGN.md and every *.md for the retired term and fix each hit inside your file, listing hits outside it in your report; do not commit. Two groups never share a file. When all return, run the tests covering the changed files, commit, then start a fresh review: bash scripts/review-branch.sh"
 exit 1

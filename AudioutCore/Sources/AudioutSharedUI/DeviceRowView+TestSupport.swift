@@ -568,6 +568,7 @@ extension DeviceRowView {
     /// drawing reads).
     public var test_removalUndoOffered: Bool { removalUndoOffered && !removalUndoStack.isHidden }
     public var test_removalUndoAXLabel: String? { removalUndoButton.accessibilityLabel() }
+    public var test_switchOfferOffered: Bool { switchOfferOffered && !switchOfferButton.isHidden }
 
     /// The membership checkbox's HIT rect in this row's coordinates (the
     /// expanded gutter target), after layout — asserts the click target really

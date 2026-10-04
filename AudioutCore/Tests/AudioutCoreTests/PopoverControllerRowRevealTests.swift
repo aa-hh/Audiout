@@ -197,7 +197,12 @@ import Foundation
     /// new mount. Headless is exactly the right harness here: the pending
     /// completion never fires, so this pins the state the eviction must be
     /// correct in.
-    @Test(.enabled(if: ProcessInfo.processInfo.environment["CI"] == nil, "Quarantined on GitHub runners 2026-10-04: reveal/collapse heights and the toolbar alpha depend on an awake display and the runner's appearance. Issue #258.")) func reMountingDuringAnAnimatedCloseEvictsTheStaleClip() {
+    @Test func reMountingDuringAnAnimatedCloseEvictsTheStaleClip() {
+        defer {
+            FoldAnimator.shared.test_reduceMotionOverride = nil
+            FoldAnimator.shared.test_settleNow()
+        }
+        FoldAnimator.shared.test_reduceMotionOverride = false
         let (panel, rows, collapsed) = makePanel(rowCount: 2, reduceMotion: false)
         let drawer = FixedRow(height: Self.drawerHeight)
         panel.insertRow(drawer, after: rows[0], animated: true)

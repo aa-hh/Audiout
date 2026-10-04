@@ -170,7 +170,8 @@ edges/ink/signal breakdown — every one of those tokens exists here under the
 same name with the same dark hex. This section covers only what differs.
 
 ### Primary
-- **Gold** (`#E8B84B` dark / `#A67C1E` light): the signal, audio state and
+- **Gold** (`#E8B84B` dark and light; Increase Contrast `#8A6614` light): the
+  signal, audio state and
   calls to action. Identical values and identical rules to iOS.
 
 ### Neutral
@@ -202,8 +203,8 @@ method keeps painting its standard-contrast hexes until some unrelated repaint
 happens along. A view that draws a token must also subscribe to
 `NSWorkspace.accessibilityDisplayOptionsDidChangeNotification` and repaint;
 `NSView.redrawOnAccessibilityDisplayChange()` (`AudioutSharedUI`) is the one
-place that wiring lives, and thirteen views across the Groups window and
-Settings call it. A view whose colors are stamped `CGColor`s on a `CALayer`
+place that wiring lives, and thirteen views across the surface's Scenes, Speakers and
+Settings screens call it. A view whose colors are stamped `CGColor`s on a `CALayer`
 needs more than a repaint and re-stamps in its own handler instead
 (`DeviceIconWellView`, `HaloRingView`, `LevelMeterView`).
 `IncreaseContrastLiveReconcileTests` walks the real view tree and fails on a
@@ -300,9 +301,11 @@ azure at 213° came within ΔE 6.4 of `permissionSystemAudio`, and a violet at
 
 **The Equalizer-Hue Fence.** One token, `Tokens.Color.equalizer` (`#41B07A`
 dark / `#007835` light), means one thing: this speaker's curve is not flat.
-Its only consumer is the device row's engaged Equalizer door
-(`DeviceRowView.updateEQButton()`), which draws the door's enclosing square in
-this hue with the two band sliders left as holes. It is not a general "on"
+Its only call site is `DeviceRowView`, which inks two marks with it: the
+device row's engaged Equalizer door (`DeviceRowView.updateEQButton()`) and
+the mark beside the speaker page's Equalizer summary, which takes its image
+from `DeviceRowView.equalizerEngagedMarkImage(in:)`. Both are the door's
+custom square symbol drawn in this hue. It is not a general "on"
 green, not a success tone, and not available to a second control that happens
 to be engaged; `DeviceRowMutedStateTests` fails if a second call site appears
 in `Sources/`. The door wore `goldText` until 2026-09-04, and gold means
@@ -349,7 +352,7 @@ companion, used where the target's identity hue must sit on the surrounding
 window chrome (the plate rim/keycap tint in light mode) instead of the fixed
 plate itself. `partyRampDeep` is NOT part of this stage — `Tokens.swift`'s
 own comment states plainly that group identity is not drawn on this sheet;
-`partyRampDeep` belongs to the Groups window and popover instead (see Group
+`partyRampDeep` belongs to the surface and popover instead (see Group
 Row and Membership Rail under Components). This is the one place in the app
 a surface deliberately does not follow appearance, and it is authored that
 way, not a bug.
@@ -450,10 +453,11 @@ sheet that measured it.
 
 ## Layout
 
-The popover is the primary shell: `AppSurfaceController` swaps Mixer/Groups/
-Settings through one hosted panel, sized through `preferredContentSize` —
-height flows from content, pinned top and bottom. It has one ceiling. The
-Output Devices card's list of speakers stops at twelve rows
+The popover is the primary shell: `AppSurfaceController` swaps its four
+screens (Mixer, Scenes, Speakers, Settings) through one hosted panel, sized
+through `preferredContentSize` — height flows from content, pinned top and
+bottom. It has one ceiling. The
+Output Speakers card's list of speakers stops at twelve rows
 (`PopoverPanelViewController.deviceListMaxHeight`, twelve times the 42pt body
 row = 504pt) and scrolls past that, so a large fleet cannot push the surface
 off the bottom of the screen. The list alone scrolls: the header strip, the
@@ -468,6 +472,12 @@ short list ignores the ceiling and hugs its rows exactly. The ceiling is
 applied before the session frame is measured, so the frame is still measured
 once per open, never animated and never re-centred.
 
+The Output Speakers header holds **Manage speakers…** beside its column
+labels. **Pair Bluetooth speaker…** is a row at the end of the speaker list,
+outside the Bluetooth subsection so it remains visible when that subsection
+is collapsed. The Main Audio destination menu offers **Save selected speakers
+as scene** under Scenes, including when no scene has been saved.
+
 **Row geometry** is centralized in `PopoverColumnGrid`, which `Tokens.Layout`
 forwards rather than duplicates: 14pt leading and trailing insets, a 26pt
 icon column, a 150pt slider, a 40pt readout column, a 24pt mute control, a
@@ -479,9 +489,31 @@ fader grammar in AppKit terms.
 never tabs — a new section becomes another sidebar row. It is its own
 window-hosted surface, not a sheet.
 
-**Groups** is a separate window (`MixerWindowController`) with a sidebar
-split that must never collapse, hosting a card-grid overview and a
-configuration-only editor pane. Selection there is never activation.
+The Scenes and Speakers content (`MixerWindowController`) has two roots. The
+Scenes root is a card-grid scene overview and a configuration-only scene
+editor, with no sidebar. The Speakers root is a sidebar split that must never
+collapse: the sidebar is the only speaker list, beside the Speakers page, a
+speaker's page or Main Audio. Selection on either is never activation.
+
+The **Speakers page** (`SpeakersPageViewController`) lists no speakers. Its
+column sits at the top of the pane on `GroupsPaneLayout` insets: the 48 pt
+icon well, the title, and one caption line in `Tokens.Font.caption` /
+`Tokens.Color.label2` that reports the search for speakers. While looking it
+reads a small spinner, "Looking for speakers on your network…" and "· N found
+so far". Once `SpeakerSearch` decides the search is done (the list of speakers
+the Mac can see has not changed for 0.5 s, the popover's first-open quiet
+window, or a 10 s ceiling ran out; once per launch) it shows an
+`NSColor.systemGreen` check and either "All N speakers found" or "Done
+looking · ● F found · ○ A away", the dots drawn by the sidebar's own
+`SidebarPresenceDotView` at 7 pt. Below it, one `GroupedSectionView` card
+ends at its last row. Its first row counts every kept speaker by kind
+(AirPlay, Bluetooth, Cast, This Mac, Unknown; a kind with none is left out):
+a 16 pt glyph, the count in `Tokens.Font.heading`, the label in caption ink.
+Then one-line `ListRowView` rows, each only when true: "Bluetooth access is
+off" with its action button, "N speakers can't be found" with "Forget N
+speakers…" (only after the search is done), and "Pair Bluetooth speaker…"
+with a chevron, always last. Each row's longer sentence is its tooltip and
+VoiceOver hint.
 
 **Onboarding** is a floating first-run window: a spine of status rows beside
 one hero panel, gating Done until every check passes.
@@ -526,7 +558,7 @@ answer plates), `SyncChipCell` and `InvisibleSwitchCell` (both
 `NSButtonCell`, in `DeviceRowView.swift` — the sync chip and the membership
 node's checkbox), `GroupRowButtonCell: NSButtonCell`
 (`DeviceDetailViewController.swift`), `WarmNameFieldCell:
-NSTextFieldCell` (the Groups window's inline-rename field), and
+NSTextFieldCell` (the scene editor's inline-rename field), and
 `SurfaceToolbarSeatCell: NSButtonCell` (`SurfaceToolbarSeatButton.swift` —
 every item of the surface header strip). Each folder's own
 `AGENTS.md` names its own local exception rather than one file listing them
@@ -567,23 +599,33 @@ click after the app is reactivated by returning from System Settings mid-
 onboarding, rather than spending that click only on activation.
 
 ### Surface Header Strip (popover shell, Mac-only)
-Four items, all drawn the same way: the three screen tabs (Mixer, Groups,
-Settings) and Pin. There is no Quit item on the strip. Each is an `NSButton`
-wearing `SurfaceToolbarSeatCell`, seated in an `NSToolbarItem` as its custom
-view; the `NSToolbar` itself stays because it is the window's unified
+Five items: the four screen tabs (Mixer, Scenes, Speakers, Settings) in one
+capsule, and Pin outside it; the brand lockup sits centred between them and is
+decorative. There is no Quit item on the strip. Each tab and Pin is an
+`NSButton` wearing `SurfaceToolbarSeatCell` (`SurfaceToolbarSeatButton.swift`);
+the four tabs sit in one `SurfaceToolbarTabCapsule`, a single `NSToolbarItem`'s
+custom view. The `NSToolbar` itself stays because it is the window's unified
 title-bar strip and supplies the system material and the Reduce Transparency
-handling.
+handling. ⌘1–⌘4 select the tabs in order.
 
-One shape carries every state: a rounded rectangle at `Radius.control` (10pt)
-on a fixed 30 × 26pt seat, glyph at 15pt. Ten on a 26pt-tall seat leaves 6pt of
-straight edge top and bottom, so it reads as a rounded rectangle and not the
-capsule a larger radius would give. Four states, three drawn weights, in
-`engagedChrome` at the ladder the mixer's rows already use: rest draws no seat
-at all, hover takes `PopoverColumnGrid.rowHoverWashAlpha` (0.10), the current
-screen and a pinned Pin take `rowSelectionWashAlpha` (0.18), and a press takes
-`mutePillFillAlpha` (0.22). Increase Contrast multiplies all three by 1.5,
-capped at 1, read live at draw time. The glyph's ink steps with the seat rather
-than against it — `label` engaged, `label2` idle — so the current screen is
+Geometry comes from `SurfaceToolbarSeat`. The strip is 34pt tall and a tab
+28pt. Tabs are laid out by their glyphs' measured ink, never by the symbol
+image's own box, which is 2–4pt bigger than the ink by a different amount per
+symbol. Each glyph starts at 15pt and is drawn smaller until its ink fits an
+18 × 15pt box (`glyphBox`: Mixer 14.5pt, Scenes 13, Speakers 12.75, Settings
+14.25), with its ink centred top to bottom. A collapsed tab is its glyph's ink
+with 7.5pt (`glyphPadding`) on each side, so the four are 28.5, 33, 29.5 and
+30pt wide; the capsule is those side by side plus 3pt of padding on every
+side, so its floor width (`capsuleSize`) is 127pt. Every highlight is cut at half its own
+height, so a tab's highlight is a stadium concentric with the pill and Pin, a
+28pt square, is a circle. Weights are `engagedChrome` at the ladder the
+mixer's rows already use: the capsule itself washes at 0.06, hover at
+`PopoverColumnGrid.rowHoverWashAlpha` (0.10), the current screen and a pinned
+Pin at `rowSelectionWashAlpha` (0.18), and a press at `mutePillFillAlpha`
+(0.22). Increase Contrast multiplies all of them by 1.5, capped at 1, read
+live at draw time; Reduce Transparency gives the capsule the heavier `rim`
+edge instead of a heavier fill. The glyph's ink steps with the seat rather
+than against it, `label` engaged and `label2` idle, so the current screen is
 marked twice. Neutral, never gold: gold means audio in the mix and a header
 seat is navigation.
 
@@ -600,10 +642,16 @@ strip is converted whole or not at all. And nothing in the seat is behind
 `if #available(macOS 26.0, *)` while the package deploys to 14.2, so macOS
 14–25 showed three identical circles and no current screen at all.
 
-The seats are icon-only and fixed-width so the strip's width cannot change
-with the selection, the appearance or the language — a widening strip is what
-would sweep the tabs behind the overflow chevron, and primary navigation cannot
-live behind a chevron.
+Only the current tab shows its name, to the right of its glyph, at
+`Tokens.Font.captionMedium`. The glyph keeps its place and the tab grows to the
+right, with the same 7.5pt from the glyph's ink to the name's first letter and
+after its last letter, measured off the drawn letters rather than the label's
+frame. The others are icon-only, and the tooltip
+("Scenes (⌘2)") and VoiceOver label carry every name. The name is clamped to
+`maxNameWidth` (120pt) and truncates past it, so the widest the strip can be
+is `widestCapsuleWidth` plus Pin, 282.5pt of the fixed 653pt surface, in any
+language: a widening strip is what would sweep the tabs behind the overflow
+chevron, and primary navigation cannot live behind a chevron.
 
 ### Device Row (shared with Groups and the popover)
 The row-as-fader grammar restated in AppKit, but through INK, not a
@@ -618,6 +666,16 @@ unconnected treatment (`DeviceRowView.swift`). Warm ink means
 `isRouteArmed`; cool means silent. Instruments are flat — no `CALayer`
 blooms.
 
+An unavailable retained row keeps its name, glyph and connection node. A
+caption in the trailing control area gives its status while live controls
+are unavailable. Where recovery is offered, the name itself is the action,
+also reachable by keyboard and VoiceOver; there is no separate Connect
+button. A nonlocal row's context menu carries a **Show in Mixer** section with
+the shared **When available**, **Always** and **Hide when not in use**
+choices, the current one checked, then **Speaker settings…**, which opens
+that speaker's page. A speaker in current use remains
+visible even when its saved choice is Hide when not in use.
+
 A speaker that asks for a password, an on-screen code or a Home member
 carries a stock `lock.fill` (10pt semibold, template) 4pt after its name. It
 takes the name's own ink (`rowTextColor`), never gold, and the name truncates
@@ -629,59 +687,69 @@ field, then Cancel and a gold `ProminentButton` Connect, right-aligned. A
 caption-size result line appears only once Connect is pressed: "Connecting…",
 then the reason if the attempt fails. A connect dismisses the sheet.
 
+### Speakers Sidebar and Pages
+The sidebar is the only speaker list. Under the System Audio row and the
+Speakers plate it holds two groups that are the Mixer visibility setting:
+**In the Mixer**, with This Mac first and the rest alphabetical, and, only
+when it has rows, **Hidden unless playing**, which folds through the stock
+hover Show/Hide control. Rows are one line. A 9 pt dot before the icon shows
+presence, never routing: a filled `ember` disc for a speaker on the network, a
+1.5 pt `ember` ring for one that is away, and the `failure`
+`exclamationmark.triangle` at 11 pt for one the Mac can't find. The one
+caption is **In the Mixer while it plays**, on a 40 pt row, for a hidden
+speaker in use. The right-click menu
+offers **Hide from Mixer** or **Show in Mixer**, **Keep in Mixer when
+unavailable** (checked for Always), **Speaker settings…**, and **Forget…** for
+speakers the Mac can't find; dragging rows onto the other group's header moves
+them between groups. Forget asks first in a warning sheet whose Return key is
+Cancel. It refuses when a scene would be left with no speaker, naming the
+scene to delete first, and when Main Audio or an app is still set to play on
+the speaker. A failed Forget shows the scene editor's "couldn't be updated"
+alert.
+
+Every window page opens with a 48 pt icon well, a 16 pt semibold name and one
+caption line. A speaker's caption is its kind and status ("Sonos · Ready"),
+"This Mac", or the failure glyph and "Can't be found". The Equalizer sits open
+below: its title row carries the green engaged mark, a one-line summary
+("Bass 3 dB, Loudness on", or "Flat") and a Reset button hidden while the
+curve is flat. A speaker the Mac can't find shows no editor, only a note that
+its curve is kept when it is shaped, and a Forget button. Then an outlined
+list: **Show in Mixer**, whose caption explains the current choice beside its
+pop-up (absent for This Mac), **Scenes**, linking each scene the speaker
+belongs to, and, only while a password is saved for the speaker, **Password**,
+captioned "Saved", with a small stock Forget button.
+
+The Speakers plate's page lists no speakers. Its caption line is the search
+result: a small spinner and the count found so far while looking, then a
+`systemGreen` `checkmark.circle.fill` with "All N speakers found", or "Done
+looking" with the found and away counts. One outlined card follows. Its first
+row counts every kept speaker by kind; after it come only the rows that are
+true: Bluetooth access while it is off, the speakers that can't be found with
+a Forget button once the search is done, and **Pair Bluetooth speaker…** last. The found mark is stock
+`systemGreen` because the equalizer green is fenced.
+
+Scene checkboxes change membership. Their rows give an unavailable member's
+status and nothing about visibility; scene cards count unavailable members
+alongside the existing Playing and Feeding labels.
+
 ### Equalizer Door (Mixer, Mac-only)
-The Mixer carries an equalizer DOOR only — the row button beside mute, and
-the row context menu — plus one mark. When the speaker's curve is not flat
-the door draws a gold seat: a `Tokens.Color.gold` fill 24 × 22pt, cornered at
-6pt, with a 1pt `Tokens.Color.inkOnFill` border, and the `slider.horizontal.3`
-glyph on top in that same dark ink at 15pt semibold. At rest there is no seat
-at all — a `Tokens.Color.label2` glyph at the row's 13pt accessory size.
+The Mixer carries an equalizer DOOR only (the row button beside mute, and the
+row context menu) plus one mark. The door is one custom symbol,
+`custom.slider.horizontal.2.square` (`RowAccessorySymbol.equalizerRest`),
+which `DeviceRowView.updateEQButton()` draws in two inks: the row's at-rest
+`label` ink while the curve is flat, and `Tokens.Color.equalizer` over
+everything the symbol draws while it is not (since 2026-09-05). Mute, 6 pt
+trailing, sits in the same square outline but carries a different glyph: a
+speaker for mute, sliders for the Equalizer. The glyph says which control it
+is, and colour then tells engaged from resting.
 
-Both numbers on the seat are measured against what sits inside it and what
-sits 6pt trailing. The 15pt glyph draws 15.5 × 13.5pt of ink, so on the door's
-own 24pt column that leaves 4.5 / 4pt of gold each side, and 22pt of height
-gives the same 4.5 / 4pt above and below: the mark sits in even padding
-instead of overrunning a seat that has a 1pt border on it. A full 24 × 24 seat
-would stand 71% taller than the engaged mute pill's measured 19 × 14 and
-dominate a 42pt row. The 6pt corner is deliberately not `Radius.control` (10):
-6 stays visibly short of the 11pt capsule point of a 22pt-high seat, so the
-door reads as a rounded SQUARE and never as a second copy of the mute pill,
-whose own 10 clamps to 7 on a 14pt pill and makes a true capsule. The seat is
-its own view behind the button rather than a fill on the button's layer,
-because an `.accessoryBar` `NSButton` frames larger than the alignment rect
-its constraints size — the door's 24 × 24 constraint pair produces a measured
-24.5 × 30.5 frame, which would put a 30pt gold slab in a 24pt slot, sat 1.5pt
-high of centre.
-
-A fill carries this state because a hue swap measurably cannot. The mark was a
-bare gold glyph until 2026-09-04: gold runs 3.64:1 on `canvas` in light where
-the at-rest `label2` runs 5.97:1, so the "on" state read 39% dimmer than the
-"off" state; dark separated the two by 1.22:1; and under the Subtle accent the
-relationship inverted in every appearance. `canvas` was added to gold's tested
-grounds in `TokenContrastMatrixTests` at the same time — its absence is why
-3.64:1 was never caught. The border resolves `inkOnFill` under `.darkAqua`
-whatever the row's own appearance is: that token turns white under light plus
-Increase Contrast, which is right for a glyph sitting ON the gold and wrong for
-the outline around it, since a white outline on the light canvas is no outline
-at all. This mark is a dark border around a gold fill in every appearance.
-
-The border is a deliberate reversal of the rule this section used to state. It
-said: no border, because the mute button beside the door already says "engaged"
-with a filled pill, and a second shape for the same idea would give one row
-three vocabularies. The owner overruled it on 2026-09-04 knowing mute sits 6pt away.
-The two engaged marks are drawn to stay legibly apart by shape, hue and border
-at once: the door is an opaque gold rounded square with a dark border and an
-oversized, heavier glyph; mute is a borderless cool capsule at the at-rest
-glyph size. The door's slot and the 6pt gap to mute are unchanged — the mark
-grew inside the seat the door already had.
-
-Still no magenta: magenta is group identity (`partyRampDeep`), never the
-wizard's territory — this migration moved the wizard's own reference light to
-`Tokens.Color.ring` (blue), and `Tokens.swift`'s own comment says group
-identity is "not drawn on this sheet" (see the Instrument Ground Rule under
-Colors). No editor, no curve, and no tone control lives on the Mixer itself
-(2026-08-22, amended 2026-09-03 and 2026-09-04); the door opens
-`DeviceDetailViewController` where the real Equalizer control lives.
+The door is green, not gold, because it wore `goldText` until the symbols
+landed and gold means "audio is flowing here" everywhere else, including the
+live wash this row draws behind the door. The Equalizer-Hue Fence under
+Colors holds the hue to this mark and the speaker page's summary mark. No
+magenta either: magenta is group identity. No editor, no curve and no tone
+control lives on the Mixer itself; the door opens `DeviceDetailViewController`,
+where the Equalizer sits open.
 
 ### Mute Button (Mixer row)
 At rest: `speaker.wave.2.fill` at the shared 13pt accessory size, tinted

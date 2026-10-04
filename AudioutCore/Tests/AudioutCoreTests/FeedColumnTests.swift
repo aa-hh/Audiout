@@ -135,7 +135,8 @@ import AudioutCore
     /// the tooltip and in the spoken value.
     @Test func unavailableOverridesTheFeedWithAGlyphAndMovesTheWordOffTheRow() {
         let row = makeBusRow()
-        row.apply(makeDevice(isAvailable: false), selected: true, routedAppNames: ["Music"])
+        // .off on purpose: a connected-but-undiscovered device is a live Cast session and renders live.
+        row.apply(makeDevice(connectionState: .off, isAvailable: false), selected: true, routedAppNames: ["Music"])
         #expect(row.test_feedText == nil, "the unavailable override carries no words of its own")
         #expect(row.test_feedErrorPillHasGlyph, "it reads by shape (P2-6) — here by shape alone")
         #expect(row.test_feedErrorGlyphIsFailureColored, "…in the failure tone it has always used")
@@ -172,7 +173,7 @@ import AudioutCore
     /// …and the unavailable rung, which draws the same lone glyph.
     @Test func theUnavailableGlyphCentresInItsColumnToo() {
         let row = laidOut(makeBusRow())
-        row.apply(makeDevice(isAvailable: false), selected: true)
+        row.apply(makeDevice(connectionState: .off, isAvailable: false), selected: true)
         row.layoutSubtreeIfNeeded()
         let feed = row.test_trailingSlotFrames.feed
         let wanted = row.bounds.maxX - PopoverColumnGrid.trailingControlCenterFromTrailing

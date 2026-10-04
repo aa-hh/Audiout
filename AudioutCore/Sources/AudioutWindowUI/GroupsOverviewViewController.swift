@@ -52,6 +52,7 @@ public final class GroupsOverviewViewController: NSViewController {
     /// changes. The cards draw from these AND the headless seams read from
     /// them, so a test and the screen can never disagree about what a card
     /// says.
+    public var speakerLibrary: SpeakerLibraryController?
     private var plans: [CardPlan] = []
 
     /// Which grid cell is selected, mirrored out of the collection view so the
@@ -254,6 +255,10 @@ public final class GroupsOverviewViewController: NSViewController {
             symbolName: DeviceIcon.resolve(group.iconSymbolName,
                                            default: Group.defaultIconSymbolName),
             memberCount: group.memberIDs.count,
+            unavailableCount: group.memberIDs.filter { id in
+                if let record = speakerLibrary?.record(for: id) { return !record.isAvailable }
+                return !devices.contains { $0.id == id && ($0.isAvailable || $0.connectionState == .connected) }
+            }.count,
             isLive: isLive,
             chipSymbolNames: shown.map(chipSymbolName(forMember:)),
             overflowText: overflow > 0 ? "+\(overflow)" : nil,
@@ -261,6 +266,11 @@ public final class GroupsOverviewViewController: NSViewController {
     }
 
     private func chipSymbolName(forMember deviceID: String) -> String {
+        if let record = speakerLibrary?.record(for: deviceID) {
+            guard record.kind != nil else { return "speaker" }
+            let device = record.renderingDevice
+            return deviceIconController?.symbolName(for: device) ?? device.kind.symbolName
+        }
         guard let device = devices.first(where: { $0.id == deviceID }) else {
             // A member the current fleet snapshot doesn't hold (offline, or not
             // yet discovered) still occupies its chip — the group's size must
@@ -347,6 +357,19 @@ public final class GroupsOverviewViewController: NSViewController {
         activate(index: index)
     }
 
+    public func test_cardMetaText(id: String) -> String? {
+        plans.first { $0.groupID == id }?.metaText
+    }
+    public func test_cardAccessibilityLabel(id: String) -> String? {
+        guard let plan = plans.first(where: { $0.groupID == id }) else { return nil }
+        let card = GroupCardView()
+        card.plan = plan
+        return card.accessibilityLabel()
+    }
+    public func test_chipSymbols(id: String) -> [String] {
+        plans.first { $0.groupID == id }?.chipSymbolNames ?? []
+    }
+
     /// The card's "Feeding …" meta clause, or `nil` when no app is routed here.
     public func test_cardFeedingText(id: String) -> String? {
         plans.first { $0.groupID == id }?.feedingText
@@ -384,6 +407,7 @@ public final class GroupsOverviewViewController: NSViewController {
                              name: "Test",
                              symbolName: Group.defaultIconSymbolName,
                              memberCount: 2,
+                             unavailableCount: 0,
                              isLive: isLive,
                              chipSymbolNames: chipSymbolNames,
                              overflowText: overflowText,
@@ -595,6 +619,7 @@ private struct CardPlan {
     let name: String
     let symbolName: String
     let memberCount: Int
+    let unavailableCount: Int
     let isLive: Bool
     let chipSymbolNames: [String]
     let overflowText: String?
@@ -609,6 +634,7 @@ private struct CardPlan {
     var metaText: String {
         let speakers = memberCount == 1 ? "1 speaker" : "\(memberCount) speakers"
         var parts = [speakers]
+        if unavailableCount > 0 { parts.append("\(unavailableCount) unavailable") }
         if isLive { parts.append("Playing") }
         if let feeding = feedingText { parts.append(feeding) }
         return parts.joined(separator: " · ")
@@ -802,7 +828,7 @@ private final class GroupCardView: NSView {
         }
 
         toolTip = plan.isLive ? "Playing" : nil
-        setAccessibilityLabel(plan.isLive ? "\(plan.name), Playing" : plan.name)
+        setAccessibilityLabel("\(plan.name), \(plan.metaText)")
         needsDisplay = true
     }
 

@@ -56,15 +56,17 @@ import AppKit
                                                memberVolumes: [:]).group
         let window = MixerWindowController(groupController: controller,
                                            settings: AppSettings(defaults: isolatedDefaults))
-        window.setHostVisible(true)
+        window.setVisibleTab(.speakers)
         window.update(devices: devices)
         // The fixed frame's floor; only the width matters here.
-        window.contentController.view.setFrameSize(AppSurfaceController.minimumContentSize)
+        window.scenesContentController.view.setFrameSize(AppSurfaceController.minimumContentSize)
+        window.speakersContentController.view.setFrameSize(AppSurfaceController.minimumContentSize)
         return (window, controller, devices, group)
     }
 
     private func settle(_ window: MixerWindowController) {
-        window.contentController.view.layoutSubtreeIfNeeded()
+        window.scenesContentController.view.layoutSubtreeIfNeeded()
+        window.speakersContentController.view.layoutSubtreeIfNeeded()
     }
 
     /// How far a HALF-POINT number can move when auto layout writes it into a
@@ -73,7 +75,7 @@ import AppKit
     /// Two of the numbers below are half points by design:
     /// ``GroupsPaneLayout/contentLeadingInset`` is 38.5 (the rail node is 13 pt
     /// across, so its radius lands on a half point), and the device pane's
-    /// 19 pt-tall title, centred on the 64 pt icon well, starts on one. Auto
+    /// 19 pt-tall title, centred on the 48 pt icon well, starts on one. Auto
     /// layout snaps every frame onto a rounding grid, and that grid's pitch is a
     /// property of the RUN, not of this layout: the same binary on the same Mac
     /// lays a 38.5 pt constraint out at 38.5 in one run and 39.0 in the next,
@@ -100,6 +102,16 @@ import AppKit
 
     // MARK: Parity
 
+    /// How far `y` sits below the TOP edge of `pane`, the view the header
+    /// hooks report their frames in. The editor and the speaker page live in
+    /// different hosts (the scenes host carries a footer, the speakers split
+    /// does not), so their panes differ in height and only top-relative
+    /// positions compare.
+    private func distanceFromTop(_ y: CGFloat, in pane: NSView) -> CGFloat {
+        pane.isFlipped ? y - pane.bounds.minY : pane.bounds.maxY - y
+    }
+
+    // Turns red when either pane moves its icon well, title or header band relative to its own top-leading corner.
     @Test func bothPanesPutTheIconWellAndTitleAtTheSameGeometry() throws {
         let (window, _, _, group) = try makeWindow()
 
@@ -108,12 +120,14 @@ import AppKit
         let editorIcon = window.test_editor.test_headerIconFrame
         let editorTitle = window.test_editor.test_headerTitleAlignmentFrame
         let editorHeader = window.test_editor.test_headerSectionFrame
+        let editorTitleFromTop = distanceFromTop(editorTitle.midY, in: window.test_editor.view)
 
         window.test_select(.device(id: "d0"))
         settle(window)
         let detailIcon = window.test_detail.test_headerIconFrame
         let detailTitle = window.test_detail.test_headerTitleAlignmentFrame
         let detailHeader = window.test_detail.test_headerSectionFrame
+        let detailTitleFromTop = distanceFromTop(detailTitle.midY, in: window.test_detail.view)
 
         #expect(abs(editorIcon.minX - detailIcon.minX) <= 0.01,
                 Comment(rawValue: "the icon well must start at the same x in both panes — a difference here " +
@@ -123,12 +137,13 @@ import AppKit
         #expect(abs(editorTitle.minX - detailTitle.minX) <= 0.01,
                 Comment(rawValue: "the title's leading edge (its ALIGNMENT rect — what auto layout pins) must " +
                 "match, even though one is an editable field and the other a plain label"))
-        #expect(abs(editorTitle.midY - detailTitle.midY) <= 0.01 + halfPointSlack(),
+        #expect(abs(editorTitleFromTop - detailTitleFromTop) <= 0.01 + halfPointSlack(),
                 "both titles are vertically centred on the icon well beside them")
         #expect(abs(editorHeader.height - detailHeader.height) <= 0.01,
                 "identical header BAND height, so the content below starts at the same y")
         #expect(abs(editorHeader.minX - detailHeader.minX) <= 0.01)
-        #expect(abs(editorHeader.width - detailHeader.width) <= 0.01)
+        // The two panes centre a width-capped header on panes of different widths, and AppKit's pixel rounding (see `halfPointSlack()`) lands them a point apart.
+        #expect(abs(editorHeader.width - detailHeader.width) <= 1.0)
     }
 
     @Test func headerBandIsTheDerivedSideBySideHeight() throws {
@@ -136,7 +151,7 @@ import AppKit
         window.test_select(.group(id: group.id))
         settle(window)
 
-        // 92 = padding + the icon well + padding, all of it derived: the icon
+        // 80 = padding + the icon well + padding, all of it derived: the icon
         // and the name share one horizontal band now instead of stacking, which
         // is where the 30 pt this pane needed came from.
         #expect(abs(GroupsPaneLayout.headerBandHeight
@@ -171,29 +186,24 @@ import AppKit
                 "alignment is worth more than reclaiming it"))
     }
 
-    /// The HEADER is pinned across both panes (above), but everything BELOW it
-    /// in the rail-less detail pane is not: reserving the spine's lane there
-    /// left those sections looking hollow on their leading edge, with nothing
-    /// occupying the gap (design review 2026-07-25). The two insets must stay
-    /// genuinely different, or one of the two halves of that decision has been
-    /// quietly undone.
-    @Test func detailMetadataRowsUseTheRailFreeInsetNotTheHeaderOne() throws {
+    /// The HEADER is pinned across both panes (above), but the speaker page's
+    /// list below it carries its own row inset, tighter than the header's
+    /// spine-gutter reserve. The two insets must stay genuinely different.
+    // Moving the list rows onto the header's inset, or off the list row's own, turns it red.
+    @Test func detailListRowsSitTighterThanTheHeader() throws {
         let (window, _, _, _) = try makeWindow()
         window.test_select(.device(id: "d0"))
         settle(window)
 
-        let rowInset = window.test_detail.test_metadataRowInset
+        let rowInset = window.test_detail.test_listRowContentInset
         let headerInset = window.test_detail.test_headerIconFrame.minX
             - window.test_detail.test_headerSectionFrame.minX
 
-        #expect(abs(rowInset - GroupsPaneLayout.railFreeContentLeadingInset) <= 0.01,
-                "no rail runs past the metadata rows, so they don't reserve its lane")
-        #expect(rowInset < headerInset,
+        #expect(abs(rowInset - ListRowView.leadingInset) <= 0.01 + halfPointSlack(),
+                "the list's rows start at their own inset, where the list's dividers start")
+        #expect(headerInset - rowInset > 1,
                 Comment(rawValue: "the rows must sit tighter than the header, which stays pinned to the " +
                 "editor's for cross-pane alignment"))
-        #expect(headerInset - rowInset > 1,
-                Comment(rawValue: "a difference this small means the rail-free inset has drifted back " +
-                "toward the header's and the hollow leading edge is returning"))
     }
 
     // MARK: The elastic column
@@ -217,7 +227,7 @@ import AppKit
         let (window, _, _, group) = try makeWindow()
         window.test_select(.group(id: group.id))
         // A pane far wider than the cap: the section must stop stretching.
-        window.contentController.view.setFrameSize(NSSize(width: 1200, height: 700))
+        window.scenesContentController.view.setFrameSize(NSSize(width: 1200, height: 700))
         settle(window)
 
         #expect(abs(window.test_editor.test_headerSectionFrame.width
@@ -301,17 +311,18 @@ import AppKit
                 "that pushed it down would make every sidebar swap twitch"))
     }
 
-    // MARK: The detail pane is one housing: one card, three titled slots
+    // MARK: The detail pane: the Equalizer's well and the outlined list
 
-    @Test func detailPageHasOneCardThreeTitlesAndNoOrphanedRule() throws {
+    // A third box, a lost list card, or a returning slot title turns it red.
+    @Test func detailPageHasTheWellTheListAndNoOrphanedRule() throws {
         let (window, _, _, _) = try makeWindow()
         window.test_select(.device(id: "d0"))
         settle(window)
 
-        #expect(window.test_detail.test_cardFrames.count == 1,
-                "the Equalizer is the page's one instrument, so the page's one card")
-        #expect(window.test_detail.test_slotTitles == ["Equalizer", "Scenes", "About"],
-                "identity is bare and unlabelled; every other slot is a titled bare list")
+        #expect(window.test_detail.test_cardFrames.count == 2,
+                "the Equalizer's well and the outlined list's card")
+        #expect(window.test_detail.test_slotTitles == ["Equalizer"],
+                "identity is bare and unlabelled; the list carries no title")
         #expect(!window.test_detail.test_hasBoxDivider,
                 Comment(rawValue: "the stock NSBox rule is gone — it drew a 185pt line that stopped a third of " +
                 "the way across the pane; the sections' own inset hairlines separate rows now"))
@@ -357,15 +368,4 @@ import AppKit
                 "well that can't be edited wears no pencil badge"))
     }
 
-    @Test func detailValuesRightAlignIntoTheSectionsWidth() throws {
-        let (window, _, _, _) = try makeWindow()
-        window.test_select(.device(id: "d0"))
-        settle(window)
-
-        let section = window.test_detail.test_aboutSectionFrame
-        let valueTrailing = window.test_detail.test_valueTrailingX
-        #expect(abs((section.maxX - valueTrailing) - GroupsPaneLayout.contentTrailingInset) <= 2.5,
-                Comment(rawValue: "values right-align on the section's own inset edge (± the text field's own " +
-                "alignment inset), instead of hanging off a fixed 90pt caption column"))
-    }
 }

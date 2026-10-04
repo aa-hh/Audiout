@@ -59,6 +59,7 @@ import Testing
         }
         let store = GroupStore(directory: directory ?? tempDirectory())
         let controller = GroupController(backend: backend, store: store,
+                                         routingStore: RoutingStore(directory: tempDirectory()),
                                          settings: AppSettings(defaults: isolatedDefaults), loadPersisted: false)
         return (controller, backend)
     }
@@ -74,6 +75,7 @@ import Testing
         let mock = try await makeBackend(fleet)
         let backend = RecordingBackend(mock, systemOutputVolume: systemOutputVolume)
         let controller = GroupController(backend: backend, store: GroupStore(directory: tempDirectory()),
+                                         routingStore: RoutingStore(directory: tempDirectory()),
                                          settings: AppSettings(defaults: isolatedDefaults), loadPersisted: false)
         return (controller, backend)
     }
@@ -88,6 +90,26 @@ import Testing
     }
 
     // MARK: Selected Devices + Main Out routing (SPEC §9 2026-07-14b)
+
+    // removeDevices writing per group, skipping the memberVolumes cleanup, or writing before the emptiness check turns it red.
+    @Test func removeDevicesSavesOnceAndRefusesToEmptyAScene() async throws {
+        let directory = tempDirectory()
+        let (controller, _) = try await makeController(directory: directory)
+        try controller.saveGroup(Group(id: "a", name: "A", memberIDs: ["x", "y"], memberVolumes: ["x": 30, "y": 60]))
+        try controller.saveGroup(Group(id: "b", name: "B", memberIDs: ["y", "z"], memberVolumes: [:]))
+        try controller.saveGroup(Group(id: "c", name: "C", memberIDs: ["z"], memberVolumes: [:]))
+        var notified = 0
+        controller.onStateDidChange = { notified += 1 }
+        #expect(try controller.removeDevices(["y"]) == 2)
+        #expect(notified == 1)
+        #expect(controller.groups.map(\.memberIDs) == [["x"], ["z"], ["z"]])
+        #expect(try GroupStore(directory: directory).load().map(\.memberIDs) == [["x"], ["z"], ["z"]])
+        #expect(throws: GroupController.GroupError.emptyMembership) { try controller.removeDevices(["x", "z"]) }
+        #expect(notified == 1)
+        #expect(try GroupStore(directory: directory).load().map(\.memberIDs) == [["x"], ["z"], ["z"]])
+        let volumes = try #require(controller.groups.first).memberVolumes
+        #expect(volumes["y"] == nil && volumes["x"] == 30)
+    }
 
     /// Red if "Play here" routed twice (deselect then select leaves
     /// This Mac briefly live between the two applies) or left a stale member.
@@ -1330,6 +1352,7 @@ import Testing
         let settings = AppSettings(defaults: isolatedDefaults)
         let mock1 = try await makeBackend()
         let c1 = GroupController(backend: mock1, store: GroupStore(directory: tempDirectory()),
+                                 routingStore: RoutingStore(directory: tempDirectory()),
                                  settings: settings, loadPersisted: false)
         c1.setMainOutMasterVolume(37)
         // No wait: the persist is a synchronous `UserDefaults` write. It used to be
@@ -1345,6 +1368,7 @@ import Testing
         // below, exercised against a real prior launch instead of a stub.
         let mock2 = try await makeBackend()
         let c2 = GroupController(backend: mock2, store: GroupStore(directory: tempDirectory()),
+                                 routingStore: RoutingStore(directory: tempDirectory()),
                                  settings: settings, loadPersisted: false)
         c2.ensureDefaultSelection()
 
@@ -1536,6 +1560,7 @@ import Testing
 
         let backend = try await makeBackend()
         let controller = GroupController(backend: backend, store: GroupStore(directory: dir),
+                                         routingStore: RoutingStore(directory: tempDirectory()),
                                          settings: AppSettings(defaults: isolatedDefaults), loadPersisted: true)
 
         #expect(controller.groups.map(\.id) == ["g1"])
@@ -2218,6 +2243,7 @@ import Testing
         let backend = try await makeBackend()
         let controller = GroupController(backend: backend,
                                          store: GroupStore(directory: try blockedDirectory()),
+                                         routingStore: RoutingStore(directory: tempDirectory()),
                                          settings: AppSettings(defaults: isolatedDefaults),
                                          loadPersisted: false)
         #expect(throws: (any Error).self) {

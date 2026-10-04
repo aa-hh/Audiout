@@ -83,12 +83,6 @@ public final class GroupEditorViewController: NSViewController {
     /// "‹ Groups" band, Escape, or ⌘[. The host owns the pane swap; this pane
     /// only reports the request (direction C's in-pane push).
     public var onBack: (() -> Void)?
-    /// Called when Escape abandoned a rename, so the host can put keyboard
-    /// focus somewhere real (the sidebar's outline view) instead of leaving
-    /// the window as its own first responder — see ``cancelRename()``. Escape
-    /// while renaming stops HERE (the field editor consumes it); only an
-    /// Escape outside a rename reaches the container and fires `onBack`.
-    public var onDidCancelRename: (() -> Void)?
 
     /// The group currently being edited, nil before `show`.
     public private(set) var editingGroupID: String?
@@ -171,9 +165,10 @@ public final class GroupEditorViewController: NSViewController {
     }()
 
     /// The line that says edits are saved as they are made — nothing on this
-    /// pane waits for a button. Every group's editor shows it; an ACTIVE
-    /// group's, where "Playing" is on screen while membership is being
-    /// edited, adds that nothing playing changes (``show(groupID:devices:)``).
+    /// pane waits for a button — and points to Speakers for Mixer visibility.
+    /// An ACTIVE group's, where "Playing" is on screen while membership is
+    /// being edited, also says that edits do not touch what is playing
+    /// (``show(groupID:devices:)``).
     ///
     /// HEIGHT BUDGET: it sits BESIDE "Delete scene…", centred on it, with no
     /// bottom pin, so it rides inside the button's existing bottom margin and
@@ -203,9 +198,9 @@ public final class GroupEditorViewController: NSViewController {
     /// invisible once already (snapshot-caught 2026-07-18). REQUIRED priority,
     /// deliberately: the field may overflow its section by a hair on a
     /// pathologically narrow pane rather than vanish.
-    /// The identity glow's mounted side. A 60 pt glow would sit wholly under
-    /// the 64 pt opaque well and never be seen, so it is the well plus 16: 40
-    /// pt of radius, 8 pt of magenta leaking past the well's edge.
+    /// The identity glow's mounted side: the 48 pt opaque well plus 16, so 8
+    /// pt of magenta leaks past the well's edge all round. A glow no wider
+    /// than the well would sit wholly under it and never be seen.
     static let iconGlowSide: CGFloat = DeviceIconWellView.size + 16
 
     private static let titleFieldMinWidth: CGFloat = 140
@@ -266,13 +261,15 @@ public final class GroupEditorViewController: NSViewController {
     private var iconWellSymbolName: String?
 
     /// Membership rows keyed by device id, so a test can read/drive them.
+    public var speakerLibrary: SpeakerLibraryController?
+    private var presentationByID: [String: SpeakerPresentationRecord] = [:]
     private var rowsByID: [String: MembershipRowView] = [:]
-    /// The devices currently offered as membership candidates, in order
-    /// (available devices, plus unavailable devices only while they remain
-    /// members of this group — see ``rebuildCandidates(devices:)``).
+    /// The devices currently offered as membership candidates, in order:
+    /// every device, unavailable ones included (see
+    /// ``rebuildCandidates(memberSet:)``).
     private var candidateDevices: [Device] = []
     /// The full device set last passed to `show`, so membership toggles can
-    /// rebuild the candidate list (an unchecked unavailable device drops out).
+    /// rebuild the candidate list.
     private var allDevices: [Device] = []
 
     public init(groupController: GroupController) {
@@ -724,9 +721,9 @@ public final class GroupEditorViewController: NSViewController {
     // MARK: Model
 
     /// Show the editor for `groupID`, building the membership row list from
-    /// `devices` (every known device is a candidate for an available row; an
-    /// unavailable device is offered only while it remains a member — see
-    /// ``rebuildCandidates(devices:)``). No-op if the group no longer exists.
+    /// the speaker library's records: every speaker it keeps, unavailable and
+    /// remembered ones included. `devices` stands in only when no library is
+    /// injected. No-op if the group no longer exists.
     ///
     /// GATED on what the pane actually draws. The host calls this on EVERY
     /// backend event while the screen is visible, and a re-render tears down
@@ -734,6 +731,15 @@ public final class GroupEditorViewController: NSViewController {
     /// keyboard focus several times a second during discovery. An unchanged
     /// ``EditorProjection`` means there is nothing to repaint.
     public func show(groupID: String, devices: [Device]) {
+        let records: [SpeakerPresentationRecord]
+        if let speakerLibrary { records = speakerLibrary.records }
+        else {
+            let library = SpeakerLibraryController(loadPersisted: false)
+            library.update(liveDevices: devices, groups: groupController.groups)
+            records = library.records
+        }
+        presentationByID = Dictionary(uniqueKeysWithValues: records.map { ($0.id, $0) })
+        let devices = records.map(\.renderingDevice)
         guard let group = groupController.groups.first(where: { $0.id == groupID }) else { return }
         guard editorProjection(for: group, devices: devices) != lastRenderedProjection else {
             // Nothing to repaint, but a later membership toggle
@@ -782,10 +788,10 @@ public final class GroupEditorViewController: NSViewController {
         isActiveGroup = isActive
         iconWell.isActiveGroup = isActive
         iconWell.setAccessibilityValue(isActive ? "Playing" : "")
-        // The ring is colour alone; these two say it in words — the marker
-        // states that this group IS playing, and the line answers the question
-        // that raises while its membership is being edited. An inactive group
-        // moves nothing either way, so its line only says edits are saved.
+        // The ring is colour alone; these two say it in words — the badge
+        // states that this group IS playing; the line says edits save as made
+        // and, for the active group, that they do not touch what is playing.
+        // Both states point to Speakers for Mixer visibility.
         playingBadge.isHidden = !isActive
         reassuranceLabel.stringValue = isActive ? Self.savedAsYouGoActive : Self.savedAsYouGo
         // The origin hook's tone follows the same active-group truth the well's
@@ -810,6 +816,7 @@ public final class GroupEditorViewController: NSViewController {
             let symbolName: String
             let isMember: Bool
             let railArmed: Bool
+            let status: SpeakerPresentationStatus?
         }
         let groupID: String
         let groupName: String
@@ -843,7 +850,8 @@ public final class GroupEditorViewController: NSViewController {
                         ?? device.kind.symbolName,
                     isMember: memberSet.contains(device.id),
                     railArmed: railArmed(for: device, memberSet: memberSet,
-                                         isActiveGroup: isActive))
+                                         isActiveGroup: isActive),
+                    status: presentationByID[device.id]?.status)
             })
     }
 
@@ -875,10 +883,10 @@ public final class GroupEditorViewController: NSViewController {
         iconWell.iconImageView.image = image
     }
 
-    /// Recompute `candidateDevices` from `allDevices` — available devices,
-    /// plus any unavailable device still in `memberSet` — and rebuild the
-    /// membership rows from that list. Called on `show` and after every
-    /// membership toggle, so an unchecked unavailable member disappears.
+    /// Recompute `candidateDevices` from `allDevices` — every device, an
+    /// unavailable one offered whether or not it is a member — and rebuild
+    /// the membership rows from that list. Called on `show` and after every
+    /// membership toggle.
     ///
     /// REUSES the existing rows whenever the candidate ID SEQUENCE is
     /// unchanged — only the list's membership/labels moved, so refreshing each
@@ -899,6 +907,7 @@ public final class GroupEditorViewController: NSViewController {
             row.apply(device: device,
                       checked: memberSet.contains(device.id),
                       iconSymbolName: deviceIconController?.symbolName(for: device))
+            row.applyPresentation(presentationByID[device.id])
             row.railArmed = railArmed(for: device, memberSet: memberSet,
                                       isActiveGroup: isActiveGroup)
             // `apply` re-enables the checkbox but doesn't know about the sole-
@@ -935,6 +944,7 @@ public final class GroupEditorViewController: NSViewController {
                 checked: memberSet.contains(device.id),
                 iconSymbolName: deviceIconController?.symbolName(for: device),
                 surface: .warmPane)
+            row.applyPresentation(presentationByID[device.id])
             row.railArmed = railArmed(for: device, memberSet: memberSet,
                                       isActiveGroup: isActiveGroup)
             row.onToggle = { [weak self] deviceID, isChecked in
@@ -1062,7 +1072,7 @@ public final class GroupEditorViewController: NSViewController {
             // a failed save) and skip the repaint that puts the controls back
             // to the truth.
             if let group = editingGroup { render(group: group, devices: allDevices) }
-            presentPersistFailureAlert(message: "Couldn\u{2019}t save the change.")
+            Self.presentPersistFailureAlert(message: "Couldn\u{2019}t save the change.", over: view.window)
             return false
         }
     }
@@ -1077,7 +1087,7 @@ public final class GroupEditorViewController: NSViewController {
     }
 
     /// The refusal for a name another group already has — same window-guarded
-    /// shape as ``presentPersistFailureAlert(message:)``.
+    /// shape as ``presentPersistFailureAlert(message:over:)``.
     private func presentDuplicateNameAlert(name: String) {
         guard let window = view.window, !HeadlessRuntime.isActive else { return }
         let alert = NSAlert()
@@ -1088,13 +1098,13 @@ public final class GroupEditorViewController: NSViewController {
         alert.beginSheetModal(for: window)
     }
 
-    /// The failure alert both `saveOrReport` and the delete path present — a
-    /// sheet when a window hosts the pane, skipped headless (the `test_*`
+    /// The failure alert `saveOrReport`, the delete path and the host's
+    /// Forget present — a sheet over `window`, skipped headless (the `test_*`
     /// seams observe the failure instead).
-    private func presentPersistFailureAlert(message: String) {
-        // `view.window != nil` is NOT a headless proxy — suites host this pane
-        // in a real (ordered-out) window, so the gate has to be explicit.
-        guard let window = view.window, !HeadlessRuntime.isActive else { return }
+    static func presentPersistFailureAlert(message: String, over window: NSWindow?) {
+        // A window is NOT a headless proxy — suites host these panes in a
+        // real (ordered-out) window, so the gate has to be explicit.
+        guard let window, !HeadlessRuntime.isActive else { return }
         let alert = NSAlert()
         alert.messageText = message
         alert.informativeText = "The scene\u{2019}s saved settings couldn\u{2019}t be updated. Try again."
@@ -1118,13 +1128,13 @@ public final class GroupEditorViewController: NSViewController {
     ///
     /// Focus goes SOMEWHERE REAL. It used to go to `makeFirstResponder(nil)`,
     /// which is the exact dead-Tab state A11Y-GROUPS fixed: the window becomes
-    /// its own first responder and Tab has nothing to advance from. The host
-    /// wires ``onDidCancelRename`` to the sidebar's outline view, the one
-    /// control present whatever pane is showing.
+    /// its own first responder and Tab has nothing to advance from. It lands
+    /// on the Back control, the way out of this editor; the sidebar it used to
+    /// land on lives on the Speakers screen, not beside the editor.
     private func cancelRename() {
         nameField.abortEditing()
         restoreNameField()
-        onDidCancelRename?()
+        view.window?.makeFirstResponder(backButton)
     }
 
     /// Re-measure the rename field around its current text. An editable
@@ -1171,7 +1181,7 @@ public final class GroupEditorViewController: NSViewController {
             if !group.memberIDs.contains(deviceID) {
                 group.memberIDs.append(deviceID)
                 // Remember the device's current volume for this membership.
-                if let device = candidateDevices.first(where: { $0.id == deviceID }) {
+                if let device = groupController.devices.first(where: { $0.id == deviceID }) {
                     group.memberVolumes[deviceID] = device.volume
                 }
             }
@@ -1391,6 +1401,8 @@ public final class GroupEditorViewController: NSViewController {
     /// The rename field itself, so a test can drive real AppKit editing (a
     /// window + `makeFirstResponder`) instead of a stand-in.
     public var test_titleField: NSTextField { nameField }
+    /// The Back control (the band's "‹ Scenes" button, wired to `onBack`).
+    public var test_backButton: NSButton { backButton }
 
     /// Simulate ticking/unticking a membership row for a device.
     public func test_setMembership(_ member: Bool, for deviceID: String) {
@@ -1457,6 +1469,7 @@ public final class GroupEditorViewController: NSViewController {
 
     /// True when "Delete scene…" is currently visible (always true — the
     /// editor is edit-only).
+    public func test_presentationText(for id: String) -> String? { rowsByID[id]?.test_presentationText }
     public var test_deleteButtonVisible: Bool { !deleteButton.isHidden }
 
     /// The primary button's title — "Done" at rest, "Save" while the name
@@ -1513,7 +1526,7 @@ public final class GroupEditorViewController: NSViewController {
             try groupController.deleteGroup(id: id)
         } catch {
             test_saveFailureReported = true
-            presentPersistFailureAlert(message: "Couldn\u{2019}t delete the scene.")
+            Self.presentPersistFailureAlert(message: "Couldn\u{2019}t delete the scene.", over: view.window)
             return
         }
         Analytics.capture("scene:deleted")
@@ -1673,7 +1686,7 @@ extension GroupEditorViewController: RailHookProviding {
     /// icon sat ABOVE the name and the climb from the list past the whole
     /// header read badly). The header is now SIDE BY SIDE: icon and name share
     /// one horizontal band, so hooking the icon hooks the name's line too, and
-    /// the hook goes back to the well — a fixed 64 pt tile whose leading edge
+    /// the hook goes back to the well — a fixed 48 pt tile whose leading edge
     /// sits on the content inset, rather than a field whose width changes with
     /// the name it holds.
     ///

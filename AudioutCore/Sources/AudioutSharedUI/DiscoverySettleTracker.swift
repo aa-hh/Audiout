@@ -13,26 +13,26 @@ import Foundation
 /// elapses with no change since it was armed settles exactly once. A stable or
 /// empty fleet settles from `start()` alone, because nothing re-arms it.
 @MainActor
-final class DiscoverySettleTracker {
+public final class DiscoverySettleTracker {
 
     /// No device-set change for this long ⇒ discovery has quiesced.
-    static let defaultQuietWindow: TimeInterval = 0.3
+    public static let defaultQuietWindow: TimeInterval = 0.3
 
     /// Fired once, when the device set has been quiet for the window.
-    var onSettled: (() -> Void)?
+    public var onSettled: (() -> Void)?
 
     private let quietWindow: TimeInterval
     /// Schedule `fire` after `delay`. The default arms a real one-shot `Timer`;
     /// a test injects a seam that stores the closure and fires it on demand.
     private let schedule: (_ delay: TimeInterval, _ fire: @escaping () -> Void) -> Void
 
-    private(set) var isSettled = false
+    public private(set) var isSettled = false
     private var lastIDs: Set<String>?
     /// Bumped on every arm; a scheduled fire only settles if it is still the
     /// newest arm, so a superseded (real) timer that still fires is ignored.
     private var epoch = 0
 
-    init(quietWindow: TimeInterval = DiscoverySettleTracker.defaultQuietWindow,
+    public init(quietWindow: TimeInterval = DiscoverySettleTracker.defaultQuietWindow,
          schedule: @escaping (_ delay: TimeInterval, _ fire: @escaping () -> Void) -> Void = { delay, fire in
              Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { _ in
                  MainActor.assumeIsolated { fire() }
@@ -44,13 +44,13 @@ final class DiscoverySettleTracker {
 
     /// Arm the quiet window before the first device arrives, so a fleet that
     /// never changes (empty, or fully-known at open) still settles.
-    func start() {
+    public func start() {
         guard !isSettled, lastIDs == nil, epoch == 0 else { return }
         arm()
     }
 
     /// Feed the latest device-id set from the discovery stream.
-    func note(deviceIDs: Set<String>) {
+    public func note(deviceIDs: Set<String>) {
         guard !isSettled, deviceIDs != lastIDs else { return }
         lastIDs = deviceIDs
         arm()
@@ -74,5 +74,5 @@ final class DiscoverySettleTracker {
     // MARK: Test-support hooks
 
     /// Settle now, exactly as an elapsed quiet window would.
-    func test_settleNow() { settle() }
+    public func test_settleNow() { settle() }
 }

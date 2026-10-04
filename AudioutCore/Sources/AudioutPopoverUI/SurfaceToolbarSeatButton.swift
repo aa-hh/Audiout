@@ -4,7 +4,7 @@ import AppKit
 import AudioutSharedUI
 
 /// The header strip's geometry and wash strengths: the ONE capsule that holds
-/// the three screen tabs, the highlight drawn inside it for the current tab,
+/// the four screen tabs, the highlight drawn inside it for the current tab,
 /// and the same highlight worn by Pin, which stands outside the capsule.
 ///
 /// **The shape the owner asked for** (2026-09-04, second pass). One
@@ -48,14 +48,18 @@ enum SurfaceToolbarSeat {
     /// Pin's seat, square so `seatCornerRadius` rounds it to a circle.
     static var pinSize: NSSize { NSSize(width: pinDiameter, height: pinDiameter) }
 
-    /// One COLLAPSED tab's hit area, and the size of the highlight drawn
-    /// behind it. Two of the three tabs are always this size; the current one
-    /// grows to the right of it to show its name (`tabWidth`).
+    /// A COLLAPSED tab's height, and the width of one whose glyph fills
+    /// `glyphBox`'s width: the widest a collapsed tab gets, and the width of a
+    /// tab with no glyph. A real tab is its own glyph's slot (`slotWidth`);
+    /// the current one grows to the right of it to show its name
+    /// (`tabWidth`).
     ///
     /// The HEIGHT is derived, never typed: a tab is the capsule minus the
     /// padding above and below it, so the concentric arithmetic in
     /// `seatCornerRadius` cannot drift out of step with the pill.
-    static var size: NSSize { NSSize(width: 30, height: stripHeight - capsulePadding * 2) }
+    static var size: NSSize {
+        NSSize(width: slotWidth(glyphWidth: glyphBox.width), height: stripHeight - capsulePadding * 2)
+    }
 
     /// The corner every HIGHLIGHT is cut at, in every state — the current
     /// tab's, a hovered tab's, a pressed tab's, and Pin's while pinned: HALF
@@ -76,12 +80,7 @@ enum SurfaceToolbarSeat {
     /// owner saw against the capsule's rounded end.
     static func seatCornerRadius(forHeight height: CGFloat) -> CGFloat { height / 2 }
 
-    /// The gap after a revealed name, between the last letter and the end of
-    /// the highlight it sits in. Mirrors the ~7.5 pt the glyph already has on
-    /// its own left, so an expanded tab is padded evenly.
-    static let nameTrailingPadding: CGFloat = 10
-
-    /// The HARD ceiling on a revealed name, whatever language it is in. A name
+    /// The HARD ceiling on a revealed name's ink, whatever language it is in. A name
     /// longer than this truncates with an ellipsis rather than widening the
     /// strip, which is the whole reason names could come back at all: three
     /// translated labels on three tabs is what swept the tabs into the
@@ -94,8 +93,8 @@ enum SurfaceToolbarSeat {
     /// as "Settings" before it even reached the ceiling — and reaching it
     /// costs nothing, because the arithmetic does not depend on any of those
     /// numbers: only ONE tab is ever expanded, so the widest the strip can be
-    /// is `widestCapsuleWidth` plus Pin, 226 + 34 = 260 pt against a fixed
-    /// 713 pt surface.
+    /// is `widestCapsuleWidth` plus Pin, 254.5 + 28 = 282.5 pt against a
+    /// fixed 713 pt surface.
     /// `SurfaceToolbarTests.theStripCannotOutgrowTheSurfaceInAnyLanguage`
     /// asserts that with a name no language could produce.
     static let maxNameWidth: CGFloat = 120
@@ -105,11 +104,141 @@ enum SurfaceToolbarSeat {
     /// without competing with it, heavy enough to hold at that size.
     static var nameFont: NSFont { Tokens.Font.captionMedium }
 
-    /// One tab's width with `nameWidth` points of name revealed — the glyph
-    /// keeps its own collapsed slot and the name is added to the right of it,
-    /// so revealing a name never moves the glyph.
-    static func tabWidth(nameWidth: CGFloat) -> CGFloat {
-        nameWidth <= 0 ? size.width : size.width + nameWidth + nameTrailingPadding
+    /// The box every tab glyph's INK fits inside. An SF Symbol image is
+    /// bigger than its ink, by 2 to 4 pt here and by a different amount per
+    /// symbol, so a strip laid out by `NSImage.size` padded every tab
+    /// differently. The ink is measured instead (`inkRect`), the method the
+    /// ring glyphs were sized by (`DeviceIcon.rowGlyphFits`), and a glyph
+    /// whose ink overflows this box is drawn smaller until it fits. 18 x 15
+    /// brings the four glyphs' visual weight closest together: the 15 pt
+    /// height is the limit Mixer, Speakers and Settings shrink to, which
+    /// leaves their ink 13.5, 14.5 and 15 pt wide, and the 18 pt width is the
+    /// limit for Scenes' wide group of rectangles. DESIGN.md "Surface Header
+    /// Strip" lists the point size each glyph is drawn at.
+    static let glyphBox = NSSize(width: 18, height: 15)
+
+    /// The ONE gap around a tab's ink: before the glyph, between the glyph
+    /// and its name, and after the name's last letter. A collapsed tab is its
+    /// glyph's ink with this on each side, so collapsed and open tabs are
+    /// padded alike. 7.5 is the smallest half point that keeps the narrowest
+    /// tab (Mixer, 13.5 pt of ink) at least as wide as it is tall, so every
+    /// highlight stays a stadium.
+    static let glyphPadding: CGFloat = 7.5
+
+    /// A tab's glyph as the seat draws it: `symbol` at `glyphPointSize`,
+    /// smaller in quarter points until its ink fits `glyphBox`, then cropped
+    /// to that ink. The image IS the ink box, so the seat lays the glyph out
+    /// by the image's own size, and centring the image centres the ink.
+    /// Template, so the seat's tint still applies.
+    static func tabGlyph(_ symbol: NSImage?) -> NSImage? {
+        guard let symbol else { return nil }
+        var pointSize = glyphPointSize
+        var sized = symbol
+        var ink = NSRect.zero
+        while pointSize > 1, let configured = symbol.withSymbolConfiguration(
+            NSImage.SymbolConfiguration(pointSize: pointSize, weight: .regular)) {
+            sized = configured
+            ink = inkRect(of: configured)
+            if ink.width <= glyphBox.width && ink.height <= glyphBox.height { break }
+            pointSize -= 0.25
+        }
+        guard !ink.isEmpty else { return sized }
+        let glyph = NSImage(size: ink.size, flipped: false) { _ in
+            sized.draw(in: NSRect(x: -ink.minX, y: -ink.minY,
+                                  width: sized.size.width, height: sized.size.height))
+            return true
+        }
+        glyph.isTemplate = true
+        glyph.accessibilityDescription = symbol.accessibilityDescription
+        return glyph
+    }
+
+    /// Each screen's glyph ink width, keyed by symbol and point size:
+    /// `capsuleSize` is read on every tick of a reveal, and measuring renders.
+    @MainActor private static var glyphWidthCache: [String: CGFloat] = [:]
+
+    /// `screen`'s glyph ink width, resolved and fitted the way the strip
+    /// draws it.
+    @MainActor static func glyphWidth(_ screen: SurfaceScreen) -> CGFloat {
+        let key = "\(screen.symbolName)|\(glyphPointSize)"
+        if let cached = glyphWidthCache[key] { return cached }
+        let symbol = SurfaceToolbarController.resolveSymbol(
+            screen.symbolName, fallbacks: screen.fallbackSymbolNames,
+            accessibilityDescription: screen.label)
+        let width = tabGlyph(symbol)?.size.width ?? glyphBox.width
+        glyphWidthCache[key] = width
+        return width
+    }
+
+    /// The bounding box of the pixels `image` paints, any alpha at all,
+    /// rendered at 2x and given in the image's own points.
+    static func inkRect(of image: NSImage) -> NSRect {
+        guard let rep = clearRep(image.size) else { return .zero }
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+        image.draw(in: NSRect(origin: .zero, size: image.size))
+        NSGraphicsContext.restoreGraphicsState()
+        return inkRect(in: rep)
+    }
+
+    /// The same box for what `view` draws, in its own bounds. This is how a
+    /// name's first and last letters are found: a label draws its text
+    /// inset from its frame, and each letter has its own side bearing.
+    @MainActor static func inkRect(of view: NSView) -> NSRect {
+        let bounds = view.bounds
+        guard let rep = clearRep(bounds.size) else { return .zero }
+        view.cacheDisplay(in: bounds, to: rep)
+        let ink = inkRect(in: rep)
+        guard !ink.isEmpty else { return .zero }
+        return NSRect(x: bounds.minX + ink.minX,
+                      y: bounds.minY + (view.isFlipped ? bounds.height - ink.maxY : ink.minY),
+                      width: ink.width, height: ink.height)
+    }
+
+    /// A transparent 2x bitmap `size` points big. A new rep's buffer is not
+    /// guaranteed to be zeroed, and a stray byte would read as ink.
+    private static func clearRep(_ size: NSSize) -> NSBitmapImageRep? {
+        guard size.width > 0, size.height > 0,
+              let rep = NSBitmapImageRep(
+                bitmapDataPlanes: nil,
+                pixelsWide: Int(ceil(size.width * 2)), pixelsHigh: Int(ceil(size.height * 2)),
+                bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0),
+              let data = rep.bitmapData else { return nil }
+        data.initialize(repeating: 0, count: rep.bytesPerRow * rep.pixelsHigh)
+        rep.size = size
+        return rep
+    }
+
+    /// The box of every pixel with any alpha, in points from the rep's
+    /// bottom-left corner.
+    private static func inkRect(in rep: NSBitmapImageRep) -> NSRect {
+        guard let data = rep.bitmapData else { return .zero }
+        let alpha = rep.bitmapFormat.contains(.alphaFirst) ? 0 : rep.samplesPerPixel - 1
+        let stride = rep.bitsPerPixel / 8
+        var minX = Int.max, minRow = Int.max, maxX = -1, maxRow = -1
+        for row in 0..<rep.pixelsHigh {
+            let line = data + row * rep.bytesPerRow
+            for x in 0..<rep.pixelsWide where line[x * stride + alpha] > 0 {
+                minX = min(minX, x); maxX = max(maxX, x)
+                minRow = min(minRow, row); maxRow = max(maxRow, row)
+            }
+        }
+        guard maxX >= 0 else { return .zero }
+        // Rows run top-down; points run bottom-up.
+        return NSRect(x: CGFloat(minX) / 2, y: CGFloat(rep.pixelsHigh - 1 - maxRow) / 2,
+                      width: CGFloat(maxX - minX + 1) / 2, height: CGFloat(maxRow - minRow + 1) / 2)
+    }
+
+    /// A collapsed tab: its glyph's ink with `glyphPadding` on each side.
+    /// The glyph keeps this slot when the tab opens; the tab grows to the
+    /// right of it.
+    static func slotWidth(glyphWidth: CGFloat) -> CGFloat { glyphWidth + glyphPadding * 2 }
+
+    /// One tab's width with `nameWidth` points of name ink revealed: its
+    /// slot, then the name, then `glyphPadding` after the name's last letter.
+    static func tabWidth(nameWidth: CGFloat, glyphWidth: CGFloat) -> CGFloat {
+        slotWidth(glyphWidth: glyphWidth) + (nameWidth <= 0 ? 0 : nameWidth + glyphPadding)
     }
 
     /// The gap between the capsule's edge and the tabs inside it, on all four
@@ -117,31 +246,37 @@ enum SurfaceToolbarSeat {
     /// the pill's rounded end.
     static let capsulePadding: CGFloat = 3
 
-    /// The capsule holding all three tabs with every one of them COLLAPSED —
+    /// The capsule holding every screen tab with each one COLLAPSED —
     /// the floor its width can never go below, and its height in every state.
+    /// Its width is the four tabs' own slots (`slotWidth`) side by side, so it
+    /// follows the glyphs: 127 pt for today's four.
     ///
     /// That height is `stripHeight`, because `size.height` is derived from it.
     /// Pin no longer stands the full height of it (owner, 2026-09-14): the
     /// circle is a tab's height, centred in the same strip.
-    static var capsuleSize: NSSize {
-        NSSize(width: size.width * 3 + capsulePadding * 2,
+    @MainActor static var capsuleSize: NSSize {
+        NSSize(width: SurfaceScreen.allCases.reduce(capsulePadding * 2) {
+                   $0 + slotWidth(glyphWidth: glyphWidth($1))
+               },
                height: size.height + capsulePadding * 2)
     }
 
-    /// The capsule's width with one tab showing `nameWidth` points of name.
-    /// At most ONE tab is ever expanded, so one name is all this ever adds.
-    static func capsuleWidth(nameWidth: CGFloat) -> CGFloat {
-        capsuleSize.width + (nameWidth <= 0 ? 0 : nameWidth + nameTrailingPadding)
+    /// The capsule's width with one tab showing `nameWidth` points of name
+    /// ink. Whichever tab it is, opening adds the name and one `glyphPadding`
+    /// after it, and at most ONE tab is ever open.
+    @MainActor static func capsuleWidth(nameWidth: CGFloat) -> CGFloat {
+        capsuleSize.width + (nameWidth <= 0 ? 0 : nameWidth + glyphPadding)
     }
 
-    /// The widest the capsule can get in ANY language: two collapsed tabs plus
-    /// one expanded to the name ceiling. The guard that keeps the strip out of
-    /// the overflow chevron is this number, not the length of the English
-    /// words — a name past the ceiling truncates instead of pushing.
-    static var widestCapsuleWidth: CGFloat { capsuleWidth(nameWidth: maxNameWidth) }
+    /// The widest the capsule can get in ANY language: every other tab
+    /// collapsed plus one open to the name ceiling. The guard that keeps the
+    /// strip out of the overflow chevron is this number, not the length of
+    /// the English words — a name past the ceiling truncates instead of
+    /// pushing.
+    @MainActor static var widestCapsuleWidth: CGFloat { capsuleWidth(nameWidth: maxNameWidth) }
 
     /// Half the capsule's height, so the capsule reads as a pill.
-    static var capsuleCornerRadius: CGFloat { capsuleSize.height / 2 }
+    @MainActor static var capsuleCornerRadius: CGFloat { capsuleSize.height / 2 }
 
     /// The capsule's own wash, one rung BELOW the hover weight
     /// (`rowHoverWashAlpha`, 0.10) so a hovered tab still separates from the
@@ -168,7 +303,8 @@ enum SurfaceToolbarSeat {
         reduceTransparency ? Tokens.Color.rim : Tokens.Color.containerEdge
     }
 
-    /// The glyph size inside a tab.
+    /// The size a tab glyph starts at; `tabGlyph` draws one whose ink
+    /// overflows `glyphBox` smaller.
     static let glyphPointSize: CGFloat = 15
 
     /// Pin's glyph only, and well under the tabs' 15: the pushpin is markedly
@@ -285,21 +421,28 @@ final class SurfaceToolbarSeatCell: NSButtonCell {
         shapePath(in: frame).fill()
     }
 
-    /// The width the glyph is centred in, or `nil` to centre it in the whole
-    /// cell. A tab sets it to the COLLAPSED width so revealing a name opens
-    /// space to the RIGHT of the icon instead of sliding the icon along with
-    /// it; Pin leaves it nil, because Pin never grows and its glyph belongs in
-    /// the middle of its circle.
-    var glyphSlotWidth: CGFloat?
+    /// Whether the glyph is placed as a tab's, `glyphPadding` in from the
+    /// leading edge, rather than centred in the whole cell (Pin, which never
+    /// grows and whose glyph belongs in the middle of its circle).
+    var placesGlyphAsTab = false
 
     override func drawImage(_ image: NSImage, withFrame frame: NSRect, in controlView: NSView) {
-        guard let glyphSlotWidth else {
+        guard placesGlyphAsTab else {
             super.drawImage(image, withFrame: frame, in: controlView)
             return
         }
-        let slot = NSRect(x: controlView.bounds.minX, y: frame.minY,
-                          width: glyphSlotWidth, height: frame.height)
-        super.drawImage(image, withFrame: slot, in: controlView)
+        super.drawImage(image, withFrame: Self.tabGlyphRect(image, frame: frame, in: controlView.bounds),
+                        in: controlView)
+    }
+
+    /// The rect a tab's glyph is drawn into: exactly its own width,
+    /// `glyphPadding` in from the seat's leading edge at every width the seat
+    /// passes through, so the glyph never moves as its name opens. The image
+    /// is cropped to its ink (`SurfaceToolbarSeat.tabGlyph`), so this places
+    /// the ink, and the cell centres it vertically.
+    static func tabGlyphRect(_ image: NSImage, frame: NSRect, in bounds: NSRect) -> NSRect {
+        NSRect(x: bounds.minX + SurfaceToolbarSeat.glyphPadding,
+               y: frame.minY, width: image.size.width, height: frame.height)
     }
 
     override func drawFocusRingMask(withFrame cellFrame: NSRect, in controlView: NSView) {
@@ -327,7 +470,7 @@ final class SurfaceToolbarSeatCell: NSButtonCell {
 /// this replaces got that from `NSToolbar.selectedItemIdentifier`, which
 /// AppKit speaks — but AppKit only draws a selection for the item styles it
 /// owns, so taking the drawing means taking the spoken state too. A tab is a
-/// radio button (one of three, exactly one on) and reports selected both as
+/// radio button (one of four, exactly one on) and reports selected both as
 /// its accessibility value and through `isAccessibilitySelected`.
 final class SurfaceToolbarSeatButton: NSButton {
 
@@ -354,11 +497,19 @@ final class SurfaceToolbarSeatButton: NSButton {
     /// keep their shape while the seat slides open past them.
     private var nameLabelWidth: NSLayoutConstraint?
 
-    /// How much room this tab's name needs, already clamped to
-    /// `SurfaceToolbarSeat.maxNameWidth`. Zero until `configure` sets a name.
+    /// Where the name label starts: placed so the first letter's ink lands
+    /// one `glyphPadding` past the glyph's ink.
+    private var nameLabelLeading: NSLayoutConstraint!
+
+    /// This tab's glyph ink width; `glyphBox`'s width when it has no glyph.
+    private(set) var glyphWidth: CGFloat = SurfaceToolbarSeat.glyphBox.width
+
+    /// How much room this tab's name ink needs, first letter to last,
+    /// already clamped to `SurfaceToolbarSeat.maxNameWidth`. Zero until
+    /// `configure` sets a name.
     private(set) var nameWidth: CGFloat = 0
 
-    /// Whether the name is showing. The three tabs are one radio group and the
+    /// Whether the name is showing. The four tabs are one radio group and the
     /// capsule expands only for the current screen, so at most one is `true`.
     private(set) var isNameRevealed = false
 
@@ -391,7 +542,7 @@ final class SurfaceToolbarSeatButton: NSButton {
         // The name is parked OUTSIDE a collapsed seat's bounds and clipped
         // away, so growing the seat wipes it into view instead of squeezing
         // the letters open. Without this it would be drawn in full beside a
-        // 30 pt tab, spilling across its neighbour.
+        // collapsed tab, spilling across its neighbour.
         clipsToBounds = true
 
         nameLabel.font = SurfaceToolbarSeat.nameFont
@@ -399,19 +550,26 @@ final class SurfaceToolbarSeatButton: NSButton {
         nameLabel.maximumNumberOfLines = 1
         nameLabel.setAccessibilityElement(false)
         nameLabel.translatesAutoresizingMaskIntoConstraints = false
+        // Hidden while the seat is collapsed, because the clip alone leaks:
+        // the name's first letter starts exactly at a collapsed seat's edge,
+        // and a 1x display snaps the seat's width and the label's origin to
+        // whole points separately, so up to a point of that letter was drawn
+        // beside every idle tab's glyph. `setNameRevealed` shows it.
+        nameLabel.isHidden = true
         addSubview(nameLabel)
 
         widthConstraint = widthAnchor.constraint(equalToConstant: SurfaceToolbarSeat.size.width)
         heightConstraint = heightAnchor.constraint(equalToConstant: SurfaceToolbarSeat.size.height)
+        // Pinned to the seat's leading edge past the glyph, and never to its
+        // trailing edge: a trailing pin would let Auto Layout compress the
+        // name as the seat grows, so the reveal would read as letters
+        // unsqueezing rather than a name sliding out.
+        nameLabelLeading = nameLabel.leadingAnchor.constraint(
+            equalTo: leadingAnchor, constant: SurfaceToolbarSeat.size.width)
         NSLayoutConstraint.activate([
             widthConstraint,
             heightConstraint,
-            // Pinned to the seat's leading edge past the glyph's own slot, and
-            // never to its trailing edge: a trailing pin would let Auto Layout
-            // compress the name as the seat grows, so the reveal would read as
-            // letters unsqueezing rather than a name sliding out.
-            nameLabel.leadingAnchor.constraint(equalTo: leadingAnchor,
-                                               constant: SurfaceToolbarSeat.size.width),
+            nameLabelLeading,
             nameLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
         ])
         refreshEngagedAppearance()
@@ -455,21 +613,21 @@ final class SurfaceToolbarSeatButton: NSButton {
 
     // MARK: Configuration
 
-    /// `isTab` marks the three screen tabs, which are one radio group; Pin is
+    /// `isTab` marks the four screen tabs, which are one radio group; Pin is
     /// an ordinary button whose own label ("Pin" / "Unpin") speaks its state.
     func configure(symbol: NSImage?, label: String, toolTip: String?, isTab: Bool) {
         self.isTab = isTab
-        image = symbol?.withSymbolConfiguration(
-            NSImage.SymbolConfiguration(
-                pointSize: isTab ? SurfaceToolbarSeat.glyphPointSize
-                                 : SurfaceToolbarSeat.pinGlyphPointSize,
-                weight: .regular)) ?? symbol
+        image = isTab ? SurfaceToolbarSeat.tabGlyph(symbol)
+                      : symbol?.withSymbolConfiguration(
+                          NSImage.SymbolConfiguration(pointSize: SurfaceToolbarSeat.pinGlyphPointSize,
+                                                      weight: .regular)) ?? symbol
         self.toolTip = toolTip
         setAccessibilityLabel(label)
         if isTab { setAccessibilityRole(.radioButton) }
-        // A tab's glyph is pinned in its collapsed slot so a name opens to the
-        // right of it; Pin's belongs in the middle of its circle.
-        seatCell.glyphSlotWidth = isTab ? SurfaceToolbarSeat.size.width : nil
+        // A tab's glyph sits one `glyphPadding` in from its leading edge in
+        // every state; Pin's belongs in the middle of its circle.
+        seatCell.placesGlyphAsTab = isTab
+        glyphWidth = (isTab ? image?.size.width : nil) ?? SurfaceToolbarSeat.glyphBox.width
         seatCell.drawsCircle = !isTab
         // Only a tab has a name to reveal. Pin's own label already flips
         // between "Pin" and "Unpin" to say what it is, and it stands outside
@@ -495,15 +653,35 @@ final class SurfaceToolbarSeatButton: NSButton {
         nameLabelWidth?.isActive = false
         guard !name.isEmpty else {
             nameWidth = 0
-            widthConstraint.constant = SurfaceToolbarSeat.tabWidth(nameWidth: 0)
+            widthConstraint.constant = SurfaceToolbarSeat.tabWidth(nameWidth: 0, glyphWidth: glyphWidth)
             return
         }
-        nameWidth = min(ceil(nameLabel.fittingSize.width), SurfaceToolbarSeat.maxNameWidth)
-        let width = nameLabel.widthAnchor.constraint(equalToConstant: nameWidth)
+        // The gaps either side of the name are taken from its first and last
+        // letters as drawn, measured once on a copy of the label at its
+        // fitting width.
+        let fitting = nameLabel.fittingSize
+        let measured = NSTextField(labelWithString: name)
+        measured.font = nameLabel.font
+        // Measured in the light appearance: macOS draws light-on-dark text up
+        // to half a point heavier on each side, and the layout wants the
+        // letters' own outline whatever the system appearance is.
+        measured.appearance = NSAppearance(named: .aqua)
+        measured.frame = NSRect(x: 0, y: 0, width: ceil(fitting.width), height: ceil(fitting.height))
+        let ink = SurfaceToolbarSeat.inkRect(of: measured)
+        nameWidth = min(ink.width, SurfaceToolbarSeat.maxNameWidth)
+        // The label keeps its own slack around the ink, so a name past the
+        // ceiling truncates rather than squeezing.
+        let width = nameLabel.widthAnchor.constraint(
+            equalToConstant: nameWidth + measured.frame.width - ink.width)
         width.isActive = true
         nameLabelWidth = width
+        // TRAP: a label's leading anchor is its ALIGNMENT rect, which starts
+        // 2 pt inside its frame, where the text starts. Measured from the
+        // frame instead, the name lands 2 pt early.
+        nameLabelLeading.constant = SurfaceToolbarSeat.slotWidth(glyphWidth: glyphWidth)
+            - (ink.minX - measured.alignmentRectInsets.left)
         widthConstraint.constant = SurfaceToolbarSeat.tabWidth(
-            nameWidth: isNameRevealed ? nameWidth : 0)
+            nameWidth: isNameRevealed ? nameWidth : 0, glyphWidth: glyphWidth)
     }
 
     /// Show or hide this tab's name by growing or shrinking the seat itself.
@@ -518,15 +696,24 @@ final class SurfaceToolbarSeatButton: NSButton {
     func setNameRevealed(_ revealed: Bool, animated: Bool) {
         guard revealed != isNameRevealed else { return }
         isNameRevealed = revealed
-        let target = SurfaceToolbarSeat.tabWidth(nameWidth: revealed ? nameWidth : 0)
+        // Shown before an opening seat travels, hidden once a closing one has
+        // arrived: the clip wipes the name only while the seat is moving.
+        if revealed { nameLabel.isHidden = false }
+        let target = SurfaceToolbarSeat.tabWidth(nameWidth: revealed ? nameWidth : 0,
+                                                 glyphWidth: glyphWidth)
         guard animated else {
             widthConstraint.constant = target
+            nameLabel.isHidden = !revealed
             revealFollower?.foldAnimatorDidTick()
             settleToolbarLayout()
             return
         }
         FoldAnimator.shared.animate(widthConstraint, to: target, follower: revealFollower) {
-            [weak self] in self?.settleToolbarLayout()
+            [weak self] in
+            guard let self else { return }
+            // A replaced travel never completes, so this one is the last.
+            nameLabel.isHidden = !isNameRevealed
+            settleToolbarLayout()
         }
     }
 
@@ -599,7 +786,26 @@ final class SurfaceToolbarSeatButton: NSButton {
     /// in-between number mid-travel. This is the drawn result, not the intent.
     var test_visibleNameWidth: CGFloat {
         max(0, min(nameWidth,
-                   widthConstraint.constant - SurfaceToolbarSeat.size.width))
+                   widthConstraint.constant - SurfaceToolbarSeat.slotWidth(glyphWidth: glyphWidth)))
+    }
+
+    /// The tab glyph's INK in the seat's bounds, measured off the image the
+    /// cell draws and placed where it draws it, or `nil` without one.
+    var test_glyphInkRect: NSRect? {
+        guard isTab, let image else { return nil }
+        let slot = SurfaceToolbarSeatCell.tabGlyphRect(image, frame: bounds, in: bounds)
+        let size = image.size
+        let ink = SurfaceToolbarSeat.inkRect(of: image)
+        let imageMinY = slot.midY - size.height / 2
+        return NSRect(x: slot.minX + ink.minX,
+                      y: imageMinY + (isFlipped ? size.height - ink.maxY : ink.minY),
+                      width: ink.width, height: ink.height)
+    }
+
+    /// The name's INK in the seat's bounds, first letter to last, measured
+    /// off the label as it is laid out.
+    var test_nameInkRect: NSRect {
+        nameLabel.convert(SurfaceToolbarSeat.inkRect(of: nameLabel), to: self)
     }
 
     /// The seat's live width, which is what the reveal animates.
@@ -607,8 +813,8 @@ final class SurfaceToolbarSeatButton: NSButton {
     var test_width: CGFloat { seatWidth }
 }
 
-/// The ONE capsule the three screen tabs sit in: a single pill-shaped surface
-/// drawn once, behind all three glyphs, with the tabs as its subviews.
+/// The ONE capsule the four screen tabs sit in: a single pill-shaped surface
+/// drawn once, behind every tab's glyph, with the tabs as its subviews.
 ///
 /// Three separate circular seats — one per tab, each its own island — is what
 /// failed review on 2026-09-04. The owner asked for the grouping macOS 26 uses
@@ -621,7 +827,7 @@ final class SurfaceToolbarSeatButton: NSButton {
 /// current screen lighter than its surroundings in dark mode without any
 /// per-appearance branch.
 ///
-/// Its HEIGHT is fixed and its width is derived from the three tabs, so it is
+/// Its HEIGHT is fixed and its width is derived from the four tabs, so it is
 /// exactly as wide as they are and no wider: the highlight moving cannot
 /// resize it, and only a tab opening to show its name can.
 ///
@@ -653,7 +859,7 @@ final class SurfaceToolbarTabCapsule: NSView, FoldFollowing {
 
         let padding = SurfaceToolbarSeat.capsulePadding
         NSLayoutConstraint.activate([
-            // No width constraint: the pill is exactly as wide as the three
+            // No width constraint: the pill is exactly as wide as the four
             // tabs plus its padding, so the one that is open pushes it out and
             // nothing else can. Height stays pinned — a reveal is horizontal.
             heightAnchor.constraint(equalToConstant: SurfaceToolbarSeat.capsuleSize.height),
@@ -664,7 +870,7 @@ final class SurfaceToolbarTabCapsule: NSView, FoldFollowing {
         ])
         for tab in tabs { tab.revealFollower = self }
 
-        // Three radio buttons in a group is what this is, so say so: VoiceOver
+        // Four radio buttons in a group is what this is, so say so: VoiceOver
         // then announces the set the tabs belong to before their own names.
         setAccessibilityRole(.radioGroup)
         setAccessibilityLabel("Screens")
@@ -750,7 +956,7 @@ final class SurfaceToolbarTabCapsule: NSView, FoldFollowing {
         item.maxSize = size
     }
 
-    /// The width the three tabs currently need, with whichever one is open
+    /// The width the four tabs currently need, with whichever one is open
     /// counted at its revealed width. The toolbar reads this to size the
     /// item's container, so it must track the reveal tick by tick.
     override var intrinsicContentSize: NSSize {

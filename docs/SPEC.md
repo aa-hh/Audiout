@@ -343,15 +343,15 @@ Decisions: **pure AppKit** (no SwiftUI) · **dropdown is a Control-Center-style
 NSPopover** (REVISED 2026-07-13, superseded 2026-08-07 — see below) · full window
 is **sidebar + mixer** · volume is **horizontal rows**.
 
-> **REVISED 2026-08-07 — ONE SURFACE replaces five windows.** The dropdown, the
-> Scenes window and the Settings window are now three **screens** of a single
-> panel, chosen by a tab-bar-style switcher in its header (ICON-ONLY tabs in
-> the Mac's toolbar-tabs idiom, ⌘1/⌘2/⌘3 — labels were built and removed on
+> **REVISED 2026-08-07 — ONE SURFACE replaces five windows.** The dropdown,
+> scene and speaker management, and the Settings window are now four
+> **screens** of a single panel, chosen by a tab-bar-style switcher in its
+> header (ICON-ONLY tabs in the Mac's toolbar-tabs idiom, ⌘1–⌘4 — labels were built and removed on
 > 2026-09-03: the surface is a fixed width, and three translated names would
 > push the tabs into AppKit's overflow chevron, which is no place for primary
 > navigation; the tooltip, the VoiceOver label and the shortcut carry the
 > names instead): **Mixer** (the panel this section
-> describes below), **Scenes**, **Settings**. Setup and About keep their own
+> describes below), **Scenes**, **Speakers**, **Settings**. Setup and About keep their own
 > windows — the two deliberate exceptions. Authoritative record:
 > PLAN-ONE-SURFACE-032.md.
 >

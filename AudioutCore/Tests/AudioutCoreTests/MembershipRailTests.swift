@@ -176,6 +176,8 @@ import AppKit
     @Test func creationSheetRowsAreAllPlain() {
         let controller = GroupController(backend: MockBackend(fleet: []),
                                          store: GroupStore(directory: tempDirectory()),
+                                         routingStore: RoutingStore(directory: scratchDir),
+                                         settings: AppSettings(defaults: isolatedDefaults),
                                          loadPersisted: false)
         let sheet = GroupCreationSheetController(groupController: controller)
         sheet.loadView()
@@ -259,13 +261,15 @@ import AppKit
     private func makeEditor() throws -> (GroupEditorViewController, GroupController, [Device]) {
         let devices = [
             makeDevice(id: "a", name: "Alpha"),
-            makeDevice(id: "office", name: "Office"),
+            makeDevice(id: "office", name: "Bravo"),
             makeDevice(id: "c", name: "Charlie"),
-            makeDevice(id: "mixer", name: "Mixer"),
+            makeDevice(id: "mixer", name: "Delta"),
             makeDevice(id: "e", name: "Echo"),
         ]
         let controller = GroupController(backend: MockBackend(fleet: []),
                                          store: GroupStore(directory: tempDirectory()),
+                                         routingStore: RoutingStore(directory: scratchDir),
+                                         settings: AppSettings(defaults: isolatedDefaults),
                                          loadPersisted: false)
         let group = try controller.createGroup(name: "Downstairs",
                                                memberIDs: ["office", "mixer"],
@@ -462,6 +466,7 @@ import AppKit
 
     // MARK: "Playing now" + the reassurance line
 
+    // Turns red when the active editor stops saying what is playing is untouched.
     @Test func everyEditorSaysEditsAreSavedAndOnlyTheActiveOneSaysPlayingNow() throws {
         let (editor, controller, devices) = try makeEditor()
         #expect(!editor.test_playingBadgeVisible,
@@ -530,6 +535,8 @@ import AppKit
         let devices = (0..<7).map { makeDevice(id: "d\($0)", name: "Device \($0)") }
         let controller = GroupController(backend: MockBackend(fleet: []),
                                          store: GroupStore(directory: tempDirectory()),
+                                         routingStore: RoutingStore(directory: scratchDir),
+                                         settings: AppSettings(defaults: isolatedDefaults),
                                          loadPersisted: false)
         let group = try controller.createGroup(name: "Downstairs", memberIDs: ["d0"],
                                                memberVolumes: [:]).group
@@ -589,6 +596,8 @@ import AppKit
     @Test func sevenDeviceFleetFitsTheCreationSheetWithoutScrolling() {
         let controller = GroupController(backend: MockBackend(fleet: []),
                                          store: GroupStore(directory: tempDirectory()),
+                                         routingStore: RoutingStore(directory: scratchDir),
+                                         settings: AppSettings(defaults: isolatedDefaults),
                                          loadPersisted: false)
         let sheet = GroupCreationSheetController(groupController: controller)
         sheet.loadView()

@@ -1385,8 +1385,9 @@ public final class DeviceRowView: NSView {
     /// Compose `segments` (main-mix + app tokens, already colored) into ONE
     /// PILL EACH, with the spec item 3 STATIC overflow
     /// rule: try showing every value's pill first; if the row of pills
-    /// doesn't fit `PopoverColumnGrid.feedColumnWidth`, drop values from the
-    /// TAIL one at a time (never cut a pill mid-string) and append a trailing
+    /// doesn't fit the row's own slot — `PopoverColumnGrid.feedColumnWidth`,
+    /// or `btFeedSlotWidth` on a row that also carries the SYNC chip — drop
+    /// values from the TAIL one at a time (never cut a pill mid-string) and append a trailing
     /// "+N" pill for the dropped count — no interactive reveal, locked.
     /// Clears the pills when there is nothing to show at all.
     private func setFeedSegments(_ segments: [FeedSegment]) {
@@ -1422,7 +1423,12 @@ public final class DeviceRowView: NSView {
             NSAttributedString(string: "+\(count)", attributes: [.font: font, .foregroundColor: chromeColor])
         }
 
-        let available = PopoverColumnGrid.feedColumnWidth
+        // Measure against the slot the stack is actually clipped to: a
+        // sync-capable row (Bluetooth, Cast, the Mac's own) keeps only the
+        // chip's leftover, and measuring the full column there let a second
+        // pill pass the check and then get cut off mid-word by the mask.
+        let available = showsSyncControls
+            ? PopoverColumnGrid.btFeedSlotWidth : PopoverColumnGrid.feedColumnWidth
         // A lone segment has no overflow GROUP to collapse into — the floor
         // stays "show the one clipped pill" (spec item 3, "a clipped single
         // pill beats showing nothing"). But when there's a genuine overflow

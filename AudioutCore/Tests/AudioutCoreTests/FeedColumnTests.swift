@@ -288,6 +288,22 @@ import AudioutCore
         #expect(!(row.test_feedText?.hasSuffix("…") ?? true))
     }
 
+    /// Turns red if `setFeedSegments` goes back to measuring every row against
+    /// the full `feedColumnWidth`: a sync-capable row only has `btFeedSlotWidth`
+    /// (52 pt) for its pills, so "System" plus an app must collapse to "+N"
+    /// there instead of passing the check and being clipped mid-word.
+    @Test func aSyncCapableRowOverflowsAgainstItsOwnNarrowerSlot() {
+        let plain = makeBusRow()
+        plain.apply(makeDevice(), selected: true, controllable: true, routedAppNames: ["Music"])
+        #expect(!plain.test_feedHasOverflow, "the full-width column still fits both pills")
+
+        let synced = DeviceRowView(device: makeDevice(), showsToggle: true, showsMeter: true,
+                                   showsBus: true, showsSyncControls: true)
+        synced.apply(makeDevice(), selected: true, controllable: true, routedAppNames: ["Music"])
+        #expect(synced.test_feedHasOverflow, "the same two values do not fit beside the sync chip")
+        #expect(synced.test_feedTooltip == "Playing System, Music", "the tooltip still names every value")
+    }
+
     @Test func shortCompositeNeverOverflows() {
         let row = makeBusRow()
         row.apply(makeDevice(), selected: true, controllable: true, routedAppNames: ["Music"])

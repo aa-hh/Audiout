@@ -797,9 +797,10 @@ import CoreAudio
         #expect(rig.capture.preDelayMs.count == published + 1, "got \(rig.capture.preDelayMs)")
     }
 
-    /// A receiver that plays EARLIER than assumed is delayed on its own feed
-    /// instead — the rest of the house is not dragged forward for it.
-    @Test func anEarlyReceiverLeavesTheRoomWhereItIs() {
+    /// A receiver that settles EARLIER than assumed brings the room down to
+    /// it once, and its own share goes to 0.
+    /// Turns red if a settle more than `raiseThresholdMs` below the term leaves the room where it is.
+    @Test func anEarlyReceiversSettleLowersTheRoomToIt() {
         let (rig, ap) = castRoom()
         rig.backend.setOutputSet([ap.id, Self.record.id])
         waitFor { !rig.capture.preDelayMs.isEmpty }
@@ -807,13 +808,11 @@ import CoreAudio
 
         rig.manager.fireLead(id: Self.record.id, leadMs: 4_000,
                              count: CastRoomDelay.settleSampleCount)
-        SuiteWait.settle(0.3)
-        #expect(rig.capture.preDelayMs.count == published, "got \(rig.capture.preDelayMs)")
-        #expect(rig.backend.localSinkReferenceDelayMs() == CastRoomDelay.defaultLeadMs + CastFeedRing.macHoldMs)
-        // Its own share is the room less its lead less the Mac hold, which
-        // the feed already carries.
-        waitFor { rig.manager.castRoomDelays.last?.ms == CastRoomDelay.defaultLeadMs - 4_000 }
-        #expect(rig.manager.castRoomDelays.last?.ms == CastRoomDelay.defaultLeadMs - 4_000)
+        waitFor { rig.capture.preDelayMs.last == 4_000 + CastFeedRing.macHoldMs - rig.backend.startBufferMs }
+        #expect(rig.capture.preDelayMs.count == published + 1, "got \(rig.capture.preDelayMs)")
+        #expect(rig.backend.localSinkReferenceDelayMs() == 4_115)
+        waitFor { rig.manager.castRoomDelays.last?.ms == 0 }
+        #expect(rig.manager.castRoomDelays.last?.ms == 0)
         #expect(rig.manager.castRoomDelays.last?.id == Self.record.id)
     }
 
@@ -827,14 +826,46 @@ import CoreAudio
         let id = Self.record.id
         let room0 = CastRoomDelay.defaultLeadMs + CastFeedRing.macHoldMs
 
-        rig.manager.fireLead(id: id, leadMs: 4_000, count: CastRoomDelay.settleSampleCount, holdMs: 84)
-        waitFor { rig.manager.castRoomDelays.last?.ms == room0 - 4_084 }
-        #expect(rig.manager.castRoomDelays.last?.ms == room0 - 4_084)
+        rig.manager.fireLead(id: id, leadMs: 5_520, count: CastRoomDelay.settleSampleCount, holdMs: 84)
+        waitFor { rig.manager.castRoomDelays.last?.ms == 11 }
+        #expect(rig.manager.castRoomDelays.last?.ms == 11)
         #expect(rig.backend.localSinkReferenceDelayMs() == room0)
 
-        rig.manager.fireLead(id: id, leadMs: 5_559, count: CastRoomDelay.settleSampleCount, holdMs: 84)
-        waitFor { rig.backend.localSinkReferenceDelayMs() == 5_643 }
-        #expect(rig.backend.localSinkReferenceDelayMs() == 5_643)
+        rig.manager.fireLead(id: id, leadMs: 5_700, count: CastRoomDelay.settleSampleCount, holdMs: 84)
+        waitFor { rig.backend.localSinkReferenceDelayMs() == 5_784 }
+        #expect(rig.backend.localSinkReferenceDelayMs() == 5_784)
+        #expect(rig.manager.castRoomDelays.last?.ms == 0)
+    }
+
+    /// A settled receiver that drifts inside its share has the share follow
+    /// it with the room and its gate left alone; drift that would need more
+    /// than `raiseThresholdMs` of negative share moves the room once.
+    /// Turns red if a settled receiver's tracked drift moves the room while its share can absorb it, leaves its share where its settle put it, or fails to move the room once the drift passes `raiseThresholdMs`.
+    @Test func aSettledReceiversTrackedDriftMovesItsShareAndTheRoomOnlyPastTheRaiseBand() {
+        let (rig, ap) = castRoom()
+        let id = Self.record.id
+        rig.backend.setOutputSet([ap.id, id])
+        waitFor { !rig.capture.preDelayMs.isEmpty }
+
+        rig.manager.fireLead(id: id, leadMs: 5_500, count: CastRoomDelay.settleSampleCount)
+        waitFor { rig.manager.castRoomDelays.last?.ms == 0 }
+        rig.backend.stateQueue.sync {}
+        rig.backend.captureControlQueue.sync {}
+        let published = rig.capture.preDelayMs.count
+
+        rig.manager.fireLead(id: id, leadMs: 5_490, count: CastRoomDelay.settleSampleCount)
+        waitFor { rig.manager.castRoomDelays.last?.ms == 10 }
+        rig.backend.stateQueue.sync {}
+        rig.backend.captureControlQueue.sync {}
+        #expect(rig.capture.preDelayMs.count == published, "got \(rig.capture.preDelayMs)")
+        #expect(rig.backend.localSinkReferenceDelayMs() == 5_615)
+        #expect(rig.manager.feedGates.suffix(10).allSatisfy { $0.open }, "got \(rig.manager.feedGates)")
+
+        rig.manager.fireLead(id: id, leadMs: 5_530, count: CastRoomDelay.settleSampleCount)
+        waitFor { rig.capture.preDelayMs.last == 5_645 - rig.backend.startBufferMs }
+        #expect(rig.capture.preDelayMs.count == published + 1, "got \(rig.capture.preDelayMs)")
+        #expect(rig.backend.localSinkReferenceDelayMs() == 5_645)
+        waitFor { rig.manager.castRoomDelays.last?.ms == 0 }
         #expect(rig.manager.castRoomDelays.last?.ms == 0)
     }
 
@@ -940,10 +971,10 @@ import CoreAudio
         rig.backend.setOutputSet([ap.id, id])
         waitFor { !rig.capture.preDelayMs.isEmpty }
 
-        rig.manager.fireLead(id: id, leadMs: 4_000, count: CastRoomDelay.settleSampleCount, holdMs: 84)
-        let share = CastRoomDelay.defaultLeadMs + CastFeedRing.macHoldMs - 4_084
-        waitFor { rig.manager.castRoomDelays.last?.ms == share }
-        rig.manager.fireLead(id: id, leadMs: 4_000, count: 3, feedDelayMs: share)
+        rig.manager.fireLead(id: id, leadMs: 4_000, count: CastRoomDelay.settleSampleCount,
+                             feedDelayMs: 1_000, holdMs: 84)
+        waitFor { rig.manager.castRoomDelays.last?.ms == 0 }
+        rig.manager.fireLead(id: id, leadMs: 4_000, count: 3, feedDelayMs: 0)
         waitFor { rig.manager.feedGates.count == CastRoomDelay.settleSampleCount + 3 }
         rig.backend.stateQueue.sync {}
         #expect(rig.manager.feedGates.allSatisfy { !$0.open }, "got \(rig.manager.feedGates)")

@@ -926,43 +926,61 @@ extension NativeBackend {
 
     /// CAST-SYNC (brief §4): one lead measurement the session manager judged
     /// trustworthy, with the room-delay share its feed held back when it was
-    /// taken. Only a settle moves any delay; every sample decides the
-    /// receiver's feed gate. On `stateQueue`.
+    /// taken. A settle or a tracked move changes a delay; only a settle holds
+    /// its gate back. Every sample decides the receiver's feed gate. On
+    /// `stateQueue`.
     func applyCastLeadSample(_ id: String, _ leadMs: Int, _ feedDelayMs: Int, _ holdMs: Int?, _ generation: Int) {   // on stateQueue
         if let settlement = castRoomDelay.ingest(leadMs: leadMs, holdMs: holdMs, forID: id) {
-            Telemetry.log(.cast, "cast_lead_settled", [
-                "device": id,
-                "lead_ms": String(settlement.leadMs),
-                "hold_ms": String(castRoomDelay.holdMs(forID: id)),
-                "refused": settlement.refused ? "1" : "0",
-                "term_ms": _castTermMs.map(String.init) ?? "nil",
-            ])
-            if settlement.termMoved {
-                roomDelayChangedLocked(cause: "cast_lead")
-            } else {
-                // The term stayed put, so the ROOM did not move — but this
-                // receiver's share of it just did, and it is the only output
-                // that needs telling. Pushing the whole room fan-out here would
-                // re-anchor every Bluetooth and local sink for a change none of
-                // them can see.
-                pushCastFeedDelaysLocked()
-            }
-            pendingCastFeedGateOpens.removeValue(forKey: id)?.cancel()
-            // The gate acts on audio as the Mac renders it, so the only
-            // old-share audio it must keep shut is what is still queued in the
-            // ring at this settle: the Mac's hold. A share that moved past the
-            // band keeps the gate shut until that has drained.
-            let hold = castRoomDelay.holdMs(forID: id)
-            if let settled = castRoomDelay.settledLeadMs(forID: id),
-               abs(Swift.max(0, roomDelayLocked() - settled - hold) - feedDelayMs)
-                   > CastRoomDelay.feedGateBandMs {
-                let work = DispatchWorkItem { [weak self] in
-                    guard let self else { return }
-                    self.pendingCastFeedGateOpens[id] = nil
-                    self.castOutputManager?.setCastFeedGate(open: true, forDeviceID: id, generation: generation)
+            if settlement.tracked {
+                if settlement.termMoved {
+                    roomDelayChangedLocked(cause: "cast_lead_tracked")
+                } else {
+                    pushCastFeedDelaysLocked()
                 }
-                pendingCastFeedGateOpens[id] = work
-                delayClock(Double(hold) / 1000, stateQueue, work)
+                Telemetry.log(.cast, "cast_lead_tracked", [
+                    "device": id,
+                    "lead_ms": String(settlement.leadMs),
+                    "hold_ms": String(castRoomDelay.holdMs(forID: id)),
+                    "old_share_ms": String(feedDelayMs),
+                    "new_share_ms": String(Swift.max(0, roomDelayLocked() - settlement.leadMs - castRoomDelay.holdMs(forID: id))),
+                    "term_moved": settlement.termMoved ? "1" : "0",
+                    "term_ms": _castTermMs.map(String.init) ?? "nil",
+                ])
+            } else {
+                Telemetry.log(.cast, "cast_lead_settled", [
+                    "device": id,
+                    "lead_ms": String(settlement.leadMs),
+                    "hold_ms": String(castRoomDelay.holdMs(forID: id)),
+                    "refused": settlement.refused ? "1" : "0",
+                    "term_ms": _castTermMs.map(String.init) ?? "nil",
+                ])
+                if settlement.termMoved {
+                    roomDelayChangedLocked(cause: "cast_lead")
+                } else {
+                    // The term stayed put, so the ROOM did not move — but this
+                    // receiver's share of it just did, and it is the only output
+                    // that needs telling. Pushing the whole room fan-out here would
+                    // re-anchor every Bluetooth and local sink for a change none of
+                    // them can see.
+                    pushCastFeedDelaysLocked()
+                }
+                pendingCastFeedGateOpens.removeValue(forKey: id)?.cancel()
+                // The gate acts on audio as the Mac renders it, so the only
+                // old-share audio it must keep shut is what is still queued in the
+                // ring at this settle: the Mac's hold. A share that moved past the
+                // band keeps the gate shut until that has drained.
+                let hold = castRoomDelay.holdMs(forID: id)
+                if let settled = castRoomDelay.settledLeadMs(forID: id),
+                   abs(Swift.max(0, roomDelayLocked() - settled - hold) - feedDelayMs)
+                       > CastRoomDelay.feedGateBandMs {
+                    let work = DispatchWorkItem { [weak self] in
+                        guard let self else { return }
+                        self.pendingCastFeedGateOpens[id] = nil
+                        self.castOutputManager?.setCastFeedGate(open: true, forDeviceID: id, generation: generation)
+                    }
+                    pendingCastFeedGateOpens[id] = work
+                    delayClock(Double(hold) / 1000, stateQueue, work)
+                }
             }
         }
         // What the listener hears from this receiver: its lead, the Mac's hold
@@ -979,9 +997,11 @@ extension NativeBackend {
     /// CAST-SYNC: hand every settled receiver the part of the room delay it
     /// does not already produce by itself. On `stateQueue`.
     ///
-    /// Called on BOTH edges that can change a receiver's share: the room delay
-    /// moving, and a receiver settling. The second one is easy to miss — a
-    /// receiver that settles BELOW the current term leaves `R` alone, so
+    /// Called on every edge that can change a receiver's share: the room delay
+    /// moving, a receiver settling, and a settled receiver's tracked move. The
+    /// settle is easy to miss — a receiver that settles below the room without
+    /// moving it (a second, faster receiver, or one within `raiseThresholdMs`
+    /// of its term) leaves `R` alone, so
     /// nothing about the room changed, but that receiver's own share just went
     /// UP by the difference. Live 2026-08-29: a reselect restored a remembered
     /// term of 5916 ms while the receiver settled at 5462, and with this
@@ -1005,8 +1025,8 @@ extension NativeBackend {
         for id in castSelectedIDs where !refusedIDs.contains(id) {
             guard let settled = castRoomDelay.settledLeadMs(forID: id) else { continue }
             // The Mac's hold is in the room (see `_castTermMs`) but already in
-            // front of this receiver, so it is not part of its share. A 0 builds
-            // no line, and shrinks an existing one when the room falls.
+            // front of this receiver, so it is not part of its share. A 0 is
+            // still pushed; it shrinks the line the first request built.
             let remainder = Swift.max(0, room - settled - castRoomDelay.holdMs(forID: id))
             castOutputManager?.setCastRoomDelayMs(remainder, forDeviceID: id)
         }

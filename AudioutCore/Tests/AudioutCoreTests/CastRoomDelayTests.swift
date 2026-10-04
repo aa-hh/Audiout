@@ -102,7 +102,7 @@ import Testing
         #expect(settlement?.leadMs == 5_500)
     }
 
-    // MARK: - High-water mark
+    // MARK: - The term follows each settle
 
     /// A receiver that turns out to play LATER than assumed raises the room —
     /// once, by the excess. Everything else takes a second, smaller gap.
@@ -119,31 +119,139 @@ import Testing
         #expect(policy.termMs == 7_000)
     }
 
-    /// **The hysteresis.** A receiver that comes BACK towards live keeps the
-    /// room where it is: it is delayed on its own feed instead. Chasing a lead
-    /// downwards makes every other output jump forward for a number the next
-    /// stall would undo.
-    @Test func theTermNeverFallsWhileAReceiverStays() {
+    /// A receiver that settles back towards live takes its term down with it,
+    /// so the room stops holding every other output behind a lead it no
+    /// longer has; a settle inside the raise band leaves the term alone.
+    /// Turns red if a settle more than `raiseThresholdMs` below the receiver's term leaves the term where it is, one inside that band moves it, or a reselect starts from anything but the lowered settle.
+    @Test func aSettleLowerThanTheTermLowersItAndIsRemembered() {
         var policy = CastRoomDelay()
         policy.setReceivers(["tv"])
+        let inside = feed(&policy, 5_480)
+        #expect(inside?.termMoved == false)
+        #expect(policy.termMs == 5_500)
+
         feed(&policy, 7_000)
         #expect(policy.termMs == 7_000)
 
         let recovered = feed(&policy, 6_000)
-        #expect(recovered?.leadMs == 6_000, "the receiver's own measurement follows it down")
-        #expect(recovered?.termMoved == false)
-        #expect(policy.termMs == 7_000, "but the room stays where it is")
+        #expect(recovered?.leadMs == 6_000)
+        #expect(recovered?.termMoved == true)
+        #expect(policy.termMs == 6_000)
+
+        policy.setReceivers([])
+        policy.setReceivers(["tv"])
+        #expect(policy.termMs == 6_000)
     }
 
-    /// Inside the correction band nothing happens at all: the error is below
-    /// what a correction could fix without being heard.
-    @Test func aSmallDriftIsLeftAlone() {
+    /// Inside the correction band a settled receiver is followed without a
+    /// re-settle: once a full window's median lead plus hold has moved past
+    /// the tracking step, its settled lead takes the median and its share
+    /// follows, while a move that only reaches the step changes nothing. A
+    /// full window that lands past `feedGateBandMs` re-settles instead, once
+    /// its samples agree within twice `settleBandMs`.
+    /// Turns red if a settled receiver's drift inside `correctionThresholdMs` stops being tracked, is acted on before `settleSampleCount` samples or at exactly `trackingStepMs`, re-opens the settle, or lowers the term, or a tracked move larger than `feedGateBandMs` is tracked instead of re-settled, or one whose window spans more than twice `settleBandMs` re-opens the settle instead of waiting for the window to agree.
+    @Test func aSettledReceiversDriftIsTrackedWithoutAResettle() {
         var policy = CastRoomDelay()
         policy.setReceivers(["tv"])
         feed(&policy, Self.steadyLeadMs)
-        let nudge = CastRoomDelay.correctionThresholdMs - 10
-        #expect(feed(&policy, Self.steadyLeadMs + nudge, count: 30) == nil)
-        #expect(policy.settledLeadMs(forID: "tv") == Self.steadyLeadMs)
+
+        for _ in 0..<(CastRoomDelay.settleSampleCount - 1) {
+            #expect(policy.ingest(leadMs: 5_990, forID: "tv") == nil)
+        }
+        let tracked = policy.ingest(leadMs: 5_990, forID: "tv")
+        #expect(tracked?.tracked == true)
+        #expect(tracked?.leadMs == 5_990)
+        #expect(tracked?.termMoved == false)
+        #expect(policy.settledLeadMs(forID: "tv") == 5_990)
+        #expect(policy.termMs == 6_000)
+
+        #expect(feed(&policy, 5_995) == nil)
+        #expect(policy.settledLeadMs(forID: "tv") == 5_990)
+
+        // 30 ms under the term: past `raiseThresholdMs`, tracked, term kept.
+        var lower = CastRoomDelay()
+        lower.setReceivers(["tv"])
+        feed(&lower, Self.steadyLeadMs)
+        let down = feed(&lower, 5_970)
+        #expect(down?.tracked == true)
+        #expect(down?.termMoved == false)
+        #expect(lower.termMs == 6_000)
+
+        // 110 ms under the tracked basis, on an empty tracking window.
+        var jumped = CastRoomDelay()
+        jumped.setReceivers(["tv"])
+        feed(&jumped, Self.steadyLeadMs)
+        #expect(feed(&jumped, 5_990)?.tracked == true)
+        for _ in 0..<(CastRoomDelay.settleSampleCount - 1) {
+            #expect(jumped.ingest(leadMs: 5_880, forID: "tv") == nil)
+        }
+        let resettled = jumped.ingest(leadMs: 5_880, forID: "tv")
+        #expect(resettled?.tracked == false)
+        #expect(resettled?.termMoved == true)
+        #expect(jumped.settledLeadMs(forID: "tv") == 5_880)
+        #expect(jumped.termMs == 5_880)
+
+        // 140 ms off the basis, but the window straddles a 280 ms jump.
+        var split = CastRoomDelay()
+        split.setReceivers(["tv"])
+        feed(&split, 5_490)
+        #expect(feed(&split, 5_500)?.tracked == true)
+        for lead in [5_360, 5_360, 5_360] + Array(repeating: 5_640, count: 7) {
+            #expect(split.ingest(leadMs: lead, forID: "tv") == nil)
+        }
+        #expect(split.settledLeadMs(forID: "tv") != nil)
+    }
+
+    /// Tracking compares lead plus hold, and its hold is the median of the
+    /// window's samples that carry one: here the lead never moves, but the
+    /// hold measured since the settle is 15 ms over the fallback.
+    /// Turns red if tracking counts a sample without a hold as the fallback hold, keeps the hold its settle measured, or compares the lead alone instead of lead plus hold.
+    @Test func trackingCountsOnlyTheSamplesThatCarryAHold() {
+        var policy = CastRoomDelay()
+        policy.setReceivers(["tv"])
+        feed(&policy, 5_500)
+        #expect(policy.holdMs(forID: "tv") == CastFeedRing.macHoldMs)
+
+        var last: CastRoomDelay.Settlement?
+        for hold in [nil, nil, nil, nil, 130, 130, 140, nil, nil, 130] as [Int?] {
+            last = policy.ingest(leadMs: 5_500, holdMs: hold, forID: "tv")
+        }
+        #expect(last?.tracked == true)
+        #expect(last?.termMoved == false)
+        #expect(policy.holdMs(forID: "tv") == 130)
+        #expect(policy.settledLeadMs(forID: "tv") == 5_500)
+        #expect(policy.termMs == 5_500)
+    }
+
+    /// A tracked move raises the term only once the receiver would need more
+    /// than `raiseThresholdMs` of negative share, measured against what it
+    /// contributes, by-ear advance included, and the raise is remembered.
+    /// Turns red if a tracked move inside `raiseThresholdMs` moves the term, one past it leaves the term where it is or is not remembered, or the raise ignores the receiver's by-ear advance.
+    @Test func aTrackedMovePastTheRaiseBandRaisesTheTermAndIsRemembered() {
+        var policy = CastRoomDelay()
+        policy.setReceivers(["tv"])
+        feed(&policy, 5_500)
+        let inside = feed(&policy, 5_515)
+        #expect(inside?.tracked == true)
+        #expect(inside?.termMoved == false)
+        #expect(policy.termMs == 5_500)
+        let past = feed(&policy, 5_530)
+        #expect(past?.tracked == true)
+        #expect(past?.termMoved == true)
+        #expect(policy.termMs == 5_530)
+        policy.setReceivers([])
+        policy.setReceivers(["tv"])
+        #expect(policy.termMs == 5_530)
+
+        var advanced = CastRoomDelay()
+        advanced.setReceivers(["tv"])
+        feed(&advanced, 5_500)
+        #expect(advanced.setAdvanceMs(94, forID: "tv") == true)
+        #expect(advanced.termMs == 5_594)
+        #expect(feed(&advanced, 5_515)?.termMoved == false)
+        #expect(advanced.termMs == 5_594)
+        #expect(feed(&advanced, 5_530)?.termMoved == true)
+        #expect(advanced.termMs == 5_624)
     }
 
     /// A settle exactly at the raise band leaves the room alone; one past it,
@@ -182,22 +290,22 @@ import Testing
     }
 
     /// A by-ear advance raises the room only past the receiver's own slack:
-    /// it is added to the receiver's last settle, never to its high-water
+    /// it is added to the receiver's last settle, never to its
     /// term, and an unsettled receiver adds it to the lead it is assumed at.
     /// The advanced term stops at `maxTermMs`, and a term already past it
     /// stays where it is.
-    /// Turns red if the advance is added to the high-water term instead of the receiver's last settle, an unsettled receiver's advance is dropped, an advance carries the term past `maxTermMs`, or the `maxTermMs` cap lowers a receiver's own term that a hold above `macHoldMs` put past it.
+    /// Turns red if the advance is added to the term instead of the receiver's last settle, an unsettled receiver's advance is dropped, an advance carries the term past `maxTermMs`, or the `maxTermMs` cap lowers a receiver's own term that a hold above `macHoldMs` put past it.
     @Test func anAdvanceRaisesTheTermOnlyPastTheReceiversLastSettle() {
         var policy = CastRoomDelay()
         policy.setReceivers(["tv"])
-        feed(&policy, 7_000)
-        feed(&policy, 6_000)
-        #expect(policy.setAdvanceMs(500, forID: "tv") == false)
-        #expect(policy.termMs == 7_000)
-        #expect(policy.setAdvanceMs(1_500, forID: "tv") == true)
-        #expect(policy.termMs == 7_500)
+        feed(&policy, 5_490)
+        #expect(policy.termMs == 5_500)
+        #expect(policy.setAdvanceMs(5, forID: "tv") == false)
+        #expect(policy.termMs == 5_500)
+        #expect(policy.setAdvanceMs(30, forID: "tv") == true)
+        #expect(policy.termMs == 5_520)
         #expect(policy.setAdvanceMs(0, forID: "tv") == true)
-        #expect(policy.termMs == 7_000)
+        #expect(policy.termMs == 5_500)
 
         var unsettled = CastRoomDelay()
         unsettled.setReceivers(["fresh"])
@@ -272,8 +380,7 @@ import Testing
     /// **A receiver announces PLAYING long before its buffer is full**, so the
     /// first seconds of every session report a lead that is still CLIMBING.
     /// Latching onto one of those numbers would set the room too low — and
-    /// since the term is a high-water mark, too low is a hole with no way out
-    /// except the receiver getting even further behind. The gate must wait for
+    /// the room would move a second time when the real plateau settles. The gate must wait for
     /// the climb to stop.
     @Test func theSettleGateDoesNotLatchDuringTheStartupClimb() {
         var policy = CastRoomDelay()
@@ -326,11 +433,11 @@ import Testing
         4_610, 4_880, 4_580, 5_620, 5_630, 5_530,
     ]
 
-    /// Replayed end to end, the room moves exactly ONCE — when the receiver is
-    /// selected — and never afterwards: the default covers what this receiver
-    /// actually does, its plateau settles inside the band, and the dips it
-    /// takes later never drag the rest of the house forward.
-    @Test func theRecordedSessionMovesTheRoomExactlyOnce() {
+    /// Replayed end to end, the room moves at select and once more when the
+    /// plateau settles 30 ms under the default; the dips it takes later never
+    /// settle, so they never move it.
+    /// Turns red if a settle more than `raiseThresholdMs` under the term stops lowering it, or a dip that never settles moves the room.
+    @Test func theRecordedSessionMovesTheRoomAtSelectAndAtItsFirstSettle() {
         var policy = CastRoomDelay()
         var terms: [Int?] = []
 
@@ -342,11 +449,11 @@ import Testing
             }
         }
 
-        #expect(terms == [CastRoomDelay.defaultLeadMs],
-                "one move, at select; got \(terms)")
+        #expect(terms == [CastRoomDelay.defaultLeadMs, 5_470],
+                "a move at select and one at the first settle; got \(terms)")
         #expect(policy.settledLeadMs(forID: "e7af49b4") == nil,
                 "the session ends mid-re-settle, three samples into a new plateau")
-        #expect(policy.termMs == CastRoomDelay.defaultLeadMs, "and the room never fell")
+        #expect(policy.termMs == 5_470)
     }
 
     /// The same series, stopped where the receiver was steady: it settles on
@@ -359,8 +466,7 @@ import Testing
             _ = policy.ingest(leadMs: lead, forID: "e7af49b4")
         }
         #expect(policy.settledLeadMs(forID: "e7af49b4") == 5_470)
-        #expect(policy.termMs == CastRoomDelay.defaultLeadMs,
-                "5.47 s sits inside the assumed 5.5 s, so the room is not raised")
+        #expect(policy.termMs == 5_470, "the room follows the plateau down")
     }
 
     // MARK: - The feed gate

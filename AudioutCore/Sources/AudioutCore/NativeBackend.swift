@@ -658,7 +658,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// the AirPlay start buffer cannot be fed early enough to meet it, so the
     /// room waits for the speaker instead (owner's call, 2026-09-26:
     /// delay-to-worst across every transport). A high-water mark while it
-    /// stands, like the Cast term: a latency that comes back DOWN leaves it
+    /// stands: a latency that comes back DOWN leaves it
     /// where it is, because every move of `R` is one gap for the whole house.
     /// Derived by ``updateBTRoomTermLocked()``; on `stateQueue`.
     var btRoomTermMs: Int?
@@ -3938,8 +3938,8 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// yields the play-out.
     var _castTermMs: Int? { castRoomDelay.termMs.map { $0 + CastFeedRing.macHoldMs } }
 
-    /// The room-delay policy (brief §4): the settle gate, the high-water mark
-    /// and the `R_max` refusal, kept pure so it can be replayed offline
+    /// The room-delay policy (brief §4): the settle gate, a term that follows
+    /// each settle, tracking of a settled receiver and the `R_max` refusal, kept pure so it can be replayed offline
     /// against recorded lead samples. Confined to `stateQueue`; the only
     /// writers are ``updateCastRoomDelayLocked()`` (the receiver set moved,
     /// and each receiver's advance), ``applyCastLeadSample(_:_:_:_:_:)`` (a

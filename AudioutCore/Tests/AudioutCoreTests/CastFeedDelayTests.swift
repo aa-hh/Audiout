@@ -51,10 +51,11 @@ import Testing
     @Test func aFeedNeverAskedForADelayHasNoLine() {
         let ring = CastFeedRing()
         #expect(ring.test_hasDelayLine == false)
-        // A zero ask must not build one either: with no Cast device selected
-        // there is no ring at all, and an undelayed leg is today's byte path.
+        // A zero ask builds the line, so a later small grow has captured
+        // audio to replay, and a line at 0 is still the byte path.
+        // Turns red if a zero request stops building the line, or a line at zero changes a byte.
         ring.setDelayMs(0)
-        #expect(ring.test_hasDelayLine == false)
+        #expect(ring.test_hasDelayLine == true)
 
         let block = tone(frames: 882)
         ring.push(block)
@@ -94,6 +95,34 @@ import Testing
         #expect(rendered.count == 264_600)
         #expect(rendered[0..<220_500].allSatisfy { $0 == 0 })
         #expect(rendered[220_500...].allSatisfy { $0 == 1000 })
+    }
+
+    /// A share grow of up to `feedGateBandMs` replays audio the line already
+    /// captured behind the crossfade; a larger one inserts its zeros.
+    /// Turns red if `CastFeedRing` builds its line without the `feedGateBandMs` crossfaded-grow limit, so a 50 ms share grow inserts silence, or a 150 ms one stops inserting it.
+    @Test func aShareGrowInsideTheGateBandReplaysAndALargerOneInsertsSilence() {
+        let ring = CastFeedRing()
+        ring.setDelayMs(1000)
+        for _ in 0..<100 {
+            ring.push(tone(frames: 882))
+            _ = ring.render(frames: 882)
+        }
+
+        ring.setDelayMs(1050)
+        var small: [Int16] = []
+        for _ in 0..<10 {
+            ring.push(tone(frames: 882))
+            small += frameValues(ring.render(frames: 882))
+        }
+        #expect(!small.contains(0))
+
+        ring.setDelayMs(1200)
+        var large: [Int16] = []
+        for _ in 0..<20 {
+            ring.push(tone(frames: 882))
+            large += frameValues(ring.render(frames: 882))
+        }
+        #expect(large.filter { $0 == 0 }.count == 6_615)
     }
 
     // MARK: - The reset()-on-GET reconciliation

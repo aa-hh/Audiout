@@ -178,7 +178,9 @@ struct CastFeedTiming: Sendable, Equatable {
 /// gain applied on the way out, ramped so a fader drag does not step.
 ///
 /// CAST-SYNC: and in front of all of it, this leg's own ``PCMDelayLine``,
-/// built on the first non-zero ``setDelayMs(_:)``. Delaying by inserting zeros
+/// built at the first ``setDelayMs(_:)``, zero included. A grow of up to
+/// ``CastRoomDelay/feedGateBandMs`` replays captured audio behind the line's
+/// crossfade; a larger one inserts zeros. Delaying by inserting zeros
 /// AHEAD of the ring is cadence-preserving, so the ring fills at exactly the
 /// rate it did before and the server's wall-clock pacing never notices.
 /// **Nothing here may hold the feed instead** — the receiver drains into
@@ -227,7 +229,7 @@ final class CastFeedRing: CastPCMSource, @unchecked Sendable {
     /// Lock-guarded. Closed, the output gain ramps to 0 while ``targetGain``
     /// keeps the level.
     private var feedGateOpen = true
-    /// Lock-guarded, and `nil` until a non-zero delay is asked for.
+    /// Lock-guarded, and `nil` until the first delay request, zero included.
     private var delayLine: PCMDelayLine?
     /// Serialises producers against each other, never against the consumer:
     /// ``CastFanOut`` reaches ``push(_:pts:nowNanos:)`` from the capture
@@ -391,29 +393,34 @@ final class CastFeedRing: CastPCMSource, @unchecked Sendable {
     /// Hold this leg's feed back by `ms` — the room delay plus the user's trim,
     /// already summed and clamped by ``CastOutputManager``. Control thread.
     ///
-    /// The line is built on the first non-zero ask and kept afterwards, so a
-    /// later `0` is a shrink through the crossfade rather than a teardown. With
-    /// no Cast device selected there is no ring at all, so there is no line
-    /// either — the bypass is structural, not a zero delay.
+    /// The line is built at the first ask, zero included, so a later small
+    /// grow has captured audio to replay, and kept afterwards, so a later `0`
+    /// is a shrink through the crossfade rather than a teardown. A grow of up
+    /// to ``CastRoomDelay/feedGateBandMs`` replays behind the crossfade; a
+    /// larger one inserts zeros. With no Cast device selected there is no ring
+    /// at all, so there is no line either — the bypass is structural, not a
+    /// zero delay.
     func setDelayMs(_ ms: Int) {
         let frames = max(0, ms) * Self.sampleRate / 1000
         if let existing = lock.withLock({ delayLine }) {
             existing.setDelayFrames(frames)
             return
         }
-        guard frames > 0 else { return }
         // Allocated outside `lock`, so a render never waits on the 2 MB
         // allocation. Callers are serialised on the manager's queue, so there
         // is no second builder to race.
-        let line = PCMDelayLine(capacityFrames: Self.delayCapacityFrames)
+        let line = PCMDelayLine(
+            capacityFrames: Self.delayCapacityFrames,
+            crossfadedGrowMaxFrames: CastRoomDelay.feedGateBandMs * Self.sampleRate / 1000)
         line.setDelayFrames(frames)
         lock.withLock { delayLine = line }
         OSMemoryBarrier()                       // release: the line before the producer's word
         delayLineWord.pointee = Unmanaged.passUnretained(line).toOpaque()
     }
 
-    /// Whether this leg has built a delay line at all. The bypass this pins is
-    /// structural: an untouched feed, and every feed while no Cast device is
+    /// Whether this leg has built a delay line at all: the first delay request
+    /// builds one, zero included. The bypass this pins is structural: a feed
+    /// never asked for a delay, and every feed while no Cast device is
     /// selected, has no line to run.
     var test_hasDelayLine: Bool { lock.withLock { delayLine != nil } }
 

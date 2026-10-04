@@ -22,6 +22,7 @@ AppKit rows and window chrome shared across surfaces. Hosts own models, routing 
 - Muted ink stays confined to the engaged device mute control.
 - Panel beak drawing is sanctioned because stock panels have no arrow.
 - The invitation QR tile remains fixed black on white; cameras require that contrast.
+- Both transient offers ("Removed, Undo" and "Play here") are host state; the row draws them and decides nothing.
 - Earlier decisions and traps: [AGENTS-HISTORY.md](AGENTS-HISTORY.md).
 
 ## Map

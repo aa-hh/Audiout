@@ -344,6 +344,16 @@ final class BTDeviceEnumerator: BTDeviceEnumerating, @unchecked Sendable {
         }
     }
 
+    /// The object id to pin a sink to for `uid`, or `nil` when no live one
+    /// exists. macOS can list two objects for one Bluetooth speaker, and
+    /// `kAudioHardwarePropertyTranslateUIDToDevice` picks either, so a dead twin
+    /// can pin the engine to a zombie: prefer an alive object with output
+    /// streams, else any alive one.
+    static func liveDeviceID(forUID uid: String) -> AudioObjectID? {
+        let alive = allDeviceIDs().filter { deviceUID($0) == uid && BTDeviceSink.halDeviceIsAlive($0) }
+        return alive.first(where: hasOutputStreams) ?? alive.first
+    }
+
     private static func allDeviceIDs() -> [AudioObjectID] {
         var addr = AudioObjectPropertyAddress(
             mSelector: kAudioHardwarePropertyDevices,

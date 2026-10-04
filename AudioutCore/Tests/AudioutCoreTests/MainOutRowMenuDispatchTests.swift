@@ -145,4 +145,27 @@ import AppKit
         }
     }
 
+    /// Red if dimming a group (the one-speaker limit) disabled its item or
+    /// dropped its dispatch: the host could then never answer the click with
+    /// the limit note, and the menu would go silent instead.
+    @Test func aDimmedGroupItemStillDispatchesItsTarget() {
+        let row = MainOutRowView()
+        let delegate = RecordingDelegate()
+        row.delegate = delegate
+        row.apply(options: [
+            .init(title: "Selected Speakers", target: .selectedDevices),
+            .init(title: "Scenes", isHeader: true),
+            .init(title: "Buy Audiout to use scenes.", isCaption: true),
+            .init(title: "tester", target: .group(id: "g1"), isDimmed: true),
+        ], current: .selectedDevices, master: 50)
+        guard let item = row.test_menuItem(for: .group(id: "g1")) else {
+            Issue.record("no dimmed group menu item to fire")
+            return
+        }
+        #expect(item.isEnabled, "a dimmed item stays enabled")
+        #expect(item.attributedTitle?.string == "tester", "the dimmed title keeps its text")
+        fire(item)
+        #expect(delegate.selectedTargets == [.group(id: "g1")],
+                "a dimmed item still hands its target to the host")
+    }
 }

@@ -15,6 +15,7 @@ everything up to the `OutputBackend` seam and never imports AppKit.
 - Over budget, a speaker shares stream 0 and streams flat, and says so through `eqBypassReason`.
 - A device the per-app domain claims leaves the EQ domain, and says so through `eqBypassReason`.
 - A Bluetooth trim is a ring seek and must never clear session state: the anchor and ring survive.
+- A released Bluetooth sink re-aligns its read position from its own render cycles once the device's pulls run 20 ms off wall time; `bt_clock_jump` and `drift_clock_step_storm` never move audio.
 - A Bluetooth EQ change bakes a new processor on `graphQueue`, never re-parameterizing a live one.
 - The PTP activation wait must strictly exceed the helper's bind-retry budget, or a late success goes unseen.
 - A PTP `register()` throw is first-run normal; only `.notFound` after it is a fault.
@@ -27,7 +28,9 @@ everything up to the `OutputBackend` seam and never imports AppKit.
 - A drift baseline exists only for a speaker with a MEASURED latency, and drift tracking runs only with two such speakers or one plus an anchor: `room + trim` presumes the latency the sink subtracts, and a lone speaker's moved peak is equally the microphone's. A slew step never moves the BT-only reference floor — only the committed write that ends it does, because a floor move rebuilds every sink.
 - An AirPlay or Cast arrival in a `PassiveDriftSampler` window is read-only: those receivers run on the room reference clock, so a peak off baseline measures the MIC, never that speaker.
 - `BTAlignmentWizardSession` enters `.listening` only when its host's `requestListening` answers true; a rejected proposal never ends a run — only the wing rule, a stagnant belief, or the spent answer budget do. A failed first listen, a MEASURED proposal's first rejection, or Try again on an implausible reading listens again; all three share one budget, so the mic runs at most `maxMicAttempts` times a run and the next failure, rejection or Try again falls to the by-ear questions.
+- A Bluetooth sink is pinned to an object id: a new id for the same UID replaces it, and a sink whose device dies or render stalls while fed tears down (`bt_sink:dead`).
 - On every user-gesture path, `stateQueue` never makes a Core Audio HAL call (default-output read/write, aggregate create/destroy, tap create, device enumeration): read on the caller's own thread before hopping in, or run it on `captureControlQueue` and hop back to commit. Three exceptions remain, pending a follow-up: `start()`, `stop()`, and `liveBTDeviceIDLocked` (the Bluetooth hardware-volume path in `NativeBackend+Bluetooth.swift`). Every main-thread `stateQueue.sync` (`devices`, `setOutputSet`, `setMeteringActive`) freezes the app for as long as coreaudiod takes to answer (live 2026-10-03).
+- `GroupController.limitsToOneSpeaker` refuses a second Selected Speaker (`oneSpeakerLimitReason`) and a group target, and never trims a live set. The row's "Play here" goes through `switchSelection(to:)`, one routing apply.
 - Long-form traps, dated decisions and the changelog: [AGENTS-HISTORY.md](AGENTS-HISTORY.md). Grep it first.
 
 ## Map

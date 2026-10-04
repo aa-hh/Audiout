@@ -1013,9 +1013,10 @@ extension NativeBackend {
     }
 
     /// Fold one `BTConnectionManager.connect` outcome into the row's
-    /// connection state (and, on success, the sink set). Availability itself
-    /// still arrives via the enumerator refresh the connect notification fires —
-    /// this is the row's lifecycle answer, not a parallel availability source.
+    /// connection state (and, on success, the sink set). Availability otherwise
+    /// arrives via the enumerator refresh the connect notification fires, but a
+    /// success commits it here too: a row a sink death marked gone may not
+    /// change the enumerator's list, so no refresh would ever bring it back.
     func finishBTReconnect(id: String, outcome: BTConnectOutcome) {
         stateQueue.async {
             switch outcome {
@@ -1040,6 +1041,14 @@ extension NativeBackend {
                 // Wave-3 known gap, closed: a SELECTED id that just came back
                 // re-enters the per-device sink set now, not at the next
                 // selection change.
+                if var device = self.known[id], !device.isAvailable {
+                    device.isAvailable = true
+                    self.commitKnownDevice(id, device)
+                    // The loss unwatched the speaker's hardware volume, and
+                    // the enumerator sees no availability edge to re-arm it.
+                    self.reevaluateBTHardwareControlLocked(id)
+                    self.logBTAvailabilityLocked(id)
+                }
                 self.reapplyBTSinkLocked()
                 // Each reconnect lands 20–90 ms from last time
                 // (`bt-latency-stability-research-2026-09-05.md`), so this is

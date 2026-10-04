@@ -1,8 +1,8 @@
-# Readability rubric (Guard 7 and the merge-time review)
+# Readability rubric (Guard 7 and the branch review)
 
 This rubric has two consumers. Guard 7's deterministic screen runs at commit
-and blocks only the three near-certain slop patterns below. The merge-time code
-review, `scripts/review-branch.sh`, runs once per branch before it lands on
+and blocks only the three near-certain slop patterns below. The branch code
+review, `scripts/review-branch.sh`, runs on each pull request before it lands on
 `main`; its instruction files in `docs/review/` carry a digest of this file.
 Readability is one category of that review; bugs come first.
 
@@ -65,12 +65,15 @@ git-owned history and comments that had drifted into being *wrong*.
   legitimate hit takes a trailing `slop-ok` comment.
 - `git commit --no-verify` remains the documented emergency escape, same as
   every guard.
-- The reviewing models run once per branch at merge time through
-  `scripts/review-branch.sh`, never inside a hook (the hook only checks the
-  receipt). `/pr-review` (`.claude/skills/pr-review/`) remains the deliberate
+- The reviewing models run once per pull request (twice at most), never
+  inside a hook. They run as subagents of the Claude session that owns the
+  branch, because headless `claude -p` is refused on this account:
+  `bash scripts/review-branch.sh`, follow its printed steps, then
+  `bash scripts/review-branch.sh --continue`, which posts the findings as one
+  PR comment and sets the `review` status main's merge queue requires. `/pr-review` (`.claude/skills/pr-review/`) remains the deliberate
   PR-comment review: adversarial, evidence-only, published as PR comments in
   one idempotent sweep; it never runs automatically.
-- Review discipline (merge-time review and PR review): fewer correct findings
+- Review discipline (branch review and PR review): fewer correct findings
   beat many doubtful ones, and a complexity finding must name exactly what to
   delete and what replaces it — never call something over-engineered without
   showing the smaller shape.

@@ -19,6 +19,8 @@ Menu-bar Mixer and shared surface host. This target renders presentation; Core o
 - Permission answers restore window manners; abandoned alignment runs must not reopen the surface.
 - AppKit owns toolbar chrome; screen cues must work on every supported macOS version.
 - Group-route membership stays live; exclusivity must not hide saved-group choices.
+- The alignment note may carry one underlined text action left of its button, both centred to the note.
+- Under the limit the note is session state (`limitNoteRaised`) and a wizard door shows it, not the wizard; the thank-you card's shown flag is written on Close or hide, never on raise.
 - Earlier decisions and traps: [AGENTS-HISTORY.md](AGENTS-HISTORY.md).
 
 ## Map

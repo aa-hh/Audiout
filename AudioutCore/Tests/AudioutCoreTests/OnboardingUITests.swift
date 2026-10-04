@@ -835,6 +835,7 @@ import Testing
     @Test func theRibbonNamesBothHalvesOfTheLocalNetworkWait() async {
         let net = SteppedLocalNetwork(found: 2)
         let vc = makeVC(model: makeModel(audio: .granted, localNetwork: net))
+        vc.test_ribbonReduceMotionOverride = false
         await vc.test_tapAllow(.audio)
 
         let priming = Task { await vc.test_tapAllow(.localNetwork) }
@@ -917,6 +918,7 @@ import Testing
         let model = makeModel(audio: .granted, foundSpeakers: 2,
                               bluetoothPrimer: NeverDecidingBluetooth())
         let vc = makeVC(model: model)
+        vc.test_ribbonReduceMotionOverride = false
         await vc.test_allow([.audio, .localNetwork])
         #expect(vc.test_activeStep == .bluetooth)
 
@@ -935,6 +937,7 @@ import Testing
                               bluetoothPrimer: NeverDecidingBluetooth(),
                               bluetoothPromptTimeout: 0.05)
         let vc = makeVC(model: model)
+        vc.test_ribbonReduceMotionOverride = false
         await vc.test_allow([.audio, .localNetwork])
         await vc.test_tapAllow(.bluetooth)
         #expect(vc.test_ribbonIsWaiting)
@@ -1210,6 +1213,7 @@ import Testing
         let model = makeModel(audio: .granted, foundSpeakers: 2,
                               bluetoothPrimer: NeverDecidingBluetooth())
         let vc = makeVC(model: model)
+        vc.test_ribbonReduceMotionOverride = false
         await vc.test_awaitInitialStatuses()   // announcements start once the opening state is known
         await vc.test_allow([.audio, .localNetwork])
 

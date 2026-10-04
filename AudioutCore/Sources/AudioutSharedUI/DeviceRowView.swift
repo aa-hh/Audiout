@@ -95,6 +95,10 @@ public final class DeviceRowView: NSView {
         /// back through the SAME path a checkbox re-check takes. Default no-op
         /// for hosts that never offer the undo.
         func deviceRowDidRequestUndoRemoval(_ row: DeviceRowView)
+        /// The user clicked the transient "Play here" offer the host
+        /// raised after refusing a second speaker under the one-speaker limit.
+        /// Default no-op for hosts that never offer it.
+        func deviceRowDidRequestSwitchHere(_ row: DeviceRowView)
     }
 
     /// Control-Center row density: comfortable height that seats a mini switch,
@@ -262,15 +266,20 @@ public final class DeviceRowView: NSView {
     /// a LIVE room out of Main Audio (the highest-stakes click in the app: it
     /// silences a playing room instantly). The host decides when it is offered
     /// and owns its lifetime — the row only renders what it is handed. It sits
-    /// in the reserved TRAILING slot, which is empty in exactly this state (a
-    /// just-removed device feeds nothing, so `feedStack` has nothing to show),
-    /// so the offer costs no column reflow and the name never re-truncates.
+    /// right-aligned in the reserved TRAILING slot, as a row action, while the
+    /// FEED pills and SYNC chip that normally live there are hidden (a
+    /// just-removed device feeds nothing anyway), so the offer costs no column
+    /// reflow and the name never re-truncates.
     let removalUndoStack = NSStackView()
     private let removalUndoLabel = NSTextField(labelWithString: "Removed:")
     let removalUndoButton = NSButton()
     /// Whether the host is currently offering the undo (mirrors the stack's
     /// visibility; read by the test hook and the FEED/SYNC suppression above).
     var removalUndoOffered = false
+    /// The second transient offer in the same slot, "Play here": host
+    /// state, raised when a second speaker is refused under the one-speaker limit.
+    let switchOfferButton = NSButton()
+    var switchOfferOffered = false
     /// The FEED column's main-mix segment text, or `nil` when this row is not
     /// currently a member of the ACTIVE main-mix target (a redirect-only row
     /// can still show app segments alone). "System" for a manual Selected-
@@ -548,6 +557,7 @@ public final class DeviceRowView: NSView {
                       movedSinceLastTimeMs: Double? = nil,
                       syncDrawerExpanded: Bool = false,
                       removalUndoOffered: Bool = false,
+                      switchOfferOffered: Bool = false,
                       volumePendingApply: Bool = false,
                       isEQShaped: Bool = false,
                       localFallbackOutput: Bool = false,
@@ -565,6 +575,7 @@ public final class DeviceRowView: NSView {
         self.localFallbackOutput = localFallbackOutput
         self.energizePending = energizePending
         self.removalUndoOffered = removalUndoOffered
+        self.switchOfferOffered = switchOfferOffered
         // Any model refresh (select OR deselect) clears a transient hover so the
         // row can't keep a stale hover wash after the pointer left the popover
         // (T-U8 root-cause fix — hover is transient, selection is model-driven).
@@ -1632,28 +1643,33 @@ public final class DeviceRowView: NSView {
         feedStack.wantsLayer = true
         feedStack.layer?.masksToBounds = true
 
-        // Live-removal undo: "Removed:" beside a link-style Undo button, in
-        // the trailing slot. Stock `NSButton`, borderless, gold title — the
-        // actionable half of the sentence carries the app's action tone while
-        // the "Removed:" half stays secondary text.
+        // The two transient offers are stock small bordered push buttons, so
+        // they read as controls in both appearances with no custom colour
+        // (owner's call, 2026-10-04: the earlier borderless caption links did
+        // not). "Removed:" stays secondary text just left of Undo.
         removalUndoLabel.translatesAutoresizingMaskIntoConstraints = false
         removalUndoLabel.font = Tokens.Font.caption
         removalUndoLabel.textColor = Tokens.Color.label2
-        removalUndoButton.translatesAutoresizingMaskIntoConstraints = false
-        removalUndoButton.bezelStyle = .accessoryBar
-        removalUndoButton.isBordered = false
-        removalUndoButton.attributedTitle = NSAttributedString(
-            string: "Undo",
-            attributes: [.font: Tokens.Font.caption, .foregroundColor: Tokens.Color.gold])
-        removalUndoButton.target = self
-        removalUndoButton.action = #selector(undoRemovalClicked(_:))
+        for (button, title, action) in [
+            (removalUndoButton, "Undo", #selector(undoRemovalClicked(_:))),
+            (switchOfferButton, "Play here", #selector(switchHereClicked(_:))),
+        ] {
+            button.translatesAutoresizingMaskIntoConstraints = false
+            button.bezelStyle = .rounded
+            button.controlSize = .small
+            button.font = .systemFont(ofSize: NSFont.systemFontSize(for: .small))
+            button.title = title
+            button.target = self
+            button.action = action
+        }
         removalUndoStack.translatesAutoresizingMaskIntoConstraints = false
         removalUndoStack.orientation = .horizontal
         removalUndoStack.alignment = .centerY
-        removalUndoStack.spacing = 2
+        removalUndoStack.spacing = 6
         removalUndoStack.addArrangedSubview(removalUndoLabel)
         removalUndoStack.addArrangedSubview(removalUndoButton)
         removalUndoStack.isHidden = true
+        switchOfferButton.isHidden = true
 
         slider.translatesAutoresizingMaskIntoConstraints = false
         // Warm fader skin: install the drawing-only cell BEFORE the value/
@@ -1740,6 +1756,7 @@ public final class DeviceRowView: NSView {
         if busActive {
             addSubview(feedStack)
             addSubview(removalUndoStack)   // same slot, shown only while offered
+            addSubview(switchOfferButton)  // same slot, shown only while offered
         }
         // Bluetooth SYNC chip (T6), sharing that slot's left portion — sync
         // rows re-anchor the FEED pill to the far right below.
@@ -1844,15 +1861,21 @@ public final class DeviceRowView: NSView {
                     equalToConstant: PopoverColumnGrid.busHitTargetWidth),
                 enableCheckbox.heightAnchor.constraint(equalTo: heightAnchor),
                 feedStack.centerYAnchor.constraint(equalTo: centerYAnchor),
-                // The undo offer takes the trailing slot's leading edge, the
-                // same anchor the (then-empty) FEED pills use, on every bus row
-                // — one placement for AirPlay and Bluetooth rows alike, so the
-                // offer can never land in a slot too narrow to read it.
-                removalUndoStack.leadingAnchor.constraint(
+                // Both offers right-align on the trailing control column's
+                // trailing edge, the inset the SYNC chip also closes on, on
+                // every bus row: they read as a row action across the hidden
+                // FEED/SYNC slot rather than as text under the "Source" title.
+                removalUndoStack.trailingAnchor.constraint(
                     equalTo: trailingAnchor,
-                    constant: -PopoverColumnGrid.feedColumnLeadingFromTrailing),
+                    constant: -PopoverColumnGrid.trailingControlTrailing),
                 removalUndoStack.centerYAnchor.constraint(equalTo: centerYAnchor),
-                // ≥24 pt of hit height for the inline link button.
+                switchOfferButton.trailingAnchor.constraint(
+                    equalTo: trailingAnchor,
+                    constant: -PopoverColumnGrid.trailingControlTrailing),
+                switchOfferButton.centerYAnchor.constraint(equalTo: centerYAnchor),
+                switchOfferButton.heightAnchor.constraint(
+                    greaterThanOrEqualToConstant: PopoverColumnGrid.removalUndoButtonHeight),
+                // ≥24 pt of hit height; the small bezel draws centred inside it.
                 removalUndoButton.heightAnchor.constraint(
                     greaterThanOrEqualToConstant: PopoverColumnGrid.removalUndoButtonHeight),
             ])
@@ -2215,6 +2238,10 @@ public final class DeviceRowView: NSView {
         delegate?.deviceRowDidRequestUndoRemoval(self)
     }
 
+    @objc private func switchHereClicked(_ sender: NSButton) {
+        delegate?.deviceRowDidRequestSwitchHere(self)
+    }
+
     /// Show/hide the offer. It borrows the reserved trailing slot, so whatever
     /// normally lives there yields for as long as the offer stands: the FEED
     /// pills (empty anyway on a just-removed device) and, on a Bluetooth row,
@@ -2224,7 +2251,9 @@ public final class DeviceRowView: NSView {
         removalUndoStack.isHidden = !removalUndoOffered
         removalUndoButton.setAccessibilityLabel(
             "Undo removing \(device.name) from Main Audio")
-        if removalUndoOffered {
+        switchOfferButton.isHidden = !switchOfferOffered
+        switchOfferButton.setAccessibilityLabel("Play on \(device.name) instead")
+        if removalUndoOffered || switchOfferOffered {
             feedStack.isHidden = true
             if showsSyncControls { syncChipButton.isHidden = true }
         } else if showsSyncControls {
@@ -2487,6 +2516,8 @@ public final class DeviceRowView: NSView {
     /// Drive the Undo button through REAL AppKit action dispatch (the click the
     /// user makes), not the delegate shortcut.
     public func test_clickUndoRemoval() { removalUndoButton.performClick(nil) }
+    /// Drive "Play here" through real AppKit action dispatch.
+    public func test_clickSwitchOffer() { switchOfferButton.performClick(nil) }
 
     /// Drive the gutter hover through the same private path the tracking area
     /// uses (a real pointer crossing can't be synthesized headlessly).
@@ -3041,6 +3072,8 @@ public extension DeviceRowView.Delegate {
     func deviceRowDidRequestEqualizer(_ row: DeviceRowView, fromButton: Bool) {}
     /// Default no-op — only the popover offers the live-removal undo.
     func deviceRowDidRequestUndoRemoval(_ row: DeviceRowView) {}
+    /// Default no-op — only the popover offers "Play here".
+    func deviceRowDidRequestSwitchHere(_ row: DeviceRowView) {}
 }
 
 // MARK: - Invisible switch cell (spec §4.8)

@@ -40,7 +40,8 @@ Read the acoustic slide:
 afconvert -f WAVE -d LEI16 hour.m4a hour.wav
 python3 click-pair-spacing.py hour.wav > hour.txt; tail -3 hour.txt
 ```
-The last line gives the linear fit in ms/min and ppm, plus the first and last offsets.
+The last lines give the clean-period count, the linear fit in ms/min and ppm with the
+first and last medians of the unsigned spacing, and the median per 5 minutes.
 The per-line output shows whether the change is a smooth line (rate drift) or steps
 (latency events). With two Bluetooth speakers the script sees only the loudest second
 arrival; run it twice with one speaker at a time if the output looks confused, or just
@@ -98,7 +99,8 @@ Also worth noting from the log: whether the two speakers (if two) show the same 
 
 ## Hand back
 
-Reply with: the script's last line (ms/min, ppm, first and last offset), the deviation
+Reply with: the script's last three lines (clean count, fit in ms/min and ppm with the
+first and last medians, median per 5 min), the deviation
 slope per speaker, and whether the per-line output is a line or steps. Attach `hour.txt`
 and `dev.txt` (and `drift-meter.txt` if Part B ran). Release the slot.
 

@@ -279,6 +279,11 @@ public final class GroupController {
             var isGroup = false
             if case .group = mainOut { isGroup = true }
             if selectedDeviceIDs.count > 1 || isGroup {
+                if case .group(let id) = mainOut {
+                    pendingLaunchClamp = ("scene", groups.first { $0.id == id }?.memberIDs.count ?? 0)
+                } else {
+                    pendingLaunchClamp = ("speakers", selectedDeviceIDs.count)
+                }
                 selectedDeviceIDs = [local.id]
                 pendingBluetoothRestoreIDs.formIntersection(selectedDeviceIDs)
                 mainOut = .selectedDevices
@@ -437,7 +442,21 @@ public final class GroupController {
     /// (`LicenseGate.limitsToOneSpeaker`). Refuses a second speaker and a group
     /// target; never trims a live set — the limit lands on the next edit or
     /// launch.
-    public var limitsToOneSpeaker = false
+    public var limitsToOneSpeaker = false {
+        didSet {
+            let pending = pendingLaunchClamp
+            pendingLaunchClamp = nil
+            if let pending, oldValue, !limitsToOneSpeaker {
+                Analytics.capture("license:launch_clamp_lifted",
+                                  ["clamped": pending.clamped, "speaker_count": String(pending.speakerCount)])
+            }
+        }
+    }
+
+    /// Set by the launch clamp in `ensureDefaultSelection`, consumed by the
+    /// first assignment to `limitsToOneSpeaker` afterwards, so only the licence
+    /// answer of the same launch can report a lift. Never persisted.
+    private var pendingLaunchClamp: (clamped: String, speakerCount: Int)?
 
     /// The refusal reason `setDeviceSelected` returns under the limit.
     public static let oneSpeakerLimitReason = "one_speaker_limit"

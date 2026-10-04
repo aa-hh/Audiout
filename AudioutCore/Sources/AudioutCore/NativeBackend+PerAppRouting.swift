@@ -587,6 +587,9 @@ extension NativeBackend {
                 let wantsLocal = self.localBundleIDs.contains(bundleID)
                     || (self.leveledBundleIDs.contains(bundleID) && !self.captureRunning)
                 guard wantsLocal else { return nil }
+                // Re-assert the Mac row's level on every start, so an engine
+                // swapped in after the last push still plays at the row's level.
+                self.pushLocalPlaybackGainLocked()
                 let vol = self.lastRoutes.first { $0.bundleID == bundleID }?.volume ?? 100
                 return Float(vol) / 100.0
             }

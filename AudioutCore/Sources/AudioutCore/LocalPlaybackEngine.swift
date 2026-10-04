@@ -220,6 +220,8 @@ public final class LocalPlaybackEngine: LocalPlaybackControlling, @unchecked Sen
     /// Confined to graphQueue so a graph restart restores the requested mixer gain.
     private var outputSuppressed = false
     /// The Mac row's level, confined to graphQueue like `outputSuppressed`.
+    /// Deliberately survives `stop()`: it is the user's level, not session
+    /// state, and the backend re-pushes it before every app starts anyway.
     private var outputGain: Float = 1
     private var nodes: [String: AppNode] = [:]
     private var engineRunning = false

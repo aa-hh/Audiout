@@ -2608,6 +2608,8 @@ import AudioutProtocol
         #expect(row.test_ringForm == .connected)
         #expect(row.test_routeArmed)
         #expect(row.test_isSliderEnabled)
+        #expect(popover.test_isCardHeaderLive(title: PopoverController.outputDevicesCardTitle) == true,
+                "the Devices card header agrees with the row it summarises")
     }
 
     /// A non-empty `.routedApps` event overrides the intent-based label with

@@ -1694,6 +1694,9 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
     /// Toggle the card with `title` (drives the chevron/title click path). Returns
     /// the new collapsed state, or `nil` if `title` isn't a card.
     @discardableResult
+    /// Whether the card header `title` is drawn live, `nil` before it renders.
+    func test_isCardHeaderLive(title: String) -> Bool? { headerLivenessByHeader[title] }
+
     func test_toggleCard(title: String, animated: Bool = false) -> Bool? {
         toggleCard(title: title, animated: animated)
     }

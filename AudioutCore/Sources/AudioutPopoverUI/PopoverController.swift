@@ -163,7 +163,8 @@ public final class PopoverController: NSObject {
     /// because it was never a redirect target, or because a route exists but
     /// hasn't started producing audio yet (e.g. still connecting). See
     /// `DeviceRowView.apply`'s `liveAppNames` doc for the precedence rule this
-    /// feeds into.
+    /// feeds into. The Mac never appears here; ``liveAppNames(for:)`` stands
+    /// its "This Mac" routes in instead, since local playback has no connect phase.
     private var liveRoutedAppNames: [String: [String]] = [:]
 
     /// Bundle IDs of routed apps whose process is currently NOT running (T4).
@@ -2656,7 +2657,7 @@ public final class PopoverController: NSObject {
         }()
         let anyDeviceSounding = deviceRowsByID.keys.contains { id in
             guard let device = devicesByID[id] else { return false }
-            if !(liveRoutedAppNames[id] ?? []).isEmpty { return true }
+            if !liveAppNames(for: device).isEmpty { return true }
             guard let controller, controller.isMainOutMember(id) else { return false }
             guard case .connected = device.connectionState else { return false }
             return !(device.isMuted || controller.isMuted(id)) && !controller.isMainOutMuted

@@ -157,6 +157,15 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// (read as "Mac not selected").
     public var selectedDevicesQuery: ((String) -> Bool)?
 
+    /// Whether the Mac's row is driving Main right now —
+    /// `GroupController.localRowDrivesMain`, wired by `AppDelegate` beside
+    /// ``selectedDevicesQuery`` and assigned once the same way. Membership,
+    /// deliberately NOT `expectedSelected`: that set drops an undiscovered
+    /// member, so a group whose only speaker is off would disagree with the row
+    /// about who owns the Mac's level. `nil` (tests) falls back to
+    /// `expectedSelected.isEmpty`.
+    public var localRowDrivesMainQuery: (() -> Bool)?
+
     /// Fired at the START of every routing action — the two chokepoints
     /// ``setOutputSet(_:)`` and ``updateAppRoutes(_:excludedBundleIDs:)``, which
     /// between them carry EVERY user action that moves audio (device selection,
@@ -3103,7 +3112,8 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// apps through the system volume, and the stored Mac level is invisible.
     func pushLocalPlaybackGainLocked() {   // on stateQueue
         let level = known[Self.localDeviceID]?.volume ?? 100
-        let gain: Float = expectedSelected.isEmpty ? 1 : Float(level.clampedToVolume) / 100
+        let drivesMain = localRowDrivesMainQuery?() ?? expectedSelected.isEmpty
+        let gain: Float = drivesMain ? 1 : Float(level.clampedToVolume) / 100
         localPlaybackEngine?.setOutputGain(gain)
     }
 

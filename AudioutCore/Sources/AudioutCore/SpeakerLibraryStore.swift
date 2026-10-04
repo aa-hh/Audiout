@@ -65,7 +65,11 @@ public struct SpeakerLibraryStore: Sendable {
         return names.contains { $0.hasPrefix("speaker-library.corrupt-") && $0.hasSuffix(".json") }
     }
 
-    public func load() throws -> SpeakerLibraryState? {
+    public func load() throws -> SpeakerLibraryState? { try loadReportingDrops()?.state }
+
+    /// `droppedEntries` tells the caller to save the cleaned state once; until it does, every load drops the
+    /// same entries again and keeps another copy.
+    func loadReportingDrops() throws -> (state: SpeakerLibraryState, droppedEntries: Bool)? {
         guard exists else { return nil }
         let data = try Data(contentsOf: fileURL)
         let envelope: Envelope
@@ -83,10 +87,11 @@ public struct SpeakerLibraryStore: Sendable {
             Device.Kind(rawValue: entry.kind).map { SpeakerMetadata(name: entry.name, kind: $0) }
         }
         let visibility = envelope.visibility.compactMapValues(SpeakerMixerVisibility.init(rawValue:))
-        if metadata.count < envelope.metadata.count || visibility.count < envelope.visibility.count {
+        let droppedEntries = metadata.count < envelope.metadata.count || visibility.count < envelope.visibility.count
+        if droppedEntries {
             StoreRecovery.preserveCopy(fileURL)
         }
-        return SpeakerLibraryState(metadata: metadata, visibility: visibility)
+        return (SpeakerLibraryState(metadata: metadata, visibility: visibility), droppedEntries)
     }
 
     public func save(_ state: SpeakerLibraryState) throws {

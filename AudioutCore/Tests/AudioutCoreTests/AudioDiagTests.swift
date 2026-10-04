@@ -94,8 +94,14 @@ import Testing
     // A Mac that exported $AIRPLAY_AUDIO_DIAG (`launchctl setenv`, for a
     // diagnostic build) hands it to the test process too, and `isEnabled`
     // cannot be switched back off, so the disabled path is unreachable there.
-    @Test(.disabled(if: AudioDiag.isEnabled, "$AIRPLAY_AUDIO_DIAG is set in the test process's environment"))
+    // The skip reads the variable itself, the way `isEnabled` does, so
+    // `isEnabled` turning on with the variable unset turns it red instead of
+    // skipping it, as does a gated call writing the shared counters.
+    @Test(.disabled(if: ProcessInfo.processInfo.environment["AIRPLAY_AUDIO_DIAG"] != nil,
+                    "$AIRPLAY_AUDIO_DIAG is set in the test process's environment"))
     func gatedAPI_isNoOpWhenDiagnosticsDisabled() {
+        #expect(!AudioDiag.isEnabled, "$AIRPLAY_AUDIO_DIAG is unset, so diagnostics must be off")
+
         let before = AudioDiag.dumpLiveHandles()
         #expect(before == "(no live handles)", "nothing in this package calls handleCreated/handleDestroyed outside the live Core Audio path, which hermetic tests never exercise")
 

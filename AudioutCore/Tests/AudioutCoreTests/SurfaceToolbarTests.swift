@@ -189,7 +189,6 @@ private func makeParkedWindow(height: CGFloat = 400) -> NSWindow {
                 let tab = try #require(controller.test_tabButton(screen))
                 let glyph = try #require(tab.test_glyphInkRect)
                 let width = tab.bounds.width
-                glyphLeadingEdges[screen, default: []].append(glyph.minX)
                 #expect(glyph.width <= SurfaceToolbarSeat.glyphBox.width
                             && glyph.height <= SurfaceToolbarSeat.glyphBox.height,
                         Comment(rawValue: "\(screen.label)'s glyph ink, \(glyph.size), fits the common box"))
@@ -199,6 +198,12 @@ private func makeParkedWindow(height: CGFloat = 400) -> NSWindow {
                 if screen == selected {
                     let name = tab.test_nameInkRect
                     gaps = [glyph.minX, name.minX - glyph.maxX, width - name.maxX]
+                    // The open seat's wash is ink across its whole width, so
+                    // it is lifted for one render; what is left is the glyph
+                    // and, right of it, the name.
+                    tab.isEngaged = false
+                    glyphLeadingEdges[screen, default: []].append(SurfaceToolbarSeat.inkRect(of: tab).minX)
+                    tab.isEngaged = true
                 } else {
                     // An idle collapsed tab paints nothing but its glyph, so
                     // its real pixels check where the hook says the ink is.
@@ -207,13 +212,14 @@ private func makeParkedWindow(height: CGFloat = 400) -> NSWindow {
                                 && abs(drawn.midY - glyph.midY) <= slack,
                             Comment(rawValue: "\(screen.label)'s glyph is drawn at \(drawn), where its ink was measured to be, \(glyph)"))
                     gaps = [glyph.minX, width - glyph.maxX]
+                    glyphLeadingEdges[screen, default: []].append(drawn.minX)
                 }
                 #expect(gaps.allSatisfy { abs($0 - padding) <= slack },
                         Comment(rawValue: "with \(selected.label) open, \(screen.label)'s gaps from its ink are \(gaps) against \(padding) pt"))
             }
         }
         for (screen, edges) in glyphLeadingEdges {
-            #expect((edges.max() ?? 0) - (edges.min() ?? 0) <= 0.01,
+            #expect((edges.max() ?? 0) - (edges.min() ?? 0) <= slack,
                     Comment(rawValue: "\(screen.label)'s glyph stays put as tabs open and close — \(edges)"))
         }
     }

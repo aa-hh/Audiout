@@ -157,9 +157,11 @@ public final class SpeakerLibraryController {
         persists = loadPersisted
         if loadPersisted {
             let hadLibrary = store.hasAuthoritativeHistory
-            state = (try? store.load()) ?? SpeakerLibraryState()
-            if hadLibrary && !store.exists {
-                // Quarantine preserves the old bytes; recreate the authoritative file without legacy import.
+            let loaded = try? store.loadReportingDrops()
+            state = loaded?.state ?? SpeakerLibraryState()
+            if loaded?.droppedEntries == true || (hadLibrary && !store.exists) {
+                // Quarantine or the load's copy preserves the old bytes; write the cleaned file without legacy
+                // import, so the next launch neither drops the same entries again nor keeps another copy.
                 _ = save(state)
             } else if !hadLibrary {
                 let hidden = (try? legacyHiddenStore.load()) ?? []

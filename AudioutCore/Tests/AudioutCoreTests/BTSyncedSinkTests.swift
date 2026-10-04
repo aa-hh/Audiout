@@ -276,6 +276,84 @@ import AVFoundation
                 == -BTSyncTrim.rangeMs...BTSyncTrim.rangeMs)
     }
 
+    // MARK: - A trim the ring cannot apply (customer 1.2.0, two Sonos Moves)
+
+    /// Feed and play `ms` of a global ramp in real time: each 10 ms the
+    /// producer writes the chunk whose pts is "now" and the render thread
+    /// plays the cycle due "now", so the ring holds the delay's worth of audio
+    /// and no more — the shape a live session has, which one big up-front
+    /// enqueue does not. Returns the delay (ms) the last sample played at:
+    /// the ramp's value is its frame index + 1, so the frame playing at cycle
+    /// time `t` says how far behind `t` it was captured.
+    static func streamRealTime(
+        _ manager: BTSyncedSink, _ sink: BTDeviceSink, clock: inout Int, ms: Int
+    ) -> Double {
+        let chunk = 480
+        var played: Float = 0
+        for _ in 0..<(ms / 10) {
+            let first = clock
+            let frames = (0..<chunk).map { Float(first + $0 + 1) }
+            let ptsNanos = anchorNanos + Int64((Double(first) * nsPerFrame).rounded())
+            frames.withUnsafeBufferPointer {
+                manager.enqueue(interleavedFrames: $0.baseAddress!, frameCount: chunk,
+                                pts: timespec(tv_sec: Int(ptsNanos / 1_000_000_000),
+                                              tv_nsec: Int(ptsNanos % 1_000_000_000)))
+            }
+            let cycle = renderCycle(sink, at: ptsNanos, frames: chunk)
+            if let last = cycle.samples.last, last != 0 { played = last }
+            clock += chunk
+        }
+        // The last frame of the last cycle played at index `clock - 1`.
+        return Double(clock - Int(played)) / sampleRate * 1_000
+    }
+
+    /// A sink on the BT-only timeline whose delay is `referenceMs − latencyMs`.
+    static func btOnlySink(referenceMs: Int, latencyMs: Int) throws -> (BTSyncedSink, BTDeviceSink) {
+        let manager = BTSyncedSink(
+            renderSampleRate: sampleRate, channelCount: 1, presentationDelayMs: { 0 })
+        manager.setComposition(BTGroupComposition(airPlayPresent: false, macLocalPresent: false))
+        manager.setBTOnlyBufferMs(referenceMs)
+        manager.setOffsetMs(latencyMs, forDeviceUID: "dev-a")
+        manager.setDevices([.init(deviceID: 0, uid: "dev-a")])
+        return (manager, try #require(manager.sinkForTesting(uid: "dev-a")))
+    }
+
+    /// DEFECT (customer, 1.2.0): Move 2 — latency 483, room 583 — sits 100 ms
+    /// behind the timeline, which is exactly the forward seek's safety margin,
+    /// so a live −10 ms seek has no room and applies nothing. 14 of 15 presses
+    /// logged `appliedMs=0.0` while the drawer and the store took the value.
+    /// The committed edit must re-anchor so the delay the store now describes
+    /// is the one that plays.
+    @Test func aClampedTrim_reanchorsOnCommitAndPlaysTheStoredValue() throws {
+        let (manager, sink) = try Self.btOnlySink(referenceMs: 583, latencyMs: 483)
+        defer { manager.stop() }
+        var clock = 0
+        let before = Self.streamRealTime(manager, sink, clock: &clock, ms: 500)
+        #expect(abs(before - 100) < 1, "anchored on the 100 ms floor: \(before)")
+
+        manager.setTrimMs(-10, forDeviceUID: "dev-a")
+        manager.reanchorIfTrimClamped(forDeviceUID: "dev-a")
+        sink.test_waitForPendingRebuild()
+        let after = Self.streamRealTime(manager, sink, clock: &clock, ms: 500)
+        #expect(abs(after - 90) < 1, "trim −10 must play 10 ms earlier: \(before) → \(after) ms")
+    }
+
+    /// The other half: a trim the seek applied in full is already playing, and
+    /// the commit must leave the music alone (`trimChangeNeverRebuildsTheSink`).
+    @Test func aTrimThatApplied_isNotReanchoredOnCommit() throws {
+        let (manager, sink) = try Self.btOnlySink(referenceMs: 583, latencyMs: 283)
+        defer { manager.stop() }
+        var clock = 0
+        _ = Self.streamRealTime(manager, sink, clock: &clock, ms: 500)
+
+        manager.setTrimMs(-10, forDeviceUID: "dev-a")
+        manager.reanchorIfTrimClamped(forDeviceUID: "dev-a")
+        sink.test_waitForPendingRebuild()
+        #expect(sink.hasStartedRendering, "no rebuild: the session is still released")
+        let after = Self.streamRealTime(manager, sink, clock: &clock, ms: 500)
+        #expect(abs(after - 290) < 1, "the live seek applied it: \(after) ms")
+    }
+
     // MARK: - BT-SYNC-DRAWER T2: live trim as a delay-line seek
 
     /// A mono delay line whose ring is big enough that nothing here ever wraps.
@@ -812,6 +890,209 @@ import AVFoundation
 
         #expect(Self.firstNonSilence(of: sinkA, startNanos: Self.anchorNanos) == nil,
                 "an unknown UID must be a no-op: no crash, and no fall-through to an unrelated sink")
+    }
+
+    // MARK: - Stale or dead Core Audio device
+
+    /// Which object ids the fake HAL still reports alive, flipped mid-test.
+    private final class AliveSwitch: @unchecked Sendable {
+        private let lock = NSLock()
+        private var dead: Set<AudioObjectID> = []
+        func kill(_ id: AudioObjectID) { lock.withLock { _ = dead.insert(id) } }
+        func isAlive(_ id: AudioObjectID) -> Bool { lock.withLock { !dead.contains(id) } }
+    }
+
+    /// Every uid the manager reported dead, in order.
+    private final class DeathLog: @unchecked Sendable {
+        private let lock = NSLock()
+        private var _uids: [String] = []
+        func append(_ uid: String) { lock.withLock { _uids.append(uid) } }
+        var uids: [String] { lock.withLock { _uids } }
+    }
+
+    private static func livenessManager(
+        alive: AliveSwitch, deaths: DeathLog
+    ) -> BTSyncedSink {
+        BTSyncedSink(
+            renderSampleRate: sampleRate, channelCount: 1, presentationDelayMs: { 100 },
+            deviceIsAlive: { alive.isAlive($0) },
+            sinkDeathObserver: { deaths.append($0) })
+    }
+
+    /// Red if `setDevices` keeps a sink whose UID is already in the table: a speaker
+    /// that dropped and returned inside one coalesced refresh renders into its dead object id forever.
+    @Test func setDevicesWithNewDeviceIDForSameUID_replacesTheSink() throws {
+        let manager = Self.livenessManager(alive: AliveSwitch(), deaths: DeathLog())
+        manager.setDevices([.init(deviceID: 0, uid: "dev-a")])
+        let old = try #require(manager.sinkForTesting(uid: "dev-a"))
+
+        manager.setDevices([.init(deviceID: 7, uid: "dev-a")])
+
+        let new = try #require(manager.sinkForTesting(uid: "dev-a"))
+        #expect(new !== old, "a new object id for the same UID must build a new sink")
+        #expect(new.deviceID == 7)
+    }
+
+    /// Red if the liveness check stops consulting the device's alive flag: a sink
+    /// pinned to a vanished object id would keep its anchor and gate green while silent.
+    @Test func deadDeviceAtLivenessCheck_reportsDeadAndDropsSink() throws {
+        let alive = AliveSwitch(), deaths = DeathLog()
+        let manager = Self.livenessManager(alive: alive, deaths: deaths)
+        manager.setDevices([.init(deviceID: 0, uid: "dev-a")])
+        let sink = try #require(manager.sinkForTesting(uid: "dev-a"))
+        sink.test_forceRunning()
+
+        alive.kill(0)
+        sink.test_checkLiveness(nowNanos: Self.anchorNanos)
+
+        #expect(deaths.uids == ["dev-a"])
+        #expect(manager.sinkForTesting(uid: "dev-a") == nil)
+        #expect(!sink.test_isRunning)
+    }
+
+    /// Red if a released, fed sink whose render callback has stopped running is not
+    /// reported dead: the speaker goes silent with nothing in the app able to say so.
+    @Test func renderStalledWhileFedAndReleased_reportsDead() throws {
+        let deaths = DeathLog()
+        let manager = Self.livenessManager(alive: AliveSwitch(), deaths: deaths)
+        manager.setDevices([.init(deviceID: 0, uid: "dev-a")])
+        let sink = try #require(manager.sinkForTesting(uid: "dev-a"))
+        let now = Self.anchorNanos
+        sink.test_forceRunning()
+        sink.test_markReleased()
+        sink.test_noteEnqueue(nowNanos: now)
+        sink.test_noteRenderCycle(nowNanos: now - 3_000_000_000)
+
+        sink.test_checkLiveness(nowNanos: now)
+
+        #expect(deaths.uids == ["dev-a"])
+        #expect(manager.sinkForTesting(uid: "dev-a") == nil)
+    }
+
+    /// Red if the fed sink's stall is measured from its last render cycle alone,
+    /// ignoring start: a sink pinned to a twin object that still answers alive
+    /// would never render, never be torn down, and stay silent with nothing reported.
+    @Test func fedSinkWhoseCallbackNeverRan_reportsDeadAfterStall() throws {
+        let deaths = DeathLog()
+        let manager = Self.livenessManager(alive: AliveSwitch(), deaths: deaths)
+        manager.setDevices([.init(deviceID: 0, uid: "dev-a")])
+        let sink = try #require(manager.sinkForTesting(uid: "dev-a"))
+        let now = Self.anchorNanos
+        sink.test_forceRunning()
+        sink.test_noteStarted(nowNanos: now - 3_000_000_000)
+        sink.test_noteEnqueue(nowNanos: now)
+
+        sink.test_checkLiveness(nowNanos: now)
+
+        #expect(deaths.uids == ["dev-a"])
+        #expect(manager.sinkForTesting(uid: "dev-a") == nil)
+    }
+
+    /// Red if the stall rule stops counting from start or drops its fed guard: a
+    /// sink still waiting on its first cycle, or a paused Mac, would tear down a healthy speaker.
+    @Test func justStartedRenderingOrIdleSink_neverReportsDead() throws {
+        let now = Self.anchorNanos
+        let cases: [(name: String, released: Bool, startedAt: Int64, lastEnqueue: Int64, lastRender: Int64)] = [
+            ("fed, started 1 s ago, no render cycle yet", false, now - 1_000_000_000, now, 0),
+            ("released and fed, rendered 1 s ago", true, 0, now, now - 1_000_000_000),
+            ("released but idle for 5 s", true, 0, now - 5_000_000_000, now - 10_000_000_000),
+        ]
+        for c in cases {
+            let deaths = DeathLog()
+            let manager = Self.livenessManager(alive: AliveSwitch(), deaths: deaths)
+            manager.setDevices([.init(deviceID: 0, uid: "dev-a")])
+            let sink = try #require(manager.sinkForTesting(uid: "dev-a"))
+            sink.test_forceRunning()
+            sink.test_noteStarted(nowNanos: c.startedAt)
+            if c.released { sink.test_markReleased() }
+            sink.test_noteEnqueue(nowNanos: c.lastEnqueue)
+            sink.test_noteRenderCycle(nowNanos: c.lastRender)
+
+            sink.test_checkLiveness(nowNanos: now)
+
+            #expect(deaths.uids.isEmpty, "\(c.name): must not be reported dead")
+            #expect(manager.sinkForTesting(uid: "dev-a") === sink, "\(c.name): sink must stay")
+            #expect(sink.test_isRunning, "\(c.name): sink must keep running")
+        }
+    }
+
+    /// Red if the health peak is not taken from the rendered buffer: a silent speaker's
+    /// `bt_sink_health` line could not say whether real audio reached its engine.
+    @Test func renderedPeakReachesHealthCounters() throws {
+        let (manager, sink, ramp) = try Self.anchoredSink()
+        defer { manager.stop() }
+        _ = try #require(Self.drainUntilDry(sink, from: Self.anchorNanos), "the ramp never drained")
+
+        let health = sink.test_healthSnapshot()
+        let expected = 20 * log10(Double(ramp.map { abs($0) }.max() ?? 0))
+        #expect(health.cycles > 0)
+        #expect(abs(health.peakDBFS - expected) <= 0.5, "peak \(health.peakDBFS) dBFS, expected \(expected)")
+    }
+
+    /// Red if silence is reported as anything but the -120 dBFS floor: an idle
+    /// sink would read as playing in its health line.
+    @Test func silentSinkReportsFloorPeak() throws {
+        let manager = BTSyncedSink(
+            renderSampleRate: Self.sampleRate, channelCount: 1, presentationDelayMs: { 100 })
+        manager.setDevices([.init(deviceID: 0, uid: "dev-a")])
+        let sink = try #require(manager.sinkForTesting(uid: "dev-a"))
+        for cycle in 0..<3 {
+            _ = Self.renderCycle(sink, at: Self.anchorNanos + Int64(cycle) * 10_000_000)
+        }
+
+        let health = sink.test_healthSnapshot()
+        #expect(health.cycles > 0)
+        #expect(health.peakDBFS == -120)
+    }
+
+    /// Red if a first start that finds the device dead only logs a start failure:
+    /// the stopped sink would sit in the table with nobody told.
+    @Test func deadDeviceAtFirstStart_reportsDeadAndDropsSink() {
+        let alive = AliveSwitch(), deaths = DeathLog()
+        let manager = Self.livenessManager(alive: alive, deaths: deaths)
+        manager.start()
+        defer { manager.stop() }
+        alive.kill(0)
+
+        manager.setDevices([.init(deviceID: 0, uid: "dev-a")])
+
+        #expect(deaths.uids == ["dev-a"])
+        #expect(manager.sinkForTesting(uid: "dev-a") == nil)
+    }
+
+    /// Red if a rebuild that finds the device dead stops the sink without reporting it:
+    /// the config-change rebuild can win the race against the alive listener.
+    @Test func deadDeviceAtRebuild_reportsDeadAndDropsSink() throws {
+        let alive = AliveSwitch(), deaths = DeathLog()
+        let manager = Self.livenessManager(alive: alive, deaths: deaths)
+        manager.setDevices([.init(deviceID: 0, uid: "dev-a")])
+        let sink = try #require(manager.sinkForTesting(uid: "dev-a"))
+        sink.test_forceRunning()
+
+        alive.kill(0)
+        sink.requestRebuild(cause: "config_change")
+        sink.test_waitForPendingRebuild()
+
+        #expect(deaths.uids == ["dev-a"])
+        #expect(manager.sinkForTesting(uid: "dev-a") == nil)
+    }
+
+    /// Red if the manager drops a dead sink by UID instead of by instance: the
+    /// replaced sink's late death would remove the live replacement for the same speaker.
+    @Test func replacementSinkSurvivesOldSinkDeathCallback() throws {
+        let alive = AliveSwitch()
+        let manager = Self.livenessManager(alive: alive, deaths: DeathLog())
+        manager.setDevices([.init(deviceID: 0, uid: "dev-a")])
+        let old = try #require(manager.sinkForTesting(uid: "dev-a"))
+        manager.setDevices([.init(deviceID: 7, uid: "dev-a")])
+        let new = try #require(manager.sinkForTesting(uid: "dev-a"))
+        try #require(new !== old, "precondition: the new id replaced the sink")
+
+        old.test_forceRunning()
+        alive.kill(0)
+        old.test_checkLiveness(nowNanos: Self.anchorNanos)
+
+        #expect(manager.sinkForTesting(uid: "dev-a") === new)
     }
 }
 

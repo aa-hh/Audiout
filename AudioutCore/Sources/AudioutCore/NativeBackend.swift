@@ -346,6 +346,16 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// to `.connected` (or the degrade to `.failed`) removes it. On `stateQueue`.
     var btConnectingDeadlines: [String: Date] = [:]
 
+    /// When each Bluetooth UID's sink last died and was rebuilt, so a second
+    /// death inside 10 s marks the speaker gone instead of looping on a
+    /// zombie object id. On `stateQueue`.
+    var btSinkDeathAt: [String: Date] = [:]
+
+    /// How long after a sink death marks a speaker gone the enumerator is
+    /// restarted, which re-emits the full list: it otherwise emits only on a
+    /// change, so a speaker macOS still lists would never come back.
+    var btSinkDeathRecoverySeconds: TimeInterval = 30
+
     /// The armed poll that asks the sink manager which devices have started
     /// rendering. `nil` = nothing is breathing, so nothing is scheduled — the
     /// poll exists only for the duration of a connect. On `stateQueue`.
@@ -604,10 +614,14 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     static let wholeSystemStreamIDBase: UInt32 = 0x8000_0000
 
     /// Test seam: a BT `Device.id` (its Core Audio UID) → the live
-    /// `AudioObjectID` a per-device sink pins its engine to. `nil` (production)
-    /// falls back to `aggregateControl.resolveDeviceID(forUID:)` — the HAL's
-    /// own translation. Resolved fresh at each apply, never cached: object ids
-    /// go stale across a disconnect/rejoin while UIDs don't.
+    /// `AudioObjectID` a per-device sink pins its engine to, also used by the
+    /// hardware-volume path and `handleBTSinkDead`. When set it is
+    /// authoritative, nil included: Core Audio is never consulted. Unset
+    /// (production), the sink and `handleBTSinkDead` use
+    /// `BTDeviceEnumerator.liveDeviceID(forUID:)`; the hardware-volume path keeps
+    /// the HAL's single UID translation.
+    /// Resolved fresh at each apply, never cached: object ids go stale across a
+    /// disconnect/rejoin while UIDs don't.
     var btDeviceIDForUID: (@Sendable (String) -> AudioObjectID?)?
 
     /// The last BT decisions `setOutputSet` committed — enable, selected uids,
@@ -2140,6 +2154,9 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // when coreaudiod is busy (device switches, sleep/wake). An unchanged name
             // is harmless: `applyLocal` suppresses the no-op emit anyway.
             let name = Self.currentOutputDeviceName()
+            // Same reason: the default output's UID is a HAL read, so take it here
+            // too, and only when the default device actually changed.
+            let changedDefaultUID: String? = defaultDeviceChanged ? self.currentDefaultOutputUIDProvider() : nil
             // Fires on the helper's OWN private serial queue, never main — hop to the
             // queue that owns `known` before touching the model.
             self.stateQueue.async {
@@ -2214,7 +2231,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                     //     off-switch. Any other change is a real user action → classify
                     //     it against the aggregate and (re)emit the routing-blocked
                     //     warning for the new steady state.
-                    let newDefaultUID = self.currentDefaultOutputUIDProvider()
+                    let newDefaultUID = changedDefaultUID
 
                     // Volume ownership turns on exactly this UID, so republish it
                     // BEFORE the echo test below. Our own switch to the aggregate
@@ -2229,6 +2246,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                     // left to correct after the fact.
                     if self.expectedDefaultWriteUID == newDefaultUID, newDefaultUID != nil {
                         self.expectedDefaultWriteUID = nil
+                        // Our takeover's echo can land before its own commit, which
+                        // then defers to this branch, so reflect the takeover here.
+                        if newDefaultUID == AggregateOutputDevice.productUID {
+                            self.setRoutingBlocked(false)
+                        }
                     } else {
                         // A genuine change that does NOT match the pending write
                         // proves our echo is no longer the newest state — the HAL
@@ -2239,7 +2261,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                         // echo", silently skipping the D1 resume — permanent silence
                         // in exactly the scenario D1 exists for. Disarm it.
                         self.expectedDefaultWriteUID = nil
-                        self.evaluateRoutingBlocked()
+                        self.evaluateRoutingBlocked(currentDefaultUID: newDefaultUID)
 
                         // Seamless handoff T3.4: the user picked a DIFFERENT default
                         // output in Sound settings while we were routing — that IS
@@ -4519,14 +4541,32 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// the end of `reconcileCaptureGate()` (streaming started/stopped) and the
     /// `systemVolume.onExternalChange` handler's `defaultDeviceChanged` branch
     /// (the system default output itself switched). On `stateQueue`.
+    ///
+    /// The AirPlay-class read is a Core Audio call, so it runs on
+    /// `captureControlQueue` and the result is committed back on `stateQueue`,
+    /// where `captureRunning` is checked again because capture may have stopped
+    /// while the read was in flight. With capture stopped there is nothing to read.
     private func reconcileSystemAirPlayGuard() {   // on stateQueue
-        let active = captureRunning && systemDefaultOutputIsAirPlayClassProvider()
-        if active {
-            guard !systemAirPlayGuardActive else { return }
-            systemAirPlayGuardActive = true
-            emit(.systemDefaultIsAirPlayActive(true))
-        } else {
+        guard captureRunning else {
             clearSystemAirPlayGuard()
+            return
+        }
+        captureControlQueue.async { [weak self] in
+            guard let self else { return }
+            let isAirPlay = self.systemDefaultOutputIsAirPlayClassProvider()
+            self.stateQueue.async {
+                guard self.captureRunning else {
+                    self.clearSystemAirPlayGuard()
+                    return
+                }
+                if isAirPlay {
+                    guard !self.systemAirPlayGuardActive else { return }
+                    self.systemAirPlayGuardActive = true
+                    self.emit(.systemDefaultIsAirPlayActive(true))
+                } else {
+                    self.clearSystemAirPlayGuard()
+                }
+            }
         }
     }
 

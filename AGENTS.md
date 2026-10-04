@@ -218,7 +218,9 @@ repo. `AudioutCore` pins it by version.
   merge runs it from `pre-merge-commit` instead); adding the `AUDIOUT_IN_MERGE`
   test there would run it twice. `pre-merge-commit` runs Guard 10 before the
   suite, so an out-of-date branch, or a merge onto `main` with no review
-  receipt for the branch diff, is refused before any tests run (`scripts/review-branch.sh`;
+  receipt for the branch diff, is refused before any tests run (`scripts/review-branch.sh`,
+  whose reviewers run as subagents of the Claude session merging the branch:
+  follow its printed steps, then `--continue`;
   `--already-reviewed` for work /scope-and-run's reviewer approved;
   `AUDIOUT_SKIP_BRANCH_REVIEW=1` is the loud override;
   `bash scripts/test-review-branch.sh` self-tests it). A fast-forward creates no
@@ -334,9 +336,15 @@ warn-only 3/5) are documented in the hook file itself:
   reviewed the branch's committed diff: it picks skip, cheap (one sonnet pass)
   or full (four parallel reviewers plus a confidence scorer, instructions in
   `docs/review/`) from the diff, thresholds and risk paths at the top of the
-  script, prints findings, logs one line per review to
+  script. The reviewers run as subagents of the Claude session merging the
+  branch, because headless `claude -p` is refused on this account: the
+  script prints each pass's model, prompt file and reply path, the session
+  runs them and saves the replies, and `bash scripts/review-branch.sh
+  --continue` reads them (exit 3 means more passes to run). It then prints findings, logs one line per review to
   `.git/audiout-branch-reviews.log`, and writes a receipt keyed to the
-  branch's own committed changes; a HIGH finding blocks the receipt. Merging
+  branch's own committed changes. Every surviving finding, of any severity,
+  blocks the receipt: the script prints fix groups (one per file) for builder
+  subagents to fix in parallel in the same worktree, then a fresh review. Merging
   main into the branch keeps the receipt valid; a commit or conflict resolution
   that changes the branch's own lines needs a new review. The merge onto
   `main` also requires the branch to contain the latest main; an out-of-date

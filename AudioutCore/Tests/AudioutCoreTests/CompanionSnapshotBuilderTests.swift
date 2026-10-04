@@ -399,8 +399,8 @@ import AudioutProtocol
         #expect(stored.connection.credentialKind == nil)
     }
 
-    /// Dropping `access` from any state in `CompanionSnapshotBuilder.connectionInfo`
-    /// turns it red.
+    /// Dropping `access` from the `off` or `failed` state in
+    /// `CompanionSnapshotBuilder.connectionInfo` turns it red.
     @Test func connectionCarriesTheSpeakersAccessKind() async throws {
         let backend = try await makeBackend()
         let controller = makeGroupController(backend: backend)

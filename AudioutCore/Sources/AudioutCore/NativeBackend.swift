@@ -3306,7 +3306,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// 2026-08-06): a came-back discovery edge (changed descriptor, or reappearing
     /// after a `disappeared`), an engine good-state transition, a membership edge
     /// for this id, or the user's "Try again" (`retryOutput`) — never by a mere
-    /// same-descriptor re-announce.
+    /// same-descriptor re-announce. Two password exceptions: a password or code
+    /// demand with no password fed parks but keeps the device available
+    /// (`waitsForPassword`), so it still offers "Enter password"; and a password
+    /// typed during the failing attempt (`awaitsResubmittedPassword`) lifts the
+    /// park and loops once more so the next attempt feeds it.
     /// Release the `converging` slot for `id` and, if the coalesced target moved
     /// while the slot was held (a toggle — or a whole-system rebind recovery,
     /// below — landed mid-op), reclaim the slot and return the output id to kick
@@ -3580,7 +3584,10 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                     // new sessions post-failure (root cause 5). The park clears only
                     // on a genuine edge (storm fix, 2026-08-06): a came-back
                     // discovery edge, an engine good-state transition, a membership
-                    // edge, or `retryOutput`.
+                    // edge, or `retryOutput`. Two exceptions: a password or code
+                    // demand with no password fed parks but stays available
+                    // (`waitsForPassword`), and a password typed during this attempt
+                    // removes the park and loops once more instead.
                     //
                     // Cause mapping mirrors `applyEngineState`'s `.passwordRequired`
                     // arm: an auth rejection is the one connect failure with a
@@ -3608,6 +3615,17 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                         // the id, so the extra attempt lifts the park.
                         if self.awaitsResubmittedPassword(id) {
                             self.failedGate.remove(id)
+                            // An armed completion is always echoed on the state
+                            // stream, after it. If that echo has not landed yet it
+                            // would arrive with the mark spent and read as a
+                            // refusal of the typed password, so the failure arm
+                            // drops it. A timeout or a stopped engine has no echo.
+                            let echoes = (error as? AirPlayEngineError).map {
+                                $0 == .sessionFailed || $0 == .passwordRequired
+                            } ?? false
+                            if echoes, !self.failureEchoSeen.contains(id) {
+                                self.expectStaleFailure.insert(id)
+                            }
                             return nil
                         }
                         let access = self.known[id]?.airPlayAccess
@@ -3692,8 +3710,9 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         let password = passwordStore.password(for: id)
         return stateQueue.sync {
             // This attempt feeds whatever is stored now, so a password typed
-            // before this point reaches it; one typed after survives to the catch.
-            self.passwordResubmitted[id] = nil
+            // before the read reaches it; one typed after survives to the catch.
+            if self.passwordResubmitted[id] == password { self.passwordResubmitted[id] = nil }
+            self.failureEchoSeen.remove(id)
             guard let last = self.lastDescriptors[id] else { return nil }
             let current = Self.withPassword(last, password)
             if let fed = self.fedDescriptors[id], Self.descriptorsEqual(fed, current) {
@@ -5182,6 +5201,10 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 // carry its stream again.
                 eqNeedsReconcile = !wasAdded
             case .failed, .passwordRequired:
+                // The echo of an add failure the converge catch already looped
+                // past (it fires after the completion): drop it whole.
+                if self.expectStaleFailure.remove(id) != nil { return nil }
+                self.failureEchoSeen.insert(id)
                 // A live session died / needs a PIN we don't have: surface it as
                 // unavailable + deselected and drop it from the streaming set. PARK
                 // it (root cause 5) so converge doesn't immediately re-issue a
@@ -5189,70 +5212,77 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 // only on a genuine edge (storm fix, 2026-08-06): a came-back
                 // discovery edge, an engine good-state transition, a membership
                 // edge, or `retryOutput` — a same-descriptor re-announce keeps it.
-                device.isAvailable = false
-                device.isSelected = false
+                // Two exceptions: a failure while a typed password still awaits
+                // its extra attempt skips all of this, and
+                // `applyPasswordFailureLocked` sets a password speaker nobody gave
+                // a password back to available.
                 let wasStreaming = self.added.remove(id) != nil
                 eqNeedsReconcile = wasStreaming
                 if self.awaitsResubmittedPassword(id) {
                     // A password typed while this connect was in flight has not
                     // reached the engine: the converge catch gives it one more
                     // attempt, so this report is not the receiver's answer to it.
-                    // No park, no `.failed`, no password outcome.
-                } else if self.desiredOn[id] == true {
-                    self.failedGate.insert(id)
-                    // `.passwordRequired` is the one engine failure with a KNOWN,
-                    // actionable cause — don't flatten it to `.unknown` (live
-                    // 2026-08-06: an auth-blocked receiver was debugged blind
-                    // because the panel said "failed for an unknown reason" while
-                    // the engine knew it wanted a password). A device that WAS
-                    // streaming is the other known shape: a live session dying
-                    // out-of-band is precisely "was connected, silently dropped".
-                    let cause: ConnectionFailure.Cause =
-                        state == .passwordRequired
-                            ? Self.accessCause(device.airPlayAccess, passwordRequired: true)
-                            : (wasStreaming ? .droppedMidStream
-                                : Self.accessCause(device.airPlayAccess, passwordRequired: false))
-                    self.applyPasswordFailureLocked(state: state, cause: cause, device: &device)
-                    device.connectionState = .failed(
-                        ConnectionFailure(cause: cause, detail: "engine state: \(state)")
-                    )
-                    self.notePasswordOutcome(id: id, newState: device.connectionState)
-                    // The ONE event that explains the user-visible "engine state:
-                    // failed" — a live AirPlay session dying. It was invisible in
-                    // telemetry until now, so a dropped session had to be inferred
-                    // from the absence of other events (live debug 2026-08-29,
-                    // where that inference cost an afternoon and still landed on
-                    // the wrong cause). The device id stays local — same rationale
-                    // as `exclusion_changed`, it is what makes "why did it stop"
-                    // legible on this Mac — and only the cause shape goes out.
-                    Telemetry.fail(.airplay, "airplay:session_failed",
-                                   local: ["device": id],
-                                   shared: [
-                                       "state": "\(state)",
-                                       "cause": "\(cause)",
-                                       "wasStreaming": wasStreaming ? "true" : "false",
-                                   ])
-                } else if self.streamBindings[id] != nil, !self.isWholeSystemOperationallyClaimedLocked(id) {
-                    // A per-app-only session never joins `added`, so whether it
-                    // was streaming reads off the state the bind path reported.
-                    let wasConnected = device.connectionState == .connected
-                    let cause: ConnectionFailure.Cause =
-                        state == .passwordRequired
-                            ? Self.accessCause(device.airPlayAccess, passwordRequired: true)
-                            : (wasConnected ? .droppedMidStream
-                                : Self.accessCause(device.airPlayAccess, passwordRequired: false))
-                    self.applyPasswordFailureLocked(state: state, cause: cause, device: &device)
-                    device.connectionState = .failed(
-                        ConnectionFailure(cause: cause, detail: "engine state: \(state)")
-                    )
-                    self.notePasswordOutcome(id: id, newState: device.connectionState)
-                    Telemetry.fail(.airplay, "airplay:session_failed",
-                                   local: ["device": id],
-                                   shared: [
-                                       "state": "\(state)",
-                                       "cause": "\(cause)",
-                                       "wasStreaming": wasConnected ? "true" : "false",
-                                   ])
+                    // No park, no `.failed`, no password outcome, and the row
+                    // stays available.
+                } else {
+                    device.isAvailable = false
+                    device.isSelected = false
+                    if self.desiredOn[id] == true {
+                        self.failedGate.insert(id)
+                        // `.passwordRequired` is the one engine failure with a KNOWN,
+                        // actionable cause — don't flatten it to `.unknown` (live
+                        // 2026-08-06: an auth-blocked receiver was debugged blind
+                        // because the panel said "failed for an unknown reason" while
+                        // the engine knew it wanted a password). A device that WAS
+                        // streaming is the other known shape: a live session dying
+                        // out-of-band is precisely "was connected, silently dropped".
+                        let cause: ConnectionFailure.Cause =
+                            state == .passwordRequired
+                                ? Self.accessCause(device.airPlayAccess, passwordRequired: true)
+                                : (wasStreaming ? .droppedMidStream
+                                    : Self.accessCause(device.airPlayAccess, passwordRequired: false))
+                        self.applyPasswordFailureLocked(state: state, cause: cause, device: &device)
+                        device.connectionState = .failed(
+                            ConnectionFailure(cause: cause, detail: "engine state: \(state)")
+                        )
+                        self.notePasswordOutcome(id: id, newState: device.connectionState)
+                        // The ONE event that explains the user-visible "engine state:
+                        // failed" — a live AirPlay session dying. It was invisible in
+                        // telemetry until now, so a dropped session had to be inferred
+                        // from the absence of other events (live debug 2026-08-29,
+                        // where that inference cost an afternoon and still landed on
+                        // the wrong cause). The device id stays local — same rationale
+                        // as `exclusion_changed`, it is what makes "why did it stop"
+                        // legible on this Mac — and only the cause shape goes out.
+                        Telemetry.fail(.airplay, "airplay:session_failed",
+                                       local: ["device": id],
+                                       shared: [
+                                           "state": "\(state)",
+                                           "cause": "\(cause)",
+                                           "wasStreaming": wasStreaming ? "true" : "false",
+                                       ])
+                    } else if self.streamBindings[id] != nil, !self.isWholeSystemOperationallyClaimedLocked(id) {
+                        // A per-app-only session never joins `added`, so whether it
+                        // was streaming reads off the state the bind path reported.
+                        let wasConnected = device.connectionState == .connected
+                        let cause: ConnectionFailure.Cause =
+                            state == .passwordRequired
+                                ? Self.accessCause(device.airPlayAccess, passwordRequired: true)
+                                : (wasConnected ? .droppedMidStream
+                                    : Self.accessCause(device.airPlayAccess, passwordRequired: false))
+                        self.applyPasswordFailureLocked(state: state, cause: cause, device: &device)
+                        device.connectionState = .failed(
+                            ConnectionFailure(cause: cause, detail: "engine state: \(state)")
+                        )
+                        self.notePasswordOutcome(id: id, newState: device.connectionState)
+                        Telemetry.fail(.airplay, "airplay:session_failed",
+                                       local: ["device": id],
+                                       shared: [
+                                           "state": "\(state)",
+                                           "cause": "\(cause)",
+                                           "wasStreaming": wasConnected ? "true" : "false",
+                                       ])
+                    }
                 }
             case .stopped:
                 device.isSelected = false
@@ -5840,6 +5870,16 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// read its descriptor (`descriptorToFeed` clears it), so a submit buys at
     /// most one extra attempt.
     private var passwordResubmitted: [String: String] = [:]
+
+    /// Ids whose failed add the converge catch looped past before the state
+    /// stream's echo of that failure arrived; the failure arm drops one report
+    /// for each. On `stateQueue`.
+    private var expectStaleFailure: Set<String> = []
+
+    /// Ids the failure arm has seen a failure report for since their last
+    /// `descriptorToFeed`, so the catch knows the echo already landed.
+    /// On `stateQueue`.
+    private var failureEchoSeen: Set<String> = []
 
     /// Whether a password typed during the in-flight connect has not reached
     /// the engine yet, so a failure now says nothing about it. Only a

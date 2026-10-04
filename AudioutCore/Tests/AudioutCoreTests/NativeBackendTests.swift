@@ -3301,7 +3301,8 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         let (backend, engine, discovery) = makeBackend(passwordStore: store)
         defer { backend.stop() }
         let device = ap2Device(access: .password)
-        await startAndDiscover(backend, engine, discovery, device)
+        let marker = ap2Device(id: "AA:BB:CC:DD:EE:02", name: "Marker")
+        await startAndDiscoverPair(backend, engine, discovery, device, marker)
         final class StateLog: @unchecked Sendable {
             private let lock = NSLock()
             private var states: [ConnectionState] = []
@@ -3324,11 +3325,10 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
             if secondAdd.testAndSet() { engine.addFailures = [] } else { await addHold.hold() }
         }
         engine.onMirroredAddFailure = { _ in
-            await pollUntil {
-                guard let row = backend.devices.first(where: { $0.id == device.id }) else { return false }
-                if case .failed = row.connectionState { return true }
-                return !row.isAvailable
-            }
+            // The state stream is applied in order, so once the marker's
+            // report shows, the echo before it has been applied too.
+            engine.pushState(marker.outputID, .failed)
+            await pollUntil { backend.devices.first { $0.id == marker.id }?.isAvailable == false }
         }
 
         backend.setOutputSet([device.id])
@@ -3341,6 +3341,70 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         #expect(log.all.contains(.connected))
         #expect(engine.fedDescriptorList.last?.password == "secret")
         #expect(!log.all.contains { if case .failed = $0 { return true } else { return false } })
+    }
+
+    /// Dropping `expectStaleFailure` (so the state-stream echo of a failed add
+    /// that lands after the catch has looped parks the speaker and shows the
+    /// typed password refused), or never consuming it (so a later genuine
+    /// failure is swallowed), turns it red.
+    @Test func passwordSubmittedDuringAFailingConnectSurvivesALateStateStreamReport() async {
+        let store = InMemoryAirPlayPasswordStore()
+        let (backend, engine, discovery) = makeBackend(passwordStore: store)
+        defer { backend.stop() }
+        let device = ap2Device(access: .password)
+        let marker = ap2Device(id: "AA:BB:CC:DD:EE:02", name: "Marker")
+        await startAndDiscoverPair(backend, engine, discovery, device, marker)
+        final class StateLog: @unchecked Sendable {
+            private let lock = NSLock()
+            private var states: [ConnectionState] = []
+            func append(_ state: ConnectionState) { lock.withLock { states.append(state) } }
+            var all: [ConnectionState] { lock.withLock { states } }
+        }
+        let log = StateLog()
+        let stream = backend.makeEventStream()
+        let task = Task {
+            for await event in stream {
+                if case .deviceUpdated(let d) = event, d.id == device.id { log.append(d.connectionState) }
+            }
+        }
+        defer { task.cancel() }
+        // The spy's scripted add failure throws with no state report, so the
+        // test sends that report itself, after the catch has looped.
+        let firstAdd = HoldPoint()
+        let secondAdd = HoldPoint()
+        let sawFirst = OnceFlag()
+        engine.addFailures = [device.outputID.rawValue]
+        engine.onAddOutputHold = { id, _ in
+            guard id == device.outputID else { return }
+            if sawFirst.testAndSet() {
+                engine.addFailures = []
+                await secondAdd.hold()
+            } else {
+                await firstAdd.hold()
+            }
+        }
+
+        backend.setOutputSet([device.id])
+        await pollUntil { firstAdd.entered }
+        backend.submitAirPlayPassword("secret", for: device.id, source: "mac")
+        backend.retryOutput(device.id)
+        firstAdd.open()
+        await pollUntil { secondAdd.entered }
+        #expect(engine.fedDescriptorList.last?.password == "secret")
+
+        engine.pushState(device.outputID, .failed)
+        engine.pushState(marker.outputID, .failed)
+        await pollUntil { backend.devices.first { $0.id == marker.id }?.isAvailable == false }
+        secondAdd.open()
+
+        await pollUntil { backend.devices.first { $0.id == device.id }?.connectionState == .connected }
+        #expect(log.all.contains(.connected))
+        #expect(!log.all.contains { if case .failed = $0 { return true } else { return false } })
+
+        engine.pushState(device.outputID, .failed)
+        await pollUntil { self.failureCause(backend, device.id) != nil }
+        #expect(failureCause(backend, device.id) == .droppedMidStream)
+        #expect(backend.devices.first { $0.id == device.id }?.isAvailable == false)
     }
 
     /// Letting a password typed with no connect in progress hide a live

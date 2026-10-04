@@ -490,7 +490,7 @@ window-hosted surface, not a sheet.
 The Scenes screen (`MixerWindowController`) uses a sidebar split that must
 never collapse. Its Speakers row opens a collection of all known speakers,
 with available speakers first; each row shows name, transport,
-status and a native **Show in Mixer** pop-up. The first column yields to the
+status and a native **Show in Mixer** pop-up. Each row ends in a chevron; double-click or Return on one selected row opens that speaker's detail and selects it in the sidebar, while a single click only selects rows for the bulk pop-up. The first column yields to the
 scrollbar while the pop-up column keeps its width. Selecting rows reveals a
 bulk pop-up. The same screen hosts a card-grid scene overview, speaker detail
 and a configuration-only scene editor. Selection there is never activation.
@@ -634,9 +634,11 @@ An unavailable retained row keeps its name, glyph and connection node. A
 caption in the trailing control area gives its status while live controls
 are unavailable. Where recovery is offered, the name itself is the action,
 also reachable by keyboard and VoiceOver; there is no separate Connect
-button. A nonlocal row's context menu offers **Always show in Mixer** and
-**Hide from Mixer**. A speaker in current use remains visible even when its
-saved choice is Hide from Mixer.
+button. A nonlocal row's context menu carries a **Show in Mixer** section with
+the shared **When available**, **Always** and **Hide when not in use**
+choices, the current one checked, then **Speaker settings…**, which opens
+that speaker's detail on the Scenes screen. A speaker in current use remains
+visible even when its saved choice is Hide when not in use.
 
 ### Speakers Collection and Scene Context (Scenes screen)
 The Speakers collection uses stock AppKit table rows and pop-ups for the

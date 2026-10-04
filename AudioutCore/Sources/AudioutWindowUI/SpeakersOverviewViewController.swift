@@ -8,7 +8,7 @@ import AudioutSharedUI
 @MainActor
 public final class SpeakersOverviewViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate {
     private let library: SpeakerLibraryController
-    private let table = NSTableView()
+    private let table = SpeakersTableView()
     private let scroll = NSScrollView()
     private let bulkPopup = NSPopUpButton()
     private let bulkStack = NSStackView()
@@ -25,6 +25,8 @@ public final class SpeakersOverviewViewController: NSViewController, NSTableView
     private var projection: [RowProjection] = []
     private var records: [SpeakerPresentationRecord] = []
     public var onVisibilityChange: (() -> Void)?
+    /// The row the user opened; the host selects it in the sidebar.
+    public var onOpenSpeaker: ((String) -> Void)?
     public var onBluetoothAccess: (() -> Void)?
 
     public init(library: SpeakerLibraryController = SpeakerLibraryController(loadPersisted: false)) {
@@ -87,6 +89,9 @@ public final class SpeakersOverviewViewController: NSViewController, NSTableView
         table.allowsMultipleSelection = true
         table.dataSource = self
         table.delegate = self
+        table.target = self
+        table.doubleAction = #selector(rowDoubleClicked(_:))
+        table.onOpenSelection = { [weak self] in self?.openSelectedRow() }
         scroll.documentView = table
         scroll.hasVerticalScroller = true
         scroll.autohidesScrollers = true
@@ -236,11 +241,37 @@ public final class SpeakersOverviewViewController: NSViewController, NSTableView
         labels.orientation = .vertical
         labels.alignment = .leading
         labels.spacing = 4
+        labels.setHuggingPriority(.defaultLow, for: .horizontal)
+        labels.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        let chevron = NSImageView()
+        chevron.image = DeviceIcon.image("chevron.right")
+        chevron.contentTintColor = Tokens.Color.label2
+        chevron.setAccessibilityElement(false)
+        chevron.setContentHuggingPriority(.required, for: .horizontal)
         let stack = NSStackView(views: [icon, labels])
+        stack.addView(chevron, in: .trailing)
         stack.spacing = GroupsPaneLayout.iconToTitleGap
         stack.alignment = .centerY
         stack.toolTip = record.secondaryText
         return stack
+    }
+
+    @objc private func rowDoubleClicked(_ sender: Any?) {
+        if table.clickedRow >= 0 {
+            open(row: table.clickedRow)
+        } else if table.selectedRowIndexes.count == 1, let row = table.selectedRowIndexes.first {
+            open(row: row)
+        }
+    }
+
+    private func openSelectedRow() {
+        guard table.selectedRowIndexes.count == 1, let row = table.selectedRowIndexes.first else { return }
+        open(row: row)
+    }
+
+    private func open(row: Int) {
+        guard records.indices.contains(row) else { return }
+        onOpenSpeaker?(records[row].id)
     }
 
     public var test_recordIDs: [String] { records.map(\.id) }
@@ -250,6 +281,27 @@ public final class SpeakersOverviewViewController: NSViewController, NSTableView
         table.selectRowIndexes(IndexSet(records.indices.filter { ids.contains(records[$0].id) }), byExtendingSelection: false)
     }
     public func test_selectAll() { table.selectAll(nil) }
+    public func test_openSelection() {
+        NSApp.sendAction(table.doubleAction!, to: table.target, from: table)
+    }
+    public func test_pressReturn() {
+        table.keyDown(with: NSEvent.keyEvent(with: .keyDown,
+                                             location: .zero,
+                                             modifierFlags: [],
+                                             timestamp: ProcessInfo.processInfo.systemUptime,
+                                             windowNumber: 0,
+                                             context: nil,
+                                             characters: "\r",
+                                             charactersIgnoringModifiers: "\r",
+                                             isARepeat: false,
+                                             keyCode: 36)!)
+    }
+    public func test_identityChevron(id: String) -> NSImageView? {
+        guard let row = records.firstIndex(where: { $0.id == id }),
+              let cell = table.view(atColumn: 0, row: row, makeIfNecessary: true) else { return nil }
+        cell.layoutSubtreeIfNeeded()
+        return (cell as? NSStackView)?.arrangedSubviews.last as? NSImageView
+    }
     public var test_visibilityColumnTitle: String? {
         table.headerView == nil ? nil : table.tableColumns.last?.headerCell.stringValue
     }
@@ -267,5 +319,17 @@ public final class SpeakersOverviewViewController: NSViewController, NSTableView
     public func test_changeBulkVisibility(_ value: SpeakerMixerVisibility) {
         bulkPopup.selectItem(withTitle: value.label)
         NSApp.sendAction(bulkPopup.action!, to: bulkPopup.target, from: bulkPopup)
+    }
+}
+
+private final class SpeakersTableView: NSTableView {
+    var onOpenSelection: (() -> Void)?
+
+    override func keyDown(with event: NSEvent) {
+        if event.keyCode == 36 || event.keyCode == 76, selectedRowIndexes.count == 1 {
+            onOpenSelection?()
+            return
+        }
+        super.keyDown(with: event)
     }
 }

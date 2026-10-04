@@ -24,8 +24,41 @@ import AppKit
 @MainActor
 @Suite final class MixerWindowControllerTests: IsolatedSuite {
 
-    /// A MockBackend with the full demo fleet discovered, a GroupController, and
-    /// a `MixerWindowController` with the devices pushed in.
+    // Turns red when the overview's double-click or Return stops selecting that speaker in the sidebar and showing its detail, opens with several rows selected, or starts routing.
+    @Test func overviewRowOpensSpeakerDetail() throws {
+        let backend = MockBackend(fleet: [])
+        let controller = GroupController(backend: backend, store: GroupStore(directory: scratchDir),
+            routingStore: RoutingStore(directory: scratchDir),
+            settings: AppSettings(defaults: isolatedDefaults), loadPersisted: false)
+        let bt = Device(id: "bt", name: "Remembered", kind: .bluetooth)
+        let airplay = Device(id: "airplay", name: "AirPlay", kind: .sonos)
+        let library = SpeakerLibraryController(loadPersisted: false)
+        library.update(liveDevices: [bt, airplay], groups: [])
+        let window = MixerWindowController(groupController: controller,
+            settings: AppSettings(defaults: isolatedDefaults), speakerLibrary: library)
+        window.test_isVisibleOverride = true
+        window.update(devices: [])
+        window.select(.speakersOverview)
+        window.test_speakers.test_select(["bt"])
+        window.test_speakers.test_openSelection()
+        #expect(window.test_isShowingDetail)
+        #expect(window.test_detail.test_shownDeviceID == "bt")
+        #expect(window.test_sidebar.currentSelection == .device(id: "bt"))
+        window.select(.speakersOverview)
+        window.test_speakers.test_select(["airplay"])
+        window.test_speakers.test_pressReturn()
+        #expect(window.test_isShowingDetail)
+        #expect(window.test_detail.test_shownDeviceID == "airplay")
+        #expect(window.test_sidebar.currentSelection == .device(id: "airplay"))
+        window.select(.speakersOverview)
+        window.test_speakers.test_selectAll()
+        window.test_speakers.test_pressReturn()
+        #expect(window.test_isShowingSpeakers)
+        #expect(controller.activeGroupID == nil)
+        #expect(!controller.isSpeakerSelected("bt"))
+        #expect(!controller.isSpeakerSelected("airplay"))
+    }
+
     // Looking up detail selections only in the live dictionary makes remembered speakers unreachable.
     @Test func speakersNavigationAndRememberedDetailUseSharedPreferences() throws {
         let backend = MockBackend(fleet: [])
@@ -102,6 +135,8 @@ import AppKit
         #expect(!controller.isSpeakerSelected(live.id))
     }
 
+    /// A MockBackend with the full demo fleet discovered, a GroupController, and
+    /// a `MixerWindowController` with the devices pushed in.
     private func makeWindow() async throws -> (MixerWindowController, GroupController, MockBackend) {
         let backend = MockBackend(fleet: .demoFleet, staggerDiscovery: false,
                                   emitsLevels: false, simulatesDropouts: false)

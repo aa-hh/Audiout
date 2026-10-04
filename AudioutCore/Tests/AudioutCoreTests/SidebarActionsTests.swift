@@ -36,6 +36,25 @@ import AppKit
         #expect(sidebar.currentSelection == .speakersOverview)
     }
 
+    // Turns red when the Speakers row goes back to a grey header cell, loses its chevron or spoken label, gains a playing marker, stops re-reporting a repeated click, or the outline triangle returns beside the chevron.
+    @Test func speakersRowIsAPlateThatReopens() throws {
+        let sidebar = SidebarViewController()
+        sidebar.loadViewIfNeeded()
+        sidebar.reload(groups: [], activeGroupID: nil, devices: [])
+        #expect(sidebar.test_speakersRowIsPlate)
+        let cell = try #require(sidebar.test_speakersRowCell)
+        #expect(cell.textField?.stringValue == "Speakers")
+        #expect(cell.disclosureView.isHidden == false)
+        #expect(cell.activeMarkerView.isHidden == true)
+        #expect(cell.textField?.accessibilityLabel() == "Speakers, manage speakers")
+        #expect(!sidebar.test_speakersRowShowsOutlineCell)
+        var selections: [SidebarSelection?] = []
+        sidebar.onSelect = { selections.append($0) }
+        sidebar.test_select(.speakersOverview)
+        sidebar.test_clickSpeakersRow()
+        #expect(selections == [.speakersOverview, .speakersOverview])
+    }
+
     // Inline status squeezes the speaker name; separate drawn lines must retain the sidebar's available width.
     @Test func speakerStatusDrawsBelowNameWithoutCompetingForWidth() throws {
         let device = Device(id: "bt", name: "Onkyo TX-8220", kind: .bluetooth, isAvailable: false)

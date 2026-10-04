@@ -211,6 +211,14 @@ public final class MixerWindowController {
         splitViewController.loadViewIfNeeded()
 
         speakersOverviewViewController.onVisibilityChange = { [weak self] in self?.refreshAll() }
+        // The overview row navigates, same `select(_:)` path as the detail pane's Scenes rows; config-only.
+        speakersOverviewViewController.onOpenSpeaker = { [weak self] id in
+            guard let self else { return }
+            self.select(.device(id: id))
+            if self.currentContent === self.detailViewController {
+                Analytics.capture("speaker:settings_opened", ["door": "overview"])
+            }
+        }
         detailViewController.onVisibilityChange = { [weak self] in self?.refreshAll() }
 
         // The panes report tone gestures; this controller forwards them

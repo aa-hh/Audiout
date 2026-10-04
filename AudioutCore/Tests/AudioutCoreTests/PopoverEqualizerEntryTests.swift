@@ -75,7 +75,7 @@ import AppKit
     @Test func airPlayRowMenuOffersEqualizerAndDispatchesTheDeviceID() {
         let (popover, recorder) = makePopover()
         let menu = popover.test_deviceRow(for: "office")?.test_contextMenu()
-        #expect(titles(menu) == ["Equalizer…", "", "Always show in Mixer", "Hide from Mixer"])
+        #expect(titles(menu) == ["Equalizer…", "", "Show in Mixer", "When available", "Always", "Hide when not in use", "", "Speaker settings…"])
 
         menu?.performActionForItem(at: 0)
         #expect(recorder.opened == ["office"])
@@ -84,7 +84,7 @@ import AppKit
     @Test func bluetoothRowMenuOffersEqualizerThenAlign() {
         let (popover, _) = makePopover()
         let menu = popover.test_deviceRow(for: "bt-a:output")?.test_contextMenu()
-        #expect(titles(menu) == ["Equalizer…", "Align by ear…", "", "Always show in Mixer", "Hide from Mixer"],
+        #expect(titles(menu) == ["Equalizer…", "Align by ear…", "", "Show in Mixer", "When available", "Always", "Hide when not in use", "", "Speaker settings…"],
                 "tone first, alignment second, then the host's Mixer visibility actions after one separator")
     }
 

@@ -1100,6 +1100,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         popoverController.onManageSpeakers = { [weak self] in
             self?.showSurface(.groups, selecting: .speakersOverview)
         }
+        popoverController.onOpenSpeakerSettings = { [weak self] id in
+            self?.showSurface(.groups, selecting: .device(id: id))
+        }
         popoverController.bluetoothPermissionProvider = { [weak self] in
             self?.permissionProviders.bluetoothReader.currentStatus() ?? .unknown
         }

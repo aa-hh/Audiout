@@ -198,6 +198,8 @@ public final class PopoverController: NSObject {
     public var bluetoothPermissionProvider: (() -> PermissionStatus)?
     public var onBluetoothAccess: (() -> Void)?
     public var onManageSpeakers: (() -> Void)?
+    /// The menu's "Speaker settings…" asks the host to open that speaker's detail on the Scenes screen.
+    public var onOpenSpeakerSettings: ((String) -> Void)?
     public var onSpeakerRecoveryChanged: (() -> Void)?
     public var speakerRecoveryIDs: Set<String> {
         speakerRecovery.retainedDeviceIDs.union(btConnectAttemptIDs)
@@ -3298,23 +3300,33 @@ public final class PopoverController: NSObject {
 
     private func speakerVisibilityMenuItems(for id: String) -> [NSMenuItem] {
         guard let record = speakerLibrary.record(for: id), !record.isLocalDevice else { return [] }
-        return [("Always show in Mixer", SpeakerMixerVisibility.always),
-                ("Hide from Mixer", SpeakerMixerVisibility.hideWhenNotInUse)].map { title, visibility in
-            let item = NSMenuItem(title: title, action: #selector(changeSpeakerVisibility(_:)), keyEquivalent: "")
+        let choices = SpeakerMixerVisibility.allCases.enumerated().map { index, value in
+            let item = NSMenuItem(title: value.label, action: #selector(changeSpeakerVisibility(_:)), keyEquivalent: "")
             item.target = self
             item.representedObject = id
-            item.tag = visibility == .always ? 1 : 2
-            item.state = record.visibility == visibility ? .on : .off
+            item.tag = index
+            item.state = record.visibility == value ? .on : .off
             return item
         }
+        let settings = NSMenuItem(title: "Speaker settings…", action: #selector(openSpeakerSettings(_:)), keyEquivalent: "")
+        settings.target = self
+        settings.representedObject = id
+        return [NSMenuItem.sectionHeader(title: "Show in Mixer")] + choices + [NSMenuItem.separator(), settings]
     }
 
     @objc private func changeSpeakerVisibility(_ sender: NSMenuItem) {
         guard let id = sender.representedObject as? String else { return }
-        let visibility: SpeakerMixerVisibility = sender.tag == 1 ? .always : .hideWhenNotInUse
+        guard SpeakerMixerVisibility.allCases.indices.contains(sender.tag) else { return }
+        let visibility = SpeakerMixerVisibility.allCases[sender.tag]
         let rebuildCount = test_rebuildCount
         guard speakerLibrary.setVisibility(visibility, for: id) else { return }
         if test_rebuildCount == rebuildCount { refreshSpeakerPresentation() }
+    }
+
+    @objc private func openSpeakerSettings(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String, speakerLibrary.record(for: id) != nil else { return }
+        Analytics.capture("speaker:settings_opened", ["door": "mixer_menu"])
+        onOpenSpeakerSettings?(id)
     }
 
     /// A non-interactive placeholder body row (V2 Devices empty state / V11

@@ -25,7 +25,7 @@ Configuration-only Speakers and Scenes content. This target owns no window and n
 
 - `MixerWindowController` → Shared configuration screen content and navigation.
 - `ContentPaneHostViewController` → Swapped content and footer.
-- `SpeakersOverviewViewController` → Global speaker visibility controls.
+- `SpeakersOverviewViewController` → Global speaker visibility controls; a row opens its speaker's detail.
 - `GroupsOverviewViewController` → Saved-scene cards.
 - `SidebarViewController` → Configuration destinations and speaker identity.
 - `GroupEditorViewController` → Scene name, membership and deletion.

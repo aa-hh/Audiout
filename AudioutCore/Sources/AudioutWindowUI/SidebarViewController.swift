@@ -25,12 +25,13 @@ public enum SidebarSelection: Equatable, Sendable {
 /// `NSOutlineView`) — **the device fleet, and nothing else** (direction C,
 /// `dev/notes/groups-speakers-split-direction-c-brief-2026-08-27.md`).
 ///
-/// Top to bottom: the pinned **Groups** row (the only non-device row — drawn
-/// as a raised PLATE with a `containerEdge` edge, taller and bolder than the fleet
-/// rows, because it is a doorway to the card overview and not one more list
-/// item; a trailing chevron says it leads somewhere, and it carries the gold
-/// "playing" marker whenever any group is live), then two flat sections,
-/// **System Audio** and **Speakers**. Saved groups used to be a third section
+/// Top to bottom: the pinned **Scenes** plate, the flat **System Audio**
+/// section, then the pinned **Speakers** plate with the speaker rows beneath
+/// it. The two plates are the only non-device rows — each drawn as a raised
+/// PLATE with a `containerEdge` edge, taller and bolder than the fleet rows,
+/// because each is a doorway to an overview and not one more list item; a
+/// trailing chevron says it leads somewhere, and the Scenes plate carries the
+/// gold "playing" marker whenever any group is live. Saved groups used to be a third section
 /// here; a growing fleet pushed them off the top, so they moved into the
 /// content pane as `GroupsOverviewViewController`'s card grid, and their
 /// Rename…/Delete scene… menu went with them. What stays anchored to the
@@ -60,6 +61,13 @@ public final class SidebarViewController: NSViewController {
         /// Only section headers ever have children now — group/device rows are
         /// always leaves (flat model, no expand/collapse).
         var children: [Node]
+        /// The two pinned rows drawn as plates.
+        var isPinnedPlate: Bool {
+            switch payload {
+            case .speakersOverview, .groupsOverview: return true
+            default: return false
+            }
+        }
         init(_ payload: Payload, children: [Node] = []) {
             self.payload = payload
             self.children = children
@@ -488,6 +496,24 @@ public final class SidebarViewController: NSViewController {
         roots.contains { if case .groupsOverview = $0.payload { return true } else { return false } }
     }
 
+    /// Whether the pinned Speakers row is drawn as a plate.
+    public var test_speakersRowIsPlate: Bool {
+        guard let node = findNode(matching: .speakersOverview) else { return false }
+        return self.outlineView(outlineView, rowViewForItem: node) is PlateRowView
+    }
+
+    /// Whether AppKit would draw its own expand triangle on the Speakers row.
+    var test_speakersRowShowsOutlineCell: Bool {
+        guard let node = findNode(matching: .speakersOverview) else { return true }
+        return self.outlineView(outlineView, shouldShowOutlineCell: node)
+    }
+
+    /// The pinned Speakers row's cell, built through the delegate path.
+    var test_speakersRowCell: IconLabelCellView? {
+        guard let node = findNode(matching: .speakersOverview) else { return nil }
+        return self.outlineView(outlineView, viewFor: nil, item: node) as? IconLabelCellView
+    }
+
     /// Whether the pinned Groups row currently renders the gold "playing"
     /// marker — built through the same delegate path a real reload uses.
     public var test_groupsRowShowsLiveMarker: Bool {
@@ -702,7 +728,7 @@ final class IconLabelCellView: NSTableCellView {
     }
 }
 
-/// The pinned Groups row's row view: a `raised` plate with a `containerEdge`
+/// The pinned Scenes and Speakers rows' row view: a `raised` plate with a `containerEdge`
 /// edge (rule 5: `hairline` never sits on `raised`) —
 /// `GroupedSectionView`'s `.card` surface vocabulary at row scale, promising
 /// the pane of cards the row opens. Drawn (not a layer colour) so the `Tokens`
@@ -861,15 +887,23 @@ extension SidebarViewController: NSOutlineViewDelegate {
         return false
     }
 
+    /// The Speakers plate keeps its device rows as children but draws only its
+    /// own chevron, like the childless Scenes plate; AppKit's triangle is off.
+    public func outlineView(_ outlineView: NSOutlineView, shouldShowOutlineCell item: Any) -> Bool {
+        guard let node = item as? Node, case .speakersOverview = node.payload else { return true }
+        return false
+    }
+
     public func outlineView(_ outlineView: NSOutlineView, shouldSelectItem item: Any) -> Bool {
         // Section headers aren't selectable (source-list convention).
         return !self.outlineView(outlineView, isGroupItem: item)
     }
 
-    /// The Groups row alone is taller: its plate needs air around the label or
-    /// the raised fill reads as a selection artifact, not a surface.
+    /// The two pinned plates (Scenes and Speakers) are taller than the fleet
+    /// rows: a plate needs air around the label or the raised fill reads as a
+    /// selection artifact, not a surface.
     public func outlineView(_ outlineView: NSOutlineView, heightOfRowByItem item: Any) -> CGFloat {
-        if let node = item as? Node, case .groupsOverview = node.payload {
+        if let node = item as? Node, node.isPinnedPlate {
             return PlateRowView.rowHeight
         }
         if let node = item as? Node, case .device(let device) = node.payload,
@@ -879,11 +913,12 @@ extension SidebarViewController: NSOutlineViewDelegate {
         return outlineView.rowHeight
     }
 
-    /// The Groups row rides a `PlateRowView` — the raised + hairline "card"
-    /// surface vocabulary (`GroupedSectionView`'s `.card`), at row scale. It is
-    /// the visual promise of what the row opens: a pane of cards.
+    /// Both pinned plates (Scenes and Speakers) ride a `PlateRowView` — the
+    /// raised + hairline "card" surface vocabulary (`GroupedSectionView`'s
+    /// `.card`), at row scale. It is the visual promise of what the row opens:
+    /// a pane of cards.
     public func outlineView(_ outlineView: NSOutlineView, rowViewForItem item: Any) -> NSTableRowView? {
-        guard let node = item as? Node, case .groupsOverview = node.payload else { return nil }
+        guard let node = item as? Node, node.isPinnedPlate else { return nil }
         let id = NSUserInterfaceItemIdentifier("groupsPlateRow")
         if let reused = outlineView.makeView(withIdentifier: id, owner: self) as? PlateRowView {
             return reused
@@ -899,7 +934,10 @@ extension SidebarViewController: NSOutlineViewDelegate {
         case .header(let title):
             return makeHeaderLabel(title)
         case .speakersOverview:
-            let cell = makeHeaderLabel("Speakers")
+            let cell = makeIconLabel(symbol: "hifispeaker.2",
+                                     text: "Speakers", identifier: "speakersOverview",
+                                     showsDisclosure: true,
+                                     emphasized: true)
             cell.textField?.setAccessibilityLabel("Speakers, manage speakers")
             return cell
         case .groupsOverview:
@@ -957,7 +995,7 @@ extension SidebarViewController: NSOutlineViewDelegate {
 
     // MARK: Cell builders
 
-    /// Section header cell ("Scenes" / "Speakers") — a DIFFERENT cell shape
+    /// Section header cell ("System Audio") — a DIFFERENT cell shape
     /// from `makeLabel`/`newCell` on purpose (design feedback 2026-07-18c):
     /// Finder's own sidebar headers sit flush-left with the ICON column
     /// below them, not indented to the item TEXT column, and render slightly
@@ -1005,10 +1043,10 @@ extension SidebarViewController: NSOutlineViewDelegate {
         let id = NSUserInterfaceItemIdentifier(identifier)
         let cell = outlineView.makeView(withIdentifier: id, owner: self) as? IconLabelCellView
             ?? Self.newCell(identifier: id)
-        // Only the Groups plate takes the emphasized weight; the fleet rows
+        // Only the two pinned plates take the emphasized weight; the fleet rows
         // keep the source list's own font. Reuse-safe without an else branch:
-        // cells are pooled per identifier, and "groupsOverview" is the only
-        // pool that ever asks for it.
+        // cells are pooled per identifier, and "groupsOverview" and
+        // "speakersOverview" are the only pools that ever ask for it.
         if emphasized { cell.textField?.font = Tokens.Font.bodyEmphasized }
         cell.imageView?.isHidden = false
         // The icon is DECORATIVE: the text field beside it speaks the row, and

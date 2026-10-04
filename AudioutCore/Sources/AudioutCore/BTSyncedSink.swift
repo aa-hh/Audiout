@@ -365,9 +365,10 @@ final class BTDelayLine {
     /// the write pointer — the buffered frames, less any shift the control
     /// thread has already asked for and the render thread has not consumed yet
     /// (a fast scrub's shifts accumulate, so ignoring them would let two
-    /// requests each spend the same room). Control thread ONLY, and advisory:
-    /// the producer is adding frames concurrently, so this is a floor, never an
-    /// over-estimate.
+    /// requests each spend the same room). Called by the control thread and by
+    /// the render thread's own re-alignment (the barrier is a fence: no lock,
+    /// no allocation). Advisory: the producer is adding frames concurrently, so
+    /// this is a floor, never an over-estimate.
     func forwardShiftRoomFrames() -> Int {
         OSMemoryBarrier()                       // acquire: see the consumer's word
         let unconsumed = requestedShiftFrames.pointee &- appliedShiftFrames.pointee
@@ -580,6 +581,9 @@ final class BTDeviceSink: @unchecked Sendable {
     /// that reaches the write pointer leaves the ring dry with no way back —
     /// the wizard's permanent silence (roadmap 056). 100 ms is a few render
     /// cycles' worth of headroom, well below the smallest reference.
+    /// The render thread's own re-alignment caps this margin at the ring's
+    /// steady holding (`steadyRoomFramesPtr`), so a speaker anchored under
+    /// 100 ms still gets its full correction.
     static let seekSafetyMarginMs: Double = 100
 
     /// How far the device's pulls may run behind or ahead of wall time before
@@ -628,6 +632,14 @@ final class BTDeviceSink: @unchecked Sendable {
     /// `lastAudibleRenderNanosPtr`; read by the liveness check on `graphQueue`.
     private let lastRenderCycleNanosPtr = UnsafeMutablePointer<Int64>.allocate(capacity: 1)
     private let lastEnqueueNanosPtr = UnsafeMutablePointer<Int64>.allocate(capacity: 1)
+    /// Frames the ring holds between capture deliveries once released: its room
+    /// right after `catchUpToTargetLocked`, less one render cycle (the sink's stand-in for a capture chunk),
+    /// moved by every requested trim since. A forward re-alignment's margin never
+    /// exceeds it. Written under `stateLock` (release on the render thread,
+    /// trims on the control thread) and read lock-free by the render thread, so
+    /// a trim publishes it with a barrier the way ``BTDelayLine/requestShift(frames:)``
+    /// publishes its word.
+    private let steadyRoomFramesPtr = UnsafeMutablePointer<Int>.allocate(capacity: 1)
     /// Render cycles and the largest absolute sample rendered since the last
     /// `bt_sink_health` line. Written on the render thread, zeroed on
     /// `graphQueue` when the line is written; a cycle landing between the read
@@ -734,6 +746,7 @@ final class BTDeviceSink: @unchecked Sendable {
         self.lastAudibleRenderNanosPtr.initialize(to: 0)
         self.lastRenderCycleNanosPtr.initialize(to: 0)
         self.lastEnqueueNanosPtr.initialize(to: 0)
+        self.steadyRoomFramesPtr.initialize(to: 0)
         self.renderCyclesSinceHealthPtr.initialize(to: 0)
         self.renderPeakSinceHealthPtr.initialize(to: 0)
 
@@ -757,6 +770,7 @@ final class BTDeviceSink: @unchecked Sendable {
         lastAudibleRenderNanosPtr.deallocate()
         lastRenderCycleNanosPtr.deallocate()
         lastEnqueueNanosPtr.deallocate()
+        steadyRoomFramesPtr.deallocate()
         renderCyclesSinceHealthPtr.deallocate()
         renderPeakSinceHealthPtr.deallocate()
     }
@@ -1102,6 +1116,7 @@ final class BTDeviceSink: @unchecked Sendable {
             targetReleaseNanos = 0
             sessionDelayNanos = 0
             trimClampedSinceAnchor = false
+            steadyRoomFramesPtr.pointee = 0
         }
         delayLine.reset()
         resampler.reset()
@@ -1279,6 +1294,8 @@ final class BTDeviceSink: @unchecked Sendable {
             // one: a clamped seek that booked the full delta would leave the
             // session's mapping describing audio the ring never moved.
             sessionDelayNanos &+= Int64((appliedMs * 1_000_000).rounded())
+            steadyRoomFramesPtr.pointee = Swift.max(0, steadyRoomFramesPtr.pointee &+ frames)
+            OSMemoryBarrier()                   // release: publish before the render thread's read
             if frames != requestedFrames { trimClampedSinceAnchor = true }
         }
         stateLock.unlock()
@@ -1404,6 +1421,10 @@ final class BTDeviceSink: @unchecked Sendable {
                     lastCycleStartNanos = cycleStartMonotonicNanos
                     framesPulledSinceOrigin = frameCount
                     pullRealignedNanos = 0
+                    // The sink never sees the capture chunk size, so this
+                    // cycle's frame count stands in for it.
+                    steadyRoomFramesPtr.pointee =
+                        Swift.max(0, delayLine.forwardShiftRoomFrames() - frameCount)
                 }
             }
         }
@@ -1443,9 +1464,12 @@ final class BTDeviceSink: @unchecked Sendable {
     /// writes on wall time, so a second in which the device pulls 958 ms leaves
     /// 42 ms more between read and write. Once that passes
     /// ``pullRealignThresholdMs``, the read position moves by it behind the
-    /// trim crossfade. Measured from the render cycles, never from
-    /// `BTClockWatcher`: a pacing clock that steps while the cycles stay even
-    /// moves nothing.
+    /// trim crossfade; a forward re-alignment is clamped like a trim seek,
+    /// ``seekSafetyMarginMs`` (or what the ring holds between deliveries, if
+    /// smaller) short of the write pointer; after a device gap the move is cut
+    /// to the ring's steady holding and the measurement restarts. Measured from
+    /// the render cycles, never from `BTClockWatcher`: a pacing clock that steps
+    /// while the cycles stay even moves nothing.
     private func realignToDevicePulls(cycleStartMonotonicNanos t: Int64, frameCount: Int) {
         guard let origin = pullOriginNanos else { return }
         let gap = t &- lastCycleStartNanos
@@ -1462,7 +1486,41 @@ final class BTDeviceSink: @unchecked Sendable {
         framesPulledSinceOrigin += frameCount
         let pending = (t &- origin) &- pulledNanos &- pullRealignedNanos
         guard Double(abs(pending)) >= Self.pullRealignThresholdMs * 1_000_000 else { return }
-        let applied = delayLine.shift(byFrames: Int((Double(pending) / 1e9 * renderSampleRate).rounded()))
+        var frames = Int((Double(pending) / 1e9 * renderSampleRate).rounded())
+        if frames > 0 {
+            // The ring holds the anchored delay less the capture lag, so the
+            // margin is capped at its room at release less one chunk, followed
+            // through trims: it never exceeds what the ring holds between
+            // deliveries, and room = holding + underpull − min(100 ms, holding)
+            // ≥ underpull, so the full correction lands. The room call comes
+            // first: its barrier is the acquire for the trims' word.
+            let held = delayLine.forwardShiftRoomFrames()
+            let marginFrames = Swift.min(
+                Int((Self.seekSafetyMarginMs / 1_000 * renderSampleRate).rounded()),
+                steadyRoomFramesPtr.pointee)
+            let room = Swift.max(0, held - marginFrames)
+            if frames > room {
+                // After a device gap of a threshold or more beyond the cycle's
+                // own length, capture stalled with the device and the shortfall
+                // never refills, so cut the ring to what it held at release
+                // (the holding word plus the cycle it was lowered by for the
+                // margin; not to the margin, which would leave a speaker
+                // whose delay is above 100 ms playing early until the next
+                // re-anchor) and measure from here. A ring short with even
+                // cycles is a late chunk, so take what fits and leave the
+                // remainder pending.
+                let excess = gap - Int64(Double(frameCount) / renderSampleRate * 1e9)
+                guard Double(excess) < Self.pullRealignThresholdMs * 1_000_000 else {
+                    delayLine.shift(byFrames: Swift.max(0, held - (steadyRoomFramesPtr.pointee + frameCount)))
+                    pullOriginNanos = t
+                    framesPulledSinceOrigin = frameCount
+                    pullRealignedNanos = 0
+                    return
+                }
+                frames = room
+            }
+        }
+        let applied = delayLine.shift(byFrames: frames)
         pullRealignedNanos &+= Int64((Double(applied) / renderSampleRate * 1e9).rounded())
     }
 

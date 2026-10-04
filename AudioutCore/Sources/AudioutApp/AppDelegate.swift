@@ -372,9 +372,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// `pruneRoutesForExcludedApps()`, inside `applicationDidFinishLaunching`.
     private lazy var excludedApps = ExcludedAppsController(store: ExcludedAppsStore())
 
-    /// The user's hidden-speakers list (popover footer "−" / "+" menu), lazy
-    /// for the same Application Support-read reason as `excludedApps` above.
-    private lazy var hiddenSpeakers = HiddenSpeakersController(store: HiddenSpeakersStore())
+    /// Shared speaker identity and Mixer visibility, loaded after app startup.
+    private lazy var speakerLibrary = SpeakerLibraryController()
+    private var updatingSpeakerSnapshot = false
+    private var primingSpeakerBluetooth = false
 
     /// The app's device model, kept as a pure function of backend events. Keyed
     /// by `Device.id`. T-U2 reads this to build rows; for now it just backs the
@@ -777,6 +778,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // too — and `GroupController` keeps that to the master's change edge.
         groupController.onStateDidChange = { [weak self] in
             guard let self else { return }
+            self.updateSpeakerLibrary()
             self.popoverController.refreshMainOutMaster()
             self.statusItemController.updateMasterVolume(self.popoverController.statusMasterVolume)
             self.repaintStructuralStateIfChanged()
@@ -1032,6 +1034,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // mutation (no lock held) → no deadlock with the backend's internal queues.
         appRouting.onRoutesDidChange = { [weak self] in
             self?.pushAppRoutesToBackend()
+            self?.updateSpeakerLibrary()
             // Companion (T7): a route add/remove/redirect/volume change moves
             // `appRoutes` AND `addableApps` in the snapshot. Extended IN PLACE —
             // this closure is single-assignment, never reassigned elsewhere.
@@ -1078,11 +1081,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // in the OTHER window — which, pinned, leaves this one on screen
             // with stale menus (the live "my new group isn't in the per-app
             // menu" report). No-ops while the surface is closed.
+            self.updateSpeakerLibrary()
             self.popoverController.groupsDidChange()
         }
-        popoverController = PopoverController(appRouting: appRouting, hiddenSpeakers: hiddenSpeakers)
+        popoverController = PopoverController(appRouting: appRouting, speakerLibrary: speakerLibrary)
         popoverController.deviceIconController = deviceIconController
         popoverController.configure(groupController: groupController)
+        speakerLibrary.onChange = { [weak self] in
+            guard let self, !self.updatingSpeakerSnapshot else { return }
+            self.popoverController.refreshSpeakerPresentation()
+            self.mixerWindowController?.refreshSpeakerPresentation()
+        }
+        popoverController.onSpeakerRecoveryChanged = { [weak self] in
+            self?.updateSpeakerLibrary()
+        }
+        popoverController.onManageSpeakers = { [weak self] in
+            self?.showSurface(.groups, selecting: .speakersOverview)
+        }
+        popoverController.bluetoothPermissionProvider = { [weak self] in
+            self?.permissionProviders.bluetoothReader.currentStatus() ?? .unknown
+        }
+        popoverController.onBluetoothAccess = { [weak self] in
+            self?.requestSpeakerBluetoothAccess()
+        }
+        updateSpeakerLibrary()
         // T6 (takeover status strip, state 1's "Open Login Items…" button): the
         // same `PTPHelperManaging` seam `registerPTPHelperIfNeeded()` already
         // reads, reused rather than standing up a second instance.
@@ -1161,10 +1183,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                               selecting: id == PopoverController.mainOutEQID
                                   ? .mainOut : .device(id: id))
         }
-        // BT-UI: the OUTPUT DEVICES "+" menu's "Pair a Bluetooth speaker…" —
-        // pairing is Apple-owned, so the one-tap Settings trip is the whole
-        // affordance; the fresh row auto-appears on return (connect
-        // notification → enumerator refresh).
+        // Pairing opens the macOS Bluetooth pane.
         popoverController.onPairBluetoothSpeaker = {
             Analytics.capture("mixer:bt_pairing_settings_opened")
             NSWorkspace.shared.open(SystemSettingsPane.bluetooth.url)
@@ -1536,6 +1555,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             MainActor.assumeIsolated {
                 guard let self else { return }
                 self.auditRequiredPermissionsIfNeeded()
+                self.refreshSpeakerBluetoothAccess()
                 // Re-check the grant out-of-process, exactly as the wake
                 // handler below does — and for a sharper reason here. Coming
                 // back from System Settings IS the reactivation: it is the one
@@ -2299,6 +2319,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// there rather than being dropped.
     @MainActor
     private func showSurface(_ screen: SurfaceScreen, selecting: SidebarSelection? = nil) {
+        refreshSpeakerBluetoothAccess()
         surface.select(screen)
         surface.show(anchorRect: statusAnchorRect())
         if let selecting { mixerWindowController?.select(selecting) }
@@ -2316,8 +2337,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             appRouting: appRouting,
             // The SAME instance the backend decides with (BT-HW-VOL): the
             // toggle's write is the backend's re-decide trigger.
-            btHardwareVolumeStore: (backend as? NativeBackend)?.btHardwareVolumeStore)
+            btHardwareVolumeStore: (backend as? NativeBackend)?.btHardwareVolumeStore,
+            settings: settings, speakerLibrary: speakerLibrary)
         mixerWindowController = controller
+        controller.speakersOverview.onBluetoothAccess = { [weak self] in
+            self?.requestSpeakerBluetoothAccess()
+        }
+        updateSpeakerLibrary()
+        refreshSpeakerBluetoothAccess()
         // The two Equalizer seams. This screen owns no backend (its own
         // AGENTS.md); the tone it reports is applied here, at the one place
         // that holds one. A live scrub applies without persisting; the
@@ -2928,18 +2955,81 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                                 groups: groupController.groups,
                                                 target: groupController.mainOut) else { return }
         popoverController.refreshDeviceMembership()
-        // NEVER with an empty fleet. This hook fires off model changes, which
-        // are not synchronised with device discovery, so `devicesByID` can
-        // still be empty here — and the Groups editor rebuilds its membership
-        // list from exactly the array it is handed, so an empty one blanks the
-        // pane outright (`GroupEditorViewController.rebuildCandidates`). The
-        // fleet arriving is itself a repaint via `repaintFromCurrentState`, so
-        // skipping costs nothing.
-        //
-        // Its own hidden-means-idle gate drops this whenever the user is
-        // looking at another screen, so this costs a dictionary rebuild there.
-        guard !devicesByID.isEmpty else { return }
         mixerWindowController?.update(devices: Array(devicesByID.values))
+    }
+
+    @MainActor
+    private func updateSpeakerLibrary() {
+        let devices = Array(devicesByID.values)
+        let mainMembers: Set<String>
+        switch groupController.mainOut {
+        case .selectedDevices:
+            mainMembers = groupController.selectedDeviceIDs
+        case .group(let id):
+            mainMembers = Set(groupController.groups.first { $0.id == id }?.memberIDs ?? [])
+        }
+        let liveFeeds = Set(routedAppNamesByDeviceID.compactMap { id, names in
+            !names.isEmpty && devicesByID[id] != nil ? id : nil
+        })
+        let connectedMembers = Set(devices.compactMap { device in
+            mainMembers.contains(device.id) && device.connectionState == .connected ? device.id : nil
+        })
+        speakerLibrary.update(liveDevices: devices, groups: groupController.groups,
+            confirmedUsedIDs: connectedMembers.union(liveFeeds),
+            currentUse: SpeakerCurrentUse(mainAudioMemberIDs: mainMembers,
+                appRouteDestinations: appRouting.appRoutes.map(\.destination),
+                liveFeedIDs: liveFeeds, recoveryIDs: popoverController?.speakerRecoveryIDs ?? []))
+    }
+
+    @MainActor
+    private func refreshSpeakerBluetoothAccess() {
+        let status = permissionProviders.bluetoothReader.currentStatus()
+        let explanation: String?
+        let actionTitle: String?
+        switch status {
+        case .granted:
+            explanation = nil
+            actionTitle = nil
+        case .denied:
+            explanation = "Allow Bluetooth access in System Settings to see paired speakers that are not connected."
+            actionTitle = "Open Bluetooth Privacy…"
+        case .unsupported:
+            explanation = "Bluetooth access is unavailable on this Mac."
+            actionTitle = nil
+        case .unknown, .requested:
+            explanation = "Allow Bluetooth access to see paired speakers that are not connected."
+            actionTitle = primingSpeakerBluetooth ? nil : "Allow Bluetooth…"
+        }
+        mixerWindowController?.speakersOverview.setBluetoothAccessExplanation(explanation, actionTitle: actionTitle)
+        popoverController?.refreshSpeakerPresentation()
+    }
+
+    @MainActor
+    private func requestSpeakerBluetoothAccess() {
+        switch permissionProviders.bluetoothReader.currentStatus() {
+        case .granted:
+            NSWorkspace.shared.open(SystemSettingsPane.bluetooth.url)
+        case .denied:
+            NSWorkspace.shared.open(SystemSettingsPane.bluetoothPrivacy.url)
+        case .unsupported:
+            break
+        case .unknown, .requested:
+            guard !primingSpeakerBluetooth else { return }
+            primingSpeakerBluetooth = true
+            surface.shell.setPermissionPromptInFlight(true)
+            refreshSpeakerBluetoothAccess()
+            permissionProviders.bluetoothPrimer.prime { [weak self] in
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    self.surface.shell.setPermissionPromptInFlight(false)
+                    self.primingSpeakerBluetooth = false
+                    self.refreshSpeakerBluetoothAccess()
+                    if self.surface.isShown {
+                        self.surface.shell.returnToFront()
+                    }
+                }
+            }
+        }
     }
 
     private func repaintFromCurrentState() {
@@ -2947,6 +3037,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // included, so its device reads stop hopping onto the backend's state
         // queue. `devicesByID` is folded from the backend's own events, so it is
         // already current here.
+        updatingSpeakerSnapshot = true
+        defer { updatingSpeakerSnapshot = false }
         let devices = Array(devicesByID.values)
         groupController.updateDevices(devices)
         // Establish the out-of-the-box default (current device selected ⇒
@@ -2954,6 +3046,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // time / if a persisted selection was loaded. Seeded from the snapshot
         // above, so it sees this event's fleet rather than the previous one's.
         groupController.ensureDefaultSelection()
+        updateSpeakerLibrary()
         // Feed the popover (repaints open rows in place, or caches for next
         // open), then drive the status symbol from the Main Out master.
         popoverController.update(devices: devices)

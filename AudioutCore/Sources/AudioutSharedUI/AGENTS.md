@@ -2,49 +2,33 @@
 
 ## Purpose
 
-AppKit row views and window chrome shared by the popover and the Groups screen.
-Pure UI: controls route out through a delegate, never a backend, store,
-or `GroupController`.
+AppKit rows and window chrome shared across surfaces. Hosts own models, routing and persistence; views draw pushed snapshots and report gestures.
 
 ## Rules
 
-- Views never read shared model state; hosts push snapshots via `apply(...)`.
-- Row geometry lives in `PopoverColumnGrid`; columns anchor to the row's trailing edge.
-- `test_*` hooks must drive the same delegate path as the live control.
-- `controllable` is separate from `selected`: the checkbox follows `selected` alone.
-- Membership checkbox enablement is `isAvailable || selected`: failure keeps selection intent.
-- A greyed Bluetooth row's name click CONNECTS, never selects.
-- Always write `NSApp?.`; bare `NSApp.` force-unwraps and crashes.
-- TRAP: `CATransition` ignores a custom animation key; it files under "transition".
-- The "Removed, Undo" offer is host state; the row draws it and decides nothing.
-- A never-measured Bluetooth row's SYNC chip is the alignment wizard's door, not a readout.
-- The row's Equalizer button is a DOOR plus one mark; the row edits and stores no tone.
-- The identity stack yields the Equalizer slot on EVERY row, so names truncate alike.
-- Instruments reconcile accessibility-display changes live; the accent dial is a third trigger.
-- No rail, no ring: `BusRailOverlayView.railReaches` decides both, and a failed room is never reached.
-- The rail overlay paints ABOVE every row, so the gutter is the spine's alone: anything that opens under a device row (sync drawer, alignment note, connection diagnosis) starts its content at `PopoverColumnGrid.firstElementLeading`, never inside the gutter.
-- A node can fill with the checkbox off: `localFallbackOutput` draws the Mac as a rail member while the engine plays on it, and edits no selection.
-- Warm ink and gold wash mean `isRouteArmed`; cool means silent. Instruments are flat, no `CALayer` blooms.
-- `Tokens.Color.muted` is fenced to the device row's engaged mute button; a second consumer fails a test.
-- `setContent`'s `defaultSize:` seeds only the first mount of a content controller.
-- `ControlPanelBackingView` is an approved custom-drawn exception; NSPanel has no arrow.
-- `RemoteInviteView`'s tile is FIXED white with black modules in every appearance, dial position and Increase Contrast: a QR code is a print artifact a camera reads, not chrome, so it is the one sanctioned literal colour outside `Tokens`.
-- `Tokens.Color.shadow`'s four real consumers are flat and clipped, never an
-  `NSShadow`: `WarmFaderCell` (here), `AlignmentPlateCell` (`AudioutPopoverUI`),
-  `GroupedSectionView`'s `.well` style (`AudioutWindowUI`, the device
-  detail page's Equalizer recess, 2026-09-04), and `SetupPreviewFrameView`
-  (`AudioutOnboardingUI`, the demo frame's recess, 2026-09-05).
-  `WarmFaderCell`, the `.well` style and the demo frame each draw one
-  inset-shade band; `AlignmentPlateCell` draws two lips (a lit one and a shade
-  one) at its own per-state alphas.
-- No `STABILITY(id)` markers remain in this target; the audit's findings and fix sketches are history in [../../../dev/notes/stability-audit-2026-07-18.md](../../../dev/notes/stability-audit-2026-07-18.md).
-- A permission prompt in flight (`setPermissionPromptInFlight`) suspends the UNPINNED tuck-away on panel AND backing bubble and survives a pin flip; the answer restores manners BEFORE `returnToFront()`, and nothing takes the front while the dialog is up — a TCC dialog that loses focus freezes.
-- Long-form traps and changelog: [AGENTS-HISTORY.md](AGENTS-HISTORY.md); grep before debugging.
+- Views never read shared model state or call a backend/store directly.
+- Visibility is presentation-only. Membership nodes control playback; unavailable names request recovery through the host and never select implicitly.
+- Presentation-only unknown speakers must not gain invented transport, sync or recovery capabilities.
+- Preserve existing menu actions when hosts add visibility actions; rebuild menu items from current identity.
+- Row geometry belongs to `PopoverColumnGrid`; columns anchor to the trailing edge.
+- Failure preserves selection intent. Availability, selection and controllability are separate concerns.
+- The rail governs both spine and ring; failed speakers are not reached. Content below rows stays outside its gutter.
+- Local fallback audio may light a node without changing selection.
+- Equalizer controls open editors; rows edit and store no tone. Names reserve equal accessory space.
+- Test hooks must use the real delegate/control action path.
+- Use optional `NSApp` access in reusable views; missing applications must not crash.
+- Permission prompts suspend transient dismissal across pin changes; restore manners before bringing the window forward.
+- Respect accessibility-display changes. Keep instruments flat; no layer blooms.
+- Muted ink stays confined to the engaged device mute control.
+- Panel beak drawing is sanctioned because stock panels have no arrow.
+- The invitation QR tile remains fixed black on white; cameras require that contrast.
+- Earlier decisions and traps: [AGENTS-HISTORY.md](AGENTS-HISTORY.md).
 
 ## Map
 
-- `DeviceRowView` → the shared device row every host mounts. Read-only test hooks live in `DeviceRowView+TestSupport.swift`.
-- `PopoverColumnGrid` → named column geometry for every row.
-- `ControlPanelBackingView` → custom-drawn panel background with the menu-bar beak.
-- `ProminentButton` → the gold call-to-action button, `inkOnFill` ink.
-- `RemoteInviteView` → the one QR-and-address invitation, hosted by three surfaces.
+- `DeviceRowView` → Shared speaker identity, playback and accessory controls.
+- `PopoverColumnGrid` → Shared row columns.
+- `BusRailOverlayView` → Playback rail and reached-node rendering.
+- `ControlPanelBackingView` → Panel bubble and menu-bar beak.
+- `ProminentButton` → Primary action control.
+- `RemoteInviteView` → Companion invitation.

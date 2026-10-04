@@ -59,6 +59,7 @@ import Testing
         }
         let store = GroupStore(directory: directory ?? tempDirectory())
         let controller = GroupController(backend: backend, store: store,
+                                         routingStore: RoutingStore(directory: tempDirectory()),
                                          settings: AppSettings(defaults: isolatedDefaults), loadPersisted: false)
         return (controller, backend)
     }
@@ -74,6 +75,7 @@ import Testing
         let mock = try await makeBackend(fleet)
         let backend = RecordingBackend(mock, systemOutputVolume: systemOutputVolume)
         let controller = GroupController(backend: backend, store: GroupStore(directory: tempDirectory()),
+                                         routingStore: RoutingStore(directory: tempDirectory()),
                                          settings: AppSettings(defaults: isolatedDefaults), loadPersisted: false)
         return (controller, backend)
     }
@@ -1105,6 +1107,7 @@ import Testing
         let settings = AppSettings(defaults: isolatedDefaults)
         let mock1 = try await makeBackend()
         let c1 = GroupController(backend: mock1, store: GroupStore(directory: tempDirectory()),
+                                 routingStore: RoutingStore(directory: tempDirectory()),
                                  settings: settings, loadPersisted: false)
         c1.setMainOutMasterVolume(37)
         // No wait: the persist is a synchronous `UserDefaults` write. It used to be
@@ -1120,6 +1123,7 @@ import Testing
         // below, exercised against a real prior launch instead of a stub.
         let mock2 = try await makeBackend()
         let c2 = GroupController(backend: mock2, store: GroupStore(directory: tempDirectory()),
+                                 routingStore: RoutingStore(directory: tempDirectory()),
                                  settings: settings, loadPersisted: false)
         c2.ensureDefaultSelection()
 
@@ -1253,6 +1257,7 @@ import Testing
 
         let backend = try await makeBackend()
         let controller = GroupController(backend: backend, store: GroupStore(directory: dir),
+                                         routingStore: RoutingStore(directory: tempDirectory()),
                                          settings: AppSettings(defaults: isolatedDefaults), loadPersisted: true)
 
         #expect(controller.groups.map(\.id) == ["g1"])
@@ -1935,6 +1940,7 @@ import Testing
         let backend = try await makeBackend()
         let controller = GroupController(backend: backend,
                                          store: GroupStore(directory: try blockedDirectory()),
+                                         routingStore: RoutingStore(directory: tempDirectory()),
                                          settings: AppSettings(defaults: isolatedDefaults),
                                          loadPersisted: false)
         #expect(throws: (any Error).self) {

@@ -1,0 +1,284 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+
+import Foundation
+import Testing
+@testable import AudioutCore
+
+@Suite final class SpeakerLibraryTests: IsolatedSuite {
+    private func library(persisted: Bool = true) -> SpeakerLibraryController {
+        SpeakerLibraryController(store: SpeakerLibraryStore(directory: scratchDir),
+                                 legacyHiddenStore: HiddenSpeakersStore(directory: scratchDir), loadPersisted: persisted)
+    }
+
+    private func speaker(_ id: String, name: String = "Speaker", kind: Device.Kind = .homePod,
+                         available: Bool = true, connection: ConnectionState = .off) -> Device {
+        Device(id: id, name: name, kind: kind, isAvailable: available, connectionState: connection)
+    }
+
+    // Remembering mere discovery, hiding, or recovery would retain an unused speaker after restart.
+    @Test func onlySuccessfulUseSavedMembersAndAlwaysRememberIdentity() throws {
+        let controller = library()
+        let fleet = [speaker("used"), speaker("scene"), speaker("always"), speaker("hidden"), speaker("browsed")]
+        let group = Group(id: "g", name: "Room", memberIDs: ["scene", "missing"], memberVolumes: [:])
+        controller.update(liveDevices: fleet, groups: [group], confirmedUsedIDs: ["used"],
+                          currentUse: SpeakerCurrentUse(recoveryIDs: ["browsed"]))
+        controller.setVisibility(.always, for: "always")
+        controller.setVisibility(.hideWhenNotInUse, for: "hidden")
+        let reloaded = library()
+        reloaded.update(liveDevices: [], groups: [group])
+        #expect(Set(reloaded.records.map(\.id)) == ["used", "scene", "always", "missing"])
+        #expect(reloaded.visibility(for: "hidden") == .hideWhenNotInUse)
+        #expect(reloaded.record(for: "missing")?.metadataIsKnown == false)
+        let stored = try #require(try SpeakerLibraryStore(directory: scratchDir).load())
+        #expect(Set(stored.metadata.keys) == ["used", "scene", "always"])
+        let json = try String(contentsOf: scratchDir.appendingPathComponent("speaker-library.json"), encoding: .utf8)
+        #expect(!json.contains("connectionState") && !json.contains("volume") && !json.contains("isAvailable"))
+    }
+
+    // Reimporting legacy IDs would undo a visibility choice on the next launch.
+    @Test func migrationIsOneTimeAndLeavesLegacyBytesUntouched() throws {
+        let legacy = HiddenSpeakersStore(directory: scratchDir)
+        try legacy.save(["old", "unknown"])
+        let legacyURL = scratchDir.appendingPathComponent("hidden-speakers.json")
+        let before = try Data(contentsOf: legacyURL)
+        let controller = library()
+        #expect(controller.visibility(for: "old") == .hideWhenNotInUse)
+        #expect(controller.record(for: "unknown") == nil)
+        controller.setVisibility(.whenAvailable, for: "old")
+        let reloaded = library()
+        #expect(reloaded.visibility(for: "old") == .whenAvailable)
+        #expect(reloaded.visibility(for: "unknown") == .hideWhenNotInUse)
+        #expect(try Data(contentsOf: legacyURL) == before)
+        #expect(try SpeakerLibraryStore(directory: scratchDir).load()?.visibility["old"] == nil)
+    }
+
+    // Merging by name or retaining old live values would show another transport's identity and controls.
+    @Test func exactIDRediscoveryReplacesLiveValuesAndRefreshesRememberedIdentity() throws {
+        let controller = library()
+        controller.update(liveDevices: [speaker("a", name: "Same"), speaker("b", name: "Same", kind: .bluetooth)],
+                          groups: [], confirmedUsedIDs: ["a", "b"])
+        #expect(controller.records.count == 2)
+        var fresh = speaker("a", name: "Renamed", kind: .cast)
+        fresh.volume = 73
+        controller.update(liveDevices: [fresh], groups: [])
+        #expect(controller.record(for: "a")?.liveDevice == fresh)
+        #expect(controller.record(for: "b")?.kind == .bluetooth)
+        let reloaded = library()
+        #expect(reloaded.record(for: "a")?.displayName == "Renamed")
+        #expect(reloaded.record(for: "a")?.kind == .cast)
+        #expect(reloaded.record(for: "a")?.liveDevice == nil)
+    }
+
+    // Inferring transport or exposing synthetic routing state would misrepresent an unknown scene member.
+    @Test func unknownSceneMembersRemainHonestAndRenderingNeverSelectsThem() throws {
+        let controller = library(persisted: false)
+        let id = "AA:BB:CC-bluetooth-looking-id"
+        let group = Group(id: "g", name: "Legacy", memberIDs: [id], memberVolumes: [id: 88])
+        controller.update(liveDevices: [], groups: [group])
+        let record = try #require(controller.record(for: id))
+        #expect(record.displayName == "Missing speaker")
+        #expect(record.kind == nil)
+        #expect(record.status == .missing)
+        #expect(record.secondaryText == id && record.accessibilityIdentity.contains(id))
+        #expect(!record.renderingDevice.isSelected && !record.renderingDevice.isAvailable)
+        #expect(record.renderingDevice.connectionState == .off)
+        #expect(record.renderingDevice.volume == 0 && !record.renderingDevice.supportsAirPlay2)
+        #expect(!record.isVisibleInMixer)
+    }
+
+    // Checking absence before connection state would label a live undiscovered Cast session unavailable.
+    @Test func transportStatusUsesLiveSessionBeforeDiscoveryAbsence() throws {
+        let controller = library(persisted: false)
+        let failure = ConnectionFailure(cause: .authRequired)
+        let fleet = [speaker("live", kind: .cast, available: false, connection: .connected),
+                     speaker("bt", kind: .bluetooth, available: false), speaker("network", available: false),
+                     speaker("idle"), speaker("bt-on", kind: .bluetooth),
+                     speaker("connecting", available: false, connection: .connecting),
+                     speaker("reconnecting", available: false, connection: .reconnecting),
+                     speaker("failed", available: false, connection: .failed(failure))]
+        controller.update(liveDevices: fleet, groups: [])
+        let expected: [String: SpeakerPresentationStatus] = ["live": .connected, "bt": .notConnected,
+            "network": .unavailable, "idle": .available, "bt-on": .connected, "connecting": .connecting,
+            "reconnecting": .reconnecting, "failed": .failed(failure)]
+        for (id, status) in expected { #expect(controller.record(for: id)?.status == status) }
+        #expect(controller.record(for: "live")?.isAvailable == true)
+        #expect(controller.record(for: "failed")?.status.text == failure.headline)
+    }
+
+    // Treating saved membership as use, or ignoring absent app-scene intent, would hide the wrong rows.
+    @Test func allThreeVisibilityChoicesRespectOnlyCurrentUseAndLocalMac() throws {
+        let controller = library(persisted: false)
+        let ids: Set<String> = ["main", "device-app", "group-app", "feed", "connecting", "recovery", "inactive"]
+        var fleet = ids.map { speaker($0, available: false) }
+        fleet.append(speaker("available"))
+        fleet.append(speaker("physical-bt", kind: .bluetooth))
+        fleet.append(Device(id: "local", name: "Mac", kind: .localMac, isAvailable: false, isLocalDevice: true))
+        fleet[fleet.firstIndex(where: { $0.id == "connecting" })!].connectionState = .connecting
+        let active = Group(id: "active", name: "App scene", memberIDs: ["group-app", "absent-app"], memberVolumes: [:])
+        let inactive = Group(id: "inactive-scene", name: "Saved", memberIDs: ["inactive"], memberVolumes: [:])
+        let use = SpeakerCurrentUse(mainAudioMemberIDs: ["main"], appRouteDestinations: [.device(id: "device-app"), .group(id: "active")],
+                                    liveFeedIDs: ["feed"], recoveryIDs: ["recovery"])
+        controller.update(liveDevices: fleet, groups: [active, inactive], currentUse: use)
+        #expect(Set(controller.mixerRecords.map(\.id)) == ids.subtracting(["inactive"]).union(["local", "available", "physical-bt", "absent-app"]))
+        controller.setVisibility(.always, for: "inactive")
+        #expect(controller.record(for: "inactive")?.isVisibleInMixer == true)
+        controller.setVisibility(.hideWhenNotInUse, for: ids.union(["available", "physical-bt", "absent-app", "local"]))
+        #expect(controller.record(for: "available")?.isVisibleInMixer == false)
+        #expect(controller.record(for: "physical-bt")?.status == .connected)
+        #expect(controller.record(for: "physical-bt")?.isVisibleInMixer == false)
+        #expect(controller.record(for: "inactive")?.isVisibleInMixer == false)
+        #expect(controller.record(for: "local")?.visibility == .whenAvailable)
+        #expect(controller.record(for: "main")?.mixerVisibilityContext == "Hidden from Mixer · Shown while in use")
+        #expect(controller.record(for: "absent-app")?.isVisibleInMixer == true)
+    }
+
+    // Publishing each bulk row or before disk success would desynchronize the two speaker screens.
+    @Test func bulkPublishesOnceAfterSaveAndNoOpDoesNotPublish() throws {
+        let controller = library()
+        let fleet = [speaker("a"), speaker("b")]
+        controller.update(liveDevices: fleet, groups: [])
+        var publications = 0
+        var diskWasReady = false
+        controller.onChange = {
+            publications += 1
+            diskWasReady = (try? SpeakerLibraryStore(directory: self.scratchDir).load()?.visibility.count) == 2
+        }
+        #expect(controller.setVisibility(.always, for: ["a", "b"]))
+        #expect(publications == 1 && diskWasReady)
+        #expect(controller.setVisibility(.always, for: ["a", "b"]))
+        controller.update(liveDevices: fleet, groups: [])
+        #expect(publications == 1)
+        let inMemory = library(persisted: false)
+        inMemory.update(liveDevices: [speaker("memory")], groups: [])
+        inMemory.setVisibility(.always, for: "memory")
+        #expect(try SpeakerLibraryStore(directory: scratchDir).load()?.metadata["memory"] == nil)
+    }
+
+    // Keeping a failed preference write in memory would falsely report a saved visibility change.
+    @Test func failedWriteDoesNotChangePreferenceOrPublish() throws {
+        let directory = scratchDir.appendingPathComponent("blocked")
+        let controller = SpeakerLibraryController(store: SpeakerLibraryStore(directory: directory),
+                                                  legacyHiddenStore: HiddenSpeakersStore(directory: directory))
+        controller.update(liveDevices: [speaker("a")], groups: [])
+        try FileManager.default.removeItem(at: directory)
+        try Data("not a directory".utf8).write(to: directory)
+        var publications = 0
+        controller.onChange = { publications += 1 }
+        #expect(!controller.setVisibility(.always, for: "a"))
+        #expect(controller.visibility(for: "a") == .whenAvailable)
+        #expect(publications == 0)
+    }
+
+    // Passing presentation records into routing would add remembered members to the live fleet.
+    @Test func visibilityAndRecoveryLeaveRoutingDevicesAndSelectionUntouched() throws {
+        let backend = MockBackend(fleet: [], staggerDiscovery: false, emitsLevels: false, simulatesDropouts: false)
+        let groupController = GroupController(backend: backend, store: GroupStore(directory: scratchDir),
+                                               routingStore: RoutingStore(directory: scratchDir),
+                                               settings: AppSettings(defaults: isolatedDefaults), loadPersisted: false)
+        let live = [speaker("present")]
+        groupController.updateDevices(live)
+        let controller = library(persisted: false)
+        let group = Group(id: "g", name: "Scene", memberIDs: ["absent"], memberVolumes: [:])
+        controller.update(liveDevices: groupController.devices, groups: [group])
+        controller.setVisibility(.always, for: "absent")
+        let clock = RecoveryClock()
+        let recovery = SpeakerRecoveryController(schedule: clock.schedule)
+        recovery.lookForSpeaker(id: "absent")
+        clock.fire(0)
+        #expect(controller.records.count == 2)
+        #expect(groupController.devices == live)
+        #expect(groupController.selectedDeviceIDs.isEmpty)
+        #expect(backend.devices.isEmpty)
+    }
+
+    // Overwriting a corrupt or newer library would erase evidence needed to recover saved identities.
+    @Test(arguments: ["garbage", #"{"schemaVersion":99,"metadata":{},"visibility":{}}"#])
+    func unreadableStoresAreQuarantined(_ contents: String) throws {
+        let file = scratchDir.appendingPathComponent("speaker-library.json")
+        try Data(contents.utf8).write(to: file)
+        _ = try? SpeakerLibraryStore(directory: scratchDir).load()
+        let names = try FileManager.default.contentsOfDirectory(atPath: scratchDir.path)
+        #expect(!names.contains("speaker-library.json"))
+        let quarantined = try #require(names.first { $0.hasPrefix("speaker-library.corrupt-") })
+        #expect(try String(contentsOf: scratchDir.appendingPathComponent(quarantined), encoding: .utf8) == contents)
+    }
+
+    // Leaving no authoritative file after quarantine would reimport superseded legacy choices on relaunch.
+    @Test func quarantineNeverReimportsLegacyChoicesOnLaterLaunch() throws {
+        try HiddenSpeakersStore(directory: scratchDir).save(["old"])
+        try SpeakerLibraryStore(directory: scratchDir).save(SpeakerLibraryState())
+        let file = scratchDir.appendingPathComponent("speaker-library.json")
+        try Data("corrupt".utf8).write(to: file)
+        let first = library()
+        #expect(first.visibility(for: "old") == .whenAvailable)
+        #expect(SpeakerLibraryStore(directory: scratchDir).exists)
+        let second = library()
+        #expect(second.visibility(for: "old") == .whenAvailable)
+        try FileManager.default.removeItem(at: file)
+        let third = library()
+        #expect(third.visibility(for: "old") == .whenAvailable)
+        #expect(try String(contentsOf: scratchDir.appendingPathComponent("hidden-speakers.json"), encoding: .utf8).contains("old"))
+    }
+
+    // A same-name arrival or a second click resetting the timer would complete the wrong recovery attempt.
+    @Test func recoveryCoalescesAndCompletesOnlyOnExactFreshID() {
+        let clock = RecoveryClock()
+        var found: [String] = []
+        let recovery = SpeakerRecoveryController(schedule: clock.schedule, onRediscovered: { found.append($0) })
+        recovery.lookForSpeaker(id: "a")
+        recovery.lookForSpeaker(id: "a")
+        #expect(clock.delays == [10])
+        recovery.update(liveDevices: [speaker("other", name: "Same")])
+        #expect(recovery.state(for: "a") == .looking)
+        #expect(recovery.state(for: "a")?.text == "Looking for speaker…")
+        recovery.update(liveDevices: [speaker("a", available: false, connection: .connected)])
+        #expect(recovery.state(for: "a") == .found && found == ["a"])
+        #expect(clock.cancelled == [0])
+        clock.fire(0)
+        #expect(recovery.state(for: "a") == .found)
+    }
+
+    // Accepting a cancelled timer would timeout a newer lookup for the same speaker.
+    @Test func timeoutCancellationAndStaleCallbacksDoNotFinishNewAttempt() {
+        let clock = RecoveryClock()
+        let recovery = SpeakerRecoveryController(schedule: clock.schedule)
+        recovery.lookForSpeaker(id: "a")
+        clock.fire(0)
+        #expect(recovery.state(for: "a") == .notFound)
+        #expect(recovery.state(for: "a")?.help == "Check that the speaker is on and on the same network.")
+        recovery.lookForSpeaker(id: "a")
+        recovery.cancel(id: "a")
+        recovery.lookForSpeaker(id: "a")
+        clock.fire(1)
+        #expect(recovery.state(for: "a") == .looking)
+        recovery.cancelAll()
+        clock.fire(2)
+        #expect(recovery.states.isEmpty && recovery.retainedDeviceIDs.isEmpty)
+        #expect(clock.cancelled == [1, 2])
+    }
+
+    // Retaining a timer after controller disposal would leave work active after its surface closes.
+    @Test func disposalCancelsPendingRecovery() {
+        let clock = RecoveryClock()
+        var recovery: SpeakerRecoveryController? = SpeakerRecoveryController(schedule: clock.schedule)
+        recovery?.lookForSpeaker(id: "a")
+        recovery = nil
+        #expect(clock.cancelled == [0])
+        clock.fire(0)
+    }
+}
+
+private final class RecoveryClock {
+    var delays: [TimeInterval] = []
+    var actions: [() -> Void] = []
+    var cancelled: [Int] = []
+
+    func schedule(_ delay: TimeInterval, _ action: @escaping () -> Void) -> SpeakerRecoveryController.Cancellation {
+        let index = actions.count
+        delays.append(delay)
+        actions.append(action)
+        return { self.cancelled.append(index) }
+    }
+
+    func fire(_ index: Int) { actions[index]() }
+}

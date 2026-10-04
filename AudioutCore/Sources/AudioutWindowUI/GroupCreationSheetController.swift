@@ -447,13 +447,10 @@ public final class GroupCreationSheetController: NSViewController {
             return
         }
         let memberIDs = candidateDevices.map(\.id).filter { checkedIDs.contains($0) }
-        let memberVolumes = Dictionary(uniqueKeysWithValues: memberIDs.compactMap { id -> (String, Int)? in
-            candidateDevices.first(where: { $0.id == id }).map { (id, $0.volume) }
-        })
         let result: GroupController.CreateResult
         do {
             result = try groupController.createGroup(
-                name: name, memberIDs: memberIDs, memberVolumes: memberVolumes,
+                name: name, memberIDs: memberIDs,
                 iconSymbolName: selectedIconSymbolName)
         } catch {
             // REPORTED, never swallowed (the editor's `saveOrReport` contract,

@@ -53,6 +53,8 @@ public final class MixerWindowController {
     /// The UI-agnostic group model shared with the menu. Source of truth for
     /// groups; the screen reads it and writes through it, never around it.
     private let groupController: GroupController
+    private let speakerLibrary: SpeakerLibraryController
+    private let ownsSpeakerLibrary: Bool
 
     /// Resolves/persists per-device icon overrides, shared with every child
     /// pane so the sidebar, editor/creation checklists, and the detail pane all
@@ -75,6 +77,7 @@ public final class MixerWindowController {
     private let detailViewController: DeviceDetailViewController
     private let mainOutDetailViewController: MainOutDetailViewController
     private let overviewViewController: GroupsOverviewViewController
+    private let speakersOverviewViewController: SpeakersOverviewViewController
 
     /// Tone seams, wired by the app to the backend. This controller never
     /// calls a backend itself (`AGENTS.md`) — it only forwards what the two
@@ -120,14 +123,21 @@ public final class MixerWindowController {
                deviceIconController: DeviceIconController = DeviceIconController(loadPersisted: false),
                appRouting: AppRoutingController? = nil,
                btHardwareVolumeStore: BTHardwareVolumeStore? = nil,
-               settings: AppSettings = AppSettings()) {
+               settings: AppSettings = AppSettings(),
+               speakerLibrary: SpeakerLibraryController? = nil) {
         self.groupController = groupController
+        self.ownsSpeakerLibrary = speakerLibrary == nil
+        self.speakerLibrary = speakerLibrary ?? SpeakerLibraryController(loadPersisted: false)
         self.deviceIconController = deviceIconController
         self.sidebarViewController = SidebarViewController()
         self.editorViewController = GroupEditorViewController(groupController: groupController)
         self.detailViewController = DeviceDetailViewController(groupController: groupController, settings: settings)
         self.mainOutDetailViewController = MainOutDetailViewController(settings: settings)
         self.overviewViewController = GroupsOverviewViewController(groupController: groupController)
+        self.speakersOverviewViewController = SpeakersOverviewViewController(library: self.speakerLibrary)
+        editorViewController.speakerLibrary = self.speakerLibrary
+        detailViewController.speakerLibrary = self.speakerLibrary
+        overviewViewController.speakerLibrary = self.speakerLibrary
 
         // Share the one icon controller across every pane so a per-device
         // override picked anywhere renders identically everywhere.
@@ -199,6 +209,9 @@ public final class MixerWindowController {
         // `refreshAll()`/auto-select runs, and those run on `update(devices:)`
         // before any host has mounted the content.
         splitViewController.loadViewIfNeeded()
+
+        speakersOverviewViewController.onVisibilityChange = { [weak self] in self?.refreshAll() }
+        detailViewController.onVisibilityChange = { [weak self] in self?.refreshAll() }
 
         // The panes report tone gestures; this controller forwards them
         // untouched to whoever owns the backend.
@@ -302,7 +315,7 @@ public final class MixerWindowController {
         // takes them off the click path too.
         for pane in [detailViewController as NSViewController,
                      mainOutDetailViewController,
-                     editorViewController] {
+                     editorViewController, speakersOverviewViewController] {
             pane.loadViewIfNeeded()
             // Loading the tree is only half of it: the first swap that shows a
             // pane also pays for solving its constraints from nothing. Solving
@@ -361,6 +374,7 @@ public final class MixerWindowController {
     /// the screen always shows current data the moment it appears.
     public func update(devices: [Device]) {
         devicesByID = Dictionary(uniqueKeysWithValues: devices.map { ($0.id, $0) })
+        if ownsSpeakerLibrary { speakerLibrary.update(liveDevices: devices, groups: groupController.groups) }
         guard isEffectivelyVisible else { return }
         refreshAll()
     }
@@ -377,8 +391,19 @@ public final class MixerWindowController {
 
     // MARK: Selection → content pane
 
+    public func refreshSpeakerPresentation() {
+        guard isEffectivelyVisible else { return }
+        refreshAll()
+    }
+
+    public var speakersOverview: SpeakersOverviewViewController { speakersOverviewViewController }
+
     private func handleSidebarSelection(_ selection: SidebarSelection?) {
         switch selection {
+        case .speakersOverview:
+            shownDetailDeviceID = nil
+            speakersOverviewViewController.reload()
+            swapContent(to: speakersOverviewViewController)
         case .groupsOverview:
             showOverview()
         case .group(let id):
@@ -433,13 +458,13 @@ public final class MixerWindowController {
     /// content when the id isn't in the current snapshot (a stale selection) so
     /// the content area is never left on a device that no longer exists.
     private func showDetail(for deviceID: String) {
-        guard let device = devicesByID[deviceID] else {
+        guard let record = speakerLibrary.record(for: deviceID) else {
             shownDetailDeviceID = nil
             showDefaultContent()
             return
         }
         shownDetailDeviceID = deviceID
-        detailViewController.show(device: device)
+        detailViewController.show(record: record)
         swapContent(to: detailViewController)
     }
 
@@ -467,7 +492,7 @@ public final class MixerWindowController {
     /// `update(devices:)`. The pending selection is applied at the end of the
     /// first `refreshAll()` whose snapshot carries the id.
     public func select(_ selection: SidebarSelection) {
-        if case .device(let id) = selection, devicesByID[id] == nil {
+        if case .device(let id) = selection, speakerLibrary.record(for: id) == nil {
             pendingSelection = selection
             return
         }
@@ -480,7 +505,7 @@ public final class MixerWindowController {
     /// the END of `refreshAll()` so it wins over the auto-select rule that ran
     /// earlier in the same pass.
     private func applyPendingSelection() {
-        guard case .device(let id)? = pendingSelection, devicesByID[id] != nil else { return }
+        guard case .device(let id)? = pendingSelection, speakerLibrary.record(for: id) != nil else { return }
         let selection = pendingSelection!
         pendingSelection = nil
         sidebarViewController.select(selection, notify: false)
@@ -565,6 +590,7 @@ public final class MixerWindowController {
         // it has to be whole.
         if sidebarSplitItem.isCollapsed { sidebarSplitItem.isCollapsed = false }
 
+        if ownsSpeakerLibrary { speakerLibrary.update(liveDevices: Array(devicesByID.values), groups: groupController.groups) }
         let devices = orderedDevices()
         reloadSidebarIfNeeded(groups: groupController.groups,
                              activeGroupID: groupController.activeGroupID,
@@ -583,11 +609,13 @@ public final class MixerWindowController {
         } else if currentContent === detailViewController {
             // Re-render the detail pane from the fresher snapshot; if the shown
             // device has since disappeared, fall back to the default content.
-            if let id = shownDetailDeviceID, let device = devicesByID[id] {
-                detailViewController.refresh(device: device)
+            if let id = shownDetailDeviceID, let record = speakerLibrary.record(for: id) {
+                detailViewController.refresh(record: record)
             } else {
                 showDefaultContent()
             }
+        } else if currentContent === speakersOverviewViewController {
+            speakersOverviewViewController.reload()
         } else if currentContent === overviewViewController {
             if sidebarViewController.currentSelection == nil {
                 // The very first refresh: the host starts on the overview, so
@@ -622,7 +650,8 @@ public final class MixerWindowController {
         let activeGroupID = groupController.activeGroupID
         let devices = orderedDevices()
         lastSidebarProjection = sidebarProjection(groups: groups, activeGroupID: activeGroupID, devices: devices)
-        sidebarViewController.reload(groups: groups, activeGroupID: activeGroupID, devices: devices)
+        sidebarViewController.reload(groups: groups, activeGroupID: activeGroupID, devices: devices,
+                                     presentationRecords: speakerLibrary.records)
         test_sidebarReloadCount += 1
     }
 
@@ -638,7 +667,8 @@ public final class MixerWindowController {
         let projection = sidebarProjection(groups: groups, activeGroupID: activeGroupID, devices: devices)
         guard projection != lastSidebarProjection else { return }
         lastSidebarProjection = projection
-        sidebarViewController.reload(groups: groups, activeGroupID: activeGroupID, devices: devices)
+        sidebarViewController.reload(groups: groups, activeGroupID: activeGroupID, devices: devices,
+                                     presentationRecords: speakerLibrary.records)
         test_sidebarReloadCount += 1
     }
 
@@ -657,6 +687,8 @@ public final class MixerWindowController {
             let kind: Device.Kind
             let isAvailable: Bool
             let iconSymbolName: String
+            let status: SpeakerPresentationStatus?
+            let visibility: SpeakerMixerVisibility?
         }
         let groups: [GroupCell]
         let activeGroupID: String?
@@ -675,7 +707,9 @@ public final class MixerWindowController {
             activeGroupID: activeGroupID,
             devices: devices.map {
                 .init(id: $0.id, name: $0.name, kind: $0.kind, isAvailable: $0.isAvailable,
-                      iconSymbolName: deviceIconController.symbolName(for: $0))
+                      iconSymbolName: deviceIconController.symbolName(for: $0),
+                      status: speakerLibrary.record(for: $0.id)?.status,
+                      visibility: speakerLibrary.record(for: $0.id)?.visibility)
             })
     }
 
@@ -685,10 +719,7 @@ public final class MixerWindowController {
     /// (2026-08-28) over keep-in-place; the accepted trade is that a
     /// speaker's row moves when its availability flips.
     private func orderedDevices() -> [Device] {
-        devicesByID.values.sorted {
-            (($0.isAvailable ? 0 : 1), $0.name, $0.id)
-                < (($1.isAvailable ? 0 : 1), $1.name, $1.id)
-        }
+        speakerLibrary.records.map(\.renderingDevice)
     }
 
     // MARK: Test-support hooks
@@ -699,6 +730,8 @@ public final class MixerWindowController {
     // suites can drive the same paths and assert structure + model state.
 
     /// The child controllers, for structural assertions.
+    public var test_isShowingSpeakers: Bool { currentContent === speakersOverviewViewController }
+    public var test_speakers: SpeakersOverviewViewController { speakersOverviewViewController }
     public var test_sidebar: SidebarViewController { sidebarViewController }
     public var test_editor: GroupEditorViewController { editorViewController }
     public var test_detail: DeviceDetailViewController { detailViewController }

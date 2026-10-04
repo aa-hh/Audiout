@@ -455,7 +455,7 @@ sheet that measured it.
 The popover is the primary shell: `AppSurfaceController` swaps Mixer/Groups/
 Settings through one hosted panel, sized through `preferredContentSize` —
 height flows from content, pinned top and bottom. It has one ceiling. The
-Output Devices card's list of speakers stops at twelve rows
+Output Speakers card's list of speakers stops at twelve rows
 (`PopoverPanelViewController.deviceListMaxHeight`, twelve times the 42pt body
 row = 504pt) and scrolls past that, so a large fleet cannot push the surface
 off the bottom of the screen. The list alone scrolls: the header strip, the
@@ -470,6 +470,12 @@ short list ignores the ceiling and hugs its rows exactly. The ceiling is
 applied before the session frame is measured, so the frame is still measured
 once per open, never animated and never re-centred.
 
+The Output Speakers header holds **Manage speakers…** beside its column
+labels. **Pair Bluetooth speaker…** is a row at the end of the speaker list,
+outside the Bluetooth subsection so it remains visible when that subsection
+is collapsed. The Main Audio destination menu offers **Save selected speakers
+as scene** under Scenes, including when no scene has been saved.
+
 **Row geometry** is centralized in `PopoverColumnGrid`, which `Tokens.Layout`
 forwards rather than duplicates: 14pt leading and trailing insets, a 26pt
 icon column, a 150pt slider, a 40pt readout column, a 24pt mute control, a
@@ -481,9 +487,13 @@ fader grammar in AppKit terms.
 never tabs — a new section becomes another sidebar row. It is its own
 window-hosted surface, not a sheet.
 
-**Groups** is a separate window (`MixerWindowController`) with a sidebar
-split that must never collapse, hosting a card-grid overview and a
-configuration-only editor pane. Selection there is never activation.
+The Scenes screen (`MixerWindowController`) uses a sidebar split that must
+never collapse. Its Speakers row opens a collection of all known speakers,
+with available speakers first; each row shows name, transport,
+status and a native **Show in Mixer** pop-up. The first column yields to the
+scrollbar while the pop-up column keeps its width. Selecting rows reveals a
+bulk pop-up. The same screen hosts a card-grid scene overview, speaker detail
+and a configuration-only scene editor. Selection there is never activation.
 
 **Onboarding** is a floating first-run window: a spine of status rows beside
 one hero panel, gating Done until every check passes.
@@ -619,6 +629,28 @@ route-armed, `emberText` while idle-but-adjustable, and drops to
 unconnected treatment (`DeviceRowView.swift`). Warm ink and a gold wash mean
 `isRouteArmed`; cool means silent. Instruments are flat — no `CALayer`
 blooms.
+
+An unavailable retained row keeps its name, glyph and connection node. A
+caption in the trailing control area gives its status while live controls
+are unavailable. Where recovery is offered, the name itself is the action,
+also reachable by keyboard and VoiceOver; there is no separate Connect
+button. A nonlocal row's context menu offers **Always show in Mixer** and
+**Hide from Mixer**. A speaker in current use remains visible even when its
+saved choice is Hide from Mixer.
+
+### Speakers Collection and Scene Context (Scenes screen)
+The Speakers collection uses stock AppKit table rows and pop-ups for the
+shared **When available**, **Always**, and **Hide when not in use** choices.
+The local Mac's choice is disabled. Multiple selected speakers can receive
+one choice from the bulk pop-up; a mixed selection reads **Mixed** until a
+choice is made. Speaker detail shows the same choice beside its status and
+scene relations, including for a remembered speaker without a live device.
+
+Scene checkboxes change membership. Their rows state Mixer visibility beside
+availability, adding **Shown while in use** for a hidden speaker that is
+currently in use. The editor footer points to Speakers for visibility; scene
+cards count unavailable members alongside the existing Playing and Feeding
+labels.
 
 ### Equalizer Door (Mixer, Mac-only)
 The Mixer carries an equalizer DOOR only — the row button beside mute, and

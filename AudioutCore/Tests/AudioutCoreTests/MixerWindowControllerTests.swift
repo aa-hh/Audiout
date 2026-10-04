@@ -26,12 +26,90 @@ import AppKit
 
     /// A MockBackend with the full demo fleet discovered, a GroupController, and
     /// a `MixerWindowController` with the devices pushed in.
+    // Looking up detail selections only in the live dictionary makes remembered speakers unreachable.
+    @Test func speakersNavigationAndRememberedDetailUseSharedPreferences() throws {
+        let backend = MockBackend(fleet: [])
+        let controller = GroupController(backend: backend, store: GroupStore(directory: scratchDir),
+            routingStore: RoutingStore(directory: scratchDir),
+            settings: AppSettings(defaults: isolatedDefaults), loadPersisted: false)
+        let bt = Device(id: "bt", name: "Remembered", kind: .bluetooth)
+        let library = SpeakerLibraryController(loadPersisted: false)
+        library.update(liveDevices: [bt], groups: [])
+        library.setVisibility(.always, for: "bt")
+        library.update(liveDevices: [], groups: [])
+        let window = MixerWindowController(groupController: controller,
+            settings: AppSettings(defaults: isolatedDefaults), speakerLibrary: library)
+        window.test_isVisibleOverride = true
+        window.update(devices: [])
+        window.select(.speakersOverview)
+        #expect(window.test_isShowingSpeakers)
+        window.test_speakers.test_changeVisibility(.hideWhenNotInUse, id: "bt")
+        #expect(library.visibility(for: "bt") == .hideWhenNotInUse)
+        window.select(.device(id: "bt"))
+        #expect(window.test_isShowingDetail)
+        #expect(window.test_detail.test_metadataStrings["status"] == "Not connected")
+        #expect(window.test_pendingSelection == nil)
+        let count = window.test_sidebarReloadCount
+        library.setVisibility(.always, for: "bt")
+        window.refreshSpeakerPresentation()
+        #expect(window.test_sidebarReloadCount == count + 1)
+        window.refreshSpeakerPresentation()
+        #expect(window.test_sidebarReloadCount == count + 1)
+        #expect(controller.activeGroupID == nil)
+        #expect(!controller.isSpeakerSelected("bt"))
+    }
+
+    // Capturing volumes from rendering records replaces live levels with synthetic zero for remembered members.
+    @Test func sceneCreationAndEditorCaptureOnlyLiveMemberVolumes() throws {
+        let controller = GroupController(backend: MockBackend(fleet: []),
+            store: GroupStore(directory: scratchDir), routingStore: RoutingStore(directory: scratchDir),
+            settings: AppSettings(defaults: isolatedDefaults), loadPersisted: false)
+        var live = Device(id: "live", name: "Live", kind: .sonos, volume: 63)
+        let other = Device(id: "other", name: "Other", kind: .sonos, volume: 37)
+        let remembered = Device(id: "remembered", name: "Remembered", kind: .bluetooth, volume: 91)
+        let library = SpeakerLibraryController(loadPersisted: false)
+        library.update(liveDevices: [live, other, remembered], groups: [])
+        library.setVisibility(.always, for: remembered.id)
+        library.update(liveDevices: [live, other], groups: [])
+        controller.updateDevices([live, other])
+        let window = MixerWindowController(groupController: controller,
+            settings: AppSettings(defaults: isolatedDefaults), speakerLibrary: library)
+        window.test_isVisibleOverride = true
+        window.update(devices: [live, other])
+        window.test_presentCreateSheet(preselected: [live.id, remembered.id])
+        let sheet = try #require(window.test_createSheet)
+        sheet.test_setName("Saved levels")
+        sheet.test_commit()
+        let created = try #require(controller.groups.first)
+        #expect(Set(created.memberIDs) == [live.id, remembered.id])
+        #expect(created.memberVolumes[live.id] == 63)
+        #expect(created.memberVolumes[remembered.id] == nil)
+
+        live.volume = 81
+        controller.updateDevices([live, other])
+        library.update(liveDevices: [live, other], groups: controller.groups)
+        window.update(devices: [live, other])
+        window.select(.group(id: created.id))
+        window.test_editor.test_setMembership(true, for: other.id)
+        window.test_editor.test_setMembership(false, for: remembered.id)
+        window.test_editor.test_setMembership(true, for: remembered.id)
+        let edited = try #require(controller.groups.first)
+        #expect(edited.memberVolumes[live.id] == 63)
+        #expect(edited.memberVolumes[other.id] == 37)
+        #expect(edited.memberVolumes[remembered.id] == nil)
+        #expect(Set(edited.memberIDs) == [live.id, other.id, remembered.id])
+        #expect(controller.activeGroupID == nil)
+        #expect(!controller.isSpeakerSelected(live.id))
+    }
+
     private func makeWindow() async throws -> (MixerWindowController, GroupController, MockBackend) {
         let backend = MockBackend(fleet: .demoFleet, staggerDiscovery: false,
                                   emitsLevels: false, simulatesDropouts: false)
         try await waitForFleet(backend, count: 7)
         let store = GroupStore(directory: tempDirectory())
-        let controller = GroupController(backend: backend, store: store, loadPersisted: false)
+        let controller = GroupController(backend: backend, store: store,
+            routingStore: RoutingStore(directory: scratchDir),
+            settings: AppSettings(defaults: isolatedDefaults), loadPersisted: false)
         let window = MixerWindowController(groupController: controller,
                                            settings: AppSettings(defaults: isolatedDefaults))
         // Headless test seam: simulate the content being visible so update(devices:)
@@ -83,7 +161,9 @@ import AppKit
                                   emitsLevels: false, simulatesDropouts: false)
         try await waitForFleet(backend, count: 7)
         let store = GroupStore(directory: tempDirectory())
-        let controller = GroupController(backend: backend, store: store, loadPersisted: false)
+        let controller = GroupController(backend: backend, store: store,
+            routingStore: RoutingStore(directory: scratchDir),
+            settings: AppSettings(defaults: isolatedDefaults), loadPersisted: false)
         let iconController = DeviceIconController(store: DeviceIconStore(directory: tempDirectory()),
                                                    loadPersisted: false)
         let window = MixerWindowController(groupController: controller, deviceIconController: iconController,
@@ -118,7 +198,9 @@ import AppKit
                                   emitsLevels: false, simulatesDropouts: false)
         try await waitForFleet(backend, count: 7)
         let store = GroupStore(directory: tempDirectory())
-        let controller = GroupController(backend: backend, store: store, loadPersisted: false)
+        let controller = GroupController(backend: backend, store: store,
+            routingStore: RoutingStore(directory: scratchDir),
+            settings: AppSettings(defaults: isolatedDefaults), loadPersisted: false)
         let window = MixerWindowController(groupController: controller,
                                            settings: AppSettings(defaults: isolatedDefaults))
 
@@ -603,7 +685,10 @@ import AppKit
         // non-member ("appletv-lr") unavailable too, in the same push.
         let devices = backend.devices.map { device -> Device in
             var d = device
-            if d.id == "office" || d.id == "appletv-lr" { d.isAvailable = false }
+            if d.id == "office" || d.id == "appletv-lr" {
+                d.isAvailable = false
+                d.connectionState = .off
+            }
             return d
         }
         window.update(devices: devices)
@@ -802,30 +887,31 @@ import AppKit
     @Test func aRefreshReusesTheMembershipRowsWhenTheCandidateListIsUnchanged() async throws {
         let (window, controller, backend) = try await makeWindow()
         let saved = try makeGroup1(controller)
-        window.update(devices: backend.devices)
+        let transient = Device(id: "transient", name: "Transient", kind: .generic)
+        let base = backend.devices + [transient]
+        window.update(devices: base)
         window.test_select(.group(id: saved.id))
         await drain()
         let editor = window.test_editor
-        // The host's own order, so the candidate SEQUENCE is the one already
-        // on screen and only the row contents move.
-        let base = backend.devices.sorted { ($0.name, $0.id) < ($1.name, $1.id) }
         let candidatesBefore = editor.test_candidateDeviceIDs
         let row = try #require(editor.test_membershipRow(for: "office"))
 
         var updated = base
         let officeIndex = try #require(updated.firstIndex { $0.id == "office" })
-        updated[officeIndex].isAvailable = false   // a member stays a candidate
-        editor.show(groupID: saved.id, devices: updated)
+        updated[officeIndex].connectionState = .connecting
+        window.update(devices: updated)
         #expect(editor.test_membershipRow(for: "office") === row,
-                "the same list, refreshed in place — clicks and hover ride on these instances")
+                "the same candidate sequence refreshes its existing rows")
         #expect(editor.test_candidateDeviceIDs == candidatesBefore)
 
-        // A candidate DROPPING OUT changes the sequence, so the list is rebuilt.
-        let fewer = updated.filter { $0.id != "homepod-bed" }
-        editor.show(groupID: saved.id, devices: fewer)
-        #expect(!editor.test_candidateDeviceIDs.contains("homepod-bed"))
+        let fewer = updated.filter { $0.id != transient.id }
+        window.update(devices: fewer)
+        #expect(!editor.test_candidateDeviceIDs.contains(transient.id))
         #expect(editor.test_membershipRow(for: "office") !== row,
-                "a changed candidate sequence falls through to the full rebuild")
+                "removing an unused transient candidate rebuilds the list")
+        window.update(devices: fewer.filter { $0.id != "office" })
+        #expect(editor.test_candidateDeviceIDs.contains("office"),
+                "a remembered scene member remains editable after discovery removes it")
     }
 
     /// Fable review fix: the projection gate in `show(groupID:devices:)` used
@@ -850,6 +936,7 @@ import AppKit
         var volumeOnly = backend.devices
         let index = try #require(volumeOnly.firstIndex { $0.id == "homepod-bed" })
         volumeOnly[index].volume = 77
+        controller.updateDevices(volumeOnly)
         window.update(devices: volumeOnly)
         #expect(editor.test_renderCount == baseline, "a volume-only change draws nothing this pane shows")
 
@@ -986,6 +1073,8 @@ import AppKit
         let controller = GroupController(
             backend: backend,
             store: GroupStore(directory: blocker.appendingPathComponent("sub", isDirectory: true)),
+            routingStore: RoutingStore(directory: scratchDir),
+            settings: AppSettings(defaults: isolatedDefaults),
             loadPersisted: false)
         let window = MixerWindowController(groupController: controller,
                                            settings: AppSettings(defaults: isolatedDefaults))
@@ -1083,7 +1172,7 @@ import AppKit
         #expect(window.test_isShowingDetail)
         #expect(!(window.test_isShowingEditor))
         #expect(window.test_detail.test_shownDeviceID == "appletv-lr")
-        #expect(window.test_detail.test_metadataStrings["status"] == "Ready")
+        #expect(window.test_detail.test_metadataStrings["status"] == "Available")
         #expect(window.test_detail.test_groupMembershipText == "None", "appletv-lr isn't a member of any saved group")
 
         let saved = try makeGroup1(controller)   // members: sonos-move, office
@@ -1131,7 +1220,10 @@ import AppKit
         let (window, _, backend) = try await makeWindow()
         let devices = backend.devices.map { device -> Device in
             var d = device
-            if d.id == "office" || d.id == "appletv-lr" { d.isAvailable = false }
+            if d.id == "office" || d.id == "appletv-lr" {
+                d.isAvailable = false
+                d.connectionState = .off
+            }
             return d
         }
         window.update(devices: devices)
@@ -1211,7 +1303,7 @@ import AppKit
         let (window, _, backend) = try await makeWindow()
         window.test_select(.device(id: "office"))
         await drain()
-        #expect(window.test_detail.test_metadataStrings["status"] == "Ready")
+        #expect(window.test_detail.test_metadataStrings["status"] == "Available")
 
         let updated = backend.devices.map { device -> Device in
             var d = device
@@ -1221,7 +1313,7 @@ import AppKit
         window.update(devices: updated)
 
         #expect(window.test_isShowingDetail, "still showing the detail pane, just re-rendered")
-        #expect(window.test_detail.test_metadataStrings["status"] == "Not on Wi-Fi", "refreshAll() re-renders the visible detail pane from the fresher snapshot")
+        #expect(window.test_detail.test_metadataStrings["status"] == "Unavailable", "refreshAll() re-renders the visible detail pane from the fresher snapshot")
     }
 
     @Test func refreshAllFallsBackWhenShownDeviceDisappears() async throws {

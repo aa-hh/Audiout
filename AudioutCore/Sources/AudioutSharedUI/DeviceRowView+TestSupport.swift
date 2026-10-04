@@ -613,3 +613,14 @@ extension DeviceRowView {
     /// `draw(_:)` call is needed to read it.
     public var test_nameColor: NSColor? { nameLabel.textColor }
 }
+
+public extension DeviceRowView {
+    var test_unavailableStatusText: String? { unavailableStatusLabel.isHidden ? nil : unavailableStatusLabel.stringValue }
+    var test_liveControlsHidden: Bool { slider.isHidden && muteButton.isHidden && readoutLabel.isHidden && eqButton.isHidden && syncChipButton.isHidden }
+    func test_pressNameAccessibility() -> Bool { nameLabel.accessibilityPerformPress() }
+    func test_pressNameKey(_ keyCode: UInt16) {
+        guard let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
+            windowNumber: 0, context: nil, characters: "", charactersIgnoringModifiers: "", isARepeat: false, keyCode: keyCode) else { return }
+        nameLabel.keyDown(with: event)
+    }
+}

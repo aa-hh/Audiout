@@ -23,6 +23,47 @@ import AppKit
 @MainActor
 @Suite final class SidebarActionsTests: IsolatedSuite {
 
+    // Making Speakers a nonselectable header again breaks empty-fleet navigation and repeated clicks.
+    @Test func speakersCollectionSelectsAndReopensWhenEmpty() {
+        let sidebar = SidebarViewController()
+        sidebar.loadViewIfNeeded()
+        sidebar.reload(groups: [], activeGroupID: nil, devices: [])
+        var selections: [SidebarSelection?] = []
+        sidebar.onSelect = { selections.append($0) }
+        sidebar.test_select(.speakersOverview)
+        sidebar.test_clickSpeakersRow()
+        #expect(selections == [.speakersOverview, .speakersOverview])
+        #expect(sidebar.currentSelection == .speakersOverview)
+    }
+
+    // Inline status squeezes the speaker name; separate drawn lines must retain the sidebar's available width.
+    @Test func speakerStatusDrawsBelowNameWithoutCompetingForWidth() throws {
+        let device = Device(id: "bt", name: "Onkyo TX-8220", kind: .bluetooth, isAvailable: false)
+        let library = SpeakerLibraryController(loadPersisted: false)
+        library.update(liveDevices: [device], groups: [])
+        let sidebar = SidebarViewController()
+        sidebar.loadViewIfNeeded()
+        sidebar.reload(groups: [], activeGroupID: nil, devices: [device], presentationRecords: library.records)
+        sidebar.view.frame = NSRect(x: 0, y: 0, width: 210, height: 400)
+        sidebar.view.layoutSubtreeIfNeeded()
+        let cell = try #require(sidebar.test_deviceCell(id: device.id))
+        let name = try #require(cell.textField)
+        let status = cell.statusLabel
+        #expect(cell.isDescendant(of: sidebar.view))
+        #expect(name.stringValue == device.name)
+        #expect(status.stringValue == "Not connected")
+        #expect(!status.isHidden)
+        let nameFrame = name.convert(name.bounds, to: cell)
+        let statusFrame = status.convert(status.bounds, to: cell)
+        #expect(!nameFrame.intersects(statusFrame))
+        #expect(abs(nameFrame.minX - statusFrame.minX) < 1)
+        #expect(name.visibleRect.width >= name.intrinsicContentSize.width)
+        #expect(status.visibleRect.width >= status.intrinsicContentSize.width)
+        #expect(status.visibleRect.height > 0)
+        sidebar.test_select(.device(id: device.id))
+        #expect(sidebar.currentSelection == .device(id: device.id))
+    }
+
     private func makeDevice(id: String, name: String) -> Device {
         Device(id: id, name: name, kind: .generic, isAvailable: true)
     }

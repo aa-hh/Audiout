@@ -14,6 +14,7 @@ public enum SidebarSelection: Equatable, Sendable {
     /// The pinned "Scenes" row: the saved-group card overview in the content
     /// pane (direction C — the sidebar itself lists no groups any more).
     case groupsOverview
+    case speakersOverview
     /// One saved group's editor. No sidebar row of its own: the overview's
     /// cards set it, and the sidebar highlights the Groups row for it.
     case group(id: String)
@@ -50,6 +51,7 @@ public final class SidebarViewController: NSViewController {
     final class Node {
         enum Payload {
             case header(String)             // "System Audio" / "Speakers" (isGroupItem)
+            case speakersOverview
             case groupsOverview             // the pinned "Scenes" plate row (root-level leaf)
             case mainOut                    // the one "Main Audio" row (flat leaf row)
             case device(Device)             // a device row (flat leaf row)
@@ -101,6 +103,7 @@ public final class SidebarViewController: NSViewController {
     /// in the content pane, this marker is all the sidebar can say about which
     /// one. Pure model state, never audio-driven.
     private var hasLiveGroup = false
+    private var presentationByID: [String: SpeakerPresentationRecord] = [:]
 
     public init() {
         super.init(nibName: nil, bundle: nil)
@@ -347,7 +350,9 @@ public final class SidebarViewController: NSViewController {
     /// list. Both sections are flat leaf lists, and the Speakers section lists
     /// EVERY device, grouped or not (hiding one here would just make it
     /// unreachable).
-    public func reload(groups: [Group], activeGroupID: String?, devices: [Device]) {
+    public func reload(groups: [Group], activeGroupID: String?, devices: [Device],
+                       presentationRecords: [SpeakerPresentationRecord] = []) {
+        presentationByID = Dictionary(uniqueKeysWithValues: presentationRecords.map { ($0.id, $0) })
         let previous = currentSelection
         hasLiveGroup = activeGroupID.map { id in groups.contains { $0.id == id } } ?? false
 
@@ -367,11 +372,9 @@ public final class SidebarViewController: NSViewController {
 
         // 3. Speakers section — every device, grouped or not, so it stays
         //    reachable now that membership isn't previewed via expansion.
-        if !devices.isEmpty {
-            let devicesHeader = Node(.header("Speakers"))
-            devicesHeader.children = devices.map { Node(.device($0)) }
-            newRoots.append(devicesHeader)
-        }
+        let devicesHeader = Node(.speakersOverview)
+        devicesHeader.children = devices.map { Node(.device($0)) }
+        newRoots.append(devicesHeader)
 
         roots = newRoots
         outlineView.reloadData()
@@ -395,6 +398,7 @@ public final class SidebarViewController: NSViewController {
     private func selection(for node: Node) -> SidebarSelection? {
         switch node.payload {
         case .header: return nil
+        case .speakersOverview: return .speakersOverview
         case .groupsOverview: return .groupsOverview
         case .mainOut: return .mainOut
         case .device(let d): return .device(id: d.id)
@@ -458,10 +462,25 @@ public final class SidebarViewController: NSViewController {
 
     // MARK: Test-support hooks
 
+    func test_deviceCell(id: String) -> IconLabelCellView? {
+        guard let node = findNode(matching: .device(id: id)) else { return nil }
+        let row = outlineView.row(forItem: node)
+        guard row >= 0,
+              let cell = outlineView.view(atColumn: 0, row: row, makeIfNecessary: true) as? IconLabelCellView else { return nil }
+        cell.layoutSubtreeIfNeeded()
+        return cell
+    }
+
     /// The section-header titles in order (["System Audio", "Speakers"]) — the
     /// pinned Groups row and its hairline sit ABOVE them and are not sections.
     public var test_sectionTitles: [String] {
-        roots.compactMap { if case .header(let t) = $0.payload { return t } else { return nil } }
+        roots.compactMap {
+            switch $0.payload {
+            case .header(let t): return t
+            case .speakersOverview: return "Speakers"
+            default: return nil
+            }
+        }
     }
 
     /// True when the pinned "Scenes" row is present (it always is).
@@ -492,7 +511,7 @@ public final class SidebarViewController: NSViewController {
     /// Device row ids under the "Speakers" header, in DISPLAY order — the
     /// order assertion seam (available first, unavailable at the bottom).
     public var test_deviceRowIDs: [String] {
-        roots.first { if case .header("Speakers") = $0.payload { return true } else { return false } }?
+        roots.first { if case .speakersOverview = $0.payload { return true } else { return false } }?
             .children.compactMap {
                 if case .device(let d) = $0.payload { return d.id } else { return nil }
             } ?? []
@@ -507,6 +526,11 @@ public final class SidebarViewController: NSViewController {
     /// fires when the row is already selected and the selection delegate
     /// stays silent. `clickedRow` cannot be set headlessly, so the row is
     /// looked up here and handed to the action's own handler.
+    public func test_clickSpeakersRow() {
+        guard let node = findNode(matching: .speakersOverview) else { return }
+        reselectGroupsRow(ifClicked: outlineView.row(forItem: node))
+    }
+
     public func test_clickGroupsRow() {
         guard let node = findNode(matching: .groupsOverview) else { return }
         reselectGroupsRow(ifClicked: outlineView.row(forItem: node))
@@ -640,6 +664,25 @@ final class IconLabelCellView: NSTableCellView {
 
     /// Holds both trailing slots. `detachesHiddenViews` (the default) is what
     /// makes a hidden slot cost zero width.
+    let statusLabel: NSTextField = {
+        let label = NSTextField(labelWithString: "")
+        label.font = Tokens.Font.caption
+        label.textColor = Tokens.Color.label3
+        label.isHidden = true
+        label.lineBreakMode = .byTruncatingTail
+        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        return label
+    }()
+
+    let labelStack: NSStackView = {
+        let stack = NSStackView()
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 2
+        return stack
+    }()
+
     let trailingStack: NSStackView = {
         let stack = NSStackView()
         stack.translatesAutoresizingMaskIntoConstraints = false
@@ -764,7 +807,7 @@ extension SidebarViewController: NSMenuDelegate {
         menu.autoenablesItems = false
         guard let node = clickedNode else { return }
         switch node.payload {
-        case .header, .mainOut:
+        case .header, .mainOut, .speakersOverview:
             break   // no identity to act on — an empty menu shows nothing at all
         case .groupsOverview:
             // The overview's one action. Rename…/Delete scene… moved to the
@@ -829,6 +872,10 @@ extension SidebarViewController: NSOutlineViewDelegate {
         if let node = item as? Node, case .groupsOverview = node.payload {
             return PlateRowView.rowHeight
         }
+        if let node = item as? Node, case .device(let device) = node.payload,
+           presentationByID[device.id] != nil {
+            return max(outlineView.rowHeight, 44)
+        }
         return outlineView.rowHeight
     }
 
@@ -851,6 +898,10 @@ extension SidebarViewController: NSOutlineViewDelegate {
         switch node.payload {
         case .header(let title):
             return makeHeaderLabel(title)
+        case .speakersOverview:
+            let cell = makeHeaderLabel("Speakers")
+            cell.textField?.setAccessibilityLabel("Speakers, manage speakers")
+            return cell
         case .groupsOverview:
             return makeIconLabel(symbol: Group.defaultIconSymbolName,
                                  text: "Scenes", identifier: "groupsOverview",
@@ -862,9 +913,17 @@ extension SidebarViewController: NSOutlineViewDelegate {
                                  text: "Main Audio", identifier: "mainOut")
         case .device(let device):
             let symbol = deviceIconController?.symbolName(for: device) ?? device.kind.symbolName
-            return makeIconLabel(symbol: symbol,
-                                 text: device.name, identifier: "device",
-                                 dimmed: !device.isAvailable)
+            let record = presentationByID[device.id]
+            let cell = makeIconLabel(symbol: record?.kind == nil && record != nil ? "speaker" : symbol,
+                                     text: device.name, identifier: "device",
+                                     dimmed: record.map { !$0.isAvailable } ?? !device.isAvailable)
+            if let record, let cell = cell as? IconLabelCellView {
+                cell.statusLabel.stringValue = record.status.text
+                cell.statusLabel.isHidden = false
+                cell.textField?.setAccessibilityLabel(record.accessibilityIdentity + ", " + record.status.text)
+                cell.toolTip = record.secondaryText
+            }
+            return cell
         }
     }
 
@@ -892,8 +951,8 @@ extension SidebarViewController: NSOutlineViewDelegate {
         let alreadyReported = clickChangedSelection
         clickChangedSelection = false
         guard !alreadyReported, row >= 0, row == outlineView.selectedRow,
-              currentSelection == .groupsOverview else { return }
-        onSelect?(.groupsOverview)
+              currentSelection == .groupsOverview || currentSelection == .speakersOverview else { return }
+        onSelect?(currentSelection)
     }
 
     // MARK: Cell builders
@@ -966,6 +1025,7 @@ extension SidebarViewController: NSOutlineViewDelegate {
         cell.imageView?.contentTintColor = dimmed ? Tokens.Color.label3 : Tokens.Color.label
         cell.textField?.stringValue = text
         cell.textField?.textColor = dimmed ? Tokens.Color.label3 : Tokens.Color.label
+        cell.statusLabel.isHidden = true
         cell.setActiveMarkerVisible(showsActiveMarker)
         cell.setDisclosureVisible(showsDisclosure)
         // Both states were COLOUR/GLYPH ONLY: a dimmed row and a gold marker
@@ -997,7 +1057,8 @@ extension SidebarViewController: NSOutlineViewDelegate {
         let textField = NSTextField(labelWithString: "")
         textField.translatesAutoresizingMaskIntoConstraints = false
         textField.lineBreakMode = .byTruncatingTail
-        cell.addSubview(textField)
+        cell.labelStack.setViews([textField, cell.statusLabel], in: .leading)
+        cell.addSubview(cell.labelStack)
         cell.textField = textField
 
         cell.trailingStack.setViews([cell.activeMarkerView, cell.disclosureView], in: .leading)
@@ -1009,11 +1070,11 @@ extension SidebarViewController: NSOutlineViewDelegate {
             imageView.widthAnchor.constraint(equalToConstant: iconSize),
             imageView.heightAnchor.constraint(equalToConstant: iconSize),
 
-            textField.leadingAnchor.constraint(
+            cell.labelStack.leadingAnchor.constraint(
                 equalTo: imageView.trailingAnchor, constant: SurfaceLayout.sidebarIconToLabelGap),
-            textField.trailingAnchor.constraint(
-                lessThanOrEqualTo: cell.trailingStack.leadingAnchor, constant: -6),
-            textField.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+            cell.labelStack.trailingAnchor.constraint(
+                equalTo: cell.trailingStack.leadingAnchor, constant: -6),
+            cell.labelStack.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
 
             cell.trailingStack.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -2),
             cell.trailingStack.centerYAnchor.constraint(equalTo: cell.centerYAnchor),

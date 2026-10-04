@@ -3,6 +3,12 @@ import AppKit
 import AudioutCore
 @testable import AudioutSharedUI
 
+private final class UnconstrainedDeviceRowWindow: NSWindow {
+    override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect {
+        frameRect
+    }
+}
+
 /// Row-focused tests for the connection **halo ring** (Warm Signal v3 §3.2) +
 /// the sublabel precedence ladder: the four `ConnectionState` ring renderings
 /// (`test_statusKind`/`test_ringForm`/`test_statusText`), the ring's per-state
@@ -193,7 +199,8 @@ import AudioutCore
                 "the failed ring speaks 'couldn't connect'")
     }
 
-    @Test func accessibilityLabelOmitsClauseWhenOff() {
+    // Announcing a placeholder volume or retaining its omission after reapply would break this label.
+    @Test func accessibilityLabelOmitsConnectionClauseWhenOffAndVolumeWhenUnknown() {
         let row = DeviceRowView(device: makeDevice(connectionState: .off))
         row.apply(makeDevice(connectionState: .off), selected: false)
         let label = row.test_accessibilityLabel ?? ""
@@ -201,6 +208,11 @@ import AudioutCore
         #expect(!label.contains("connected"))
         #expect(!label.contains("couldn't connect"),
                 "an unringed (.off) row adds no connection clause")
+        #expect(label.contains("volume \(VolumePercent.spoken(50))"))
+        row.apply(makeDevice(), selected: false, liveVolumeAvailable: false)
+        #expect(row.test_accessibilityLabel == "Test Speaker, not selected")
+        row.apply(makeDevice(), selected: false)
+        #expect(row.test_accessibilityLabel == "Test Speaker, not selected, volume \(VolumePercent.spoken(50))")
     }
 
     // MARK: Breathing pulse — connecting animates, gated on Reduce Motion
@@ -362,6 +374,8 @@ import AudioutCore
     // MARK: Name-click toggles the checkbox (same delegate path)
 
     private final class RecordingDelegate: DeviceRowView.Delegate {
+        var reconnects: [String] = []
+        func deviceRowDidRequestReconnect(_ row: DeviceRowView) { reconnects.append(row.device.id) }
         var toggledFor: String?
         var toggledOn: Bool?
         func deviceRow(_ row: DeviceRowView, didSetVolume volume: Int, for id: String) {}
@@ -734,4 +748,85 @@ import AudioutCore
         row.apply(device, selected: false)
         #expect(row.test_meterLevel() == 0, "a deselected device's meter must reset")
     }
+    // Routing name recovery through the checkbox would change membership instead of requesting recovery.
+    @Test func unavailableNetworkNameRecoveryUsesMouseKeyboardAndAccessibilityAction() throws {
+        for kind in [Device.Kind.homePod, .cast] {
+            let device = Device(id: "offline", name: "Remembered speaker", kind: kind, isAvailable: false)
+            let row = DeviceRowView(device: device, showsBus: true, showsSyncControls: true)
+            let window = UnconstrainedDeviceRowWindow(
+                contentRect: NSRect(x: 0, y: 0, width: 653, height: 100),
+                styleMask: [.titled], backing: .buffered, defer: false)
+            window.setFrameOrigin(NSPoint(x: -10_000, y: -10_000))
+            window.contentView = row
+            defer { window.makeFirstResponder(nil) }
+            #expect(!NSScreen.screens.contains { $0.frame.intersects(window.frame) })
+
+            let delegate = RecordingDelegate()
+            row.delegate = delegate
+            row.apply(device, selected: false, unavailableStatus: "Looking for speaker…",
+                      unavailableHelp: "Check that the speaker is on and on the same network.", nameRecoveryEnabled: true)
+            let node = row.test_busNode
+            row.test_clickName()
+            #expect(delegate.reconnects == ["offline"])
+            let name = try #require(findNameLabel(in: row))
+            #expect(window.makeFirstResponder(name))
+            #expect(window.firstResponder === name)
+            let countBeforeReturn = delegate.reconnects.count
+            try sendKey(code: 36, characters: "\r", through: window)
+            #expect(delegate.reconnects.count == countBeforeReturn + 1)
+            #expect(delegate.toggledFor == nil)
+            #expect(row.test_busNode == node)
+            #expect(!row.test_isEnabledOn)
+            let countBeforeSpace = delegate.reconnects.count
+            try sendKey(code: 49, characters: " ", through: window)
+            #expect(delegate.reconnects.count == countBeforeSpace + 1)
+            #expect(delegate.toggledFor == nil)
+            #expect(row.test_busNode == node)
+            #expect(!row.test_isEnabledOn)
+            #expect(row.test_pressNameAccessibility())
+            #expect(delegate.reconnects == ["offline", "offline", "offline", "offline"])
+            #expect(delegate.toggledFor == nil)
+            #expect(row.test_busNode == node)
+            #expect(!row.test_isEnabledOn)
+            #expect(row.test_unavailableStatusText == "Looking for speaker…")
+            #expect(row.test_liveControlsHidden)
+            #expect(row.test_nameTooltip == "Check that the speaker is on and on the same network.")
+            #expect(row.test_accessibilityValue?.contains("Looking for speaker…") == true)
+            row.apply(device, selected: false, unavailableStatus: "Unavailable", nameRecoveryEnabled: false)
+            row.test_clickName()
+            #expect(!row.test_pressNameAccessibility())
+            #expect(delegate.reconnects.count == 4)
+        }
+    }
+
+    private func findNameLabel(in view: NSView) -> DeviceNameLabel? {
+        if let name = view as? DeviceNameLabel { return name }
+        for subview in view.subviews {
+            if let name = findNameLabel(in: subview) { return name }
+        }
+        return nil
+    }
+
+    private func sendKey(code: UInt16, characters: String, through window: NSWindow) throws {
+        let event = try #require(NSEvent.keyEvent(
+            with: .keyDown, location: .zero, modifierFlags: [],
+            timestamp: ProcessInfo.processInfo.systemUptime,
+            windowNumber: window.windowNumber, context: nil,
+            characters: characters, charactersIgnoringModifiers: characters,
+            isARepeat: false, keyCode: code), "AppKit refused to build the key event")
+        window.sendEvent(event)
+    }
+
+    // Treating discovery absence as disconnected would dim a Cast session that still carries audio.
+    @Test func connectedUndiscoveredCastKeepsLiveControlsAndMembership() {
+        let device = Device(id: "cast", name: "TV", kind: .cast, isAvailable: false, connectionState: .connected)
+        let row = DeviceRowView(device: device, showsBus: true)
+        row.apply(device, selected: true, controllable: true, unavailableStatus: "Unavailable", nameRecoveryEnabled: true)
+        #expect(!row.test_controlsMuted)
+        #expect(row.test_isSliderEnabled)
+        #expect(row.test_nameColor == Tokens.Color.label)
+        #expect(row.test_unavailableStatusText == nil)
+        #expect(row.test_busNode != .nonMember)
+    }
+
 }

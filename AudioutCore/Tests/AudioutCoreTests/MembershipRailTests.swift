@@ -176,6 +176,8 @@ import AppKit
     @Test func creationSheetRowsAreAllPlain() {
         let controller = GroupController(backend: MockBackend(fleet: []),
                                          store: GroupStore(directory: tempDirectory()),
+                                         routingStore: RoutingStore(directory: scratchDir),
+                                         settings: AppSettings(defaults: isolatedDefaults),
                                          loadPersisted: false)
         let sheet = GroupCreationSheetController(groupController: controller)
         sheet.loadView()
@@ -259,13 +261,15 @@ import AppKit
     private func makeEditor() throws -> (GroupEditorViewController, GroupController, [Device]) {
         let devices = [
             makeDevice(id: "a", name: "Alpha"),
-            makeDevice(id: "office", name: "Office"),
+            makeDevice(id: "office", name: "Bravo"),
             makeDevice(id: "c", name: "Charlie"),
-            makeDevice(id: "mixer", name: "Mixer"),
+            makeDevice(id: "mixer", name: "Delta"),
             makeDevice(id: "e", name: "Echo"),
         ]
         let controller = GroupController(backend: MockBackend(fleet: []),
                                          store: GroupStore(directory: tempDirectory()),
+                                         routingStore: RoutingStore(directory: scratchDir),
+                                         settings: AppSettings(defaults: isolatedDefaults),
                                          loadPersisted: false)
         let group = try controller.createGroup(name: "Downstairs",
                                                memberIDs: ["office", "mixer"],
@@ -456,7 +460,7 @@ import AppKit
         #expect(!editor.test_playingBadgeVisible,
                 "an inactive group is not playing, so it must not claim to be")
         #expect(editor.test_reassuranceVisible)
-        #expect(editor.test_reassuranceText == "Changes are saved as you go.")
+        #expect(editor.test_reassuranceText == "Scene membership only. Mixer visibility is managed in Speakers.")
 
         let group = try #require(controller.groups.first)
         controller.activateGroup(id: group.id)
@@ -465,7 +469,7 @@ import AppKit
         #expect(editor.test_playingBadgeVisible)
         #expect(editor.test_reassuranceVisible)
         #expect(editor.test_reassuranceText
-                == "Changes are saved as you go. They don\u{2019}t change what\u{2019}s playing now.")
+                == "Scene membership only. Mixer visibility is managed in Speakers.")
     }
 
     @Test func thePrimaryLeavesTheEditorTheWayGroupsDoes() throws {
@@ -519,6 +523,8 @@ import AppKit
         let devices = (0..<7).map { makeDevice(id: "d\($0)", name: "Device \($0)") }
         let controller = GroupController(backend: MockBackend(fleet: []),
                                          store: GroupStore(directory: tempDirectory()),
+                                         routingStore: RoutingStore(directory: scratchDir),
+                                         settings: AppSettings(defaults: isolatedDefaults),
                                          loadPersisted: false)
         let group = try controller.createGroup(name: "Downstairs", memberIDs: ["d0"],
                                                memberVolumes: [:]).group
@@ -578,6 +584,8 @@ import AppKit
     @Test func sevenDeviceFleetFitsTheCreationSheetWithoutScrolling() {
         let controller = GroupController(backend: MockBackend(fleet: []),
                                          store: GroupStore(directory: tempDirectory()),
+                                         routingStore: RoutingStore(directory: scratchDir),
+                                         settings: AppSettings(defaults: isolatedDefaults),
                                          loadPersisted: false)
         let sheet = GroupCreationSheetController(groupController: controller)
         sheet.loadView()

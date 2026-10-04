@@ -149,6 +149,10 @@ public final class DeviceDetailViewController: NSViewController {
 
     /// The device currently shown, `nil` before the first `show(device:)`.
     private var shownDevice: Device?
+    private var shownRecord: SpeakerPresentationRecord?
+    public var speakerLibrary: SpeakerLibraryController?
+    public var onVisibilityChange: (() -> Void)?
+    private let visibilityPopup = NSPopUpButton()
 
     /// Report a tone change: the new EQ, the device it belongs to, and whether
     /// the gesture is finished (`false` = live scrub, apply only; `true` =
@@ -212,6 +216,12 @@ public final class DeviceDetailViewController: NSViewController {
         // its minimum thickness.
         nameLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
+        visibilityPopup.menu?.autoenablesItems = false
+        visibilityPopup.addItems(withTitles: SpeakerMixerVisibility.allCases.map(\.label))
+        visibilityPopup.target = self
+        visibilityPopup.action = #selector(visibilityChanged(_:))
+        visibilityPopup.setAccessibilityLabel("Show in Mixer")
+
         // "About" — the speaker's facts, one per row, on bare pane. Status
         // folds availability in rather than taking a row of its own: as two
         // rows they contradicted each other to read ("Not connected" over
@@ -224,6 +234,7 @@ public final class DeviceDetailViewController: NSViewController {
             makeMetadataRow(caption: "Status", valueLabel: statusValueLabel),
             makeMetadataRow(caption: "Kind", valueLabel: kindValueLabel),
             airPlayRow,
+            makeVisibilityRow(),
         ] {
             aboutStack.addArrangedSubview(row)
             // Rows FILL the list, so a right-aligned value lands on the
@@ -591,6 +602,7 @@ public final class DeviceDetailViewController: NSViewController {
 
     /// Show the pane for `device`, replacing whatever was shown before.
     public func show(device: Device) {
+        shownRecord = presentation(for: device)
         shownDevice = device
         eqEdits.removeAll()
         refreshUI()
@@ -602,16 +614,59 @@ public final class DeviceDetailViewController: NSViewController {
     /// the sidebar is expected to call `show(device:)` for a new selection,
     /// but this stays correct either way.
     public func refresh(device: Device) {
+        shownRecord = presentation(for: device)
         shownDevice = device
         refreshUI()
+    }
+
+    public func show(record: SpeakerPresentationRecord) {
+        shownRecord = record
+        shownDevice = record.renderingDevice
+        eqEdits.removeAll()
+        refreshUI()
+    }
+
+    public func refresh(record: SpeakerPresentationRecord) {
+        shownRecord = record
+        shownDevice = record.renderingDevice
+        refreshUI()
+    }
+
+    private func presentation(for device: Device) -> SpeakerPresentationRecord? {
+        if let record = speakerLibrary?.record(for: device.id) { return record }
+        let library = SpeakerLibraryController(loadPersisted: false)
+        library.update(liveDevices: [device], groups: [])
+        return library.record(for: device.id)
+    }
+
+    private func makeVisibilityRow() -> NSView {
+        let caption = NSTextField(labelWithString: "Show in Mixer")
+        caption.font = Tokens.Font.body
+        let row = NSStackView(views: [caption, visibilityPopup])
+        row.orientation = .horizontal
+        row.distribution = .fill
+        row.spacing = 8
+        return row
+    }
+
+    @objc private func visibilityChanged(_ sender: NSPopUpButton) {
+        guard let record = shownRecord, !record.isLocalDevice,
+              let library = speakerLibrary,
+              let value = SpeakerMixerVisibility.allCases.first(where: { $0.label == sender.titleOfSelectedItem }) else { return }
+        if library.setVisibility(value, for: record.id) { onVisibilityChange?() }
+        if let updated = library.record(for: record.id) { refresh(record: updated) }
     }
 
     private func refreshUI() {
         guard let device = shownDevice else { return }
         nameLabel.stringValue = device.name
-        statusValueLabel.stringValue = Self.statusText(for: device)
-        kindValueLabel.stringValue = Self.kindText(for: device.kind)
-        let airPlay = Self.airPlayText(for: device)
+        statusValueLabel.stringValue = shownRecord?.status.text ?? Self.statusText(for: device)
+        nameLabel.toolTip = shownRecord?.secondaryText
+        nameLabel.setAccessibilityLabel(shownRecord?.accessibilityIdentity ?? device.name)
+        visibilityPopup.selectItem(withTitle: (shownRecord?.visibility ?? .whenAvailable).label)
+        visibilityPopup.isEnabled = speakerLibrary != nil && shownRecord?.isLocalDevice != true
+        kindValueLabel.stringValue = shownRecord?.kind.map(Self.kindText) ?? "Unknown"
+        let airPlay = shownRecord?.liveDevice == nil ? nil : Self.airPlayText(for: device)
         airPlayValueLabel.stringValue = airPlay ?? ""
         airPlayRow.isHidden = airPlay == nil
         // Only the rows that are actually there, so no divider is drawn above
@@ -651,7 +706,7 @@ public final class DeviceDetailViewController: NSViewController {
     /// default — the slot it shows is the one a following `refreshUI()` keeps
     /// for every device but This Mac.
     private func applyPerDeviceSectionVisibility() {
-        let showsEQ = !(shownDevice?.isLocalDevice == true || shownDevice?.kind == .localMac)
+        let showsEQ = shownRecord?.liveDevice != nil && !(shownDevice?.isLocalDevice == true || shownDevice?.kind == .localMac)
         eqWell.isHidden = !showsEQ
         eqEditor.isHidden = !showsEQ
         eqTitleLabel.isHidden = !showsEQ
@@ -664,7 +719,7 @@ public final class DeviceDetailViewController: NSViewController {
         // something that cannot happen. Unknown (`nil` — never connected this
         // run) keeps it, so the choice can be made ahead of a connect.
         let store = btHardwareVolumeStore
-        let showsBTVolume = shownDevice?.kind == .bluetooth && store != nil
+        let showsBTVolume = shownRecord?.liveDevice != nil && shownDevice?.kind == .bluetooth && store != nil
             && shownDevice?.btHardwareVolumeCapable != false
         btVolumeWell.isHidden = !showsBTVolume
         btVolumeTitleLabel.isHidden = !showsBTVolume
@@ -708,8 +763,10 @@ public final class DeviceDetailViewController: NSViewController {
         case .connected:     return "Connected"
         case .connecting:    return "Connecting…"
         case .reconnecting:  return "Reconnecting…"
-        case .failed:        return "Couldn't connect"
-        case .off:           return device.isAvailable ? "Ready" : "Not on Wi-Fi"
+        case .failed(let failure): return failure.headline
+        case .off:
+            if device.kind == .bluetooth { return device.isAvailable ? "Connected" : "Not connected" }
+            return device.isAvailable ? "Available" : "Unavailable"
         }
     }
 
@@ -933,7 +990,7 @@ public final class DeviceDetailViewController: NSViewController {
     /// The editor's own rendered model IS the source of truth here — it
     /// already received `eqEdits[device.id]?.eq ?? device.eq`.
     private func refreshResetEnabled() {
-        eqResetButton.isEnabled = !eqEditor.currentEQ.isFlat
+        eqResetButton.isEnabled = shownRecord?.liveDevice != nil && !eqEditor.currentEQ.isFlat
     }
 
     /// Resolve and apply the icon for `shownDevice`: the controller's override
@@ -1174,6 +1231,12 @@ public final class DeviceDetailViewController: NSViewController {
     public var test_eqEditor: EQEditorView { eqEditor }
 
     /// False for This Mac, where the whole Equalizer section is hidden.
+    public var test_visibilityTitle: String? { visibilityPopup.titleOfSelectedItem }
+    public var test_visibilityEnabled: Bool { visibilityPopup.isEnabled }
+    public func test_changeVisibility(_ value: SpeakerMixerVisibility) {
+        visibilityPopup.selectItem(withTitle: value.label)
+        NSApp.sendAction(visibilityPopup.action!, to: visibilityPopup.target, from: visibilityPopup)
+    }
     public var test_eqSectionShown: Bool { !eqWell.isHidden }
 
     /// True while the form column is wrapped in the scroll view the Equalizer
@@ -1320,7 +1383,7 @@ public final class DeviceDetailViewController: NSViewController {
 extension DeviceDetailViewController: EQEditorViewDelegate {
 
     public func eqEditor(_ editor: EQEditorView, didChange eq: DeviceEQ, committed: Bool) {
-        guard let id = shownDevice?.id else { return }
+        guard shownRecord?.liveDevice != nil, let id = shownDevice?.id else { return }
         // Set BEFORE forwarding: `onSetEQ` can fan a snapshot straight back,
         // and until it matches this exact value the snapshot must not win.
         eqEdits[id] = (eq, committed)
@@ -1330,7 +1393,7 @@ extension DeviceDetailViewController: EQEditorViewDelegate {
     }
 
     public func eqEditorDidRequestReset(_ editor: EQEditorView) {
-        guard let id = shownDevice?.id else { return }
+        guard shownRecord?.liveDevice != nil, let id = shownDevice?.id else { return }
         // One committed action, not ten: the editor has already put its own
         // controls back to flat.
         eqEdits[id] = (.flat, true)

@@ -25,6 +25,39 @@ import AppKit
 @MainActor
 @Suite struct DeviceDetailViewTests {
 
+    // Rendering remembered records as live devices would expose invented Equalizer and AirPlay capability controls.
+    @Test func rememberedDetailKeepsSceneRelationsAndSharedVisibility() throws {
+        let controller = makeController()
+        let bt = makeDevice(id: "bt", name: "Saved speaker", kind: .bluetooth)
+        let group = Group(id: "g", name: "Scene", memberIDs: ["bt"], memberVolumes: [:])
+        try controller.saveGroup(group)
+        let library = SpeakerLibraryController(loadPersisted: false)
+        library.update(liveDevices: [bt], groups: [group])
+        library.update(liveDevices: [], groups: [group])
+        let detail = DeviceDetailViewController(groupController: controller,
+            settings: AppSettings(defaults: isolation.isolatedDefaults))
+        detail.speakerLibrary = library
+        detail.loadViewIfNeeded()
+        detail.show(record: try #require(library.record(for: "bt")))
+        #expect(detail.test_metadataStrings["status"] == "Not connected")
+        #expect(detail.test_groupRowTitles == ["Scene"])
+        #expect(!detail.test_eqSectionShown)
+        var eqWrites = 0
+        detail.onSetEQ = { _, _, _ in eqWrites += 1 }
+        detail.test_eqEditor.test_dragBass(to: 3)
+        detail.test_fireResetClick()
+        #expect(eqWrites == 0)
+        #expect(!detail.test_resetEnabled)
+        detail.test_changeVisibility(.always)
+        #expect(library.visibility(for: "bt") == .always)
+        #expect(detail.test_visibilityTitle == "Always")
+        #expect(controller.activeGroupID == nil)
+        let local = makeDevice(id: "mac", kind: .localMac)
+        library.update(liveDevices: [local], groups: [group])
+        detail.show(record: try #require(library.record(for: "mac")))
+        #expect(!detail.test_visibilityEnabled)
+    }
+
     private let isolation = TestIsolation(owner: "DeviceDetailViewTests")
 
     private func tempDirectory() -> URL {
@@ -39,7 +72,9 @@ import AppKit
     /// never the backend, so an un-started, fleet-less backend is enough.
     private func makeController() -> GroupController {
         let backend = MockBackend(fleet: [], staggerDiscovery: false, emitsLevels: false, simulatesDropouts: false)
-        return GroupController(backend: backend, store: GroupStore(directory: tempDirectory()), loadPersisted: false)
+        return GroupController(backend: backend, store: GroupStore(directory: tempDirectory()),
+                               routingStore: RoutingStore(directory: isolation.scratchDir),
+                               settings: AppSettings(defaults: isolation.isolatedDefaults), loadPersisted: false)
     }
 
     private func makeDevice(
@@ -71,10 +106,10 @@ import AppKit
         let detail = DeviceDetailViewController(groupController: makeController(),
                                             settings: AppSettings(defaults: isolation.isolatedDefaults))
         detail.show(device: makeDevice(isAvailable: true))
-        #expect(detail.test_metadataStrings["status"] == "Ready")
+        #expect(detail.test_metadataStrings["status"] == "Available")
 
         detail.refresh(device: makeDevice(isAvailable: false))
-        #expect(detail.test_metadataStrings["status"] == "Not on Wi-Fi")
+        #expect(detail.test_metadataStrings["status"] == "Unavailable")
         #expect(detail.test_shownDeviceID == "d1")
     }
 
@@ -84,7 +119,7 @@ import AppKit
         let detail = DeviceDetailViewController(groupController: makeController(),
                                             settings: AppSettings(defaults: isolation.isolatedDefaults))
         detail.show(device: makeDevice(isAvailable: true, connectionState: .off))
-        #expect(detail.test_metadataStrings["status"] == "Ready",
+        #expect(detail.test_metadataStrings["status"] == "Available",
                 "a reachable idle speaker is something you can use, not something broken")
     }
 
@@ -92,7 +127,7 @@ import AppKit
         let detail = DeviceDetailViewController(groupController: makeController(),
                                             settings: AppSettings(defaults: isolation.isolatedDefaults))
         detail.show(device: makeDevice(isAvailable: false, connectionState: .off))
-        #expect(detail.test_metadataStrings["status"] == "Not on Wi-Fi",
+        #expect(detail.test_metadataStrings["status"] == "Unavailable",
                 "Status folds availability in — it is the only row that reports it")
     }
 
@@ -129,7 +164,7 @@ import AppKit
         let detail = DeviceDetailViewController(groupController: makeController(),
                                             settings: AppSettings(defaults: isolation.isolatedDefaults))
         detail.show(device: makeDevice(connectionState: .failed(.init(cause: .notResponding))))
-        #expect(detail.test_metadataStrings["status"] == "Couldn't connect",
+        #expect(detail.test_metadataStrings["status"] == ConnectionFailure(cause: .notResponding).headline,
                        "matches DeviceRowView's existing failed vocabulary")
     }
 
@@ -926,7 +961,7 @@ import AppKit
         let detail = makeLoadedPane(device: makeDevice(id: "office", name: "Office"))
         let fields = detail.view.descendantTextFields()
 
-        for text in ["Office", "Ready", "AirPlay Speaker", "AirPlay 2"] {
+        for text in ["Office", "Available", "AirPlay Speaker", "AirPlay 2"] {
             let matches = fields.filter { $0.stringValue == text }
             #expect(!matches.isEmpty, "expected a field carrying \"\(text)\"")
             for field in matches {

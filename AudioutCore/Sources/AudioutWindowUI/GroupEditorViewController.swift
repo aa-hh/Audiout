@@ -266,6 +266,8 @@ public final class GroupEditorViewController: NSViewController {
     private var iconWellSymbolName: String?
 
     /// Membership rows keyed by device id, so a test can read/drive them.
+    public var speakerLibrary: SpeakerLibraryController?
+    private var presentationByID: [String: SpeakerPresentationRecord] = [:]
     private var rowsByID: [String: MembershipRowView] = [:]
     /// The devices currently offered as membership candidates, in order
     /// (available devices, plus unavailable devices only while they remain
@@ -730,6 +732,15 @@ public final class GroupEditorViewController: NSViewController {
     /// keyboard focus several times a second during discovery. An unchanged
     /// ``EditorProjection`` means there is nothing to repaint.
     public func show(groupID: String, devices: [Device]) {
+        let records: [SpeakerPresentationRecord]
+        if let speakerLibrary { records = speakerLibrary.records }
+        else {
+            let library = SpeakerLibraryController(loadPersisted: false)
+            library.update(liveDevices: devices, groups: groupController.groups)
+            records = library.records
+        }
+        presentationByID = Dictionary(uniqueKeysWithValues: records.map { ($0.id, $0) })
+        let devices = records.map(\.renderingDevice)
         guard let group = groupController.groups.first(where: { $0.id == groupID }) else { return }
         guard editorProjection(for: group, devices: devices) != lastRenderedProjection else {
             // Nothing to repaint, but a later membership toggle
@@ -783,7 +794,7 @@ public final class GroupEditorViewController: NSViewController {
         // that raises while its membership is being edited. An inactive group
         // moves nothing either way, so its line only says edits are saved.
         playingBadge.isHidden = !isActive
-        reassuranceLabel.stringValue = isActive ? Self.savedAsYouGoActive : Self.savedAsYouGo
+        reassuranceLabel.stringValue = "Scene membership only. Mixer visibility is managed in Speakers."
         // The origin hook's tone follows the same active-group truth the well's
         // gold ring does (`railHookAnchor`), so repaint the rail with it.
         railOverlay.needsDisplay = true
@@ -806,6 +817,8 @@ public final class GroupEditorViewController: NSViewController {
             let symbolName: String
             let isMember: Bool
             let railArmed: Bool
+            let status: SpeakerPresentationStatus?
+            let visibilityContext: String?
         }
         let groupID: String
         let groupName: String
@@ -839,7 +852,9 @@ public final class GroupEditorViewController: NSViewController {
                         ?? device.kind.symbolName,
                     isMember: memberSet.contains(device.id),
                     railArmed: railArmed(for: device, memberSet: memberSet,
-                                         isActiveGroup: isActive))
+                                         isActiveGroup: isActive),
+                    status: presentationByID[device.id]?.status,
+                    visibilityContext: presentationByID[device.id]?.mixerVisibilityContext)
             })
     }
 
@@ -895,6 +910,7 @@ public final class GroupEditorViewController: NSViewController {
             row.apply(device: device,
                       checked: memberSet.contains(device.id),
                       iconSymbolName: deviceIconController?.symbolName(for: device))
+            row.applyPresentation(presentationByID[device.id])
             row.railArmed = railArmed(for: device, memberSet: memberSet,
                                       isActiveGroup: isActiveGroup)
             // `apply` re-enables the checkbox but doesn't know about the sole-
@@ -931,6 +947,7 @@ public final class GroupEditorViewController: NSViewController {
                 checked: memberSet.contains(device.id),
                 iconSymbolName: deviceIconController?.symbolName(for: device),
                 surface: .warmPane)
+            row.applyPresentation(presentationByID[device.id])
             row.railArmed = railArmed(for: device, memberSet: memberSet,
                                       isActiveGroup: isActiveGroup)
             row.onToggle = { [weak self] deviceID, isChecked in
@@ -1167,7 +1184,7 @@ public final class GroupEditorViewController: NSViewController {
             if !group.memberIDs.contains(deviceID) {
                 group.memberIDs.append(deviceID)
                 // Remember the device's current volume for this membership.
-                if let device = candidateDevices.first(where: { $0.id == deviceID }) {
+                if let device = groupController.devices.first(where: { $0.id == deviceID }) {
                     group.memberVolumes[deviceID] = device.volume
                 }
             }
@@ -1453,6 +1470,7 @@ public final class GroupEditorViewController: NSViewController {
 
     /// True when "Delete scene…" is currently visible (always true — the
     /// editor is edit-only).
+    public func test_presentationText(for id: String) -> String? { rowsByID[id]?.test_presentationText }
     public var test_deleteButtonVisible: Bool { !deleteButton.isHidden }
 
     /// The primary button's title — "Done" at rest, "Save" while the name

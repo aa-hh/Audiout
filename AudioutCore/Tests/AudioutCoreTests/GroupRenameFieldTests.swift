@@ -287,14 +287,13 @@ import AppKit
         }
         fieldEditor.string = "Kitch"
 
-        // A real change elsewhere in the snapshot, so the pane's gate opens and
-        // `render` genuinely runs — this is not a test of the gate.
+        // A real change pushed through the host, so the library and the pane's gate both see it and `render` genuinely runs — this is not a test of the gate.
         let renamed = (0..<4).map {
             Device(id: "d\($0)", name: $0 == 1 ? "Device 1 (renamed)" : "Device \($0)",
                    kind: .generic, isAvailable: true)
         }
         let before = editor.test_renderCount
-        editor.show(groupID: group.id, devices: renamed)
+        window.update(devices: renamed)
 
         #expect(editor.test_renderCount == before + 1, "the pane really did repaint")
         #expect(fieldEditor.string == "Kitch",

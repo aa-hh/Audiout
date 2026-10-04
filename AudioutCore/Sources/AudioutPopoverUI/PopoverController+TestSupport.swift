@@ -107,16 +107,16 @@ extension PopoverController {
     /// behavior).
     public func test_tapApplicationsFooterRemove() { applicationsFooter.test_tapRemove() }
 
-    /// Whether the Output Devices card's "+" footer strip is currently mounted
-    /// as the LAST row of that card — the assertion surface for the strip's
-    /// position (it moved out of the header row, 2026-08-08).
-    public var test_devicesFooterIsLastCardRow: Bool {
-        panel.test_cardRows(title: Self.outputDevicesCardTitle).last === devicesFooter
+    public var test_pairBluetoothIsLastCardRow: Bool {
+        panel.test_cardRows(title: Self.outputDevicesCardTitle).last === pairBluetoothButton?.superview
     }
-
-    /// Simulate tapping the Output Devices footer's "+" — the same closure a
-    /// real click fires (the on-screen `popUp` itself stays headless-gated).
-    public func test_tapDevicesFooterAdd() { devicesFooter.test_tapAdd() }
+    public var test_manageSpeakersButton: NSButton? {
+        panel.test_leadingActionButton(title: Self.outputDevicesCardTitle)
+    }
+    public func test_tapManageSpeakers() { test_manageSpeakersButton?.performClick(nil) }
+    public func test_tapPairBluetooth() { pairBluetoothButton?.performClick(nil) }
+    public var test_pairBluetoothButton: NSButton? { pairBluetoothButton }
+    public var test_speakerLibrary: SpeakerLibraryController { speakerLibrary }
 
     /// Whether saving the current selection as a group is possible (this backs the
     /// Main Out selector's group-routing entries — a saved group becomes a
@@ -343,16 +343,6 @@ extension PopoverController {
     /// order — the visibility/collapse assertion surface.
     public func test_renderedDeviceIDs() -> [String] { renderedDeviceOrder().map(\.id) }
 
-    /// The Output Devices "+" menu, built exactly as a live click builds it.
-    /// Tests dispatch its items via `NSMenu.performActionForItem(at:)` — real
-    /// AppKit menu dispatch, per the row-selection lesson (never a bypass seam).
-    public func test_outputDevicesPlusMenu() -> NSMenu { makeOutputDevicesPlusMenu() }
-    /// The footer "−" menu a real click would pop (headless twin of
-    /// `presentOutputDevicesMinusMenu`).
-    public func test_outputDevicesMinusMenu() -> NSMenu { makeOutputDevicesMinusMenu() }
-    /// Whether the devices footer's "−" segment is enabled.
-    public var test_devicesFooterRemoveEnabled: Bool { devicesFooter.isRemoveEnabled }
-
     /// The device id whose align-by-ear tick is currently running, if any
     /// (BT-OFFSET-UI) — asserts one-at-a-time + the close/auto-stop paths.
     public func test_alignTickDeviceID() -> String? { alignTickDeviceID }
@@ -361,41 +351,10 @@ extension PopoverController {
     /// sort), top to bottom; empty when the subsection is hidden.
     public func test_bluetoothRowOrder() -> [String] { renderedBluetoothOrder }
 
-    /// Whether the last rebuild mounted the Bluetooth empty-state Connect row
-    /// (BT-LIST).
-    public func test_bluetoothConnectRowShown() -> Bool { renderedBTConnectShown }
-
     /// Whether the last rebuild printed the card header's "Offset" column
     /// title (2026-08-28: the legend lives on the card header line, once —
     /// never on a subsection header).
     public func test_offsetColumnTitleShown() -> Bool { renderedOffsetColumnTitle }
-
-    /// Fire the Bluetooth empty-state Connect button through real AppKit
-    /// target/action dispatch (never a bypass seam).
-    public func test_fireBluetoothConnectClick() { bluetoothConnectButton?.performClick(nil) }
-
-    /// Whether the mounted Connect row carries its leading glyph — the half of
-    /// "reads as clickable" a headless run can actually see.
-    public var test_bluetoothConnectRowHasGlyph: Bool { bluetoothConnectButton?.image != nil }
-
-    /// The Connect row's visible title and the label VoiceOver speaks. They
-    /// differ on purpose: the subsection header carries "Bluetooth" for the
-    /// eye, the accessibility label carries it for the ear.
-    public var test_bluetoothConnectRowTitles: (visible: String, spoken: String?)? {
-        guard let button = bluetoothConnectButton else { return nil }
-        return (button.title, button.accessibilityLabel())
-    }
-
-    /// Leading inset of the Connect row's button from its own row's leading
-    /// edge — pinned to `firstElementLeading(indented: false)` (where a
-    /// device row's ICON sits), not the deeper `nameColumnLeading` (where a
-    /// NAME sits), so the "+" reads as one indent step, not two. `nil` if the
-    /// row isn't mounted. Force a layout pass first (e.g. via
-    /// `test_panelView`) so the frame is current.
-    public var test_bluetoothConnectRowLeadingInset: CGFloat? {
-        guard let button = bluetoothConnectButton, let wrap = button.superview else { return nil }
-        return button.frame.minX - wrap.bounds.minX
-    }
 
     /// The AirPlay empty-state line the last rebuild rendered, `nil` when it
     /// rendered none.

@@ -630,7 +630,7 @@ final class BTDeviceSink: @unchecked Sendable {
     private let lastRenderCycleNanosPtr = UnsafeMutablePointer<Int64>.allocate(capacity: 1)
     private let lastEnqueueNanosPtr = UnsafeMutablePointer<Int64>.allocate(capacity: 1)
     /// Frames the ring holds between capture deliveries once released: its room
-    /// right after `catchUpToTargetLocked`, less one chunk for the capture lag,
+    /// right after `catchUpToTargetLocked`, less one render cycle (the sink's stand-in for a capture chunk),
     /// moved by every applied trim since. A forward re-alignment's margin never
     /// exceeds it. Written under `stateLock` (release on the render thread,
     /// trims on the control thread) and read lock-free by the render thread, so

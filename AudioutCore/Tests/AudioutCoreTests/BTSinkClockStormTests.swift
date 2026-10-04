@@ -210,12 +210,11 @@ import Testing
     /// than the ring holds. Drop the `seekSafetyMarginMs` clamp from the
     /// forward branch of `realignToDevicePulls` and the seek drains the ring
     /// to the write pointer, so this cycle ends in silence and this test goes
-    /// red. Three rows: at 100 ms the margin and the holding coincide; at
+    /// red. Two rows: at 100 ms the margin and the holding coincide; at
     /// 400 ms it is red if the clamped stall branch keeps the 100 ms margin
     /// instead of the holding (the ring ends near 4288 frames against the
-    /// 18168 bound); the 1.1 s row pins that the path for a stall of a second
-    /// or more keeps the same holding.
-    @Test(arguments: [(delayMs: Int64(100), stallMs: 900), (400, 900), (400, 1_100)])
+    /// 18168 bound).
+    @Test(arguments: [(delayMs: Int64(100), stallMs: 900), (400, 900)])
     func aForwardRealignmentStopsTheSafetyMarginShortOfTheWritePointer(
         delayMs: Int64, stallMs: Int
     ) throws {

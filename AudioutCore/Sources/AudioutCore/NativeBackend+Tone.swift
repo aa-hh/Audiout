@@ -538,7 +538,6 @@ extension NativeBackend {
             // it is selected, so everything else takes its one delay hit now
             // rather than ten seconds into the song.
             let castIDs = ids.filter { self.known[$0]?.isCast == true }.sorted()
-            let castSelectionChanged = castIDs != self.castSelectedIDs
             self.castSelectedIDs = castIDs
             let castTermMoved = self.updateCastRoomDelayLocked()
 
@@ -629,38 +628,13 @@ extension NativeBackend {
                 self.publishAirPlayPreDelayLocked()
             }
 
-            // CAST-OUT (R-partition, third arm): selected `.cast` ids drive the
-            // Cast session manager — same decide-here/apply-on-`captureControlQueue`
-            // split as BT, and an unchanged id list enqueues nothing. An empty
-            // `castIDs` on an already-empty selection is a no-op.
-            //
-            // The row's connect story, twin of the BT arm's: a newly-selected
-            // AVAILABLE Cast id breathes until its receiver reports PLAYING; a
-            // newly-selected UNAVAILABLE one stays `.off`. A deselect ends the
-            // hold but leaves a `.failed` story standing, so "Try again" keeps
-            // explaining what went wrong.
-            for id in previouslySelected.symmetricDifference(ids)
-            where self.known[id]?.isCast == true {
-                if ids.contains(id) {
-                    if self.known[id]?.isAvailable == true {
-                        self.setConnectionState(.connecting, for: id)
-                    }
-                } else {
-                    self.castPlaying.remove(id)
-                    if case .failed = self.known[id]?.connectionState {} else {
-                        self.setConnectionState(.off, for: id)
-                    }
-                }
-            }
-            if castSelectionChanged {
-                let records = castIDs.compactMap { self.castRecords[$0] }
-                let levels = Dictionary(
-                    uniqueKeysWithValues: castIDs.map { ($0, self.castLevel(forID: $0)) })
-                self.captureControlQueue.async { [weak self] in
-                    self?.applyCastTransition(
-                        enable: !castIDs.isEmpty, records: records, levels: levels)
-                }
-            }
+            // CAST-OUT (R-partition, third arm): the selected `.cast` ids join
+            // the per-app routes' receivers in one decision about which Cast
+            // sessions exist and who feeds each — same decide-here/apply-on-
+            // `captureControlQueue` split as BT. A receiver that a route still
+            // targets moves to the app's audio rather than losing its session,
+            // and the row story (breathe, `.off`, keep `.failed`) lives there.
+            self.reconcileCastSessionsLocked()
 
             // The selection just moved, so the set of devices the plan carries
             // moved with it — and, for a deselected speaker with no session and
@@ -804,13 +778,14 @@ extension NativeBackend {
     }
 
     /// CAST-OUT: handle `retryOutput` for a `.cast` id. Returns `false` for
-    /// non-Cast ids (the AirPlay path runs instead). Unlike the BT arm,
-    /// membership IS required — nothing streams to an unselected receiver, so a
-    /// retry there could only open a session with no audio behind it.
+    /// non-Cast ids (the AirPlay path runs instead). Unlike the BT arm, the
+    /// receiver must hold a session — whole-system membership OR a live per-app
+    /// route — because nothing streams to any other receiver, so a retry there
+    /// could only open a session with no audio behind it.
     private func retryCastOutput(_ id: String) -> Bool {
         stateQueue.sync {
             guard self.known[id]?.isCast == true else { return false }
-            if self.expectedSelected.contains(id) {
+            if self.castOwnedLocked(id) {
                 // Eager `.connecting`, mirroring both arms above: immediate
                 // spinner, and the `.failed → .connecting` edge marks a fresh
                 // user-initiated attempt for the row's failure-episode semantics.
@@ -848,12 +823,12 @@ extension NativeBackend {
         case .connecting:
             // Only while still desired: a late `.connecting` from a session
             // being torn down must not resurrect a spinner on a deselected row.
-            if expectedSelected.contains(id) { setConnectionState(.connecting, for: id) }
+            if castOwnedLocked(id) { setConnectionState(.connecting, for: id) }
         case .playing:
             // Same "only while still desired" test as `.connecting`: a receiver's
             // first PLAYING can land after a deselect has already written `.off`,
             // and an unguarded write would show a deselected row as connected.
-            guard expectedSelected.contains(id) else { break }
+            guard castOwnedLocked(id) else { break }
             castPlaying.insert(id)
             setConnectionState(.connected, for: id)
         case .failed(let failure):

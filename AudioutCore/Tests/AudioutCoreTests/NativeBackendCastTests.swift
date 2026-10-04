@@ -50,6 +50,8 @@ import CoreAudio
         private var _onVolumeLagChange: (@Sendable (String, Int?) -> Void)?
         private var _onLeadSample: (@Sendable (String, Int) -> Void)?
         private var _deviceSets: [[CastDeviceRecord]] = []
+        private var _sourceSets: [[String: CastFeedSource]] = []
+        private var _perAppWrites: [(id: String, bytes: Int, fills: Set<UInt8>)] = []
         private var _levels: [(level: Double, id: String)] = []
         private var _retries: [String] = []
         private var _stopAllCount = 0
@@ -69,6 +71,11 @@ import CoreAudio
             set { lock.withLock { _onLeadSample = newValue } }
         }
         var deviceSets: [[CastDeviceRecord]] { lock.withLock { _deviceSets } }
+        /// The ownership handed over with each ``deviceSets`` entry, in step.
+        var sourceSets: [[String: CastFeedSource]] { lock.withLock { _sourceSets } }
+        /// Every per-app block, by device id, byte count and the distinct byte
+        /// values it carried (an app's fingerprint fill).
+        var perAppWrites: [(id: String, bytes: Int, fills: Set<UInt8>)] { lock.withLock { _perAppWrites } }
         var levels: [(level: Double, id: String)] { lock.withLock { _levels } }
         var retries: [String] { lock.withLock { _retries } }
         var stopAllCount: Int { lock.withLock { _stopAllCount } }
@@ -76,7 +83,15 @@ import CoreAudio
         var castUserOffsets: [(ms: Int, id: String)] { lock.withLock { _castUserOffsets } }
         private var _castUserOffsets: [(ms: Int, id: String)] = []
 
-        func setDevices(_ records: [CastDeviceRecord]) { lock.withLock { _deviceSets.append(records) } }
+        func setDevices(_ records: [CastDeviceRecord], sources: [String: CastFeedSource]) {
+            lock.withLock {
+                _deviceSets.append(records)
+                _sourceSets.append(sources)
+            }
+        }
+        func writePerApp(pcm: Data, toDevice id: String) {
+            lock.withLock { _perAppWrites.append((id, pcm.count, Set(pcm))) }
+        }
         func setLevel(_ level: Double, forDevice id: String) { lock.withLock { _levels.append((level, id)) } }
         func setCastUserOffsetMs(_ ms: Int, forDeviceID id: String) {
             lock.withLock { _castUserOffsets.append((ms, id)) }
@@ -134,7 +149,14 @@ import CoreAudio
         }
     }
 
+    /// Counts the two engine calls a Cast-only per-app stream must never make.
     private final class NoOpEngine: EngineControlling, @unchecked Sendable {
+        private let lock = NSLock()
+        private var _writes = 0
+        private var _streamAdds = 0
+        var writes: Int { lock.withLock { _writes } }
+        var streamAdds: Int { lock.withLock { _streamAdds } }
+
         func start() async throws {}
         func stop() async {}
         func updateDiscovery(_ descriptor: DeviceDescriptor) async throws -> OutputID {
@@ -142,11 +164,15 @@ import CoreAudio
         }
         func removeDiscovery(_ descriptor: DeviceDescriptor) async {}
         func addOutput(_ id: OutputID) async throws {}
-        func addOutput(_ id: OutputID, streamId: UInt32) async throws {}
+        func addOutput(_ id: OutputID, streamId: UInt32) async throws {
+            lock.withLock { _streamAdds += 1 }
+        }
         func removeOutput(_ id: OutputID) async throws {}
         func setVolume(_ id: OutputID, _ volume: Double) async throws {}
         func setStartBufferMs(_ ms: Int) async {}
-        func write(pcm: Data, streamId: UInt32, pts: timespec) {}
+        func write(pcm: Data, streamId: UInt32, pts: timespec) {
+            lock.withLock { _writes += 1 }
+        }
         func makeStateStream() -> AsyncStream<(OutputID, OutputState)> { AsyncStream { _ in } }
         func makeRemoteEventStream() -> AsyncStream<RemoteEvent> { AsyncStream { _ in } }
         var dacpID: UInt64 { 0 }
@@ -235,6 +261,7 @@ import CoreAudio
         let capture: FakeCapture
         let bt: FakeBTEnumerator
         let discovery: NoOpDiscovery
+        let engine: NoOpEngine
     }
 
     /// `castAbsenceGrace` defaults SHORT so the browse-debounce never adds
@@ -244,15 +271,17 @@ import CoreAudio
         withBT: Bool = false,
         silenceFallbackDelay: TimeInterval = NativeBackend.defaultSilenceFallbackDelay,
         castAbsenceGrace: TimeInterval = 0.05,
-        castOffsetStore: BTTrimStore? = nil
+        castOffsetStore: BTTrimStore? = nil,
+        injectedPerAppCapture: PerAppCaptureCoordinator? = nil
     ) -> Rig {
+        let engine = NoOpEngine()
         let cast = FakeCastEnumerator()
         let manager = FakeCastOutputManager()
         let capture = FakeCapture()
         let bt = FakeBTEnumerator()
         let discovery = NoOpDiscovery()
         let backend = NativeBackend(
-            engineControl: NoOpEngine(),
+            engineControl: engine,
             discoverySource: discovery,
             btEnumerator: withBT ? bt : nil,
             castEnumerator: cast,
@@ -260,6 +289,7 @@ import CoreAudio
             castOffsetStore: castOffsetStore,
             dacpEndpoint: FakeDACPEndpoint(),
             systemVolume: NoOpSystemVolume(),
+            injectedPerAppCapture: injectedPerAppCapture,
             silenceFallbackDelay: silenceFallbackDelay,
             castAbsenceGrace: castAbsenceGrace,
             aggregateControl: NoOpAggregateControl(),
@@ -273,7 +303,87 @@ import CoreAudio
         backend.captureCoordinator = capture
         backend.start()
         return Rig(backend: backend, cast: cast, manager: manager, capture: capture, bt: bt,
-                   discovery: discovery)
+                   discovery: discovery, engine: engine)
+    }
+
+    // MARK: Per-app capture doubles (per-suite copies of `NativeBackendTests`')
+
+    /// A `ProcessAudioTap` that always succeeds, registers itself under the
+    /// bundle id it was started for, and speaks the engine's S16 format, so a
+    /// test can push a fingerprinted buffer into one app's tap.
+    private final class BundleTaggingTap: ProcessAudioTap, @unchecked Sendable {
+        var onBuffer: (@Sendable (CapturedBuffer) -> Void)?
+        var onDefaultDeviceChanged: (@Sendable () -> Void)?
+        var onRegister: (@Sendable (String) -> Void)?
+        func createAndStart(processes: Set<AudioProcess>, bundleID: String, muteBehavior: TapMuteBehavior) throws -> TapFormat {
+            onRegister?(bundleID)
+            return TapFormat(sampleRate: 44100, channels: 2, bitsPerSample: 16, isFloat: false, isInterleaved: true)
+        }
+        func teardown() {}
+        func push(_ buffer: CapturedBuffer) { onBuffer?(buffer) }
+    }
+
+    /// Thread-safe bundleID -> tap registry, populated by `BundleTaggingTap.onRegister`.
+    private final class TapRegistry: @unchecked Sendable {
+        private let lock = NSLock()
+        private var byBundleID: [String: BundleTaggingTap] = [:]
+        func register(_ bundleID: String, _ tap: BundleTaggingTap) { lock.withLock { byBundleID[bundleID] = tap } }
+        func tap(for bundleID: String) -> BundleTaggingTap? { lock.withLock { byBundleID[bundleID] } }
+    }
+
+    /// A scripted process list; settable, so a test can launch an app that was
+    /// not running when its route was pushed.
+    private final class FakeProcessEnumerator: AudioProcessEnumerating, @unchecked Sendable {
+        private let lock = NSLock()
+        private var _processes: [RawAudioProcess]
+        init(processes: [RawAudioProcess]) { _processes = processes }
+        var processes: [RawAudioProcess] {
+            get { lock.withLock { _processes } }
+            set { lock.withLock { _processes = newValue } }
+        }
+        func enumerateProcesses() -> [RawAudioProcess] { processes }
+        func parentPID(of pid: pid_t) -> pid_t? { nil }
+    }
+
+    /// Builds an `AudioProcessResolver` where each bundle id resolves to
+    /// exactly ONE process object, at `pid = objectID`.
+    private func singleProcessResolver(_ bundleIDsToObjectIDs: [String: AudioObjectID]) -> AudioProcessResolver {
+        let processes = bundleIDsToObjectIDs.map { bundleID, objectID in
+            RawAudioProcess(objectID: objectID, pid: pid_t(objectID), bundleID: bundleID)
+        }
+        return AudioProcessResolver(enumerator: FakeProcessEnumerator(processes: processes))
+    }
+
+    /// A per-app capture over registering taps. Each listed bundle id resolves
+    /// to its own process; pass `enumerator` instead to script the list.
+    private func registeringPerAppCapture(
+        bundleIDs: [String], into registry: TapRegistry,
+        enumerator: FakeProcessEnumerator? = nil
+    ) -> PerAppCaptureCoordinator {
+        var mapping: [String: AudioObjectID] = [:]
+        for (offset, bundleID) in bundleIDs.enumerated() {
+            mapping[bundleID] = AudioObjectID(9500 + offset)
+        }
+        return PerAppCaptureCoordinator(
+            makeTap: {
+                let tap = BundleTaggingTap()
+                tap.onRegister = { bundleID in registry.register(bundleID, tap) }
+                return tap
+            },
+            processResolver: enumerator.map { AudioProcessResolver(enumerator: $0) }
+                ?? singleProcessResolver(mapping),
+            muteBehavior: .mutedWhenTapped)
+    }
+
+    /// A single-second, fixed-fill-byte, interleaved-S16-stereo `CapturedBuffer`.
+    private func fingerprintedBuffer(fill: UInt8, frames: Int, atSecond sec: Int) -> CapturedBuffer {
+        let data = Data(repeating: fill, count: frames * 2 /* ch */ * 2 /* bytes/sample */)
+        return CapturedBuffer(channelData: [data], frameCount: frames, pts: timespec(tv_sec: sec, tv_nsec: 0))
+    }
+
+    /// A `.device(id:)` route fixture.
+    private func route(_ bundleID: String, name: String, toDevice deviceID: String, volume: Int = 100) -> AppRoute {
+        AppRoute(bundleID: bundleID, displayName: name, destination: .device(id: deviceID), volume: volume)
     }
 
     /// Inert `LogStreamSpawning` stand-in (D7) — see `NativeBackendTests`' twin.
@@ -885,5 +995,318 @@ import CoreAudio
 
         #expect(levels.lastDeviceLevel(Self.record.id) == nil,
                 "a selected-but-silent Cast receiver must not light its bar")
+    }
+
+    // MARK: - Per-app Cast routes
+    //
+    // A Cast receiver can be one app's `.device` destination: its session is
+    // owned by the per-app mixer (`CastFeedSource.perApp`) unless whole-system
+    // selection claims it, and it never joins `castSelectedIDs`.
+
+    /// A second receiver, for the tests that address two at once.
+    private static let otherRecord = CastDeviceRecord(
+        id: "def789", friendlyName: "Bedroom TV", model: "Google TV Streamer",
+        endpoint: .hostPort(host: "192.168.4.56", port: 8009))
+
+    /// Every connection state the backend reports for one id, in order.
+    private final class StateLog: @unchecked Sendable {
+        private let lock = NSLock()
+        private var _states: [ConnectionState] = []
+        var states: [ConnectionState] { lock.withLock { _states } }
+        func record(_ event: BackendEvent, id: String) {
+            if case .deviceUpdated(let device) = event, device.id == id {
+                lock.withLock { _states.append(device.connectionState) }
+            }
+        }
+    }
+
+    private func logStates(_ backend: NativeBackend, id: String) -> (StateLog, Task<Void, Never>) {
+        let log = StateLog()
+        let stream = backend.makeEventStream()
+        let task = Task { for await event in stream { log.record(event, id: id) } }
+        return (log, task)
+    }
+
+    private static func isCapturing(_ capture: PerAppCaptureCoordinator, _ bundleID: String) -> Bool {
+        if case .capturing = capture.state(for: bundleID) { return true }
+        return false
+    }
+
+    /// Row 1: two apps on two receivers get two per-app sessions, and each
+    /// receiver hears only its own app with nothing written to the engine.
+    /// Turns red if `onMixedBuffer` stops addressing `writePerApp` by the
+    /// stream's own Cast ids (`PerAppStreamDelivery.castIDs`).
+    @Test func twoAppsOnTwoCastReceiversEachHearOnlyTheirOwnApp() {
+        let registry = TapRegistry()
+        let capture = registeringPerAppCapture(bundleIDs: ["com.a", "com.b"], into: registry)
+        let rig = makeBackend(injectedPerAppCapture: capture)
+        defer { rig.backend.stop() }
+        let x = Self.record.id, y = Self.otherRecord.id
+        rig.cast.fire([Self.record, Self.otherRecord])
+        waitFor { Self.device(rig.backend, x) != nil && Self.device(rig.backend, y) != nil }
+
+        rig.backend.updateAppRoutes([
+            route("com.a", name: "A", toDevice: x), route("com.b", name: "B", toDevice: y),
+        ])
+        waitFor { rig.manager.sourceSets.last == [x: .perApp, y: .perApp] }
+        waitFor { Self.isCapturing(capture, "com.a") && Self.isCapturing(capture, "com.b") }
+        registry.tap(for: "com.a")?.push(fingerprintedBuffer(fill: 0xAA, frames: 1000, atSecond: 1))
+        registry.tap(for: "com.b")?.push(fingerprintedBuffer(fill: 0xBB, frames: 1000, atSecond: 1))
+        waitFor { Set(rig.manager.perAppWrites.map(\.id)) == [x, y] }
+
+        let toX = rig.manager.perAppWrites.filter { $0.id == x }
+        let toY = rig.manager.perAppWrites.filter { $0.id == y }
+        #expect(toX.contains { $0.fills.contains(0xAA) } && !toX.contains { $0.fills.contains(0xBB) },
+                "receiver X hears app A and never app B")
+        #expect(toY.contains { $0.fills.contains(0xBB) } && !toY.contains { $0.fills.contains(0xAA) },
+                "receiver Y hears app B and never app A")
+        #expect(rig.manager.deviceSets.count == 1, "both sessions start in one decision")
+        #expect(rig.engine.writes == 0, "a Cast-only stream never writes to the engine")
+        #expect(rig.backend.test_castSelectedIDs.isEmpty)
+    }
+
+    /// Row 3: whole-system claims a receiver an app is routed to, then lets it
+    /// go. Every call keeps the session; only its producer flips, and the row
+    /// never goes `.off`. Turns red if `reconcileCastSessionsLocked` drops a
+    /// receiver that changes producer instead of re-labelling it.
+    @Test func aWholeSystemClaimAndReleaseKeepsTheRoutedReceiversSession() {
+        let rig = makeBackend()
+        defer { rig.backend.stop() }
+        let x = Self.record.id
+        rig.cast.fire([Self.record])
+        waitFor { Self.device(rig.backend, x) != nil }
+        let (log, task) = logStates(rig.backend, id: x); defer { task.cancel() }
+
+        rig.backend.updateAppRoutes([route("com.a", name: "A", toDevice: x)])
+        waitFor { rig.manager.sourceSets.count == 1 }
+        rig.backend.setOutputSet([x])
+        waitFor { rig.manager.sourceSets.count == 2 }
+        rig.backend.setOutputSet([])
+        waitFor { rig.manager.sourceSets.count == 3 }
+        SuiteWait.settle(0.3)
+
+        #expect(rig.manager.sourceSets == [[x: .perApp], [x: .wholeSystem], [x: .perApp]])
+        #expect(rig.manager.deviceSets.allSatisfy { $0 == [Self.record] },
+                "no call ever leaves the receiver out, so its session is never torn down")
+        #expect(!log.states.contains(.off), "got \(log.states)")
+        #expect(Self.device(rig.backend, x)?.connectionState == .connecting)
+        #expect(rig.backend.test_castSelectedIDs.isEmpty)
+    }
+
+    /// Row 4: turning whole-system Cast off while an app stays routed to the
+    /// receiver keeps its session as per-app and detaches the fan-out slot.
+    /// Turns red if `applyCastTransition` keeps the slot attached with no
+    /// whole-system receiver, or tears the session down on deselect.
+    @Test func wholeSystemCastOffHandsTheReceiverToItsRouteAndDetachesTheFanOut() {
+        let rig = makeBackend()
+        defer { rig.backend.stop() }
+        let x = Self.record.id
+        rig.cast.fire([Self.record])
+        waitFor { Self.device(rig.backend, x) != nil }
+
+        rig.backend.setOutputSet([x])
+        waitFor { rig.manager.sourceSets.last == [x: .wholeSystem] }
+        #expect(rig.capture.castSinkCalls.last?.isNil == false)
+        rig.backend.updateAppRoutes([route("com.a", name: "A", toDevice: x)])
+        SuiteWait.settle(0.3)
+        #expect(rig.manager.sourceSets.count == 1, "a claimed receiver stays whole-system")
+
+        rig.backend.setOutputSet([])
+        waitFor { rig.manager.sourceSets.last == [x: .perApp] }
+        #expect(rig.manager.deviceSets.last == [Self.record])
+        waitFor { rig.capture.castSinkCalls.last?.isNil == true }
+        #expect(rig.capture.castSinkCalls.count == 2)
+        #expect(rig.backend.test_castSelectedIDs.isEmpty)
+    }
+
+    /// Row 5: the session follows the route, not the app. It arms while the
+    /// app is not running, survives the app quitting, and is fed again after
+    /// a relaunch with no new `setDevices`. Turns red if Cast desire in
+    /// `reconcileCastSessionsLocked` keys on capture state instead of the route.
+    @Test func aRoutedReceiverKeepsItsSessionAcrossTheAppQuittingAndRelaunching() {
+        let registry = TapRegistry()
+        let processes = FakeProcessEnumerator(processes: [])
+        let capture = registeringPerAppCapture(bundleIDs: [], into: registry, enumerator: processes)
+        let rig = makeBackend(injectedPerAppCapture: capture)
+        defer { rig.backend.stop() }
+        let x = Self.record.id
+        rig.cast.fire([Self.record])
+        waitFor { Self.device(rig.backend, x) != nil }
+
+        rig.backend.updateAppRoutes([route("com.a", name: "A", toDevice: x)])
+        waitFor { rig.manager.sourceSets.last == [x: .perApp] }
+        waitFor { if case .failed = capture.state(for: "com.a") { return true }; return false }
+        let armed = rig.manager.deviceSets.count
+
+        rig.backend.handleAppTerminated(bundleID: "com.a")
+        SuiteWait.settle(0.2)
+        #expect(rig.manager.deviceSets.count == armed, "a quit app keeps its receiver's session")
+
+        processes.processes = [RawAudioProcess(objectID: 9500, pid: 9500, bundleID: "com.a")]
+        rig.backend.handleAppLaunched(bundleID: "com.a")
+        waitFor { Self.isCapturing(capture, "com.a") }
+        registry.tap(for: "com.a")?.push(fingerprintedBuffer(fill: 0xAA, frames: 1000, atSecond: 1))
+        waitFor { rig.manager.perAppWrites.contains { $0.id == x && $0.bytes > 0 } }
+        #expect(rig.manager.deviceSets.count == armed, "nor does the relaunch restart it")
+    }
+
+    /// Row 6: a route pushed before its receiver is discovered arms nothing,
+    /// then engages the moment the browse finds it. Turns red if
+    /// `applyCastSnapshots` stops replaying routes for a NEW receiver.
+    @Test func aRoutePushedBeforeDiscoveryEngagesWhenTheReceiverAppears() {
+        let rig = makeBackend()
+        defer { rig.backend.stop() }
+        let x = Self.record.id
+
+        rig.backend.updateAppRoutes([route("com.a", name: "A", toDevice: x)])
+        SuiteWait.settle(0.3)
+        #expect(rig.manager.deviceSets.isEmpty, "an unknown receiver gets no session")
+
+        rig.cast.fire([Self.record])
+        waitFor { rig.manager.deviceSets.last == [Self.record] }
+        #expect(rig.manager.sourceSets.last == [x: .perApp])
+    }
+
+    /// Row 7: a routed receiver that leaves the network past the grace loses
+    /// its session and goes `.off`; the route stays, so its return re-arms it.
+    /// Turns red if `reconcileCastSessionsLocked` stops requiring the receiver
+    /// to be reachable.
+    @Test func aRoutedReceiverThatLeavesLosesItsSessionAndGetsItBackOnReturn() {
+        let rig = makeBackend(castAbsenceGrace: 0.05)
+        defer { rig.backend.stop() }
+        let x = Self.record.id
+        rig.cast.fire([Self.record])
+        waitFor { Self.device(rig.backend, x) != nil }
+        rig.backend.updateAppRoutes([route("com.a", name: "A", toDevice: x)])
+        waitFor { rig.manager.deviceSets.last == [Self.record] }
+
+        rig.cast.fire([])
+        waitFor { Self.device(rig.backend, x)?.isAvailable == false }
+        waitFor { rig.manager.deviceSets.last == [] }
+        #expect(rig.manager.sourceSets.last == [:])
+        waitFor { Self.device(rig.backend, x)?.connectionState == .off }
+        #expect(Self.device(rig.backend, x)?.connectionState == .off)
+
+        rig.cast.fire([Self.record])
+        waitFor { rig.manager.deviceSets.last == [Self.record] }
+        #expect(rig.manager.sourceSets.last == [x: .perApp], "the kept route re-arms the receiver")
+    }
+
+    /// Row 8: rapid route edits between two receivers end on the last one, and
+    /// every call in between hands over records and sources for the same ids.
+    /// Turns red if `reconcileCastSessionsLocked` builds `records` from a
+    /// different id list than `sources`.
+    @Test func rapidRouteEditsEndOnTheLastReceiverWithEveryCallConsistent() {
+        let rig = makeBackend()
+        defer { rig.backend.stop() }
+        let x = Self.record.id, y = Self.otherRecord.id
+        rig.cast.fire([Self.record, Self.otherRecord])
+        waitFor { Self.device(rig.backend, x) != nil && Self.device(rig.backend, y) != nil }
+
+        rig.backend.updateAppRoutes([route("com.a", name: "A", toDevice: x)])
+        rig.backend.updateAppRoutes([route("com.a", name: "A", toDevice: y)])
+        rig.backend.updateAppRoutes([route("com.a", name: "A", toDevice: x)])
+        waitFor { rig.manager.sourceSets.count == 3 }
+        SuiteWait.settle(0.3)
+
+        #expect(rig.manager.sourceSets.last == [x: .perApp])
+        #expect(rig.manager.deviceSets.last == [Self.record])
+        for (records, sources) in zip(rig.manager.deviceSets, rig.manager.sourceSets) {
+            #expect(Set(records.map(\.id)) == Set(sources.keys), "records \(records) vs sources \(sources)")
+        }
+    }
+
+    /// Row 9: a stream whose only destination is a Cast receiver never binds
+    /// an engine stream and never writes to the engine, yet reaches the
+    /// receiver. Turns red if a delivery with no engine-bound device keeps
+    /// the engine write (`PerAppStreamDelivery.engine`).
+    @Test func aCastOnlyStreamNeverTouchesTheEngine() {
+        let registry = TapRegistry()
+        let capture = registeringPerAppCapture(bundleIDs: ["com.a"], into: registry)
+        let rig = makeBackend(injectedPerAppCapture: capture)
+        defer { rig.backend.stop() }
+        let x = Self.record.id
+        rig.cast.fire([Self.record])
+        waitFor { Self.device(rig.backend, x) != nil }
+
+        rig.backend.updateAppRoutes([route("com.a", name: "A", toDevice: x)])
+        waitFor { Self.isCapturing(capture, "com.a") }
+        registry.tap(for: "com.a")?.push(fingerprintedBuffer(fill: 0xAA, frames: 1000, atSecond: 1))
+        waitFor { rig.manager.perAppWrites.contains { $0.id == x && $0.bytes > 0 } }
+        SuiteWait.settle(0.2)
+
+        #expect(rig.engine.writes == 0)
+        #expect(rig.engine.streamAdds == 0)
+    }
+
+    /// Row 11: a per-app-only receiver never joins the room. Its lead samples
+    /// move no AirPlay pre-delay even with an AirPlay speaker selected. Turns
+    /// red if a per-app receiver enters `castSelectedIDs`.
+    @Test func aPerAppReceiverNeverSetsTheRoomsTiming() {
+        let (rig, ap) = castRoom()
+        defer { rig.backend.stop() }
+        let x = Self.record.id
+        rig.backend.setOutputSet([ap.id])
+        rig.backend.updateAppRoutes([route("com.a", name: "A", toDevice: x)])
+        waitFor { rig.manager.sourceSets.last == [x: .perApp] }
+
+        rig.manager.fireLead(id: x, leadMs: 7_000, count: CastRoomDelay.settleSampleCount)
+        SuiteWait.settle(0.3)
+        #expect(rig.capture.preDelayMs.isEmpty, "got \(rig.capture.preDelayMs)")
+        #expect(rig.backend.localSinkReferenceDelayMs() == rig.backend.startBufferMs)
+        #expect(rig.backend.test_castSelectedIDs.isEmpty)
+    }
+
+    /// Row 12: a per-app-owned receiver gets master level changes, retries,
+    /// and its PLAYING. Turns red if the master loop, `retryCastOutput` or
+    /// `applyCastSessionState` go back to reading whole-system selection only.
+    @Test func aPerAppReceiverGetsLevelsRetryAndPlaying() {
+        let rig = makeBackend()
+        defer { rig.backend.stop() }
+        let x = Self.record.id
+        rig.cast.fire([Self.record])
+        waitFor { Self.device(rig.backend, x) != nil }
+        rig.backend.updateAppRoutes([route("com.a", name: "A", toDevice: x)])
+        waitFor { rig.manager.sourceSets.last == [x: .perApp] }
+
+        rig.backend.setMasterGain(mainOut: 50, group: 100, mirrorToSystemVolume: false)
+        waitFor { rig.manager.levels.last?.level == 0.5 }
+        #expect(rig.manager.levels.last?.id == x)
+
+        rig.manager.fire(id: x, state: .failed(.timedOut))
+        waitFor { Self.device(rig.backend, x)?.connectionState != .connecting }
+        rig.backend.retryOutput(x)
+        waitFor { rig.manager.retries == [x] }
+        #expect(Self.device(rig.backend, x)?.connectionState == .connecting)
+
+        rig.manager.fire(id: x, state: .playing)
+        waitFor { Self.device(rig.backend, x)?.connectionState == .connected }
+        #expect(Self.device(rig.backend, x)?.connectionState == .connected)
+    }
+
+    /// Row 13: a playing per-app-only receiver meters its routed app's source
+    /// level, never the whole-system RMS it is not fed from. Turns red if
+    /// `isMeterable` drops its `castSelectedIDs` test for Cast.
+    @Test func aPerAppReceiverMetersItsAppNotTheSystem() {
+        let registry = TapRegistry()
+        let capture = registeringPerAppCapture(bundleIDs: ["com.a"], into: registry)
+        let rig = makeBackend(injectedPerAppCapture: capture)
+        defer { rig.backend.stop() }
+        let x = Self.record.id
+        rig.cast.fire([Self.record])
+        waitFor { Self.device(rig.backend, x) != nil }
+        rig.backend.updateAppRoutes([route("com.a", name: "A", toDevice: x)])
+        waitFor { Self.isCapturing(capture, "com.a") }
+        rig.manager.fire(id: x, state: .playing)
+        waitFor { Self.device(rig.backend, x)?.connectionState == .connected }
+
+        let (levels, task) = subscribeLevels(rig.backend); defer { task.cancel() }
+        rig.backend.setMeteringActive(true)
+        waitFor(timeout: 0.3) { rig.capture.onLevel?(0.6); return false }
+        #expect(levels.lastDeviceLevel(x) == nil, "the system RMS never reaches a per-app-only receiver")
+
+        waitFor { rig.backend.routeMixer.onAppLevel?("com.a", 0.4); return levels.lastDeviceLevel(x) != nil }
+        #expect(abs((levels.lastDeviceLevel(x) ?? 0) - 0.4) <= 0.001,
+                "its bar is the routed app's source level")
     }
 }

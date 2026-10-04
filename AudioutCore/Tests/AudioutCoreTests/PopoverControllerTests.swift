@@ -2279,6 +2279,26 @@ import AudioutProtocol
         #expect(titles.firstIndex(of: "Scenes")! < titles.firstIndex(of: "AirPlay Speakers")!)
     }
 
+    /// Red if the device list refuses Cast again, or the group rule stops
+    /// excluding it.
+    @Test func castIsAListedDestinationButNeverAUsableGroupMember() async throws {
+        let (popover, groups, _) = try await makePopover()
+        let groupID = try seedGroup(groups, members: ["cast-tv"])
+        let devices = [
+            Device(id: "cast-tv", name: "TV", kind: .cast, supportsAirPlay2: false),
+            Device(id: "homepod-bed", name: "Bedroom", kind: .homePod, supportsAirPlay2: true),
+        ]
+
+        let entries = popover.appDestinations(devices: devices, keeping: .noRedirect,
+                                              bundleID: "com.example.music")
+
+        #expect(entries.contains { $0.id == "cast-tv" })
+        let group = try #require(entries.first {
+            $0.id == PopoverController.groupDestinationID(forGroupID: groupID) })
+        #expect(group.isEnabled == false)
+        #expect(group.subtitle == PopoverController.emptyGroupDestinationSubtitle)
+    }
+
     @Test func pickingAGroupRoutesTheAppToThatGroup() async throws {
         let appRouting = tempAppRoutingController()
         seedRoute(appRouting, bundleID: "com.example.music", displayName: "Music")

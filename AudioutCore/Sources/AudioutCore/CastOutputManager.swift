@@ -22,6 +22,17 @@ enum CastSessionFailure: Equatable, Sendable {
     case noLocalAddress
 }
 
+/// Which producer one Cast session's ring takes audio from. Each session has
+/// exactly one: its ring accepts a push only from its own source, checked
+/// inside ``CastFeedRing/push(_:from:)`` under the ring's lock. The
+/// whole-system fan-out reaches only `.wholeSystem` rings; a per-app push
+/// reaches only the one `.perApp` ring addressed by device id.
+///
+/// The values are classes of producer, not revisions. When a per-app stream's
+/// id changes, the old and new streams are both `.perApp` and may overlap by at
+/// most one block; that is accepted, because both carry the same app's audio.
+enum CastFeedSource: Equatable, Sendable { case wholeSystem, perApp }
+
 /// The seam `NativeBackend` drives Cast output through, so its tests never open
 /// a socket.
 protocol CastOutputControlling: AnyObject, Sendable {
@@ -40,7 +51,15 @@ protocol CastOutputControlling: AnyObject, Sendable {
     /// The capture fan-out slot: every whole-system buffer written here is
     /// copied into each desired receiver's feed ring.
     var feed: PCMSink { get }
-    func setDevices(_ records: [CastDeviceRecord])
+    /// The ONE operation that sets which receivers have a session and which
+    /// producer feeds each. `sources` carries one entry per record; a record
+    /// with no entry is `.wholeSystem`. A present receiver whose source changes
+    /// keeps its session, ring and delay line; only its producer moves.
+    func setDevices(_ records: [CastDeviceRecord], sources: [String: CastFeedSource])
+    /// One per-app mixed block for the `.perApp` session of `id`. Ignored for
+    /// an id with no such session. Called from the mixer's delivery thread, so
+    /// it never blocks.
+    func writePerApp(pcm: Data, toDevice id: String)
     func setLevel(_ level: Double, forDevice id: String)
     func retry(deviceID: String)
     func stopAll()
@@ -161,7 +180,10 @@ final class CastFeedRing: CastPCMSource, @unchecked Sendable {
     private var targetGain: Float = 1
     /// Lock-guarded, and `nil` until a non-zero delay is asked for.
     private var delayLine: PCMDelayLine?
-    /// Producer-owned: incremented only by ``push(_:)``, which cannot take the
+    /// Lock-guarded: the one producer this ring accepts. Set by the manager's
+    /// queue through ``setSource(_:)``.
+    private var source: CastFeedSource = .wholeSystem
+    /// Producer-owned: incremented only by ``push(_:from:)``, which cannot take the
     /// lock on the path that matters (a failed `try()` IS one of the drops).
     /// How many times the producer re-tries the ring's lock before it gives up
     /// and drops the block. Small: the holder is only ever a memcpy away from
@@ -196,8 +218,14 @@ final class CastFeedRing: CastPCMSource, @unchecked Sendable {
         droppedLockBusyWord.deallocate()
     }
 
-    /// Producer side (capture IOProc). Interleaved S16LE stereo, 4 bytes/frame.
-    func push(_ pcm: Data) {
+    /// Producer side (capture IOProc, or the per-app mixer's delivery thread).
+    /// Interleaved S16LE stereo, 4 bytes/frame.
+    ///
+    /// A block from any producer other than this ring's ``setSource(_:)`` is
+    /// returned untouched and uncounted: it is a stale producer still running
+    /// after the session changed owner, not lost audio, so it moves neither
+    /// ``CastFeedStats/writes`` nor ``CastFeedStats/droppedBlocks``.
+    func push(_ pcm: Data, from source: CastFeedSource = .wholeSystem) {
         let frames = pcm.count / 4
         guard frames > 0 else { return }
         // Retry before giving up. The consumer's critical section is a memcpy
@@ -223,6 +251,7 @@ final class CastFeedRing: CastPCMSource, @unchecked Sendable {
             return
         }
         defer { lock.unlock() }
+        guard source == self.source else { return }
         // The line runs before the room check: its clock is the producer's, so
         // a block the ring then has no space for still has to go through it,
         // or the delay walks.
@@ -266,6 +295,12 @@ final class CastFeedRing: CastPCMSource, @unchecked Sendable {
         let line = PCMDelayLine(capacityFrames: Self.delayCapacityFrames)
         line.setDelayFrames(frames)
         lock.withLock { delayLine = line }
+    }
+
+    /// Which producer this ring accepts from now on. Control thread, like
+    /// ``setDelayMs(_:)``.
+    func setSource(_ source: CastFeedSource) {
+        lock.withLock { self.source = source }
     }
 
     /// Whether this leg has built a delay line at all. The bypass this pins is
@@ -424,7 +459,7 @@ final class CastFanOut: PCMSink, @unchecked Sendable {
         guard lock.try() else { return }
         let rings = self.rings
         lock.unlock()
-        for ring in rings { ring.push(pcm) }
+        for ring in rings { ring.push(pcm, from: .wholeSystem) }
     }
 }
 
@@ -456,6 +491,12 @@ final class CastOutputManager: CastOutputControlling, @unchecked Sendable {
     private let playDeadline: TimeInterval
     private let queue = DispatchQueue(label: "CastOutputManager")
     private let fanOut = CastFanOut()
+    /// Guards ONLY `perAppRings`: one dictionary store per ``setDevices(_:sources:)``,
+    /// one `try()` read per ``writePerApp(pcm:toDevice:)``.
+    private let perAppLock = NSLock()
+    /// id → ring of every `.perApp` session, mirrored from ``sessions`` so the
+    /// mixer's delivery thread never touches ``queue``.
+    private var perAppRings: [String: CastFeedRing] = [:]
 
     /// Lock-guarded rather than queue-confined: the backend sets it from its
     /// own queue while a session completion may be reading it on ``queue``.
@@ -528,6 +569,9 @@ final class CastOutputManager: CastOutputControlling, @unchecked Sendable {
         /// sum is what reaches the feed.
         var roomDelayMs = 0
         var userOffsetMs = 0
+        /// The one producer ``ring`` accepts. A `.perApp` session holds no room
+        /// delay and no trim: it is not part of the room's timing.
+        var source: CastFeedSource
         var playDeadline: DispatchWorkItem?
         var statusPoll: DispatchSourceTimer?
         var wasPlaying = false
@@ -544,7 +588,11 @@ final class CastOutputManager: CastOutputControlling, @unchecked Sendable {
         /// recipe starts from that teardown's completion, not here.
         var awaitingTeardown = false
 
-        init(record: CastDeviceRecord) { self.record = record }
+        init(record: CastDeviceRecord, source: CastFeedSource) {
+            self.record = record
+            self.source = source
+            ring.setSource(source)
+        }
     }
 
     /// Which step an error came out of — the same `CastError` means different
@@ -553,7 +601,7 @@ final class CastOutputManager: CastOutputControlling, @unchecked Sendable {
 
     // MARK: - CastOutputControlling
 
-    func setDevices(_ records: [CastDeviceRecord]) {
+    func setDevices(_ records: [CastDeviceRecord], sources: [String: CastFeedSource]) {
         queue.async { [weak self] in
             guard let self else { return }
             let desired = Set(records.map(\.id))
@@ -563,9 +611,27 @@ final class CastOutputManager: CastOutputControlling, @unchecked Sendable {
                 self.setState(session, .idle)
             }
             // An id present in both is left alone: a re-advertised endpoint is
-            // not a reason to interrupt a playing receiver.
+            // not a reason to interrupt a playing receiver. A change of source
+            // moves only the producer — no LAUNCH, no new server, no ring reset,
+            // no rebuilt delay line.
+            for record in records {
+                guard let session = self.sessions[record.id] else { continue }
+                let source = sources[record.id] ?? .wholeSystem
+                guard session.source != source else { continue }
+                session.source = source
+                session.ring.setSource(source)
+                if source == .perApp {
+                    session.roomDelayMs = 0
+                    session.userOffsetMs = 0
+                    self.applyFeedDelay(session)
+                }
+                Telemetry.log(.cast, "cast_feed_source", [
+                    "device": record.id,
+                    "source": source == .perApp ? "per_app" : "whole_system",
+                ])
+            }
             for record in records where self.sessions[record.id] == nil {
-                let session = Session(record: record)
+                let session = Session(record: record, source: sources[record.id] ?? .wholeSystem)
                 self.sessions[record.id] = session
                 if self.teardownsInFlight[record.id] != nil {
                     // The row is connecting from the user's point of view the
@@ -576,8 +642,19 @@ final class CastOutputManager: CastOutputControlling, @unchecked Sendable {
                     self.startRecipe(session)
                 }
             }
-            self.fanOut.setRings(self.sessions.values.map(\.ring))
+            self.fanOut.setRings(self.sessions.values.filter { $0.source == .wholeSystem }.map(\.ring))
+            let perApp = self.sessions.filter { $0.value.source == .perApp }.mapValues(\.ring)
+            self.perAppLock.withLock { self.perAppRings = perApp }
         }
+    }
+
+    func writePerApp(pcm: Data, toDevice id: String) {
+        // The mixer's delivery thread: never block, and never hold the lock
+        // across the push — the same posture as ``CastFanOut/write(pcm:pts:)``.
+        guard perAppLock.try() else { return }
+        let ring = perAppRings[id]
+        perAppLock.unlock()
+        ring?.push(pcm, from: .perApp)
     }
 
     func setLevel(_ level: Double, forDevice id: String) {
@@ -601,10 +678,12 @@ final class CastOutputManager: CastOutputControlling, @unchecked Sendable {
 
     /// Both delay setters take the ``setLevel(_:forDevice:)`` posture: an id
     /// with no session is ignored, and the value lives on the session, so it
-    /// survives a drop-and-reconnect without being re-pushed.
+    /// survives a drop-and-reconnect without being re-pushed. A `.perApp`
+    /// session drops both: it is not part of the room's timing.
     func setCastRoomDelayMs(_ ms: Int, forDeviceID id: String) {
         queue.async { [weak self] in
             guard let self, let session = self.sessions[id] else { return }
+            guard session.source != .perApp else { return }
             session.roomDelayMs = ms
             self.applyFeedDelay(session)
         }
@@ -613,6 +692,7 @@ final class CastOutputManager: CastOutputControlling, @unchecked Sendable {
     func setCastUserOffsetMs(_ ms: Int, forDeviceID id: String) {
         queue.async { [weak self] in
             guard let self, let session = self.sessions[id] else { return }
+            guard session.source != .perApp else { return }
             session.userOffsetMs = ms
             self.applyFeedDelay(session)
         }
@@ -644,6 +724,7 @@ final class CastOutputManager: CastOutputControlling, @unchecked Sendable {
             }
             self.sessions.removeAll()
             self.fanOut.setRings([])
+            self.perAppLock.withLock { self.perAppRings = [:] }
         }
     }
 

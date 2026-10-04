@@ -556,40 +556,43 @@ extension NativeBackend {
         }
     }
 
-    /// Apply one Cast selection decision (CAST-OUT). On `captureControlQueue`,
-    /// like ``applyBTSinkTransition(enable:uids:composition:gains:)``, so a Cast
+    /// Apply one Cast ownership decision (CAST-OUT): which receivers hold a
+    /// session and which producer feeds each. On `captureControlQueue`, like
+    /// ``applyBTSinkTransition(enable:uids:composition:gains:)``, so a Cast
     /// transition can never race a tap start/stop or a BT transition.
     ///
-    /// The fan-out slot is attached exactly once per armed stretch — the pid is
-    /// our own already-tap-excluded process, so attaching costs no tap rebuild,
-    /// but re-attaching on every selection change would still churn the
-    /// snapshot for nothing.
+    /// The whole-system fan-out slot is attached only while some receiver takes
+    /// `.wholeSystem`, and exactly once per such stretch — the pid is our own
+    /// already-tap-excluded process, so attaching costs no tap rebuild, but
+    /// re-attaching on every change would still churn the snapshot for
+    /// nothing. A receiver fed only by per-app routes needs no slot: the mixer
+    /// writes to it by device id.
     func applyCastTransition(
-        enable: Bool, records: [CastDeviceRecord], levels: [String: Double]
+        records: [CastDeviceRecord], sources: [String: CastFeedSource],
+        levels: [String: Double]
     ) {   // on captureControlQueue
         guard let manager = castOutputManager else { return }
-        if enable {
-            if !castFeedAttached {
-                captureCoordinator?.setCastSink(manager.feed, renderProcessPID: getpid())
-                castFeedAttached = true
-            }
-            manager.setDevices(records)
-            // Composed levels land after the device set: a session that has not
-            // reached its receiver yet stores the level and pushes it as soon
-            // as the channel is live.
-            for (id, level) in levels {
-                manager.setLevel(level, forDevice: id)
-            }
-            // CAST-SYNC: an arm re-states every receiver's stored by-ear offset,
-            // so reselecting one brings its offset back rather than leaving the
-            // delay line at whatever the last armed stretch left there.
-            pushStoredCastUserOffsets(forDeviceIDs: records.map(\.id))
-        } else {
-            manager.setDevices([])
-            if castFeedAttached {
-                captureCoordinator?.setCastSink(nil, renderProcessPID: nil)
-                castFeedAttached = false
-            }
+        let wantsFanOut = sources.values.contains(.wholeSystem)
+        if wantsFanOut && !castFeedAttached {
+            captureCoordinator?.setCastSink(manager.feed, renderProcessPID: getpid())
+            castFeedAttached = true
+        }
+        manager.setDevices(records, sources: sources)
+        // Composed levels land after the device set: a session that has not
+        // reached its receiver yet stores the level and pushes it as soon as
+        // the channel is live.
+        for (id, level) in levels {
+            manager.setLevel(level, forDevice: id)
+        }
+        // CAST-SYNC: an arm re-states every whole-system receiver's stored
+        // by-ear offset, so reselecting one brings its offset back rather than
+        // leaving the delay line at whatever the last armed stretch left there.
+        // A per-app receiver holds no delay, so it gets none.
+        pushStoredCastUserOffsets(
+            forDeviceIDs: sources.filter { $0.value == .wholeSystem }.keys.sorted())
+        if !wantsFanOut && castFeedAttached {
+            captureCoordinator?.setCastSink(nil, renderProcessPID: nil)
+            castFeedAttached = false
         }
     }
 

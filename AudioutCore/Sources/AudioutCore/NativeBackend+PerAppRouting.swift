@@ -13,10 +13,11 @@ extension NativeBackend {
     /// feeds by UID and which therefore never holds an `outputIDs` entry. On
     /// `stateQueue`.
     ///
-    /// The second arm tests the POSITIVE kind (`isBluetooth`), never `!isCast`
-    /// or `supportsAirPlay2`: Cast is the third R-partition arm with no per-app
-    /// delivery path at all, and AP1 receivers share `supportsAirPlay2: false`
-    /// with Bluetooth while being engine-driven.
+    /// The second and third arms test the POSITIVE kinds (`isBluetooth`,
+    /// `isCast`), never `supportsAirPlay2`: a Cast receiver is fed by device id
+    /// through `CastOutputManager.writePerApp` and holds no `outputIDs` entry,
+    /// and AP1 receivers share `supportsAirPlay2: false` with Bluetooth while
+    /// being engine-driven.
     ///
     /// This is the whole basis of the effective route table below (R5). A route
     /// aimed at an unreachable receiver is intent, not a live redirect: honouring
@@ -25,9 +26,9 @@ extension NativeBackend {
     /// unreachable, which is also what makes launch safe — persisted routes are
     /// pushed in before discovery has found anything, and each one engages as its
     /// device shows up.
-    private func isRouteTargetReachableLocked(_ id: String) -> Bool {   // on stateQueue
+    func isRouteTargetReachableLocked(_ id: String) -> Bool {   // on stateQueue
         guard let device = known[id], device.isAvailable else { return false }
-        return outputIDs[id] != nil || device.isBluetooth
+        return outputIDs[id] != nil || device.isBluetooth || device.isCast
     }
 
     /// Whether whole-system routing CLAIMS `id` at the DECISION layer —
@@ -292,6 +293,7 @@ extension NativeBackend {
             // app stays in the whole-system mix rather than being excluded in favour
             // of a stream that can't reach anything.
             let resolved = self.effectiveAppRoutesLocked(routes)
+            self.reconcileCastSessionsLocked()
             let effective = resolved.routes
             let newRouted = Set(resolved.routedApps.map(\.bundleID))
             // Bug T2: apps deliberately pinned to the local Mac ("This Mac").
@@ -1836,28 +1838,32 @@ extension NativeBackend {
                     self?.btSink?.setPerAppClaimedUIDs(claimed)
                 }
             }
-            self.rebuildBTPerAppFeedsLocked(sets)
+            self.rebuildPerAppDeliveriesLocked(sets)
         }
     }
 
-    /// Rebuild the per-app Bluetooth delivery map from the current topology —
-    /// one entry per stream that has at least one Bluetooth device on it, none
-    /// for a stream that has none. The adapter and its resampler are built HERE,
-    /// once per stream, never per buffer. On `stateQueue`.
-    func rebuildBTPerAppFeedsLocked(_ sets: [AppRouteMixer.DestinationSet]) {   // on stateQueue
+    /// Rebuild the per-app delivery map from the current topology — one entry
+    /// per stream, naming its engine write, its Bluetooth feed (only when the
+    /// stream has a Bluetooth device) and its Cast receivers. A Cast-bearing set
+    /// holds exactly one device: the group resolver never admits Cast, and an
+    /// app has one destination. The Bluetooth adapter and its resampler are
+    /// built HERE, once per stream, never per buffer. On `stateQueue`.
+    func rebuildPerAppDeliveriesLocked(_ sets: [AppRouteMixer.DestinationSet]) {   // on stateQueue
         let renderSampleRate = btSinkRefLock.withLock { btSink }?.renderSampleRate
             ?? Double(PCMFormat.airplay.sampleRate)
-        var feeds: [Int: BTPerAppStreamFeed] = [:]
+        var deliveries: [Int: PerAppStreamDelivery] = [:]
         for set in sets {
             let uids = set.deviceIDs.filter { known[$0]?.isBluetooth == true }.sorted()
-            guard !uids.isEmpty else { continue }
-            feeds[set.streamID] = BTPerAppStreamFeed(
+            let bt = uids.isEmpty ? nil : BTPerAppStreamFeed(
                 uids: uids,
-                feedsEngine: set.deviceIDs.contains { outputIDs[$0] != nil },
                 renderSampleRate: renderSampleRate,
                 manager: { [weak self] in self?.btSinkRefLock.withLock { self?.btSink } })
+            deliveries[set.streamID] = PerAppStreamDelivery(
+                engine: set.deviceIDs.contains { outputIDs[$0] != nil },
+                bt: bt,
+                castIDs: set.deviceIDs.filter { known[$0]?.isCast == true }.sorted())
         }
-        btPerAppFeedsLock.withLock { btPerAppFeeds = feeds }
+        perAppDeliveriesLock.withLock { perAppDeliveries = deliveries }
     }
 
     /// Chain `ops` onto the `bindTail` FIFO in the given order (on `stateQueue`).

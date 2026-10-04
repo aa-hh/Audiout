@@ -20,6 +20,9 @@ extension NativeBackend {
     /// receiver advertises intermittently, and greying the row on the first
     /// browse that omits it made the device read as disabled mid-session. A
     /// browse that lists the id again inside the grace cancels the flip.
+    ///
+    /// A NEW receiver replays the per-app routes: a route pushed before the
+    /// receiver was discovered (an unknown id is ineligible) engages here.
     func applyCastSnapshots(_ records: [CastDeviceRecord]) {   // on stateQueue
         for record in records {
             castRecords[record.id] = record
@@ -38,6 +41,7 @@ extension NativeBackend {
                 order.append(record.id)
                 emit(.deviceAdded(device))
                 logCastRowState(device)
+                rerunAppRoutesIfTargeted(record.id, wasEligible: false)
             }
         }
         let present = Set(records.map(\CastDeviceRecord.id))
@@ -85,6 +89,56 @@ extension NativeBackend {
         case .connected: return "connected"
         case .reconnecting: return "reconnecting"
         case .failed(let failure): return "failed(\(failure.cause))"
+        }
+    }
+
+    // MARK: Cast session ownership (whole-system selection ∪ per-app routes)
+
+    /// Whether the manager holds a session for `id`, from either producer.
+    /// On `stateQueue`.
+    func castOwnedLocked(_ id: String) -> Bool {   // on stateQueue
+        castLastApplied[id] != nil
+    }
+
+    /// Decide which Cast receivers hold a session and which producer feeds
+    /// each: every whole-system-selected id takes `.wholeSystem`, and every
+    /// other reachable Cast id a per-app route targets takes `.perApp`. Whole
+    /// system wins a contested receiver because the per-app set excludes
+    /// `castSelectedIDs`, and a per-app-only receiver never enters
+    /// `castSelectedIDs`, so it never reaches the room-delay policy. Desire is
+    /// the route, not whether the app is playing: a quiet or relaunching app
+    /// keeps its receiver's session. On `stateQueue`.
+    ///
+    /// The row story is the whole-system arm's, keyed on ownership: an id that
+    /// gains a session breathes while available; one that loses it ends its
+    /// hold but keeps a `.failed` story; one that only changes producer keeps
+    /// its row as it is. An unchanged decision enqueues nothing.
+    func reconcileCastSessionsLocked() {   // on stateQueue
+        let perApp = order.filter {
+            known[$0]?.isCast == true && !castSelectedIDs.contains($0)
+                && isRouteTargetReachableLocked($0) && routesTargetDeviceLocked($0)
+        }
+        var sources: [String: CastFeedSource] = [:]
+        for id in castSelectedIDs { sources[id] = .wholeSystem }
+        for id in perApp { sources[id] = .perApp }
+
+        for id in Set(sources.keys).symmetricDifference(castLastApplied.keys) {
+            if sources[id] != nil {
+                if known[id]?.isAvailable == true { setConnectionState(.connecting, for: id) }
+            } else {
+                castPlaying.remove(id)
+                if case .failed = known[id]?.connectionState {} else {
+                    setConnectionState(.off, for: id)
+                }
+            }
+        }
+
+        guard sources != castLastApplied else { return }
+        castLastApplied = sources
+        let records = sources.keys.sorted().compactMap { castRecords[$0] }
+        let levels = Dictionary(uniqueKeysWithValues: sources.keys.map { ($0, castLevel(forID: $0)) })
+        captureControlQueue.async { [weak self] in
+            self?.applyCastTransition(records: records, sources: sources, levels: levels)
         }
     }
 

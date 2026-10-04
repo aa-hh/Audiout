@@ -310,3 +310,15 @@ repo-wide and are detailed in [../AGENTS.md](../AGENTS.md): subclass
 `IsolatedTestCase` instead of touching `UserDefaults.standard`/shared temp
 dirs directly, and use `Telemetry._installTestSink(_:)` to assert a
 subsystem's own emissions rather than adding ad hoc logging hooks.
+
+**Per-app Cast routes (2026-10-04):** a Cast receiver can be one app's
+`.device` destination (never a saved group's member). `CastFeedSource` names
+the one producer each Cast session takes: `.wholeSystem` (the capture fan-out)
+or `.perApp` (the mixer, through `CastOutputManager.writePerApp` by device id).
+Which receivers hold a session, and which producer feeds each, is decided in
+one place, `reconcileCastSessionsLocked`: the whole-system selection plus every
+reachable Cast receiver a per-app route targets. A per-app-only receiver never
+enters `castSelectedIDs`, so it holds no room delay and never moves the AirPlay
+pre-delay. Whole-system still wins a contested receiver: claiming it flips the
+same session to `.wholeSystem` and demotes the app's route, and releasing it
+flips it back with no relaunch.

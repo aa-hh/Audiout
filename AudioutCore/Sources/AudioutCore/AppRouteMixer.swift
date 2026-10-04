@@ -149,7 +149,11 @@ public final class AppRouteMixer: @unchecked Sendable {
     public var onDestinationSetsChanged: (@Sendable ([DestinationSet]) -> Void)?
 
     /// Fired for each finished mixed buffer, tagged with its `streamID`. Called
-    /// on the delivering tap's thread, holding no lock of the mixer's.
+    /// on the delivering tap's thread. For a single-contributor stream it holds
+    /// no lock of the mixer's. For a shared (multi-contributor) stream it runs
+    /// UNDER `timelineLock`, so one stream's emissions reach the handler in
+    /// timeline order even when two taps deliver at once; the handler must
+    /// therefore stay bounded and must never re-enter the mixer.
     public var onMixedBuffer: (@Sendable (MixedBuffer) -> Void)?
 
     /// Fired once per handled buffer, while metering is active, with the PRE-
@@ -247,9 +251,17 @@ public final class AppRouteMixer: @unchecked Sendable {
     private var _snapshot: DeliverySnapshot = .empty
 
     /// Guards ONLY `timelines`. Every holder does bounded in-memory work — a
-    /// timeline add, a drain, or a removal — never a converter call, never a
-    /// Core Audio call, never a wait on `queue`. That is what makes it the kind
-    /// of lock the delivery thread may take with `lock()` rather than `try()`.
+    /// timeline add, a drain, a removal, or a shared stream's ``onMixedBuffer``
+    /// calls — never a converter call, never a Core Audio call, never a wait on
+    /// `queue`. That is what makes it the kind of lock the delivery thread may
+    /// take with `lock()` rather than `try()`.
+    ///
+    /// Running a shared stream's handler under this lock cannot stall a tap
+    /// thread that would not already have waited here: the other contributor
+    /// already takes this lock to add its share of the mix, and the handler's
+    /// work is bounded — the engine write is a fire-and-forget enqueue,
+    /// `CastFeedRing.push` is 64 `try()`s plus a memcpy, and the Bluetooth
+    /// fan-out is the same call that ran on this thread before.
     private let timelineLock = NSLock()
 
     /// streamID → its running mix timeline. Guarded by `timelineLock`.
@@ -503,9 +515,11 @@ public final class AppRouteMixer: @unchecked Sendable {
         if let level { onAppLevel?(bundleID, level) }
     }
 
-    /// Mix one app's already-converted buffer into ONE stream at `gain`, and
-    /// return whatever that stream is now ready to emit. Takes `timelineLock`
-    /// around the `timelines` touches — and nothing else; `contributorCount`
+    /// Mix one app's already-converted buffer into ONE stream at `gain`. A
+    /// single-contributor stream's buffer is returned for the caller to emit; a
+    /// shared stream's ready prefix is emitted here, under `timelineLock`, and
+    /// nothing is returned. Takes `timelineLock` around the `timelines` touches
+    /// and a shared stream's emissions — and nothing else; `contributorCount`
     /// comes from the caller's published snapshot, not from `currentSets`.
     private func mixUnderTimelineLock(
         pcm: Data, gain: Int, streamID: Int, pts: timespec, contributorCount: Int
@@ -552,10 +566,15 @@ public final class AppRouteMixer: @unchecked Sendable {
             return t
         }()
         timeline.add(firstFrame: Self.frameIndex(of: pts), stereo: scaled)
-        return timeline.drainReady(
+        // Emitted while the lock is still held: released first, a second tap
+        // could drain the next range and deliver it before this one, and the
+        // stream's one consumer would see its pts run backwards.
+        let ready = timeline.drainReady(
             streamID: streamID,
             holdFrames: Self.holdFrames,
             maxPendingFrames: Self.maxPendingFrames)
+        for emission in ready { onMixedBuffer?(emission) }
+        return []
     }
 
     /// Emit every stream's still-pending mixed audio immediately (end-of-run,

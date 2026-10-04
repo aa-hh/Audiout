@@ -452,8 +452,13 @@ public enum PopoverColumnGrid {
     /// stops/resumes above and below it (the owner's clearance refinement) —
     /// the rail "meets" a node with breathing room instead of jamming into it,
     /// so consecutive nodes read airy. Applied to the straight through-rail
-    /// (member / connecting / pending / failed nodes, which sit ON the spine).
+    /// (member and failed nodes, which sit ON the spine; a connecting node uses
+    /// `busConnectingNodeRailGap` instead).
     public static let busNodeRailGap: CGFloat = 3
+    /// The same gap for a CONNECTING node: the line stops this far from the
+    /// node's edge, above and below, so the break says "not joined yet" by
+    /// shape rather than by colour.
+    public static let busConnectingNodeRailGap: CGFloat = 9
     /// How far the detour arc bows out past an off-spine node's own edge, so the
     /// line visibly goes AROUND a node it doesn't run through. Added to that
     /// node's radius, so a large node and a small one are cleared by the same

@@ -641,7 +641,7 @@ public final class PopoverController: NSObject {
     /// The device ids currently showing the energize PENDING beat (item 9): the
     /// members of the just-switched Main-Audio target that hadn't started
     /// connecting yet (`connectionState == .off`) at the switch instant. Their
-    /// rows render `MembershipBusView.Node.connecting` (ember dashed, on-spine) —
+    /// rows render `MembershipBusView.Node.connecting` (plain gold, on-spine) —
     /// the instant "press-play" drop — until their real `connectionState`
     /// advances (`→ .connecting`, then `→ .member`), at which point
     /// `reconcileEnergize()` prunes them and the model state carries the node.

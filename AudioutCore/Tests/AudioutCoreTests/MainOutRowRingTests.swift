@@ -46,6 +46,17 @@ import AppKit
                 "a destination-switch handshake shows the pending (dashed) ring (spec §6)")
     }
 
+    // Turns red if the connecting branch starts honouring `joinsSpine` or returns to `ember`.
+    @Test func connectingRingIsRimNotSpineTone() {
+        let row = MainOutRowView()
+        row.apply(options: makeOptions(), current: .selectedDevices, master: 50,
+                  connectionState: .connecting)
+        #expect(sameInk(row.test_ringStrokeColor, Tokens.Color.rim),
+                "a connecting Main Audio ring strokes rim")
+        #expect(!sameInk(row.test_ringStrokeColor, Tokens.Color.spineTone),
+                "…not the spine tone")
+    }
+
     @Test func connectedRingWhenTargetLive() {
         let row = MainOutRowView()
         row.apply(options: makeOptions(), current: .selectedDevices, master: 50,

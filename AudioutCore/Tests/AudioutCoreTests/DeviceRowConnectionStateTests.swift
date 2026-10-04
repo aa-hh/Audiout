@@ -7,7 +7,7 @@ import AudioutCore
 /// the sublabel precedence ladder: the four `ConnectionState` ring renderings
 /// (`test_statusKind`/`test_ringForm`/`test_statusText`), the ring's per-state
 /// FORM (dashed connecting vs solid connected/failed), the per-state hues
-/// (`ember` connecting, `rim` connected, `failure`) at one stroke width, the VoiceOver
+/// (`rim` connecting and connected, `failure`) at one stroke width, the VoiceOver
 /// spoken equivalent per state, the name-click-toggles-enabled wiring
 /// (`test_clickName`) through the checkbox, the routing sublabel composed from
 /// `selected` + `routedAppNames`, and that a repeated `apply` cleanly
@@ -118,18 +118,16 @@ import AudioutCore
         #expect(abs(a.blueComponent - b.blueComponent) < 0.01, "\(message)", sourceLocation: sourceLocation)
     }
 
-    @Test func connectingRingIsEmberAndConnectedRingIsRim() {
-        // Connecting is `ember`, the colour the rail's connecting node wears
-        // beside it, so one row never shows connecting in two colours.
+    // Turns red if the connecting ring goes back to `ember` or loses its dash.
+    @Test func connectingRingIsDashedRimAndConnectedRingIsSolidRim() {
         let connecting = DeviceRowView(device: makeDevice(connectionState: .connecting))
         let connected = DeviceRowView(device: makeDevice(connectionState: .connected))
-        assertSameHue(connecting.test_ringStrokeColor, Tokens.Color.ember,
-                      "the connecting ring is ember, matching the rail node")
+        assertSameHue(connecting.test_ringStrokeColor, Tokens.Color.rim,
+                      "the connecting ring is the rim token")
+        #expect(connecting.test_ringIsDashed, "the connecting ring is dashed")
         assertSameHue(connected.test_ringStrokeColor, Tokens.Color.rim,
                       "the connected ring is the rim token")
-        let a = connecting.test_ringStrokeColor?.usingColorSpace(.sRGB)
-        let b = connected.test_ringStrokeColor?.usingColorSpace(.sRGB)
-        #expect(a?.blueComponent != b?.blueComponent, "connecting ≠ connected")
+        #expect(!connected.test_ringIsDashed, "the connected ring is solid")
     }
 
     @Test func connectedRingUsesRimToken() {

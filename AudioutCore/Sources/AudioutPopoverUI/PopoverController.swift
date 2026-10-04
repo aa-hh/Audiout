@@ -2659,7 +2659,7 @@ public final class PopoverController: NSObject {
             guard let device = devicesByID[id] else { return false }
             if !liveAppNames(for: device).isEmpty { return true }
             guard let controller, controller.isMainOutMember(id) else { return false }
-            guard case .connected = device.connectionState else { return false }
+            guard drawsConnected(device, controller: controller) else { return false }
             return !(device.isMuted || controller.isMuted(id)) && !controller.isMainOutMuted
         }
         let anyRouteSounding = appRouting.appRoutes.contains { route in
@@ -3051,11 +3051,23 @@ public final class PopoverController: NSObject {
                                    groupTargets: groupRouteTargets()).isEmpty
     }
 
+    /// Whether `device` draws as connected. The Mac has no connection to make,
+    /// so its snapshot can sit at `.off` while it carries audio — in the main
+    /// mix (the default Mac-only setup the rail already draws as connected) or
+    /// for an app sent to "This Mac" — and then draws the ring and status dot
+    /// any speaker in that position draws. One answer for the row and the
+    /// Devices card header, so the two cannot disagree.
+    private func drawsConnected(_ device: Device, controller: GroupController) -> Bool {
+        if case .connected = device.connectionState { return true }
+        return device.isLocalDevice && device.isAvailable && device.connectionState == .off
+            && (controller.isMainOutMember(device.id) || !liveAppNames(for: device).isEmpty)
+    }
+
     /// The apps confirmed playing on `device`. An AirPlay or Bluetooth target
     /// learns this from the backend once its stream is up; the Mac has no
     /// connect phase to wait through — a "This Mac" app renders locally the
     /// moment it is picked — so its routes count as live, which gives its row
-    /// the same connected ring, gold dot and gold pills any target gets.
+    /// the same connected ring, gold dot and primary-text pills any target gets.
     private func liveAppNames(for device: Device) -> [String] {
         guard device.isLocalDevice else { return liveRoutedAppNames[device.id] ?? [] }
         return appRouting.routedAppNames(for: device.id, isLocalDevice: true)
@@ -3202,13 +3214,7 @@ public final class PopoverController: NSObject {
         if device.isLocalDevice, controller.localRowDrivesMain {
             device.volume = controller.mainOutMasterVolume
         }
-        // The Mac has no connection to make, so its snapshot can sit at `.off`
-        // while it is carrying audio — in the main mix (the default Mac-only
-        // setup the rail already draws as connected) or for an app sent to
-        // "This Mac". Draw the connected ring and status dot any speaker in
-        // that position draws.
-        if device.isLocalDevice, device.isAvailable, device.connectionState == .off,
-           controller.isMainOutMember(device.id) || !liveAppNames(for: device).isEmpty {
+        if drawsConnected(device, controller: controller) {
             device.connectionState = .connected
         }
         // T-UI-ALLOW: the Phase-1 local-mix block is gone — the Mac row's

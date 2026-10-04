@@ -208,14 +208,13 @@ extension PopoverController {
     public func test_isCardCollapsed(title: String) -> Bool? {
         panel.test_isCardCollapsed(title: title)
     }
+    /// Whether the card header `title` is drawn live (`refreshCardHeaderLiveness`).
+    public func test_isCardHeaderLive(title: String) -> Bool? { panel.test_isCardHeaderLive(title: title) }
     /// Toggle the card titled `title` (drives the chevron/title-click path,
     /// including the T-5 transient-state bookkeeping so a later mid-open
     /// `rebuild()` preserves it). Returns the new collapsed state (`nil` if no
     /// card).
     @discardableResult
-    /// Whether the card header `title` is drawn live (`refreshCardHeaderLiveness`).
-    public func test_isCardHeaderLive(title: String) -> Bool? { panel.test_isCardHeaderLive(title: title) }
-
     public func test_toggleCard(title: String, animated: Bool = false) -> Bool? {
         guard panel.test_isCardCollapsed(title: title) != nil else { return nil }
         toggleCard(title, animated: animated)

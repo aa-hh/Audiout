@@ -163,8 +163,12 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// deliberately NOT `expectedSelected`: that set drops an undiscovered
     /// member, so a group whose only speaker is off would disagree with the row
     /// about who owns the Mac's level. `nil` (tests) falls back to
-    /// `expectedSelected.isEmpty`.
+    /// `expectedSelected.isEmpty`. Called ONLY inside `setOutputSet`'s
+    /// main-thread `stateQueue.sync`, where main is parked and the controller's
+    /// state is safe to read; everything else reads ``localRowDrivesMainLatched``.
     public var localRowDrivesMainQuery: (() -> Bool)?
+    /// The last answer from ``localRowDrivesMainQuery``. On `stateQueue`.
+    var localRowDrivesMainLatched = true
 
     /// Fired at the START of every routing action — the two chokepoints
     /// ``setOutputSet(_:)`` and ``updateAppRoutes(_:excludedBundleIDs:)``, which
@@ -3112,8 +3116,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// apps through the system volume, and the stored Mac level is invisible.
     func pushLocalPlaybackGainLocked() {   // on stateQueue
         let level = known[Self.localDeviceID]?.volume ?? 100
-        let drivesMain = localRowDrivesMainQuery?() ?? expectedSelected.isEmpty
-        let gain: Float = drivesMain ? 1 : Float(level.clampedToVolume) / 100
+        let gain: Float = localRowDrivesMainLatched ? 1 : Float(level.clampedToVolume) / 100
         localPlaybackEngine?.setOutputGain(gain)
     }
 

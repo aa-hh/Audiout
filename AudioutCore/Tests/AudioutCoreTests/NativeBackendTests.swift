@@ -7435,8 +7435,13 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         let (backend, engine, _) = makeBackend(injectedPerAppCapture: perAppCapture)
         backend.start(); defer { backend.stop() }
         await waitUntilStarted(engine)
+        let original = SpyLocalPlayback()
+        backend.localPlaybackEngine = original
         backend.setOutputSet(["dev-1"])
         backend.setVolume(30, for: NativeBackend.localDeviceID)
+        // Let the slider's own push land on the original engine first, so only
+        // the start-time re-push can reach the swapped-in one.
+        await pollUntil { original.outputGains.contains { abs($0 - 0.3) < 0.001 } }
 
         let localPlayback = SpyLocalPlayback()
         backend.localPlaybackEngine = localPlayback

@@ -2623,6 +2623,8 @@ import AudioutProtocol
         let row = try #require(popover.test_deviceRow(for: "local-mac"))
         #expect(row.test_ringForm == .connected)
         #expect(row.test_dotIsShown)
+        #expect(popover.test_isCardHeaderLive(title: PopoverController.outputDevicesCardTitle) == true,
+                "the Devices card header agrees with the Mac row it summarises")
     }
 
     /// A non-empty `.routedApps` event overrides the intent-based label with
@@ -4089,10 +4091,13 @@ import AudioutProtocol
         assertSameRGBA(popover.test_cardHeaderTitleColor(title: "System Audio"),
                        Tokens.Color.goldText, "the Mac alone is still the mix")
         #expect(popover.test_mainOutRow.test_routeArmed == true)
-        for title in ["Output Speakers", "App Routing"] {
-            assertSameRGBA(popover.test_cardHeaderTitleColor(title: title),
-                           Tokens.Color.label2, "\(title) starts silent")
-        }
+        // The Mac's own row draws connected and armed in that mix, so the
+        // Output Speakers title it sits under lights with it.
+        #expect(popover.test_deviceRow(for: "local-mac")?.test_routeArmed == true)
+        assertSameRGBA(popover.test_cardHeaderTitleColor(title: "Output Speakers"),
+                       Tokens.Color.goldText, "the Mac row sounds, so its card does")
+        assertSameRGBA(popover.test_cardHeaderTitleColor(title: "App Routing"),
+                       Tokens.Color.label2, "App Routing starts silent")
 
         _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
         try await waitForConnectionState(backend, id: "office") { $0 == .connected }

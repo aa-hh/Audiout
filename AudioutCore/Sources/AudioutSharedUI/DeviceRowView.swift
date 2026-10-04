@@ -192,11 +192,7 @@ public final class DeviceRowView: NSView {
     /// hollow ring in the glyph ring's own colour while that ring is drawn,
     /// and hidden when it is not. Paused
     /// and playing render identically here (R3 — only the meter differs).
-    let armedDotView: RouteArmedDotView = {
-        let dot = RouteArmedDotView()
-        dot.armedRowWashes = true   // `draw(_:)` paints the gold wash while armed
-        return dot
-    }()
+    let armedDotView = RouteArmedDotView()
     /// Whether the MASTER (Main Out) mute is currently engaged — folded into
     /// the route-armed predicate (spec §3.3: master mute drains EVERY device
     /// dot) and into the meter's mute-coerce gate. Host-supplied via `apply`.
@@ -642,6 +638,8 @@ public final class DeviceRowView: NSView {
         // per-app feed arms the row while it is still connecting, and that
         // speaker's dot stays the connecting ring's hollow ember.
         armedDotView.apply(armed: isRouteArmed && isConnected)
+        // The cut-out matches the row's wash, which follows `isRouteArmed` alone.
+        armedDotView.rowWashed = isRouteArmed
         nameLabel.textColor = rowTextColor
 
         // FEED column (v4.1 item 3): main-mix segment wording — "System" for a

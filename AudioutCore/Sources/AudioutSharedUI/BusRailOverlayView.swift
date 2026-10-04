@@ -1089,6 +1089,15 @@ public struct RailPlan: Equatable {
                     && $0.y - $0.halfHeight < band.lowerBound - tolerance
             } || input.folds.contains { $0.headerSpan.lowerBound < band.lowerBound - tolerance }
         }()
+        // Something reached lies above the list's visible top edge, scrolled up
+        // out of view. A collapsing card hides it as surely as one below.
+        let reachedAboveEdge: Bool = {
+            guard let band else { return false }
+            return input.stops.contains {
+                BusRailOverlayView.railReaches($0.node)
+                    && $0.y + $0.halfHeight > band.upperBound + tolerance
+            } || input.folds.contains { $0.headerSpan.upperBound > band.upperBound + tolerance }
+        }()
         let anyReached = !input.folds.isEmpty
             || input.stops.contains { BusRailOverlayView.railReaches($0.node) }
 
@@ -1097,7 +1106,7 @@ public struct RailPlan: Equatable {
             return fold.headerSpan.lowerBound >= band.lowerBound - tolerance
                 && fold.headerSpan.upperBound <= band.upperBound + tolerance
         }.map(\.dotY)
-        let cardCollapsing = input.deviceSectionCollapsed && reachedBelowEdge
+        let cardCollapsing = input.deviceSectionCollapsed && (reachedBelowEdge || reachedAboveEdge)
         if cardCollapsing, let cardDot = input.listHeaderDotY {
             dots.append(cardDot)
         }

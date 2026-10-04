@@ -168,6 +168,22 @@ import AudioutCore
         #expect(!off.test_dotIsShown, "no ring, no dot")
     }
 
+    /// The dot's cut-out carries the row's gold wash whenever the row paints
+    /// it, including a connecting speaker with a per-app feed, whose dot stays
+    /// hollow ember while the row washes gold.
+    @Test func connectingRowWithALiveFeedWashesTheDotsCutOut() {
+        let row = DeviceRowView(device: makeDevice(connectionState: .connecting))
+        row.apply(makeDevice(connectionState: .connecting), selected: true, liveAppNames: ["Spotify"])
+        #expect(row.test_isShowingLiveWash, "a per-app feed washes the row")
+        #expect(!row.armedDotView.test_isLit, "a connecting speaker's dot is not gold")
+        assertSameHue(row.armedDotView.test_cutoutWashColor,
+                      Tokens.Color.gold.withAlphaComponent(PopoverColumnGrid.rowLiveWashAlpha),
+                      "the cut-out matches the washed row")
+
+        row.apply(makeDevice(connectionState: .connecting), selected: true, liveAppNames: [])
+        #expect(row.armedDotView.test_cutoutWashColor == nil, "no wash on the row, none in the cut-out")
+    }
+
     @Test func mutedConnectedDotIsAHollowRingInTheConnectedRingColour() {
         let row = DeviceRowView(device: makeDevice(isMuted: true))
         row.apply(makeDevice(isMuted: true), selected: true)

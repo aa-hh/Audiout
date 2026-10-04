@@ -29,7 +29,7 @@
 // ring · `.connecting`/`.reconnecting` → dashed `ember` ring (the
 // breathing pulse renders settled/full-opacity via `cacheDisplay`, so the PNG
 // is deterministic) · `.connected` → solid `rim` ring · `.failed` →
-// heavier solid red `failure` ring + red "Couldn't connect" sublabel.
+// solid red `failure` ring + red "Couldn't connect" sublabel.
 //
 // `AIRPLAY_SNAPSHOT_MODE=feed-composite` renders the Warm Signal v4.1 item 3
 // FEED column's full precedence ladder in one panel — see
@@ -391,7 +391,7 @@ func snapshotMeters(appearanceName: NSAppearance.Name, label: String, outDir: UR
 /// demoing so the PNG is self-explanatory without cross-referencing code. This
 /// now exercises the halo connection ring (Warm Signal v3 §3.2): `.off` shows
 /// no ring, `.connecting`/`.reconnecting` a dashed breathing `ember`
-/// ring, `.connected` a solid `rim` ring, `.failed` a heavier solid
+/// ring, `.connected` a solid `rim` ring, `.failed` a solid
 /// red `failure` ring with the red "Couldn't connect" sublabel.
 private var connectionStatesFleet: [Device] {
     [

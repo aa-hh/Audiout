@@ -237,8 +237,8 @@ public final class MainOutRowView: NSView {
         // own colour, pushed by `haloRingView.cutoutDot`. Shown whenever the
         // ring is.
         armedDotView.apply(armed: isSpineLive)
-        // The master fader's engaged (gold) fill reuses the EXACT same armed
-        // predicate the dot renders — one armed truth, two instruments.
+        // The master fader's engaged (gold) fill takes `armed` alone; the dot
+        // also lights for the Mac playing on its own (`localOnlyArmed`).
         faderCell.isRouteArmed = armed
         // The readout agrees with the fill beside it: gold while the master is
         // actually sounding, ember while it only holds a stored level.

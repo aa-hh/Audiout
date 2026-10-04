@@ -235,6 +235,17 @@ import Testing
                 "a hidden member is hidden signal — the rail runs on to the card's dot")
     }
 
+    @Test func collapsingTheCardDotsAReachedSpeakerScrolledAboveTheList() throws {
+        // The only reached speaker sits above the list's top edge (440); the
+        // card's collapse hides it all the same, so the header gets its dot.
+        var input = expandedInput()
+        input.deviceSectionCollapsed = true
+        input.stops = [.init(y: 470, node: .member, halfHeight: 14),
+                       .init(y: 300, node: .nonMember, halfHeight: 14)]
+        let plan = RailPlan.resolve(input)
+        #expect(plan.terminusDotY == 452, "the rail ends on a dot on the card header's text line")
+    }
+
     // MARK: Behavior 4 — re-expand restores the exact prior geometry
 
     @Test func resolveIsPureSoReexpandRestoresIdenticalGeometry() {
@@ -460,5 +471,18 @@ import Testing
         #expect(plan.lineEndY == nil && plan.headerDotYs.isEmpty,
                 "no end dot, and the off-screen fold's dot is not drawn")
         #expect(lowestInk(overlay.wireRuns(for: plan)) >= 40, "nothing draws below the list's bottom edge")
+    }
+
+    /// The mirror case: the only reached speaker is scrolled ABOVE the list's
+    /// top edge (y = 320) and nothing reached is visible. The rail runs to that
+    /// top edge with no dot and no end node.
+    @Test func aMemberScrolledAboveTheListRunsTheRailToTheTopEdge() throws {
+        let (overlay, _) = mountedOverlay(rows: [(326, .member),   // centre 340, out of view
+                                                 (240, .nonMember)])
+        let plan = try #require(overlay.test_resolvePlan())
+        #expect(plan.stops.map(\.y) == [254], "only the visible non-member is drawn")
+        #expect(plan.signalTerminusIndex == nil, "no visible node ends the rail")
+        #expect(plan.lineEndY == 320 && plan.headerDotYs.isEmpty,
+                "the line stops at the list's top edge, with no dot")
     }
 }

@@ -775,7 +775,7 @@ system is always connected to at least Main Audio, so an idle rail never
 occurs, and an `ember` line read as a connecting state that wasn't one. Hook,
 segments, end dots, collapsed-header dots and Main Audio's ring where the line
 joins it all resolve through `Tokens.Color.spineTone`. A segment feeding a
-connecting or failed speaker keeps that colour; the speaker's state shows in
+connecting or failed speaker keeps the line's colour; the speaker's state shows in
 its node (dashed `ember` while connecting, `failure` red when failed) and its
 glyph ring, never in the line. Main Audio's status dot still turns gold only
 while the spine is live.

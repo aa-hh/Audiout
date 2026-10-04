@@ -159,12 +159,12 @@ public enum PopoverColumnGrid {
 
     /// Diameter of the Main Audio ring's visible circle (stroke centerline).
     /// Deliberately its OWN constant, not `haloRingDiameter` — grown slightly
-    /// past the device-row ring so the heavier matched stroke doesn't read
-    /// cramped against the icon glyph.
+    /// past the device-row ring so it doesn't read cramped against the icon
+    /// glyph.
     public static let mainAudioRingDiameter: CGFloat = 34
     /// Extra headroom (mirrors `haloBreathingRoomGap`) added to the Main Audio
     /// ring's own host box past `iconWidth`, so the larger `mainAudioRingDiameter`
-    /// ring plus its heavier matched stroke has drawing room without crowding
+    /// ring has drawing room without crowding
     /// the row's other controls.
     public static let mainAudioRingHostBoxGap: CGFloat = 8
     /// The Main Audio ring's host square diameter once breathing room is

@@ -26,9 +26,8 @@ import QuartzCore
 /// hollow, the same colour the glyph ring wears while connecting),
 /// `.failed` (failure-red ring), `.nonMember` (hollow, detoured).
 /// The energize "pending" beat has NO node form of its own; it renders as
-/// `.connecting`. Every node rim strokes at `ringStrokeWidth`. **Rail segment tone:**
-/// GOLD through a connected member, `ember` otherwise — ember survives as a
-/// SEGMENT tone only, which is where Call 3's energize sequence reads.
+/// `.connecting`. Every node rim strokes at `ringStrokeWidth`. Every rail
+/// segment is the spine tone: gold, or `railDormant` while the rail is dormant.
 ///
 /// **Determinism:** at rest node + rails are steady drawing, so
 /// `cacheDisplay(in:to:)` captures them identically every run. The ONE
@@ -53,7 +52,7 @@ public final class MembershipBusView: NSView {
         /// real state. Reduce Motion removes the beat (the node renders its
         /// resolved form).
         case connecting
-        /// A member that failed to connect — a HOLLOW node with a heavier
+        /// A member that failed to connect — a HOLLOW node with a
         /// FAILURE-RED solid ring (spec §Call-1 "failed = failure-red ring"). It
         /// keeps its place in the spine; the red ring says which room didn't make
         /// it. Never dimmed.

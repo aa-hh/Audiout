@@ -28,7 +28,7 @@ import AppKit
 /// popover with) that cuts it out of the glyph, so the full
 /// 8 pt dot reads as a badge over the glyph, not part of it. A device row
 /// paints a 12 % gold wash behind itself while armed; with
-/// `armedRowWashes` set, the cut-out carries the same wash so it matches the
+/// `rowWashed` set, the cut-out carries the same wash so it matches the
 /// ground it sits on instead of showing as a lighter (light) or black (dark)
 /// ring.
 ///
@@ -109,9 +109,11 @@ public final class RouteArmedDotView: NSView {
 
     public required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-    /// Whether the host row paints the gold live wash behind itself while
-    /// armed (`DeviceRowView` does; Main Audio's row does not).
-    public var armedRowWashes = false {
+    /// Whether the host row is painting its gold live wash behind the dot
+    /// right now. Pushed by `DeviceRowView` from the row's own armed flag,
+    /// which can be on while the dot is not (a connecting speaker with a
+    /// per-app feed); Main Audio's row never washes.
+    public var rowWashed = false {
         didSet { updateLayerAppearance() }
     }
 
@@ -164,7 +166,7 @@ public final class RouteArmedDotView: NSView {
     private func updateLayerAppearance() {
         effectiveAppearance.performAsCurrentDrawingAppearance {
             cutoutLayer.fillColor = Tokens.Color.panel.cgColor
-            cutoutWashLayer.fillColor = isArmed && armedRowWashes
+            cutoutWashLayer.fillColor = rowWashed
                 ? Tokens.Color.gold.withAlphaComponent(PopoverColumnGrid.rowLiveWashAlpha).cgColor
                 : nil
             if isArmed {
@@ -238,6 +240,12 @@ public final class RouteArmedDotView: NSView {
     /// gold when armed, `nil` (hollow) otherwise.
     public var test_fillColor: NSColor? {
         guard let cg = dotLayer.fillColor else { return nil }
+        return NSColor(cgColor: cg)
+    }
+
+    /// The cut-out's wash fill — the row's gold wash, or `nil` (plain panel).
+    public var test_cutoutWashColor: NSColor? {
+        guard let cg = cutoutWashLayer.fillColor else { return nil }
         return NSColor(cgColor: cg)
     }
 

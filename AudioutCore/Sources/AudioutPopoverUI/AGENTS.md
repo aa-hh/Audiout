@@ -17,7 +17,7 @@ folder renders; routing arithmetic lives in Core.
 - `insertRow`/`removeRow` own the re-fit; never add your own height republish.
 - Two rebuild flavors: `rebuildForOpen()` discards manual toggles, `rebuild()` preserves them.
 - A subsection collapses by animating its own clip height, never rebuilding (2026-08-10).
-- Rail extent is the owner's ruling of 2026-10-04 (DESIGN.md "Membership rail extent", eight rules). In short: every collapsed header — subsection or the Output Speakers card — hiding a selected connected/connecting speaker gets a dot on its text line; the rail ends at the lower of the lowest visible such node and the lowest dot; nothing draws outside the list's visible band, and a member scrolled below it ends the rail on the lowest fully visible on-spine row with no dot.
+- Where the rail starts and stops is DESIGN.md "Membership rail extent"; the summary is in AGENTS-HISTORY.md.
 - `updateRailRows` names EVERY collapsed subsection hiding a reached device (`foldedSubsectionTitles`), judged in the full `deviceSections()` order; hidden nodes come from `DeviceRowView.busNode`. A subsection hiding none is never named.
 - Hidden means idle: ingest skips behind `isEffectivelyShown`, and every open rebuilds.
 - The footer "−" hides a speaker from the LIST only (`HiddenSpeakersController`, display-only, persisted); a SELECTED speaker always renders and its "Hide" item disables — nothing may play from an invisible row (2026-09-15). The way back is the "+" menu's "Hidden speakers" section, discovered devices only.

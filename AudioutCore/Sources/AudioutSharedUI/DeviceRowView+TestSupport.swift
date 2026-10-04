@@ -56,8 +56,8 @@ extension DeviceRowView {
     /// use distinct hues.
     public var test_ringStrokeColor: NSColor? { haloRingView.test_strokeColor }
 
-    /// The halo ring's current stroke width — asserts the failed ring's heavier
-    /// weight (`haloRingFailedStroke`) vs the connected ring.
+    /// The halo ring's current stroke width — asserts every state strokes at
+    /// the shared `ringStrokeWidth`.
     public var test_ringLineWidth: CGFloat { haloRingView.test_lineWidth }
 
     /// Whether the halo ring is currently DASHED — the connecting/reconnecting

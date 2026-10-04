@@ -1347,6 +1347,10 @@ private final class SpyLocalPlayback: LocalPlaybackControlling, @unchecked Senda
     func setMeteringActive(_ active: Bool) { lock.withLock { _meteringActive = active } }
     var meteringActive: Bool { lock.withLock { _meteringActive } }
 
+    private var _outputGains: [Float] = []
+    func setOutputGain(_ gain: Float) { lock.withLock { _outputGains.append(gain) } }
+    var outputGains: [Float] { lock.withLock { _outputGains } }
+
     var addedApps: [(bundleID: String, volume: Float)] { lock.withLock { _added } }
     var removedApps: [String] { lock.withLock { _removed } }
     var volumeSets: [(bundleID: String, volume: Float)] { lock.withLock { _volumes } }
@@ -7389,6 +7393,27 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         #expect(
             localPlayback.volumeSets.contains { $0.bundleID == "com.local" && abs($0.volume - 0.4) < 0.001 },
             "setLocalPlaybackVolume(40) must reach the local engine as 0.4 for com.local")
+    }
+
+    /// Turns red if the Mac row's level stops reaching the engine that plays
+    /// "This Mac" apps, or if it keeps applying while the Mac row is driving
+    /// Main (no non-local output selected), where it must stay at unity.
+    @Test func macRowLevelScalesLocalPlaybackOnlyBesideARealOutput() async {
+        let (backend, engine, _) = makeBackend()
+        let localPlayback = SpyLocalPlayback()
+        backend.localPlaybackEngine = localPlayback
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        backend.setVolume(40, for: NativeBackend.localDeviceID)
+        await pollUntil { !localPlayback.outputGains.isEmpty }
+        #expect(localPlayback.outputGains.last == 1, "with nothing else selected the Mac row drives Main")
+
+        let other = backend.devices.first { !$0.isLocalDevice }?.id ?? "dev-1"
+        backend.setOutputSet([other])
+        backend.setVolume(40, for: NativeBackend.localDeviceID)
+        await pollUntil { localPlayback.outputGains.last.map { abs($0 - 0.4) < 0.001 } ?? false }
+        #expect(abs((localPlayback.outputGains.last ?? -1) - 0.4) < 0.001)
     }
 
     // MARK: Bug 2 — `.currentDevice` apps must clean up capture on quit/relaunch

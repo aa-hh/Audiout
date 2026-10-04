@@ -2858,6 +2858,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             stateQueue.async {
                 self.applyLocal(id) { $0.volume = clamped }
                 self.pushSyncedLocalGain()
+                self.pushLocalPlaybackGainLocked()
             }
             return
         }
@@ -3093,6 +3094,17 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     func pushSyncedLocalGain() {   // on stateQueue
         let gain = syncedLocalGain
         captureControlQueue.async { [weak self] in self?.syncedLocalSink?.setGain(gain) }
+    }
+
+    /// Push the Mac row's level onto the apps sent to "This Mac", so its slider
+    /// scales them the way an AirPlay row's slider scales its redirected app.
+    /// Unity while no non-local output is in Main Out: there the Mac row drives
+    /// Main itself (`GroupController.localRowDrivesMain`), Main reaches these
+    /// apps through the system volume, and the stored Mac level is invisible.
+    func pushLocalPlaybackGainLocked() {   // on stateQueue
+        let level = known[Self.localDeviceID]?.volume ?? 100
+        let gain: Float = expectedSelected.isEmpty ? 1 : Float(level.clampedToVolume) / 100
+        localPlaybackEngine?.setOutputGain(gain)
     }
 
     /// `group × the Mac's own fader` as a 0.0…1.0 `Float` — times Main as well

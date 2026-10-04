@@ -62,6 +62,11 @@ public protocol LocalPlaybackControlling: AnyObject, Sendable {
     func setOutputSuppressed(_ suppressed: Bool,
                              completion: @escaping @Sendable () -> Void)
 
+    /// The Mac row's own level (0.0…1.0) over every local player at once — the
+    /// local twin of an AirPlay speaker's volume scaling the app redirected to
+    /// it. Suppression still wins: a suppressed engine stays at 0.
+    func setOutputGain(_ gain: Float)
+
     /// Fired with one app's raw (PRE-volume) captured RMS (0.0…1.0) while
     /// metering is active — the per-app analogue of the whole-system tap's
     /// `onLevel`. ``NativeBackend`` forwards it as ``BackendEvent/appLevel`` for a
@@ -86,6 +91,7 @@ extension LocalPlaybackControlling {
     public func setMeteringActive(_ active: Bool) {}
     public func setOutputSuppressed(_ suppressed: Bool,
                                     completion: @escaping @Sendable () -> Void) { completion() }
+    public func setOutputGain(_ gain: Float) {}
 }
 
 /// Ways local playback setup can fail.
@@ -213,6 +219,8 @@ public final class LocalPlaybackEngine: LocalPlaybackControlling, @unchecked Sen
     private let graphQueue = DispatchQueue(label: "com.airplaycontroller.localplayback.graph")
     /// Confined to graphQueue so a graph restart restores the requested mixer gain.
     private var outputSuppressed = false
+    /// The Mac row's level, confined to graphQueue like `outputSuppressed`.
+    private var outputGain: Float = 1
     private var nodes: [String: AppNode] = [:]
     private var engineRunning = false
     /// The device id the engine's output is currently pinned to (or `nil` when no
@@ -370,8 +378,15 @@ public final class LocalPlaybackEngine: LocalPlaybackControlling, @unchecked Sen
                                     completion: @escaping @Sendable () -> Void) {
         graphQueue.async {
             self.outputSuppressed = suppressed
-            self.engine.mainMixerNode.outputVolume = suppressed ? 0 : 1
+            self.engine.mainMixerNode.outputVolume = suppressed ? 0 : self.outputGain
             completion()
+        }
+    }
+
+    public func setOutputGain(_ gain: Float) {
+        graphQueue.async {
+            self.outputGain = Self.clamp(gain)
+            self.engine.mainMixerNode.outputVolume = self.outputSuppressed ? 0 : self.outputGain
         }
     }
 
@@ -396,7 +411,7 @@ public final class LocalPlaybackEngine: LocalPlaybackControlling, @unchecked Sen
         // instantiated before start; starting with no player inputs is silent
         // and correct — players attach/connect afterward while it runs.
         _ = engine.mainMixerNode
-        engine.mainMixerNode.outputVolume = outputSuppressed ? 0 : 1
+        engine.mainMixerNode.outputVolume = outputSuppressed ? 0 : outputGain
         engine.prepare()
         do {
             if let testOverride = test_startOverride {
@@ -491,7 +506,7 @@ public final class LocalPlaybackEngine: LocalPlaybackControlling, @unchecked Sen
             }
         }
         _ = engine.mainMixerNode
-        engine.mainMixerNode.outputVolume = outputSuppressed ? 0 : 1
+        engine.mainMixerNode.outputVolume = outputSuppressed ? 0 : outputGain
         engine.prepare()
         do {
             try engine.start()

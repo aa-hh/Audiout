@@ -2590,6 +2590,26 @@ import AudioutProtocol
     // goes back to empty (see `DeviceRowView.apply`'s `liveAppNames` doc for the
     // full precedence rule this exercises end-to-end).
 
+    /// Turns red if the Mac's row stops treating a "This Mac" pick as a live
+    /// routed app: with the Mac outside the main mix it would go back to no
+    /// ring, a dark dot, a locked slider and an empty Source column.
+    @Test func aThisMacPickLightsTheMacRowLikeAnyRoutedSpeaker() async throws {
+        let appRouting = tempAppRoutingController()
+        seedRoute(appRouting, bundleID: "com.example.music", displayName: "Music",
+                  destination: .currentDevice)
+        let (popover, controller, backend) = try await makePopover(appRouting: appRouting,
+                                                                    runningAppsProvider: routedApps)
+        _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)   // drops the Mac
+        #expect(!controller.isMainOutMember("local-mac"))
+        popover.update(devices: backend.devices)
+
+        let row = try #require(popover.test_deviceRow(for: "local-mac"))
+        #expect(row.test_feedText == "Music")
+        #expect(row.test_ringForm == .connected)
+        #expect(row.test_routeArmed)
+        #expect(row.test_isSliderEnabled)
+    }
+
     /// A non-empty `.routedApps` event overrides the intent-based label with
     /// the confirmed live set.
     @Test func applyRoutedAppsOverridesIntentLabelWhenNonEmpty() async throws {

@@ -42,7 +42,12 @@ public struct SpeakerCurrentUse: Equatable, Sendable {
     }
 
     public func deviceIDs(groups: [Group]) -> Set<String> {
-        var ids = mainAudioMemberIDs.union(liveFeedIDs).union(recoveryIDs)
+        routedDeviceIDs(groups: groups).union(liveFeedIDs).union(recoveryIDs)
+    }
+
+    /// Speakers Main Audio or an app route names. Forget refuses these; a recovery lookup alone never blocks it.
+    public func routedDeviceIDs(groups: [Group]) -> Set<String> {
+        var ids = mainAudioMemberIDs
         for destination in appRouteDestinations {
             switch destination {
             case .device(let id): ids.insert(id)
@@ -97,6 +102,9 @@ public struct SpeakerPresentationRecord: Identifiable, Equatable, Sendable {
     public let visibility: SpeakerMixerVisibility
     public let metadataIsKnown: Bool
     public let isInUse: Bool
+    /// Main Audio or an app route names it, which blocks Forget. Narrower than `isInUse`, which also counts
+    /// connections, live feeds and recovery lookups, and decides visibility.
+    public let isRouted: Bool
 
     public var isLocalDevice: Bool { liveDevice?.isLocalDevice == true || kind == .localMac }
     public var secondaryText: String? { metadataIsKnown ? nil : id }
@@ -248,12 +256,12 @@ public final class SpeakerLibraryController {
     }
 
     /// Removes speakers the Mac cannot find from every scene and from the library. Speakers with a live device,
-    /// and speakers still in use (Main Audio or an app route names them), are skipped. Throws
+    /// and speakers Main Audio or an app route names (`isRouted`), are skipped. Throws
     /// `GroupError.emptyMembership` (nothing written) when a scene would be left empty.
     /// Never touches routing. Returns how many scenes changed.
     @discardableResult
     public func forget(_ ids: Set<String>, scenes: GroupController) throws -> Int {
-        let filtered = ids.filter { record(for: $0)?.liveDevice == nil && record(for: $0)?.isInUse != true }
+        let filtered = ids.filter { record(for: $0)?.liveDevice == nil && record(for: $0)?.isRouted != true }
         guard !filtered.isEmpty else { return 0 }
         let sceneCounts = Dictionary(uniqueKeysWithValues: filtered.map { id in
             (id, scenes.groups.filter { $0.memberIDs.contains(id) }.count)
@@ -293,6 +301,7 @@ public final class SpeakerLibraryController {
         let live = Dictionary(liveDevices.map { ($0.id, $0) }, uniquingKeysWith: { _, last in last })
         let ids = Set(live.keys).union(state.metadata.keys).union(groups.flatMap(\.memberIDs))
         var inUse = currentUse.deviceIDs(groups: groups)
+        let routed = currentUse.routedDeviceIDs(groups: groups)
         for device in liveDevices {
             switch device.connectionState {
             case .connected, .connecting, .reconnecting: inUse.insert(device.id)
@@ -305,7 +314,7 @@ public final class SpeakerLibraryController {
             return SpeakerPresentationRecord(id: id, displayName: device?.name ?? metadata?.name ?? "Missing speaker",
                                              kind: device?.kind ?? metadata?.kind, liveDevice: device,
                                              visibility: visibility(for: id), metadataIsKnown: device != nil || metadata != nil,
-                                             isInUse: inUse.contains(id))
+                                             isInUse: inUse.contains(id), isRouted: routed.contains(id))
         }.sorted {
             if $0.isAvailable != $1.isAvailable { return $0.isAvailable }
             let comparison = $0.displayName.localizedStandardCompare($1.displayName)

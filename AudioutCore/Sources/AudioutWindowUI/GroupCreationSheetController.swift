@@ -71,9 +71,9 @@ public final class GroupCreationSheetController: NSViewController {
     private static let iconWellSize: CGFloat = 32
 
     /// Pencil badge diameter, scaled down from `DeviceIconWellView`'s 22pt (at
-    /// its 64pt well) to this sheet's smaller 32pt well — same proportion,
-    /// smaller stage. Corner-badge overlay, not a second custom control: see
-    /// `iconWellPencilBadge`.
+    /// its 48pt well, `DeviceIconWellView.size`) to this sheet's smaller 32pt
+    /// well — same proportion, smaller stage. Corner-badge overlay, not a
+    /// second custom control: see `iconWellPencilBadge`.
     private static let pencilBadgeDiameter: CGFloat = 14
 
     private let nameField = NSTextField(string: "")

@@ -549,6 +549,29 @@ import AppKit
                 "an icon override IS the rendered sidebar icon, so a same-id/name/kind/isAvailable change must still reload")
     }
 
+    // Turns red when the sidebar's reload gate reads availability from discovery instead of the presentation record, so a Main Audio member whose discovery entry lapsed keeps a stale dot when it connects or drops.
+    @Test func sidebarRepaintsAConnectedSpeakerWhoseDiscoveryLapsed() throws {
+        let controller = GroupController(backend: MockBackend(fleet: []), store: GroupStore(directory: scratchDir),
+            routingStore: RoutingStore(directory: scratchDir), settings: AppSettings(defaults: isolatedDefaults),
+            loadPersisted: false)
+        var cast = Device(id: "cast", name: "Cast", kind: .cast, isAvailable: false)
+        let use = SpeakerCurrentUse(mainAudioMemberIDs: ["cast"])
+        let library = SpeakerLibraryController(loadPersisted: false)
+        library.update(liveDevices: [cast], groups: [], currentUse: use)
+        let window = MixerWindowController(groupController: controller,
+            settings: AppSettings(defaults: isolatedDefaults), speakerLibrary: library)
+        window.test_isVisibleOverride = true
+        window.update(devices: [cast])
+        #expect(window.test_sidebar.test_dotState(id: "cast") == .away)
+        let steps: [(ConnectionState, SidebarPresenceDotView.State)] = [(.connected, .found), (.off, .away)]
+        for (state, dot) in steps {
+            cast.connectionState = state
+            library.update(liveDevices: [cast], groups: [], currentUse: use)
+            window.update(devices: [cast])
+            #expect(window.test_sidebar.test_dotState(id: "cast") == dot, "\(state)")
+        }
+    }
+
     // MARK: New Group — sheet (SPEC.md §9, design revamp)
 
     @Test func tapAddRoutesToCreationSheet() async throws {
@@ -1466,11 +1489,11 @@ import AppKit
         #expect(controller.groups.map(\.memberIDs) == [["live", "den"], ["den", "attic"]])
     }
 
-    // Turns red when the Forget confirm offers Forget for a speaker Main Audio still names, or `forget` drops it anyway.
-    @Test func forgetRefusesASpeakerStillInUse() throws {
+    // Turns red when the Forget confirm offers Forget for a speaker Main Audio still names, `forget` drops it anyway, or a retained recovery lookup alone refuses Forget.
+    @Test func forgetRefusesOnlyASpeakerStillRouted() throws {
         let (window, controller, library) = try makeForgetWindow()
         library.update(liveDevices: [Device(id: "live", name: "Live", kind: .sonos)], groups: controller.groups,
-                       currentUse: SpeakerCurrentUse(mainAudioMemberIDs: ["den"]))
+                       currentUse: SpeakerCurrentUse(mainAudioMemberIDs: ["den"], recoveryIDs: ["attic"]))
 
         let alert = window.test_makeForgetAlert(ids: ["den"])
         #expect(alert.messageText == "Can\u{2019}t forget \u{201C}Den\u{201D}")
@@ -1481,6 +1504,11 @@ import AppKit
         window.test_confirmForget(ids: ["den"])
         #expect(library.record(for: "den") != nil)
         #expect(controller.groups.map(\.memberIDs) == [["live", "den"], ["den", "attic"]])
+
+        #expect(window.test_makeForgetAlert(ids: ["attic"]).buttons.map(\.title) == ["Forget", "Cancel"])
+        window.test_confirmForget(ids: ["attic"])
+        #expect(library.record(for: "attic") == nil)
+        #expect(controller.groups.map(\.memberIDs) == [["live", "den"], ["den"]])
     }
 
     // Turns red when "Manage speakers…" stops landing on This Mac's page while the Mac is in the list.

@@ -111,9 +111,10 @@ enum SurfaceToolbarSeat {
     /// ring glyphs were sized by (`DeviceIcon.rowGlyphFits`), and a glyph
     /// whose ink overflows this box is drawn smaller until it fits. 18 x 15
     /// brings the four glyphs' visual weight closest together: the 15 pt
-    /// height holds Mixer, Speakers and Settings (13.5, 14.5 and 15 pt of ink
-    /// wide), and the 18 pt width holds Scenes' wide group of rectangles.
-    /// DESIGN.md "Surface Header Strip" lists the size each one lands on.
+    /// height is the limit Mixer, Speakers and Settings shrink to, which
+    /// leaves their ink 13.5, 14.5 and 15 pt wide, and the 18 pt width is the
+    /// limit for Scenes' wide group of rectangles. DESIGN.md "Surface Header
+    /// Strip" lists the point size each glyph is drawn at.
     static let glyphBox = NSSize(width: 18, height: 15)
 
     /// The ONE gap around a tab's ink: before the glyph, between the glyph

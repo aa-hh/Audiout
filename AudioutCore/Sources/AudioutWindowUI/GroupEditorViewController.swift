@@ -264,12 +264,12 @@ public final class GroupEditorViewController: NSViewController {
     public var speakerLibrary: SpeakerLibraryController?
     private var presentationByID: [String: SpeakerPresentationRecord] = [:]
     private var rowsByID: [String: MembershipRowView] = [:]
-    /// The devices currently offered as membership candidates, in order
-    /// (available devices, plus unavailable devices only while they remain
-    /// members of this group — see ``rebuildCandidates(devices:)``).
+    /// The devices currently offered as membership candidates, in order:
+    /// every device, unavailable ones included (see
+    /// ``rebuildCandidates(memberSet:)``).
     private var candidateDevices: [Device] = []
     /// The full device set last passed to `show`, so membership toggles can
-    /// rebuild the candidate list (an unchecked unavailable device drops out).
+    /// rebuild the candidate list.
     private var allDevices: [Device] = []
 
     public init(groupController: GroupController) {
@@ -883,10 +883,10 @@ public final class GroupEditorViewController: NSViewController {
         iconWell.iconImageView.image = image
     }
 
-    /// Recompute `candidateDevices` from `allDevices` — available devices,
-    /// plus any unavailable device still in `memberSet` — and rebuild the
-    /// membership rows from that list. Called on `show` and after every
-    /// membership toggle, so an unchecked unavailable member disappears.
+    /// Recompute `candidateDevices` from `allDevices` — every device, an
+    /// unavailable one offered whether or not it is a member — and rebuild
+    /// the membership rows from that list. Called on `show` and after every
+    /// membership toggle.
     ///
     /// REUSES the existing rows whenever the candidate ID SEQUENCE is
     /// unchanged — only the list's membership/labels moved, so refreshing each

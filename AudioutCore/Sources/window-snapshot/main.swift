@@ -615,7 +615,7 @@ func snapshotSpeakerManagement(appearanceName: NSAppearance.Name, outDir: URL) {
             window?.refreshSpeakerPresentation()
         }
         if variant == "denied" {
-            window.speakersPage.setBluetoothAccess(SpeakerBluetoothAccessPresentation(status: .denied, priming: false))
+            window.setSpeakerBluetoothAccess(SpeakerBluetoothAccessPresentation(status: .denied, priming: false))
         }
         let surface = AppSurfaceController(popoverController: popover, settings: settings,
             groupsContent: { window.scenesContentController },

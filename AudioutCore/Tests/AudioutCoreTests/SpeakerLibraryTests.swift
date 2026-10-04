@@ -319,18 +319,22 @@ extension SerializedSharedState {
             #expect(controller.record(for: "live") != nil)
         }
 
-        // Forget dropping a lost speaker that Main Audio or an app route still names turns it red.
-        @Test func forgetSkipsALostSpeakerStillInUse() throws {
+        // Forget dropping a lost speaker that Main Audio or an app route still names, or skipping one only a retained recovery lookup keeps in use, turns it red.
+        @Test func forgetSkipsOnlyALostSpeakerStillRouted() throws {
             let controller = library()
             let scenes = try sceneController([Group(id: "k", name: "Kitchen",
-                                                    memberIDs: ["live", "main", "routed", "gone"], memberVolumes: [:])])
+                                                    memberIDs: ["live", "main", "routed", "looked-for", "gone"],
+                                                    memberVolumes: [:])])
             controller.update(liveDevices: [speaker("live")], groups: scenes.groups,
                               currentUse: SpeakerCurrentUse(mainAudioMemberIDs: ["main"],
-                                                            appRouteDestinations: [.device(id: "routed")]))
-            #expect(try controller.forget(["main", "routed", "gone"], scenes: scenes) == 1)
+                                                            appRouteDestinations: [.device(id: "routed")],
+                                                            recoveryIDs: ["looked-for"]))
+            #expect(controller.record(for: "looked-for")?.isInUse == true)
+            #expect(try controller.forget(["main", "routed", "looked-for", "gone"], scenes: scenes) == 1)
             #expect(scenes.groups.first?.memberIDs == ["live", "main", "routed"])
             #expect(controller.record(for: "main") != nil)
             #expect(controller.record(for: "routed") != nil)
+            #expect(controller.record(for: "looked-for") == nil)
             #expect(controller.record(for: "gone") == nil)
         }
 

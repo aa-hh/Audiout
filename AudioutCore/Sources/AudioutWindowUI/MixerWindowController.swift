@@ -560,7 +560,7 @@ public final class MixerWindowController {
             // the headless path.
             return
         }
-        let refused = !blockingScenes(for: ids).isEmpty || !speakersInUse(ids).isEmpty
+        let refused = !blockingScenes(for: ids).isEmpty || !routedSpeakers(ids).isEmpty
         makeForgetAlert(ids: ids).beginSheetModal(for: window) { [weak self] response in
             guard response == .alertFirstButtonReturn, !refused else { return }
             self?.performForget(ids: ids)
@@ -578,9 +578,11 @@ public final class MixerWindowController {
     }
 
     /// Speakers Main Audio or an app is still set to play on. Core skips
-    /// them, so the confirm refuses them in words instead.
-    private func speakersInUse(_ ids: Set<String>) -> [SpeakerPresentationRecord] {
-        speakerLibrary.records.filter { ids.contains($0.id) && $0.isInUse }
+    /// them, so the confirm refuses them in words instead. A recovery lookup
+    /// or a Bluetooth reconnect attempt keeps a row visible (`isInUse`) but
+    /// never blocks Forget.
+    private func routedSpeakers(_ ids: Set<String>) -> [SpeakerPresentationRecord] {
+        speakerLibrary.records.filter { ids.contains($0.id) && $0.isRouted }
     }
 
     /// The confirm, in the shape of the scene editor's delete alert: Forget
@@ -601,11 +603,11 @@ public final class MixerWindowController {
             alert.addButton(withTitle: "OK")
             return alert
         }
-        let inUse = speakersInUse(ids)
-        if !inUse.isEmpty {
+        let routed = routedSpeakers(ids)
+        if !routed.isEmpty {
             alert.messageText = name.map { "Can\u{2019}t forget \u{201C}\($0)\u{201D}" }
                 ?? "Can\u{2019}t forget \(ids.count) speakers"
-            let names = inUse.map { "\u{201C}\($0.displayName)\u{201D}" }.joined(separator: ", ")
+            let names = routed.map { "\u{201C}\($0.displayName)\u{201D}" }.joined(separator: ", ")
             alert.informativeText = "Main Audio or an app is still set to play on \(names). Change that in the Mixer first."
             alert.addButton(withTitle: "OK")
             return alert
@@ -833,9 +835,12 @@ public final class MixerWindowController {
         test_sidebarReloadCount += 1
     }
 
-    /// Exactly what the sidebar's cells render (`SidebarViewController`'s
-    /// device/group row cell), named as one Equatable value so a reload can be
-    /// gated on it changing rather than on the raw model arrays changing.
+    /// What the sidebar's cells render (`SidebarViewController`'s
+    /// device/group row cell), read from the presentation records the cells
+    /// read, so a connection that keeps a speaker available after its
+    /// discovery entry lapsed still repaints its dot and dimming. Named as one
+    /// Equatable value so a reload can be gated on it changing rather than on
+    /// the raw model arrays changing.
     private struct SidebarProjection: Equatable {
         struct DeviceCell: Equatable {
             let id: String
@@ -856,7 +861,8 @@ public final class MixerWindowController {
         SidebarProjection(
             devices: devices.map {
                 let record = speakerLibrary.record(for: $0.id)
-                return SidebarProjection.DeviceCell(id: $0.id, name: $0.name, kind: $0.kind, isAvailable: $0.isAvailable,
+                return SidebarProjection.DeviceCell(id: $0.id, name: $0.name, kind: $0.kind,
+                             isAvailable: record?.isAvailable ?? $0.isAvailable,
                              iconSymbolName: deviceIconController.symbolName(for: $0),
                              visibility: record?.visibility,
                              isInUse: record?.isInUse ?? false,

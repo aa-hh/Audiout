@@ -100,6 +100,22 @@ import AudioutSharedUI
         #expect(fired)
     }
 
+    // Making `retryClicked` call `onRetry` for `.authRequired`, or leaving the title "Try again", turns it red.
+    @Test func authCauseButtonOpensPasswordEntryInsteadOfRetrying() {
+        let view = ConnectionDiagnosisView(failure: ConnectionFailure(cause: .authRequired), deviceName: "Den")
+        var retried = false
+        var enteredPassword = false
+        view.onRetry = { retried = true }
+        view.onEnterPassword = { enteredPassword = true }
+        #expect(view.test_retryButtonTitle == "Enter Password…")
+        view.test_tapRetry()
+        #expect(enteredPassword)
+        #expect(!retried)
+
+        view.apply(failure: ConnectionFailure(cause: .timedOut), deviceName: "Den")
+        #expect(view.test_retryButtonTitle == "Try again")
+    }
+
     @Test func tapCopyDetailsFiresOnCopyDetailsWithoutTouchingPasteboard() {
         let view = ConnectionDiagnosisView(
             failure: ConnectionFailure(cause: .droppedMidStream, detail: "dropped at 12:00"),

@@ -138,6 +138,12 @@ public final class DeviceDetailViewController: NSViewController {
     /// and `refreshUI()` reaches it first; the two arrive in either order.
     private lazy var airPlayRow: NSView =
         makeMetadataRow(caption: "AirPlay", valueLabel: airPlayValueLabel)
+    private let passwordValueLabel = NSTextField(labelWithString: "Saved")
+    private let forgetPasswordButton = NSButton(title: "Forget", target: nil, action: nil)
+    /// Shown only while the backend has a password on file for the speaker.
+    /// Lazy for the same either-order reason as `airPlayRow`.
+    private lazy var passwordRow: NSView =
+        makeMetadataRow(caption: "Password", valueLabel: passwordValueLabel, button: forgetPasswordButton)
 
     /// The saved groups the shown device belongs to, in the order the rows
     /// currently in ``groupsStack`` render them — the row's `tag` indexes into
@@ -159,6 +165,9 @@ public final class DeviceDetailViewController: NSViewController {
     /// editor), never activate it. The pane reaches no sidebar and no
     /// `GroupController` mutation itself — the host owns selection.
     public var onSelectGroup: ((String) -> Void)?
+
+    /// "Forget" on the About list's Password row, with the shown device's id.
+    public var onForgetPassword: ((String) -> Void)?
 
     /// The EQ this pane has SENT for a device while a gesture is IN FLIGHT, and
     /// whether that send was the COMMIT (`awaitingEcho`). Without it a mid-scrub
@@ -224,6 +233,7 @@ public final class DeviceDetailViewController: NSViewController {
             makeMetadataRow(caption: "Status", valueLabel: statusValueLabel),
             makeMetadataRow(caption: "Kind", valueLabel: kindValueLabel),
             airPlayRow,
+            passwordRow,
         ] {
             aboutStack.addArrangedSubview(row)
             // Rows FILL the list, so a right-aligned value lands on the
@@ -587,6 +597,37 @@ public final class DeviceDetailViewController: NSViewController {
         return row
     }
 
+    /// `makeMetadataRow` with a small stock button at the trailing edge, after
+    /// the value.
+    private func makeMetadataRow(caption: String, valueLabel: NSTextField, button: NSButton) -> NSView {
+        let row = makeMetadataRow(caption: caption, valueLabel: valueLabel)
+        button.bezelStyle = .rounded
+        button.controlSize = .small
+        button.font = .systemFont(ofSize: NSFont.systemFontSize(for: .small))
+        button.target = self
+        button.action = #selector(forgetPasswordTapped)
+        button.translatesAutoresizingMaskIntoConstraints = false
+        button.setContentHuggingPriority(.required, for: .horizontal)
+        button.setContentCompressionResistancePriority(.required, for: .horizontal)
+        row.addSubview(button)
+        // Move the value off the trailing edge to sit before the button.
+        for constraint in row.constraints
+        where constraint.firstItem === valueLabel && constraint.firstAttribute == .trailing {
+            constraint.isActive = false
+        }
+        NSLayoutConstraint.activate([
+            valueLabel.trailingAnchor.constraint(equalTo: button.leadingAnchor, constant: -8),
+            button.trailingAnchor.constraint(equalTo: row.trailingAnchor),
+            button.centerYAnchor.constraint(equalTo: valueLabel.centerYAnchor),
+        ])
+        return row
+    }
+
+    @objc private func forgetPasswordTapped() {
+        guard let id = shownDevice?.id else { return }
+        onForgetPassword?(id)
+    }
+
     // MARK: Model
 
     /// Show the pane for `device`, replacing whatever was shown before.
@@ -614,6 +655,7 @@ public final class DeviceDetailViewController: NSViewController {
         let airPlay = Self.airPlayText(for: device)
         airPlayValueLabel.stringValue = airPlay ?? ""
         airPlayRow.isHidden = airPlay == nil
+        passwordRow.isHidden = !device.hasStoredPassword
         // Only the rows that are actually there, so no divider is drawn above
         // a row that isn't.
         aboutWell.rows = aboutStack.arrangedSubviews.filter { !$0.isHidden }
@@ -1017,8 +1059,12 @@ public final class DeviceDetailViewController: NSViewController {
             "kind": kindValueLabel.stringValue,
         ]
         if !airPlayRow.isHidden { strings["airplay"] = airPlayValueLabel.stringValue }
+        if !passwordRow.isHidden { strings["Password"] = passwordValueLabel.stringValue }
         return strings
     }
+
+    /// Invoke the Password row's "Forget" as a click would.
+    public func test_tapForgetPassword() { forgetPasswordTapped() }
 
     /// The shown device's membership as ONE comma-joined string ("None" when it
     /// belongs to no saved group) — the plain-string contract `window-harness`

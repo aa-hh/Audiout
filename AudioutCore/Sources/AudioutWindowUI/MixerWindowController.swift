@@ -83,6 +83,8 @@ public final class MixerWindowController {
     /// `onSetDeviceEQ` carries (eq, device id, committed); `onSetMainOutEQ`
     /// carries (eq, committed) — no id, it is the whole mix.
     public var onSetDeviceEQ: ((DeviceEQ, String, Bool) -> Void)?
+    /// The device page's "Forget" on its Password row, with the device id.
+    public var onForgetAirPlayPassword: ((String) -> Void)?
     public var onSetMainOutEQ: ((DeviceEQ, Bool) -> Void)?
     /// Reads the whole mix's current tone when the Main Audio page opens.
     /// Pulled rather than pushed: the value lives on the backend, and this
@@ -204,6 +206,9 @@ public final class MixerWindowController {
         // untouched to whoever owns the backend.
         detailViewController.onSetEQ = { [weak self] eq, id, committed in
             self?.onSetDeviceEQ?(eq, id, committed)
+        }
+        detailViewController.onForgetPassword = { [weak self] id in
+            self?.onForgetAirPlayPassword?(id)
         }
         mainOutDetailViewController.onSetEQ = { [weak self] eq, committed in
             self?.onSetMainOutEQ?(eq, committed)

@@ -158,6 +158,26 @@ import AppKit
                 "This Mac is where the audio comes FROM")
     }
 
+    // MARK: About list — the Password row
+
+    // Showing the row without `hasStoredPassword`, or "Forget" not firing `onForgetPassword` with the id, turns it red.
+    @Test func passwordRowShowsOnlyWithAStoredPasswordAndForgetReportsTheID() {
+        let detail = DeviceDetailViewController(groupController: makeController(),
+                                            settings: AppSettings(defaults: isolation.isolatedDefaults))
+        detail.show(device: makeDevice())
+        #expect(detail.test_metadataStrings["Password"] == nil)
+
+        var device = makeDevice()
+        device.hasStoredPassword = true
+        detail.show(device: device)
+        #expect(detail.test_metadataStrings["Password"] == "Saved")
+
+        var forgotten: [String] = []
+        detail.onForgetPassword = { forgotten.append($0) }
+        detail.test_tapForgetPassword()
+        #expect(forgotten == ["d1"])
+    }
+
     // MARK: About list — kind
 
     @Test func kindTextForEveryKind() {

@@ -221,6 +221,9 @@ public final class DeviceRowView: NSView {
     /// speak its equivalent.
     private var volumePendingApply = false
     let nameLabel = NSTextField(labelWithString: "")
+    /// Stock `lock.fill` after the name, shown for any speaker that asks for a
+    /// password, an on-screen code or a Home member. Row ink, never gold.
+    let lockGlyphView = NSImageView()
     /// The single sublabel line under the name (Warm Signal v4.1 item 3 —
     /// re-scoped from the retired routing ladder): carries ONLY state words now.
     /// The one remaining rung is the Muted token, shown iff the device is
@@ -623,6 +626,13 @@ public final class DeviceRowView: NSView {
             : { [weak self] in self?.presentIconMenu() }
         iconView.setAccessibilityLabel("Speaker options")
         nameLabel.stringValue = device.name
+        lockGlyphView.isHidden = device.airPlayAccess == .open
+        switch device.airPlayAccess {
+        case .open: lockGlyphView.setAccessibilityLabel(nil)
+        case .password: lockGlyphView.setAccessibilityLabel("Password protected")
+        case .onScreenCode: lockGlyphView.setAccessibilityLabel("Code required")
+        case .homeMembersOnly: lockGlyphView.setAccessibilityLabel("Home members only")
+        }
         alphaValue = 1.0
 
         // Connection halo ring: driven off `connectionState` ALONE (spec §3.2 /
@@ -659,6 +669,7 @@ public final class DeviceRowView: NSView {
         // speaker's dot stays the connecting ring's hollow `rim`.
         armedDotView.apply(armed: isRouteArmed && isConnected)
         nameLabel.textColor = rowTextColor
+        lockGlyphView.contentTintColor = rowTextColor
 
         // FEED column (v4.1 item 3): main-mix segment wording — "System" for a
         // manual member, the active group's name for a group-target member;
@@ -1580,6 +1591,13 @@ public final class DeviceRowView: NSView {
         nameLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
         nameLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
+        lockGlyphView.image = NSImage(systemSymbolName: "lock.fill", accessibilityDescription: nil)?
+            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 10, weight: .semibold))
+        lockGlyphView.image?.isTemplate = true
+        lockGlyphView.setContentHuggingPriority(.required, for: .horizontal)
+        lockGlyphView.setContentCompressionResistancePriority(.required, for: .horizontal)
+        lockGlyphView.isHidden = true
+
         // Status sublabel (2026-07-17): one line driven by the precedence ladder
         // (failed / unavailable / routing). Small and secondary; `resolveSublabel`
         // shows/hides it and `applyNameStackLayout` centers the name accordingly.
@@ -1693,7 +1711,13 @@ public final class DeviceRowView: NSView {
         identityStack.alignment = .leading
         identityStack.spacing = 2
         identityStack.distribution = .fill
-        identityStack.addArrangedSubview(nameLabel)
+        // The lock rides after the name; the name keeps its low priorities, so
+        // it truncates first and the lock is never squeezed out.
+        let nameLine = NSStackView(views: [nameLabel, lockGlyphView])
+        nameLine.orientation = .horizontal
+        nameLine.spacing = 4
+        nameLine.translatesAutoresizingMaskIntoConstraints = false
+        identityStack.addArrangedSubview(nameLine)
         if showsMeter {
             identityStack.addArrangedSubview(meterView)
             meterView.isHidden = true   // shown only on armed rows (gated in `apply`)
@@ -2686,6 +2710,7 @@ public final class DeviceRowView: NSView {
             // without an `apply` — a menu redraw is its only signal, so only
             // this path still needs a draw-time re-stamp (perf P3-11 / P2-2).
             nameLabel.textColor = rowTextColor
+            lockGlyphView.contentTintColor = rowTextColor
         } else {
             // Menu-less host (popover card / mixer window). A rounded pill behind
             // the row: a gold 12 % wash while the row is SOUNDING (D1 —

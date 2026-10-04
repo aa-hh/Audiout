@@ -620,6 +620,15 @@ public final class PopoverController: NSObject {
     /// mirror of `openDiagnosisIDs`, rebuilt by `reconcileDiagnosisPanels`.
     var diagnosisPanelsByID: [String: ConnectionDiagnosisView] = [:]
 
+    /// The AirPlay password sheet while it is up, and the speaker it asks for.
+    /// Opened only by a user act (the diagnosis panel's button or a join of a
+    /// protected speaker), never by a background reconnect.
+    var passwordSheet: SpeakerPasswordSheetViewController?
+    var passwordSheetDeviceID: String?
+    /// Set on Connect, cleared by the next failure edge for that speaker, so a
+    /// failure that happened before the submit never reads as its answer.
+    var passwordSheetSubmitted = false
+
     /// Bluetooth devices the user explicitly asked to connect from the "+" menu
     /// during THIS popover session — listed while the attempt is in flight and
     /// while its outcome is still on screen, then dropped on close.
@@ -3606,7 +3615,17 @@ public final class PopoverController: NSObject {
                 // "Try again → fails again" (`.failed → .connecting → .failed`).
                 dismissedDiagnosisIDs.remove(device.id)
                 openDiagnosisIDs.insert(device.id)
+                if device.id == passwordSheetDeviceID, passwordSheetSubmitted,
+                   case .failed(let failure) = current {
+                    passwordSheetSubmitted = false
+                    passwordSheet?.showResult(failure.cause == .authRequired
+                        ? "That password didn't work. Check it and try again."
+                        : failure.headline)
+                }
             case .connected, .off:
+                if current == .connected && device.id == passwordSheetDeviceID {
+                    dismissPasswordSheet()
+                }
                 // Same gate as the failure above, for the same reason: a
                 // speaker nobody asked for is the backend's business.
                 if current == .connected && previous != .connected && !device.isLocalDevice
@@ -3707,6 +3726,7 @@ public final class PopoverController: NSObject {
         view.onRetry = { [weak self] in self?.retryConnection(for: id) }
         view.onCopyDetails = { [weak self] in self?.copyDiagnosisDetails(for: id) }
         view.onDismiss = { [weak self] in self?.dismissDiagnosisPanel(for: id) }
+        view.onEnterPassword = { [weak self] in self?.presentPasswordSheet(for: id) }
         diagnosisPanelsByID[id] = view
         panel.insertRow(view, after: row, animated: animated)
     }
@@ -3739,6 +3759,38 @@ public final class PopoverController: NSObject {
         Analytics.capture("connection:retry_clicked")
         let result = groupController?.retryConnection(for: id) ?? .ok
         handleSelection(result, deviceID: id)
+    }
+
+    /// Ask for `id`'s AirPlay password. Connect stores it and retries through
+    /// `GroupController.submitAirPlayPassword`; the sheet stays up until the
+    /// speaker connects (dismiss) or fails again (`showResult`), both read off
+    /// the connection edges in `handleConnectionTransitions`.
+    func presentPasswordSheet(for id: String) {
+        guard passwordSheet == nil else { return }
+        Analytics.capture("airplay:code_prompt_shown", ["kind": "password"])
+        let sheet = SpeakerPasswordSheetViewController(deviceName: devicesByID[id]?.name ?? "")
+        sheet.onSubmit = { [weak self] text in
+            guard let self else { return }
+            self.passwordSheetSubmitted = true
+            _ = self.groupController?.submitAirPlayPassword(text, for: id, source: "mac")
+        }
+        sheet.onCancel = { [weak self] in self?.dismissPasswordSheet() }
+        passwordSheet = sheet
+        passwordSheetDeviceID = id
+        passwordSheetSubmitted = false
+        // Headless runs (host never shown) keep the reference and drive the
+        // sheet through its test hooks.
+        if let host = panel.viewIfLoaded?.window, host.isVisible {
+            panel.presentAsSheet(sheet)
+        }
+    }
+
+    private func dismissPasswordSheet() {
+        let sheet = passwordSheet
+        passwordSheet = nil
+        passwordSheetDeviceID = nil
+        passwordSheetSubmitted = false
+        if sheet?.presentingViewController != nil { sheet?.dismiss(nil) }
     }
 
     /// "Copy details": the raw evidence when the diagnosis captured any, else
@@ -3828,6 +3880,10 @@ extension PopoverController: DeviceRowView.Delegate {
             clearSwitchOffer()
         }
         handleSelection(result, deviceID: id)
+        if on, result.refusalReason == nil, let device = devicesByID[id],
+           device.airPlayAccess == .password, !device.hasStoredPassword {
+            presentPasswordSheet(for: id)
+        }
     }
 
     /// "Play here": the clicked speaker replaces the whole selection

@@ -3222,7 +3222,6 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
 
         engine.pushState(device.outputID, .passwordRequired)
         await pollUntil { backend.devices.first { $0.id == device.id }?.hasStoredPassword == false }
-        await pollUntil { store.password(for: device.id) == nil }
         #expect(store.password(for: device.id) == nil)
         #expect(failureCause(backend, device.id) == .authRequired)
     }

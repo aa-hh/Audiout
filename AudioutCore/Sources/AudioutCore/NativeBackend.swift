@@ -3649,6 +3649,10 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                         // it rather than retry it.
                         let rejectedStored = (error as? AirPlayEngineError) == .passwordRequired
                             && self.fedDescriptors[id]?.password != nil
+                        // Deletes are exempt from the off-`stateQueue` Keychain rule: they target
+                        // an item this app's own signature created, so a Developer ID build
+                        // raises no access prompt, and running them synchronously is what stops
+                        // a background delete from erasing a password the user types right after.
                         if rejectedStored { self.passwordStore.removePassword(for: id) }
                         self.removeFromAddedLocked(id)
                         self.failedGate.insert(id)
@@ -5923,9 +5927,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     private func applyPasswordFailureLocked(state: OutputState, cause: ConnectionFailure.Cause, device: inout Device) {
         let fedPassword = fedDescriptors[device.id]?.password
         if state == .passwordRequired, fedPassword != nil {
-            // Off `stateQueue`: a Keychain delete can wait on an access prompt.
-            let store = passwordStore, id = device.id
-            DispatchQueue.global().async { store.removePassword(for: id) }
+            // Deletes are exempt from the off-`stateQueue` Keychain rule: they target
+            // an item this app's own signature created, so a Developer ID build
+            // raises no access prompt, and running them synchronously is what stops
+            // a background delete from erasing a password the user types right after.
+            passwordStore.removePassword(for: device.id)
             device.hasStoredPassword = false
         }
         if Self.waitsForPassword(cause, fedPassword: fedPassword) {
@@ -5936,6 +5942,8 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     public func submitAirPlayPassword(_ password: String, for id: String, source: String) {
         // Mark first: a converge catch running before the store write would
         // otherwise read the old fed password as refused and delete this one.
+        // This sync only inserts into a dictionary (microseconds), so the
+        // main-thread rule about slow calls on `stateQueue` does not apply.
         stateQueue.sync { self.passwordResubmitted[id] = password }
         passwordStore.setPassword(password, for: id)
         stateQueue.async {

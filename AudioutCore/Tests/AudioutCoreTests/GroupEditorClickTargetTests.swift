@@ -32,8 +32,8 @@ struct GroupEditorClickTargetTests {
         pane.loadViewIfNeeded()
         pane.show(groupID: "g", devices: [bt])
         #expect(pane.test_candidateDeviceIDs.contains("missing"))
-        #expect(pane.test_presentationText(for: "bt") == "Not connected\nHidden from Mixer")
-        #expect(pane.test_reassuranceText == "Saved as you go. Mixer visibility is managed in Speakers.")
+        #expect(pane.test_presentationText(for: "bt") == "Not connected")
+        #expect(pane.test_reassuranceText == "Changes are saved as you go.")
         pane.test_setMembership(false, for: "missing")
         #expect(groups.groups.first?.memberIDs == ["bt"])
         #expect(library.visibility(for: "bt") == .hideWhenNotInUse)
@@ -56,7 +56,7 @@ struct GroupEditorClickTargetTests {
         let row = MembershipRowView(device: device, checked: true, surface: .warmPane)
         row.applyPresentation(try #require(library.record(for: device.id)))
         #expect(!row.test_isDimmed)
-        #expect(row.test_presentationText == "When available in Mixer")
+        #expect(row.test_presentationText == "")
     }
 
     private func warmRow() -> MembershipRowView {

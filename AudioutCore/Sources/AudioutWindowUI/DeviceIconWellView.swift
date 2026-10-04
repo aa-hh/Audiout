@@ -42,7 +42,7 @@ import AudioutSharedUI
 /// WARM SIGNAL (spec §1 / §5.3): the well draws itself as a real seat — a
 /// rounded rect filled `raised` at the control radius (on light that is the
 /// flat ground, so only the edge draws the seat) edged with
-/// `containerEdge` — so the 64 pt box reads as one clickable control whose LEFT EDGE
+/// `containerEdge` — so the box reads as one clickable control whose LEFT EDGE
 /// aligns with the column (the previous bare glyph floated centered in an
 /// invisible box, which read as a left-alignment drift against the labels
 /// below it). Hovering (or keyboard focus) adds a neutral wash at
@@ -60,9 +60,10 @@ import AudioutSharedUI
 /// `.cgColor` (the `WarmCanvasView` pattern).
 final class DeviceIconWellView: NSView {
 
-    /// Square side length (approved: "~64pt"), one constant so the detail
-    /// pane's and the editor's headers can never drift apart.
-    static let size: CGFloat = 64
+    /// Square side length: every window page opens with a 48 pt icon well.
+    /// One constant so the speaker page's, the Main Audio page's and the
+    /// scene editor's headers can never drift apart.
+    static let size: CGFloat = 48
 
     /// Corner radius of the raised-well rounded rect (and of the focus ring /
     /// hover wash that trace the same shape) — the control radius.

@@ -27,5 +27,5 @@ Menu-bar Mixer and shared surface host. It renders presentation; Core owns routi
 
 - `PopoverController` → Mixer presentation and host action dispatch.
 - `PopoverPanelViewController` → Hosted Mixer panel content.
-- `AppSurfaceController` → Shared shell and screen lifecycle.
+- `AppSurfaceController` → Shared shell and the four screens' lifecycle.
 - `SurfaceToolbarController` → Native toolbar screen and pin actions.

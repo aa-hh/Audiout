@@ -83,12 +83,6 @@ public final class GroupEditorViewController: NSViewController {
     /// "‹ Groups" band, Escape, or ⌘[. The host owns the pane swap; this pane
     /// only reports the request (direction C's in-pane push).
     public var onBack: (() -> Void)?
-    /// Called when Escape abandoned a rename, so the host can put keyboard
-    /// focus somewhere real (the sidebar's outline view) instead of leaving
-    /// the window as its own first responder — see ``cancelRename()``. Escape
-    /// while renaming stops HERE (the field editor consumes it); only an
-    /// Escape outside a rename reaches the container and fires `onBack`.
-    public var onDidCancelRename: (() -> Void)?
 
     /// The group currently being edited, nil before `show`.
     public private(set) var editingGroupID: String?
@@ -211,9 +205,9 @@ public final class GroupEditorViewController: NSViewController {
 
     private static let titleFieldMinWidth: CGFloat = 140
 
-    private static let savedAsYouGo = "Saved as you go. Mixer visibility is managed in Speakers."
+    private static let savedAsYouGo = "Changes are saved as you go."
     private static let savedAsYouGoActive =
-        "Saved as you go; what\u{2019}s playing now doesn\u{2019}t change. Mixer visibility is managed in Speakers."
+        "Changes are saved as you go. They don\u{2019}t change what\u{2019}s playing now."
 
     /// The primary's resting title. Every edit on this pane autosaves, so
     /// there is normally nothing outstanding to save and the button only has
@@ -819,7 +813,6 @@ public final class GroupEditorViewController: NSViewController {
             let isMember: Bool
             let railArmed: Bool
             let status: SpeakerPresentationStatus?
-            let visibilityContext: String?
         }
         let groupID: String
         let groupName: String
@@ -854,8 +847,7 @@ public final class GroupEditorViewController: NSViewController {
                     isMember: memberSet.contains(device.id),
                     railArmed: railArmed(for: device, memberSet: memberSet,
                                          isActiveGroup: isActive),
-                    status: presentationByID[device.id]?.status,
-                    visibilityContext: presentationByID[device.id]?.mixerVisibilityContext)
+                    status: presentationByID[device.id]?.status)
             })
     }
 
@@ -1132,13 +1124,13 @@ public final class GroupEditorViewController: NSViewController {
     ///
     /// Focus goes SOMEWHERE REAL. It used to go to `makeFirstResponder(nil)`,
     /// which is the exact dead-Tab state A11Y-GROUPS fixed: the window becomes
-    /// its own first responder and Tab has nothing to advance from. The host
-    /// wires ``onDidCancelRename`` to the sidebar's outline view, the one
-    /// control present whatever pane is showing.
+    /// its own first responder and Tab has nothing to advance from. It lands
+    /// on the Back control, the way out of this editor; the sidebar it used to
+    /// land on lives on the Speakers screen, not beside the editor.
     private func cancelRename() {
         nameField.abortEditing()
         restoreNameField()
-        onDidCancelRename?()
+        view.window?.makeFirstResponder(backButton)
     }
 
     /// Re-measure the rename field around its current text. An editable
@@ -1405,6 +1397,8 @@ public final class GroupEditorViewController: NSViewController {
     /// The rename field itself, so a test can drive real AppKit editing (a
     /// window + `makeFirstResponder`) instead of a stand-in.
     public var test_titleField: NSTextField { nameField }
+    /// The Back control (the band's "‹ Scenes" button, wired to `onBack`).
+    public var test_backButton: NSButton { backButton }
 
     /// Simulate ticking/unticking a membership row for a device.
     public func test_setMembership(_ member: Bool, for deviceID: String) {

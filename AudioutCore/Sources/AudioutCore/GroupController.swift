@@ -771,6 +771,27 @@ public final class GroupController {
         return group
     }
 
+    /// Removes every id in `ids` from every group's members and volumes in one write. Throws
+    /// ``GroupError/emptyMembership`` before writing if any group would be left empty. Never touches
+    /// routing or the active group. Returns how many groups changed.
+    @discardableResult
+    public func removeDevices(_ ids: Set<String>) throws -> Int {
+        var changed = 0
+        var updated = groups
+        for index in updated.indices {
+            let before = updated[index].memberIDs.count
+            updated[index].memberIDs.removeAll { ids.contains($0) }
+            for id in ids { updated[index].memberVolumes.removeValue(forKey: id) }
+            if updated[index].memberIDs.isEmpty { throw GroupError.emptyMembership }
+            if updated[index].memberIDs.count != before { changed += 1 }
+        }
+        guard changed > 0 else { return 0 }
+        try store.save(updated)
+        groups = updated
+        onStateDidChange?()
+        return changed
+    }
+
     /// Outcome of a create/save-current operation, so the UI can tell "made a new
     /// group" from "you're already that group" (SPEC.md §9 dedup).
     public struct CreateResult {

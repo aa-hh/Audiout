@@ -548,8 +548,14 @@ func speakerManagementFixture(empty: Bool = false) ->
                            isAvailable: false, volume: 50)
     let hidden = Device(id: "bt-hidden", name: "Onkyo TX-8220", kind: .bluetooth, volume: 50)
     let remembered = Device(id: "remembered-network", name: "Bedroom", kind: .homePod, isAvailable: false)
+    // Hidden unless playing, and playing: the sidebar's one caption row.
+    let hiddenPlaying = Device(id: "bt-hidden-playing", name: "Beosound A1", kind: .bluetooth,
+                               volume: 50, connectionState: .connected)
+    // Known to the library, seen by the Mac never again, in two scenes: the
+    // Speakers page's Forget row.
+    let lost = Device(id: "lost-den", name: "Den", kind: .sonos, isAvailable: false)
     let legacyID = "legacy-scene-member-42"
-    let devices = empty ? [local] : [local, airplay, cast, bluetooth, hidden]
+    let devices = empty ? [local] : [local, airplay, cast, bluetooth, hidden, hiddenPlaying]
     let backend = MockBackend(fleet: devices, staggerDiscovery: false,
                               emitsLevels: false, simulatesDropouts: false)
     let groups = GroupController(backend: backend, store: GroupStore(directory: directory),
@@ -562,20 +568,23 @@ func speakerManagementFixture(empty: Bool = false) ->
     if !empty {
         do {
             try groups.saveGroup(Group(id: "kitchen", name: "Kitchen",
-                memberIDs: ["airplay", "cast", "bt-offline", legacyID], memberVolumes: ["airplay": 50, "cast": 50]))
+                memberIDs: ["airplay", "cast", "bt-offline", legacyID, "lost-den"],
+                memberVolumes: ["airplay": 50, "cast": 50]))
             try groups.saveGroup(Group(id: "living", name: "Living Room",
-                memberIDs: ["airplay", "remembered-network"], memberVolumes: ["airplay": 50]))
+                memberIDs: ["airplay", "remembered-network", "lost-den"], memberVolumes: ["airplay": 50]))
         } catch {
             print("  FAIL  speaker fixture scene save: \(error)")
             renderFailed = true
         }
-        library.update(liveDevices: devices + [remembered], groups: groups.groups,
+        library.update(liveDevices: devices + [remembered, lost], groups: groups.groups,
                        confirmedUsedIDs: ["remembered-network"])
         library.setVisibility(.always, for: "bt-offline")
         library.setVisibility(.always, for: "remembered-network")
         library.setVisibility(.always, for: legacyID)
         library.setVisibility(.hideWhenNotInUse, for: "bt-hidden")
+        library.setVisibility(.hideWhenNotInUse, for: "bt-hidden-playing")
         _ = groups.setDeviceSelected("cast", true)
+        _ = groups.setDeviceSelected("bt-hidden-playing", true)
     }
     library.update(liveDevices: devices, groups: groups.groups,
         confirmedUsedIDs: empty ? [] : ["cast"],
@@ -606,27 +615,28 @@ func snapshotSpeakerManagement(appearanceName: NSAppearance.Name, outDir: URL) {
             window?.refreshSpeakerPresentation()
         }
         if variant == "denied" {
-            window.speakersOverview.setBluetoothAccessExplanation(
-                "Allow Bluetooth access in System Settings to see paired speakers that are not connected.",
-                actionTitle: "Open Bluetooth privacy…")
+            window.speakersPage.setBluetoothAccess(SpeakerBluetoothAccessPresentation(status: .denied, priming: false))
         }
         let surface = AppSurfaceController(popoverController: popover, settings: settings,
-            groupsContent: { window.contentController },
+            groupsContent: { window.scenesContentController },
+            speakersContent: { window.speakersContentController },
             settingsContent: { SettingsRootViewController(sections: []) },
             frameAutosaveName: "SpeakerManagementSnapshotSurface")
         popover.onManageSpeakers = {
-            surface.select(.groups)
+            surface.select(.speakers)
             window.select(.speakersOverview)
         }
-        let present: (NSRect?) -> Void = { anchor in
+        let presenting: (SurfaceScreen) -> (NSRect?) -> Void = { screen in { anchor in
             surface.show(anchorRect: anchor)
-            surface.select(.groups)
+            surface.select(screen)
             settleSpeakerSnapshot(1.0)
             if (surface.shell.window?.contentView?.layer?.opacity ?? 0) < 0.999 {
                 print("  FAIL  speaker screen fade did not settle")
                 renderFailed = true
             }
-        }
+        } }
+        let present = presenting(.speakers)
+        let presentScenes = presenting(.groups)
         if variant == "fleet" {
             let presentMixer: (NSRect?) -> Void = { anchor in
                 surface.show(anchorRect: anchor)
@@ -648,10 +658,10 @@ func snapshotSpeakerManagement(appearanceName: NSAppearance.Name, outDir: URL) {
         if variant == "fleet" {
             window.select(.group(id: "kitchen"))
             snapshotControlPanel(surface.shell, label: "scene-editor", appearanceName: appearanceName,
-                                 outDir: outDir, present: present)
+                                 outDir: outDir, present: presentScenes)
             window.select(.groupsOverview)
             snapshotControlPanel(surface.shell, label: "scene-cards", appearanceName: appearanceName,
-                                 outDir: outDir, present: present)
+                                 outDir: outDir, present: presentScenes)
             window.select(.device(id: "remembered-network"))
             snapshotControlPanel(surface.shell, label: "remembered-network", appearanceName: appearanceName,
                                  outDir: outDir, present: present)
@@ -740,20 +750,26 @@ func run() -> Int32 {
         let surface = AppSurfaceController(
             popoverController: surfacePopover,
             settings: surfaceSettings,
-            groupsContent: { windowController.contentController },
+            groupsContent: { windowController.scenesContentController },
+            speakersContent: { windowController.speakersContentController },
             settingsContent: {
                 // Lazily built on first .settings selection — never reached
-                // in this render (only Groups is ever selected).
+                // in this render (only Scenes and Speakers are selected).
                 SettingsRootViewController(sections: [])
             },
             frameAutosaveName: "WindowSnapshotSurface")
         // `show` mounts + fronts (a no-op re-front once already shown);
-        // `select` is a no-op once Groups is already the selected screen —
-        // so calling this before every capture just guarantees the surface
-        // is showing Groups, without re-running the mount/resize dance.
+        // `select` is a no-op once that screen is already selected —
+        // so calling one of these before every capture just guarantees the
+        // surface is showing Scenes (or Speakers, for a speaker page), without
+        // re-running the mount/resize dance.
         let presentGroups: (NSRect?) -> Void = { anchor in
             surface.show(anchorRect: anchor)
             surface.select(.groups)
+        }
+        let presentSpeakers: (NSRect?) -> Void = { anchor in
+            surface.show(anchorRect: anchor)
+            surface.select(.speakers)
         }
 
         // 1. Default state: no groups — the card overview's own zero-groups
@@ -796,7 +812,7 @@ func run() -> Int32 {
             windowController.test_detail.test_setOverlayVisible(true)
             drain()
             snapshotControlPanel(surface.shell, label: "4-device-detail", appearanceName: appearanceName,
-                                outDir: outDir, present: presentGroups)
+                                outDir: outDir, present: presentSpeakers)
 
             // 4b. The same pane with Advanced open — the scope lives in the
             // fold, so this is the only render that shows it. Put back
@@ -806,7 +822,7 @@ func run() -> Int32 {
             drain()
             snapshotControlPanel(surface.shell, label: "4b-device-detail-eq-open",
                                 appearanceName: appearanceName,
-                                outDir: outDir, present: presentGroups)
+                                outDir: outDir, present: presentSpeakers)
             windowController.test_detail.test_eqEditor.test_fireAdvancedClick()
             drain()
 
@@ -850,7 +866,7 @@ func run() -> Int32 {
             // beak-backed bubble (live-review D1) actually draws on the
             // unpinned bubble.
             snapshotControlPanel(surface.shell, label: "5-panel-chrome",
-                                appearanceName: appearanceName, outDir: outDir, present: presentGroups)
+                                appearanceName: appearanceName, outDir: outDir, present: presentSpeakers)
 
             // 8. Groups overview (direction C): the card field the sidebar's
             // pinned Groups row opens. Two more groups are saved so the grid

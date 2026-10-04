@@ -293,3 +293,4 @@ backend.
 - `GroupCreationSheetController` → standard sheet for new groups; never activates.
 - `DeviceDetailViewController` → device pane: identity, Equalizer, Groups, About.
 - `MainOutDetailViewController` → Main Audio page, non-editable icon well.
+- 2026-10-04: The Speakers overview table (`SpeakersOverviewViewController`) was retired: the sidebar is the only speaker list, and the Speakers plate opens `SpeakersPageViewController`. The Forget confirm refuses, rather than deleting the scene, when forgetting would leave a scene with no speaker, because deleting a scene can move audio.

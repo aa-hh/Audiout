@@ -15,7 +15,7 @@ public enum SpeakerPresentationStatus: Equatable, Sendable {
     public var text: String {
         switch self {
         case .connected: return "Connected"
-        case .available: return "Available"
+        case .available: return "Ready"
         case .notConnected: return "Not connected"
         case .unavailable: return "Unavailable"
         case .missing: return "Missing speaker"
@@ -75,7 +75,7 @@ public struct SpeakerBluetoothAccessPresentation: Equatable, Sendable {
             action = .openSettings(.bluetooth)
         case .denied:
             explanation = "Allow Bluetooth access in System Settings to see paired speakers that are not connected."
-            actionTitle = "Open Bluetooth privacy…"
+            actionTitle = "Open Privacy Settings…"
             action = .openSettings(.bluetoothPrivacy)
         case .unsupported:
             explanation = "Bluetooth access is unavailable on this Mac."
@@ -128,16 +128,6 @@ public struct SpeakerPresentationRecord: Identifiable, Equatable, Sendable {
         case .whenAvailable: return isAvailable
         case .hideWhenNotInUse: return false
         }
-    }
-
-    public var mixerVisibilityContext: String {
-        let text: String
-        switch visibility {
-        case .whenAvailable: text = "When available in Mixer"
-        case .always: text = "Always in Mixer"
-        case .hideWhenNotInUse: text = "Hidden from Mixer"
-        }
-        return visibility == .hideWhenNotInUse && isInUse ? "\(text) · Shown while in use" : text
     }
 
     /// For configuration rendering only. Never supply this value to routing or a backend.
@@ -253,6 +243,34 @@ public final class SpeakerLibraryController {
         Analytics.capture("speaker:visibility_changed", ["visibility": visibility.rawValue, "count": String(written)])
         publishIfChanged(force: true)
         return true
+    }
+
+    /// Removes speakers the Mac cannot find from every scene and from the library. Speakers with a live device
+    /// are skipped. Throws `GroupError.emptyMembership` (nothing written) when a scene would be left empty.
+    /// Never touches routing. Returns how many scenes changed.
+    @discardableResult
+    public func forget(_ ids: Set<String>, scenes: GroupController) throws -> Int {
+        let filtered = ids.filter { record(for: $0)?.liveDevice == nil }
+        guard !filtered.isEmpty else { return 0 }
+        let sceneCounts = Dictionary(uniqueKeysWithValues: filtered.map { id in
+            (id, scenes.groups.filter { $0.memberIDs.contains(id) }.count)
+        })
+        let changed = try scenes.removeDevices(filtered)
+        for index in groups.indices {
+            groups[index].memberIDs.removeAll { filtered.contains($0) }
+        }
+        var candidate = state
+        for id in filtered {
+            candidate.metadata.removeValue(forKey: id)
+            candidate.visibility.removeValue(forKey: id)
+        }
+        guard save(candidate) else { return changed }
+        state = candidate
+        publishIfChanged(force: true)
+        for id in filtered.sorted() {
+            Analytics.capture("speaker:forgotten", ["scenes": String(sceneCounts[id] ?? 0)])
+        }
+        return changed
     }
 
     private func save(_ candidate: SpeakerLibraryState) -> Bool {

@@ -208,8 +208,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// `applicationDidFinishLaunching` so it binds to the resolved `backend`.
     private var groupController: GroupController!
 
-    /// Owns the Groups screen's content (SPEC §9). Created lazily the first
-    /// time the Groups tab is visited, then reused; it is a pure content
+    /// Owns the Scenes and Speakers screens' content (SPEC §9). Created lazily
+    /// the first time either tab is visited, then reused; it is a pure content
     /// controller (its standalone window was retired in U6). Holds the same
     /// `GroupController` as the Mixer, so the two screens stay in lockstep.
     private var mixerWindowController: MixerWindowController?
@@ -1098,10 +1098,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.updateSpeakerLibrary()
         }
         popoverController.onManageSpeakers = { [weak self] in
-            self?.showSurface(.groups, selecting: .speakersOverview)
+            guard let self else { return }
+            self.showSurface(.speakers)
+            if let c = self.mixerWindowController { c.select(c.firstSpeakerSelection) }
+            Analytics.capture("speaker:settings_opened", ["door": "manage_speakers"])
         }
         popoverController.onOpenSpeakerSettings = { [weak self] id in
-            self?.showSurface(.groups, selecting: .device(id: id))
+            self?.showSurface(.speakers, selecting: .device(id: id))
         }
         popoverController.bluetoothPermissionProvider = { [weak self] in
             self?.permissionProviders.bluetoothReader.currentStatus() ?? .unknown
@@ -1199,19 +1202,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             (self?.backend as? AppRouteConfiguring)?.setLocalPlaybackVolume(
                 volume: volume, bundleID: bundleID)
         }
-        // EQ lives on the GROUPS screen, never on the Mixer (owner decision
+        // EQ lives on the Speakers screen, never on the Mixer (owner decision
         // 2026-08-22): a row's "Equalizer…" is a DOOR, and this is the hinge —
-        // it opens the surface on the speaker's own page (or the whole mix's).
+        // it opens the surface on the speaker's own page (or Main Audio's,
+        // which sits in the Speakers sidebar).
         popoverController.onOpenEqualizer = { [weak self] id in
-            self?.showSurface(.groups,
+            self?.showSurface(.speakers,
                               selecting: id == PopoverController.mainOutEQID
                                   ? .mainOut : .device(id: id))
         }
         // Pairing opens the macOS Bluetooth pane.
-        popoverController.onPairBluetoothSpeaker = {
-            Analytics.capture("mixer:bt_pairing_settings_opened")
-            NSWorkspace.shared.open(SystemSettingsPane.bluetooth.url)
-        }
+        popoverController.onPairBluetoothSpeaker = Self.openBluetoothPairing
         // BT-UI ghost pairings: recency feed for the Bluetooth subsection's
         // stale-to-the-bottom sort. Capability-gated like the hooks above —
         // nil on MockBackend, which sorts by name alone.
@@ -1251,7 +1252,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         // The row's Equalizer door wears one mark when the curve is not flat.
         // The answer comes off `Device.eq` on the device model — the same
-        // field the Groups screen's detail pane reads, seeded by the backend
+        // field the Speakers screen's detail pane reads, seeded by the backend
         // from `DeviceEQStore` — so the Mixer holds no tone state of its own.
         popoverController.deviceEQIsShaped = { [weak self] deviceID in
             self?.devicesByID[deviceID]?.eq.isFlat == false
@@ -1385,15 +1386,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.permissionAuditModel?.localNetworkStatus == .denied
         }
 
-        // The one surface (U4). Both screen providers are lazy — the Groups and
-        // Settings trees are only built when their tab is first visited — and
+        // The one surface (U4). Every screen provider is lazy — the Scenes,
+        // Speakers and Settings trees are only built when their tab is first
+        // visited (Scenes and Speakers share one `MixerWindowController`) — and
         // the Mixer panel is claimed from the popover on its first mount.
         surface = AppSurfaceController(
             popoverController: popoverController,
             settings: settings,
             groupsContent: { [unowned self] in self.groupsScreenContent() },
+            speakersContent: { [unowned self] in self.speakersScreenContent() },
             settingsContent: { [unowned self] in self.makeSettingsRoot() })
-        // The Groups content skips its rebuild while hidden (B8) and has no
+        // The Scenes and Speakers content skips its rebuild while hidden (B8) and has no
         // window of its own to ask about visibility any more, so the surface
         // tells it which screen the user is looking at.
         // Escape in a group's editor steps back to the overview; the next
@@ -1406,7 +1409,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         surface.onVisibleScreenChange = { [weak self] screen in
             let openedOntoMixer = previousScreen == nil && screen == .mixer
             previousScreen = screen
-            self?.mixerWindowController?.setHostVisible(screen == .groups)
+            self?.mixerWindowController?.setVisibleTab(
+                screen == .groups ? .scenes : screen == .speakers ? .speakers : nil)
             // Settings' panes are built once and cached for the process's
             // life, so a phone-driven connect-volume/buffer change would show
             // the launch-time value forever. Reconciled on appearance rather
@@ -2253,18 +2257,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: Menu-bar secondary menu + app main menu (Quit / Settings discoverability)
 
     /// The menu shown on a right/control-click of the status item — the
-    /// discoverable path to Settings, Groups, and Quit for a Dock-less app whose
+    /// discoverable path to Settings, Scenes, Speakers and Quit for a Dock-less app whose
     /// only other quit affordance is the small power glyph in the surface header.
     @MainActor
     private func makeStatusMenu() -> NSMenu {
         let menu = NSMenu()
-        // No ellipsis (HIG): both switch tabs on the surface, they don't open a
+        // No ellipsis (HIG): these switch tabs on the surface, they don't open a
         // window — the app menu's own "Settings…" below keeps its ellipsis,
         // that one IS the macOS menu-bar convention (⌘,), unrelated to this rule.
         let settings = menu.addItem(withTitle: "Settings", action: #selector(menuOpenSettings), keyEquivalent: ",")
         settings.target = self
         let groups = menu.addItem(withTitle: "Scenes", action: #selector(menuOpenGroups), keyEquivalent: "")
         groups.target = self
+        // No key equivalent: the surface's ⌘3 is the Speakers shortcut.
+        let speakers = menu.addItem(withTitle: "Speakers", action: #selector(menuOpenSpeakers), keyEquivalent: "")
+        speakers.target = self
         menu.addItem(.separator())
         // About carries NO ellipsis — it opens the About window and asks the
         // user nothing, which is the whole rule. "Check for Updates…" does
@@ -2349,6 +2356,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @MainActor @objc private func menuOpenSettings() { showSurface(.settings) }
     @MainActor @objc private func menuOpenGroups() { showSurface(.groups) }
+    @MainActor @objc private func menuOpenSpeakers() { showSurface(.speakers) }
     @MainActor @objc private func menuOpenAbout() { aboutWindowController.show() }
     @MainActor @objc private func menuCheckForUpdates() { updaterController?.checkForUpdates(nil) }
 
@@ -2356,10 +2364,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// affordance now shares (right-click menu, ⌘,, the header tabs' pre-claim
     /// fallbacks, and the post-Setup landing).
     ///
-    /// `selecting` deep-links INTO the Groups screen (the popover's
-    /// "Equalizer…"), applied after the screen is up so the pane it names is
-    /// built and mounted. A device the Groups screen has not seen yet pends
-    /// there rather than being dropped.
+    /// `selecting` deep-links INTO the Scenes or Speakers screen (the popover's
+    /// "Equalizer…" opens Speakers on a speaker's page), applied after the
+    /// screen is up so the pane it names is built and mounted. A device the
+    /// `MixerWindowController` has not seen yet pends there rather than being
+    /// dropped.
     @MainActor
     private func showSurface(_ screen: SurfaceScreen, selecting: SidebarSelection? = nil) {
         refreshSpeakerBluetoothAccess()
@@ -2368,13 +2377,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let selecting { mixerWindowController?.select(selecting) }
     }
 
-    /// The Groups screen's content: `MixerWindowController`'s split view. The
-    /// controller owns the sidebar/editor plumbing and nothing else. Built on
-    /// the first visit to the Groups tab and reused; seeded with the current
-    /// device snapshot so it is correct the instant it appears.
+    /// The Scenes screen's content: the scene cards and editor.
     @MainActor
     private func groupsScreenContent() -> NSViewController {
-        let controller = mixerWindowController ?? MixerWindowController(
+        builtMixerWindowController().scenesContentController
+    }
+
+    /// The Speakers screen's content: `MixerWindowController`'s split view
+    /// (speaker sidebar beside the speaker pages).
+    @MainActor
+    private func speakersScreenContent() -> NSViewController {
+        builtMixerWindowController().speakersContentController
+    }
+
+    /// The one controller behind both the Scenes and Speakers screens. It
+    /// owns the sidebar/editor plumbing and nothing else. Built on the first
+    /// visit to either tab and reused; seeded with the current device snapshot
+    /// so it is correct the instant it appears.
+    @MainActor
+    private func builtMixerWindowController() -> MixerWindowController {
+        if let mixerWindowController { return mixerWindowController }
+        let controller = MixerWindowController(
             groupController: groupController,
             deviceIconController: deviceIconController,
             appRouting: appRouting,
@@ -2383,9 +2406,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             btHardwareVolumeStore: (backend as? NativeBackend)?.btHardwareVolumeStore,
             settings: settings, speakerLibrary: speakerLibrary)
         mixerWindowController = controller
-        controller.speakersOverview.onBluetoothAccess = { [weak self] in
+        // A scene created from the Speakers sidebar opens in the Scenes tab.
+        controller.onRequestScenesTab = { [weak self] in self?.surface.select(.groups) }
+        controller.speakersPage.onBluetoothAccess = { [weak self] in
             self?.requestSpeakerBluetoothAccess()
         }
+        controller.speakersPage.onPairBluetooth = Self.openBluetoothPairing
+        // A speaker the Mac can't find has no backend entry to ask, so its
+        // saved tone is read from the same store the backend writes.
+        controller.storedDeviceEQ = { id in (try? DeviceEQStore().load())?.devices[id] }
         updateSpeakerLibrary()
         refreshSpeakerBluetoothAccess()
         // The two Equalizer seams. This screen owns no backend (its own
@@ -2406,7 +2435,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         controller.mainOutEQProvider = { [weak self] in self?.backend.mainOutEQ ?? .flat }
         controller.update(devices: Array(devicesByID.values))
-        return controller.contentController
+        return controller
+    }
+
+    /// The one "Pair Bluetooth speaker…" action, shared by the Mixer's footer
+    /// and the Speakers page: opens the macOS Bluetooth pane.
+    private static let openBluetoothPairing: () -> Void = {
+        Analytics.capture("mixer:bt_pairing_settings_opened")
+        NSWorkspace.shared.open(SystemSettingsPane.bluetooth.url)
     }
 
     /// The Settings screen's content, built on the first visit: a Groups-style
@@ -2993,11 +3029,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var structuralStateGate = StructuralStateGate()
 
     /// Repaint the surfaces that render membership — the popover's device rows
-    /// and the Groups screen — for the changes that reach the model with no
+    /// and the Scenes and Speakers screens — for the changes that reach the model with no
     /// `BackendEvent` behind them, so nothing else would ever repaint them: a
     /// phone toggling a speaker while a GROUP carries Main Out (see
     /// `PopoverController.refreshDeviceMembership`), and phone-driven group
-    /// create/rename/membership/delete, which the Groups screen otherwise
+    /// create/rename/membership/delete, which the Scenes screen otherwise
     /// showed stale until the user navigated away and back.
     @MainActor
     private func repaintStructuralStateIfChanged() {
@@ -3021,8 +3057,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func refreshSpeakerBluetoothAccess() {
         let access = SpeakerBluetoothAccessPresentation(status: permissionProviders.bluetoothReader.currentStatus(),
                                                         priming: primingSpeakerBluetooth)
-        mixerWindowController?.speakersOverview.setBluetoothAccessExplanation(access.explanation,
-                                                                              actionTitle: access.actionTitle)
+        mixerWindowController?.speakersPage.setBluetoothAccess(access)
         popoverController?.refreshSpeakerPresentation()
     }
 
@@ -3091,8 +3126,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             settings.telemetryDailyActiveDay = due.day
             Analytics.capture("streaming:daily_active", ["speaker_count": String(due.speakerCount)])
         }
-        // Keep the Groups screen in lockstep with the same snapshot. Nil until
-        // that tab has been visited, and its own hidden-means-idle gate drops
+        // Keep the Scenes and Speakers screens in lockstep with the same
+        // snapshot. Nil until either tab has been visited, and its own hidden-means-idle gate drops
         // the rebuild whenever the user is looking at another screen — so a
         // backend event never builds or repaints a screen nobody can see.
         mixerWindowController?.update(devices: devices)

@@ -1054,11 +1054,17 @@ public final class DeviceRowView: NSView {
         eqButton.setAccessibilityLabel("Equalizer for \(device.name)")
         eqButton.setAccessibilityValue(isEQShaped ? "Shaped" : "Flat")
         // One shape, two inks.
-        eqButton.image = RowAccessorySymbol.image(
-            named: Self.eqRestSymbolName,
-            ink: isEQShaped
-                ? Self.engagedInk(fill: Tokens.Color.equalizer, in: effectiveAppearance)
-                : Self.restInk(in: effectiveAppearance))
+        eqButton.image = isEQShaped
+            ? Self.equalizerEngagedMarkImage(in: effectiveAppearance)
+            : RowAccessorySymbol.image(named: Self.eqRestSymbolName, ink: Self.restInk(in: effectiveAppearance))
+    }
+
+    /// The engaged equalizer mark, for the speaker page's Equalizer summary
+    /// as well as this row's door, so the green stays drawn from this file.
+    public static func equalizerEngagedMarkImage(in appearance: NSAppearance) -> NSImage? {
+        RowAccessorySymbol.image(
+            named: eqRestSymbolName,
+            ink: engagedInk(fill: Tokens.Color.equalizer, in: appearance))
     }
 
     /// The engaged ink: `fill` over everything the symbol draws — on mute's

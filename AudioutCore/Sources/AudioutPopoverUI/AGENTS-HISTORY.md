@@ -163,3 +163,4 @@ folder renders; routing arithmetic lives in Core.
 - `PopoverPanelViewController` → the panel view controller every host mounts.
 - `AppSurfaceController` → owns the shell, swaps the three screens.
 - `SurfaceToolbar` → the window's header strip, built from bordered `NSToolbarItem`s.
+- 2026-10-04: the Speakers screen split from Scenes, so the surface has four tabs (Mixer, Scenes, Speakers, Settings; ⌘1–⌘4). `SurfaceScreen.groups` remains the Scenes case so the `surface:screen_selected` analytics value "groups" is unchanged; the new screen sends "speakers".

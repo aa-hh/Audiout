@@ -74,9 +74,10 @@ private func makeParkedWindow(height: CGFloat = 400) -> NSWindow {
         #expect(window.toolbarStyle == .unified, "D1: unified — the toolbar IS the one header strip")
     }
 
-    @Test func tabsCarryAllThreeScreensWithResolvedGlyphs() {
+    // Turns red when a `SurfaceScreen` case is added, dropped or reordered without its tab, or a tab's glyph stops resolving.
+    @Test func tabsCarryEveryScreenWithResolvedGlyphs() {
         let (controller, _) = makeAttached()
-        #expect(controller.test_tabAccessibilityLabels == ["Mixer", "Scenes", "Settings"])
+        #expect(controller.test_tabAccessibilityLabels == ["Mixer", "Scenes", "Speakers", "Settings"])
         #expect(controller.test_allTabImagesResolved,
                 "every tab resolved a system SF Symbol")
     }
@@ -90,7 +91,7 @@ private func makeParkedWindow(height: CGFloat = 400) -> NSWindow {
     /// Resolving HERE only proves this machine has the symbol; the 14.2 floor
     /// was checked against CoreGlyphs' `name_availability.plist` by hand
     /// (`waveform` and `waveform.path` are macOS 10.15, `waveform.circle`
-    /// 10.15, `hifispeaker.2` and `gearshape` 11.0). The runtime check below
+    /// 10.15, `hifispeaker.2`, `rectangle.3.group` and `gearshape` 11.0). The runtime check below
     /// still catches a typo, which is the failure that actually happens.
     @Test func noTabDrawsTheEqualizersGlyphAndNoTwoTabsShareOne() {
         let names = SurfaceScreen.allCases.map(\.symbolName)
@@ -156,7 +157,7 @@ private func makeParkedWindow(height: CGFloat = 400) -> NSWindow {
     }
 
     /// Both items ask to stay visible, Pin never changes size, and the capsule
-    /// is exactly the three tabs plus its padding — one of them open.
+    /// is exactly the four tabs plus its padding — one of them open.
     @Test func everyItemAsksToStayOutOfTheOverflowMenu() {
         let (controller, _) = makeAttached()
         for item in controller.toolbar.items where item.view != nil {
@@ -171,10 +172,10 @@ private func makeParkedWindow(height: CGFloat = 400) -> NSWindow {
         }
         #expect(controller.test_capsuleFittingWidth
                     == SurfaceToolbarSeat.capsuleWidth(nameWidth: mixer.nameWidth),
-                "the capsule is two collapsed tabs, the open one, and its padding")
+                "the capsule is the collapsed tabs, the open one, and its padding")
         #expect(SurfaceToolbarSeat.capsuleSize.width
-                    == SurfaceToolbarSeat.size.width * 3 + SurfaceToolbarSeat.capsulePadding * 2,
-                "and with every tab collapsed it is exactly three of them plus that padding")
+                    == SurfaceToolbarSeat.size.width * 4 + SurfaceToolbarSeat.capsulePadding * 2,
+                "and with every tab collapsed it is exactly four of them plus that padding")
         #expect(SurfaceToolbarSeat.capsuleCornerRadius == SurfaceToolbarSeat.capsuleSize.height / 2,
                 "half the height, so the capsule reads as a pill and not a rounded box")
     }
@@ -202,7 +203,7 @@ private func makeParkedWindow(height: CGFloat = 400) -> NSWindow {
         #expect(tab.test_width == SurfaceToolbarSeat.tabWidth(nameWidth: SurfaceToolbarSeat.maxNameWidth),
                 "so the seat opens to the ceiling and no further — \(tab.test_width) pt")
 
-        let capsule = SurfaceToolbarTabCapsule(tabs: [tab] + (0..<2).map { _ in
+        let capsule = SurfaceToolbarTabCapsule(tabs: [tab] + (0..<(SurfaceScreen.allCases.count - 1)).map { _ in
             SurfaceToolbarSeatButton(frame: NSRect(origin: .zero, size: SurfaceToolbarSeat.size))
         })
         #expect(capsule.fittingSize.width == SurfaceToolbarSeat.widestCapsuleWidth,
@@ -797,9 +798,9 @@ private func makeParkedWindow(height: CGFloat = 400) -> NSWindow {
             let capsule = makeCapsule(engaged: .groups, hovered: .settings)
             guard let rep = render(capsule, appearanceName: appearanceName),
                   let ground = groundColor(appearanceName),
-                  let idle = color(rep, atPoint: tabProbe(0), in: capsule.bounds),
-                  let selected = color(rep, atPoint: tabProbe(1), in: capsule.bounds),
-                  let hovered = color(rep, atPoint: tabProbe(2), in: capsule.bounds),
+                  let idle = color(rep, atPoint: tabProbe(SurfaceScreen.mixer.rawValue), in: capsule.bounds),
+                  let selected = color(rep, atPoint: tabProbe(SurfaceScreen.groups.rawValue), in: capsule.bounds),
+                  let hovered = color(rep, atPoint: tabProbe(SurfaceScreen.settings.rawValue), in: capsule.bounds),
                   let idleOnStrip = composite(idle, over: ground),
                   let selectedOnStrip = composite(selected, over: ground),
                   let hoveredOnStrip = composite(hovered, over: ground) else {

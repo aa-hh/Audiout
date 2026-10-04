@@ -9,9 +9,9 @@ import AudioutSharedUI
 /// machinery; the system toolbar provides Liquid Glass on macOS 26+, the older
 /// material below, and Reduce Transparency handling on its own):
 ///
-/// - the three screens as three tabs. The CURRENT one shows its name beside
-///   its glyph; the other two are icon-only. The tooltips ("Mixer (⌘1)"), the
-///   accessibility labels and ⌘1/⌘2/⌘3 still carry all three names as they
+/// - the four screens as four tabs. The CURRENT one shows its name beside
+///   its glyph; the others are icon-only. The tooltips ("Mixer (⌘1)"), the
+///   accessibility labels and ⌘1–⌘4 still carry every name as they
 ///   always did;
 /// - Pin as a trailing item, standing OUTSIDE the tabs' capsule.
 ///
@@ -25,7 +25,7 @@ import AudioutSharedUI
 /// carries ONE name however many languages it is read in; and that name is
 /// clamped to `SurfaceToolbarSeat.maxNameWidth` and truncates past it, so no
 /// word in any language can push the strip wider than
-/// `widestCapsuleWidth` + Pin = 260 pt of the fixed 653 pt surface.
+/// `widestCapsuleWidth` + Pin = 284 pt of the fixed 653 pt surface.
 /// `SurfaceToolbarTests.theStripCannotOutgrowTheSurfaceInAnyLanguage` asserts
 /// it against a name no translator could produce.
 ///
@@ -37,9 +37,9 @@ import AudioutSharedUI
 /// that driver already answers it: the width settles synchronously, with no
 /// frame of travel.
 ///
-/// **The three tabs are ONE capsule** (owner's call, 2026-09-04, second pass). A
+/// **The screen tabs are ONE capsule** (owner's call, 2026-09-04, second pass). A
 /// single `NSToolbarItem` carries a `SurfaceToolbarTabCapsule`: one
-/// pill-shaped surface drawn once, with the three tabs as buttons layered over
+/// pill-shaped surface drawn once, with the four tabs as buttons layered over
 /// it. The current tab is marked by a soft rounded highlight INSIDE that pill,
 /// hover is the same highlight weaker, and an idle tab draws nothing of its
 /// own — the grouping macOS 26 uses in its own toolbars. What that replaces:
@@ -63,7 +63,7 @@ import AudioutSharedUI
 /// kinds of ITEM.** Until this review the strip drew one rounded rectangle
 /// everywhere, tabs and Pin alike. The owner asked for Pin to be "a circle instead
 /// of an oval", so Pin's seat is now square and cut at half its height, while
-/// the three tabs keep the stadium they wear inside their shared pill. The
+/// the tabs keep the stadium they wear inside their shared pill. The
 /// 2026-08-30 rule is NOT what changed: every item is still the same authored
 /// control drawn by the same cell at the same three weights, which is what
 /// "convert the whole strip or none of it" was about. What is no longer true
@@ -97,8 +97,8 @@ import AudioutSharedUI
 ///   had to clear the UNSELECTED capsule, and in dark mode that capsule
 ///   already sat at the same grey, so the selected tab rendered as the
 ///   darkest thing in the strip;
-/// - three `.space`-separated items, each drawing its own seat, read as three
-///   islands rather than one control.
+/// - one `.space`-separated item per tab, each drawing its own seat, read as
+///   separate islands rather than one control.
 ///
 /// None of those traps survives here: nothing in `SurfaceToolbarSeat` or
 /// `SurfaceToolbarTabCapsule` is behind an availability check; the capsule is
@@ -116,10 +116,10 @@ import AudioutSharedUI
 /// from the host-confirmed `selectedScreen` afterward, so the strip can never
 /// drift from the screen actually shown.
 ///
-/// ⌘1/⌘2/⌘3 do NOT live here: the surface installs them on the shell panel's
+/// ⌘1–⌘4 do NOT live here: the surface installs them on the shell panel's
 /// `keyEquivalentHandler` seam instead.
 ///
-/// Lives in AudioutPopoverUI, not the shell: the header switches the three
+/// Lives in AudioutPopoverUI, not the shell: the header switches the four
 /// screens, and the shell stays content-agnostic.
 @MainActor
 final class SurfaceToolbarController: NSObject {
@@ -129,8 +129,8 @@ final class SurfaceToolbarController: NSObject {
     /// The centred wordmark + icon (owner, 2026-09-05).
     static let brandItemIdentifier = NSToolbarItem.Identifier("SurfaceBrand")
 
-    /// The ONE item carrying all three tabs. Three identifiers, one per
-    /// screen, is what let the tabs drift apart into three islands; one item
+    /// The ONE item carrying every tab. One identifier per screen is what
+    /// let the tabs drift apart into islands; one item
     /// is what makes the capsule a single drawn surface.
     static let tabsItemIdentifier = NSToolbarItem.Identifier("SurfaceTabs")
 
@@ -278,7 +278,7 @@ final class SurfaceToolbarController: NSObject {
 
     /// The toolbar's materialized items, in display order.
     var test_itemIdentifiers: [NSToolbarItem.Identifier] { toolbar.items.map(\.itemIdentifier) }
-    /// The one capsule the three tabs live in.
+    /// The one capsule the four tabs live in.
     var test_tabCapsule: SurfaceToolbarTabCapsule? {
         tabsItem?.view as? SurfaceToolbarTabCapsule
     }
@@ -336,11 +336,11 @@ final class SurfaceToolbarController: NSObject {
         test_engagedTabCount == 1 && test_selectedTabIndex == selectedScreen.rawValue
     }
     /// Whether the strip is exactly the capsule plus Pin, and every clickable
-    /// thing in it — the three tabs inside the capsule AND Pin outside it —
+    /// thing in it — the four tabs inside the capsule AND Pin outside it —
     /// wears the one authored control. The 2026-08-30 failure was half the
     /// strip converted.
     var test_everyItemWearsTheSeat: Bool {
-        // Every CONTROL in the strip wears the authored seat: the three tabs
+        // Every CONTROL in the strip wears the authored seat: the four tabs
         // inside the capsule, and Pin outside it. The brand lockup is the one
         // custom view that is not a seat — it is decorative, not a control.
         let views = toolbar.items.compactMap(\.view)
@@ -370,8 +370,8 @@ extension SurfaceToolbarController: NSToolbarDelegate {
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
         // Two items and the width of the strip between them. The tabs are ONE
-        // item because they are one capsule; letting AppKit space three tab
-        // items is what produced three islands, and letting it merge them is
+        // item because they are one capsule; letting AppKit space one item
+        // per tab is what produced separate islands, and letting it merge them is
         // what produced a container that reshaped as the selection moved
         // (measured on macOS 26: Mixer gave circle + capsule(2), Groups three
         // circles, Settings capsule(2) + circle). A capsule we draw ourselves
@@ -409,9 +409,9 @@ extension SurfaceToolbarController: NSToolbarDelegate {
                                  label: screen.label,
                                  // The tooltip stays even though the current
                                  // tab now draws its name: it is where the
-                                 // ⌘1/⌘2/⌘3 shortcut is written down (the
+                                 // ⌘1–⌘4 shortcut is written down (the
                                  // shell panel's key-equivalent seam runs it),
-                                 // and it is the only place the two tabs you
+                                 // and it is the only place the tabs you
                                  // are NOT on can be named.
                                  toolTip: "\(screen.label) (⌘\(screen.keyEquivalent))",
                                  isTab: true)

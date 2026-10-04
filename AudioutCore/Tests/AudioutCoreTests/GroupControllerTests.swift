@@ -91,6 +91,26 @@ import Testing
 
     // MARK: Selected Devices + Main Out routing (SPEC §9 2026-07-14b)
 
+    // removeDevices writing per group, skipping the memberVolumes cleanup, or writing before the emptiness check turns it red.
+    @Test func removeDevicesSavesOnceAndRefusesToEmptyAScene() async throws {
+        let directory = tempDirectory()
+        let (controller, _) = try await makeController(directory: directory)
+        try controller.saveGroup(Group(id: "a", name: "A", memberIDs: ["x", "y"], memberVolumes: ["x": 30, "y": 60]))
+        try controller.saveGroup(Group(id: "b", name: "B", memberIDs: ["y", "z"], memberVolumes: [:]))
+        try controller.saveGroup(Group(id: "c", name: "C", memberIDs: ["z"], memberVolumes: [:]))
+        var notified = 0
+        controller.onStateDidChange = { notified += 1 }
+        #expect(try controller.removeDevices(["y"]) == 2)
+        #expect(notified == 1)
+        #expect(controller.groups.map(\.memberIDs) == [["x"], ["z"], ["z"]])
+        #expect(try GroupStore(directory: directory).load().map(\.memberIDs) == [["x"], ["z"], ["z"]])
+        #expect(throws: GroupController.GroupError.emptyMembership) { try controller.removeDevices(["x", "z"]) }
+        #expect(notified == 1)
+        #expect(try GroupStore(directory: directory).load().map(\.memberIDs) == [["x"], ["z"], ["z"]])
+        let volumes = try #require(controller.groups.first).memberVolumes
+        #expect(volumes["y"] == nil && volumes["x"] == 30)
+    }
+
     /// Red if "Play here" routed twice (deselect then select leaves
     /// This Mac briefly live between the two applies) or left a stale member.
     @Test func switchSelectionReplacesTheSetInOneRoutingApply() async throws {

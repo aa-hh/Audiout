@@ -310,3 +310,5 @@ repo-wide and are detailed in [../AGENTS.md](../AGENTS.md): subclass
 `IsolatedTestCase` instead of touching `UserDefaults.standard`/shared temp
 dirs directly, and use `Telemetry._installTestSink(_:)` to assert a
 subsystem's own emissions rather than adding ad hoc logging hooks.
+
+2026-10-04: Forget (`SpeakerLibraryController.forget`) is the only path that removes a speaker's metadata and scene membership together; it refuses to empty a scene and never touches routing.

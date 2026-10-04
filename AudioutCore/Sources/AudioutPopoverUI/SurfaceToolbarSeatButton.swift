@@ -4,7 +4,7 @@ import AppKit
 import AudioutSharedUI
 
 /// The header strip's geometry and wash strengths: the ONE capsule that holds
-/// the three screen tabs, the highlight drawn inside it for the current tab,
+/// the four screen tabs, the highlight drawn inside it for the current tab,
 /// and the same highlight worn by Pin, which stands outside the capsule.
 ///
 /// **The shape the owner asked for** (2026-09-04, second pass). One
@@ -49,7 +49,7 @@ enum SurfaceToolbarSeat {
     static var pinSize: NSSize { NSSize(width: pinDiameter, height: pinDiameter) }
 
     /// One COLLAPSED tab's hit area, and the size of the highlight drawn
-    /// behind it. Two of the three tabs are always this size; the current one
+    /// behind it. Every tab but the current one is always this size; the current one
     /// grows to the right of it to show its name (`tabWidth`).
     ///
     /// The HEIGHT is derived, never typed: a tab is the capsule minus the
@@ -94,7 +94,7 @@ enum SurfaceToolbarSeat {
     /// as "Settings" before it even reached the ceiling — and reaching it
     /// costs nothing, because the arithmetic does not depend on any of those
     /// numbers: only ONE tab is ever expanded, so the widest the strip can be
-    /// is `widestCapsuleWidth` plus Pin, 226 + 34 = 260 pt against a fixed
+    /// is `widestCapsuleWidth` plus Pin, 256 + 28 = 284 pt against a fixed
     /// 653 pt surface.
     /// `SurfaceToolbarTests.theStripCannotOutgrowTheSurfaceInAnyLanguage`
     /// asserts that with a name no language could produce.
@@ -117,14 +117,14 @@ enum SurfaceToolbarSeat {
     /// the pill's rounded end.
     static let capsulePadding: CGFloat = 3
 
-    /// The capsule holding all three tabs with every one of them COLLAPSED —
+    /// The capsule holding every screen tab with each one COLLAPSED —
     /// the floor its width can never go below, and its height in every state.
     ///
     /// That height is `stripHeight`, because `size.height` is derived from it.
     /// Pin no longer stands the full height of it (owner, 2026-09-14): the
     /// circle is a tab's height, centred in the same strip.
     static var capsuleSize: NSSize {
-        NSSize(width: size.width * 3 + capsulePadding * 2,
+        NSSize(width: size.width * CGFloat(SurfaceScreen.allCases.count) + capsulePadding * 2,
                height: size.height + capsulePadding * 2)
     }
 
@@ -134,8 +134,8 @@ enum SurfaceToolbarSeat {
         capsuleSize.width + (nameWidth <= 0 ? 0 : nameWidth + nameTrailingPadding)
     }
 
-    /// The widest the capsule can get in ANY language: two collapsed tabs plus
-    /// one expanded to the name ceiling. The guard that keeps the strip out of
+    /// The widest the capsule can get in ANY language: every other tab
+    /// collapsed plus one expanded to the name ceiling. The guard that keeps the strip out of
     /// the overflow chevron is this number, not the length of the English
     /// words — a name past the ceiling truncates instead of pushing.
     static var widestCapsuleWidth: CGFloat { capsuleWidth(nameWidth: maxNameWidth) }
@@ -327,7 +327,7 @@ final class SurfaceToolbarSeatCell: NSButtonCell {
 /// this replaces got that from `NSToolbar.selectedItemIdentifier`, which
 /// AppKit speaks — but AppKit only draws a selection for the item styles it
 /// owns, so taking the drawing means taking the spoken state too. A tab is a
-/// radio button (one of three, exactly one on) and reports selected both as
+/// radio button (one of four, exactly one on) and reports selected both as
 /// its accessibility value and through `isAccessibilitySelected`.
 final class SurfaceToolbarSeatButton: NSButton {
 
@@ -358,7 +358,7 @@ final class SurfaceToolbarSeatButton: NSButton {
     /// `SurfaceToolbarSeat.maxNameWidth`. Zero until `configure` sets a name.
     private(set) var nameWidth: CGFloat = 0
 
-    /// Whether the name is showing. The three tabs are one radio group and the
+    /// Whether the name is showing. The four tabs are one radio group and the
     /// capsule expands only for the current screen, so at most one is `true`.
     private(set) var isNameRevealed = false
 
@@ -455,7 +455,7 @@ final class SurfaceToolbarSeatButton: NSButton {
 
     // MARK: Configuration
 
-    /// `isTab` marks the three screen tabs, which are one radio group; Pin is
+    /// `isTab` marks the four screen tabs, which are one radio group; Pin is
     /// an ordinary button whose own label ("Pin" / "Unpin") speaks its state.
     func configure(symbol: NSImage?, label: String, toolTip: String?, isTab: Bool) {
         self.isTab = isTab
@@ -607,8 +607,8 @@ final class SurfaceToolbarSeatButton: NSButton {
     var test_width: CGFloat { seatWidth }
 }
 
-/// The ONE capsule the three screen tabs sit in: a single pill-shaped surface
-/// drawn once, behind all three glyphs, with the tabs as its subviews.
+/// The ONE capsule the four screen tabs sit in: a single pill-shaped surface
+/// drawn once, behind every tab's glyph, with the tabs as its subviews.
 ///
 /// Three separate circular seats — one per tab, each its own island — is what
 /// failed review on 2026-09-04. The owner asked for the grouping macOS 26 uses
@@ -621,7 +621,7 @@ final class SurfaceToolbarSeatButton: NSButton {
 /// current screen lighter than its surroundings in dark mode without any
 /// per-appearance branch.
 ///
-/// Its HEIGHT is fixed and its width is derived from the three tabs, so it is
+/// Its HEIGHT is fixed and its width is derived from the four tabs, so it is
 /// exactly as wide as they are and no wider: the highlight moving cannot
 /// resize it, and only a tab opening to show its name can.
 ///
@@ -653,7 +653,7 @@ final class SurfaceToolbarTabCapsule: NSView, FoldFollowing {
 
         let padding = SurfaceToolbarSeat.capsulePadding
         NSLayoutConstraint.activate([
-            // No width constraint: the pill is exactly as wide as the three
+            // No width constraint: the pill is exactly as wide as the four
             // tabs plus its padding, so the one that is open pushes it out and
             // nothing else can. Height stays pinned — a reveal is horizontal.
             heightAnchor.constraint(equalToConstant: SurfaceToolbarSeat.capsuleSize.height),
@@ -664,7 +664,7 @@ final class SurfaceToolbarTabCapsule: NSView, FoldFollowing {
         ])
         for tab in tabs { tab.revealFollower = self }
 
-        // Three radio buttons in a group is what this is, so say so: VoiceOver
+        // Four radio buttons in a group is what this is, so say so: VoiceOver
         // then announces the set the tabs belong to before their own names.
         setAccessibilityRole(.radioGroup)
         setAccessibilityLabel("Screens")
@@ -750,7 +750,7 @@ final class SurfaceToolbarTabCapsule: NSView, FoldFollowing {
         item.maxSize = size
     }
 
-    /// The width the three tabs currently need, with whichever one is open
+    /// The width the four tabs currently need, with whichever one is open
     /// counted at its revealed width. The toolbar reads this to size the
     /// item's container, so it must track the reveal tick by tick.
     override var intrinsicContentSize: NSSize {

@@ -139,7 +139,7 @@ public final class EQEditorView: NSView {
     // MARK: State — pushed by `apply`, never read from a model
 
     private var eq: DeviceEQ = .flat
-    private var bypassReason: Device.EQBypassReason?
+    private var bypassNote: String?
     private var advancedExpanded = false
 
     /// The slider currently mid-pointer-drag, if any. `refreshDisplay` must
@@ -214,7 +214,22 @@ public final class EQEditorView: NSView {
         // explaining the controls beneath it, and the module rule is that a
         // dimmed label must be dimmed BY something.
         bypassLabel.textColor = Tokens.Color.label2
-        bypassLabel.lineBreakMode = .byTruncatingTail
+        // Wraps to two lines: the speaker page's unavailable sentence is
+        // longer than one line at pane width.
+        bypassLabel.usesSingleLineMode = false
+        bypassLabel.maximumNumberOfLines = 2
+        bypassLabel.lineBreakMode = .byWordWrapping
+        bypassLabel.cell?.wraps = true
+        bypassLabel.cell?.truncatesLastVisibleLine = true
+    }
+
+    override public func layout() {
+        super.layout()
+        // A wrapping label needs a width to compute its height against.
+        let width = contentStack.frame.width
+        if width > 0, bypassLabel.preferredMaxLayoutWidth != width {
+            bypassLabel.preferredMaxLayoutWidth = width
+        }
     }
 
     private func configureSimpleTier() {
@@ -255,7 +270,7 @@ public final class EQEditorView: NSView {
         loudnessCheckbox.action = #selector(loudnessToggled(_:))
         loudnessCheckbox.setAccessibilityLabel("Loudness")
 
-        contentStack.addArrangedSubview(bypassLabel)
+        addFullWidthRow(bypassLabel)
         addFullWidthRow(sliderRow(caption: bassCaption, middle: bassSlider, readout: bassReadout))
         addFullWidthRow(sliderRow(caption: trebleCaption, middle: trebleSlider, readout: trebleReadout))
         addFullWidthRow(sliderRow(caption: balanceCaption, middle: balanceMiddleView(), readout: balanceReadout))
@@ -508,14 +523,19 @@ public final class EQEditorView: NSView {
 
     // MARK: Public API
 
-    /// Push a fresh snapshot. A non-`nil` `bypassReason` mounts that reason's
-    /// "not applied" sentence and hollows the curve (the stored values stay
+    /// Push a fresh snapshot. A non-`nil` `bypassNote` mounts that "not
+    /// applied" sentence and hollows the curve (the stored values stay
     /// editable — the host is saying they are inaudible right now, not that
     /// they are gone).
-    public func apply(eq: DeviceEQ, bypassReason: Device.EQBypassReason?) {
+    public func apply(eq: DeviceEQ, bypassNote: String?) {
         self.eq = eq
-        self.bypassReason = bypassReason
+        self.bypassNote = bypassNote
         refreshDisplay()
+    }
+
+    /// The backend's bypass reason, mounted as its shipped sentence.
+    public func apply(eq: DeviceEQ, bypassReason: Device.EQBypassReason?) {
+        apply(eq: eq, bypassNote: bypassReason.map(Self.bypassNoteText))
     }
 
     /// The tone the drawer is currently rendering — the model every spoken
@@ -668,11 +688,11 @@ public final class EQEditorView: NSView {
     }
 
     private func refreshDisplay() {
-        if let bypassReason { bypassLabel.stringValue = Self.bypassNoteText(bypassReason) }
-        bypassLabel.isHidden = bypassReason == nil
+        if let bypassNote { bypassLabel.stringValue = bypassNote }
+        bypassLabel.isHidden = bypassNote == nil
         // The scope reads the SAME model every slider below it renders, so the
         // picture and the controls can never disagree.
-        curve.apply(eq: eq, bypassed: bypassReason != nil)
+        curve.apply(eq: eq, bypassed: bypassNote != nil)
 
         writeSliderIfNeeded(bassSlider, value: eq.bassDB)
         writeSliderIfNeeded(trebleSlider, value: eq.trebleDB)
@@ -719,7 +739,7 @@ public final class EQEditorView: NSView {
     /// Rounds to one decimal and prints exactly that: a whole value prints
     /// "3 dB", a half prints "3.5 dB" — every stored gain is a half-dB step,
     /// so nothing here needs more precision than that.
-    static func gainText(_ db: Double) -> String {
+    public static func gainText(_ db: Double) -> String {
         let tenths = (db * 10).rounded()
         let magnitude = abs(Int(tenths))
         let whole = magnitude / 10
@@ -730,7 +750,7 @@ public final class EQEditorView: NSView {
 
     /// The Balance readout: "Center" at rest, otherwise "L 30%" / "R 20%" —
     /// printed alongside the slider in the same readout column Bass/Treble use.
-    static func balanceReadoutText(_ balance: Double) -> String {
+    public static func balanceReadoutText(_ balance: Double) -> String {
         let percent = Int((abs(balance) * 100).rounded())
         if percent == 0 { return "Center" }
         return balance < 0 ? "L \(percent)%" : "R \(percent)%"
@@ -808,6 +828,14 @@ public final class EQEditorView: NSView {
 
     public var test_bypassNoteShown: Bool { !bypassLabel.isHidden }
     public var test_bypassNoteText: String { bypassLabel.stringValue }
+    /// How many lines the bypass note draws at the editor's laid-out width.
+    /// Two passes: the first sets the wrap width, the second measures by it.
+    public var test_bypassNoteLineCount: Int {
+        layoutSubtreeIfNeeded()
+        layoutSubtreeIfNeeded()
+        let lineHeight = NSLayoutManager().defaultLineHeight(for: bypassLabel.font ?? Tokens.Font.caption)
+        return Int((bypassLabel.frame.height / lineHeight).rounded())
+    }
     public var test_curve: EQResponseCurveView { curve }
     public var test_bassReadout: String { bassReadout.stringValue }
     public var test_trebleReadout: String { trebleReadout.stringValue }

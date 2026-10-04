@@ -24,42 +24,7 @@ import AppKit
 @MainActor
 @Suite final class MixerWindowControllerTests: IsolatedSuite {
 
-    // Turns red when the overview's double-click or Return stops selecting that speaker in the sidebar and showing its detail, opens with several rows selected, or starts routing.
-    @Test func overviewRowOpensSpeakerDetail() throws {
-        let backend = MockBackend(fleet: [])
-        let controller = GroupController(backend: backend, store: GroupStore(directory: scratchDir),
-            routingStore: RoutingStore(directory: scratchDir),
-            settings: AppSettings(defaults: isolatedDefaults), loadPersisted: false)
-        let bt = Device(id: "bt", name: "Remembered", kind: .bluetooth)
-        let airplay = Device(id: "airplay", name: "AirPlay", kind: .sonos)
-        let library = SpeakerLibraryController(loadPersisted: false)
-        library.update(liveDevices: [bt, airplay], groups: [])
-        let window = MixerWindowController(groupController: controller,
-            settings: AppSettings(defaults: isolatedDefaults), speakerLibrary: library)
-        window.test_isVisibleOverride = true
-        window.update(devices: [])
-        window.select(.speakersOverview)
-        window.test_speakers.test_select(["bt"])
-        window.test_speakers.test_openSelection()
-        #expect(window.test_isShowingDetail)
-        #expect(window.test_detail.test_shownDeviceID == "bt")
-        #expect(window.test_sidebar.currentSelection == .device(id: "bt"))
-        window.select(.speakersOverview)
-        window.test_speakers.test_select(["airplay"])
-        window.test_speakers.test_pressReturn()
-        #expect(window.test_isShowingDetail)
-        #expect(window.test_detail.test_shownDeviceID == "airplay")
-        #expect(window.test_sidebar.currentSelection == .device(id: "airplay"))
-        window.select(.speakersOverview)
-        window.test_speakers.test_selectAll()
-        window.test_speakers.test_pressReturn()
-        #expect(window.test_isShowingSpeakers)
-        #expect(controller.activeGroupID == nil)
-        #expect(!controller.isSpeakerSelected("bt"))
-        #expect(!controller.isSpeakerSelected("airplay"))
-    }
-
-    // Looking up detail selections only in the live dictionary makes remembered speakers unreachable.
+    // Turns red when the sidebar's Hide stops writing through the shared library, or a detail lookup consults only the live dictionary so remembered speakers become unreachable.
     @Test func speakersNavigationAndRememberedDetailUseSharedPreferences() throws {
         let backend = MockBackend(fleet: [])
         let controller = GroupController(backend: backend, store: GroupStore(directory: scratchDir),
@@ -75,12 +40,13 @@ import AppKit
         window.test_isVisibleOverride = true
         window.update(devices: [])
         window.select(.speakersOverview)
-        #expect(window.test_isShowingSpeakers)
-        window.test_speakers.test_changeVisibility(.hideWhenNotInUse, id: "bt")
+        #expect(window.test_isShowingSpeakersPage)
+        #expect(window.test_sidebar.test_clickContextMenuItem("Hide from Mixer", for: .device(id: "bt")))
         #expect(library.visibility(for: "bt") == .hideWhenNotInUse)
+        #expect(window.test_sidebar.test_deviceRowIDs(inGroupTitled: "Hidden unless playing") == ["bt"])
         window.select(.device(id: "bt"))
         #expect(window.test_isShowingDetail)
-        #expect(window.test_detail.test_metadataStrings["status"] == "Not connected")
+        #expect(window.test_detail.test_subtitleText == "Bluetooth Speaker · Can\u{2019}t be found")
         #expect(window.test_pendingSelection == nil)
         let count = window.test_sidebarReloadCount
         library.setVisibility(.always, for: "bt")
@@ -222,8 +188,8 @@ import AppKit
         try? await Task.sleep(nanoseconds: 150_000_000)
     }
 
-    /// Hosted as the surface's Groups screen (U4) this controller owns no
-    /// window, so `setHostVisible(_:)` is what tells it the
+    /// Hosted as the surface's Scenes and Speakers screens this controller
+    /// owns no window, so `setVisibleTab(_:)` is what tells it the
     /// user is looking at its content. Turning it on must CATCH UP on whatever
     /// arrived while it was hidden — otherwise every speaker discovered before
     /// the Groups tab was first opened would be missing from the sidebar for
@@ -243,18 +209,19 @@ import AppKit
         #expect(window.test_sidebar.test_deviceRowCount == 0,
                 "no host is showing the content, so the snapshot is only stored (B8)")
 
-        window.setHostVisible(true)
+        window.setVisibleTab(.speakers)
         #expect(window.test_sidebar.test_deviceRowCount == 7,
                 "becoming the visible screen refreshes from the stored snapshot")
     }
 
-    // MARK: Sidebar structure (direction C: the fleet, under the Groups row)
+    // MARK: Sidebar structure (the fleet, beside the Speakers page)
 
-    @Test func sidebarIsTheFleetUnderThePinnedGroupsRow() async throws {
+    // Turns red when the sidebar regains a scenes row or the split stops starting on the Speakers page.
+    @Test func sidebarIsTheFleetBesideTheSpeakersPage() async throws {
         let (window, _, _) = try await makeWindow()
-        #expect(window.test_sidebar.test_sectionTitles == ["System Audio", "Speakers"],
-                "saved groups moved into the content pane, so the sidebar has two sections")
-        #expect(window.test_sidebar.test_hasGroupsRow, "the pinned Groups row is always there")
+        #expect(window.test_sidebar.test_sectionTitles == ["System Audio", "Speakers", "In the Mixer"],
+                "scenes live on their own screen; the speakers sit in their visibility group")
+        #expect(window.test_isShowingSpeakersPage, "with nothing selected the split shows the Speakers page")
         #expect(window.test_sidebar.test_deviceRowCount == 7)
         #expect(!(window.test_isShowingEditor))
     }
@@ -267,7 +234,7 @@ import AppKit
     /// re-assert covers AppKit's own narrow-layout auto-collapse.
     @Test func theSidebarCannotBeCollapsedAway() async throws {
         let (window, controller, backend) = try await makeWindow()
-        let split = try #require(window.contentController as? NSSplitViewController)
+        let split = try #require(window.speakersContentController as? NSSplitViewController)
         let sidebarItem = try #require(split.splitViewItems.first)
         #expect(!sidebarItem.canCollapse, "the user's divider drag cannot collapse it")
 
@@ -276,13 +243,13 @@ import AppKit
         _ = try makeGroup1(controller)
         window.update(devices: backend.devices)
         #expect(!sidebarItem.isCollapsed, "a refresh restores a collapsed sidebar")
-        #expect(window.test_sidebar.test_sectionTitles == ["System Audio", "Speakers"],
-                "and it still lists both sections")
+        #expect(window.test_sidebar.test_sectionTitles == ["System Audio", "Speakers", "In the Mixer"],
+                "and it still lists every section")
     }
 
     @Test func baselineContentIsTheOverviewsEmptyCanvasAtZeroGroups() async throws {
         let (window, _, _) = try await makeWindow()
-        #expect(window.test_isShowingOverview, "zero groups + no selection auto-lands on the overview")
+        #expect(window.test_isShowingScenesOverview, "zero groups + no selection auto-lands on the overview")
         #expect(window.test_overview.test_isShowingEmptyCanvas,
                 "with nothing saved the overview IS the empty state — there is no separate pane")
     }
@@ -296,16 +263,18 @@ import AppKit
         window.test_createSheet?.test_cancel()
     }
 
+    // Turns red when the scenes host opens on a scene's editor instead of the card field, or the speakers host leaves the Speakers page with nothing selected.
     @Test func autoSelectLandsOnTheGroupsOverviewNotAGroupsEditor() async throws {
         let (window, controller, backend) = try await makeWindow()
         let saved = try makeGroup1(controller)
         window.update(devices: backend.devices)
         await drain()
-        #expect(window.test_isShowingOverview,
-                "with a saved group and no selection the screen shows the card field, not one group's editor")
+        #expect(window.test_isShowingScenesOverview,
+                "with a saved group the scenes host shows the card field, not one group's editor")
         #expect(!(window.test_isShowingEditor))
         #expect(window.test_overview.test_cardGroupIDs == [saved.id])
-        #expect(window.test_sidebar.test_groupsRowIsSelected)
+        #expect(window.test_isShowingSpeakersPage, "the speakers host is untouched by scenes")
+        #expect(window.test_sidebar.currentSelection == nil)
         #expect(controller.activeGroupID == nil, "auto-select never activates")
     }
 
@@ -314,7 +283,7 @@ import AppKit
         let saved = try makeGroup1(controller)
         window.update(devices: backend.devices)
 
-        #expect(window.test_sidebar.test_sectionTitles == ["System Audio", "Speakers"])
+        #expect(window.test_sidebar.test_sectionTitles == ["System Audio", "Speakers", "In the Mixer"])
         #expect(window.test_overview.test_cardGroupIDs == [saved.id])
         #expect(!(window.test_overview.test_isShowingEmptyCanvas))
         #expect(window.test_overview.test_chipCount(forCard: saved.id) == saved.memberIDs.count,
@@ -322,22 +291,27 @@ import AppKit
         #expect(window.test_sidebar.test_deviceRowCount == 7, "the Speakers section lists every device, a saved group's members included")
     }
 
-    // MARK: Groups row → overview → editor (direction C's in-pane push)
+    // MARK: Overview → editor (the in-pane push on the Scenes screen)
 
+    // Turns red when the two hosts stop being independent: returning the scenes host to its cards disturbs a speaker's page, or the reverse.
     @Test func selectingTheGroupsRowShowsTheOverview() async throws {
         let (window, controller, backend) = try await makeWindow()
-        _ = try makeGroup1(controller)
+        let saved = try makeGroup1(controller)
         window.update(devices: backend.devices)
-        window.test_select(.device(id: "office"))
+        window.select(.device(id: "office"))
+        window.test_overview.test_clickCard(id: saved.id)
         await drain()
         #expect(window.test_isShowingDetail)
+        #expect(window.test_isShowingEditor)
 
         window.test_select(.groupsOverview)
         await drain()
-        #expect(window.test_isShowingOverview)
+        #expect(window.test_isShowingScenesOverview)
+        #expect(window.test_isShowingDetail, "the speaker's page beside the sidebar stays")
+        #expect(window.test_sidebar.currentSelection == .device(id: "office"))
     }
 
-    @Test func openingACardPushesTheEditorAndKeepsTheGroupsRowSelected() async throws {
+    @Test func openingACardPushesTheEditorAndLeavesTheSidebarAlone() async throws {
         let (window, controller, backend) = try await makeWindow()
         let saved = try makeGroup1(controller)
         window.update(devices: backend.devices)
@@ -348,8 +322,8 @@ import AppKit
 
         #expect(window.test_isShowingEditor, "a card opens its group's editor")
         #expect(window.test_editor.editingGroupID == saved.id)
-        #expect(window.test_sidebar.test_groupsRowIsSelected,
-                "the fleet never moves under the pointer — the Groups row stays selected")
+        #expect(window.test_sidebar.currentSelection == nil,
+                "the fleet never moves under the pointer — the sidebar is untouched")
         #expect(controller.activeGroupID == nil, "opening a card never activates the group")
     }
 
@@ -386,8 +360,7 @@ import AppKit
         window.test_editor.test_goBack()
         await drain()
 
-        #expect(window.test_isShowingOverview, "'‹ Groups' pops the editor back to the card field")
-        #expect(window.test_sidebar.test_groupsRowIsSelected)
+        #expect(window.test_isShowingScenesOverview, "'‹ Groups' pops the editor back to the card field")
     }
 
     /// The surface's Escape asks this: an open editor pops and reports so;
@@ -397,7 +370,7 @@ import AppKit
         let saved = try makeGroup1(controller)
         window.update(devices: backend.devices)
         await drain()
-        #expect(window.test_isShowingOverview)
+        #expect(window.test_isShowingScenesOverview)
         #expect(!window.dismissEditor(), "nothing to step back from")
 
         window.test_overview.test_clickCard(id: saved.id)
@@ -405,7 +378,7 @@ import AppKit
         #expect(window.test_isShowingEditor)
 
         #expect(window.dismissEditor())
-        #expect(window.test_isShowingOverview)
+        #expect(window.test_isShowingScenesOverview)
         #expect(!window.dismissEditor(), "a second press has nothing left to pop")
     }
 
@@ -419,42 +392,45 @@ import AppKit
         #expect(window.test_isShowingEditor)
         window.test_editor.test_done()
         await drain()
-        #expect(window.test_isShowingOverview, "Done leaves the editor")
+        #expect(window.test_isShowingScenesOverview, "Done leaves the editor")
 
         window.test_overview.test_clickCard(id: saved.id)
         await drain()
         #expect(window.test_isShowingEditor)
         #expect(window.test_editor.test_performBackKeyEquivalent(), "the editor claims ⌘[")
         await drain()
-        #expect(window.test_isShowingOverview, "⌘[ leaves the editor")
+        #expect(window.test_isShowingScenesOverview, "⌘[ leaves the editor")
     }
 
-    @Test func clickingTheSelectedGroupsRowReturnsToTheOverview() async throws {
-        let (window, controller, backend) = try await makeWindow()
-        let saved = try makeGroup1(controller)
-        window.update(devices: backend.devices)
-        window.test_overview.test_clickCard(id: saved.id)
+    // Turns red when a deep link to the Speakers plate stops showing the Speakers page or stops lighting its row.
+    @Test func selectingTheSpeakersPlateShowsTheSpeakersPage() async throws {
+        let (window, _, _) = try await makeWindow()
+        window.select(.device(id: "office"))
+        #expect(window.test_isShowingDetail)
+
+        window.select(.speakersOverview)
+
+        #expect(window.test_isShowingSpeakersPage)
+        #expect(window.test_sidebar.currentSelection == .speakersOverview)
+    }
+
+    // Turns red when a scene created from the sidebar's selection stops opening its editor in the scenes host or stops asking the host for the Scenes tab.
+    @Test func aSceneCreatedFromTheSidebarOpensOnTheScenesTab() async throws {
+        let (window, controller, _) = try await makeWindow()
+        var requests = 0
+        window.onRequestScenesTab = { requests += 1 }
+        window.test_sidebar.test_selectDevices(["office", "sonos-move"])
+        window.test_sidebar.test_tapAdd()
+        let sheet = try #require(window.test_createSheet)
+        sheet.test_commit()
         await drain()
+
+        let group = try #require(controller.groups.first)
+        #expect(Set(group.memberIDs) == ["office", "sonos-move"])
         #expect(window.test_isShowingEditor)
-        #expect(window.test_sidebar.test_groupsRowIsSelected)
-
-        window.test_sidebar.test_clickGroupsRow()
-        await drain()
-
-        #expect(window.test_isShowingOverview,
-                "the highlighted Groups row is a way back, not a dead click")
-    }
-
-    @Test func theGroupsRowMenuOffersOnlyNewGroup() async throws {
-        let (window, controller, backend) = try await makeWindow()
-        _ = try makeGroup1(controller)
-        window.update(devices: backend.devices)
-
-        #expect(window.test_sidebar.test_contextMenuItems(for: .groupsOverview) == ["Add scene"],
-                "Rename…/Delete Group… moved to the cards with the groups")
-        window.test_sidebar.test_clickContextMenuItem("Add scene", for: .groupsOverview)
-        #expect(window.test_isPresentingCreateSheet)
-        window.test_createSheet?.test_cancel()
+        #expect(window.test_editor.editingGroupID == group.id)
+        #expect(requests == 1)
+        #expect(controller.activeGroupID == nil, "creating never activates")
     }
 
     /// The card menu inherits the sidebar group row's two items and both of its
@@ -472,7 +448,6 @@ import AppKit
 
         #expect(window.test_isShowingEditor)
         #expect(window.test_editor.editingGroupID == saved.id)
-        #expect(window.test_sidebar.test_groupsRowIsSelected)
     }
 
     @Test func aCardsDeleteRunsTheEditorsConfirmThenDeleteFlow() async throws {
@@ -493,7 +468,7 @@ import AppKit
         window.test_editor.test_confirmDelete()
         await drain()
         #expect(controller.groups.isEmpty)
-        #expect(window.test_isShowingOverview, "the delete falls back to the overview")
+        #expect(window.test_isShowingScenesOverview, "the delete falls back to the overview")
         #expect(window.test_overview.test_isShowingEmptyCanvas)
     }
 
@@ -829,9 +804,8 @@ import AppKit
 
         #expect(controller.groups.count == 0)
         #expect(!(window.test_isShowingEditor))
-        #expect(window.test_isShowingOverview, "deleting the last group falls back to the overview")
+        #expect(window.test_isShowingScenesOverview, "deleting the last group falls back to the overview")
         #expect(window.test_overview.test_isShowingEmptyCanvas, "which is now the empty state too")
-        #expect(window.test_sidebar.test_hasGroupsRow, "the pinned Groups row never goes away")
     }
 
     // MARK: The delete confirmation (P0-1)
@@ -1207,7 +1181,7 @@ import AppKit
         #expect(window.test_isShowingDetail)
         #expect(!(window.test_isShowingEditor))
         #expect(window.test_detail.test_shownDeviceID == "appletv-lr")
-        #expect(window.test_detail.test_metadataStrings["status"] == "Available")
+        #expect(window.test_detail.test_subtitleText == "Apple TV · Ready")
         #expect(window.test_detail.test_groupMembershipText == "None", "appletv-lr isn't a member of any saved group")
 
         let saved = try makeGroup1(controller)   // members: sonos-move, office
@@ -1222,7 +1196,7 @@ import AppKit
     }
 
     /// Membership on the detail pane is NAVIGATION: clicking a group row
-    /// selects that group in the sidebar and opens its editor. Still
+    /// opens that group's editor in the scenes host. Still
     /// configuration-only — selecting is not activating, so `activeGroupID`
     /// stays nil and no audio moves.
     @Test func clickingAGroupRowOnTheDetailPaneOpensThatGroupsEditor() async throws {
@@ -1230,7 +1204,7 @@ import AppKit
         let saved = try makeGroup1(controller)   // members: sonos-move, office
         window.update(devices: backend.devices)
 
-        window.test_select(.device(id: "office"))
+        window.select(.device(id: "office"))
         await drain()
         #expect(window.test_isShowingDetail)
         #expect(window.test_detail.test_groupRowTitles == [saved.name])
@@ -1239,19 +1213,33 @@ import AppKit
         await drain()
 
         #expect(window.test_isShowingEditor, "the row opened the group's editor")
-        #expect(!(window.test_isShowingDetail))
         #expect(window.test_editor.editingGroupID == saved.id)
-        #expect(window.test_sidebar.test_groupsRowIsSelected,
-                "the sidebar follows onto the Groups row, so the screen has one selection, not two")
+        #expect(window.test_sidebar.currentSelection == .device(id: "office"),
+                "the sidebar is untouched by a scene selection")
         #expect(controller.activeGroupID == nil,
                 "selecting a group from the detail pane NEVER activates it")
     }
 
-    /// Unavailable speakers sink to the bottom of the Speakers section, kept
-    /// alphabetical within each half (owner's call, 2026-08-28 — chosen over
-    /// keep-in-place; the accepted trade is that a row moves when its
-    /// availability flips).
-    @Test func unavailableSpeakersSortToTheBottomOfTheSidebar() async throws {
+    // Turns red when the speaker page's scene link stops calling `onRequestScenesTab`, which leaves the editor opening on a screen nobody is looking at.
+    @Test func aSceneLinkOnASpeakerPageAsksForTheScenesTab() async throws {
+        let (window, controller, backend) = try await makeWindow()
+        _ = try makeGroup1(controller)   // members: sonos-move, office
+        window.update(devices: backend.devices)
+        var requests = 0
+        window.onRequestScenesTab = { requests += 1 }
+
+        window.select(.device(id: "office"))
+        await drain()
+        #expect(requests == 0, "showing a speaker page asks for no tab")
+        window.test_detail.test_selectGroupRow(at: 0)
+        await drain()
+
+        #expect(window.test_isShowingEditor)
+        #expect(requests == 1, "the scene link asks the surface for the Scenes tab")
+    }
+
+    // Turns red when the sidebar stops putting This Mac first or sinks unavailable speakers instead of keeping each in its alphabetical place.
+    @Test func sidebarIsAlphabeticalWithinItsGroupWithTheMacFirst() async throws {
         let (window, _, backend) = try await makeWindow()
         let devices = backend.devices.map { device -> Device in
             var d = device
@@ -1263,18 +1251,16 @@ import AppKit
         }
         window.update(devices: devices)
 
-        let ids = window.test_sidebar.test_deviceRowIDs
-        #expect(ids.count == 7)
-        #expect(ids.suffix(2).sorted() == ["appletv-lr", "office"],
-                "the two asleep speakers are the last two rows")
-        #expect(ids.prefix(5).allSatisfy { $0 != "office" && $0 != "appletv-lr" })
+        // MacBook Pro Speakers; then Bedroom HomePod, Living Room TV, Mixer,
+        // Move 2, Office, Sonos Move — the two asleep ones keep their places.
+        #expect(window.test_sidebar.test_deviceRowIDs(inGroupTitled: "In the Mixer")
+                == ["local-mac", "homepod-bed", "appletv-lr", "airport-mixer", "sonos-move-2", "office", "sonos-move"])
     }
 
     /// `select(_:)` is the deep-link/cross-link entry point (the detail pane's
     /// group rows, `AppDelegate.showSurface(_:selecting:)`), and unlike a real
     /// click it has to move the sidebar's highlight ITSELF. Sidebar and content
-    /// must end up agreeing: a speaker's pane means the speaker's row is lit,
-    /// never the Groups row. (Only the card->editor push parks it on Groups.)
+    /// must end up agreeing: a speaker's pane means the speaker's row is lit.
     @Test func selectingASpeakerHighlightsThatSpeakersRow() async throws {
         let (window, controller, backend) = try await makeWindow()
         _ = try makeGroup1(controller)
@@ -1286,11 +1272,10 @@ import AppKit
 
         #expect(window.test_isShowingDetail)
         #expect(window.test_sidebar.currentSelection == .device(id: "office"))
-        #expect(!window.test_sidebar.test_groupsRowIsSelected,
-                "the Groups row must not stay lit while a speaker's pane is open")
     }
 
-    @Test func deselectingADeviceAutoSelectsTheOverview() async throws {
+    // Turns red when a deselected sidebar leaves a speaker's page up, or lands anywhere but the Speakers page.
+    @Test func deselectingADeviceLandsOnTheSpeakersPage() async throws {
         let (window, controller, backend) = try await makeWindow()
         window.test_select(.device(id: "office"))
         await drain()
@@ -1299,7 +1284,7 @@ import AppKit
         window.test_select(nil)
         await drain()
         #expect(!(window.test_isShowingDetail))
-        #expect(window.test_isShowingOverview, "no groups: deselecting a device lands on the empty canvas")
+        #expect(window.test_isShowingSpeakersPage, "deselecting a device lands on the Speakers page")
 
         let saved = try makeGroup1(controller)
         window.update(devices: backend.devices)
@@ -1307,7 +1292,8 @@ import AppKit
         await drain()
         window.test_select(nil)
         await drain()
-        #expect(window.test_isShowingOverview, "with a saved group, deselecting lands on its card, not its editor")
+        #expect(window.test_isShowingSpeakersPage)
+        #expect(window.test_isShowingScenesOverview, "the scenes host still shows the cards")
         #expect(window.test_overview.test_cardGroupIDs == [saved.id])
     }
 
@@ -1317,7 +1303,7 @@ import AppKit
         await drain()
 
         #expect(!(window.test_isShowingDetail))
-        #expect(window.test_isShowingOverview)
+        #expect(window.test_isShowingSpeakersPage)
         #expect(window.test_detail.test_shownDeviceID == nil, "the detail pane was never actually shown")
     }
 
@@ -1338,7 +1324,7 @@ import AppKit
         let (window, _, backend) = try await makeWindow()
         window.test_select(.device(id: "office"))
         await drain()
-        #expect(window.test_detail.test_metadataStrings["status"] == "Available")
+        #expect(window.test_detail.test_subtitleText == "AirPlay Speaker · Ready")
 
         let updated = backend.devices.map { device -> Device in
             var d = device
@@ -1348,7 +1334,7 @@ import AppKit
         window.update(devices: updated)
 
         #expect(window.test_isShowingDetail, "still showing the detail pane, just re-rendered")
-        #expect(window.test_detail.test_metadataStrings["status"] == "Unavailable", "refreshAll() re-renders the visible detail pane from the fresher snapshot")
+        #expect(window.test_detail.test_subtitleText == "AirPlay Speaker · Unavailable", "refreshAll() re-renders the visible detail pane from the fresher snapshot")
     }
 
     @Test func refreshAllFallsBackWhenShownDeviceDisappears() async throws {
@@ -1361,7 +1347,73 @@ import AppKit
         window.update(devices: devicesWithoutOffice)
 
         #expect(!(window.test_isShowingDetail), "refreshAll() falls back to the default content once the shown device vanishes")
-        #expect(window.test_isShowingOverview, "the fallback is always the overview now")
+        #expect(window.test_isShowingSpeakersPage, "the fallback is the Speakers page")
+    }
+
+    // MARK: Forget
+
+    /// A screen whose injected library remembers two speakers the Mac can no
+    /// longer find, Den and Attic, beside a live one; Den is in Kitchen and
+    /// Porch, Attic only in Porch, and Porch has no other speaker.
+    private func makeForgetWindow() throws -> (MixerWindowController, GroupController, SpeakerLibraryController) {
+        let controller = GroupController(backend: MockBackend(fleet: []),
+            store: GroupStore(directory: scratchDir), routingStore: RoutingStore(directory: scratchDir),
+            settings: AppSettings(defaults: isolatedDefaults), loadPersisted: false)
+        let live = Device(id: "live", name: "Live", kind: .sonos)
+        let den = Device(id: "den", name: "Den", kind: .sonos)
+        let attic = Device(id: "attic", name: "Attic", kind: .homePod)
+        try controller.saveGroup(Group(id: "kitchen", name: "Kitchen", memberIDs: ["live", "den"], memberVolumes: [:]))
+        try controller.saveGroup(Group(id: "porch", name: "Porch", memberIDs: ["den", "attic"], memberVolumes: [:]))
+        let library = SpeakerLibraryController(loadPersisted: false)
+        library.update(liveDevices: [live, den, attic], groups: controller.groups)
+        library.setVisibility(.always, for: ["den", "attic"])
+        library.update(liveDevices: [live], groups: controller.groups)
+        let window = MixerWindowController(groupController: controller,
+            settings: AppSettings(defaults: isolatedDefaults), speakerLibrary: library)
+        window.test_isVisibleOverride = true
+        window.update(devices: [live])
+        return (window, controller, library)
+    }
+
+    // Turns red when the Forget confirm stops counting the scenes a speaker leaves, puts Return on Forget, or offers Forget when a scene would be left with no speaker.
+    @Test func forgetAlertCountsScenesAndRefusesToEmptyOne() throws {
+        let (window, _, _) = try makeForgetWindow()
+
+        let den = window.test_makeForgetAlert(ids: ["den"])
+        #expect(den.messageText == "Forget \u{201C}Den\u{201D}?")
+        #expect(den.informativeText == "It will be removed from 2 scenes.")
+        #expect(den.buttons.map(\.title) == ["Forget", "Cancel"])
+        #expect(den.buttons[0].hasDestructiveAction)
+        #expect(den.buttons[1].keyEquivalent == "\r", "Return is Cancel on a destructive sheet")
+
+        let attic = window.test_makeForgetAlert(ids: ["attic"])
+        #expect(attic.informativeText == "It will be removed from 1 scene.")
+
+        let both = window.test_makeForgetAlert(ids: ["den", "attic"])
+        #expect(both.messageText == "Can\u{2019}t forget 2 speakers")
+        #expect(both.informativeText == "Delete \u{201C}Porch\u{201D} first: it has no other speaker.")
+        #expect(both.buttons.map(\.title) == ["OK"])
+    }
+
+    // Turns red when confirming Forget leaves the speaker's record or a scene membership behind, or leaves its page showing once it is gone.
+    @Test func confirmingForgetRemovesTheSpeakerAndFallsBackToTheSpeakersPage() throws {
+        let (window, controller, library) = try makeForgetWindow()
+        window.select(.device(id: "den"))
+        #expect(window.test_isShowingDetail)
+
+        window.test_confirmForget(ids: ["den"])
+
+        #expect(library.record(for: "den") == nil)
+        #expect(controller.groups.map(\.memberIDs) == [["live"], ["attic"]])
+        #expect(!window.test_sidebar.test_deviceRowIDs.contains("den"))
+        #expect(window.test_isShowingSpeakersPage)
+        #expect(controller.activeGroupID == nil)
+    }
+
+    // Turns red when "Manage speakers…" stops landing on This Mac's page while the Mac is in the list.
+    @Test func firstSpeakerSelectionIsThisMac() async throws {
+        let (window, _, _) = try await makeWindow()
+        #expect(window.firstSpeakerSelection == .device(id: "local-mac"))
     }
 
     // MARK: Icon flows
@@ -1451,7 +1503,7 @@ import AppKit
         let (window, _, _) = try await makeWindow()
         let host = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 505),
                             styleMask: [.titled, .resizable], backing: .buffered, defer: true)
-        host.contentViewController = window.contentController
+        host.contentViewController = window.speakersContentController
         // Before `viewDidAppear()` has ever run, the host's first responder
         // is itself — nothing has claimed it. This is the exact state a live
         // Tab press found: nothing to advance from.
@@ -1463,27 +1515,25 @@ import AppKit
         let (window, _, _) = try await makeWindow()
         let host = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 505),
                             styleMask: [.titled, .resizable], backing: .buffered, defer: true)
-        host.contentViewController = window.contentController
+        host.contentViewController = window.speakersContentController
         window.test_sidebar.test_simulateViewDidAppear()
         #expect(window.test_sidebar.test_isOutlineViewFirstResponder, "the sidebar's outline view must become first responder once the content appears, or Tab has nothing to advance from")
     }
 
-    // MARK: Live markers (the Groups row + the card)
+    // MARK: Live marker (the card)
 
-    @Test func theGroupsRowAndTheLiveCardBothCarryTheGoldMarker() async throws {
+    // Turns red when the live scene's card stops carrying the gold marker, or carries it while nothing is the active Main Out.
+    @Test func theLiveCardCarriesTheGoldMarker() async throws {
         let (window, controller, backend) = try await makeWindow()
         let saved = try makeGroup1(controller)
         window.update(devices: backend.devices)
-        #expect(!window.test_sidebar.test_groupsRowShowsLiveMarker,
+        #expect(!window.test_overview.test_cardShowsLive(id: saved.id),
                 "no marker while nothing is the active Main Out")
-        #expect(!window.test_overview.test_cardShowsLive(id: saved.id))
 
         controller.activateGroup(id: saved.id)
         window.update(devices: backend.devices)
-        #expect(window.test_sidebar.test_groupsRowShowsLiveMarker,
-                "the Groups row is all the sidebar can say about which group is live")
         #expect(window.test_overview.test_cardShowsLive(id: saved.id),
-                "and the card names it")
+                "the card names the live scene")
     }
 
     // MARK: Add-button retitle (multi-select discoverability)
@@ -1618,7 +1668,7 @@ import AppKit
         let (window, _, _) = try await makeWindow()
         window.mainOutEQProvider = { .flat }
         window.select(.mainOut)
-        window.contentController.view.layoutSubtreeIfNeeded()
+        window.speakersContentController.view.layoutSubtreeIfNeeded()
 
         let detail = window.test_mainOutDetail
         #expect(detail.test_resetEnabled == false)
@@ -1654,14 +1704,18 @@ import AppKit
         #expect(reported.last?.2 == true)
     }
 
+    // Turns red when an empty sidebar selection lands on Main Audio (or anywhere but the Speakers page) or disturbs the scene cards.
     @Test func autoSelectLandsOnTheOverviewWhenNothingIsSelected() async throws {
-        let (window, controller, _) = try await makeWindow()
+        let (window, controller, backend) = try await makeWindow()
         let group = try makeGroup1(controller)
+        window.update(devices: backend.devices)
 
         window.test_select(nil)
 
-        #expect(window.test_isShowingOverview,
-                "the System Audio row must not steal the empty selection's auto-select either")
+        #expect(window.test_isShowingSpeakersPage,
+                "the System Audio row must not steal the empty selection's landing")
+        #expect(!window.test_isShowingMainOut)
+        #expect(window.test_isShowingScenesOverview)
         #expect(window.test_overview.test_cardGroupIDs == [group.id])
     }
 }

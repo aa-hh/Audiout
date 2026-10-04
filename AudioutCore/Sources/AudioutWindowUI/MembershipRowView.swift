@@ -343,15 +343,15 @@ public final class MembershipRowView: NSView {
         applyInk()
         updateBus()
         guard let record else { return }
-        let status = record.isAvailable ? "" : record.status.text + "\n"
-        unavailableLabel.stringValue = status + record.mixerVisibilityContext
-        unavailableLabel.isHidden = false
+        let status = record.isAvailable ? "" : record.status.text
+        unavailableLabel.stringValue = status
+        unavailableLabel.isHidden = status.isEmpty
         unavailableLabel.toolTip = unavailableLabel.stringValue
         nameLabel.toolTip = record.secondaryText
         if record.kind == nil {
             iconView.image = DeviceIcon.image("speaker")
         }
-        setAccessibilityLabel(record.accessibilityIdentity + ", " + record.status.text + ", " + record.mixerVisibilityContext)
+        setAccessibilityLabel(record.accessibilityIdentity + (record.isAvailable ? "" : ", " + record.status.text))
         updateCheckboxAccessibilityLabel()
     }
 

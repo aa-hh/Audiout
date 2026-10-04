@@ -129,7 +129,6 @@ extension SerializedSharedState {
             #expect(controller.record(for: "physical-bt")?.isVisibleInMixer == false)
             #expect(controller.record(for: "inactive")?.isVisibleInMixer == false)
             #expect(controller.record(for: "local")?.visibility == .whenAvailable)
-            #expect(controller.record(for: "main")?.mixerVisibilityContext == "Hidden from Mixer · Shown while in use")
             #expect(controller.record(for: "absent-app")?.isVisibleInMixer == true)
         }
 
@@ -239,7 +238,7 @@ extension SerializedSharedState {
             #expect(FileManager.default.fileExists(atPath: file.path))
         }
 
-        // The capture moving before the save, firing on a no-op gesture, or counting the local Mac turns this red.
+        // The capture moving before the save, firing on a no-op gesture, or counting the local Mac turns it red.
         @Test func visibilityChangeCapturesOneEventAfterARealWrite() {
             let captured = CapturedEvents()
             Analytics.install(Analytics.Sink(capture: { name, props in captured.append(name, props) },
@@ -258,6 +257,74 @@ extension SerializedSharedState {
             #expect(captured.events().count == 1)
         }
 
+        private func sceneController(_ scenes: [Group]) throws -> GroupController {
+            let controller = GroupController(backend: MockBackend(fleet: []), store: GroupStore(directory: scratchDir),
+                                             routingStore: RoutingStore(directory: scratchDir),
+                                             settings: AppSettings(defaults: isolatedDefaults), loadPersisted: false)
+            for scene in scenes { try controller.saveGroup(scene) }
+            return controller
+        }
+
+        // Forget leaving the id in either the scene store or the library (metadata, visibility, record) turns it red.
+        @Test func forgetRemovesTheSpeakerFromLibraryAndEveryScene() throws {
+            let controller = library()
+            let kitchen = Group(id: "k", name: "Kitchen", memberIDs: ["live", "gone"], memberVolumes: ["gone": 40])
+            let den = Group(id: "d", name: "Den", memberIDs: ["gone", "live"], memberVolumes: [:])
+            let scenes = try sceneController([kitchen, den])
+            controller.update(liveDevices: [speaker("live")], groups: scenes.groups)
+            controller.setVisibility(.always, for: "gone")
+            #expect(controller.record(for: "gone")?.liveDevice == nil)
+            #expect(try controller.forget(["gone"], scenes: scenes) == 2)
+            #expect(controller.record(for: "gone") == nil)
+            #expect(controller.visibility(for: "gone") == .whenAvailable)
+            #expect(scenes.groups.allSatisfy { $0.memberIDs == ["live"] && $0.memberVolumes["gone"] == nil })
+            #expect(try GroupStore(directory: scratchDir).load().allSatisfy { $0.memberIDs == ["live"] })
+            let reloaded = library()
+            reloaded.update(liveDevices: [], groups: [])
+            #expect(reloaded.record(for: "gone") == nil)
+        }
+
+        // Forget acting on a speaker the Mac can still see turns it red.
+        @Test func forgetIgnoresSpeakersWithALiveDevice() throws {
+            let controller = library()
+            let scenes = try sceneController([Group(id: "k", name: "Kitchen", memberIDs: ["live", "x"], memberVolumes: [:])])
+            controller.update(liveDevices: [speaker("live")], groups: scenes.groups)
+            #expect(try controller.forget(["live"], scenes: scenes) == 0)
+            #expect(scenes.groups.first?.memberIDs == ["live", "x"])
+            #expect(controller.record(for: "live") != nil)
+        }
+
+        // Forget deleting or emptying a scene instead of refusing, or writing one store before the refusal, turns it red.
+        @Test func forgetRefusesWhenASceneWouldBeEmptyAndWritesNothing() throws {
+            let controller = library()
+            let solo = Group(id: "s", name: "Solo", memberIDs: ["gone"], memberVolumes: [:])
+            let other = Group(id: "o", name: "Other", memberIDs: ["live", "gone"], memberVolumes: [:])
+            let scenes = try sceneController([other, solo])
+            controller.update(liveDevices: [speaker("live")], groups: scenes.groups)
+            controller.setVisibility(.always, for: "gone")
+            #expect(throws: GroupController.GroupError.emptyMembership) { try controller.forget(["gone"], scenes: scenes) }
+            #expect(scenes.groups.map(\.memberIDs) == [["live", "gone"], ["gone"]])
+            #expect(try GroupStore(directory: scratchDir).load().map(\.memberIDs) == [["live", "gone"], ["gone"]])
+            #expect(controller.record(for: "gone") != nil)
+            #expect(controller.visibility(for: "gone") == .always)
+        }
+
+        // The capture firing before the writes, once per call instead of per speaker, or carrying a wrong scene count turns it red.
+        @Test func forgetCapturesOneEventPerSpeakerWithItsSceneCount() throws {
+            let captured = CapturedEvents()
+            Analytics.install(Analytics.Sink(capture: { name, props in captured.append(name, props) },
+                                             captureError: { _, _ in }, consentChanged: { _ in }), consent: true)
+            defer { Analytics.install(nil, consent: false) }
+            let controller = library()
+            let scenes = try sceneController([
+                Group(id: "a", name: "A", memberIDs: ["live", "one", "two"], memberVolumes: [:]),
+                Group(id: "b", name: "B", memberIDs: ["live", "two"], memberVolumes: [:])])
+            controller.update(liveDevices: [speaker("live")], groups: scenes.groups)
+            _ = try controller.forget(["one", "two"], scenes: scenes)
+            let events = captured.events().filter { $0.0 == "speaker:forgotten" }
+            #expect(events.map { $0.1["scenes"] }.sorted { ($0 ?? "") < ($1 ?? "") } == ["1", "2"])
+        }
+
         // A status gaining a button without a destination, or the action title drifting back to Title Case, turns red.
         @Test func bluetoothAccessTablePairsEveryButtonWithItsAction() {
             let asking = "Allow Bluetooth access to see paired speakers that are not connected."
@@ -266,9 +333,9 @@ extension SerializedSharedState {
                 (.granted, false, (nil, nil, .openSettings(.bluetooth))),
                 (.granted, true, (nil, nil, .openSettings(.bluetooth))),
                 (.denied, false, ("Allow Bluetooth access in System Settings to see paired speakers that are not connected.",
-                                  "Open Bluetooth privacy…", .openSettings(.bluetoothPrivacy))),
+                                  "Open Privacy Settings…", .openSettings(.bluetoothPrivacy))),
                 (.denied, true, ("Allow Bluetooth access in System Settings to see paired speakers that are not connected.",
-                                 "Open Bluetooth privacy…", .openSettings(.bluetoothPrivacy))),
+                                 "Open Privacy Settings…", .openSettings(.bluetoothPrivacy))),
                 (.unsupported, false, ("Bluetooth access is unavailable on this Mac.", nil, .none)),
                 (.unsupported, true, ("Bluetooth access is unavailable on this Mac.", nil, .none)),
                 (.unknown, false, (asking, "Allow Bluetooth…", .prime)),

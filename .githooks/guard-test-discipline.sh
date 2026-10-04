@@ -13,7 +13,9 @@
 #   2. no added print( line (trailing `print-ok` exempts)
 #   3. a NEW test file holds more than one @Test (`new-suite-ok` exempts)
 
-[ -n "$AUDIOUT_IN_MERGE" ] && exit 0
+# A conflict-resolution merge commit (MERGE_HEAD present) carries other
+# people's lines; a clean merge never runs pre-commit at all.
+[ -f "$(git rev-parse --git-dir 2>/dev/null)/MERGE_HEAD" ] && exit 0
 
 files=$(git diff --cached --name-only --diff-filter=AM -- 'AudioutCore/Tests/' 'AirPlayEngine/Tests/' 2>/dev/null | grep -E '\.swift$')
 [ -z "$files" ] && exit 0

@@ -90,7 +90,7 @@ failure it starts a fresh `afplay`, which follows the current default output.
 
 Watch from another Mac (the driver prints the folder at start):
 ```
-ssh alechamilton@SUMUP-M9Y197RFVG.local tail -F '<results path>/status.log' | grep --line-buffered -E 'ALERT|ABORT|BLOCK|WAITING|DONE'
+ssh alechamilton@SUMUP-M9Y197RFVG.local "tail -F '<results path>/status.log'" | grep --line-buffered -E 'ALERT|ABORT|BLOCK|WAITING|DONE'
 ```
 Your main Claude session can run that under a monitor and notify your phone per line.
 
@@ -109,7 +109,7 @@ running), loads `~/Library/LaunchAgents/com.audiout.dev.listening-night.plist` w
 agent fires, removes itself and runs the driver. It prints how to cancel.
 
 The clicks, each after its `WAITING` line, then Enter in that Terminal or
-`ssh alechamilton@SUMUP-M9Y197RFVG.local touch ~/Library/Application\ Support/AudioutDev/listening/go-block-a` (`-b`, `-c`):
+`ssh alechamilton@SUMUP-M9Y197RFVG.local 'touch ~/Library/Application\ Support/AudioutDev/listening/go-block-a'` (`-b`, `-c`; the quotes keep `~` and the space for the remote shell):
 
 1. A: select both Moves, nothing else.
 2. B: quit and reopen Audiout Dev first (a Move whose link was dropped stays

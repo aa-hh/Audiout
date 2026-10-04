@@ -3,7 +3,7 @@
 #
 #   ./unattended-night.sh [--dry-run | --smoke] [--relaunch] [--with-airplay | --only-c] [--move1 ID] [--move2 ID] [--airplay-id ID] [--c-move ID]
 #   ./unattended-night.sh --list-devices      # ids this Mac has seen, in the form the driver takes
-#   ./unattended-night.sh --check [flags]     # tools, ids and build only, then exit (launch-tonight.sh runs it)
+#   ./unattended-night.sh --check [flags]     # tools, ids, build; connects Move 1 over Bluetooth; then exit (launch-tonight.sh runs it)
 #
 # Block A (25 min): both Moves, click track loops, mic records; at minute 22 the
 #   Move that is not --c-move is disconnected for 10 s and reconnected (needs
@@ -237,7 +237,7 @@ BLUE_PROBLEM=""
 if ! command -v blueutil >/dev/null; then BLUE_PROBLEM="blueutil not installed"
 elif ! to 15 blueutil --power >/dev/null 2>&1; then BLUE_PROBLEM="blueutil cannot reach Bluetooth (Terminal needs Bluetooth access in Privacy & Security)"; fi
 HAVE_BLUEUTIL=$([[ -z $BLUE_PROBLEM ]] && print 1 || print 0)
-(( DRY )) || [[ -z $BLUE_PROBLEM ]] || die "$BLUE_PROBLEM. A real run needs it: quitting Audiout Dev drops the Moves' links, and the driver must reconnect them before every relaunch."
+(( DRY )) || [[ -z $BLUE_PROBLEM ]] || die "$BLUE_PROBLEM. A real run needs it for Block A's disconnect and reconnect, and with --relaunch to reconnect the Moves before every relaunch."
 
 # ---- Bluetooth links ---------------------------------------------------------
 # Quitting Audiout Dev drops the A2DP links, and the launch-time restore
@@ -636,7 +636,7 @@ select_manual() {  # block letter, then ids
   [[ $blk == B && -n $TOGGLE_ID ]] && pre="quit and reopen Audiout Dev first (a Move whose link was dropped stays silent until the app restarts); then "
   for try in {1..$SELECT_TRIES}; do
     play_stop; rm -f "$GO_DIR/go-block-${(L)blk}"; from=$(tel_size)
-    status "WAITING $blk $(date +%H:%M:%S) ${pre}in Audiout Dev select exactly: \"$list\" and nothing else, then press Enter (or: touch $GO_DIR/go-block-${(L)blk})"
+    status "WAITING $blk $(date +%H:%M:%S) ${pre}in Audiout Dev select exactly: \"$list\" and nothing else, then press Enter (or: touch ${(q)GO_DIR}/go-block-${(L)blk})"
     wait_go $blk || { status "ABORT $blk $(date +%H:%M:%S) nobody confirmed the selection within $WAIT_C_S s"; return 1; }
     play_start || log "afplay did not start"
     (( DRY )) && { log "dry run: selection and audio checks skipped (no app running)"; return 0; }
@@ -912,7 +912,7 @@ wait_for_wifi_switch() {
     to 20 osascript -e "tell application id \"$BUNDLE_ID\" to quit" >/dev/null 2>&1 || true
   fi
   rm -f "$GO_DIR/go-block-c"
-  status "WAITING C $(date +%H:%M:%S) switch the other Move to Wi-Fi mode, wait for it to appear as an AirPlay speaker, then confirm (Enter here, or: touch $GO_DIR/go-block-c)"
+  status "WAITING C $(date +%H:%M:%S) switch the other Move to Wi-Fi mode, wait for it to appear as an AirPlay speaker, then confirm (Enter here, or: touch ${(q)GO_DIR}/go-block-c)"
   wait_go C && return 0
   status "ABORT C timeout waiting for the AirPlay switch"
   return 1

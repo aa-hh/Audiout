@@ -377,6 +377,10 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// Persistence for the per-device SYNC trims. `nil` (most tests) = trims
     /// live for the session only.
     let btTrimStore: BTTrimStore?
+
+    /// Per-speaker AirPlay passwords. The designated init's default is
+    /// session-only (`InMemoryAirPlayPasswordStore`), like ``btTrimStore``.
+    private let passwordStore: AirPlayPasswordStoring
     /// Guards ``btTrimsByUID`` alone — read from the UI thread
     /// (``btSyncTrim(forDevice:)``), written by ``setBTSyncTrim(_:forDevice:)``,
     /// and snapshotted by `captureControlQueue` when a sink is (re)armed; a
@@ -1656,6 +1660,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             btHardwareVolumeControl: BTHardwareVolume(),
             btAbsoluteVolumeClaim: { BTAbsoluteVolumeSDP.claim(forUID: $0) },
             eqStore: DeviceEQStore(),
+            passwordStore: KeychainAirPlayPasswordStore(),
             processResolver: processResolver,
             defaultOutputSwitcher: DefaultOutputSwitcher())
     }
@@ -1705,6 +1710,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         btHardwareVolumeControl: BTHardwareVolumeControlling? = nil,
         btAbsoluteVolumeClaim: (@Sendable (String) -> Bool?)? = nil,
         eqStore: DeviceEQStore? = nil,
+        passwordStore: AirPlayPasswordStoring? = nil,
         dacpEndpoint: DACPEndpoint = DACPServer(),
         systemVolume: SystemVolumeControlling = SystemOutputVolume(),
         ptpHelperActivator: PTPHelperActivating = PTPHelperSelfHealingActivator(),
@@ -1754,6 +1760,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         self.castEnumerator = castEnumerator
         self.castOutputManager = castOutputManager
         self.btTrimStore = btTrimStore
+        self.passwordStore = passwordStore ?? InMemoryAirPlayPasswordStore()
         do {
             if let loaded = try btTrimStore?.load() ?? nil {
                 self.btTrimsByUID = loaded.mapValues { BTSyncTrim.clamp($0) }
@@ -3583,14 +3590,34 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                     // `.timedOut` tells the user. Anything else stays `.unknown` —
                     // a plausible-but-wrong cause is worse than a vague one — but
                     // the raw error always rides along as `detail`.
-                    var cause: ConnectionFailure.Cause = .unknown
-                    if case AirPlayEngineError.passwordRequired = error { cause = .authRequired }
-                    if case AirPlayEngineError.opTimedOut = error { cause = .timedOut }
-                    stateQueue.sync {
+                    //
+                    // razor: on AirPlay 2 a password rejection and a network
+                    // failure during connect both arrive as a plain failure, so a
+                    // `.password` speaker's connect failure is read as a bad
+                    // password. PR 2's authorize path is where the engine can say more.
+                    let cause: ConnectionFailure.Cause = stateQueue.sync {
+                        let access = self.known[id]?.airPlayAccess
+                        let cause: ConnectionFailure.Cause
+                        switch error {
+                        case AirPlayEngineError.passwordRequired:
+                            cause = Self.accessCause(access, passwordRequired: true)
+                        case AirPlayEngineError.opTimedOut:
+                            cause = .timedOut
+                        default:
+                            cause = Self.accessCause(access, passwordRequired: false)
+                        }
+                        // A stored password the receiver refused is wrong: delete
+                        // it rather than retry it.
+                        let rejectedStored = cause == .authRequired && self.fedDescriptors[id]?.password != nil
+                        if rejectedStored { self.passwordStore.removePassword(for: id) }
                         self.removeFromAddedLocked(id)
                         self.failedGate.insert(id)
-                        self.applyLocal(id) { $0.isSelected = false; $0.isAvailable = false }
+                        self.applyLocal(id) {
+                            $0.isSelected = false; $0.isAvailable = false
+                            if rejectedStored { $0.hasStoredPassword = false }
+                        }
                         self.enterFailure(id, cause: cause, detail: String(describing: error))
+                        return cause
                     }
                     // The engine error rides along locally only: its
                     // description can name the receiver.
@@ -3643,12 +3670,22 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// it (reads are snapshotted under `sync`).
     private func descriptorToFeed(id: String) -> DeviceDescriptor? {
         stateQueue.sync {
-            guard let current = self.lastDescriptors[id] else { return nil }
+            guard let last = self.lastDescriptors[id] else { return nil }
+            let current = self.withStoredPassword(last, id: id)
             if let fed = self.fedDescriptors[id], Self.descriptorsEqual(fed, current) {
                 return nil // engine already has this exact descriptor
             }
             return current
         }
+    }
+
+    /// `descriptor` carrying this speaker's stored password, if any. Both engine
+    /// feed sites compare and feed this, so a discovery re-feed never wipes the
+    /// engine's per-device password.
+    private func withStoredPassword(_ descriptor: DeviceDescriptor, id: String) -> DeviceDescriptor {
+        var copy = descriptor
+        copy.password = passwordStore.password(for: id)
+        return copy
     }
 
     /// The last descriptor actually fed to the engine per id, so a converge can
@@ -3662,6 +3699,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     static func descriptorsEqual(_ a: DeviceDescriptor, _ b: DeviceDescriptor) -> Bool {
         a.name == b.name && a.hostname == b.hostname && a.address == b.address
             && sameFamily(a.family, b.family) && a.port == b.port && a.txtRecord == b.txtRecord
+            && a.password == b.password
     }
 
     /// `AddressFamily` isn't `Equatable` in the engine's public surface (and we
@@ -4786,8 +4824,8 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// changed, so a repeated identical `.updated` doesn't re-add either.
     private func feedEngineIfAvailable(_ discovered: DiscoveredDevice, appearing: Bool) {
         guard discovered.isAvailable else { return }
-        let descriptor = discovered.descriptor
         let id = discovered.id
+        let descriptor = withStoredPassword(discovered.descriptor, id: id)
         let shouldFeed: Bool = stateQueue.sync {
             if let fed = self.fedDescriptors[id], Self.descriptorsEqual(fed, descriptor) {
                 return false
@@ -5089,6 +5127,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 device.isAvailable = true
                 device.isSelected = true
                 device.connectionState = .connected
+                self.notePasswordOutcome(id: id, newState: .connected)
                 self.added.insert(id)
                 // Recovery (root cause 4): a good transition clears any failure
                 // park so the device is re-enableable / stays converged.
@@ -5137,11 +5176,17 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                     // out-of-band is precisely "was connected, silently dropped".
                     let cause: ConnectionFailure.Cause =
                         state == .passwordRequired
-                            ? .authRequired
-                            : (wasStreaming ? .droppedMidStream : .unknown)
+                            ? Self.accessCause(device.airPlayAccess, passwordRequired: true)
+                            : (wasStreaming ? .droppedMidStream
+                                : Self.accessCause(device.airPlayAccess, passwordRequired: false))
+                    if cause == .authRequired, self.fedDescriptors[id]?.password != nil {
+                        self.passwordStore.removePassword(for: id)
+                        device.hasStoredPassword = false
+                    }
                     device.connectionState = .failed(
                         ConnectionFailure(cause: cause, detail: "engine state: \(state)")
                     )
+                    self.notePasswordOutcome(id: id, newState: device.connectionState)
                     // The ONE event that explains the user-visible "engine state:
                     // failed" — a live AirPlay session dying. It was invisible in
                     // telemetry until now, so a dropped session had to be inferred
@@ -5163,11 +5208,17 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                     let wasConnected = device.connectionState == .connected
                     let cause: ConnectionFailure.Cause =
                         state == .passwordRequired
-                            ? .authRequired
-                            : (wasConnected ? .droppedMidStream : .unknown)
+                            ? Self.accessCause(device.airPlayAccess, passwordRequired: true)
+                            : (wasConnected ? .droppedMidStream
+                                : Self.accessCause(device.airPlayAccess, passwordRequired: false))
+                    if cause == .authRequired, self.fedDescriptors[id]?.password != nil {
+                        self.passwordStore.removePassword(for: id)
+                        device.hasStoredPassword = false
+                    }
                     device.connectionState = .failed(
                         ConnectionFailure(cause: cause, detail: "engine state: \(state)")
                     )
+                    self.notePasswordOutcome(id: id, newState: device.connectionState)
                     Telemetry.fail(.airplay, "airplay:session_failed",
                                    local: ["device": id],
                                    shared: [
@@ -5404,7 +5455,9 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // describe a LIVE session, which nothing that isn't streaming yet
             // can have. `reconcileEQPlan` sets it on the `added` edge and clears
             // it when the device stops streaming.
-            eq: eqByDeviceID[id] ?? .flat
+            eq: eqByDeviceID[id] ?? .flat,
+            airPlayAccess: discovered.access,
+            hasStoredPassword: passwordStore.password(for: id) != nil
         )
     }
 
@@ -5416,6 +5469,8 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         result.name = discovered.name
         result.kind = discovered.kind
         result.supportsAirPlay2 = discovered.supportsAirPlay2
+        // `hasStoredPassword` stays the existing value: the backend's own writes own it.
+        result.airPlayAccess = discovered.airPlayAccess
         if discovered.isAvailable {
             // A reachable receiver (AP1 or AP2) that re-resolved is streamable
             // again (a dropped→returned device comes back available). Its
@@ -5720,10 +5775,61 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     func setConnectionState(_ state: ConnectionState, for id: String) {   // on stateQueue
         guard connectionState(of: id) != state else { return }
         applyLocal(id) { $0.connectionState = state }
+        notePasswordOutcome(id: id, newState: state)
         // Every connection-lifecycle edge can change "is any desired device audible":
         // a `→ .connected` re-engages the gate (clearing a silence fallback), a
         // `→ .failed`/`.off` for the last connected member arms the countdown (R11).
         reconcileSilenceWatchdog()
+    }
+
+    // MARK: AirPlay passwords
+
+    /// The cause for an engine failure, read against what the receiver
+    /// advertises. A password demand on an on-screen-code receiver is a code;
+    /// a failure the engine gives no reason for is the receiver's advertised
+    /// demand when it has one, else `.unknown`.
+    static func accessCause(_ access: AirPlayAccess?, passwordRequired: Bool) -> ConnectionFailure.Cause {
+        if passwordRequired { return access == .onScreenCode ? .codeRequired : .authRequired }
+        switch access {
+        case .password: return .authRequired
+        case .homeMembersOnly: return .homeMembersOnly
+        default: return .unknown
+        }
+    }
+
+    /// Who submitted the password now being tried, per device id (`"mac"` or
+    /// `"phone"`), until that attempt ends. Read by ``notePasswordOutcome``.
+    private var pendingPasswordOutcome: [String: String] = [:]
+
+    public func submitAirPlayPassword(_ password: String, for id: String, source: String) {
+        passwordStore.setPassword(password, for: id)
+        stateQueue.async {
+            self.pendingPasswordOutcome[id] = source
+            self.applyLocal(id) { $0.hasStoredPassword = true }
+        }
+    }
+
+    /// Reports how a submitted password's attempt ended, once, then forgets
+    /// the submission. A `.connecting` edge leaves it pending. On `stateQueue`.
+    private func notePasswordOutcome(id: String, newState: ConnectionState) {
+        guard let source = pendingPasswordOutcome[id] else { return }
+        let outcome: String
+        switch newState {
+        case .connected: outcome = "accepted"
+        case .failed(let failure): outcome = failure.cause == .authRequired ? "rejected" : "failed"
+        default: return
+        }
+        pendingPasswordOutcome[id] = nil
+        Analytics.capture("airplay:code_submitted",
+                          ["kind": "password", "outcome": outcome, "source": source])
+    }
+
+    public func forgetAirPlayPassword(for id: String) {
+        passwordStore.removePassword(for: id)
+        stateQueue.async {
+            self.applyLocal(id) { $0.hasStoredPassword = false }
+        }
+        Analytics.capture("airplay:code_forgotten", ["kind": "password"])
     }
 
     /// Enter the resting `.failed` state (converge add-throw or an out-of-band

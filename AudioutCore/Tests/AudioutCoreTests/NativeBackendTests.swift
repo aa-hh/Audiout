@@ -620,18 +620,22 @@ private struct NoOpAggregateControl: AggregateDeviceControlling {
     func setDefaultOutputDevice(_ deviceID: AudioObjectID) -> Bool { false }
 }
 
-private func ap2Device(id: String = "AA:BB:CC:DD:EE:01", name: String = "Sonos Move", model: String = "S13") -> DiscoveredDevice {
+private func ap2Device(id: String = "AA:BB:CC:DD:EE:01", name: String = "Sonos Move", model: String = "S13",
+                       access: AirPlayAccess = .open) -> DiscoveredDevice {
     let txt = ["deviceid": id, "model": model, "features": "0x445F8A00,0x1C340"]
     let (parsedID, outputID) = NativeDiscovery.parseDeviceID(txt)!
     let desc = DeviceDescriptor(name: name, address: "192.168.1.10", family: .ipv4, port: 7000, txtRecord: txt)
-    return DiscoveredDevice(id: parsedID, descriptor: desc, outputID: outputID, isAirPlay2Supported: true)
+    return DiscoveredDevice(id: parsedID, descriptor: desc, outputID: outputID, isAirPlay2Supported: true,
+                            access: access)
 }
 
-private func ap1Device(id: String = "AA:BB:CC:DD:EE:99", name: String = "Old Express") -> DiscoveredDevice {
+private func ap1Device(id: String = "AA:BB:CC:DD:EE:99", name: String = "Old Express",
+                       access: AirPlayAccess = .open) -> DiscoveredDevice {
     let txt = ["deviceid": id, "model": "AirPort4,107"]
     let (parsedID, outputID) = NativeDiscovery.parseDeviceID(txt)!
     let desc = DeviceDescriptor(name: name, address: "192.168.1.20", family: .ipv4, port: 5000, txtRecord: txt)
-    return DiscoveredDevice(id: parsedID, descriptor: desc, outputID: outputID, isAirPlay2Supported: false)
+    return DiscoveredDevice(id: parsedID, descriptor: desc, outputID: outputID, isAirPlay2Supported: false,
+                            access: access)
 }
 
 /// `systemVolume` defaults to a fresh ``FakeSystemVolume`` so EVERY call
@@ -646,6 +650,7 @@ private func makeBackend(
     /// only, exactly like `btTrimStore`. The EQ tests pass a store over an
     /// isolated scratch directory so nothing touches real Application Support.
     eqStore: DeviceEQStore? = nil,
+    passwordStore: InMemoryAirPlayPasswordStore? = nil,
     systemVolume: SystemVolumeControlling = FakeSystemVolume(),
     ptpHelperActivator: PTPHelperActivating = AlwaysReadyPTPHelperActivator(),
     connectVolume: @escaping @Sendable () -> Int = { AppSettings.defaultConnectVolume },
@@ -671,6 +676,7 @@ private func makeBackend(
     let discovery = FakeDiscovery()
     let backend = NativeBackend(
         engineControl: engine, discoverySource: discovery, eqStore: eqStore,
+        passwordStore: passwordStore,
         dacpEndpoint: FakeDACPEndpoint(),
         systemVolume: systemVolume, ptpHelperActivator: ptpHelperActivator,
         connectVolume: connectVolume, processResolver: processResolver,
@@ -3117,6 +3123,97 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         }
         #expect(failure.cause == .authRequired,
                 "the add-throw catch maps the engine's passwordRequired, not .unknown")
+    }
+
+    // MARK: AirPlay passwords
+
+    private func failureCause(_ backend: NativeBackend, _ id: String) -> ConnectionFailure.Cause? {
+        if case .failed(let f)? = backend.devices.first(where: { $0.id == id })?.connectionState { return f.cause }
+        return nil
+    }
+
+    /// The retry not feeding the stored password to the engine (the
+    /// converge's descriptor compare ignoring `password`) turns it red.
+    @Test func submittedPasswordIsFedToTheEngineOnRetry() async {
+        let store = InMemoryAirPlayPasswordStore()
+        let (backend, engine, discovery) = makeBackend(passwordStore: store)
+        let device = ap2Device(access: .password)
+        engine.addFailures = [device.outputID.rawValue]
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+
+        backend.setOutputSet([device.id])
+        await pollUntil { self.failureCause(backend, device.id) == .authRequired }
+
+        engine.addFailures = []
+        backend.submitAirPlayPassword("secret", for: device.id, source: "mac")
+        backend.retryOutput(device.id)
+        await pollUntil { backend.devices.first { $0.id == device.id }?.connectionState == .connected }
+        #expect(engine.fedDescriptorList.last?.password == "secret")
+        #expect(backend.devices.first { $0.id == device.id }?.hasStoredPassword == true)
+    }
+
+    /// Keeping a stored password after the receiver refused it (so every
+    /// later retry repeats the wrong password) turns it red.
+    @Test func refusedStoredPasswordIsDeleted() async {
+        let store = InMemoryAirPlayPasswordStore()
+        let device = ap2Device(access: .password)
+        store.setPassword("wrong", for: device.id)
+        let (backend, engine, discovery) = makeBackend(passwordStore: store)
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+        #expect(backend.devices.first { $0.id == device.id }?.hasStoredPassword == true)
+
+        backend.setOutputSet([device.id])
+        await pollUntil { backend.devices.first { $0.id == device.id }?.connectionState == .connected }
+        #expect(engine.fedDescriptorList.last?.password == "wrong")
+
+        engine.pushState(device.outputID, .passwordRequired)
+        await pollUntil { backend.devices.first { $0.id == device.id }?.hasStoredPassword == false }
+        #expect(store.password(for: device.id) == nil)
+        #expect(failureCause(backend, device.id) == .authRequired)
+    }
+
+    /// Mapping a password speaker's unexplained connect failure to `.unknown`
+    /// (AirPlay 2 reports a refused password as a plain failure) turns it red.
+    @Test func passwordSpeakerConnectFailureReadsAsAuthRequired() async {
+        let (backend, engine, discovery) = makeBackend()
+        let device = ap2Device(access: .password)
+        engine.addFailures = [device.outputID.rawValue]
+        engine.addFailureError = .sessionFailed
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+
+        backend.setOutputSet([device.id])
+        await pollUntil { self.failureCause(backend, device.id) != nil }
+        #expect(failureCause(backend, device.id) == .authRequired)
+    }
+
+    /// Mapping a password demand from an on-screen-code receiver to
+    /// `.authRequired` (offering a password sheet an Apple TV can't use) turns it red.
+    @Test func passwordRequiredOnOnScreenCodeSpeakerReadsAsCodeRequired() async {
+        let (backend, engine, discovery) = makeBackend()
+        let device = ap2Device(access: .onScreenCode)
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+
+        backend.setOutputSet([device.id])
+        await pollUntil { backend.devices.first { $0.id == device.id }?.isSelected == true }
+        engine.pushState(device.outputID, .passwordRequired)
+        await pollUntil { self.failureCause(backend, device.id) != nil }
+        #expect(failureCause(backend, device.id) == .codeRequired)
     }
 
     /// A MUTED AirPlay-1 receiver that drops and reconnects must come back TRULY

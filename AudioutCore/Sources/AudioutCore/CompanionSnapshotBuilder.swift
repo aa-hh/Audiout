@@ -278,26 +278,32 @@ public enum CompanionSnapshotBuilder {
             isMuted: groupController.isMuted(device.id),
             isSelected: groupController.isSpeakerSelected(device.id),
             isMainOutMember: groupController.isMainOutMember(device.id),
-            connection: connectionInfo(device.connectionState),
+            connection: connectionInfo(device),
             alignment: alignment
         )
     }
 
-    private static func connectionInfo(_ state: ConnectionState) -> DeviceState.ConnectionInfo {
-        switch state {
+    /// `credentialKind` is `"password"` in every state while a password
+    /// speaker has none on file, so the phone can offer to enter one.
+    private static func connectionInfo(_ device: Device) -> DeviceState.ConnectionInfo {
+        let credentialKind: String? =
+            device.airPlayAccess == .password && !device.hasStoredPassword ? "password" : nil
+        switch device.connectionState {
         case .off:
-            return DeviceState.ConnectionInfo(state: "off")
+            return DeviceState.ConnectionInfo(state: "off", credentialKind: credentialKind)
         case .connecting:
-            return DeviceState.ConnectionInfo(state: "connecting")
+            return DeviceState.ConnectionInfo(state: "connecting", credentialKind: credentialKind)
         case .connected:
-            return DeviceState.ConnectionInfo(state: "connected")
+            return DeviceState.ConnectionInfo(state: "connected", credentialKind: credentialKind)
         case .reconnecting:
-            return DeviceState.ConnectionInfo(state: "reconnecting")
+            return DeviceState.ConnectionInfo(state: "reconnecting", credentialKind: credentialKind)
         case .failed(let failure):
             return DeviceState.ConnectionInfo(
                 state: "failed",
                 failureHeadline: failure.headline,
-                failureSuggestion: failure.suggestion
+                failureSuggestion: failure.suggestion,
+                failureCause: String(describing: failure.cause),
+                credentialKind: credentialKind
             )
         }
     }

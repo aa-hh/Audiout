@@ -310,3 +310,5 @@ repo-wide and are detailed in [../AGENTS.md](../AGENTS.md): subclass
 `IsolatedTestCase` instead of touching `UserDefaults.standard`/shared temp
 dirs directly, and use `Telemetry._installTestSink(_:)` to assert a
 subsystem's own emissions rather than adding ad hoc logging hooks.
+
+2026-10-04, AirPlay passwords: a stored password the receiver refuses is deleted at the failure site (the connect catch and both state-stream failure arms in `NativeBackend`) and never retried, so a wrong password costs one attempt, not one per reconnect. On AirPlay 2 a refused password and a network failure during connect both arrive as a plain failure, so a speaker that advertises a password reads any connect failure as a bad password until the engine can say more. `notePasswordOutcome`, reading `pendingPasswordOutcome`, is the one place `airplay:code_submitted` fires, for submissions from the Mac and the phone alike.

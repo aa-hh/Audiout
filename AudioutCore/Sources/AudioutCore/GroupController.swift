@@ -593,6 +593,14 @@ public final class GroupController {
         return setDeviceSelected(id, true)
     }
 
+    /// Store the AirPlay password the user typed for `id` and retry it.
+    /// `source` is `"mac"` or `"phone"`, for analytics only.
+    @discardableResult
+    public func submitAirPlayPassword(_ password: String, for id: String, source: String) -> SelectionResult {
+        backend.submitAirPlayPassword(password, for: id, source: source)
+        return retryConnection(for: id)
+    }
+
     /// A membership-FREE reconnect kick (BT-UI): clicking a greyed
     /// paired-but-disconnected Bluetooth row connects it (the macOS
     /// Bluetooth-menu behavior) WITHOUT selecting it — `retryConnection(for:)`

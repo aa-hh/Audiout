@@ -418,6 +418,13 @@ public protocol OutputBackend: AnyObject {
     /// attempts). Don't tighten either direction without checking both.
     func retryOutput(_ id: String)
 
+    /// Store `password` as speaker `id`'s AirPlay password. The caller retries
+    /// the speaker. `source` is `"mac"` or `"phone"` and only feeds analytics.
+    func submitAirPlayPassword(_ password: String, for id: String, source: String)
+
+    /// Delete speaker `id`'s stored AirPlay password.
+    func forgetAirPlayPassword(for id: String)
+
     /// Set the two master gain stages, both on the UI's 0–100 scale: what reaches
     /// a device is `Main × Group × Device`, multiplied before the dB/curve mapping.
     /// `group` is 100 when no group is active, making it the identity.
@@ -451,6 +458,10 @@ public protocol OutputBackend: AnyObject {
 public extension OutputBackend {
     /// Backends with no post-`stop()` teardown to await inherit this no-op.
     func stopAndWait(timeout: Duration) async {}
+
+    /// Only ``NativeBackend`` feeds a password to a receiver.
+    func submitAirPlayPassword(_ password: String, for id: String, source: String) {}
+    func forgetAirPlayPassword(for id: String) {}
 
     /// Backends with no real streaming sessions (the mock) have nothing to
     /// disconnect on sleep and no capture gate/watchdog to drive, so they inherit
@@ -701,7 +712,7 @@ public func makeBackend(
             AirPlayEngine.setLogFile(path: logs.appendingPathComponent("engine.log").path)
         }
         let engine = AirPlayEngine(
-            config: EngineConfig(startBufferMs: startBufferMs))
+            config: EngineConfig(startBufferMs: startBufferMs, installSeed: AppSettings().engineInstallSeed))
         // Bundle ID → full process-object set, supplied by the caller
         // (`AppDelegate` passes an `NSRunningApplication`-backed resolver; other
         // callers get the "nothing resolves" default). Shared by BOTH the per-app

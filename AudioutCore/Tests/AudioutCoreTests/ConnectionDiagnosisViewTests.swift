@@ -26,6 +26,7 @@ import AudioutSharedUI
     @Test func allCausesRenderTheirOwnCopy() {
         let causes: [ConnectionFailure.Cause] = [
             .notResponding, .vanished, .refusedOrBusy, .authRequired,
+            .codeRequired, .homeMembersOnly,
             .droppedMidStream, .timedOut, .unknown,
         ]
         for cause in causes {
@@ -181,15 +182,15 @@ import AudioutSharedUI
         short.layoutSubtreeIfNeeded()
 
         let long = ConnectionDiagnosisView(
-            failure: ConnectionFailure(cause: .authRequired), deviceName: "Loft")
+            failure: ConnectionFailure(cause: .homeMembersOnly), deviceName: "Loft")
         long.frame = NSRect(x: 0, y: 0, width: 320, height: 0)
         long.layoutSubtreeIfNeeded()
 
-        // `.authRequired` became the longest copy in the table when it gained
-        // the Mac receiver-side fix instructions (2026-08-07 — it was the
-        // SHORTEST before, and this test's short fixture); at a fixed narrow
-        // width it must wrap across more lines than the brief `.timedOut`
-        // copy, i.e. a taller fitting height.
+        // `.homeMembersOnly` is the longest copy in the table: it carries the
+        // receiver-side fix instructions that `.authRequired` held before it
+        // became a short "enter the password" line. At a fixed narrow width it
+        // must wrap across more lines than the brief `.timedOut` copy, i.e. a
+        // taller fitting height.
         #expect(long.fittingSize.height > short.fittingSize.height)
     }
 

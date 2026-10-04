@@ -352,31 +352,51 @@ import AudioutProtocol
 
     // MARK: Connection fields (D9 full parity)
 
+    /// Dropping `failureCause`, or sending `credentialKind` for a speaker that
+    /// already has a stored password (or never sending it), turns it red.
     @Test func connectionCarriesFailureHeadlineAndSuggestion() async throws {
         let backend = try await makeBackend()
         let controller = makeGroupController(backend: backend)
         let appRouting = makeAppRouting()
 
-        let snapshot = CompanionSnapshotBuilder.build(
-            devices: backend.devices, groupController: controller, appRouting: appRouting,
-            excludedBundleIDs: noExcludedBundleIDs, iconFor: iconFor, addableApps: noAddableApps,
-            runningRouted: noRunningRouted, liveRoutedAppNames: noLiveRoutedAppNames,
-            localFallbackActive: false, takeoverStatus: nil, serverName: defaultServerName,
-            connectVolume: defaultConnectVolume, connectVolumeMin: defaultConnectVolumeMin,
-            connectVolumeMax: defaultConnectVolumeMax, startBufferMs: defaultStartBufferMs,
-            startBufferOptionsMs: defaultStartBufferOptionsMs
-        )
+        func build(storedPassword: Bool) -> Snapshot {
+            CompanionSnapshotBuilder.build(
+                devices: backend.devices.map { device in
+                    var device = device
+                    if device.id == "speaker-b" {
+                        device.airPlayAccess = .password
+                        device.hasStoredPassword = storedPassword
+                    }
+                    return device
+                },
+                groupController: controller, appRouting: appRouting,
+                excludedBundleIDs: noExcludedBundleIDs, iconFor: iconFor, addableApps: noAddableApps,
+                runningRouted: noRunningRouted, liveRoutedAppNames: noLiveRoutedAppNames,
+                localFallbackActive: false, takeoverStatus: nil, serverName: defaultServerName,
+                connectVolume: defaultConnectVolume, connectVolumeMin: defaultConnectVolumeMin,
+                connectVolumeMax: defaultConnectVolumeMax, startBufferMs: defaultStartBufferMs,
+                startBufferOptionsMs: defaultStartBufferOptionsMs
+            )
+        }
+        let snapshot = build(storedPassword: false)
         let speakerB = try #require(snapshot.devices.first { $0.id == "speaker-b" })
         let failure = ConnectionFailure(cause: .refusedOrBusy)
         #expect(speakerB.connection.state == "failed")
         #expect(speakerB.connection.failureHeadline == failure.headline)
         #expect(speakerB.connection.failureSuggestion == failure.suggestion)
+        #expect(speakerB.connection.failureCause == "refusedOrBusy")
+        #expect(speakerB.connection.credentialKind == "password")
 
-        // A device with no failure carries no headline/suggestion.
+        // A device with no failure carries no headline/suggestion/cause.
         let local = try #require(snapshot.devices.first { $0.id == "local" })
         #expect(local.connection.state == "off")
         #expect(local.connection.failureHeadline == nil)
         #expect(local.connection.failureSuggestion == nil)
+        #expect(local.connection.failureCause == nil)
+        #expect(local.connection.credentialKind == nil)
+
+        let stored = try #require(build(storedPassword: true).devices.first { $0.id == "speaker-b" })
+        #expect(stored.connection.credentialKind == nil)
     }
 
     // MARK: Passthrough fields

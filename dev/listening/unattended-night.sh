@@ -343,6 +343,7 @@ print -n -- - > "$OUT/.block"
   done
 ) &
 LOAD_PID=$!
+PLAY_PID=""; REC_PID=""   # read by the trap before either is first set
 trap 'kill $LOAD_PID 2>/dev/null; [[ -n $PLAY_PID ]] && kill $PLAY_PID 2>/dev/null; [[ -n $REC_PID ]] && kill -TERM $REC_PID 2>/dev/null' EXIT
 [[ -n $BLUE_PROBLEM ]] && note "$BLUE_PROBLEM: Block A's disconnect and the connection checks are skipped"
 if (( DRY )); then

@@ -1171,7 +1171,7 @@ public final class DeviceDetailViewController: NSViewController {
     public var test_visibilityEnabled: Bool { visibilityPopup.isEnabled }
     public func test_changeVisibility(_ value: SpeakerMixerVisibility) {
         visibilityPopup.selectItem(withTitle: value.label)
-        NSApp.sendAction(visibilityPopup.action!, to: visibilityPopup.target, from: visibilityPopup)
+        visibilityChanged(visibilityPopup)
     }
     /// False for This Mac and a speaker that can't be found.
     public var test_eqSectionShown: Bool { !eqWell.isHidden }

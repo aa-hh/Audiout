@@ -844,6 +844,21 @@ import AppKit
         return scroll?.documentView?.frame.height ?? 0
     }
 
+    // Leaving the list without a top pin, or pinning it under the header instead of the Equalizer well, on a speaker shown before its pane loads turns it red.
+    @Test func aSpeakerPaneShownBeforeItIsMountedPutsTheListUnderTheEqualizer() {
+        let detail = makeShownThenLoadedPane(device: makeDevice())
+
+        #expect(detail.test_eqSectionShown)
+        // The pane's own view is NOT flipped, so "below" is a SMALLER y.
+        #expect(detail.test_listSectionFrame.maxY <= detail.test_eqSectionFrame.minY + 0.5,
+                "the list sits under the Equalizer well, what precedes it on a speaker")
+
+        let slots = detail.test_headerSectionFrame.height + detail.test_eqSectionFrame.height
+            + detail.test_listSectionFrame.height
+        #expect(documentHeight(detail) > slots,
+                "the document holds the whole stack — a collapsed one is shorter than its own slots")
+    }
+
     // Leaving the list without a top pin when the pane is shown before it loads turns it red.
     @Test func aThisMacPaneShownBeforeItIsMountedPutsTheListDirectlyUnderTheHeader() {
         let detail = makeShownThenLoadedPane(

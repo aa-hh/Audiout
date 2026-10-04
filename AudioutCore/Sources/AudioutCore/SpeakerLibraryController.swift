@@ -247,12 +247,13 @@ public final class SpeakerLibraryController {
         return true
     }
 
-    /// Removes speakers the Mac cannot find from every scene and from the library. Speakers with a live device
-    /// are skipped. Throws `GroupError.emptyMembership` (nothing written) when a scene would be left empty.
+    /// Removes speakers the Mac cannot find from every scene and from the library. Speakers with a live device,
+    /// and speakers still in use (Main Audio or an app route names them), are skipped. Throws
+    /// `GroupError.emptyMembership` (nothing written) when a scene would be left empty.
     /// Never touches routing. Returns how many scenes changed.
     @discardableResult
     public func forget(_ ids: Set<String>, scenes: GroupController) throws -> Int {
-        let filtered = ids.filter { record(for: $0)?.liveDevice == nil }
+        let filtered = ids.filter { record(for: $0)?.liveDevice == nil && record(for: $0)?.isInUse != true }
         guard !filtered.isEmpty else { return 0 }
         let sceneCounts = Dictionary(uniqueKeysWithValues: filtered.map { id in
             (id, scenes.groups.filter { $0.memberIDs.contains(id) }.count)

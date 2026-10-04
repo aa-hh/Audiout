@@ -198,9 +198,9 @@ public final class GroupEditorViewController: NSViewController {
     /// invisible once already (snapshot-caught 2026-07-18). REQUIRED priority,
     /// deliberately: the field may overflow its section by a hair on a
     /// pathologically narrow pane rather than vanish.
-    /// The identity glow's mounted side. A 60 pt glow would sit wholly under
-    /// the 64 pt opaque well and never be seen, so it is the well plus 16: 40
-    /// pt of radius, 8 pt of magenta leaking past the well's edge.
+    /// The identity glow's mounted side: the 48 pt opaque well plus 16, so 8
+    /// pt of magenta leaks past the well's edge all round. A glow no wider
+    /// than the well would sit wholly under it and never be seen.
     static let iconGlowSide: CGFloat = DeviceIconWellView.size + 16
 
     private static let titleFieldMinWidth: CGFloat = 140
@@ -721,9 +721,9 @@ public final class GroupEditorViewController: NSViewController {
     // MARK: Model
 
     /// Show the editor for `groupID`, building the membership row list from
-    /// `devices` (every known device is a candidate for an available row; an
-    /// unavailable device is offered only while it remains a member — see
-    /// ``rebuildCandidates(devices:)``). No-op if the group no longer exists.
+    /// the speaker library's records: every speaker it keeps, unavailable and
+    /// remembered ones included. `devices` stands in only when no library is
+    /// injected. No-op if the group no longer exists.
     ///
     /// GATED on what the pane actually draws. The host calls this on EVERY
     /// backend event while the screen is visible, and a re-render tears down
@@ -1072,7 +1072,7 @@ public final class GroupEditorViewController: NSViewController {
             // a failed save) and skip the repaint that puts the controls back
             // to the truth.
             if let group = editingGroup { render(group: group, devices: allDevices) }
-            presentPersistFailureAlert(message: "Couldn\u{2019}t save the change.")
+            Self.presentPersistFailureAlert(message: "Couldn\u{2019}t save the change.", over: view.window)
             return false
         }
     }
@@ -1087,7 +1087,7 @@ public final class GroupEditorViewController: NSViewController {
     }
 
     /// The refusal for a name another group already has — same window-guarded
-    /// shape as ``presentPersistFailureAlert(message:)``.
+    /// shape as ``presentPersistFailureAlert(message:over:)``.
     private func presentDuplicateNameAlert(name: String) {
         guard let window = view.window, !HeadlessRuntime.isActive else { return }
         let alert = NSAlert()
@@ -1098,13 +1098,13 @@ public final class GroupEditorViewController: NSViewController {
         alert.beginSheetModal(for: window)
     }
 
-    /// The failure alert both `saveOrReport` and the delete path present — a
-    /// sheet when a window hosts the pane, skipped headless (the `test_*`
+    /// The failure alert `saveOrReport`, the delete path and the host's
+    /// Forget present — a sheet over `window`, skipped headless (the `test_*`
     /// seams observe the failure instead).
-    private func presentPersistFailureAlert(message: String) {
-        // `view.window != nil` is NOT a headless proxy — suites host this pane
-        // in a real (ordered-out) window, so the gate has to be explicit.
-        guard let window = view.window, !HeadlessRuntime.isActive else { return }
+    static func presentPersistFailureAlert(message: String, over window: NSWindow?) {
+        // A window is NOT a headless proxy — suites host these panes in a
+        // real (ordered-out) window, so the gate has to be explicit.
+        guard let window, !HeadlessRuntime.isActive else { return }
         let alert = NSAlert()
         alert.messageText = message
         alert.informativeText = "The scene\u{2019}s saved settings couldn\u{2019}t be updated. Try again."
@@ -1526,7 +1526,7 @@ public final class GroupEditorViewController: NSViewController {
             try groupController.deleteGroup(id: id)
         } catch {
             test_saveFailureReported = true
-            presentPersistFailureAlert(message: "Couldn\u{2019}t delete the scene.")
+            Self.presentPersistFailureAlert(message: "Couldn\u{2019}t delete the scene.", over: view.window)
             return
         }
         Analytics.capture("scene:deleted")
@@ -1686,7 +1686,7 @@ extension GroupEditorViewController: RailHookProviding {
     /// icon sat ABOVE the name and the climb from the list past the whole
     /// header read badly). The header is now SIDE BY SIDE: icon and name share
     /// one horizontal band, so hooking the icon hooks the name's line too, and
-    /// the hook goes back to the well — a fixed 64 pt tile whose leading edge
+    /// the hook goes back to the well — a fixed 48 pt tile whose leading edge
     /// sits on the content inset, rather than a field whose width changes with
     /// the name it holds.
     ///

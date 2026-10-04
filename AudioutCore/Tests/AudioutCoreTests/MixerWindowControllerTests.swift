@@ -214,6 +214,46 @@ import AppKit
                 "becoming the visible screen refreshes from the stored snapshot")
     }
 
+    // Turns red when a backend update repaints the sidebar while only the Scenes tab is on screen.
+    @Test func scenesOnScreenLeaveTheSidebarAlone() {
+        let controller = GroupController(backend: MockBackend(fleet: []), store: GroupStore(directory: scratchDir),
+            routingStore: RoutingStore(directory: scratchDir),
+            settings: AppSettings(defaults: isolatedDefaults), loadPersisted: false)
+        let window = MixerWindowController(groupController: controller,
+                                           settings: AppSettings(defaults: isolatedDefaults))
+        window.setVisibleTab(.scenes)
+        window.update(devices: [Device(id: "a", name: "Alpha", kind: .sonos),
+                                Device(id: "b", name: "Beta", kind: .homePod)])
+        #expect(window.test_sidebarReloadCount == 0)
+        #expect(window.test_sidebar.test_deviceRowCount == 0)
+
+        window.setVisibleTab(.speakers)
+        #expect(window.test_sidebar.test_deviceRowCount == 2, "showing Speakers catches the sidebar up")
+    }
+
+    // Turns red when the Speakers page rebuilds for a Bluetooth access or search change while its tab is hidden, or misses either once the tab shows.
+    @Test func aHiddenSpeakersPageStoresItsStateAndCatchesUpWhenShown() throws {
+        let controller = GroupController(backend: MockBackend(fleet: []), store: GroupStore(directory: scratchDir),
+            routingStore: RoutingStore(directory: scratchDir),
+            settings: AppSettings(defaults: isolatedDefaults), loadPersisted: false)
+        try controller.saveGroup(Group(id: "porch", name: "Porch", memberIDs: ["live", "den"], memberVolumes: [:]))
+        let library = SpeakerLibraryController(loadPersisted: false)
+        library.update(liveDevices: [Device(id: "live", name: "Live", kind: .sonos)], groups: controller.groups)
+        let window = MixerWindowController(groupController: controller,
+            settings: AppSettings(defaults: isolatedDefaults), speakerLibrary: library)
+        window.setVisibleTab(.scenes)
+        let page = window.test_speakersPage
+        let before = page.test_rowTitles
+
+        window.setSpeakerBluetoothAccess(SpeakerBluetoothAccessPresentation(status: .unknown, priming: false))
+        window.setSpeakerSearchDone(true)
+        #expect(page.test_rowTitles == before, "a hidden page only stores what it is told")
+
+        window.setVisibleTab(.speakers)
+        #expect(page.test_rowTitles == ["Bluetooth access is off", "1 speaker can\u{2019}t be found",
+                                        "Pair Bluetooth speaker\u{2026}"])
+    }
+
     // MARK: Sidebar structure (the fleet, beside the Speakers page)
 
     // Turns red when the sidebar regains a scenes row or the split stops starting on the Speakers page.
@@ -1355,9 +1395,10 @@ import AppKit
     /// A screen whose injected library remembers two speakers the Mac can no
     /// longer find, Den and Attic, beside a live one; Den is in Kitchen and
     /// Porch, Attic only in Porch, and Porch has no other speaker.
-    private func makeForgetWindow() throws -> (MixerWindowController, GroupController, SpeakerLibraryController) {
+    private func makeForgetWindow(groupDirectory: URL? = nil)
+        throws -> (MixerWindowController, GroupController, SpeakerLibraryController) {
         let controller = GroupController(backend: MockBackend(fleet: []),
-            store: GroupStore(directory: scratchDir), routingStore: RoutingStore(directory: scratchDir),
+            store: GroupStore(directory: groupDirectory ?? scratchDir), routingStore: RoutingStore(directory: scratchDir),
             settings: AppSettings(defaults: isolatedDefaults), loadPersisted: false)
         let live = Device(id: "live", name: "Live", kind: .sonos)
         let den = Device(id: "den", name: "Den", kind: .sonos)
@@ -1408,6 +1449,38 @@ import AppKit
         #expect(!window.test_sidebar.test_deviceRowIDs.contains("den"))
         #expect(window.test_isShowingSpeakersPage)
         #expect(controller.activeGroupID == nil)
+    }
+
+    // Turns red when `performForget` swallows a failed scene write instead of reporting it.
+    @Test func aForgetWhoseSceneWriteFailsIsReported() throws {
+        let directory = tempDirectory()
+        let (window, controller, library) = try makeForgetWindow(groupDirectory: directory)
+        // A plain FILE where the store wants its directory: the scene write throws.
+        try FileManager.default.removeItem(at: directory)
+        FileManager.default.createFile(atPath: directory.path, contents: Data())
+
+        window.test_confirmForget(ids: ["den"])
+
+        #expect(window.test_forgetFailureReported)
+        #expect(library.record(for: "den") != nil, "nothing was forgotten")
+        #expect(controller.groups.map(\.memberIDs) == [["live", "den"], ["den", "attic"]])
+    }
+
+    // Turns red when the Forget confirm offers Forget for a speaker Main Audio still names, or `forget` drops it anyway.
+    @Test func forgetRefusesASpeakerStillInUse() throws {
+        let (window, controller, library) = try makeForgetWindow()
+        library.update(liveDevices: [Device(id: "live", name: "Live", kind: .sonos)], groups: controller.groups,
+                       currentUse: SpeakerCurrentUse(mainAudioMemberIDs: ["den"]))
+
+        let alert = window.test_makeForgetAlert(ids: ["den"])
+        #expect(alert.messageText == "Can\u{2019}t forget \u{201C}Den\u{201D}")
+        #expect(alert.informativeText
+                == "Main Audio or an app is still set to play on \u{201C}Den\u{201D}. Change that in the Mixer first.")
+        #expect(alert.buttons.map(\.title) == ["OK"])
+
+        window.test_confirmForget(ids: ["den"])
+        #expect(library.record(for: "den") != nil)
+        #expect(controller.groups.map(\.memberIDs) == [["live", "den"], ["den", "attic"]])
     }
 
     // Turns red when "Manage speakers…" stops landing on This Mac's page while the Mac is in the list.

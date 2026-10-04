@@ -198,7 +198,7 @@ public final class PopoverController: NSObject {
     public var bluetoothPermissionProvider: (() -> PermissionStatus)?
     public var onBluetoothAccess: (() -> Void)?
     public var onManageSpeakers: (() -> Void)?
-    /// The menu's "Speaker settings…" asks the host to open that speaker's detail on the Scenes screen.
+    /// The menu's "Speaker settings…" asks the host to open that speaker's detail on the Speakers screen.
     public var onOpenSpeakerSettings: ((String) -> Void)?
     public var onSpeakerRecoveryChanged: (() -> Void)?
     public var speakerRecoveryIDs: Set<String> {
@@ -1030,8 +1030,9 @@ public final class PopoverController: NSObject {
             // event. Headers are structure too: a COLLAPSED subsection contributes
             // no rows to the compare, but its header must still appear the moment
             // its type gains a first device, and go when the last one does — and
-            // Bluetooth's header is ALWAYS expected (`rendersHeader`), never only
-            // when it has rows.
+            // a header with no rows stays expected while it has something to
+            // say (`rendersHeader`): Bluetooth's while Bluetooth access is off,
+            // AirPlay's while there is a search state to show.
             //
             // Both reads walk the whole fleet and rebuild the section list, and
             // nothing outside this gate consumes them — a hidden surface used to
@@ -2256,9 +2257,15 @@ public final class PopoverController: NSObject {
     }
 
     /// The host calls this after shared preferences or permission status change.
+    /// Mid-drag it records the debt instead of rebuilding, as `groupsDidChange()`
+    /// does: a rebuild would detach the slider the mouse is tracking.
     public func refreshSpeakerPresentation() {
         refreshOwnedSpeakerLibrary()
         guard isEffectivelyShown else { return }
+        guard !isSliderDragLive else {
+            structuralRebuildDeferred = true
+            return
+        }
         rebuild()
         panel.panelContentDidChangeHeight(animated: true)
     }
@@ -3074,9 +3081,12 @@ public final class PopoverController: NSObject {
     }
 
     /// In-place device-section repaint that escalates to a full `rebuild()` when
-    /// the Devices card's dormancy note must appear/disappear/rename (a card-note
-    /// change is structural — only `rebuild()` mounts/unmounts it). Everything
-    /// else stays the cheap `refreshDeviceRows()` + `refreshMainOutRow()` path.
+    /// the rendered speaker set changed, or the Devices card's dormancy note or
+    /// first-run hint must appear, disappear or change (only `rebuild()` mounts
+    /// and unmounts them). Mid-drag the rebuild is recorded as owed instead.
+    /// Everything else stays the cheap `refreshDeviceRows()` +
+    /// `refreshMainOutRow()` path, which also re-applies selection to the rows of
+    /// remembered speakers the backend no longer lists.
     func refreshDeviceRowsReconcilingCardNote() {
         refreshOwnedSpeakerLibrary()
         let structureChanged = Set(renderedDeviceOrder().map(\.id)) != Set(deviceRowsByID.keys)
@@ -3721,19 +3731,23 @@ extension PopoverController: DeviceRowView.Delegate {
         deviceRow(row, didToggleEnabled: true, for: id)
     }
 
-    /// A greyed Bluetooth row's click (BT-UI "click connects"): a
-    /// membership-FREE reconnect kick — `requestReconnect` goes straight to
+    /// An unavailable row's name click (`DeviceRowView.canRecoverByName`).
+    /// A Bluetooth speaker the backend still lists gets a membership-FREE
+    /// reconnect kick: `requestReconnect` goes straight to
     /// `OutputBackend.retryOutput`, never editing selection (selecting a
-    /// greyed row separately means "play when up" and stays the node/checkbox's
-    /// job, exactly like AirPlay rows).
+    /// greyed row separately means "play when up" and stays the
+    /// node/checkbox's job), and only that kick counts as
+    /// `mixer:reconnect_requested`. A Bluetooth speaker the backend no longer
+    /// lists opens pairing, or Bluetooth access while it is not granted. An
+    /// AirPlay or Cast speaker is looked for on the network instead.
     public func deviceRowDidRequestReconnect(_ row: DeviceRowView) {
         let id = row.device.id
         guard let record = speakerLibrary.record(for: id) else { return }
-        Analytics.capture("mixer:reconnect_requested")
         if record.kind == .bluetooth {
             if devicesByID[id] != nil {
                 btConnectAttemptIDs.insert(id)
                 groupController?.requestReconnect(for: id)
+                Analytics.capture("mixer:reconnect_requested")
                 onSpeakerRecoveryChanged?()
                 refreshSpeakerPresentation()
             } else if bluetoothPermissionProvider?() == .granted {

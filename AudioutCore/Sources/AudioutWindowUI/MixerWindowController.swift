@@ -349,22 +349,28 @@ public final class MixerWindowController {
     private var visibleTab: Tab?
 
     /// Set by the host showing ``scenesContentController`` or
-    /// ``speakersContentController`` (nil when it shows neither), so the
-    /// refresh gate below asks about the content the user is actually looking
-    /// at. Turning a tab on refreshes immediately: `update(devices:)` kept
-    /// storing snapshots while hidden, so there is always a current one to
-    /// catch up to. `PopoverController.surfaceDidShow()` is the same idea, one
-    /// host over.
+    /// ``speakersContentController`` (nil when it shows neither). Each root
+    /// repaints only while it is the tab on screen, so turning a tab on
+    /// refreshes it immediately: `update(devices:)` and the Speakers page's
+    /// setters kept storing state while it was hidden, so there is always a
+    /// current one to catch up to. `PopoverController.surfaceDidShow()` is the
+    /// same idea, one host over.
     public func setVisibleTab(_ tab: Tab?) {
         visibleTab = tab
         if tab != nil { refreshAll() }
     }
 
-    /// Whether the content should be treated as visible for refresh-gating
-    /// purposes — a host showing either root, or the test override. Mirrors
+    /// Whether either root should be treated as visible for refresh-gating
+    /// purposes — a host showing one, or the test override. Mirrors
     /// `PopoverController.isEffectivelyShown`.
     private var isEffectivelyVisible: Bool {
         visibleTab != nil || test_isVisibleOverride
+    }
+
+    /// Whether `tab`'s root is the one on screen; the test override stands in
+    /// for both.
+    private func isShowing(_ tab: Tab) -> Bool {
+        visibleTab == tab || test_isVisibleOverride
     }
 
     /// Push the latest device snapshot. Refreshes the sidebar and the visible
@@ -388,7 +394,7 @@ public final class MixerWindowController {
     /// overview and the editor. Refreshing before handing it off keeps a
     /// freshly-hosted screen correct.
     public var scenesContentController: NSViewController {
-        refreshAll()
+        refreshAll(handedOff: .scenes)
         return scenesHost
     }
 
@@ -396,7 +402,7 @@ public final class MixerWindowController {
     /// beside the host swapping the Speakers page, a speaker's page and Main
     /// Audio.
     public var speakersContentController: NSViewController {
-        refreshAll()
+        refreshAll(handedOff: .speakers)
         return splitViewController
     }
 
@@ -409,6 +415,26 @@ public final class MixerWindowController {
 
     /// The Speakers page, for the app's Bluetooth access and Pair wiring.
     public var speakersPage: SpeakersPageViewController { speakersPageViewController }
+
+    /// The Speakers page's Bluetooth access row (`nil` hides it). Stored at
+    /// once, painted only while the Speakers tab is on screen;
+    /// `setVisibleTab(_:)` catches a hidden page up.
+    public func setSpeakerBluetoothAccess(_ access: SpeakerBluetoothAccessPresentation?) {
+        speakersPageViewController.setBluetoothAccess(access)
+        reloadSpeakersPageIfShown()
+    }
+
+    /// Whether the app's `SpeakerSearch` has finished, for the Speakers page's
+    /// caption and lost-speaker row. Stored and painted like the access row.
+    public func setSpeakerSearchDone(_ done: Bool) {
+        speakersPageViewController.isSearchDone = done
+        reloadSpeakersPageIfShown()
+    }
+
+    private func reloadSpeakersPageIfShown() {
+        guard isShowing(.speakers), speakersHost.currentChild === speakersPageViewController else { return }
+        speakersPageViewController.reload()
+    }
 
     /// Reads the saved tone of a speaker the Mac can't find; forwarded to the
     /// speaker page, which reads it once per show.
@@ -534,7 +560,7 @@ public final class MixerWindowController {
             // the headless path.
             return
         }
-        let refused = !blockingScenes(for: ids).isEmpty
+        let refused = !blockingScenes(for: ids).isEmpty || !speakersInUse(ids).isEmpty
         makeForgetAlert(ids: ids).beginSheetModal(for: window) { [weak self] response in
             guard response == .alertFirstButtonReturn, !refused else { return }
             self?.performForget(ids: ids)
@@ -551,9 +577,16 @@ public final class MixerWindowController {
         groupController.groups.filter { Set($0.memberIDs).isSubset(of: ids) }
     }
 
+    /// Speakers Main Audio or an app is still set to play on. Core skips
+    /// them, so the confirm refuses them in words instead.
+    private func speakersInUse(_ ids: Set<String>) -> [SpeakerPresentationRecord] {
+        speakerLibrary.records.filter { ids.contains($0.id) && $0.isInUse }
+    }
+
     /// The confirm, in the shape of the scene editor's delete alert: Forget
     /// first and destructive but off Return, Cancel on Return. A refusal is
-    /// one OK button that says which scene to delete first.
+    /// one OK button that says which scene to delete first, or which speaker
+    /// is still in use.
     private func makeForgetAlert(ids: Set<String>) -> NSAlert {
         let alert = NSAlert()
         let name = ids.count == 1 ? ids.first.map { speakerLibrary.record(for: $0)?.displayName ?? $0 } : nil
@@ -565,6 +598,15 @@ public final class MixerWindowController {
             alert.informativeText = blocking.count == 1
                 ? "Delete \(scenes) first: it has no other speaker."
                 : "Delete \(scenes) first: they have no other speaker."
+            alert.addButton(withTitle: "OK")
+            return alert
+        }
+        let inUse = speakersInUse(ids)
+        if !inUse.isEmpty {
+            alert.messageText = name.map { "Can\u{2019}t forget \u{201C}\($0)\u{201D}" }
+                ?? "Can\u{2019}t forget \(ids.count) speakers"
+            let names = inUse.map { "\u{201C}\($0.displayName)\u{201D}" }.joined(separator: ", ")
+            alert.informativeText = "Main Audio or an app is still set to play on \(names). Change that in the Mixer first."
             alert.addButton(withTitle: "OK")
             return alert
         }
@@ -584,11 +626,20 @@ public final class MixerWindowController {
         return alert
     }
 
-    /// A refusal from Core (a scene would be emptied) has already been
-    /// reported there; either way every list re-reads the stores, and a
-    /// forgotten speaker whose page is showing falls back to the Speakers page.
+    /// A throw from Core (a failed scene write, or a scene that would be
+    /// emptied) reports nothing there, so it gets the scene editor's
+    /// plain-words alert here. Either way every list re-reads the stores, and
+    /// a forgotten speaker whose page is showing falls back to the Speakers
+    /// page.
     private func performForget(ids: Set<String>) {
-        _ = try? speakerLibrary.forget(ids, scenes: groupController)
+        do {
+            try speakerLibrary.forget(ids, scenes: groupController)
+        } catch {
+            test_forgetFailureReported = true
+            GroupEditorViewController.presentPersistFailureAlert(
+                message: ids.count == 1 ? "Couldn\u{2019}t forget the speaker." : "Couldn\u{2019}t forget the speakers.",
+                over: splitViewController.view.window)
+        }
         refreshAll()
     }
 
@@ -689,7 +740,10 @@ public final class MixerWindowController {
 
     // MARK: Refresh
 
-    private func refreshAll() {
+    /// Repaint each root that is on screen, plus `handedOff`, the root a
+    /// content getter is about to hand its host. A hidden root keeps its
+    /// stored state until `setVisibleTab(_:)` shows it.
+    private func refreshAll(handedOff: Tab? = nil) {
         // A collapsed sidebar is unrecoverable (see the split-item setup), and
         // `canCollapse` does not stop AppKit collapsing it on its own. This
         // runs on mount and whenever the screen becomes visible — exactly when
@@ -698,10 +752,21 @@ public final class MixerWindowController {
 
         if ownsSpeakerLibrary { speakerLibrary.update(liveDevices: Array(devicesByID.values), groups: groupController.groups) }
         let devices = orderedDevices()
-        reloadSidebarIfNeeded(devices: devices)
-        // Refresh both hosts' current children. The create sheet is a
+        // Refresh the visible hosts' current children. The create sheet is a
         // separate presentation (not a content pane) — it is never disturbed
         // here.
+        if isShowing(.scenes) || handedOff == .scenes {
+            refreshScenes(devices: devices)
+        }
+        if isShowing(.speakers) || handedOff == .speakers {
+            reloadSidebarIfNeeded(devices: devices)
+            refreshSpeakers()
+        }
+
+        applyPendingSelection()
+    }
+
+    private func refreshScenes(devices: [Device]) {
         if scenesHost.currentChild === editorViewController {
             if let id = editorViewController.editingGroupID,
                groupController.groups.contains(where: { $0.id == id }) {
@@ -716,7 +781,9 @@ public final class MixerWindowController {
             // the popover's quick-save, a member back online).
             overviewViewController.reload(devices: devices)
         }
+    }
 
+    private func refreshSpeakers() {
         let speakersChild = speakersHost.currentChild
         if speakersChild === detailViewController {
             // Re-render the detail pane from the fresher snapshot; if the shown
@@ -736,8 +803,6 @@ public final class MixerWindowController {
             // during a drag. The one legitimate pull is at `showMainOut()`,
             // on open.
         }
-
-        applyPendingSelection()
     }
 
     /// Unconditional — callers of this one reach it after a user ACTION
@@ -779,7 +844,6 @@ public final class MixerWindowController {
             let isAvailable: Bool
             let iconSymbolName: String
             let visibility: SpeakerMixerVisibility?
-            let isPlaying: Bool
             let isInUse: Bool
             let isFound: Bool
         }
@@ -795,7 +859,6 @@ public final class MixerWindowController {
                 return SidebarProjection.DeviceCell(id: $0.id, name: $0.name, kind: $0.kind, isAvailable: $0.isAvailable,
                              iconSymbolName: deviceIconController.symbolName(for: $0),
                              visibility: record?.visibility,
-                             isPlaying: $0.connectionState == .connected,
                              isInUse: record?.isInUse ?? false,
                              isFound: record.map { r in r.liveDevice != nil } ?? true)
             })
@@ -864,6 +927,10 @@ public final class MixerWindowController {
     public func test_confirmForget(ids: Set<String>) {
         performForget(ids: ids)
     }
+
+    /// True once a failed Forget was reported instead of swallowed. Headless
+    /// seam: the alert itself is a window-guarded sheet.
+    public private(set) var test_forgetFailureReported = false
 
     /// Simulate the user selecting a sidebar row (nil = deselect → AUTO-SELECT).
     public func test_select(_ selection: SidebarSelection?) {

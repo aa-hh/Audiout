@@ -3381,6 +3381,22 @@ import AudioutProtocol
         #expect(!popover.test_structuralRebuildDeferred, "and the debt cleared")
     }
 
+    // Turns red when `refreshSpeakerPresentation()` rebuilds under a live slider drag instead of recording the rebuild as owed.
+    @Test func aSpeakerPresentationRefreshWaitsOutASliderDrag() async throws {
+        let (popover, _, backend) = try await makePopover()
+        let before = popover.test_rebuildCount
+
+        popover.test_setLiveSliderDrag(true)
+        popover.refreshSpeakerPresentation()
+        #expect(popover.test_rebuildCount == before, "no rebuild may run under the user's finger")
+        #expect(popover.test_structuralRebuildDeferred, "the rebuild is owed")
+
+        popover.test_setLiveSliderDrag(false)
+        popover.update(devices: backend.devices)
+        #expect(popover.test_rebuildCount > before, "the next update pays the debt")
+        #expect(!popover.test_structuralRebuildDeferred)
+    }
+
     // MARK: "Save Selected Speakers as group" reports its failures (hardening 11)
 
     /// The success path stays exactly as it was, and reports no failure.
@@ -4233,6 +4249,46 @@ extension SerializedSharedState {
             }
             #expect(seen.properties(of: "connection:connected")
                     == (intent == .unwanted ? [] : [["kind": "homePod"]]))
+        }
+
+        // Turns red when `mixer:reconnect_requested` fires for a name click that reconnects nothing: an AirPlay speaker looked for on the network, or a Bluetooth speaker the backend no longer lists.
+        @Test func aReconnectIsCapturedOnlyWhenABluetoothSpeakerIsAskedToReconnect() throws {
+            let local = Device(id: "local-mac", name: "This Mac", kind: .localMac, isLocalDevice: true)
+            let office = Device(id: "office", name: "Office", kind: .homePod, isAvailable: false)
+            let bt = Device(id: "bt", name: "Desk", kind: .bluetooth, isAvailable: false, supportsAirPlay2: false)
+            let gone = Device(id: "gone", name: "Gone", kind: .bluetooth, isAvailable: false, supportsAirPlay2: false)
+            let backend = MockBackend(fleet: [local, office, bt], staggerDiscovery: false,
+                                      emitsLevels: false, simulatesDropouts: false)
+            backend.start()
+            backend.test_settle()
+            let controller = GroupController(backend: backend,
+                                             store: GroupStore(directory: tempDirectory()),
+                                             routingStore: RoutingStore(directory: tempDirectory()),
+                                             settings: AppSettings(defaults: isolation.makeDefaults()),
+                                             loadPersisted: false)
+            let popover = PopoverController(
+                appRouting: AppRoutingController(store: AppRouteStore(directory: tempDirectory()),
+                                                 loadPersisted: false),
+                speakerRecovery: SpeakerRecoveryController(schedule: { _, _ in {} }))
+            popover.configure(groupController: controller)
+            popover.test_isShownOverride = true
+            popover.bluetoothPermissionProvider = { .granted }
+            var pairings = 0
+            popover.onPairBluetoothSpeaker = { pairings += 1 }
+            popover.update(devices: [local, office, bt, gone])
+            popover.test_speakerLibrary.setVisibility(.always, for: ["office", "bt", "gone"])
+            popover.update(devices: [local, office, bt])
+            for id in ["office", "gone", "bt"] {
+                try #require(popover.test_deviceRow(for: id) != nil, "\(id) has a row to click")
+            }
+
+            let seen = captured {
+                popover.test_deviceRow(for: "office")?.test_clickName()
+                popover.test_deviceRow(for: "gone")?.test_clickName()
+                popover.test_deviceRow(for: "bt")?.test_clickName()
+            }
+            #expect(pairings == 1, "the speaker the backend no longer lists opened pairing")
+            #expect(seen.properties(of: "mixer:reconnect_requested") == [[:]])
         }
     }
 }

@@ -1097,7 +1097,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.popoverController.refreshSpeakerPresentation()
             self.mixerWindowController?.refreshSpeakerPresentation()
         }
-        speakerSearch.onDone = { [weak self] in self?.mixerWindowController?.speakersPage.isSearchDone = true }
+        speakerSearch.onDone = { [weak self] in self?.mixerWindowController?.setSpeakerSearchDone(true) }
         popoverController.onSpeakerRecoveryChanged = { [weak self] in
             self?.updateSpeakerLibrary()
         }
@@ -2416,7 +2416,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.requestSpeakerBluetoothAccess()
         }
         controller.speakersPage.onPairBluetooth = Self.openBluetoothPairing
-        controller.speakersPage.isSearchDone = speakerSearch.isDone
+        controller.setSpeakerSearchDone(speakerSearch.isDone)
         // A speaker the Mac can't find has no backend entry to ask, so its
         // saved tone is read from the same store the backend writes.
         controller.storedDeviceEQ = { id in (try? DeviceEQStore().load())?.devices[id] }
@@ -3063,7 +3063,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func refreshSpeakerBluetoothAccess() {
         let access = SpeakerBluetoothAccessPresentation(status: permissionProviders.bluetoothReader.currentStatus(),
                                                         priming: primingSpeakerBluetooth)
-        mixerWindowController?.speakersPage.setBluetoothAccess(access)
+        mixerWindowController?.setSpeakerBluetoothAccess(access)
         popoverController?.refreshSpeakerPresentation()
     }
 

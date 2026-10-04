@@ -115,17 +115,17 @@ import AppKit
         #expect(sidebar.test_deviceRowIDs(inGroupTitled: "Hidden unless playing") == ["den", "onkyo"])
     }
 
-    // Turns red when the dot follows availability alone (a playing or lost speaker drawn as found or away) or the spoken label stops carrying the dot's state.
+    // Turns red when the dot follows routing (a connected speaker drawn as anything but found), follows availability alone (a lost speaker drawn as away), or the spoken label stops carrying the dot's state.
     @Test func theDotShowsPresenceForEachRecordShape() throws {
         let (sidebar, _) = makeFleetSidebar()
         #expect(sidebar.test_dotState(id: "alpha") == .found)
         #expect(sidebar.test_dotState(id: "kitchen") == .away)
-        #expect(sidebar.test_dotState(id: "onkyo") == .playing)
+        #expect(sidebar.test_dotState(id: "onkyo") == .found)
         #expect(sidebar.test_dotState(id: "study") == .lost)
         let lost = try #require(sidebar.test_deviceCell(id: "study"))
         #expect(lost.textField?.accessibilityLabel() == "Study, can\u{2019}t be found")
         let playing = try #require(sidebar.test_deviceCell(id: "onkyo"))
-        #expect(playing.textField?.accessibilityLabel() == "Onkyo, playing, in the Mixer while it plays")
+        #expect(playing.textField?.accessibilityLabel() == "Onkyo, in the Mixer while it plays")
     }
 
     // Turns red when the hidden group's header is built with no rows under it, or a reload re-expands a group the user folded.

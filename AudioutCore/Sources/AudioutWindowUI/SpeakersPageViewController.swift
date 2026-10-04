@@ -111,10 +111,10 @@ public final class SpeakersPageViewController: NSViewController {
     private var bluetoothAccess: SpeakerBluetoothAccessPresentation?
     /// Whether the host's `SpeakerSearch` has finished. Until then the caption
     /// says it is still looking and the lost-speaker row waits, so a cold
-    /// launch never flashes every remembered speaker as lost.
-    public var isSearchDone = false {
-        didSet { if isSearchDone != oldValue { reload() } }
-    }
+    /// launch never flashes every remembered speaker as lost. Stored only:
+    /// the host reloads the page while it is on screen
+    /// (`MixerWindowController.setSpeakerSearchDone`).
+    public var isSearchDone = false
     private let iconWell = DeviceIconWellView()
     private let titleLabel = NSTextField(labelWithString: "Speakers")
     private let subtitleStack = NSStackView()
@@ -218,10 +218,10 @@ public final class SpeakersPageViewController: NSViewController {
         reload()
     }
 
-    /// The Bluetooth access state the host read; `nil` hides the row.
+    /// The Bluetooth access state the host read; `nil` hides the row. Stored
+    /// only, like ``isSearchDone``.
     public func setBluetoothAccess(_ presentation: SpeakerBluetoothAccessPresentation?) {
         bluetoothAccess = presentation
-        reload()
     }
 
     /// Rebuild the page from the library and the saved scenes.

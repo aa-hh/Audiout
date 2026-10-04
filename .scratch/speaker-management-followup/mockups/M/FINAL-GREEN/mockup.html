@@ -1,0 +1,390 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Speakers Tab Green</title>
+<style>
+/* Tokens from AudioutSharedUI/Tokens.swift (speakers-nav). New: speakersAccent (light #007835 / IC #03642B, dark #41B07A / IC #63D199).
+   System colours measured on macOS 27: sidebar ground, pills, label. Header ground is not measured; drawn as FINAL drew it. */
+:root{
+  --page:#E4E5E8; --box:#FAFAFB; --frame:rgba(0,0,0,.16); --note:#4E5A63; --noteHead:#1D1D1F;
+  --panel:#FAFAFB; --raised:#FAFAFB; --well:#E9EAEC; --plate:#FAFAFB;
+  --label:rgba(0,0,0,.85); --label2:#6B5F4E; --cool:#4E5A63; --cool2:#5F6A73;
+  --containerEdge:#AEB3BB; --hairline:#CBCED4; --sep:rgba(0,0,0,.098);
+  --sidebar:#F0F0F0; --toolbar:#F5F5F6; --greySel:#DCDCDC; --accSel:#0064E1; --onAcc:#FFFFFF;
+  --btn:#FFFFFF; --btnEdge:rgba(0,0,0,.14); --btnShadow:0 .5px 1px rgba(0,0,0,.12);
+  --track:rgba(0,0,0,.12); --trackFill:rgba(0,0,0,.32); --knob:#FFFFFF;
+  --chrome:0,0,0;
+  --green:#007835; --greenWash:rgba(0,120,53,.18); --greenFill:#007835;
+  --gold:#E8B84B; --goldText:#825E0F; --goldWash:rgba(232,184,75,.18);
+  --equalizer:#007835; --muted:#585EC7;
+  color-scheme:light;
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    --page:#050507; --box:#15171A; --frame:rgba(255,255,255,.14); --note:#A9B3BB; --noteHead:#E9E9EA;
+    --panel:#15171A; --raised:#1F232A; --well:#050507; --plate:rgba(255,255,255,.05);
+    --label:rgba(255,255,255,.85); --label2:#B7AC95; --cool:#A9B3BB; --cool2:#818C94;
+    --containerEdge:#3D4247; --hairline:#2A2E33; --sep:rgba(255,255,255,.098);
+    --sidebar:#282828; --toolbar:#1C1D20; --greySel:#464646; --accSel:#0059D1; --onAcc:#FFFFFF;
+    --btn:rgba(255,255,255,.14); --btnEdge:rgba(255,255,255,.08); --btnShadow:none;
+    --track:rgba(255,255,255,.16); --trackFill:rgba(255,255,255,.42); --knob:#D9D9DB;
+    --chrome:255,255,255;
+    --green:#41B07A; --greenWash:rgba(65,176,122,.18); --greenFill:#187C49;
+    --gold:#E8B84B; --goldText:#E8B84B; --goldWash:rgba(232,184,75,.18);
+    --equalizer:#41B07A; --muted:#8E93F0;
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --page:#050507; --box:#15171A; --frame:rgba(255,255,255,.14); --note:#A9B3BB; --noteHead:#E9E9EA;
+  --panel:#15171A; --raised:#1F232A; --well:#050507; --plate:rgba(255,255,255,.05);
+  --label:rgba(255,255,255,.85); --label2:#B7AC95; --cool:#A9B3BB; --cool2:#818C94;
+  --containerEdge:#3D4247; --hairline:#2A2E33; --sep:rgba(255,255,255,.098);
+  --sidebar:#282828; --toolbar:#1C1D20; --greySel:#464646; --accSel:#0059D1; --onAcc:#FFFFFF;
+  --btn:rgba(255,255,255,.14); --btnEdge:rgba(255,255,255,.08); --btnShadow:none;
+  --track:rgba(255,255,255,.16); --trackFill:rgba(255,255,255,.42); --knob:#D9D9DB;
+  --chrome:255,255,255;
+  --green:#41B07A; --greenWash:rgba(65,176,122,.18); --greenFill:#187C49;
+  --gold:#E8B84B; --goldText:#E8B84B; --goldWash:rgba(232,184,75,.18);
+  --equalizer:#41B07A; --muted:#8E93F0;
+  color-scheme:dark;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{background:var(--page)}
+body{font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","Helvetica Neue",sans-serif;font-size:13px;color:var(--label);-webkit-font-smoothing:antialiased;padding:20px 16px 24px;width:1400px}
+svg.i{width:16px;height:16px;flex:none}
+.o{fill:none;stroke:currentColor;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round}
+.f{fill:currentColor;stroke:none}
+h1.pg{font-size:15px;font-weight:600;color:var(--noteHead);margin:0 0 2px 2px}
+p.lede{font-size:12px;color:var(--note);margin:0 0 16px 2px;max-width:1080px;line-height:1.45}
+h2{font-size:12px;font-weight:600;color:var(--noteHead);margin:0 0 8px 2px}
+h2 span,h3 span{font-weight:400;color:var(--note)}
+.note{font-size:11.5px;color:var(--note);line-height:1.5;margin-top:8px;max-width:653px}
+.note b,.cap2 b{color:var(--noteHead);font-weight:600}
+code{font:11px ui-monospace,Menlo,monospace;color:var(--noteHead)}
+.g{color:var(--green)}
+.top,.mid,.low{display:flex;gap:24px;align-items:flex-start}
+.mid,.low{margin-top:24px}
+.box{background:var(--box);border-radius:12px;box-shadow:0 0 0 .5px var(--frame),0 8px 20px rgba(0,0,0,.08);padding:14px 16px 16px}
+.box h3{font-size:12px;font-weight:600;color:var(--noteHead);margin-bottom:12px}
+.cap2{font-size:11.5px;color:var(--note);line-height:1.45;margin-top:8px}
+.lbl{font-size:11px;font-weight:600;color:var(--noteHead);margin:0 0 6px 2px}
+
+/* ---------- window 653 x 600, sidebar 210 ---------- */
+.win{width:653px;border-radius:12px;overflow:hidden;background:var(--panel);box-shadow:0 0 0 .5px var(--frame),0 18px 40px rgba(0,0,0,.18)}
+.body{display:grid;grid-template-columns:210px 443px;height:548px}
+
+/* ---------- header strip: SurfaceToolbarSeat geometry (34 pt strip, 28 pt seats, 3 pt capsule padding, 7.5 pt glyph padding) ---------- */
+.tb{height:52px;background:var(--toolbar);border-bottom:1px solid var(--hairline);display:flex;align-items:center;padding:0 12px;position:relative}
+.cap{display:flex;padding:3px;border-radius:17px;background:rgba(var(--chrome),.06)}
+.seat{height:28px;display:flex;align-items:center;gap:7.5px;padding:0 7.5px;border-radius:14px;color:var(--label2);font-size:11px;font-weight:500;white-space:nowrap}
+.seat svg{width:15px;height:15px}
+.seat.on{background:rgba(var(--chrome),.18);color:var(--label)}
+.seat.on.mix{background:var(--goldWash)} .seat.on.mix svg{color:var(--goldText)}
+.seat.on.spk{background:var(--greenWash)} .seat.on.spk svg{color:var(--green)}
+.seat .nm{color:var(--label)}
+.wm{position:absolute;left:50%;transform:translateX(-50%);font-size:17px;font-weight:600;letter-spacing:-.2px;color:var(--label2)}
+.pin{position:absolute;right:12px;width:28px;height:28px;border-radius:50%;display:grid;place-items:center;color:var(--label2)}
+.pin svg{width:15px;height:15px}
+
+/* ---------- sidebar (FINAL grid) ---------- */
+.sb{background:var(--sidebar);border-right:1px solid var(--sep);display:flex;flex-direction:column;position:relative;overflow:hidden}
+.list{flex:1;overflow:hidden}
+.gh{margin-top:13px;height:19px;position:relative}
+.gh.sp{height:31px}
+.gh span{position:absolute;left:14px;bottom:3px;font-size:11px;line-height:13px;color:var(--cool);white-space:nowrap}
+.gh.t span{font-weight:600}.gh.s span{font-weight:500}
+.pr,.row{position:relative}
+.pr{height:40px}.row{height:32px}
+.pf{position:absolute;left:10px;right:10px;top:0;bottom:0;border-radius:10px;background:var(--plate);box-shadow:inset 0 0 0 1px var(--containerEdge)}
+.pill{position:absolute;left:10px;right:10px;top:0;bottom:0;border-radius:7px}
+.sel-acc .pill,.pr.sel-acc .pf{background:var(--accSel);box-shadow:none}
+.sel-grey .pill,.pr.sel-grey .pf{background:var(--greySel);box-shadow:none}
+.sel-green .pill,.pr.sel-green .pf{background:var(--greenFill);box-shadow:none}
+.ib{position:absolute;left:16px;top:50%;width:22px;height:22px;margin-top:-11px;display:grid;place-items:center;color:var(--label)}
+.lb{position:absolute;left:46px;width:140px;top:50%;transform:translateY(-50%)}
+.n{font-size:13px;line-height:16px;white-space:nowrap;overflow:hidden;color:var(--label)}
+.pr .n{font-weight:600;width:132px}
+.chev{position:absolute;right:18px;top:50%;width:10px;height:10px;margin-top:-5px;color:var(--cool2)}
+.chev svg{width:10px;height:10px}
+.row.dim .n{color:var(--cool)}.row.dim .ib{color:var(--cool2)}
+.sel-acc .n,.sel-acc .ib,.sel-acc .chev,.sel-green .n,.sel-green .ib,.sel-green .chev{color:var(--onAcc)!important}
+.sel-grey .n,.sel-grey .ib,.sel-grey .chev{color:var(--label)!important}
+.dv{height:24px;position:relative;color:var(--cool)}
+.dv .dg{position:absolute;left:16px;width:22px;bottom:3px;height:13px;display:grid;place-items:center}
+.dv .dg svg{width:12px;height:12px}
+.dv .dw{position:absolute;left:46px;right:18px;bottom:3px;height:13px;display:flex;align-items:center}
+.dv .dl{font-size:11px;line-height:13px;font-variant-numeric:tabular-nums;white-space:nowrap}
+.dv .rule{flex:1;height:1px;background:var(--sep);margin-left:8px;position:relative;top:1px}
+.addbar{height:32px;position:relative;flex:none;background:var(--sidebar)}
+.addbar .ib svg{width:13px;height:13px}
+.addbar span.t{position:absolute;left:46.5px;top:50%;transform:translateY(-50%);font-size:13px;color:var(--label)}
+.fade{position:absolute;left:0;right:0;bottom:32px;height:1px;background:var(--sep)}
+
+/* ---------- panes ---------- */
+.pane{background:var(--panel);padding:44px 14px 20px;height:548px;overflow:hidden}
+.ph{display:flex;gap:12px;height:48px;margin-left:38.5px}
+.idw{width:48px;height:48px;border-radius:10px;box-shadow:inset 0 0 0 1px var(--containerEdge);display:grid;place-items:center;color:var(--cool);flex:none;background:var(--raised)}
+.idw svg{width:26px;height:26px}
+.ph .tx{padding-top:7px;min-width:0}
+.ph h1{font-size:16px;font-weight:600;line-height:20px;color:var(--label)}
+.tot,.sub{font-size:11px;line-height:14px;color:var(--cool);margin-top:2px;white-space:nowrap;font-variant-numeric:tabular-nums}
+/* overview card */
+.oc{margin-top:36px;border-radius:26px;background:var(--raised);box-shadow:inset 0 0 0 1px var(--containerEdge);overflow:hidden}
+.strip{display:flex;align-items:stretch;padding:12px 10px 11px 18px}
+.avail{width:309.6px;display:flex;flex-direction:column;gap:4px;flex:none}
+.capr{display:flex;align-items:center;height:14px}
+.capr b{font-size:11px;font-weight:600;line-height:14px;color:var(--green);white-space:nowrap}
+.capr i{flex:1;height:1px;background:var(--containerEdge);margin:0 12px 0 8px;position:relative;top:1px}
+.ktiles{display:grid;grid-template-columns:repeat(4,77.4px)}
+.un{width:77.4px;flex:none;padding-left:13px;position:relative;display:flex;flex-direction:column;justify-content:flex-end}
+.un::before{content:"";position:absolute;left:0;top:2px;bottom:2px;border-left:1px solid var(--containerEdge)}
+.tp{display:flex;align-items:center;gap:6px;height:20px;color:var(--cool2)}
+.num{font-size:16px;font-weight:600;line-height:20px;color:var(--label);font-variant-numeric:tabular-nums}
+.k .num{color:var(--green)}
+.num.zero,.k .num.zero{color:var(--cool2)}
+.lab{font-size:11px;line-height:14px;color:var(--cool);margin-top:1px;white-space:nowrap}
+.li{display:flex;align-items:center;gap:10px;min-height:44px;margin-left:18px;padding-right:16px;box-shadow:inset 0 1px 0 var(--containerEdge)}
+.li .gl{color:var(--cool2);display:flex}
+.li .gl.g{color:var(--green)}
+.li .t{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--label)}
+.li .go{color:var(--cool2);display:flex}.li .go svg{width:10px;height:10px}
+.btn{font:inherit;font-size:13px;height:22px;padding:0 10px;border-radius:6px;background:var(--btn);border:.5px solid var(--btnEdge);box-shadow:var(--btnShadow);display:inline-flex;align-items:center;color:var(--label);white-space:nowrap;flex:none}
+/* speaker page */
+.eqt{margin:36px 0 0 14px;height:16px;display:flex;align-items:center;gap:8px;position:relative}
+.eqt .t{font-size:13px;color:var(--cool)}
+.eqt .mk{width:15px;height:15px;color:var(--equalizer);display:grid;place-items:center;margin-right:-3px}
+.eqt .mk svg{width:15px;height:15px}
+.eqt .sum{font-size:11px;color:var(--cool)}
+.reset{position:absolute;right:14px;top:50%;transform:translateY(-50%);font-size:11px;height:19px;padding:0 9px;border-radius:5px;background:var(--btn);box-shadow:0 0 0 .5px var(--btnEdge),var(--btnShadow);display:grid;place-items:center;color:var(--label)}
+.well{margin-top:6px;border-radius:26px;background:var(--well);box-shadow:inset 0 0 0 1px var(--containerEdge),inset 0 1px 0 rgba(0,0,0,.06);padding:14px}
+.er{display:flex;align-items:center;gap:8px;height:20px;margin-bottom:8px}
+.er .cp{width:56px;font-size:11px;color:var(--cool);flex:none}
+.er .rd{width:48px;font-size:11px;color:var(--cool);text-align:right;flex:none}
+.sl{flex:1;height:20px;position:relative}
+.sl::before{content:"";position:absolute;left:0;right:0;top:8px;height:4px;border-radius:2px;background:var(--track)}
+.sl i{position:absolute;top:2px;width:16px;height:16px;border-radius:50%;background:var(--knob);box-shadow:0 0 0 .5px rgba(0,0,0,.25),0 1px 2px rgba(0,0,0,.25);margin-left:-8px}
+.sl b{position:absolute;top:8px;height:4px;background:var(--trackFill);border-radius:2px}
+.sl u{position:absolute;left:50%;bottom:-3px;width:1px;height:3px;background:var(--track)}
+.bal{flex:1;display:flex;align-items:center;gap:4px}
+.bal span{font-size:11px;color:var(--cool2)}
+.cb{display:flex;align-items:center;gap:6px;font-size:11px;height:16px;margin-bottom:8px}
+.cb i{width:14px;height:14px;border-radius:4px;background:var(--btn);box-shadow:0 0 0 .5px var(--btnEdge),var(--btnShadow)}
+.adv{border-top:1px solid var(--containerEdge);padding-top:8px;display:flex;align-items:center;gap:6px;height:27px}
+.adv .tri{width:0;height:0;border-left:5px solid var(--cool);border-top:3.5px solid transparent;border-bottom:3.5px solid transparent;margin-right:2px}
+.adv .a{font-size:11px;color:var(--cool)}.adv .h{font-size:11px;color:var(--cool2)}
+.card{margin-top:20px;border-radius:26px;background:var(--raised);box-shadow:inset 0 0 0 1px var(--containerEdge);overflow:hidden}
+.card .li{padding:9px 16px 9px 0;box-shadow:none}
+.card .li+.li{box-shadow:inset 0 1px 0 var(--containerEdge)}
+.card .tt{flex:1;min-width:0}
+.card .t1{font-size:13px;line-height:16px}
+.card .c{font-size:11px;line-height:13px;margin-top:2px;color:var(--cool)}
+.pop{height:22px;padding:0 6px 0 9px;border-radius:6px;background:var(--btn);box-shadow:0 0 0 .5px var(--btnEdge),var(--btnShadow);display:flex;align-items:center;gap:6px;font-size:13px;white-space:nowrap}
+.pop svg{width:9px;height:12px}
+.links{display:flex;gap:14px}
+.lk{display:flex;align-items:center;gap:5px;font-size:13px;white-space:nowrap}
+.lk .lc{color:var(--cool2);display:flex}.lk .lc svg{width:9px;height:9px}
+
+/* ---------- small pieces ---------- */
+.strips{display:flex;flex-direction:column;gap:10px}
+.sh{width:653px;border-radius:10px;overflow:hidden;box-shadow:0 0 0 .5px var(--frame)}
+.sh .tb{border-bottom:0}
+.crops{display:flex;gap:14px}
+.crop{width:200px;background:var(--sidebar);border-radius:8px;box-shadow:0 0 0 .5px var(--frame);overflow:hidden;padding:0 0 8px}
+.crop .row .lb{width:130px}
+.cw{width:200px;flex:none}
+.cw .lbl{height:38px;overflow:hidden}
+.tag{display:inline-block;font-size:10.5px;font-weight:600;padding:1px 6px;border-radius:4px;margin-left:4px;vertical-align:1px}
+.tag.y{background:var(--greenWash);color:var(--label)}
+.tag.n{background:rgba(var(--chrome),.08);color:var(--note)}
+/* mixer row crop */
+.mrow{height:42px;background:var(--panel);border-radius:8px;box-shadow:0 0 0 .5px var(--frame);display:flex;align-items:center;padding:0 12px;gap:10px;width:300px}
+.mrow .nm{flex:1;font-size:13px}
+.mrow .sq{width:18px;height:18px;display:grid;place-items:center}
+.mrow .sq svg{width:18px;height:18px}
+.mrow .eqd{color:var(--equalizer)}.mrow .mu{color:var(--label)}
+.mini{width:300px;background:var(--panel);border-radius:8px;box-shadow:0 0 0 .5px var(--frame);padding:4px 14px 10px 0;position:relative}
+.mini .eqt{margin:10px 0 0 14px}
+/* placement table */
+table.pl{border-collapse:collapse;font-size:11.5px;color:var(--note);width:100%}
+table.pl th{text-align:left;font-weight:600;color:var(--noteHead);padding:4px 10px 6px 0;border-bottom:1px solid var(--sep);white-space:nowrap}
+table.pl td{padding:5px 10px 5px 0;border-bottom:1px solid var(--sep);vertical-align:top;line-height:1.4}
+table.pl td:first-child{color:var(--noteHead);white-space:nowrap}
+table.pl td.v{white-space:nowrap}
+.sw{display:inline-block;width:11px;height:11px;border-radius:3px;vertical-align:-1px;margin-right:6px;box-shadow:0 0 0 .5px var(--frame)}
+.tok{display:grid;grid-template-columns:auto auto auto;gap:6px 14px;font-size:11.5px;color:var(--note);align-items:center}
+.tok b{color:var(--noteHead);font-weight:600}
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+ <defs>
+  <!-- stand-ins for the SF Symbols the code names; shapes approximate -->
+  <symbol id="laptop" viewBox="0 0 24 24"><g class="o"><rect x="4.5" y="5.5" width="15" height="10.5" rx="1.3"/><path d="M2.5 18.5h19"/></g></symbol>
+  <symbol id="homepod" viewBox="0 0 24 24"><path class="f" d="M7 6.5c0-1.7 2.2-3 5-3s5 1.3 5 3v11c0 1.7-2.2 3-5 3s-5-1.3-5-3z"/></symbol>
+  <symbol id="hifi" viewBox="0 0 24 24"><path class="f" fill-rule="evenodd" d="M8.2 2.5h7.6a2 2 0 0 1 2 2v15a2 2 0 0 1-2 2H8.2a2 2 0 0 1-2-2v-15a2 2 0 0 1 2-2zM12 10.2a4 4 0 1 0 0 8 4 4 0 0 0 0-8zm0-5.2a1.6 1.6 0 1 0 0 3.2 1.6 1.6 0 0 0 0-3.2z"/></symbol>
+  <symbol id="atv" viewBox="0 0 24 24"><path class="f" fill-rule="evenodd" d="M5 6.5h14a2.5 2.5 0 0 1 2.5 2.5v6a2.5 2.5 0 0 1-2.5 2.5H5A2.5 2.5 0 0 1 2.5 15V9A2.5 2.5 0 0 1 5 6.5zM9 10v4.2h1.1V10zm4.4 0 1.5 4.2h1l1.5-4.2h-1.1l-.9 2.8-.9-2.8z"/></symbol>
+  <symbol id="cast" viewBox="0 0 24 24"><path class="f" fill-rule="evenodd" d="M3.5 4.5h12a1.5 1.5 0 0 1 1.5 1.5v1.5h-2.2a2.3 2.3 0 0 0-2.3 2.3V15H3.5A1.5 1.5 0 0 1 2 13.5V6a1.5 1.5 0 0 1 1.5-1.5zM6 17.2h6.5v1.6H6zM15 9h5.2a1.3 1.3 0 0 1 1.3 1.3v8.9a1.3 1.3 0 0 1-1.3 1.3H15a1.3 1.3 0 0 1-1.3-1.3v-8.9A1.3 1.3 0 0 1 15 9zm2.6 6.2a1.7 1.7 0 1 0 0 3.4 1.7 1.7 0 0 0 0-3.4z"/></symbol>
+  <symbol id="radioF" viewBox="0 0 24 24"><path class="f" fill-rule="evenodd" d="M15.6 3.2l.7 1.4-7.4 3.4H19a2.5 2.5 0 0 1 2.5 2.5v8a2.5 2.5 0 0 1-2.5 2.5H5A2.5 2.5 0 0 1 2.5 18.5v-8A2.5 2.5 0 0 1 5 8h.4zM8.5 11.2a3.2 3.2 0 1 0 0 6.4 3.2 3.2 0 0 0 0-6.4zm6 .8v1.5h4V12zm0 3v1.5h4V15z"/></symbol>
+  <symbol id="mainA" viewBox="0 0 24 24"><path class="f" fill-rule="evenodd" d="M5.2 3h7.6a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5.2a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2zM9 10.4a3.6 3.6 0 1 0 0 7.2 3.6 3.6 0 0 0 0-7.2zm0-4.7a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3z"/><path class="o" d="M16.5 12h5M19.2 9.3 21.9 12l-2.7 2.7"/></symbol>
+  <symbol id="spk2" viewBox="0 0 24 24"><g class="o"><rect x="3.5" y="4" width="8.5" height="16" rx="1.6"/><circle cx="7.75" cy="14.2" r="2.4"/><circle cx="7.75" cy="8" r=".9"/><path d="M14.5 6.5h4.4a1.6 1.6 0 0 1 1.6 1.6v10.3a1.6 1.6 0 0 1-1.6 1.6h-4.4"/><circle cx="17" cy="15" r="1.6"/></g></symbol>
+  <symbol id="airplay" viewBox="0 0 24 24"><g class="o"><path d="M6.6 16.6a7.6 7.6 0 1 1 10.8 0"/><path d="M9.3 13.9a3.8 3.8 0 1 1 5.4 0"/></g><path class="f" d="M12 14.2l4.2 5.8H7.8z"/></symbol>
+  <symbol id="radio" viewBox="0 0 24 24"><g class="o"><rect x="3" y="8.2" width="18" height="11.8" rx="2.2"/><path d="M6.5 8.2 15.8 4"/><circle cx="8.6" cy="14.1" r="2.7"/><path d="M14.5 12.4h3.5M14.5 15.8h3.5"/></g></symbol>
+  <symbol id="tvspk" viewBox="0 0 24 24"><g class="o"><path d="M13 14.5H3.8A1.3 1.3 0 0 1 2.5 13.2V5.8a1.3 1.3 0 0 1 1.3-1.3h11.4a1.3 1.3 0 0 1 1.3 1.3v1.7"/><path d="M6 17.8h6"/><rect x="14" y="9.5" width="7.5" height="11" rx="1.4"/><circle cx="17.75" cy="16.6" r="1.5"/></g></symbol>
+  <symbol id="nosig" viewBox="0 0 24 24"><g class="o"><circle cx="12" cy="10.5" r="1.6"/><path d="M12 12.4v8.1M8.7 7.3a4.6 4.6 0 0 0 0 6.4M15.3 7.3a4.6 4.6 0 0 1 0 6.4M5.7 4.5a8.7 8.7 0 0 0 0 12M18.3 4.5a8.7 8.7 0 0 1 0 12M3.6 3 20.4 21"/></g></symbol>
+  <symbol id="qmark" viewBox="0 0 24 24"><g class="o"><circle cx="12" cy="12" r="9"/><path d="M9.6 9.4a2.5 2.5 0 1 1 3.4 2.3c-.6.3-1 .8-1 1.4v.8"/><path d="M12 16.8v.1" stroke-width="2"/></g></symbol>
+  <symbol id="plusC" viewBox="0 0 24 24"><g class="o"><circle cx="12" cy="12" r="9"/><path d="M12 8v8M8 12h8"/></g></symbol>
+  <symbol id="chev" viewBox="0 0 24 24"><path class="o" stroke-width="3" d="m8.5 4 8 8-8 8"/></symbol>
+  <symbol id="plus" viewBox="0 0 24 24"><path class="o" stroke-width="2" d="M12 4v16M4 12h16"/></symbol>
+  <symbol id="updn" viewBox="0 0 9 12"><path class="o" stroke-width="1.4" d="M1.5 4.5 4.5 1.5l3 3M1.5 7.5l3 3 3-3"/></symbol>
+  <symbol id="scene" viewBox="0 0 24 24"><g class="o"><rect x="3" y="5" width="8" height="14" rx="1.4"/><rect x="13" y="5" width="8" height="14" rx="1.4"/></g></symbol>
+  <symbol id="wave" viewBox="0 0 24 24"><path class="o" d="M3 10.5v3M6.5 8v8M10 4.5v15M13.5 7v10M17 9.5v5M20.5 11v2"/></symbol>
+  <symbol id="group" viewBox="0 0 24 24"><g class="o"><rect x="2.5" y="6" width="5.5" height="12" rx="1.2"/><rect x="9.25" y="4" width="5.5" height="16" rx="1.2"/><rect x="16" y="6" width="5.5" height="12" rx="1.2"/></g></symbol>
+  <symbol id="gear" viewBox="0 0 24 24"><g class="o"><circle cx="12" cy="12" r="3"/><path d="M12 3.5l1.6 2.3 2.7-.8.6 2.8 2.7.9-.8 2.7 2.3 1.6-2.3 1.6.8 2.7-2.7.9-.6 2.8-2.7-.8L12 20.5l-1.6-2.3-2.7.8-.6-2.8-2.7-.9.8-2.7L2.9 12l2.3-1.6-.8-2.7 2.7-.9.6-2.8 2.7.8z"/></g></symbol>
+  <symbol id="pin" viewBox="0 0 24 24"><g class="o"><path d="M9 3.5h6M10 3.5v6.2L7 13.5h10l-3-3.8V3.5M12 13.5v7"/></g></symbol>
+  <symbol id="eqdoor" viewBox="0 0 24 24"><g class="o" stroke-width="1.5"><rect x="3.25" y="3.25" width="17.5" height="17.5" rx="4"/><path d="M7 9.5h10M7 14.5h10"/></g><circle class="f" cx="10" cy="9.5" r="1.9"/><circle class="f" cx="14.5" cy="14.5" r="1.9"/></symbol>
+  <symbol id="mutedoor" viewBox="0 0 24 24"><g class="o" stroke-width="1.5"><rect x="3.25" y="3.25" width="17.5" height="17.5" rx="4"/></g><path class="f" d="M7.5 10.3h2.2l3-2.4v8.2l-3-2.4H7.5z"/><path class="o" d="M14.6 9.8a3 3 0 0 1 0 4.4M16.2 8.3a5.2 5.2 0 0 1 0 7.4"/></symbol>
+ </defs>
+</svg>
+
+<h1 class="pg">Speakers tab in green</h1>
+<p class="lede">The owner's ruling: green is the Speakers tab's colour, the way gold is the Mixer's. One new token, <code>speakersAccent</code>, carries it; its base values are the Equalizer green's, so the app keeps one green. Green here means a speaker the Mac can reach, the tab's one add action, and the current tab in the header. It does not mark selection: the sidebar pill is the system's own, as gold never marks selection in the Mixer.</p>
+
+<div class="top">
+ <div style="width:653px;flex:none">
+  <h2>Overview selected <span>· sidebar focused, drawn at the window's real height (the list scrolls)</span></h2>
+  <div class="win" id="w1"></div>
+  <p class="note"><b>Green on this page:</b> the current tab in the header, the word <span class="g">Available</span> and every count above zero under it, and the <span class="g">+</span> on Pair Bluetooth speaker. Zeros, Unavailable, the problem row and the sidebar stay grey. The pill is the system accent, blue by default.</p>
+ </div>
+ <div style="width:653px;flex:none">
+  <h2>A speaker selected <span>· focus in the page, so the sidebar pill is the system's grey</span></h2>
+  <div class="win" id="w2"></div>
+  <p class="note"><b>Green on this page:</b> the current tab and the status word when the Mac can reach the speaker (<span class="g">Ready</span> or <span class="g">Connected</span>). The Equalizer title row loses its green mark: on this tab green means reachable, so the mark would say two things. "Bass +3 dB" and the Reset button already say the curve is shaped. Pages in cool greys, as ruled. Sliders, the checkbox and the pop-up stay stock.</p>
+ </div>
+</div>
+
+<div class="mid">
+ <div class="box" style="width:685px;flex:none">
+  <h3>Each tab owns its colour <span>· the header strip, current tab only</span></h3>
+  <div class="strips" id="strips"></div>
+  <p class="cap2">The current tab keeps today's 18 % wash (27 % with Increase Contrast) but takes its tab's hue, and its glyph takes the tab's ink: <code>goldText</code> for Mixer, <code>speakersAccent</code> for Speakers. The name stays <code>label</code>, so it reads 4.8:1 or better in every mode. Scenes and Settings stay neutral. Coloured text on today's grey seat was measured and fails: 2.1 to 3.9:1. This reverses DESIGN.md's "Neutral, never gold" for the header, so it needs the owner's yes.</p>
+ </div>
+ <div class="box" style="width:659px;flex:none">
+  <h3>Why the sidebar pill stays the system's <span>· AppKit draws it</span></h3>
+  <div class="crops" id="crops"></div>
+  <p class="cap2">A source-list sidebar draws its own pill in the system accent; AppKit never calls the row view's selection drawing there (<code>NSTableRowView.h</code>, and the trap recorded on <code>PlateRowView</code>). Two ways to a green pill, both declined: make green the whole app's accent through <code>NSAccentColorName</code> (every checkbox, pop-up, focus ring and the Settings sidebar turn green too, and only for people on the Multicolor accent), or leave the source-list style and draw the pill, losing the stock Show/Hide fold and the sidebar header styling.</p>
+ </div>
+</div>
+
+<div class="low">
+ <div class="box" style="width:860px;flex:none">
+  <h3>Where green goes <span>· ranked</span></h3>
+  <table class="pl" id="pl"></table>
+ </div>
+ <div style="width:484px;flex:none;display:flex;flex-direction:column;gap:24px">
+  <div class="box">
+   <h3>The Equalizer green stays in the Mixer</h3>
+   <div class="lbl">Mixer row, unchanged: the door is green while the curve is shaped</div>
+   <div class="mrow"><span style="display:flex;color:var(--label)"><svg class="i"><use href="#homepod"/></svg></span><span class="nm">Sonos Move</span><span class="sq eqd"><svg><use href="#eqdoor"/></svg></span><span class="sq mu"><svg><use href="#mutedoor"/></svg></span></div>
+   <div style="display:flex;gap:14px;margin-top:12px">
+    <div><div class="lbl">Speaker page today</div><div class="mini" style="width:205px"><div class="eqt"><span class="t">Equalizer</span><span class="mk"><svg><use href="#eqdoor"/></svg></span><span class="sum">Bass +3 dB</span></div></div></div>
+    <div><div class="lbl">Speaker page, proposed</div><div class="mini" style="width:205px"><div class="eqt"><span class="t">Equalizer</span><span class="sum">Bass +3 dB</span></div></div></div>
+   </div>
+   <p class="cap2"><code>Tokens.Color.equalizer</code> keeps one meaning and one place: the Mixer row's door. The fence test needs no change; <code>equalizerEngagedMarkImage</code> stops being public, so the compiler keeps the speaker page from drawing it again.</p>
+  </div>
+  <div class="box">
+   <h3>The token</h3>
+   <div class="tok">
+    <span></span><b>Light</b><b>Dark</b>
+    <b>speakersAccent</b><span><span class="sw" style="background:#007835"></span>#007835</span><span><span class="sw" style="background:#41B07A"></span>#41B07A</span>
+    <b>Increase Contrast</b><span><span class="sw" style="background:#03642B"></span>#03642B</span><span><span class="sw" style="background:#63D199"></span>#63D199</span>
+    <b>Worst, as text</b><span>4.59 sidebar · 5.39 pane</span><span>5.12 sidebar · 5.79 card</span>
+    <b>White on it</b><span>5.62</span><span>2.72: never a fill</span>
+   </div>
+   <p class="cap2">Same values as <code>equalizer</code>, plus the Increase Contrast pair it lacks. Not <code>systemGreen</code>: #34C759 is 2.13:1 on the light pane.</p>
+  </div>
+ </div>
+</div>
+
+<script>
+var u=function(id,cls){return '<svg class="i'+(cls?' '+cls:'')+'"><use href="#'+id+'"/></svg>'};
+var S={
+ mbp:['laptop','MacBook Pro Speakers'], amb:['laptop','Alec’s MacBook Pro'], ca1:['cast','casty'], ca2:['cast','casty'],
+ mcr:['cast','Mac Cast Receiver'], sm:['homepod','Sonos Move'], tv:['atv','TV'],
+ ion:['hifi','ION Speaker'], isa:['hifi','isaac'], jbl:['radioF','JBL Flip 5'], mis:['hifi','Missing speaker'],
+ m2:['radioF','Move 2 (SONOS Bedroom)','Move 2 (S…Bedroom)'], onk:['hifi','Onkyo TX-8220'],
+ smk:['hifi','Sonos Move (SONOS Kitchen)','Sonos Mo…S Kitchen)'], tee:['atv','teevee']};
+var MIX_ON=['mbp','amb','ca1','ca2','mcr','sm','tv'], MIX_OFF=['ion','isa','jbl','mis','m2','onk','smk','tee'];
+function gh(t,cls){return '<div class="gh '+cls+'"><span>'+t+'</span></div>'}
+function row(k,o){o=o||{};var r=S[k];
+ return '<div class="row'+(o.dim?' dim':'')+(o.sel?' sel-'+o.sel:'')+'">'+(o.sel?'<div class="pill"></div>':'')+'<span class="ib">'+u(r[0])+'</span><span class="lb"><span class="n">'+(r[2]||r[1])+'</span></span></div>'}
+function rows(ks,o,selKey,selKind){return ks.map(function(k){var oo=Object.assign({},o||{});if(k===selKey)oo.sel=selKind;return row(k,oo)}).join('')}
+function dv(n){return '<div class="dv"><span class="dg">'+u('nosig')+'</span><span class="dw"><span class="dl">'+n+' unavailable</span><span class="rule"></span></span></div>'}
+function plate(icon,text,sel){return '<div class="pr'+(sel?' sel-'+sel:'')+'"><div class="pf"></div><span class="ib">'+u(icon)+'</span><span class="lb"><span class="n">'+text+'</span></span><span class="chev">'+u('chev')+'</span></div>'}
+function sidebar(overviewSel,spkSel){
+ return '<aside class="sb"><div class="list">'+gh('System Audio','t')+plate('mainA','Main Audio')+gh('Speakers','t sp')+plate('spk2','Overview',overviewSel)+
+  gh('Shown in Mixer','s')+rows(MIX_ON,{},spkSel?'sm':null,spkSel)+dv(8)+rows(MIX_OFF,{dim:1})+'</div><div class="fade"></div>'+
+  '<div class="addbar"><span class="ib">'+u('plus')+'</span><span class="t">Add scene</span></div></aside>'}
+
+/* header strip */
+var TABS=[['mix','wave','Mixer'],['scn','group','Scenes'],['spk','spk2','Speakers'],['set','gear','Settings']];
+function header(cur,neutral){
+ return '<div class="tb"><div class="cap">'+TABS.map(function(t){var on=t[0]===cur;
+   return '<span class="seat'+(on?' on'+(neutral?'':' '+t[0]):'')+'">'+u(t[1])+(on?'<span class="nm">'+t[2]+'</span>':'')+'</span>'}).join('')+
+  '</div><span class="wm">Audiout</span><span class="pin">'+u('pin')+'</span></div>'}
+
+/* overview */
+var KINDS=[['airplay','AirPlay'],['radio','Bluetooth'],['tvspk','Cast'],['laptop','This Mac']];
+function num(n){return '<span class="num'+(n===0?' zero':'')+'">'+n+'</span>'}
+function tile(g,n,l){return '<div class="tp">'+u(g)+num(n)+'</div><div class="lab">'+l+'</div>'}
+function strip(c){
+ return '<div class="strip"><div class="avail"><div class="capr"><b>Available</b><i></i></div><div class="ktiles">'+
+  KINDS.map(function(k,i){return '<div class="k">'+tile(k[0],c[i],k[1])+'</div>'}).join('')+'</div></div>'+
+  '<div class="un">'+tile('nosig',c[4],'Unavailable')+'</div></div>'}
+function li(g,t,acc,green){return '<div class="li"><span class="gl'+(green?' g':'')+'">'+u(g)+'</span><span class="t">'+t+'</span>'+acc+'</div>'}
+var PAIR=li('plusC','Pair Bluetooth speaker…','<span class="go">'+u('chev')+'</span>',true);
+var LOST=li('qmark','6 speakers can’t be found','<span class="btn">Forget 6 speakers…</span>');
+var OVERVIEW='<div class="pane"><div class="ph"><div class="idw">'+u('spk2')+'</div><div class="tx"><h1>Overview</h1><div class="tot">20 speakers</div></div></div><div class="oc">'+strip([4,0,3,1,12])+LOST+PAIR+'</div></div>';
+
+/* speaker page */
+function slider(pos,fill){return '<div class="sl">'+(fill?'<b style="left:50%;width:'+(pos-50)+'%"></b>':'')+'<u></u><i style="left:'+pos+'%"></i></div>'}
+var SPEAKER='<div class="pane"><div class="ph"><div class="idw">'+u('homepod')+'</div><div class="tx"><h1>Sonos Move</h1><div class="sub">Sonos · <span class="g">Ready</span></div></div></div>'+
+ '<div class="eqt"><span class="t">Equalizer</span><span class="sum">Bass +3 dB</span><span class="reset">Reset</span></div>'+
+ '<div class="well"><div class="er"><span class="cp">Bass</span>'+slider(62.5,true)+'<span class="rd">+3 dB</span></div>'+
+ '<div class="er"><span class="cp">Treble</span>'+slider(50)+'<span class="rd"></span></div>'+
+ '<div class="er"><span class="cp">Balance</span><div class="bal"><span>L</span>'+slider(50)+'<span>R</span></div><span class="rd"></span></div>'+
+ '<div class="cb"><i></i>Loudness</div><div class="adv"><span class="tri"></span><span class="a">Advanced</span><span class="h">10 bands</span></div></div>'+
+ '<div class="card"><div class="li"><div class="tt"><div class="t1">Show in Mixer</div><div class="c">Shown while your Mac can reach it.</div></div><span class="pop">When available<svg><use href="#updn"/></svg></span></div>'+
+ '<div class="li"><div class="tt"><div class="t1">Scenes</div></div><div class="links"><span class="lk">'+u('scene')+'Downstairs<span class="lc">'+u('chev')+'</span></span><span class="lk">'+u('scene')+'Kitchen<span class="lc">'+u('chev')+'</span></span></div></div></div></div>';
+
+document.getElementById('w1').innerHTML=header('spk')+'<div class="body">'+sidebar('acc',null)+'<section>'+OVERVIEW+'</section></div>';
+document.getElementById('w2').innerHTML=header('spk')+'<div class="body">'+sidebar(null,'grey')+'<section>'+SPEAKER+'</section></div>';
+
+document.getElementById('strips').innerHTML=
+ '<div><div class="lbl">Today · every current tab neutral</div><div class="sh">'+header('mix',true)+'</div></div>'+
+ '<div><div class="lbl">Proposed · Mixer is the current tab</div><div class="sh">'+header('mix')+'</div></div>'+
+ '<div><div class="lbl">Proposed · Speakers is the current tab</div><div class="sh">'+header('spk')+'</div></div>';
+
+function crop(sel,title){return '<div class="cw"><div class="lbl">'+title+'</div><div class="crop">'+gh('Shown in Mixer','s')+row('mcr')+row('sm',{sel:sel})+row('tv')+'</div></div>'}
+document.getElementById('crops').innerHTML=crop('acc','Focused · system accent <span class="tag y">this build</span>')+crop('grey','Not focused · system grey')+crop('green','Green · app-wide accent only <span class="tag n">declined</span>');
+
+var PL=[
+ ['1','Header strip, current tab','y','The tab’s own mark: 18 % green wash, green glyph, <code>label</code> name. Glyph 3.03:1 at worst, name 5.48:1. Mixer takes gold the same way (owner’s yes needed).'],
+ ['2','Overview: Available and its counts above zero','y','Green means the Mac can reach it, the job gold does for sound in the Mixer. Words carry it too. Zeros stay <code>labelCool2</code>.'],
+ ['3','Overview: Unavailable','n','Stays grey: glyph <code>labelCool2</code>, count <code>label</code>, label <code>labelCool</code>.'],
+ ['4','Pair Bluetooth speaker… glyph','y','The tab’s one add action, as gold marks calls to action. 5.39:1 light, 5.79:1 dark. Chevron stays grey.'],
+ ['5','Problem rows’ glyphs (can’t be found, access off)','n','Green on a problem says the opposite.'],
+ ['6','Speaker page status word, reachable','y','"Ready" and "Connected" only, beside the kind; the overview’s meaning at page scale. 5.39 / 6.60:1.'],
+ ['7','Sidebar selection pill','n','AppKit draws a source list’s pill in the system accent. Routes cost the whole app’s controls or the stock sidebar.'],
+ ['8','Main Audio and Overview plates, selected','n','The same system pill. Unselected plates stay neutral.'],
+ ['9','Speaker page controls and focus rings','n','No per-control colour for checkboxes, switches, pop-ups or focus rings; green sliders beside an accent checkbox is two accents on one card, and green Equalizer sliders bring back the clash.'],
+ ['10','The search shimmer','n','It crosses Unavailable and the total too; green there promises "reachable" before anything is known.'],
+ ['11','Divider, Forget, reachable rows','n','Divider and Forget: ruled out. Reachable rows: colour would be the only cue, and the owner ruled no mark.'],
+ ['12','Section titles, Add scene, page icons','n','Chrome and a Scenes action, not reachability.']];
+document.getElementById('pl').innerHTML='<tr><th>#</th><th>Place</th><th>Green?</th><th>Why</th></tr>'+PL.map(function(r){
+ return '<tr><td>'+r[0]+'</td><td style="color:var(--noteHead)">'+r[1]+'</td><td class="v">'+(r[2]==='y'?'<span class="sw" style="background:var(--green)"></span>Yes':'<span class="sw" style="background:var(--cool2)"></span>No')+'</td><td>'+r[3]+'</td></tr>'}).join('');
+</script>
+</body>
+</html>

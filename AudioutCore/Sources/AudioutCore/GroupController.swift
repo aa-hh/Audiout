@@ -211,6 +211,17 @@ public final class GroupController {
     /// deliberate selection that was later cleared to empty.
     private var loadedPersistedRouting = false
 
+    /// How long a restored Bluetooth id may wait to appear in the device snapshot
+    /// before it is dropped from the selection. Bounded so a speaker that is off
+    /// or out of range leaves the selection instead of lingering in it; 30 s
+    /// covers a slow Bluetooth enumeration after the permission grant lands.
+    public var bluetoothRestoreWindow: TimeInterval = 30
+
+    /// Restored Bluetooth ids not yet in the device snapshot, and when they stop
+    /// waiting. See ``settleBluetoothRestore()``.
+    private var pendingBluetoothRestoreIDs: Set<String> = []
+    private var bluetoothRestoreDeadline: Date?
+
     /// Establish the out-of-the-box default once the fleet is known (SPEC §9b):
     /// **Current Device toggled ON**, Main Out = Selected Devices ⇒ passthrough.
     /// No-op once established or if a selection already exists. The app calls
@@ -224,7 +235,12 @@ public final class GroupController {
     /// volume, so the gain is pushed with `mirrorToSystemVolume: false` and no
     /// hardware write happens at launch. (`init` deliberately reads nothing back;
     /// see the decision note there.)
+    ///
+    /// A restored Bluetooth id that is not yet discovered waits up to
+    /// ``bluetoothRestoreWindow`` to appear, is applied and connected when it
+    /// does, and is dropped from the selection if it never does.
     public func ensureDefaultSelection() {
+        settleBluetoothRestore()
         guard !loadedPersistedRouting, selectedDeviceIDs.isEmpty else { return }
         guard let local = devices.first(where: \.isLocalDevice) else { return }
         // Opt-in resume (Settings › General "Reconnect last speakers when
@@ -237,6 +253,19 @@ public final class GroupController {
            let stored = try? routingStore.load(),
            !stored.selectedDeviceIDs.isEmpty {
             selectedDeviceIDs = Set(stored.selectedDeviceIDs)
+            // A Bluetooth id already listed but unavailable here used to get the
+            // output set and never `retryOutput`, so the reconnect hung on whether
+            // the enumeration landed before or after this first call
+            // (`reconnectAtLaunchRetriesBluetoothIdListedButUnavailable`).
+            pendingBluetoothRestoreIDs = selectedDeviceIDs.filter {
+                device($0)?.isAvailable != true && BTDeviceEnumerator.derivedUID(fromAddress: $0) == $0
+            }
+            if pendingBluetoothRestoreIDs.contains(where: { device($0) == nil }) {
+                bluetoothRestoreDeadline = Date().addingTimeInterval(bluetoothRestoreWindow)
+                DispatchQueue.main.asyncAfter(deadline: .now() + bluetoothRestoreWindow) { [weak self] in
+                    self?.settleBluetoothRestore()
+                }
+            }
             if case .group(let id) = stored.mainOut, !groups.contains(where: { $0.id == id }) {
                 mainOut = .selectedDevices
             } else {
@@ -246,12 +275,62 @@ public final class GroupController {
             selectedDeviceIDs = [local.id]
             mainOut = .selectedDevices
         }
+        if limitsToOneSpeaker {
+            var isGroup = false
+            if case .group = mainOut { isGroup = true }
+            if selectedDeviceIDs.count > 1 || isGroup {
+                selectedDeviceIDs = [local.id]
+                pendingBluetoothRestoreIDs.formIntersection(selectedDeviceIDs)
+                mainOut = .selectedDevices
+            }
+        }
         loadedPersistedRouting = true
         mainOutMasterVolume = (backend.systemOutputVolume ?? settings.mainOutVolume).clampedToVolume
         pushMasterGain(mirrorToSystemVolume: false)
         applyRouting()
+        let listedUnavailable = pendingBluetoothRestoreIDs.filter { device($0) != nil }
+        pendingBluetoothRestoreIDs.subtract(listedUnavailable)
+        for id in listedUnavailable.sorted() { backend.retryOutput(id) }
         persistRouting()
         onStateDidChange?()
+    }
+
+    /// Finish the launch restore for Bluetooth ids that were not yet discovered.
+    ///
+    /// Only Bluetooth ids wait: a paired speaker loses its link when the app
+    /// quits, reaches the snapshot only after the Bluetooth enumeration lands
+    /// (after the first update), and the app must open the link itself. AirPlay
+    /// ids stay one-shot on purpose (the 2026-07-17 decision note in `init`).
+    /// An id that appears gets the output set first, so the backend already
+    /// expects it, then `retryOutput`, the same connect a click on a greyed row
+    /// sends; `setOutputSet` alone never opens a Bluetooth link
+    /// (`NativeBackend.retryBTOutput`). An id the user deselected while it
+    /// waited stops waiting and gets no connect.
+    private func settleBluetoothRestore() {
+        guard !pendingBluetoothRestoreIDs.isEmpty else { return }
+        pendingBluetoothRestoreIDs.formIntersection(selectedDeviceIDs)
+        let appeared = pendingBluetoothRestoreIDs.filter { device($0) != nil }
+        pendingBluetoothRestoreIDs.subtract(appeared)
+        if !appeared.isEmpty {
+            applyRouting()
+            for id in appeared.sorted() { backend.retryOutput(id) }
+            onStateDidChange?()
+        }
+        if pendingBluetoothRestoreIDs.isEmpty {
+            bluetoothRestoreDeadline = nil
+        } else if let deadline = bluetoothRestoreDeadline, Date() >= deadline {
+            selectedDeviceIDs.subtract(pendingBluetoothRestoreIDs)
+            // A selection of only never-appearing Bluetooth ids emptied here, breaking the
+            // never-zero-selected floor `setDeviceSelected` keeps, so fall back to the Mac.
+            if selectedDeviceIDs.isEmpty, let local = localDeviceID {
+                selectedDeviceIDs.insert(local)
+            }
+            pendingBluetoothRestoreIDs = []
+            bluetoothRestoreDeadline = nil
+            applyRouting()
+            persistRouting()
+            onStateDidChange?()
+        }
     }
 
     // MARK: Routing persistence
@@ -354,12 +433,39 @@ public final class GroupController {
         }
     }
 
+    /// Set by the host when the install is limited to one Selected Speaker
+    /// (`LicenseGate.limitsToOneSpeaker`). Refuses a second speaker and a group
+    /// target; never trims a live set — the limit lands on the next edit or
+    /// launch.
+    public var limitsToOneSpeaker = false
+
+    /// The refusal reason `setDeviceSelected` returns under the limit.
+    public static let oneSpeakerLimitReason = "one_speaker_limit"
+
     /// The local (Mac's own) device id in the current fleet, if discovered.
     private var localDeviceID: String? { devices.first(where: \.isLocalDevice)?.id }
 
     /// Whether `id` is in the "Selected Speakers" set. (Membership, NOT "is it
     /// receiving audio" — routing is decided by Main Out.)
     public func isSpeakerSelected(_ id: String) -> Bool { selectedDeviceIDs.contains(id) }
+
+    /// Replace the whole Selected Devices set with `id` in one routing apply —
+    /// "Play here". A deselect-then-select would apply twice and leave
+    /// This Mac briefly live between them. Always a one-member result, so it
+    /// holds under `limitsToOneSpeaker`. No-op (`.ok`) if unknown.
+    /// Main Out moves to Selected Speakers too: under a scene target the click
+    /// would otherwise change nothing audible.
+    @discardableResult
+    public func switchSelection(to id: String) -> SelectionResult {
+        guard device(id) != nil else { return .ok }
+        selectedDeviceIDs = [id]
+        mainOut = .selectedDevices
+        pushMasterGain(mirrorToSystemVolume: false)
+        applyRouting()
+        persistRouting()
+        onStateDidChange?()
+        return .ok
+    }
 
     /// Add or remove a device from "Selected Speakers" (SPEC §9b). Composes the
     /// persistent set; live-applies the output set when Main Out targets
@@ -408,14 +514,19 @@ public final class GroupController {
             // Auto-swap: an AirPlay device turning ON while the local device is
             // the sole selected member drops the local device. Once the Mac is
             // already mixed with AirPlay, this guard is false and the Mac stays.
+            var next = selectedDeviceIDs
             var autoSwapped = false
             if !d.isLocalDevice, let local = localDeviceID,
                selectedDeviceIDs == [local] {
-                selectedDeviceIDs.remove(local)
+                next.remove(local)
                 autoSwapped = true
             }
+            next.insert(id)
+            if limitsToOneSpeaker, next.count > 1 {
+                return .refused(Self.oneSpeakerLimitReason)
+            }
 
-            selectedDeviceIDs.insert(id)
+            selectedDeviceIDs = next
             persistRouting()
             if mainOut == .selectedDevices { applyRouting() }
             onStateDidChange?()
@@ -536,6 +647,7 @@ public final class GroupController {
     /// possibly louder — product was still in force would get one burst at the
     /// wrong level.
     public func setMainOut(_ target: MainOutTarget) {
+        if limitsToOneSpeaker, case .group = target { return }
         mainOut = target
         pushMasterGain(mirrorToSystemVolume: false)
         applyRouting()

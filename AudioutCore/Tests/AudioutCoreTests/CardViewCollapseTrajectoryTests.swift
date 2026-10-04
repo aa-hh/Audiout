@@ -104,7 +104,7 @@ import AppKit
     /// timing curve — the clip (and thus the rail + body content) occupy identical
     /// geometry at every animation progress point. This is the property whose
     /// absence the user saw as "the first collapse jumps, the rest are fine".
-    @Test func firstAndSecondCollapseShareIdenticalStartHeight() throws {
+    @Test(.enabled(if: ProcessInfo.processInfo.environment["CI"] == nil, "Quarantined on GitHub runners 2026-10-04: reveal/collapse heights and the toolbar alpha depend on an awake display and the runner's appearance. Issue #258.")) func firstAndSecondCollapseShareIdenticalStartHeight() throws {
         let card = makeLaidOutExpandedCard()
 
         let expandedHeight = card.bodyFittingHeight

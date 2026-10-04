@@ -4,8 +4,7 @@
 # Decision: the owner, 2026-09-04. The full ~3,500-test run on every branch
 # commit was the main cost of committing (and hung twice that day). Branch
 # commits now run only the suites that plausibly cover the staged Swift; the
-# full suite runs when a merge lands on main — the one commit shape Guard 1
-# permits there, and the last gate before main.
+# full suite runs on GitHub for every pull request and in the merge queue.
 #
 # Prints ONE line on stdout:
 #   FULL      — run the whole suite
@@ -14,8 +13,7 @@
 # pre-commit calls it with no arguments, so it reads the staged index. Runnable
 # standalone for a dry run by passing the file list as arguments:
 #   sh .githooks/guard-test-scope.sh AudioutCore/Sources/AudioutCore/Analytics.swift
-# Dry-run env: GUARD_MERGE=1 (merge landing on main), GUARD_DELETED (newline
-# separated paths), GUARD_SCOPE_ROOT (repo root to look for test files under).
+# Dry-run env: GUARD_DELETED (newline separated paths), GUARD_SCOPE_ROOT (repo root to look for test files under).
 #
 # How a staged source file maps to test files, first rule that finds any wins:
 #   1. By name. `Foo.swift` selects every test file named `Foo*Tests.swift`. A
@@ -37,17 +35,12 @@
 #     removing one breaks callers that live elsewhere)
 #   - AUDIOUT_FULL_SUITE=1, the switch agents already use for a deliberate full
 #     run, so no second variable is needed
-#
-# A rebase or cherry-pick also produces commits with no MERGE_HEAD, so those get
-# the branch treatment. That is correct, not a bug to fix: those commits replay
-# work that was already gated, and the merge onto main runs everything anyway.
 
 root=${GUARD_SCOPE_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null)}
 
 if [ "$#" -gt 0 ]; then
     changed=$(printf '%s\n' "$@")
     deleted=${GUARD_DELETED:-}
-    merge=${GUARD_MERGE:-0}
 else
     # Same pathspec idiom as Guard 4 itself: a bare directory plus a `.swift`
     # grep, never `Sources/**/*.swift` (whose `**` misses a file sitting
@@ -56,15 +49,9 @@ else
         'AudioutCore/Sources/' 'AudioutCore/Tests/' 2>/dev/null | grep '\.swift$')
     deleted=$(git diff --cached --name-only --diff-filter=DR -- \
         'AudioutCore/Sources/' 'AudioutCore/Tests/' 2>/dev/null | grep '\.swift$')
-    branch=$(git symbolic-ref --short HEAD 2>/dev/null)
-    git_dir=$(git rev-parse --git-dir 2>/dev/null)
-    merge=0
-    if [ "$branch" = "main" ] && [ -f "$git_dir/MERGE_HEAD" ]; then
-        merge=1
-    fi
 fi
 
-if [ "$merge" = "1" ] || [ "${AUDIOUT_FULL_SUITE:-0}" = "1" ] || [ -n "$deleted" ]; then
+if [ "${AUDIOUT_FULL_SUITE:-0}" = "1" ] || [ -n "$deleted" ]; then
     echo FULL
     exit 0
 fi
@@ -86,7 +73,7 @@ dependents_of() {
 
 # Library targets rule 2 knows about. A target missing from this list (the
 # executables: AudioutApp, the harnesses, the snapshot tools) maps to nothing.
-library_targets=" AudioutCore AudioutSharedUI AudioutPopoverUI AudioutWindowUI AudioutSettingsUI AudioutOnboardingUI CastSender CastFakeReceiver ObjCExceptionShim "
+library_targets=" AudioutCore AudioutSharedUI AudioutPopoverUI AudioutWindowUI AudioutSettingsUI AudioutOnboardingUI CastSender CastFakeReceiver ObjCExceptionShim TestKeySilencer "
 
 # Prints the test files rule 2 selects for a source file, or nothing.
 tests_by_target() {

@@ -325,8 +325,13 @@ public final class AppSurfaceController {
         // Escape on the Groups screen steps back one level first (a group
         // editor pops to the overview); anything else, and the next Escape,
         // closes the surface.
+        // On the Mixer, a showing thank-you card takes the first Escape.
         shell.cancelHandler = { [weak self] in
-            guard let self, selectedScreen == .groups else { return false }
+            guard let self else { return false }
+            if selectedScreen == .mixer, popoverController.dismissThankYouCardForEscape() {
+                return true
+            }
+            guard selectedScreen == .groups else { return false }
             return groupsCancelHandler?() ?? false
         }
     }

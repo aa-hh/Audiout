@@ -997,8 +997,9 @@ extension NativeBackend {
         // No AirPlay device, no line: nothing would read it, and it is a
         // megabyte and a memcpy per buffer. An output also cannot be delayed by
         // less than nothing — and `0` publishes NO line rather than an empty
-        // one, which is the whole bypass: a room that leaves Cast is back to
-        // today's exact bytes on the very next buffer.
+        // one, which is the whole bypass: a room that leaves Cast and holds
+        // no Bluetooth term either is back to today's exact bytes on the very
+        // next buffer.
         //
         // Read from the SELECTION, never from `btComposition`: that memo is
         // only refreshed when the Bluetooth side moves, so in an AirPlay+Cast

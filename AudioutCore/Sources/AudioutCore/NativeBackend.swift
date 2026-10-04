@@ -663,7 +663,9 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// Derived by ``updateBTRoomTermLocked()``; on `stateQueue`.
     var btRoomTermMs: Int?
     /// A Bluetooth-target wizard run is under way, so the reference is pinned
-    /// wide open (``btWizardReferenceBufferMs``) for the duration. On `stateQueue`.
+    /// wide open (``btWizardReferenceBufferMs``) for the duration, except in a
+    /// presentation-timeline room, where the room delay is the reference and
+    /// the wizard's ceiling follows it. On `stateQueue`.
     var btWizardReferenceRaised = false
     /// Whether the wizard tick is currently on, so a redundant edge costs
     /// nothing — both edges re-anchor every sink, and the panel fires a second

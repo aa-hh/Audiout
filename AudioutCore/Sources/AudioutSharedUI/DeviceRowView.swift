@@ -237,8 +237,8 @@ public final class DeviceRowView: NSView {
     /// composite joined by " · "), hosted in a plain horizontal `NSStackView`.
     /// Every pill carries TEXT ONLY; its tint says whether the value it names
     /// is sounding (D7): the main-mix segment (``mainMixSourceName``, "System"
-    /// or the active group's name) reads `goldText` while the main mix is
-    /// armed here, an app pill reads `goldText` while its feed is live, and
+    /// or the active group's name) reads primary `label` while the main mix is
+    /// armed here, an app pill reads `label` while its feed is live, and
     /// both fall back to `label2` (`label3` while the row is not adjustable).
     /// A `.failed`/unavailable device OVERRIDES
     /// this with a SINGLE failure-red pill instead ("Couldn't connect" /
@@ -1300,20 +1300,21 @@ public final class DeviceRowView: NSView {
         }
         var segments: [FeedSegment] = []
         // Pill tint says what is SOUNDING (D7): the main-mix pill goes
-        // `goldText` while the main mix is armed on this row, an app pill goes
-        // `goldText` while its feed is confirmed live, and anything not
-        // sounding wears the chrome tone. A row in the muted-unconnected
+        // `label` while the main mix is armed on this row, an app pill goes
+        // `label` while its feed is confirmed live, and anything not sounding
+        // wears the chrome tone. Primary text, not `goldText` (owner, 2026-10-04):
+        // gold on the `well` fill measured only 4.90:1 in light mode. A row in the muted-unconnected
         // treatment drops the whole column to `label3`.
         if let mainMixSourceName {
             let color = controlsMuted
                 ? Tokens.Color.label3
-                : (isMainMixArmed ? Tokens.Color.goldText : Tokens.Color.label2)
+                : (isMainMixArmed ? Tokens.Color.label : Tokens.Color.label2)
             segments.append(.init(text: mainMixSourceName, color: color))
         }
         for name in feedAppNames {
             let color = controlsMuted
                 ? Tokens.Color.label3
-                : (hasLiveFeeds ? Tokens.Color.goldText : Tokens.Color.label2)
+                : (hasLiveFeeds ? Tokens.Color.label : Tokens.Color.label2)
             segments.append(.init(text: name, color: color))
         }
         setFeedSegments(segments)
@@ -1393,11 +1394,18 @@ public final class DeviceRowView: NSView {
         (centered ? feedStackCenterConstraint : feedStackLeadingConstraint)?.isActive = true
     }
 
+    /// At most this many value pills are ever named on the row (owner's
+    /// call, 2026-10-04): the first two, then "+N" for the rest, with the
+    /// hover tooltip carrying every name. Three or more named pills read as
+    /// a list, not a status.
+    static let maxNamedFeedPills = 2
+
     /// Compose `segments` (main-mix + app tokens, already colored) into ONE
     /// PILL EACH, with the spec item 3 STATIC overflow
-    /// rule: try showing every value's pill first; if the row of pills
-    /// doesn't fit `PopoverColumnGrid.feedColumnWidth`, drop values from the
-    /// TAIL one at a time (never cut a pill mid-string) and append a trailing
+    /// rule: try showing the first `maxNamedFeedPills` values; if that row of pills
+    /// doesn't fit the row's own slot — `PopoverColumnGrid.feedColumnWidth`,
+    /// or `btFeedSlotWidth` on a row that also carries the SYNC chip — drop
+    /// values from the TAIL one at a time (never cut a pill mid-string) and append a trailing
     /// "+N" pill for the dropped count — no interactive reveal, locked.
     /// Clears the pills when there is nothing to show at all.
     private func setFeedSegments(_ segments: [FeedSegment]) {
@@ -1433,7 +1441,12 @@ public final class DeviceRowView: NSView {
             NSAttributedString(string: "+\(count)", attributes: [.font: font, .foregroundColor: chromeColor])
         }
 
-        let available = PopoverColumnGrid.feedColumnWidth
+        // Measure against the slot the stack is actually clipped to: a
+        // sync-capable row (Bluetooth, Cast, the Mac's own) keeps only the
+        // chip's leftover, and measuring the full column there let a second
+        // pill pass the check and then get cut off mid-word by the mask.
+        let available = showsSyncControls
+            ? PopoverColumnGrid.btFeedSlotWidth : PopoverColumnGrid.feedColumnWidth
         // A lone segment has no overflow GROUP to collapse into — the floor
         // stays "show the one clipped pill" (spec item 3, "a clipped single
         // pill beats showing nothing"). But when there's a genuine overflow
@@ -1444,7 +1457,7 @@ public final class DeviceRowView: NSView {
         // accurate, legible count beats a barely-visible fragment of one.
         let minVisibleCount = segments.count > 1 ? 0 : 1
 
-        var visibleCount = segments.count
+        var visibleCount = min(segments.count, Self.maxNamedFeedPills)
         var committed: [NSAttributedString] = []
         while true {
             let overflowCount = segments.count - visibleCount

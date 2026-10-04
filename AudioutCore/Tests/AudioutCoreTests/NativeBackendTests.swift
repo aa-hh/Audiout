@@ -1402,6 +1402,10 @@ private final class SpyLocalPlayback: LocalPlaybackControlling, @unchecked Senda
     func setMeteringActive(_ active: Bool) { lock.withLock { _meteringActive = active } }
     var meteringActive: Bool { lock.withLock { _meteringActive } }
 
+    private var _outputGains: [Float] = []
+    func setOutputGain(_ gain: Float) { lock.withLock { _outputGains.append(gain) } }
+    var outputGains: [Float] { lock.withLock { _outputGains } }
+
     var addedApps: [(bundleID: String, volume: Float)] { lock.withLock { _added } }
     var removedApps: [String] { lock.withLock { _removed } }
     var volumeSets: [(bundleID: String, volume: Float)] { lock.withLock { _volumes } }
@@ -7971,6 +7975,63 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         #expect(
             localPlayback.volumeSets.contains { $0.bundleID == "com.local" && abs($0.volume - 0.4) < 0.001 },
             "setLocalPlaybackVolume(40) must reach the local engine as 0.4 for com.local")
+    }
+
+    /// Turns red if the Mac row's level stops reaching the engine that plays
+    /// "This Mac" apps, or if it keeps applying while the Mac row is driving
+    /// Main (no non-local output selected), where it must stay at unity.
+    @Test func macRowLevelScalesLocalPlaybackOnlyBesideARealOutput() async {
+        let (backend, engine, _) = makeBackend()
+        let localPlayback = SpyLocalPlayback()
+        backend.localPlaybackEngine = localPlayback
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        backend.setVolume(40, for: NativeBackend.localDeviceID)
+        await pollUntil { !localPlayback.outputGains.isEmpty }
+        #expect(localPlayback.outputGains.last == 1, "with nothing else selected the Mac row drives Main")
+
+        let other = backend.devices.first { !$0.isLocalDevice }?.id ?? "dev-1"
+        backend.setOutputSet([other])
+        backend.setVolume(40, for: NativeBackend.localDeviceID)
+        await pollUntil { localPlayback.outputGains.last.map { abs($0 - 0.4) < 0.001 } ?? false }
+        #expect(abs((localPlayback.outputGains.last ?? -1) - 0.4) < 0.001)
+
+        // The host's membership answer wins over the discovered set: a group
+        // whose only speaker is off still has the Mac row driving its own level.
+        backend.localRowDrivesMainQuery = { false }
+        backend.setOutputSet([])
+        backend.setVolume(25, for: NativeBackend.localDeviceID)
+        await pollUntil { localPlayback.outputGains.last.map { abs($0 - 0.25) < 0.001 } ?? false }
+        #expect(abs((localPlayback.outputGains.last ?? -1) - 0.25) < 0.001)
+    }
+
+    /// Turns red if starting a "This Mac" app stops re-pushing the Mac row's
+    /// level: an engine swapped in after the last slider move would then play
+    /// the app at unity instead of the level the row shows.
+    @Test func aLocalAppStartingRepushesTheMacLevelToASwappedInEngine() async {
+        let perAppCapture = PerAppCaptureCoordinator(
+            makeTap: { AlwaysSucceedsTap() },
+            processResolver: singleProcessResolver(["com.local": 4242]),
+            muteBehavior: .mutedWhenTapped)
+        let (backend, engine, _) = makeBackend(injectedPerAppCapture: perAppCapture)
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+        let original = SpyLocalPlayback()
+        backend.localPlaybackEngine = original
+        backend.setOutputSet(["dev-1"])
+        backend.setVolume(30, for: NativeBackend.localDeviceID)
+        // Let the slider's own push land on the original engine first, so only
+        // the start-time re-push can reach the swapped-in one.
+        await pollUntil { original.outputGains.contains { abs($0 - 0.3) < 0.001 } }
+
+        let localPlayback = SpyLocalPlayback()
+        backend.localPlaybackEngine = localPlayback
+        backend.updateAppRoutes([
+            AppRoute(bundleID: "com.local", displayName: "Local App", destination: .currentDevice),
+        ])
+        await pollUntil { localPlayback.addedApps.contains { $0.bundleID == "com.local" } }
+        #expect(localPlayback.outputGains.contains { abs($0 - 0.3) < 0.001 })
     }
 
     // MARK: Bug 2 — `.currentDevice` apps must clean up capture on quit/relaunch

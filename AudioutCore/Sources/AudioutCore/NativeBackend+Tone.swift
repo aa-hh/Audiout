@@ -469,6 +469,11 @@ extension NativeBackend {
             // mid-apply. Runs inside this critical section so the enqueued
             // start/stop order matches the decision order exactly.
             self.reconcileCaptureGate()
+            // Main Out gaining or losing its last non-local output flips who owns
+            // the Mac's level, so the local players' gain follows. The query is
+            // read only here, while main is parked on this `sync`.
+            self.localRowDrivesMainLatched = self.localRowDrivesMainQuery?() ?? ids.isEmpty
+            self.pushLocalPlaybackGainLocked()
             // Intent changed: re-evaluate the silence watchdog. Selecting a device (or
             // activating a group) with nothing yet `.connected` arms the countdown;
             // deselecting everything (or dropping to a local-only selection) clears any

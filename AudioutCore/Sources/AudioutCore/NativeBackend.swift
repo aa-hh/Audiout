@@ -157,6 +157,19 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// (read as "Mac not selected").
     public var selectedDevicesQuery: ((String) -> Bool)?
 
+    /// Whether the Mac's row is driving Main right now —
+    /// `GroupController.localRowDrivesMain`, wired by `AppDelegate` beside
+    /// ``selectedDevicesQuery`` and assigned once the same way. Membership,
+    /// deliberately NOT `expectedSelected`: that set drops an undiscovered
+    /// member, so a group whose only speaker is off would disagree with the row
+    /// about who owns the Mac's level. `nil` (tests) falls back to
+    /// `expectedSelected.isEmpty`. Called ONLY inside `setOutputSet`'s
+    /// main-thread `stateQueue.sync`, where main is parked and the controller's
+    /// state is safe to read; everything else reads ``localRowDrivesMainLatched``.
+    public var localRowDrivesMainQuery: (() -> Bool)?
+    /// The last answer from ``localRowDrivesMainQuery``. On `stateQueue`.
+    var localRowDrivesMainLatched = true
+
     /// Fired at the START of every routing action — the two chokepoints
     /// ``setOutputSet(_:)`` and ``updateAppRoutes(_:excludedBundleIDs:)``, which
     /// between them carry EVERY user action that moves audio (device selection,
@@ -2869,6 +2882,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             stateQueue.async {
                 self.applyLocal(id) { $0.volume = clamped }
                 self.pushSyncedLocalGain()
+                self.pushLocalPlaybackGainLocked()
             }
             return
         }
@@ -3104,6 +3118,17 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     func pushSyncedLocalGain() {   // on stateQueue
         let gain = syncedLocalGain
         captureControlQueue.async { [weak self] in self?.syncedLocalSink?.setGain(gain) }
+    }
+
+    /// Push the Mac row's level onto the apps sent to "This Mac", so its slider
+    /// scales them the way an AirPlay row's slider scales its redirected app.
+    /// Unity while no non-local output is in Main Out: there the Mac row drives
+    /// Main itself (`GroupController.localRowDrivesMain`), Main reaches these
+    /// apps through the system volume, and the stored Mac level is invisible.
+    func pushLocalPlaybackGainLocked() {   // on stateQueue
+        let level = known[Self.localDeviceID]?.volume ?? 100
+        let gain: Float = localRowDrivesMainLatched ? 1 : Float(level.clampedToVolume) / 100
+        localPlaybackEngine?.setOutputGain(gain)
     }
 
     /// `group × the Mac's own fader` as a 0.0…1.0 `Float` — times Main as well

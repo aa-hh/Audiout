@@ -194,7 +194,8 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
     /// Popover width — SoundSource-style proportions so the columns
     /// (name · Volume · Device) line up. Narrowed 2026-07-16 (change 5): the
     /// flexible name column was over-wide, so `panelWidth` dropped from 690 to
-    /// 623 (653 since 2026-09-03, which gave the name column its 30 pt back),
+    /// 623 (653 since 2026-09-03, which gave the name column its 30 pt back;
+    /// 713 since 2026-10-04, all 60 pt to the trailing column for source pills),
     /// cutting the name column's reserved width ~25% (≈269 → ≈202pt with the fixed
     /// left chrome + slider/readout/trailing columns). Longer device names may
     /// truncate more — accepted. (Footer removed; actions moved to the header +
@@ -1690,6 +1691,9 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
     func test_isCardCollapsed(title: String) -> Bool? {
         cardsByHeader[title]?.isBodyCollapsed
     }
+    /// Whether the card header `title` is drawn live, `nil` before it renders.
+    func test_isCardHeaderLive(title: String) -> Bool? { headerLivenessByHeader[title] }
+
     /// Toggle the card with `title` (drives the chevron/title click path). Returns
     /// the new collapsed state, or `nil` if `title` isn't a card.
     @discardableResult

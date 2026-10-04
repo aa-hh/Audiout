@@ -95,7 +95,7 @@ enum SurfaceToolbarSeat {
     /// costs nothing, because the arithmetic does not depend on any of those
     /// numbers: only ONE tab is ever expanded, so the widest the strip can be
     /// is `widestCapsuleWidth` plus Pin, 226 + 34 = 260 pt against a fixed
-    /// 653 pt surface.
+    /// 713 pt surface.
     /// `SurfaceToolbarTests.theStripCannotOutgrowTheSurfaceInAnyLanguage`
     /// asserts that with a name no language could produce.
     static let maxNameWidth: CGFloat = 120

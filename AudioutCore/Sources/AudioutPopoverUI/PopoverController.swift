@@ -163,7 +163,8 @@ public final class PopoverController: NSObject {
     /// because it was never a redirect target, or because a route exists but
     /// hasn't started producing audio yet (e.g. still connecting). See
     /// `DeviceRowView.apply`'s `liveAppNames` doc for the precedence rule this
-    /// feeds into.
+    /// feeds into. The Mac never appears here; ``liveAppNames(for:)`` stands
+    /// its "This Mac" routes in instead, since local playback has no connect phase.
     private var liveRoutedAppNames: [String: [String]] = [:]
 
     /// Bundle IDs of routed apps whose process is currently NOT running (T4).
@@ -2668,9 +2669,9 @@ public final class PopoverController: NSObject {
         }()
         let anyDeviceSounding = deviceRowsByID.keys.contains { id in
             guard let device = devicesByID[id] else { return false }
-            if !(liveRoutedAppNames[id] ?? []).isEmpty { return true }
+            if !liveAppNames(for: device).isEmpty { return true }
             guard let controller, controller.isMainOutMember(id) else { return false }
-            guard case .connected = device.connectionState else { return false }
+            guard drawsConnected(device, controller: controller) else { return false }
             return !(device.isMuted || controller.isMuted(id)) && !controller.isMainOutMuted
         }
         let anyRouteSounding = appRouting.appRoutes.contains { route in
@@ -3058,7 +3059,30 @@ public final class PopoverController: NSObject {
     /// Whether an app route currently redirects to this device — the canonical
     /// `isRedirectTarget` source (backs `controllable` and the Q4 retry path).
     private func isRedirectTarget(_ id: String) -> Bool {
-        !appRouting.routedAppNames(for: id, groupTargets: groupRouteTargets()).isEmpty
+        !appRouting.routedAppNames(for: id, isLocalDevice: devicesByID[id]?.isLocalDevice ?? false,
+                                   groupTargets: groupRouteTargets()).isEmpty
+    }
+
+    /// Whether `device` draws as connected. The Mac has no connection to make,
+    /// so its snapshot can sit at `.off` while it carries audio — in the main
+    /// mix (the default Mac-only setup the rail already draws as connected) or
+    /// for an app sent to "This Mac" — and then draws the ring and status dot
+    /// any speaker in that position draws. One answer for the row and the
+    /// Devices card header, so the two cannot disagree.
+    private func drawsConnected(_ device: Device, controller: GroupController) -> Bool {
+        if case .connected = device.connectionState { return true }
+        return device.isLocalDevice && device.isAvailable && device.connectionState == .off
+            && (controller.isMainOutMember(device.id) || !liveAppNames(for: device).isEmpty)
+    }
+
+    /// The apps confirmed playing on `device`. An AirPlay or Bluetooth target
+    /// learns this from the backend once its stream is up; the Mac has no
+    /// connect phase to wait through — a "This Mac" app renders locally the
+    /// moment it is picked — so its routes count as live, which gives its row
+    /// the same connected ring, gold dot and primary-text pills any target gets.
+    private func liveAppNames(for device: Device) -> [String] {
+        guard device.isLocalDevice else { return liveRoutedAppNames[device.id] ?? [] }
+        return appRouting.routedAppNames(for: device.id, isLocalDevice: true)
     }
 
     /// The Devices card's genuinely-DIVERGING dormant state (spec §4.7 FINAL
@@ -3165,8 +3189,9 @@ public final class PopoverController: NSObject {
             row.apply(device, selected: false, controllable: false,
                       selectionDimmed: dimmed,
                       routedAppNames: appRouting.routedAppNames(for: device.id,
+                                                              isLocalDevice: device.isLocalDevice,
                                                               groupTargets: groupRouteTargets()),
-                      liveAppNames: liveRoutedAppNames[device.id] ?? [],
+                      liveAppNames: liveAppNames(for: device),
                       appRouteGroupNames: appRouteGroupNames(),
                       mainOutTargetsGroupName: activeMainOutGroupName,
                       energizePending: energizePendingIDs.contains(device.id),
@@ -3201,6 +3226,9 @@ public final class PopoverController: NSObject {
         if device.isLocalDevice, controller.localRowDrivesMain {
             device.volume = controller.mainOutMasterVolume
         }
+        if drawsConnected(device, controller: controller) {
+            device.connectionState = .connected
+        }
         // T-UI-ALLOW: the Phase-1 local-mix block is gone — the Mac row's
         // select-ability gate went with it (T-GROUPCTL / Q5, synced local sink),
         // so the Mac row is never blocked/greyed any more. This no longer computes
@@ -3222,8 +3250,9 @@ public final class PopoverController: NSObject {
                   controllable: controller.isMainOutMember(device.id) || isRedirectTarget(device.id),
                   selectionDimmed: dimmed,
                   routedAppNames: appRouting.routedAppNames(for: device.id,
+                                                              isLocalDevice: device.isLocalDevice,
                                                               groupTargets: groupRouteTargets()),
-                  liveAppNames: liveRoutedAppNames[device.id] ?? [],
+                  liveAppNames: liveAppNames(for: device),
                   appRouteGroupNames: appRouteGroupNames(),
                   masterMuted: controller.isMainOutMuted,
                   inActiveTarget: inActiveTarget,

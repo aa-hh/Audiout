@@ -88,6 +88,7 @@ click does not take. Two things happen:
    undo-removal offer: **Play here instead**. Clicking it deselects the current
    speaker and selects this one in one step, through the row's own delegate
    path, then clears the offer.
+   *2026-10-04: the button now reads "Play here" (commit 854fb2c5).*
 2. The note, for this popover open, reads:
    > Your trial has ended, so Audiout plays on one speaker at a time.
    with the same two actions as J2. It reverts to the standing note on the next

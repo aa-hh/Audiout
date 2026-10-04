@@ -402,14 +402,15 @@ public final class GeneralSettingsViewController: NSViewController {
     /// What the status line under the License row says, per state — plain
     /// words, no jargon, and never a claim the app is about to stop working.
     /// The four server-verdict strings come from
-    /// ``LicenseSheetViewController/statusLine(for:)`` so the pane and the
+    /// ``LicenseSheetViewController/statusLine(for:reason:)`` so the pane and the
     /// sheet can never drift apart; the two key-side states are the pane's own.
     ///
     /// The no-verdict line leads with the state the user cares about (their key
     /// is safe) rather than with the failure, and promises nothing about when
     /// the retry happens — Check Again sits beside it.
     private static func licenseStatusLine(keyIsEmpty: Bool,
-                                          status: LicenseStatus?) -> String {
+                                          status: LicenseStatus?,
+                                          reason: String?) -> String {
         if keyIsEmpty {
             // Since 2026-09-26 an unregistered install is not gated; it runs
             // limited to one speaker (dev/notes/unregistered-mode-spec-2026-09-26.md).
@@ -419,7 +420,7 @@ public final class GeneralSettingsViewController: NSViewController {
         guard let status else {
             return "Your key is saved. Audiout hasn’t been able to verify it yet."
         }
-        return LicenseSheetViewController.statusLine(for: status)
+        return LicenseSheetViewController.statusLine(for: status, reason: reason)
     }
 
     /// The line for a limited install, which must agree with the limit:
@@ -456,7 +457,9 @@ public final class GeneralSettingsViewController: NSViewController {
         let status = settings.licenseStatus
         if serverConfigured {
             licenseStatusHint.stringValue = limitedStatusLine()
-                ?? Self.licenseStatusLine(keyIsEmpty: key.isEmpty, status: status)
+                ?? Self.licenseStatusLine(keyIsEmpty: key.isEmpty,
+                                          status: status,
+                                          reason: settings.licenseReason)
         }
 
         // Only where it can do something: a key is stored, and no verdict has

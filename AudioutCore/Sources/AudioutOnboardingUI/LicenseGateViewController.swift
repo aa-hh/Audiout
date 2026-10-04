@@ -627,7 +627,7 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
             Analytics.capture("license:key_submitted", ["outcome": outcome, "source": "gate"])
             switch result {
             case .verified(.active):
-                self.show(LicenseCopy.statusLine(for: .active))
+                self.show(LicenseCopy.statusLine(for: .active, reason: nil))
                 self.field.surge(intensity: 1.0)
                 self.field.setScene(.farewell)
                 self.pass(afterBeat: true)
@@ -635,7 +635,7 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
                 self.keyField.isEnabled = true
                 self.registerButton.isEnabled = true
                 self.keyField.stringValue = self.settings.licenseKey ?? ""
-                self.show(LicenseCopy.statusLine(for: status))
+                self.show(LicenseCopy.statusLine(for: status, reason: self.settings.licenseReason))
                 self.field.setScene(.quiet)
                 // A refunded key has one useful answer left, so the offer
                 // stops being quiet.

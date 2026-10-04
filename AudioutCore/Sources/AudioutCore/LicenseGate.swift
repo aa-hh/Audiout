@@ -109,10 +109,16 @@ public enum LicenseCopy {
     /// (`AppSettings.licenseReason`): the popover's standing note and the
     /// Settings status line both read it, so the two never disagree.
     public static func oneSpeakerKeyRefusedLine(reason: String?) -> String {
+        "\(refusedKeyClause(reason: reason)), so Audiout plays on one speaker at a time."
+    }
+
+    /// What happened to a refused key, by the server's `reason`, in ONE place:
+    /// `oneSpeakerKeyRefusedLine` and `statusLine` both open with it.
+    private static func refusedKeyClause(reason: String?) -> String {
         switch reason {
-        case "refund": return "This key was refunded, so Audiout plays on one speaker at a time."
-        case "chargeback": return "This key\u{2019}s payment was reversed, so Audiout plays on one speaker at a time."
-        default: return "This key was revoked, so Audiout plays on one speaker at a time."
+        case "refund": return "This key was refunded"
+        case "chargeback": return "This key\u{2019}s payment was reversed"
+        default: return "This key was revoked"
         }
     }
 
@@ -121,10 +127,15 @@ public enum LicenseCopy {
     /// worker issues.
     public static let keyFormatHint = "AUDT-XXXXX-XXXXX-XXXXX-XXXXX"
 
-    public static func statusLine(for status: LicenseStatus) -> String {
+    /// `reason` is the server's `reason` for a `revoked` answer
+    /// (`AppSettings.licenseReason`); the line names it rather than lumping
+    /// every revocation together. Other statuses ignore it.
+    public static func statusLine(for status: LicenseStatus, reason: String?) -> String {
         switch status {
         case .active: return "Registered. Thank you for supporting Audiout."
-        case .revoked: return "This key was refunded or revoked. Buy a new one to keep using Audiout."
+        case .revoked:
+            if reason == "trial_expired" { return "Your trial has ended. Buy Audiout to keep using it." }
+            return "\(refusedKeyClause(reason: reason)). Buy a new one to keep using Audiout."
         case .unknown: return "This key isn’t recognized. Check it against your receipt."
         case .invalid: return "That doesn’t look like an Audiout key (\(keyFormatHint))."
         }

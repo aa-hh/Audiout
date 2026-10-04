@@ -198,11 +198,15 @@ before the gate means anything.
 
 1. Issue #261: the two open re-alignment findings, as ONE scoped round (the
    scoper's case table is in the PR 256 conversation), plus fix 2's doc debt.
-2. Merge #228 on the owner's go: mark ready, one review round (Bluetooth
-   backend, a risk path), CI, queue. Rulings owed from runbook Part 3: (a)
-   fall back or hold when a slow speaker is re-measured lower; (b) with two
-   slow Moves, keep the delay of the deselected slower one or drop to the
-   other's. Then fix runbook Part 3's pass criterion.
+2. #228 MERGED (06:29, after one review round with the deep pass on Fable:
+   0 HIGH, 3 MEDIUM posted on the PR as follow-ups: the wizard's ceiling
+   disagrees with the raised room once the term stands; an AirPlay speaker
+   joining a room where only the Bluetooth term stands gets no pre-delay
+   line; the `roomDelayLocked` doc). Owner's ruling (a): HOLD the room delay
+   until the slow speaker is deselected when it is re-measured lower (#228
+   falls back today: follow-up change). Ruling (b), two slow Moves and the
+   slower one deselected, still open. Then fix runbook Part 3's pass
+   criterion. The branch review script's deep pass runs on Fable now (#265).
 3. Issue #263: keep a Bluetooth speaker through a short link drop, or re-add
    it when it returns within a grace window.
 4. Direction (Alec, 2026-10-03): PostHog shows 11 production Macs in 90 days,

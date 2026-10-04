@@ -3614,9 +3614,12 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                         // instead of showing this attempt's failure as a refusal.
                         // The state stream reports the same failure, and if that
                         // report landed before the password was typed it parked
-                        // the id, so the extra attempt lifts the park.
+                        // the id, so the extra attempt lifts the park. The mark is
+                        // spent here, whatever the store returns next, so a submit
+                        // buys exactly one extra attempt.
                         if self.awaitsResubmittedPassword(id) {
                             self.failedGate.remove(id)
+                            self.passwordResubmitted[id] = nil
                             // An armed completion is always echoed on the state
                             // stream, after it. If that echo has not landed yet it
                             // would arrive with the mark spent and read as a
@@ -5312,9 +5315,6 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                     device.connectionState = .off
                 }
             case .startup:
-                // The engine also throws `sessionFailed` for a `.startup`
-                // terminal, so this can be the echo the catch expects.
-                if self.expectStaleFailure.remove(id) == nil { self.failureEchoSeen.insert(id) }
                 return nil // non-terminal progress; nothing to render yet
             }
             guard device != before else {
@@ -5885,8 +5885,8 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     private var pendingPasswordOutcome: [String: String] = [:]
 
     /// The password submitted per id since that id's last connect attempt
-    /// read its descriptor (`descriptorToFeed` clears it), so a submit buys at
-    /// most one extra attempt.
+    /// read its descriptor (`descriptorToFeed` and the converge catch clear
+    /// it), so a submit buys at most one extra attempt.
     private var passwordResubmitted: [String: String] = [:]
 
     /// Ids whose failed add the converge catch looped past before the state
@@ -5923,7 +5923,9 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     private func applyPasswordFailureLocked(state: OutputState, cause: ConnectionFailure.Cause, device: inout Device) {
         let fedPassword = fedDescriptors[device.id]?.password
         if state == .passwordRequired, fedPassword != nil {
-            passwordStore.removePassword(for: device.id)
+            // Off `stateQueue`: a Keychain delete can wait on an access prompt.
+            let store = passwordStore, id = device.id
+            DispatchQueue.global().async { store.removePassword(for: id) }
             device.hasStoredPassword = false
         }
         if Self.waitsForPassword(cause, fedPassword: fedPassword) {
@@ -5932,10 +5934,12 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     }
 
     public func submitAirPlayPassword(_ password: String, for id: String, source: String) {
+        // Mark first: a converge catch running before the store write would
+        // otherwise read the old fed password as refused and delete this one.
+        stateQueue.sync { self.passwordResubmitted[id] = password }
         passwordStore.setPassword(password, for: id)
         stateQueue.async {
             self.pendingPasswordOutcome[id] = source
-            self.passwordResubmitted[id] = password
             self.applyLocal(id) { $0.hasStoredPassword = true }
         }
     }

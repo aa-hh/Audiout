@@ -666,7 +666,7 @@ private func makeBackend(
     /// only, exactly like `btTrimStore`. The EQ tests pass a store over an
     /// isolated scratch directory so nothing touches real Application Support.
     eqStore: DeviceEQStore? = nil,
-    passwordStore: InMemoryAirPlayPasswordStore? = nil,
+    passwordStore: AirPlayPasswordStoring? = nil,
     systemVolume: SystemVolumeControlling = FakeSystemVolume(),
     ptpHelperActivator: PTPHelperActivating = AlwaysReadyPTPHelperActivator(),
     connectVolume: @escaping @Sendable () -> Int = { AppSettings.defaultConnectVolume },
@@ -1208,6 +1208,36 @@ private final class HoldPoint: @unchecked Sendable {
     func hold() async {
         lock.withLock { _entered = true }
         while !(lock.withLock { _open }) { try? await Task.sleep(nanoseconds: 2_000_000) }
+    }
+}
+
+/// Every connection state a device's `deviceUpdated` events carried, in order.
+private final class StateLog: @unchecked Sendable {
+    private let lock = NSLock()
+    private var states: [ConnectionState] = []
+    func append(_ state: ConnectionState) { lock.withLock { states.append(state) } }
+    var all: [ConnectionState] { lock.withLock { states } }
+}
+
+/// A password store whose writes run `onSet` after storing, unless
+/// `dropsWrites` makes them no-ops (a refused or denied Keychain write).
+private final class ScriptedPasswordStore: AirPlayPasswordStoring, @unchecked Sendable {
+    private let inner = InMemoryAirPlayPasswordStore()
+    private let lock = NSLock()
+    private var removes = 0
+    let dropsWrites: Bool
+    var onSet: (@Sendable () -> Void)?
+    init(dropsWrites: Bool = false) { self.dropsWrites = dropsWrites }
+    var removeCount: Int { lock.withLock { removes } }
+    func password(for deviceID: String) -> String? { inner.password(for: deviceID) }
+    func setPassword(_ password: String, for deviceID: String) {
+        guard !dropsWrites else { return }
+        inner.setPassword(password, for: deviceID)
+        onSet?()
+    }
+    func removePassword(for deviceID: String) {
+        lock.withLock { removes += 1 }
+        inner.removePassword(for: deviceID)
     }
 }
 
@@ -3192,6 +3222,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
 
         engine.pushState(device.outputID, .passwordRequired)
         await pollUntil { backend.devices.first { $0.id == device.id }?.hasStoredPassword == false }
+        await pollUntil { store.password(for: device.id) == nil }
         #expect(store.password(for: device.id) == nil)
         #expect(failureCause(backend, device.id) == .authRequired)
     }
@@ -3293,6 +3324,79 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         #expect(engine.fedDescriptorList.last?.password == "secret")
     }
 
+    /// Leaving the typed-password mark set in the converge catch (so a store
+    /// that never holds the password loops addOutput forever) turns it red.
+    @Test func passwordTheStoreNeverKeepsBuysExactlyOneExtraAttempt() async {
+        let store = ScriptedPasswordStore(dropsWrites: true)
+        let (backend, engine, discovery) = makeBackend(passwordStore: store)
+        defer { backend.stop() }
+        let device = ap2Device(access: .password)
+        await startAndDiscover(backend, engine, discovery, device)
+        let firstAdd = HoldPoint()
+        let sawFirst = OnceFlag()
+        engine.addFailures = [device.outputID.rawValue]
+        engine.onAddOutputHold = { id, _ in
+            guard id == device.outputID, !sawFirst.testAndSet() else { return }
+            await firstAdd.hold()
+        }
+
+        backend.setOutputSet([device.id])
+        await pollUntil { firstAdd.entered }
+        backend.submitAirPlayPassword("secret", for: device.id, source: "mac")
+        firstAdd.open()
+
+        await pollUntil { self.failureCause(backend, device.id) != nil }
+        #expect(failureCause(backend, device.id) == .authRequired)
+        #expect(engine.addedIDs.filter { $0 == device.outputID }.count == 2)
+    }
+
+    /// Setting the typed-password mark after the store write (so a
+    /// `.passwordRequired` catch in between deletes the password just typed)
+    /// turns it red.
+    @Test func passwordRequiredLandingRightAfterASubmitKeepsTheTypedPassword() async {
+        let store = ScriptedPasswordStore()
+        let device = ap2Device(access: .password)
+        store.setPassword("old", for: device.id)
+        let (backend, engine, discovery) = makeBackend(passwordStore: store)
+        defer { backend.stop() }
+        await startAndDiscover(backend, engine, discovery, device)
+        let firstAdd = HoldPoint()
+        let sawFirst = OnceFlag()
+        engine.addFailures = [device.outputID.rawValue]
+        engine.addFailureError = .passwordRequired
+        engine.onAddOutputHold = { id, _ in
+            guard id == device.outputID else { return }
+            if sawFirst.testAndSet() { engine.addFailures = [] } else { await firstAdd.hold() }
+        }
+        // The failed add lands between the store write and the rest of the
+        // submit: the hook lets it fail and waits until the catch has either
+        // deleted a password or looped into the next attempt.
+        store.onSet = {
+            firstAdd.open()
+            let deadline = Date().addingTimeInterval(30)
+            while store.removeCount == 0,
+                  engine.addedIDs.filter({ $0 == device.outputID }).count < 2,
+                  Date() < deadline {
+                Thread.sleep(forTimeInterval: 0.002)
+            }
+        }
+
+        backend.setOutputSet([device.id])
+        await pollUntil { firstAdd.entered }
+        #expect(engine.fedDescriptorList.last?.password == "old")
+        await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
+            DispatchQueue.global().async {
+                backend.submitAirPlayPassword("new", for: device.id, source: "mac")
+                done.resume()
+            }
+        }
+
+        await pollUntil { backend.devices.first { $0.id == device.id }?.connectionState == .connected }
+        #expect(store.removeCount == 0)
+        #expect(store.password(for: device.id) == "new")
+        #expect(backend.devices.first { $0.id == device.id }?.hasStoredPassword == true)
+    }
+
     /// Parking the speaker or showing it refused when the state stream reports
     /// the failed connect before the catch runs (so the typed password never
     /// reaches the receiver) turns it red.
@@ -3303,12 +3407,6 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         let device = ap2Device(access: .password)
         let marker = ap2Device(id: "AA:BB:CC:DD:EE:02", name: "Marker")
         await startAndDiscoverPair(backend, engine, discovery, device, marker)
-        final class StateLog: @unchecked Sendable {
-            private let lock = NSLock()
-            private var states: [ConnectionState] = []
-            func append(_ state: ConnectionState) { lock.withLock { states.append(state) } }
-            var all: [ConnectionState] { lock.withLock { states } }
-        }
         let log = StateLog()
         let stream = backend.makeEventStream()
         let task = Task {
@@ -3354,12 +3452,6 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         let device = ap2Device(access: .password)
         let marker = ap2Device(id: "AA:BB:CC:DD:EE:02", name: "Marker")
         await startAndDiscoverPair(backend, engine, discovery, device, marker)
-        final class StateLog: @unchecked Sendable {
-            private let lock = NSLock()
-            private var states: [ConnectionState] = []
-            func append(_ state: ConnectionState) { lock.withLock { states.append(state) } }
-            var all: [ConnectionState] { lock.withLock { states } }
-        }
         let log = StateLog()
         let stream = backend.makeEventStream()
         let task = Task {

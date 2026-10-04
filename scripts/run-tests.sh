@@ -481,7 +481,7 @@ if [ "$suite_cache_kind" = "suites" ] && [ "$suite_cache_missing" != "$suite_cac
 fi
 
 # --- prefer-remote ----------------------------------------------------------
-# With `audiout.testPrefer = permits` (the setting since 2026-09-11), go to
+# With `audiout.testPrefer = permits` (the setting 2026-09-11 to 2026-10-04; `remote` since), go to
 # the other Mac FIRST only when it has at least as many free capacity permits
 # as this one — see remote_permits_win. `= remote` goes there first
 # unconditionally, which keeps THIS machine free but piles every job onto the

@@ -619,4 +619,7 @@ extension DeviceRowView {
     /// ordinary available/selected states. `apply` already stamps this, so no
     /// `draw(_:)` call is needed to read it.
     public var test_nameColor: NSColor? { nameLabel.textColor }
+
+    /// Whether the lock glyph after the name is showing.
+    public var test_lockGlyphIsVisible: Bool { !lockGlyphView.isHidden }
 }

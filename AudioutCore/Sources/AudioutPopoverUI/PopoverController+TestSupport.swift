@@ -427,6 +427,9 @@ extension PopoverController {
         diagnosisPanelsByID[id]
     }
 
+    /// The AirPlay password sheet while it is up, or `nil`.
+    public func test_passwordSheet() -> SpeakerPasswordSheetViewController? { passwordSheet }
+
     /// Simulate clicking "Try again" in the device's open diagnosis panel.
     public func test_tapRetry(for id: String) {
         diagnosisPanelsByID[id]?.test_tapRetry()

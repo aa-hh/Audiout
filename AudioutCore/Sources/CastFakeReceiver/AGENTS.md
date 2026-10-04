@@ -15,9 +15,11 @@ emulator: no advertising, no device auth, no decoding.
 - One session at a time; a second concurrent load clobbers the first fetch.
 - Callbacks are weak and there is no deinit, so hold the receiver strongly and stop it yourself.
 - The embedded identity is a self-signed throwaway and must never reach the shipping app.
+- `FakeCastStreamingReceiver`'s playout estimate uses the raw SR offset, not openscreen's 30 s smoother; it proves the mapping, not the jitter.
 - Long-form traps, dated decisions and the changelog: [AGENTS-HISTORY.md](AGENTS-HISTORY.md). Grep it before debugging anything here.
 
 ## Map
 
 - `FakeCastIdentity` → the embedded throwaway TLS identity.
 - `FakeCastReceiver` → loopback TLS listener answering the Cast handshake.
+- `FakeCastStreamingReceiver` → loopback UDP mirroring receiver: answers OFFER, decrypts, estimates playout.

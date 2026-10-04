@@ -7,12 +7,14 @@
 
 import Foundation
 
-/// The four `urn:x-cast:` namespaces this sender speaks.
+/// The five `urn:x-cast:` namespaces this sender speaks.
 public enum CastNamespace {
     public static let connection = "urn:x-cast:com.google.cast.tp.connection"
     public static let heartbeat = "urn:x-cast:com.google.cast.tp.heartbeat"
     public static let receiver = "urn:x-cast:com.google.cast.receiver"
     public static let media = "urn:x-cast:com.google.cast.media"
+    /// Cast Streaming (mirroring): OFFER/ANSWER to the launched mirroring app.
+    public static let webrtc = "urn:x-cast:com.google.cast.webrtc"
 }
 
 /// The two well-known endpoint ids on the control channel. Application

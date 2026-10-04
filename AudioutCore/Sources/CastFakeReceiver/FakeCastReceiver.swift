@@ -86,6 +86,9 @@ public final class FakeCastReceiver: @unchecked Sendable {
     /// served, header and audio alike.
     public var onFetchComplete: ((Data, Int) -> Void)?
 
+    /// Answers OFFERs on the webrtc namespace when set; set it before LAUNCH.
+    public var streaming: FakeCastStreamingReceiver?
+
     // Queue-confined below this line.
     private var listener: NWListener?
     private var sessions: [ObjectIdentifier: Session] = [:]
@@ -358,6 +361,13 @@ public final class FakeCastReceiver: @unchecked Sendable {
             guard isRunningApplication(message.destinationID),
                   session.connectedDestinations.contains(message.destinationID) else { return }
             handleMedia(type: type, json: json, requestID: requestID, message: message, session: session)
+        case CastNamespace.webrtc:
+            // Same virtual-connection rule as the media namespace. The ANSWER
+            // carries `requestId: 0` from `reply`; the sender matches on seqNum.
+            guard isRunningApplication(message.destinationID),
+                  session.connectedDestinations.contains(message.destinationID),
+                  type == "OFFER", let streaming else { return }
+            reply(to: message, on: session, payload: streaming.answer(for: json), requestID: nil)
         default:
             break
         }
@@ -397,14 +407,19 @@ public final class FakeCastReceiver: @unchecked Sendable {
         case "LAUNCH":
             record("LAUNCH")
             transportCounter += 1
+            let appID = json["appId"] as? String ?? ""
+            // The two Cast Streaming app ids: audio-only and audio+video.
+            let mirroring = appID == "85CDB22F" || appID == "0F5096E8"
             applications.append([
-                "appId": json["appId"] as? String ?? "",
-                "displayName": "Default Media Receiver",
+                "appId": appID,
+                "displayName": mirroring ? "Chrome Mirroring" : "Default Media Receiver",
                 "sessionId": UUID().uuidString,
                 "transportId": "web-\(transportCounter)",
                 "statusText": "Ready To Cast",
                 "isIdleScreen": false,
-                "namespaces": [["name": CastNamespace.media]],
+                "namespaces": mirroring
+                    ? [["name": CastNamespace.webrtc], ["name": CastNamespace.media]]
+                    : [["name": CastNamespace.media]],
             ])
         case "STOP":
             record("STOP")

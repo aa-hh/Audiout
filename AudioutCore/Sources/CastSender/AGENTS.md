@@ -9,23 +9,16 @@ routing, no app concepts. Callers: `CastDeviceEnumerator`/`CastOutputManager`
 
 ## Rules
 
-- **A receiver never accepts pushed audio** — it is handed a URL and pulls. The
-  media namespace carries LOAD/PLAY/PAUSE/STOP and status only; audio leaves
-  through `CastLiveAudioServer` as an endless chunked WAV response.
+- **The Default Media Receiver never accepts pushed audio** — it is handed a
+  URL and pulls. Its media namespace carries LOAD/PLAY/PAUSE/STOP and status
+  only; audio leaves through `CastLiveAudioServer` as an endless chunked WAV.
 - **LICENSE-CLEAN.** Never copy from stream2chromecast, browser-castv2-client,
   VLC or any copyleft source; every file carries the clean-room banner.
-- **Zero dependencies** — Foundation, Network, Security. Protobuf is hand-rolled
-  by decision 4 of `dev/notes/006-cast-output-scope-2026-08-22.md`: seven
-  fields, cheaper than codegen.
-- **`NSBonjourServices` carries `_googlecast._tcp`** (`scripts/make-app.sh`
-  enforces it) — no bundled app can browse otherwise. A browse
-  that works in the CLI but finds nothing in the app is this, not `CastBrowser`.
-- **Cross-queue reads take a lock, never `queue.sync`** — `stateLock` in
-  `CastChannel`, `portLock` in `CastLiveAudioServer`: callers read them from
-  completions already on that queue, where a sync getter deadlocks.
-- **Nothing owns a `CastSpikeRun` but its caller** — hold it strongly, because
-  its callbacks are `weak self` and a dropped run stops silently. Its log lines
-  are prefixed `+%.3fs `; keep new events in that shape.
+- **Foundation, Network, Security, plus AudioToolbox (Opus encoder) and
+  CommonCrypto (AES-CTR) in the streaming files only.**
+- **The first Sender Report goes out before the first RTP packet;** a receiver
+  drops packet 0 of every frame until it has one.
+- Long-form traps: [AGENTS-HISTORY.md](AGENTS-HISTORY.md).
 
 ## Map
 
@@ -40,3 +33,9 @@ routing, no app concepts. Callers: `CastDeviceEnumerator`/`CastOutputManager`
 | `CastLiveAudioServer` | Serves the endless chunked WAV. |
 | `CastPCMSource` | Audio seam; `SineSource` is the tone. |
 | `CastSpikeRun` | The Phase-0 measurement. |
+| `CastMirrorSpikeRun` | The Cast Streaming (mirroring) measurement. |
+| `CastStreamingSession` | One Opus RTP stream: Sender Reports, feedback, resends. |
+| `CastStreamingOffer` | OFFER builder; `CastStreamingAnswer` parses the reply. |
+| `CastFrameCrypto` | Per-frame AES-128-CTR. |
+| `CastOpusEncoder` | AudioToolbox Opus, one packet per frame. |
+| `CastRTPPacket` / `CastSenderReport` / `CastReceiverFeedback` | Wire codecs for Cast Streaming. |

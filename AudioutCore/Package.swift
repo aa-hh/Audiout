@@ -449,7 +449,17 @@ let package = Package(
         // Not linked by the app.
         .executableTarget(
             name: "cast-spike",
-            dependencies: ["CastSender", "CastFakeReceiver"]
+            dependencies: ["CastSender", "CastFakeReceiver", .product(name: "ProbeKit", package: "audiout-shared")],
+            // The plist exists only for the microphone prompt in `--mirror --mic`.
+            exclude: ["Info.plist"],
+            linkerSettings: [
+                .unsafeFlags([
+                    "-Xlinker", "-sectcreate",
+                    "-Xlinker", "__TEXT",
+                    "-Xlinker", "__info_plist",
+                    "-Xlinker", "Sources/cast-spike/Info.plist"
+                ])
+            ]
         ),
         .testTarget(
             name: "AudioutCoreTests",

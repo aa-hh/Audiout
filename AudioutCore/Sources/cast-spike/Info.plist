@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>cast-spike listens through the built-in microphone to time when a Cast receiver plays each probe.</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.audiout.cast-spike</string>
+    <key>CFBundleName</key>
+    <string>cast-spike</string>
+</dict>
+</plist>

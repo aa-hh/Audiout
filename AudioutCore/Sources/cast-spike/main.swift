@@ -40,6 +40,17 @@ struct Options {
     var fetchDelay: Double = 0
     var stallAfter: Double?
     var stallDuration: Double = 0.9
+    // `--mirror`: the Cast Streaming spike instead of the HTTP one.
+    var mirror = false
+    var appIDGiven = false
+    var targetDelayMs = 400
+    var frameMs = 10
+    var bitRate = 128_000
+    var payloadType: UInt8 = 127
+    var probePeriod: Double = 1
+    var probeGain: Float = 0.3
+    var mic = false
+    var csvPath: String?
 }
 
 struct UsageError: Error {
@@ -88,6 +99,7 @@ func parseArgs(_ args: [String]) throws -> Options {
             options.autoplay = false
         case "--app-id":
             options.appID = try next("a Cast app id")
+            options.appIDGiven = true
         case "--prime-ms":
             let raw = try next("a number of milliseconds")
             guard let value = Int(raw), value >= 0 else { throw UsageError(message: "--prime-ms: '\(raw)' is not a number of milliseconds") }
@@ -108,6 +120,36 @@ func parseArgs(_ args: [String]) throws -> Options {
             let raw = try next("a number of seconds")
             guard let value = Double(raw), value > 0 else { throw UsageError(message: "--stall-for: '\(raw)' is not a number of seconds") }
             options.stallDuration = value
+        case "--mirror":
+            options.mirror = true
+        case "--target-delay":
+            let raw = try next("a number of milliseconds")
+            guard let value = Int(raw), (0...5_000).contains(value) else { throw UsageError(message: "--target-delay: '\(raw)' is not 0 to 5000 ms") }
+            options.targetDelayMs = value
+        case "--frame-ms":
+            let raw = try next("10 or 20")
+            guard let value = Int(raw), [10, 20].contains(value) else { throw UsageError(message: "--frame-ms: '\(raw)' is not 10 or 20") }
+            options.frameMs = value
+        case "--bitrate":
+            let raw = try next("bits per second")
+            guard let value = Int(raw), value > 0 else { throw UsageError(message: "--bitrate: '\(raw)' is not a bit rate") }
+            options.bitRate = value
+        case "--payload-type":
+            let raw = try next("96 or 127")
+            guard let value = UInt8(raw), [96, 127].contains(value) else { throw UsageError(message: "--payload-type: '\(raw)' is not 96 or 127") }
+            options.payloadType = value
+        case "--probe-period":
+            let raw = try next("a number of seconds")
+            guard let value = Double(raw), value > 0 else { throw UsageError(message: "--probe-period: '\(raw)' is not a number of seconds") }
+            options.probePeriod = value
+        case "--probe-gain":
+            let raw = try next("a level from 0 to 1")
+            guard let value = Float(raw), value >= 0, value <= 1 else { throw UsageError(message: "--probe-gain: '\(raw)' is not a level from 0 to 1") }
+            options.probeGain = value
+        case "--mic":
+            options.mic = true
+        case "--csv":
+            options.csvPath = try next("a file path")
         default:
             throw UsageError(message: "unknown argument: \(argument)")
         }
@@ -117,6 +159,11 @@ func parseArgs(_ args: [String]) throws -> Options {
     guard modeFlags == 1 else {
         throw UsageError(message: "give exactly one of --list, --fake, --device or --host")
     }
+    // The fake receiver plays nothing, so there is nothing to hear.
+    if options.mic, case .fake = options.mode {
+        throw UsageError(message: "--mic cannot be used with --fake")
+    }
+    if options.mirror, !options.appIDGiven { options.appID = "85CDB22F" }
     return options
 }
 
@@ -143,6 +190,18 @@ OPTIONS:
   --stream-type <t>      Cast streamType for LOAD: LIVE (default), BUFFERED, NONE
   --no-autoplay          LOAD with autoplay=false, then an explicit PLAY (AirConnect)
   --app-id <id>          receiver app to launch (default CC1AD845; AirConnect uses 46C1A819)
+
+MIRROR OPTIONS (--mirror: Cast Streaming, Opus over RTP; combines with --fake, --device, --host):
+  --mirror               stream to the mirroring app (default app id 85CDB22F) instead of
+                         serving WAV; --hold is how long it streams
+  --target-delay <ms>    playout delay offered to the receiver (default 400)
+  --frame-ms <10|20>     Opus frame length (default 10)
+  --bitrate <bps>        Opus bit rate (default 128000)
+  --payload-type <n>     RTP payload type, 96 or 127 (default 127)
+  --probe-period <s>     seconds between probes (default 1)
+  --probe-gain <0..1>    probe level (default 0.3)
+  --mic                  record the built-in microphone and time each probe (not with --fake)
+  --csv <path>           write index,pts_ns,arrival_ms,delay_ms,confidence per probe
 
 FAKE-RECEIVER OPTIONS (--fake only):
   --control-type <t>     volume.controlType it reports: attenuation (default) or fixed
@@ -229,6 +288,94 @@ func spike(endpoint: NWEndpoint, options: Options, loopbackOnly: Bool, exit: Exi
     }
 }
 
+/// The probes the run generated, written on the run's queue.
+final class ProbeLog: @unchecked Sendable {
+    private let lock = NSLock()
+    private var probes: [(index: Int, ptsNanos: UInt64)] = []
+    func append(_ index: Int, _ pts: UInt64) { lock.withLock { probes.append((index, pts)) } }
+    var all: [(index: Int, ptsNanos: UInt64)] { lock.withLock { probes } }
+}
+
+/// Runs the Cast Streaming spike against `endpoint`, timing each probe with
+/// the built-in microphone when `--mic` is set, and signals `exit` when over.
+/// `afterRun` prints whatever the caller's fake receiver saw.
+func mirrorSpike(endpoint: NWEndpoint, options: Options, exit: Exit, afterRun: (() -> Void)? = nil) {
+    var recorder: MicArrivalRecorder?
+    var micRate = 0.0
+    if options.mic {
+        // Started first, so the recording is running before the first probe.
+        let mic = MicArrivalRecorder()
+        do {
+            micRate = try mic.start()
+        } catch {
+            print("error=\(error)")
+            exit.finish(1)
+            return
+        }
+        retainer.keep(mic)
+        recorder = mic
+        print("mic_started rate=\(micRate)")
+    }
+    let probes = ProbeLog()
+    let run = CastMirrorSpikeRun(
+        options: CastMirrorSpikeRun.Options(
+            endpoint: endpoint,
+            appID: options.appID,
+            targetDelayMs: options.targetDelayMs,
+            framesPerPacket: options.frameMs * 48,
+            bitRate: options.bitRate,
+            rtpPayloadType: options.payloadType,
+            holdSeconds: options.holdSeconds,
+            probePeriodSeconds: options.probePeriod,
+            probeAmplitude: options.probeGain,
+            probeSamples: MirrorMeasurement.probe(sampleRate: 48_000),
+            onProbe: { probes.append($0, $1) }
+        ),
+        log: { print($0) }
+    )
+    retainer.keep(run)
+    run.run { result in
+        afterRun?()
+        if let recorder {
+            let (samples, start) = recorder.stop()
+            let generated = probes.all
+            let arrivals = MirrorMeasurement.arrivals(
+                recording: samples, recordingStartNanos: start, micRate: micRate,
+                probes: generated, targetDelayMs: options.targetDelayMs)
+            for arrival in arrivals {
+                print(String(format: "arrival index=%d delay_ms=%.2f confidence=%.1f",
+                             arrival.index, arrival.delayMs, arrival.confidence))
+            }
+            print(MirrorMeasurement.summary(arrivals, targetDelayMs: options.targetDelayMs)
+                + " probes=\(generated.count)")
+            if let path = options.csvPath {
+                var csv = "index,pts_ns,arrival_ms,delay_ms,confidence\n"
+                for probe in generated {
+                    if let hit = arrivals.first(where: { $0.index == probe.index }) {
+                        let arrivalMs = Double(probe.ptsNanos) / 1e6 + hit.delayMs
+                        csv += String(format: "%d,%llu,%.3f,%.3f,%.1f\n",
+                                      probe.index, probe.ptsNanos, arrivalMs, hit.delayMs, hit.confidence)
+                    } else {
+                        csv += "\(probe.index),\(probe.ptsNanos),,,\n"
+                    }
+                }
+                do {
+                    try csv.write(toFile: path, atomically: true, encoding: .utf8)
+                    print("csv=\(path)")
+                } catch {
+                    print("csv_error=\(error)")
+                }
+            }
+        }
+        switch result {
+        case .failure:
+            exit.finish(1)
+        case .success:
+            exit.finish(0)
+        }
+    }
+}
+
 // Unbuffered stdout: under a pipe, `print` would otherwise hold every line
 // until exit, and a run that hangs would look like one that never started.
 setvbuf(stdout, nil, _IONBF, 0)
@@ -276,6 +423,33 @@ case .fake:
     fakeOptions.streamHost = options.streamHost ?? "127.0.0.1"
     let fake = FakeCastReceiver(controlType: options.controlType, fetchDelay: options.fetchDelay)
     retainer.keep(fake)
+    if options.mirror {
+        let streaming = FakeCastStreamingReceiver()
+        retainer.keep(streaming)
+        fake.streaming = streaming
+        streaming.start { result in
+            guard case .success = result else {
+                print("error=\(result)")
+                exitState.finish(1)
+                return
+            }
+            fake.start { result in
+                switch result {
+                case .failure(let error):
+                    print("error=\(error)")
+                    exitState.finish(1)
+                case .success(let endpoint):
+                    mirrorSpike(endpoint: endpoint, options: options, exit: exitState) {
+                        print("fake_frames=\(streaming.frames.count) dropped_before_sr=\(streaming.droppedBeforeFirstSR)"
+                            + " sender_reports=\(streaming.senderReports.count)")
+                        streaming.stop()
+                        fake.stop()
+                    }
+                }
+            }
+        }
+        break
+    }
     // Scheduled from here, so `--stall-after` reads against the log's own
     // elapsed times; one that fires before the LOAD has nothing to stall.
     if let after = options.stallAfter { fake.stall(after: after, duration: options.stallDuration) }
@@ -298,7 +472,11 @@ case .device(let substring):
               chosen.claim() else { return }
         print("device id=\(match.id) fn=\(match.friendlyName) endpoint=\(match.endpoint)")
         browser.stop()
-        spike(endpoint: match.endpoint, options: options, loopbackOnly: false, exit: exitState)
+        if options.mirror {
+            mirrorSpike(endpoint: match.endpoint, options: options, exit: exitState)
+        } else {
+            spike(endpoint: match.endpoint, options: options, loopbackOnly: false, exit: exitState)
+        }
     }
     browser.start()
     DispatchQueue.global().asyncAfter(deadline: .now() + 10) {
@@ -315,7 +493,11 @@ case .host(let spec):
         print("error=--host wants ip[:port], got '\(spec)'")
         Foundation.exit(2)
     }
-    spike(endpoint: .hostPort(host: NWEndpoint.Host(host), port: port), options: options, loopbackOnly: false, exit: exitState)
+    if options.mirror {
+        mirrorSpike(endpoint: .hostPort(host: NWEndpoint.Host(host), port: port), options: options, exit: exitState)
+    } else {
+        spike(endpoint: .hostPort(host: NWEndpoint.Host(host), port: port), options: options, loopbackOnly: false, exit: exitState)
+    }
 }
 
 exitState.done.wait()

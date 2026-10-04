@@ -4,7 +4,7 @@
 #
 # Picks a level from the committed diff against main: skip (no model), cheap
 # (one sonnet pass) or full (four parallel reviewers, then one haiku
-# confidence score per finding, findings under 80 dropped). Prints the
+# confidence score per finding, findings under 75 dropped). Prints the
 # findings, appends one line to <git-common-dir>/audiout-branch-reviews.log,
 # and writes a receipt keyed to the branch's own committed changes, so a later
 # commit that changes them needs a new review (merging main in does not).
@@ -36,7 +36,7 @@ set -uo pipefail
 # The one place to edit: thresholds, risk paths, the model each pass runs on.
 SKIP_UNDER_LINES=50
 FULL_OVER_LINES=300
-SCORE_KEEP_AT=80
+SCORE_KEEP_AT=75
 
 CHEAP_MODEL=sonnet
 DEEP_MODEL=opus

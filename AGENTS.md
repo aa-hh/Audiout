@@ -332,6 +332,14 @@ warn-only 3/5) are documented in the hook file itself:
 - **Guard 7 blocks** a Swift commit whose added comments match near-certain
   slop patterns (`slop-ok` exempts a line; rubric
   [docs/REVIEW-RUBRIC.md](docs/REVIEW-RUBRIC.md)).
+- **Guard 11 blocks** a commit whose new `@Test` has no comment sentence naming
+  the code change that turns it red, a `print(` in a test (`print-ok` exempts),
+  or a new test file holding one test (`new-suite-ok` exempts);
+  `bash scripts/test-guard-test-discipline.sh` self-tests it.
+- **Guard 12 blocks** a folder AGENTS.md that gains ruling phrasing or grows
+  while over its 300-word budget, and any removed line in an AGENTS-HISTORY.md;
+  it warns on a new date. Root `AGENTS.md` and merges are exempt;
+  `bash scripts/test-guard-agents-docs.sh` self-tests it.
 - **Guard 10 blocks** a merge onto `main` until `scripts/review-branch.sh` has
   reviewed the branch's committed diff: it picks skip, cheap (one sonnet pass)
   or full (four parallel reviewers plus a confidence scorer, instructions in
@@ -397,8 +405,9 @@ This app must feel like a native macOS citizen, not a cross-platform port.
 - **`DESIGN.md` records the shipped design; nothing mirrors it elsewhere.**
   The Figma design system was abandoned on 2026-09-03. When a change to
   `Tokens`, `PopoverColumnGrid`, a custom-drawn view, or a screen lands, the
-  record is regenerated from the code by the `impeccable-documenter` agent
-  (`.claude/agents/impeccable-documenter.md`), never hand-mirrored.
+  same commit updates the sections of `DESIGN.md` that describe it, written
+  from the code as shipped; it never describes a planned change, and never
+  restates a rule into a folder AGENTS.md.
 - Deviating is fine when the system has no equivalent — but note *why* in the
   nearest AGENTS.md, so the next agent doesn't "fix" it back to a system control
   that doesn't fit.

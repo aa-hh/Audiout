@@ -176,6 +176,7 @@ import AppKit
         let detail = makeLoadedPane(device: makeDevice(id: "office"))
         #expect(detail.test_eqMarkShown)
         #expect(!detail.test_eqMarkIsEngaged)
+        #expect(detail.test_eqMarkShapedSymbolName == RowAccessorySymbol.equalizerRest)
         #expect(detail.test_eqHeadingSpokenValue == "Flat")
         #expect(!detail.test_resetShown)
 
@@ -184,6 +185,9 @@ import AppKit
         detail.refresh(device: shaped)
         #expect(detail.test_eqMarkShown)
         #expect(detail.test_eqMarkIsEngaged)
+        #expect(detail.test_eqMarkShapedSymbolName == RowAccessorySymbol.equalizerEngaged)
+        #expect(detail.test_eqMarkLastFlipEffect == .none, "a snapshot never animates the icon")
+        #expect(detail.test_eqMarkLastAnnouncement == nil, "a snapshot never speaks")
         #expect(detail.test_eqHeadingSpokenValue == "Bass 3 dB, Loudness on")
         #expect(detail.test_resetShown)
 
@@ -191,11 +195,49 @@ import AppKit
         detail.test_fireResetClick()
         #expect(detail.test_eqMarkShown)
         #expect(!detail.test_eqMarkIsEngaged)
+        #expect(detail.test_eqMarkShapedSymbolName == RowAccessorySymbol.equalizerRest)
         #expect(detail.test_eqHeadingSpokenValue == "Flat")
         #expect(!detail.test_resetShown)
 
         detail.show(device: makeDevice(id: "local", name: "This Mac", kind: .localMac))
         #expect(!detail.test_eqMarkShown)
+    }
+
+    // Animating a scrub's second crossing, skipping the grow going shaped, growing under Reduce Motion, or dropping the announcement turns it red.
+    @Test func onlyTheUsersGestureAnimatesTheHeadingIconOncePerGesture() {
+        let detail = makeLoadedPane(device: makeDevice(id: "office"))
+        detail.onSetEQ = { _, _, _ in }
+        detail.test_eqMarkReduceMotionOverride = false
+        let editor = detail.test_eqEditor
+        editor.test_pointerGestureOverride = false
+        editor.test_committedGestureOverride = false
+
+        editor.test_dragBass(to: 3)
+        #expect(detail.test_eqMarkLastFlipEffect == .crossFadeAndScale)
+        #expect(detail.test_eqMarkLastAnnouncement == "Equalizer shaped")
+
+        editor.test_dragBass(to: 0)
+        #expect(detail.test_eqMarkLastFlipEffect == .none, "one effect per gesture")
+        editor.test_dragBass(to: 3)
+        #expect(detail.test_eqMarkLastFlipEffect == .none, "one effect per gesture")
+
+        editor.test_committedGestureOverride = true
+        editor.test_dragBass(to: 3)
+        editor.test_committedGestureOverride = false
+        editor.test_dragBass(to: 0)
+        #expect(detail.test_eqMarkLastFlipEffect == .crossFadeOnly)
+        #expect(detail.test_eqMarkLastAnnouncement == "Equalizer flat")
+
+        // Commit at 0 to end that gesture before the Reduce Motion step.
+        editor.test_committedGestureOverride = true
+        editor.test_dragBass(to: 0)
+        detail.test_eqMarkReduceMotionOverride = true
+        editor.test_dragBass(to: 3)
+        #expect(detail.test_eqMarkLastFlipEffect == .crossFadeOnly, "no grow under Reduce Motion")
+
+        detail.test_fireResetClick()
+        #expect(detail.test_eqMarkLastFlipEffect == .crossFadeOnly)
+        #expect(detail.test_eqMarkLastAnnouncement == "Equalizer flat")
     }
 
     private let isolation = TestIsolation(owner: "DeviceDetailViewTests")
@@ -770,9 +812,12 @@ import AppKit
             settings: AppSettings(defaults: isolation.isolatedDefaults))
         page.loadViewIfNeeded()
         #expect(!page.test_eqMarkIsEngaged)
+        #expect(page.test_eqMarkShapedSymbolName == RowAccessorySymbol.equalizerRest)
         #expect(page.test_eqHeadingSpokenValue == "Flat")
         page.show(eq: DeviceEQ(bassDB: 3, loudness: true))
         #expect(page.test_eqMarkIsEngaged)
+        #expect(page.test_eqMarkShapedSymbolName == RowAccessorySymbol.equalizerEngaged)
+        #expect(page.test_eqMarkLastFlipEffect == .none, "a snapshot never animates the icon")
         #expect(page.test_eqHeadingSpokenValue == "Bass 3 dB, Loudness on")
         page.show(eq: .flat)
         #expect(!page.test_eqMarkIsEngaged)

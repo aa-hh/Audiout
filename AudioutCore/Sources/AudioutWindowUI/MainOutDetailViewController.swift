@@ -127,7 +127,7 @@ public final class MainOutDetailViewController: NSViewController {
         headerWell.style = .bare
 
         eqTitleLabel.translatesAutoresizingMaskIntoConstraints = false
-        eqTitleLabel.font = Tokens.Font.body
+        eqTitleLabel.font = Tokens.Font.heading
         eqTitleLabel.textColor = Tokens.Color.label2
         eqTitleRow.orientation = .horizontal
         eqTitleRow.alignment = .centerY
@@ -224,9 +224,10 @@ public final class MainOutDetailViewController: NSViewController {
             // section (the device pane's identical break).
             eqTitleRow.topAnchor.constraint(equalTo: headerWell.bottomAnchor,
                                             constant: GroupsPaneLayout.sectionGap),
+            // The symbol's box carries a side bearing; the drawn square, not the box, sits on the inset.
             eqTitleRow.leadingAnchor.constraint(
                 equalTo: column.leadingAnchor,
-                constant: GroupsPaneLayout.railFreeContentLeadingInset),
+                constant: GroupsPaneLayout.railFreeContentLeadingInset - RowAccessorySymbol.headingMarkSquareInset),
 
             // Reset sits on the SAME title line, trailing-aligned to the
             // card's content edge (the same edge `eqEditor` itself trails to).
@@ -296,10 +297,10 @@ public final class MainOutDetailViewController: NSViewController {
     /// Reset, the heading icon's ink and the heading's spoken summary and
     /// tooltip. The editor's own rendered model IS the source of truth here —
     /// it already received `pendingEdit?.eq ?? eq`.
-    private func refreshEQTitleRow() {
+    private func refreshEQTitleRow(userCaused: Bool = false) {
         let eq = eqEditor.currentEQ
         eqResetButton.isEnabled = !eq.isFlat
-        eqMarkView.isShaped = !eq.isFlat
+        eqMarkView.setShaped(!eq.isFlat, userCaused: userCaused)
         eqTitleRow.setAccessibilityValue(DeviceDetailViewController.eqSummary(eq))
         eqTitleRow.toolTip = DeviceDetailViewController.eqSummary(eq)
     }
@@ -356,6 +357,23 @@ public final class MainOutDetailViewController: NSViewController {
 
     /// Whether the Equalizer heading's icon is inked for a shaped curve.
     public var test_eqMarkIsEngaged: Bool { eqMarkView.isShaped }
+    /// The heading icon's last flip effect; internal because its type is.
+    var test_eqMarkLastFlipEffect: EqualizerMarkView.FlipEffect { eqMarkView.test_lastFlipEffect }
+    public var test_eqMarkLastAnnouncement: String? { eqMarkView.test_lastAnnouncement }
+    public var test_eqMarkShapedSymbolName: String { eqMarkView.test_shapedSymbolName }
+    public var test_eqMarkReduceMotionOverride: Bool? {
+        get { eqMarkView.test_reduceMotionOverride }
+        set { eqMarkView.test_reduceMotionOverride = newValue }
+    }
+    /// The heading icon's DRAWN square in the pane's own coordinates: the
+    /// mark view's frame with its left edge moved past the symbol's bearing.
+    public var test_eqMarkSquareFrame: NSRect {
+        view.layoutSubtreeIfNeeded()
+        var frame = eqMarkView.convert(eqMarkView.bounds, to: view)
+        frame.origin.x += RowAccessorySymbol.headingMarkSquareInset
+        frame.size.width -= RowAccessorySymbol.headingMarkSquareInset
+        return frame
+    }
 
     /// What VoiceOver says for the Equalizer heading's summary.
     public var test_eqHeadingSpokenValue: String? { eqTitleRow.accessibilityValue() as? String }
@@ -395,7 +413,8 @@ extension MainOutDetailViewController: EQEditorViewDelegate {
         // and until it matches this exact value the snapshot must not win.
         pendingEdit = (eq, committed)
         onSetEQ?(eq, committed)
-        refreshEQTitleRow()
+        refreshEQTitleRow(userCaused: true)
+        if committed { eqMarkView.gestureEnded() }
         if committed { Analytics.capture("eq:adjusted", ["target": "main_out"]) }
     }
 
@@ -403,7 +422,8 @@ extension MainOutDetailViewController: EQEditorViewDelegate {
         // One committed action; the editor has already flattened its controls.
         pendingEdit = (.flat, true)
         onSetEQ?(.flat, true)
-        refreshEQTitleRow()
+        refreshEQTitleRow(userCaused: true)
+        eqMarkView.gestureEnded()
         Analytics.capture("eq:reset", ["target": "main_out"])
     }
 }

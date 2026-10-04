@@ -271,12 +271,14 @@ public final class DeviceDetailViewController: NSViewController {
         btVolumeHintLabel.textColor = Tokens.Color.label2
         btVolumeHintLabel.lineBreakMode = .byTruncatingTail
 
-        // The two slot titles take the scene editor's plain label voice.
+        // Volume keeps the scene editor's label voice; the Equalizer title
+        // takes the page name's heading font.
         for title in [eqTitleLabel, btVolumeTitleLabel] {
             title.translatesAutoresizingMaskIntoConstraints = false
             title.font = Tokens.Font.body
             title.textColor = Tokens.Color.label2
         }
+        eqTitleLabel.font = Tokens.Font.heading
         eqTitleRow.translatesAutoresizingMaskIntoConstraints = false
         eqTitleRow.orientation = .horizontal
         eqTitleRow.alignment = .centerY
@@ -441,9 +443,10 @@ public final class DeviceDetailViewController: NSViewController {
             // the CONTENT lane's leading inset, since this pane draws no rail.
             eqTitleRow.topAnchor.constraint(equalTo: headerWell.bottomAnchor,
                                             constant: GroupsPaneLayout.sectionGap),
+            // The symbol's box carries a side bearing; the drawn square, not the box, sits on the inset.
             eqTitleRow.leadingAnchor.constraint(
                 equalTo: column.leadingAnchor,
-                constant: GroupsPaneLayout.railFreeContentLeadingInset),
+                constant: GroupsPaneLayout.railFreeContentLeadingInset - RowAccessorySymbol.headingMarkSquareInset),
             eqTitleRow.trailingAnchor.constraint(lessThanOrEqualTo: eqResetButton.leadingAnchor,
                                                  constant: -8),
 
@@ -679,9 +682,9 @@ public final class DeviceDetailViewController: NSViewController {
     /// The title row's icon ink, its spoken summary and tooltip, Reset, the
     /// kept note and the Forget button's position — everything that follows
     /// the shown tone.
-    private func refreshEQTitleRow() {
+    private func refreshEQTitleRow(userCaused: Bool = false) {
         let eq = shownEQ
-        eqMarkView.isShaped = !eq.isFlat
+        eqMarkView.setShaped(!eq.isFlat, userCaused: userCaused)
         eqTitleRow.setAccessibilityValue(Self.eqSummary(eq))
         eqTitleRow.toolTip = Self.eqSummary(eq)
         eqResetButton.isHidden = eqTitleRow.isHidden || isLost || eq.isFlat
@@ -1215,6 +1218,23 @@ public final class DeviceDetailViewController: NSViewController {
     public var test_eqMarkShown: Bool { !eqTitleRow.isHidden && !eqMarkView.isHidden }
     /// Whether the heading's icon is inked for a shaped curve.
     public var test_eqMarkIsEngaged: Bool { eqMarkView.isShaped }
+    /// The heading icon's last flip effect; internal because its type is.
+    var test_eqMarkLastFlipEffect: EqualizerMarkView.FlipEffect { eqMarkView.test_lastFlipEffect }
+    public var test_eqMarkLastAnnouncement: String? { eqMarkView.test_lastAnnouncement }
+    public var test_eqMarkShapedSymbolName: String { eqMarkView.test_shapedSymbolName }
+    public var test_eqMarkReduceMotionOverride: Bool? {
+        get { eqMarkView.test_reduceMotionOverride }
+        set { eqMarkView.test_reduceMotionOverride = newValue }
+    }
+    /// The heading icon's DRAWN square in the pane's own coordinates: the
+    /// mark view's frame with its left edge moved past the symbol's bearing.
+    public var test_eqMarkSquareFrame: NSRect {
+        view.layoutSubtreeIfNeeded()
+        var frame = eqMarkView.convert(eqMarkView.bounds, to: view)
+        frame.origin.x += RowAccessorySymbol.headingMarkSquareInset
+        frame.size.width -= RowAccessorySymbol.headingMarkSquareInset
+        return frame
+    }
     public var test_showInMixerRowShown: Bool { !showInMixerRow.isHidden }
     public var test_showInMixerCaption: String? { showInMixerRow.isHidden ? nil : showInMixerRow.caption }
     public var test_forgetButtonShown: Bool { !forgetButton.isHidden }
@@ -1332,7 +1352,8 @@ extension DeviceDetailViewController: EQEditorViewDelegate {
         // and until it matches this exact value the snapshot must not win.
         eqEdits[id] = (eq, committed)
         onSetEQ?(eq, id, committed)
-        refreshEQTitleRow()
+        refreshEQTitleRow(userCaused: true)
+        if committed { eqMarkView.gestureEnded() }
         if committed { Analytics.capture("eq:adjusted", ["target": "device"]) }
     }
 
@@ -1342,7 +1363,8 @@ extension DeviceDetailViewController: EQEditorViewDelegate {
         // controls back to flat.
         eqEdits[id] = (.flat, true)
         onSetEQ?(.flat, id, true)
-        refreshEQTitleRow()
+        refreshEQTitleRow(userCaused: true)
+        eqMarkView.gestureEnded()
         Analytics.capture("eq:reset", ["target": "device"])
     }
 }
@@ -1381,19 +1403,47 @@ final class GroupRowButtonCell: NSButtonCell {
     }
 }
 
-/// The icon leading the Equalizer heading: green on a shaped curve, the
-/// door's rest ink on a flat one. Re-made on an appearance change and on an
-/// Increase Contrast change, because both inks are resolved into the image.
-final class EqualizerMarkView: NSImageView {
-    var isShaped = false { didSet { refresh() } }
+/// The icon leading the Equalizer heading: the filled square in the equalizer
+/// green on a shaped curve, the outline in the door's rest ink on a flat one.
+/// Re-made on an appearance change, an Increase Contrast change and a backing
+/// scale change, because the inks and the pixels are resolved into the image.
+///
+/// Drawn into one owned sublayer rather than as an `NSImageView` so the flip
+/// can cross-fade and grow without AppKit's implicit 0.25 s animation: every
+/// write that is not a deliberate flip effect runs with actions disabled.
+final class EqualizerMarkView: NSView {
+    enum FlipEffect { case none, crossFadeOnly, crossFadeAndScale }
+
+    private(set) var isShaped = false
+    /// One effect and one announcement per gesture: a scrub that crosses 0 dB
+    /// back and forth flips the icon silently after the first time. The
+    /// announcement posts on `superview` (the heading row, which is the
+    /// accessibility element) because this view is not one and VoiceOver may
+    /// drop an announcement posted on it.
+    private var animatedThisGesture = false
+    private let markLayer = CALayer()
+
+    var test_reduceMotionOverride: Bool?
+    private(set) var test_lastFlipEffect: FlipEffect = .none
+    private(set) var test_lastAnnouncement: String?
+    var test_shapedSymbolName: String {
+        isShaped ? RowAccessorySymbol.equalizerEngaged : RowAccessorySymbol.equalizerRest
+    }
+
+    private var reduceMotion: Bool {
+        test_reduceMotionOverride ?? NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+    }
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         translatesAutoresizingMaskIntoConstraints = false
-        imageScaling = .scaleNone
+        wantsLayer = true
+        markLayer.contentsGravity = .center
+        markLayer.contentsScale = 2
+        layer?.addSublayer(markLayer)
         setAccessibilityElement(false)
-        widthAnchor.constraint(equalToConstant: 20).isActive = true
-        heightAnchor.constraint(equalToConstant: 20).isActive = true
+        widthAnchor.constraint(equalToConstant: RowAccessorySymbol.headingPointSize).isActive = true
+        heightAnchor.constraint(equalToConstant: RowAccessorySymbol.headingPointSize).isActive = true
         // Selector-based observation needs no matching `removeObserver` —
         // AppKit auto-unregisters on dealloc (same as `DeviceRowView`).
         NSWorkspace.shared.notificationCenter.addObserver(
@@ -1406,8 +1456,72 @@ final class EqualizerMarkView: NSImageView {
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
+    func setShaped(_ shaped: Bool, userCaused: Bool) {
+        test_lastFlipEffect = .none
+        let flipped = shaped != isShaped
+        let wantsEffect = flipped && userCaused && !animatedThisGesture
+        isShaped = shaped
+        guard flipped else { return }
+        guard wantsEffect else {
+            refresh()
+            return
+        }
+        animatedThisGesture = true
+        let message = shaped ? "Equalizer shaped" : "Equalizer flat"
+        test_lastAnnouncement = message
+        NSAccessibility.post(
+            element: superview ?? self,
+            notification: .announcementRequested,
+            userInfo: [.announcement: message,
+                       .priority: NSAccessibilityPriorityLevel.high.rawValue])
+        let effect: FlipEffect = shaped && !reduceMotion ? .crossFadeAndScale : .crossFadeOnly
+        test_lastFlipEffect = effect
+
+        let oldContents = markLayer.contents
+        refresh()
+        guard !HeadlessRuntime.isActive else { return }
+        let fade = CABasicAnimation(keyPath: "contents")
+        fade.fromValue = oldContents
+        fade.toValue = markLayer.contents
+        fade.duration = shaped ? 0.15 : 0.12
+        markLayer.add(fade, forKey: "contents")
+        if effect == .crossFadeAndScale {
+            let grow = CAKeyframeAnimation(keyPath: "transform.scale")
+            grow.values = [1, 1.14, 1]
+            grow.keyTimes = [0, NSNumber(value: 0.11 / 0.30), 1]
+            grow.timingFunctions = [CAMediaTimingFunction(controlPoints: 0.16, 1, 0.3, 1),
+                                    CAMediaTimingFunction(name: .easeInEaseOut)]
+            grow.duration = 0.30
+            markLayer.add(grow, forKey: "grow")
+        }
+    }
+
+    /// The user's gesture is over (a committed change or a Reset), so the next
+    /// flip may animate and announce again.
+    func gestureEnded() {
+        animatedThisGesture = false
+    }
+
+    override func layout() {
+        super.layout()
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        markLayer.frame = bounds
+        CATransaction.commit()
+    }
+
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
+        refresh()
+    }
+
+    override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        refresh()
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
         refresh()
     }
 
@@ -1415,10 +1529,20 @@ final class EqualizerMarkView: NSImageView {
         refresh()
     }
 
+    /// Writes the current state's image with actions disabled, so the owned
+    /// layer never picks up an implicit animation.
     private func refresh() {
-        image = isShaped
-            ? DeviceRowView.equalizerEngagedMarkImage(in: effectiveAppearance)
-            : DeviceRowView.equalizerRestMarkImage(in: effectiveAppearance)
+        let scale = window?.backingScaleFactor ?? 2
+        let image = isShaped
+            ? DeviceRowView.equalizerShapedHeadingMarkImage(
+                in: effectiveAppearance, pointSize: RowAccessorySymbol.headingPointSize)
+            : DeviceRowView.equalizerRestMarkImage(
+                in: effectiveAppearance, pointSize: RowAccessorySymbol.headingPointSize)
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        markLayer.contentsScale = scale
+        markLayer.contents = image?.layerContents(forContentsScale: scale)
+        CATransaction.commit()
     }
 }
 

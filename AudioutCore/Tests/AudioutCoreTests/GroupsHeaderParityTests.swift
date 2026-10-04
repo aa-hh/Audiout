@@ -185,6 +185,25 @@ import AppKit
                 "the Main Audio page starts its icon where its Equalizer heading starts")
     }
 
+    // Pinning either page's Equalizer heading row back to the inset itself, without subtracting the symbol's bearing, turns it red.
+    @Test func theEqualizerHeadingsDrawnSquareSitsOnThePagesInset() throws {
+        let (window, _, _, _) = try makeWindow()
+        window.test_select(.device(id: "d0"))
+        settle(window)
+        let detailInset = window.test_detail.test_eqMarkSquareFrame.minX
+            - window.test_detail.test_headerSectionFrame.minX
+        window.test_select(.mainOut)
+        settle(window)
+        let mainInset = window.test_mainOutDetail.test_eqMarkSquareFrame.minX
+            - window.test_mainOutDetail.test_headerSectionFrame.minX
+
+        let slack = 0.01 + halfPointSlack()
+        #expect(abs(detailInset - GroupsPaneLayout.railFreeContentLeadingInset) <= slack,
+                "the speaker page's drawn square starts at \(detailInset), not on its inset")
+        #expect(abs(mainInset - GroupsPaneLayout.railFreeContentLeadingInset) <= slack,
+                "the Main Audio page's drawn square starts at \(mainInset), not on its inset")
+    }
+
     // Moving the list rows off ListRowView.leadingInset, or the header icon off railFreeContentLeadingInset, turns it red.
     @Test func detailListRowsStartOnThePagesOwnInset() throws {
         let (window, _, _, _) = try makeWindow()

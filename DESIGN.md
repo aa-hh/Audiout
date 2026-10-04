@@ -118,7 +118,7 @@ cool-neutral now: `#0A0A0C` in dark, one flat `#FAFAFB` ground in light, with
 warmth reserved for wherever the Mac is actually sending sound. Gold's core
 jobs are audio state and calls to action; it also marks selection (the icon
 picker's selected cell, the appearance-tile ring) and completion (onboarding
-checkmarks), and the EQ scope draws its own reference trace in gold too. This
+checkmarks). This
 file exists because the
 Mac is a second native surface, not a second skin of the same one: stock
 AppKit chrome, `NSColor`/`NSFont` tokens instead of SwiftUI, and a menu-bar
@@ -144,8 +144,8 @@ light/dark pairing does not carry at all.
   own rather than a dimmed neutral: `muted`, a cool periwinkle-indigo fenced
   to the device row's engaged mute button (see the Muted-Hue Fence)
 - Gold's primary jobs are audio state and calls to action; it is also the
-  app's one selection/completion mark and the EQ scope's own signal trace —
-  never a decoration outside those roles
+  app's one selection/completion mark — never a decoration outside those
+  roles
 - A two-position accent dial (Full / Subtle) remaps ten tokens —
   `gold`/`goldText`/`ember`/`emberText`/`glow` and all five permission
   identity hues — nothing else; Follow-System was deleted in this migration
@@ -300,18 +300,28 @@ azure at 213° came within ΔE 6.4 of `permissionSystemAudio`, and a violet at
 257° within ΔE 6.5 of `permissionLocalNetwork`.
 
 **The Equalizer-Hue Fence.** One token, `Tokens.Color.equalizer` (`#41B07A`
-dark / `#007835` light), means one thing: this speaker's curve is not flat.
-Its only call site is `DeviceRowView`, which inks the token on a non-flat
-curve in two places: the Mixer row's Equalizer door
-(`DeviceRowView.updateEQButton()`) and the icon leading the "Equalizer"
-heading on the speaker page and the Main Audio page. A flat curve shows the
-door's rest ink instead. All three images come from
-`DeviceRowView.equalizerEngagedMarkImage(in:)` and
-`DeviceRowView.equalizerRestMarkImage(in:)`; each is the door's custom square
-symbol, in this hue when the curve is shaped. It is not a general "on"
+dark / `#007835` light; Increase Contrast `#5FD597` / `#005A28`), means one
+thing: a curve is not flat. It marks a shaped curve in four places across the
+equalizer UI: the Mixer row's Equalizer door (the outline square, in green ink;
+`DeviceRowView.updateEQButton()`), the icon leading the "Equalizer" heading on
+the speaker page and the Main Audio page (the filled square when shaped), and
+the stretch of each EQ slider from where the knob sits at 0 dB to the knob
+(`EQGainFillCell` in `EQEditorView.swift`), and the Advanced section's
+response curve (its 2 pt shaped trace and the 13 % fill under it,
+`EQResponseCurveView`). A flat curve shows the door's rest ink and an empty
+slider track instead. The one exception: the scope's 0.14-alpha band
+gridlines are reference marks drawn in this green in every state, as the gold
+ones were. `DeviceRowView` draws the
+door and heading images through its mark helpers
+`equalizerShapedHeadingMarkImage(in:pointSize:)` and
+`equalizerRestMarkImage(in:pointSize:)`. On `scopeGround` only the dark hexes
+draw, 6.92:1 (Increase Contrast 10.65:1). It is not a general "on"
 green, not a success tone, and not available to a second control that happens
-to be engaged; `DeviceRowMutedStateTests` fails if a second call site appears
-in `Sources/`. The door wore `goldText` until 2026-09-04, and gold means
+to be engaged; `DeviceRowMutedStateTests` fences the literal to
+`DeviceRowView.swift`, `DeviceRowView+TestSupport.swift`,
+`EQEditorView.swift` and `EQResponseCurveView.swift`, and fails if a fifth
+file in `Sources/` names it.
+The door wore `goldText` until 2026-09-04, and gold means
 "audio is flowing here" everywhere else, so one hue was carrying two ideas. Green was
 unspoken for, and stays 84–86° of hue off `muted`, the control 6 pt to its
 right, and 9° off `permissionUsageStats`, which is fenced to onboarding and
@@ -373,10 +383,12 @@ alpha still steps from 0.35 to 0.9 in light mode, where a heavier edge is what
 keeps a black plate off white paper.
 
 **The Scope Instrument Rule (Mac-only).** The EQ response curve
-(`scopeGround`/`scopeFlatLine`/`scopeBypassLine`, plus a `gold` shaped trace
-and reference gridline) is a hardware-analyser scope: dark screen, lit
-trace, identical hex in both appearances, drawn under a forced
-`NSAppearance(named: .darkAqua)`. The wizard stage and this scope are the
+(`scopeGround`/`scopeFlatLine`/`scopeBypassLine`, and `equalizer` for the
+shaped trace, its fill and the band gridlines) is a hardware-analyser scope:
+dark screen, lit trace, identical hex in both appearances, drawn under a
+forced `NSAppearance(named: .darkAqua)`. A flat curve draws only the
+`scopeFlatLine` hairline over the faint gridlines, shaping draws in
+`equalizer`, and a bypassed shape goes dashed in `scopeBypassLine`. The wizard stage and this scope are the
 Mac's two concrete cases of instruments that hold a fixed appearance rather
 than themeing with the window (PRODUCT.md's Brand Commitments names the
 broader "instruments never theme" principle for the gold family, failure,
@@ -553,7 +565,7 @@ does not itself draw a shadow.
 **Custom Drawing Is a Short, Named List.** Root `AGENTS.md` names the
 sanctioned custom-drawn Warm Signal pieces as: the canvas, the connection
 ring, the signal dot, the meter, the bus control, the fader skin, and the
-shell bubble fill. Below that chrome-level list, seven drawing-only AppKit
+shell bubble fill. Below that chrome-level list, eight drawing-only AppKit
 cell subclasses carry the same "paint changes, behavior stays stock"
 contract, each installed FIRST and the control configured on top of it, so tracking,
 keyboard input and VoiceOver stay untouched: `WarmFaderCell: NSSliderCell`
@@ -564,7 +576,9 @@ node's checkbox), `GroupRowButtonCell: NSButtonCell`
 (`DeviceDetailViewController.swift`), `WarmNameFieldCell:
 NSTextFieldCell` (the scene editor's inline-rename field), and
 `SurfaceToolbarSeatCell: NSButtonCell` (`SurfaceToolbarSeatButton.swift` —
-every item of the surface header strip). Each folder's own
+every item of the surface header strip), and `EQGainFillCell: NSSliderCell`
+(`EQEditorView.swift` — the EQ sliders' green stretch; stock bar, knob and
+tick). Each folder's own
 `AGENTS.md` names its own local exception rather than one file listing them
 all — `AudioutSharedUI/AGENTS.md` names `ControlPanelBackingView`,
 `AudioutPopoverUI/AGENTS.md` names the seat cell, and
@@ -708,8 +722,14 @@ caption line. The icon well starts on the page's own 14 pt inset, level with
 the "Equalizer" heading below it, and the name and caption sit as one block
 centred on the well. A speaker's caption is its kind and status ("Sonos ·
 Ready"), "This Mac", or the failure glyph and "Can't be found". The Equalizer
-sits open below. Its heading is a 20 pt icon, then the word "Equalizer": the
-icon is green on a shaped curve and the door's rest ink on a flat one. The
+sits open below. Its heading is a 25 pt icon, then the word "Equalizer" in the page name's 16 pt semibold, in `label2`: the
+icon is the outline square in the door's rest ink on a flat curve and the
+filled square in the equalizer green on a shaped one. The drawn square, not
+the symbol's wider box, sits on the page's 14 pt inset. Only the user's own
+drag, step, Loudness tick or Reset animates the flip: going shaped, a 0.15 s cross-fade with
+a brief grow to 114% and back over 0.30 s; going flat, a 0.12 s cross-fade;
+under Reduce Motion, the cross-fade alone. VoiceOver hears "Equalizer shaped"
+or "Equalizer flat" once per gesture. The
 summary ("Bass 3 dB, Loudness on", or "Flat") is read out by VoiceOver and
 shown as a tooltip on the heading, never as text. Reset sits at the trailing
 edge and is hidden while the curve is flat. An unavailable speaker keeps its
@@ -747,8 +767,12 @@ is, and colour then tells engaged from resting.
 The door is green, not gold, because it wore `goldText` until the symbols
 landed and gold means "audio is flowing here" everywhere else, including the
 live wash this row draws behind the door. The Equalizer-Hue Fence under
-Colors holds the hue to this mark and the Equalizer heading icon on the
-speaker page and the Main Audio page. No
+Colors holds the hue to this door (the outline), the Equalizer heading icon
+on the speaker page and the Main Audio page (the filled square when shaped),
+the stretch of each EQ slider between 0 dB and its knob, and the Advanced
+scope's shaped trace and fill. The scope's 0.14-alpha band gridlines are the
+one exception: reference marks drawn in that green in every state, as the gold
+ones were. No
 magenta either: magenta is group identity. No editor, no curve and no tone
 control lives on the Mixer itself; the door opens `DeviceDetailViewController`,
 where the Equalizer sits open.
@@ -1017,9 +1041,11 @@ is a change in two apps.
   `DemoPaneView.swift` carries its own hex-resolution helper for the same
   reason: it rehearses a real macOS system prompt's chrome, which must stay
   visually accurate even when it is not live UI reading through `Tokens`.
-- **Do** treat the alignment wizard's stage tokens and the EQ scope's tokens
-  as fixed-hue instruments that never theme, matching their documented
-  intent, not as a bug to "fix" toward appearance-awareness.
+- **Do** treat the alignment wizard's stage tokens and the EQ scope's own
+  tokens as fixed-hue instruments that never theme (the scope's shaped trace,
+  fill and gridlines draw `equalizer` under its pinned dark appearance, so
+  they never theme either), matching their documented intent, not as a bug to
+  "fix" toward appearance-awareness.
 - **Do** keep the six permission identity hues fenced to the first-run
   Setup spine; a new surface needing a per-item identity hue asks for its
   own decision, it does not borrow from this set.

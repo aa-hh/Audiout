@@ -99,7 +99,8 @@ Also worth noting from the log: whether the two speakers (if two) show the same 
 
 ## Hand back
 
-Reply with: the script's last line (ms/min, ppm, first and last offset), the deviation
+Reply with: the script's last three lines (clean count, fit in ms/min and ppm with the
+first and last medians, median per 5 min), the deviation
 slope per speaker, and whether the per-line output is a line or steps. Attach `hour.txt`
 and `dev.txt` (and `drift-meter.txt` if Part B ran). Release the slot.
 

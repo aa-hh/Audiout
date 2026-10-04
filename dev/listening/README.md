@@ -16,7 +16,7 @@ Selection is by hand: three clicks a night (four with Block C). The app's
 launch-time restore leaves Bluetooth speakers selected but not connected (third
 smoke run, 2026-10-03), so the driver itself never quits Audiout Dev and needs it open.
 At each block it stops `afplay`, writes `WAITING <block>` naming the exact rows,
-and waits for Enter or `~/listening/go-block-<a|b|c>` (30 min, then that block is
+and waits for Enter or `go-block-<a|b|c>` beside the script (30 min, then that block is
 aborted). It then plays and, within 35 s, needs the app's selection
 (`set_output_set`), a Bluetooth output line per Move, `connect_requested` for
 the AirPlay row, and audio (`stream_health`) to match; otherwise it says what
@@ -24,15 +24,15 @@ differs and shows `WAITING` again, three times at most.
 
 ## One-time setup on the second Mac
 
-1. From the repo root, copy the six files side by side into `~/listening/` (not
-   Desktop or Documents; that Mac's Desktop is iCloud-synced). This is the one
-   dev install outside `~/Library/Application Support/AudioutDev/`: the folder is
-   typed by hand in Terminal on the night, and `scripts/purge-dev-installs.sh`
-   removes it along with a night still running.
+1. From the repo root, copy the six files side by side into
+   `~/Library/Application Support/AudioutDev/listening/` on that Mac (the folder
+   the root AGENTS.md sets for dev tooling that outlives its session; not Desktop
+   or Documents, which are iCloud-synced there). `scripts/purge-dev-installs.sh`
+   removes it along with a night still running. `L` below is that path:
    ```
    tar -cf - -C dev/listening unattended-night.sh launch-tonight.sh README.md .gitignore \
      -C ../notes/bt-sync-discovery/runbooks click-track-3s.wav click-pair-spacing.py \
-     | ssh alechamilton@SUMUP-M9Y197RFVG.local 'mkdir -p ~/listening && tar -xf - -C ~/listening'
+     | ssh alechamilton@SUMUP-M9Y197RFVG.local 'L=~/Library/Application\ Support/AudioutDev/listening; mkdir -p "$L" && tar -xf - -C "$L"'
    ```
 2. Install the dev build under `~/Applications` from the checkout whose `build/`
    holds it. The iCloud-synced Desktop adds extended attributes that break the
@@ -44,7 +44,7 @@ differs and shows `WAITING` again, three times at most.
    Open it once at the screen and grant its own prompts.
 3. Pair and connect both Moves; run the wizard once on each to store an alignment.
    `brew install blueutil ffmpeg`; `python3 -m pip install numpy` (or set `PYTHON=`).
-4. In Terminal in `~/listening`, run `./unattended-night.sh --dry-run` and Allow
+4. In Terminal in `$L`, run `./unattended-night.sh --dry-run` and Allow
    Microphone and Bluetooth (2 minutes; no "DRY RUN FALLBACK" note = mic works).
 5. `./unattended-night.sh --list-devices`; paste the ids into `MOVE1_ID`,
    `MOVE2_ID`, `AIRPLAY_ID` at the top, or pass `--move1`, `--move2`, `--airplay-id`.
@@ -96,7 +96,7 @@ Your main Claude session can run that under a monitor and notify your phone per 
 
 ## Starting it tonight
 
-In Terminal on the second Mac (Screen Sharing is fine), from `~/listening`:
+In Terminal on the second Mac (Screen Sharing is fine), from `$L`:
 
 ```
 ./launch-tonight.sh 23:30                 # Blocks A and B, about 35 min
@@ -109,7 +109,7 @@ running), loads `~/Library/LaunchAgents/com.audiout.dev.listening-night.plist` w
 agent fires, removes itself and runs the driver. It prints how to cancel.
 
 The clicks, each after its `WAITING` line, then Enter in that Terminal or
-`ssh alechamilton@SUMUP-M9Y197RFVG.local touch ~/listening/go-block-a` (`-b`, `-c`):
+`ssh alechamilton@SUMUP-M9Y197RFVG.local touch ~/Library/Application\ Support/AudioutDev/listening/go-block-a` (`-b`, `-c`):
 
 1. A: select both Moves, nothing else.
 2. B: quit and reopen Audiout Dev first (a Move whose link was dropped stays

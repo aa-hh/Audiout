@@ -13,7 +13,7 @@
 #
 # Selection is manual by default: at each block the driver writes a WAITING line
 # naming the rows to select in Audiout Dev and waits for Enter or
-# ~/listening/go-block-<a|b|c>, then checks telemetry. The app's launch-time
+# go-block-<a|b|c> beside this script, then checks telemetry. The app's launch-time
 # restore leaves Bluetooth speakers selected but not connected (third smoke run,
 # 2026-10-03), so the relaunch path is kept behind --relaunch for when it is fixed.
 # Block C (60 min, --with-airplay only): one Move on Bluetooth (--c-move, default
@@ -59,7 +59,7 @@ MOVE1_ID=""
 MOVE2_ID=""
 AIRPLAY_ID=""            # only needed for --with-airplay: the other Move's id in Wi-Fi mode
 C_MOVE_ID=""             # the Move that stays on Bluetooth in Block C; empty = MOVE1_ID
-GO_DIR="$HOME/listening"  # touch $GO_DIR/go-block-<a|b|c> to confirm a WAITING line (Enter works too at a terminal)
+GO_DIR=$HERE  # touch $GO_DIR/go-block-<a|b|c> to confirm a WAITING line (Enter works too at a terminal)
 WAIT_C_S=1800           # how long a WAITING line waits before that block is aborted
 SELECT_CHECK_S=35       # after confirming: telemetry must show the selection within this (bt_clock_deviation is every 30 s)
 SELECT_TRIES=3          # WAITING is shown again after a mismatch, this many times in all
@@ -72,7 +72,7 @@ MAC_VOLUME=50            # system output volume set before each relaunch; Audiou
 # `ffmpeg -f avfoundation -list_devices true -i ""`.
 MIC_INDEX=""
 MIC_PATTERN='MacBook.*Microphone|Built-in Microphone'
-CLICK_WAV="$HERE/click-track-3s.wav"      # beside the script (the ~/listening copy); else the repo's runbooks folder
+CLICK_WAV="$HERE/click-track-3s.wav"      # beside the script (the installed copy); else the repo's runbooks folder
 ANALYSER="$HERE/click-pair-spacing.py"
 [[ -f $CLICK_WAV ]] || CLICK_WAV="$HERE/../notes/bt-sync-discovery/runbooks/click-track-3s.wav"
 [[ -f $ANALYSER ]] || ANALYSER="$HERE/../notes/bt-sync-discovery/runbooks/click-pair-spacing.py"
@@ -612,7 +612,7 @@ human_names() {  # ids...; one name per line, as the WAITING line shows them
   for id in "$@"; do
     case $id in
       $MAC_ID) PAIRS+=("$id=$MAC_ROW") ;;
-      *:output) PAIRS+=("$id=$( (( HAVE_BLUEUTIL )) && bt_name $(bt_addr $id))") ;;
+      *:output) PAIRS+=("$id=$( { (( HAVE_BLUEUTIL )) && bt_name $(bt_addr $id); } || true)") ;;
       *) PAIRS+=("$id=the AirPlay row of the Move in Wi-Fi mode (id $id)") ;;
     esac
   done

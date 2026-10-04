@@ -16,6 +16,8 @@
 #     long after the app that made it is deleted
 #   - an always-on ROOT PTP-helper launchd daemon
 #   - possibly its own Application Support / Caches / saved-state directories
+#   - a listening night still running (dev/listening) and its install, with
+#     its results/ recordings
 #
 # It also removes two things that are nobody's build residue but everybody's
 # problem: USER LAUNCH AGENTS under either product name (the shipping app
@@ -482,9 +484,8 @@ echo
 # is a night already running: the Terminal wrapper, the driver and the
 # caffeinate holding the Mac awake. launch-tonight.sh's pre-start caffeinate
 # has its own -t deadline and ends by itself.
-# Its install on the listening Mac is ~/listening (README there: Desktop and
-# Documents are iCloud-synced, and the folder is typed by hand in Terminal on
-# the night), recognised by the driver script inside it.
+# Its install on the listening Mac is ~/Library/Application Support/AudioutDev/listening,
+# recognised by the driver script inside it.
 echo "==> Listening-night driver processes and install"
 night_pids="$(pgrep -f 'listening/results/night.command|unattended-night.sh' || true)"
 if [ -z "$night_pids" ]; then
@@ -496,10 +497,11 @@ else
     removed_anything=1
   fi
 fi
-if [ -f "$HOME/listening/unattended-night.sh" ]; then
-  echo "    $HOME/listening (driver install; results/ holds the recordings)"
+night_dir="$HOME/Library/Application Support/AudioutDev/listening"
+if [ -f "$night_dir/unattended-night.sh" ]; then
+  echo "    $night_dir (driver install; results/ holds the recordings)"
   if [ "$APPLY" -eq 1 ]; then
-    rm -rf "$HOME/listening"
+    rm -rf "$night_dir"
     removed_anything=1
   fi
 fi

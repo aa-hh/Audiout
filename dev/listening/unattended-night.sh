@@ -1021,12 +1021,12 @@ for line in list(open(f"{out}/blocks.tsv"))[1:]:
                    "(a click pair is a 3 s period with a separate second arrival; a merged arrival is not counted)"]
         else: md += ["", f"Toggled Move: {toggle or 'not set'}; no reconnect in this run ({', '.join(marks) or 'no marks'})."]
     if name == "B" and "pause" in marks and "resume" in marks:
-        before = [o for t, o in rows if t < marks["pause"]][-5:]
+        before = [o for t, o in rows if t < marks["pause"]][-20:]
         after = [o for t, o in rows if t > marks["resume"]]
         md += ["", "| | offset of the second arrival |", "|---|---|",
-               f"| before the pause (last 5 periods) | {median(before)} |",
+               f"| before the pause (last 20 periods) | {median(before)} |",
                f"| right after resume (first 3 periods) | {median(after[:3])} |",
-               f"| one minute after resume (last 3 periods) | {median(after[-3:])} |"]
+               f"| one minute after resume (last 10 periods) | {median(after[-10:])} |"]
     else:
         offs = [o if o is not None else 0.0 for _, o in rows]
         jumps = sum(1 for x, y in zip(offs, offs[1:]) if abs(y - x) > jump_ms)

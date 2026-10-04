@@ -17,17 +17,23 @@ private final class UnconstrainedWindow: NSWindow {
     override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect {
         frameRect
     }
+
+    /// The pixel density layout snaps to, whatever screen this Mac has: Auto
+    /// Layout reads it to place frames on whole points at 1 and half points at 2.
+    var forcedBackingScale: CGFloat?
+    override var backingScaleFactor: CGFloat { forcedBackingScale ?? super.backingScaleFactor }
 }
 
 /// A titled window carrying a real `NSToolbar`, parked off every screen. The
 /// toolbar still gets AppKit's own layout passes out there, so a test can order
 /// this in without anything reaching the screen.
 @MainActor
-private func makeParkedWindow(height: CGFloat = 400) -> NSWindow {
+private func makeParkedWindow(height: CGFloat = 400, backingScale: CGFloat? = nil) -> NSWindow {
     let window = UnconstrainedWindow(
         contentRect: NSRect(x: 0, y: 0, width: SurfaceLayout.width, height: height),
         styleMask: [.titled, .closable, .fullSizeContentView],
         backing: .buffered, defer: false)
+    window.forcedBackingScale = backingScale
     window.setFrameOrigin(NSPoint(x: -10_000, y: -10_000))
     return window
 }
@@ -50,9 +56,9 @@ private func makeParkedWindow(height: CGFloat = 400) -> NSWindow {
     /// A controller with its toolbar attached (attachment is what makes
     /// AppKit materialize the delegate's items), on a window that never
     /// orders in.
-    private func makeAttached() -> (SurfaceToolbarController, NSWindow) {
+    private func makeAttached(backingScale: CGFloat? = nil) -> (SurfaceToolbarController, NSWindow) {
         let controller = SurfaceToolbarController()
-        let window = makeParkedWindow()
+        let window = makeParkedWindow(backingScale: backingScale)
         controller.attach(to: window)
         return (controller, window)
     }
@@ -169,10 +175,13 @@ private func makeParkedWindow(height: CGFloat = 400) -> NSWindow {
     /// one `glyphPadding` either side; open, the same padding runs from the
     /// highlight's edge to the glyph, from the glyph to the name's first
     /// letter, and from its last letter to the far edge. The glyph keeps its
-    /// place whichever tab is open.
+    /// place whichever tab is open. Laid out at both pixel densities, because
+    /// a 1x display snaps every frame to whole points.
     // Turns red if a tab glyph is laid out by its symbol image's box instead of its measured ink, the name by its label frame instead of its letters, or a glyph shifts as its tab opens.
-    @Test func everyTabPadsItsGlyphAndNameEvenlyFromTheirInk() throws {
-        let (controller, window) = makeAttached()
+    // At 1x it also turns red if `SurfaceToolbarSeatButton` stops hiding a collapsed tab's name label and leaves it to the clip.
+    @Test(arguments: [CGFloat(1), 2])
+    func everyTabPadsItsGlyphAndNameEvenlyFromTheirInk(backingScale: CGFloat) throws {
+        let (controller, window) = makeAttached(backingScale: backingScale)
         // Light, because macOS draws light text on dark up to half a point
         // heavier on each side, and that is the OS's weight, not the layout's.
         window.appearance = NSAppearance(named: .aqua)

@@ -550,6 +550,12 @@ final class SurfaceToolbarSeatButton: NSButton {
         nameLabel.maximumNumberOfLines = 1
         nameLabel.setAccessibilityElement(false)
         nameLabel.translatesAutoresizingMaskIntoConstraints = false
+        // Hidden while the seat is collapsed, because the clip alone leaks:
+        // the name's first letter starts exactly at a collapsed seat's edge,
+        // and a 1x display snaps the seat's width and the label's origin to
+        // whole points separately, so up to a point of that letter was drawn
+        // beside every idle tab's glyph. `setNameRevealed` shows it.
+        nameLabel.isHidden = true
         addSubview(nameLabel)
 
         widthConstraint = widthAnchor.constraint(equalToConstant: SurfaceToolbarSeat.size.width)
@@ -690,16 +696,24 @@ final class SurfaceToolbarSeatButton: NSButton {
     func setNameRevealed(_ revealed: Bool, animated: Bool) {
         guard revealed != isNameRevealed else { return }
         isNameRevealed = revealed
+        // Shown before an opening seat travels, hidden once a closing one has
+        // arrived: the clip wipes the name only while the seat is moving.
+        if revealed { nameLabel.isHidden = false }
         let target = SurfaceToolbarSeat.tabWidth(nameWidth: revealed ? nameWidth : 0,
                                                  glyphWidth: glyphWidth)
         guard animated else {
             widthConstraint.constant = target
+            nameLabel.isHidden = !revealed
             revealFollower?.foldAnimatorDidTick()
             settleToolbarLayout()
             return
         }
         FoldAnimator.shared.animate(widthConstraint, to: target, follower: revealFollower) {
-            [weak self] in self?.settleToolbarLayout()
+            [weak self] in
+            guard let self else { return }
+            // A replaced travel never completes, so this one is the last.
+            nameLabel.isHidden = !isNameRevealed
+            settleToolbarLayout()
         }
     }
 

@@ -89,6 +89,36 @@ import Testing
 
     // MARK: Selected Devices + Main Out routing (SPEC §9 2026-07-14b)
 
+    /// Red if "Play here" routed twice (deselect then select leaves
+    /// This Mac briefly live between the two applies) or left a stale member.
+    @Test func switchSelectionReplacesTheSetInOneRoutingApply() async throws {
+        let (controller, backend) = try await makeRecordingController()
+        _ = controller.setDeviceSelected("sonos-move", true)
+        _ = controller.setDeviceSelected("office", true)
+        controller.limitsToOneSpeaker = true
+        backend.reset()
+
+        let result = controller.switchSelection(to: "homepod-bed")
+        #expect(result == .ok)
+        #expect(controller.selectedDeviceIDs == ["homepod-bed"])
+        #expect(backend.outputSetWrites.count == 1, "one routing apply, not two")
+    }
+
+    /// Red if "Play here" left Main Out on a scene: a refused click raises the
+    /// offer and clicking it changes nothing audible.
+    @Test func switchSelectionUnderAGroupTargetMovesMainOutToTheSpeaker() async throws {
+        let (controller, backend) = try await makeRecordingController()
+        try controller.saveGroup(Group(id: "g1", name: "Pair", memberIDs: ["office", "sonos-move"], memberVolumes: [:]))
+        controller.setMainOut(.group(id: "g1"))
+        controller.limitsToOneSpeaker = true
+        backend.reset()
+
+        _ = controller.switchSelection(to: "homepod-bed")
+        #expect(controller.mainOut == .selectedDevices)
+        #expect(controller.selectedDeviceIDs == ["homepod-bed"])
+        #expect(backend.outputSetWrites.count == 1, "one routing apply")
+    }
+
     @Test func setDeviceSelectedComposesSetWithoutRoutingUnderGroupTarget() async throws {
         let (controller, backend) = try await makeController()
         // Point Main Out at a group so composing must not re-route.
@@ -483,6 +513,74 @@ import Testing
         let r = controller.setDeviceSelected("office", true)
         #expect(r.autoSwappedCurrentDevice)
         #expect(controller.selectedDeviceIDs == ["office"], "local dropped, AirPlay added")
+    }
+
+    // MARK: One-speaker limit (unregistered mode, 2026-09-26)
+
+    /// Red if a limited install could add a second AirPlay speaker, or if the
+    /// refusal still persisted or announced a change.
+    @Test func oneSpeakerLimitRefusesASecondAirPlaySpeaker() async throws {
+        let (controller, _) = try await makeController()
+        controller.ensureDefaultSelection()
+        _ = controller.setDeviceSelected("office", true)
+        controller.limitsToOneSpeaker = true
+        var changes = 0
+        controller.onStateDidChange = { changes += 1 }
+        let r = controller.setDeviceSelected("sonos-move", true)
+        #expect(r == .refused(GroupController.oneSpeakerLimitReason))
+        #expect(controller.selectedDeviceIDs == ["office"])
+        #expect(changes == 0)
+    }
+
+    /// Red if the limit blocked the ordinary move from This Mac to one speaker.
+    @Test func oneSpeakerLimitStillSwapsFromThisMac() async throws {
+        let (controller, _) = try await makeController()
+        controller.ensureDefaultSelection()
+        controller.limitsToOneSpeaker = true
+        let r = controller.setDeviceSelected("office", true)
+        #expect(r.autoSwappedCurrentDevice)
+        #expect(controller.selectedDeviceIDs == ["office"])
+    }
+
+    /// Red if This Mac could join a speaker under the limit, making two.
+    @Test func oneSpeakerLimitRefusesThisMacBesideASpeaker() async throws {
+        let (controller, _) = try await makeController()
+        controller.ensureDefaultSelection()
+        _ = controller.setDeviceSelected("office", true)
+        controller.limitsToOneSpeaker = true
+        let r = controller.setDeviceSelected("local-mac", true)
+        #expect(r == .refused(GroupController.oneSpeakerLimitReason))
+        #expect(controller.selectedDeviceIDs == ["office"])
+    }
+
+    /// Red if a limited install could still point Main Out at a group.
+    @Test func oneSpeakerLimitIgnoresAGroupTarget() async throws {
+        let (controller, _) = try await makeController()
+        controller.ensureDefaultSelection()
+        try controller.saveGroup(Group(id: "g1", name: "Pair", memberIDs: ["office", "sonos-move"], memberVolumes: [:]))
+        controller.limitsToOneSpeaker = true
+        controller.setMainOut(.group(id: "g1"))
+        #expect(controller.mainOut == .selectedDevices)
+    }
+
+    /// Red if a limited launch resumed a stored two-speaker set, or still
+    /// opened the Bluetooth link to a stored speaker the limit just dropped.
+    @MainActor
+    @Test func oneSpeakerLimitLaunchesOnThisMacInsteadOfAStoredPair() async throws {
+        let bt = "54-2A-1B-79-08-9E:output"
+        let routing = RoutingStore(directory: tempDirectory())
+        try routing.save(.init(selectedDeviceIDs: ["office", bt], mainOut: .selectedDevices))
+        let settings = AppSettings(defaults: isolatedDefaults)
+        settings.reconnectAtLaunch = true
+        let backend = RecordingBackend(try await makeBackend())
+        let controller = GroupController(backend: backend, store: GroupStore(directory: tempDirectory()),
+                                         routingStore: routing, settings: settings, loadPersisted: false)
+        controller.limitsToOneSpeaker = true
+        controller.updateDevices(.demoFleet + [Device(id: bt, name: "Move", kind: .bluetooth, isAvailable: false)])
+        controller.ensureDefaultSelection()
+        #expect(controller.selectedDeviceIDs == ["local-mac"])
+        #expect(controller.mainOut == .selectedDevices)
+        #expect(backend.retryWrites.isEmpty)
     }
 
     /// REVERSE auto-swap (ahh, live session 2026-07-17b): removing the LAST

@@ -7,10 +7,6 @@
 
 git_dir=$(git rev-parse --git-dir 2>/dev/null) || exit 0
 hook_dir=$(dirname "$0")
-# Is this a merge commit? A conflict resolution has MERGE_HEAD; a clean merge
-# arrives via pre-merge-commit, which runs before git writes MERGE_HEAD and so
-# sets AUDIOUT_IN_MERGE itself. Exported for the helper scripts below.
-[ -f "$git_dir/MERGE_HEAD" ] && export AUDIOUT_IN_MERGE=1
 
 # ---------------------------------------------------------------------------
 # GUARD 1 (BLOCKING): no direct commits onto main.
@@ -25,25 +21,18 @@ hook_dir=$(dirname "$0")
 # next agent through, and the trap is that committing them looks helpful.
 #
 # So: don't work in the main checkout. Work in a worktree, where docs and code
-# have to travel together as one merge.
-#
-# Merges are deliberately exempt, and this is verified behaviour, not a guess:
-#   - a clean `git merge` runs pre-merge-commit, which sets AUDIOUT_IN_MERGE
-#   - a conflict-resolution merge commit runs pre-commit, but has MERGE_HEAD
-# So merging a branch into main — the correct way to land anything — is
-# untouched. Only typing `git commit` while standing on main is refused.
+# have to travel together as one pull request. Main takes changes only through
+# GitHub's merge queue, so no commit of any kind is made on main locally.
 branch=$(git symbolic-ref --short HEAD 2>/dev/null)
-if [ "$branch" = "main" ] && [ -z "${AUDIOUT_IN_MERGE:-}" ]; then
+if [ "$branch" = "main" ]; then
     echo "" >&2
     echo "  REFUSED: direct commit to main." >&2
     echo "" >&2
-    echo "  Work in a worktree and merge it in — that is how docs and code stay" >&2
+    echo "  Work in a worktree and land it through a pull request and the merge" >&2
+    echo "  queue — that is how docs and code stay" >&2
     echo "  together. Committing straight to main is how f1f3e94 shipped a" >&2
     echo "  feature's docs with none of its code, and cost a whole session to" >&2
     echo "  recover. See the hard rule in AGENTS.md." >&2
-    echo "" >&2
-    echo "  Merging a branch into main is NOT affected by this — only a bare" >&2
-    echo "  'git commit' on main is." >&2
     echo "" >&2
     echo "  If these are someone else's uncommitted edits and they are in your" >&2
     echo "  way: STOP and ask. Do not commit work you did not write — that is" >&2
@@ -158,7 +147,8 @@ fi
 # test-suite guards — so a bounce costs seconds, not a full suite run.
 # Logic lives in guard-self-review.sh (same split as Guard 2's checker): a
 # deterministic screen over added comment lines (rubric:
-# docs/REVIEW-RUBRIC.md). The code review happens at merge time (Guard 10).
+# docs/REVIEW-RUBRIC.md). The code review runs on the pull request
+# (scripts/review-branch.sh).
 # Missing helper => silently skip, same principle as Guard 2 — a hook that
 # errors on an unrelated machine is worse than a hook that isn't there.
 g7="$hook_dir/guard-self-review.sh"
@@ -167,31 +157,38 @@ if [ -f "$g7" ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# GUARD 10 (BLOCKING): a merge onto main needs a code-review receipt.
-# A conflict-resolution merge commit runs this hook instead of pre-merge-commit,
-# so the receipt check runs here too. A clean merge gets it from pre-merge-commit.
-# Before Guard 4, so a refused merge never pays for a suite run.
-g10="$hook_dir/guard-merge-review.sh"
-if [ "$branch" = "main" ] && [ -f "$git_dir/MERGE_HEAD" ] && [ -f "$g10" ]; then
-    sh "$g10" || exit 1
+# GUARD 11 (BLOCKING): test discipline in staged test files.
+#
+# A new @Test needs a comment sentence naming the change that turns it red,
+# no print( in tests, and no new file holding a single test. Written after
+# five review rounds on one branch re-flagged tests without that sentence.
+# Logic in guard-test-discipline.sh; missing helper => silently skip.
+g11="$hook_dir/guard-test-discipline.sh"
+if [ -f "$g11" ]; then
+    sh "$g11" || exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# GUARD 12 (BLOCKING): AGENTS.md / AGENTS-HISTORY.md rules.
+#
+# Blocks ruling phrasing and growth of an over-300-word folder AGENTS.md, and
+# any removed line in an AGENTS-HISTORY.md; warns on a newly added date.
+# Logic in guard-agents-docs.sh; missing helper => silently skip.
+g12="$hook_dir/guard-agents-docs.sh"
+if [ -f "$g12" ]; then
+    sh "$g12" || exit 1
 fi
 
 # ---------------------------------------------------------------------------
 # GUARD 4 (BLOCKING): the tests must pass before Swift code is committed. THE
-# coverage guarantee — nothing broken gets committed, and since everything that
-# reaches main was committed here first, main stays green.
+# fast check before a commit; the full suite runs on GitHub (the `tests`
+# workflow) for every pull request and again in the merge queue.
 #
-# How much runs depends on the commit (owner's call, 2026-09-04):
-#   - a branch commit runs only the suites that plausibly cover its staged
-#     Swift, derived by guard-test-scope.sh (which fails closed to the full
-#     suite whenever it cannot map a file)
-#   - a merge landing on main runs the FULL suite with the pass cache off,
-#     unless a full-suite pass is stamped on the identical merged tree
-#   - merging main into a branch runs the FULL suite, which stamps that pass
-# The full run on every commit was the main cost of committing, and the risk it
-# absorbed lands one step later instead: nothing reaches main without a full
-# run on its exact sources, so a too-narrow branch filter costs at most one fix cycle at
-# merge time.
+# A commit runs only the suites that plausibly cover its staged Swift, derived
+# by guard-test-scope.sh (which fails closed to the full suite whenever it
+# cannot map a file); AUDIOUT_FULL_SUITE=1 forces the full run (owner's call,
+# 2026-09-04). A too-narrow filter costs at most one fix cycle when the
+# pull request's full run catches it.
 #
 # Scope: only runs when staged files include AudioutCore Swift source/test
 # files. Docs/config/other commits skip it (no code changed → nothing to gate).
@@ -242,29 +239,8 @@ if [ -n "$staged_swift" ] && command -v swift >/dev/null 2>&1; then
         echo "  (no scripts/run-tests.sh found — running unserialised)" >&2
         run_suite=""
     fi
-    # A merge onto main is the last gate before main, so it never runs filtered
-    # and never accepts the runner's "these sources already passed" cache. The
-    # one exception: a FULL-suite pass stamped on the exact tree this merge
-    # commits (hashed from the index, not the working tree). Merging main into
-    # a branch already ran that full suite, and landing the branch then commits
-    # byte-identical sources. Filtered passes never count, whatever they named.
-    merge_env=""
-    merge_stamp=""
-    if [ "$branch" = "main" ] && [ -n "${AUDIOUT_IN_MERGE:-}" ]; then
-        scope=FULL
-        merge_env="AUDIOUT_TEST_NO_CACHE=1"
-        cache_lib="$(dirname "$run_suite")/lib/suite-cache.sh"
-        if [ -n "$run_suite" ] && [ -f "$cache_lib" ] && [ "${AUDIOUT_TEST_NO_CACHE:-0}" != "1" ]; then
-            . "$cache_lib"
-            merge_key=$(suite_cache_staged_hash "$repo_root" AudioutCore)
-            [ -n "$merge_key" ] && [ -f "$suite_cache_dir/$merge_key.full" ] \
-                && merge_stamp="$suite_cache_dir/$merge_key.full"
-        fi
-    fi
     echo "" >&2
-    if [ -n "$merge_stamp" ]; then
-        echo "  Guard 4: skipped — full suite already passed on this exact merged tree (stamp $(printf '%.12s' "$merge_key"), passed $(stat -f '%Sm' -t '%Y-%m-%d %H:%M:%S' "$merge_stamp")); AUDIOUT_TEST_NO_CACHE=1 forces a run." >&2
-    elif [ "$scope" = "FULL" ]; then
+    if [ "$scope" = "FULL" ]; then
         echo "  Guard 4: AudioutCore Swift changed — running full suite" >&2
         echo "  (scripts/run-tests.sh) before commit. ~70s warm; --no-verify to skip." >&2
     else
@@ -286,21 +262,18 @@ if [ -n "$staged_swift" ] && command -v swift >/dev/null 2>&1; then
     # the unset is scoped to the swift calls so the staged-diff guards above
     # keep reading the commit's real index.
     nogit='env -u GIT_DIR -u GIT_INDEX_FILE -u GIT_WORK_TREE'
-    # $nogit and $merge_env are deliberately unquoted — each must reach `env` as
-    # separate words. "$scope" stays quoted: it is one regex with `|` in it, and
+    # $nogit is deliberately unquoted — it must reach `env` as separate words. "$scope" stays quoted: it is one regex with `|` in it, and
     # unquoting it would hand the shell a pipeline.
     # No runner found (a branch older than run-tests.sh) => full suite inline,
     # unchanged from before.
     run_guard4() {
-        if [ -n "$merge_stamp" ]; then
-            return 0
-        elif [ -z "$run_suite" ]; then
+        if [ -z "$run_suite" ]; then
             ( cd "$repo_root/AudioutCore" \
                 && $nogit swift test --parallel >&2 )
         elif [ "$scope" = "FULL" ]; then
-            $nogit $merge_env "$run_suite"
+            $nogit "$run_suite"
         else
-            $nogit $merge_env "$run_suite" --filter "$scope"
+            $nogit "$run_suite" --filter "$scope"
         fi
     }
     if ! run_guard4; then
@@ -310,9 +283,7 @@ if [ -n "$staged_swift" ] && command -v swift >/dev/null 2>&1; then
         echo "" >&2
         exit 1
     fi
-    if [ -n "$merge_stamp" ]; then
-        :
-    elif [ "$scope" = "FULL" ]; then
+    if [ "$scope" = "FULL" ]; then
         echo "  Guard 4: full suite passed." >&2
     else
         echo "  Guard 4: the suites covering this change passed." >&2

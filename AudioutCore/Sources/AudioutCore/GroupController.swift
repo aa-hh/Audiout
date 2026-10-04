@@ -275,6 +275,15 @@ public final class GroupController {
             selectedDeviceIDs = [local.id]
             mainOut = .selectedDevices
         }
+        if limitsToOneSpeaker {
+            var isGroup = false
+            if case .group = mainOut { isGroup = true }
+            if selectedDeviceIDs.count > 1 || isGroup {
+                selectedDeviceIDs = [local.id]
+                pendingBluetoothRestoreIDs.formIntersection(selectedDeviceIDs)
+                mainOut = .selectedDevices
+            }
+        }
         loadedPersistedRouting = true
         mainOutMasterVolume = (backend.systemOutputVolume ?? settings.mainOutVolume).clampedToVolume
         pushMasterGain(mirrorToSystemVolume: false)
@@ -424,12 +433,39 @@ public final class GroupController {
         }
     }
 
+    /// Set by the host when the install is limited to one Selected Speaker
+    /// (`LicenseGate.limitsToOneSpeaker`). Refuses a second speaker and a group
+    /// target; never trims a live set — the limit lands on the next edit or
+    /// launch.
+    public var limitsToOneSpeaker = false
+
+    /// The refusal reason `setDeviceSelected` returns under the limit.
+    public static let oneSpeakerLimitReason = "one_speaker_limit"
+
     /// The local (Mac's own) device id in the current fleet, if discovered.
     private var localDeviceID: String? { devices.first(where: \.isLocalDevice)?.id }
 
     /// Whether `id` is in the "Selected Speakers" set. (Membership, NOT "is it
     /// receiving audio" — routing is decided by Main Out.)
     public func isSpeakerSelected(_ id: String) -> Bool { selectedDeviceIDs.contains(id) }
+
+    /// Replace the whole Selected Devices set with `id` in one routing apply —
+    /// "Play here". A deselect-then-select would apply twice and leave
+    /// This Mac briefly live between them. Always a one-member result, so it
+    /// holds under `limitsToOneSpeaker`. No-op (`.ok`) if unknown.
+    /// Main Out moves to Selected Speakers too: under a scene target the click
+    /// would otherwise change nothing audible.
+    @discardableResult
+    public func switchSelection(to id: String) -> SelectionResult {
+        guard device(id) != nil else { return .ok }
+        selectedDeviceIDs = [id]
+        mainOut = .selectedDevices
+        pushMasterGain(mirrorToSystemVolume: false)
+        applyRouting()
+        persistRouting()
+        onStateDidChange?()
+        return .ok
+    }
 
     /// Add or remove a device from "Selected Speakers" (SPEC §9b). Composes the
     /// persistent set; live-applies the output set when Main Out targets
@@ -478,14 +514,19 @@ public final class GroupController {
             // Auto-swap: an AirPlay device turning ON while the local device is
             // the sole selected member drops the local device. Once the Mac is
             // already mixed with AirPlay, this guard is false and the Mac stays.
+            var next = selectedDeviceIDs
             var autoSwapped = false
             if !d.isLocalDevice, let local = localDeviceID,
                selectedDeviceIDs == [local] {
-                selectedDeviceIDs.remove(local)
+                next.remove(local)
                 autoSwapped = true
             }
+            next.insert(id)
+            if limitsToOneSpeaker, next.count > 1 {
+                return .refused(Self.oneSpeakerLimitReason)
+            }
 
-            selectedDeviceIDs.insert(id)
+            selectedDeviceIDs = next
             persistRouting()
             if mainOut == .selectedDevices { applyRouting() }
             onStateDidChange?()
@@ -606,6 +647,7 @@ public final class GroupController {
     /// possibly louder — product was still in force would get one burst at the
     /// wrong level.
     public func setMainOut(_ target: MainOutTarget) {
+        if limitsToOneSpeaker, case .group = target { return }
         mainOut = target
         pushMasterGain(mirrorToSystemVolume: false)
         applyRouting()

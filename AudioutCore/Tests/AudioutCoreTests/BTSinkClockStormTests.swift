@@ -64,11 +64,14 @@ import Testing
     /// ring plays everything after it 42 ms late. Summed over the storm that
     /// was a quarter of a second, which is what the user heard. Asserted on
     /// the median over each 5 s, so a correction may lag one step but never
-    /// let the offset build up.
-    @Test func aSteppingClockDoesNotMoveThePlayoutOffset() throws {
+    /// let the offset build up. The 60 ms row is red if the forward clamp
+    /// keeps a fixed 100 ms margin instead of min(100 ms, anchored delay): the
+    /// first 42 ms under-pull then moves 2 ms and the Move stays 40 ms late.
+    @Test(arguments: [Self.delayMs, 60])
+    func aSteppingClockDoesNotMoveThePlayoutOffset(delayMs: Int64) throws {
         let manager = BTSyncedSink(
             renderSampleRate: Self.sampleRate, channelCount: 1,
-            presentationDelayMs: { Int(Self.delayMs) })
+            presentationDelayMs: { Int(delayMs) })
         manager.setComposition(BTGroupComposition(airPlayPresent: true, macLocalPresent: false))
         manager.setDevices([.init(deviceID: 0, uid: "move-2")])
         defer { manager.stop() }
@@ -105,7 +108,7 @@ import Testing
                 }
                 if out[0] > 0 {
                     let pts = Double(Self.anchorNanos) + Double(out[0] - 1) * Self.nsPerFrame
-                    errors.append((host - pts) / 1e6 - Double(Self.delayMs))
+                    errors.append((host - pts) / 1e6 - Double(delayMs))
                 }
                 host += cyclePeriod
             }
@@ -182,9 +185,10 @@ import Testing
 
         // Capture and device stalled together, so capture resumes at wall rate
         // from the stall while the device runs the storm's fast 92.6 ms second.
-        // Book the clamped shortfall into `pullRealignedNanos` instead of
-        // re-basing the measurement and the stuck forward remainder swallows
-        // this over-pull, the backward move never runs, and the ring drains.
+        // Red if the clamped shortfall is booked into `pullRealignedNanos`
+        // instead of re-basing the measurement: the stuck forward remainder
+        // swallows this over-pull, the backward move never runs, and the ring
+        // drains.
         let captureBase = stallHost - Double(written) * Self.nsPerFrame
         let fastPeriod = cyclePeriod * 1_000 / 1_092.6
         let thresholdFrames = Int(BTDeviceSink.pullRealignThresholdMs / 1_000 * Self.sampleRate)

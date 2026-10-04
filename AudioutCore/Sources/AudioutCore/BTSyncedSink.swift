@@ -598,6 +598,10 @@ final class BTDeviceSink: @unchecked Sendable {
     private var lastCycleStartNanos: Int64 = 0
     /// How much of the device's pull deficit the read position already absorbed.
     private var pullRealignedNanos: Int64 = 0
+    /// The anchored delay at release, which is all the ring holds then
+    /// (`catchUpToTargetLocked` skips the rest): a forward re-alignment's
+    /// margin never exceeds it.
+    private var releasedDelayNanos: Int64 = 0
 
     // Engine (all mutation on `graphQueue`).
     private let graphQueue: DispatchQueue
@@ -1107,6 +1111,7 @@ final class BTDeviceSink: @unchecked Sendable {
         delayLine.reset()
         resampler.reset()
         pullOriginNanos = nil
+        releasedDelayNanos = 0
     }
 
     // MARK: Producer (capture → delay line)
@@ -1405,6 +1410,7 @@ final class BTDeviceSink: @unchecked Sendable {
                     lastCycleStartNanos = cycleStartMonotonicNanos
                     framesPulledSinceOrigin = frameCount
                     pullRealignedNanos = 0
+                    releasedDelayNanos = Swift.max(0, sessionDelayNanos)
                 }
             }
         }
@@ -1445,9 +1451,10 @@ final class BTDeviceSink: @unchecked Sendable {
     /// 42 ms more between read and write. Once that passes
     /// ``pullRealignThresholdMs``, the read position moves by it behind the
     /// trim crossfade; a forward re-alignment is clamped like a trim seek,
-    /// ``seekSafetyMarginMs`` short of the write pointer. Measured from the
-    /// render cycles, never from `BTClockWatcher`: a pacing clock that steps
-    /// while the cycles stay even moves nothing.
+    /// ``seekSafetyMarginMs`` (or the anchored delay, if smaller) short of the
+    /// write pointer. Measured from the render cycles, never from
+    /// `BTClockWatcher`: a pacing clock that steps while the cycles stay even
+    /// moves nothing.
     private func realignToDevicePulls(cycleStartMonotonicNanos t: Int64, frameCount: Int) {
         guard let origin = pullOriginNanos else { return }
         let gap = t &- lastCycleStartNanos
@@ -1466,11 +1473,16 @@ final class BTDeviceSink: @unchecked Sendable {
         guard Double(abs(pending)) >= Self.pullRealignThresholdMs * 1_000_000 else { return }
         let frames = Int((Double(pending) / 1e9 * renderSampleRate).rounded())
         if frames > 0 {
-            let marginFrames = Int((Self.seekSafetyMarginMs / 1_000 * renderSampleRate).rounded())
+            // The margin is capped at the anchored delay, so the room is
+            // delay + underpull − 100 ms ≥ underpull at a delay of 100 ms or
+            // more, and delay + underpull − delay = underpull below it: the full
+            // correction lands and the ring keeps min(100 ms, delay) after it.
+            let marginMs = Swift.min(Self.seekSafetyMarginMs, Double(releasedDelayNanos) / 1e6)
+            let marginFrames = Int((marginMs / 1_000 * renderSampleRate).rounded())
             let room = Swift.max(0, delayLine.forwardShiftRoomFrames() - marginFrames)
             if frames > room {
-                // The capture side writes at the rate the device pulls, so a ring
-                // too short for the move means both stalled together and the
+                // Capture writes on wall time, so the ring comes up short only
+                // when capture stalled together with the device and the
                 // shortfall never refills: take what fits and measure from here
                 // like the stall branch, or the stuck remainder hides the
                 // backward move a later over-pull needs.

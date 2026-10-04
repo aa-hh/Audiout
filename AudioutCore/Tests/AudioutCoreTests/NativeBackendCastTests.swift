@@ -924,6 +924,37 @@ import CoreAudio
         #expect(rig.manager.feedGates.last?.open == false)
     }
 
+    /// A settle that moves the receiver's share past the band keeps its feed
+    /// shut until audio carrying the new share has reached the receiver's play
+    /// head, the settled lead plus the measured hold later; a sample in
+    /// between does not open it.
+    /// Turns red if the gate opens at that settle or on a later sample before the held-back open fires, or that open waits anything but the settled lead plus the receiver's measured hold.
+    @Test func aSettleThatMovesTheShareOpensTheGateOnlyWhenTheHeldBackOpenFires() {
+        let clock = ManualDelayClock()
+        // Only a job asked to wait the settled lead plus the hold reaches the clock.
+        let wait = Double(4_000 + 84) / 1000
+        let (rig, ap) = castRoom(delayClock: { seconds, queue, work in
+            guard seconds == wait else { return }
+            clock.clock(seconds, queue, work)
+        })
+        let id = Self.record.id
+        rig.backend.setOutputSet([ap.id, id])
+        waitFor { !rig.capture.preDelayMs.isEmpty }
+
+        rig.manager.fireLead(id: id, leadMs: 4_000, count: CastRoomDelay.settleSampleCount, holdMs: 84)
+        let share = CastRoomDelay.defaultLeadMs + CastFeedRing.macHoldMs - 4_084
+        waitFor { rig.manager.castRoomDelays.last?.ms == share }
+        rig.manager.fireLead(id: id, leadMs: 4_000, count: 3, feedDelayMs: share)
+        waitFor { rig.manager.feedGates.count == CastRoomDelay.settleSampleCount + 3 }
+        rig.backend.stateQueue.sync {}
+        #expect(rig.manager.feedGates.allSatisfy { !$0.open }, "got \(rig.manager.feedGates)")
+        #expect(clock.pendingCount == 1)
+
+        rig.backend.stateQueue.sync { clock.fireAll() }
+        #expect(rig.manager.feedGates.last?.open == true)
+        #expect(rig.manager.feedGates.last?.id == id)
+    }
+
     /// A receiver that is the only output has nothing to fall out of step
     /// with, so its feed plays from the first byte; another output joining
     /// takes that back.

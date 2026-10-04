@@ -52,8 +52,8 @@ protocol CastOutputControlling: AnyObject, Sendable {
 
     /// CAST-SYNC: hold this receiver's feed back by `ms`, so a Cast leg that
     /// plays closer to live than the room's slowest output still lands with it
-    /// (sync architecture brief §4: the `R − settledLead` term of `D_cast`,
-    /// whose trim is ``setCastUserOffsetMs(_:forDeviceID:)``).
+    /// (sync architecture brief §4: the room delay less the settled lead less
+    /// the Mac's measured hold, whose trim is ``setCastUserOffsetMs(_:forDeviceID:)``).
     ///
     /// **Lengthen only.** `0` is the floor: shortening below the receiver's own
     /// lead would need frames the wall clock has not produced yet.
@@ -98,8 +98,8 @@ struct CastFeedStats: Sendable, Equatable {
     /// ``CastFeedRing/reset()`` needs no separate bookkeeping — the backlog it
     /// discards simply stops counting here.
     let achievedDelayMs: Int
-    /// Whole producer blocks the ring refused for want of room. Live audio
-    /// that never reached the receiver.
+    /// Whole producer blocks the ring refused, for want of room or at a
+    /// hand-off between producers. Live audio that never reached the receiver.
     let droppedBlocks: Int
     /// Frames the consumer had to invent because the ring was short. The 1 s
     /// prime each GET renders from a just-emptied ring lands here too — that
@@ -162,8 +162,8 @@ struct CastFeedTiming: Sendable, Equatable {
 /// One Cast receiver's feed: the 2-second hand-off between the capture IOProc
 /// (producer) and the HTTP server's pacing timer (consumer).
 ///
-/// Producers take ``producerLock``, so they wait only on each other; the
-/// consumer never waits on a producer. The producer also never allocated,
+/// Producers try ``producerLock`` and drop a block rather than wait for it;
+/// the consumer never waits on a producer. The producer also never allocated,
 /// until a feed delay line was put in front of it:
 /// ``PCMDelayLine/exchange(_:)-> Data`` takes a copy per block, on the IOProc,
 /// whenever a line is live — a block that does not fit is dropped whole,
@@ -231,15 +231,17 @@ final class CastFeedRing: CastPCMSource, @unchecked Sendable {
     private var delayLine: PCMDelayLine?
     /// Serialises producers against each other, never against the consumer:
     /// ``CastFanOut`` reaches ``push(_:pts:nowNanos:)`` from the capture
-    /// callback, the wizard pacing queue and the leveled-app fallback clock,
-    /// which only timing keeps apart.
+    /// callback, the wizard pacing queue and the leveled-app fallback clock.
+    /// Timing keeps them apart (`NativeCaptureCoordinator.deliver`), so a
+    /// `try()` fails only at a hand-off between them; a failed try drops one
+    /// block instead of making the real-time callback wait.
     private let producerLock = NSLock()
     /// Producer-owned words, written only by ``push(_:pts:nowNanos:)`` and read
     /// behind a barrier: frames pushed, stamps written and blocks accepted.
     private let pushedFramesWord: UnsafeMutablePointer<Int>
     private let stampsWrittenWord: UnsafeMutablePointer<Int>
     private let writesWord: UnsafeMutablePointer<Int>
-    /// Producer-owned: blocks refused for want of room.
+    /// Producer-owned: blocks refused for want of room or at a producer hand-off.
     private let droppedBlocksWord: UnsafeMutablePointer<Int>
     /// Frames the consumer has taken or skipped. Written only under the lock;
     /// the producer reads it behind a barrier.
@@ -335,7 +337,7 @@ final class CastFeedRing: CastPCMSource, @unchecked Sendable {
     func push(_ pcm: Data, pts: timespec, nowNanos: Int64) {
         let frames = pcm.count / 4
         guard frames > 0 else { return }
-        producerLock.lock()
+        guard producerLock.try() else { countDroppedBlock(); return }
         defer { producerLock.unlock() }
         OSMemoryBarrier()                       // acquire: the line and the consumer's progress
         let line = delayLineWord.pointee.map { Unmanaged<PCMDelayLine>.fromOpaque($0).takeUnretainedValue() }
@@ -681,7 +683,8 @@ final class CastFanOut: PCMSink, @unchecked Sendable {
 
     func write(pcm: Data, pts: timespec) {
         // Called from the capture IOProc: never block, and never hold the lock
-        // across the pushes.
+        // across the pushes. Each push tries its ring's producer lock and drops
+        // the block rather than wait.
         guard lock.try() else {
             droppedWritesWord.pointee &+= 1
             OSMemoryBarrier()                   // release: publish before a reader's acquire

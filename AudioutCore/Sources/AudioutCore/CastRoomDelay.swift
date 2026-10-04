@@ -28,20 +28,23 @@ import Foundation
 ///    to the fallback hold: `settled + hold − CastFeedRing.macHoldMs`, where
 ///    `hold` is the median Mac hold measured in the settle window, or the
 ///    fallback before the receiver's first settle.
-///  - **The term never falls while a receiver stays in the mix.** A receiver
+///  - **A receiver's term never falls while it stays in the mix**; the room's
+///    term falls only when a by-ear advance is reduced or cleared. A receiver
 ///    whose adjusted lead lands more than ``raiseThresholdMs`` past its term
 ///    raises the term to that lead. One that plays earlier is absorbed by
 ///    delaying its own feed instead — chasing a lead downwards makes every
 ///    other output jump forward for a number the next stall would undo.
 ///  - A by-ear advance (a negative offset) is added to the receiver's last
 ///    adjusted lead, never to its term: an advance that fits inside the
-///    receiver's own share moves nothing.
+///    receiver's own share moves nothing. The sum stops at ``maxTermMs``.
 ///  - A receiver settling past ``maxTermMs`` is REFUSED for sync: it keeps
 ///    playing, unsynced, and contributes no term. Holding the rest of the
 ///    house that far behind live to reach it is not a trade anyone would take.
 ///  - A receiver's feed plays once it has settled (refused included) or its
 ///    play-out lands within ±``feedGateBandMs`` of the room; until then it is
 ///    silent, so a startup still climbing towards the room is never heard.
+///    When a settle moves its share by more than that band, ``NativeBackend``
+///    holds the open back by the settled lead plus the Mac's hold.
 struct CastRoomDelay {
 
     /// What a receiver is assumed to lead by until it has been measured — the
@@ -226,7 +229,7 @@ struct CastRoomDelay {
         let updated = receivers.filter { !$0.value.refused }.map { id, receiver -> Int in
             let advance = advanceMs[id] ?? 0
             guard advance > 0 else { return receiver.termMs }
-            return max(receiver.termMs, (receiver.adjustedLeadMs ?? receiver.termMs) + advance)
+            return min(Self.maxTermMs, max(receiver.termMs, (receiver.adjustedLeadMs ?? receiver.termMs) + advance))
         }.max()
         guard updated != termMs else { return false }
         termMs = updated

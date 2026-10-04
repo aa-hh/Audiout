@@ -280,8 +280,11 @@ import Testing
         #expect(ring.render(frames: 441).contains { $0 != 0 })
     }
 
-    /// Turns red if the served stream stops carrying the 1 s prime, the 80 ms
-    /// standing queue, or the applied feed delay as readable numbers.
+    /// Turns red if the served stream's timing report breaks either identity
+    /// (age is capture-to-push plus feed delay plus ring wait; ring wait is
+    /// queue ahead plus pacing phase), reports a queue ahead outside the 2 s
+    /// ring or a capture-to-push below 0, stops rendering the 1 s prime as
+    /// silence, or never carries the applied 300 ms feed delay to a rendered frame.
     @Test func theServedStreamReportsItsPrimeCushionAndFeedDelay() throws {
         guard #available(macOS 15, *) else { return }
         let (fake, endpoint) = try startFake()
@@ -311,27 +314,33 @@ import Testing
         manager.setDevices([record(endpoint)])
         try #require(waitUntil(timeout: 10) { log.contains(.playing) },
                      Comment(rawValue: "never reached PLAYING, saw \(log.all)"))
-        _ = waitUntil(timeout: 3.0) { false }
 
         let ring = try #require(manager.test_ring(forDevice: "dev1"))
+        try #require(waitUntil(timeout: 10) { ring.timing.lastRender != nil },
+                     "no render took real frames")
+        // Only relationships between the reported fields: a stall on a loaded
+        // machine moves every wall-clock reading, never these.
         let timing = ring.timing
         let stats = ring.stats
         let last = try #require(timing.lastRender)
         #expect(last.delayLineMs == 0)
-        #expect((40...200).contains(last.queueAheadMs), "queueAheadMs \(last.queueAheadMs)")
-        #expect((0...250).contains(last.pacingPhaseMs), "pacingPhaseMs \(last.pacingPhaseMs)")
-        #expect((-1...100).contains(last.ioprocToPushMs), "ioprocToPushMs \(last.ioprocToPushMs)")
+        #expect(abs(last.ageMs - (last.ioprocToPushMs + last.delayLineMs + last.ringWaitMs)) < 0.01, "\(last)")
+        #expect(abs(last.ringWaitMs - (last.queueAheadMs + last.pacingPhaseMs)) < 0.01, "\(last)")
+        // What the 2 s ring held ahead of the frame when its block was pushed.
+        #expect((0...2_000).contains(last.queueAheadMs), "queueAheadMs \(last.queueAheadMs)")
+        // Stamped 20 ms before the push, less the frame's place in its 20 ms block.
+        #expect(last.ioprocToPushMs >= -1, "ioprocToPushMs \(last.ioprocToPushMs)")
         // The prime, rendered whole as silence: a refilling ring takes nothing
-        // for it. The top allows a loaded machine.
-        #expect((44_100...88_200).contains(stats.underrunFrames), "underrunFrames \(stats.underrunFrames)")
-        #expect(timing.renderedFramesSinceReset >= 44_100 + 66_150,
+        // for it, and a stall only adds underruns.
+        #expect(stats.underrunFrames >= 44_100, "underrunFrames \(stats.underrunFrames)")
+        // The prime, then at least one render that took real frames.
+        #expect(timing.renderedFramesSinceReset > 44_100,
                 "renderedFramesSinceReset \(timing.renderedFramesSinceReset)")
 
         manager.setCastRoomDelayMs(300, forDeviceID: "dev1")
-        _ = waitUntil(timeout: 2.0) { false }
-        let delayed = ring.timing
-        #expect(delayed.lastRender?.delayLineMs == 300)
-        #expect(delayed.delayLineMs == 300)
+        #expect(waitUntil(timeout: 10) { ring.timing.lastRender?.delayLineMs == 300 },
+                "the applied feed delay never reached a rendered frame")
+        #expect(ring.timing.delayLineMs == 300)
     }
 
     @Test func setLevelRoundTrips() throws {

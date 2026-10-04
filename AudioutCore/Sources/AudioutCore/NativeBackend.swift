@@ -714,6 +714,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// Per Cast id, the pending room move for a by-ear offset change, on
     /// `stateQueue`; a newer change cancels and replaces it.
     var pendingCastOffsetSettles: [String: DispatchWorkItem] = [:]
+    /// Per Cast id, the feed-gate open held back after a settle that moved the
+    /// receiver's share by more than ``CastRoomDelay/feedGateBandMs``, on
+    /// `stateQueue`. While one is pending the gate stays shut; a newer settle,
+    /// a deselect or `stop()` cancels it.
+    var pendingCastFeedGateOpens: [String: DispatchWorkItem] = [:]
     /// Whether the capture fan-out's Cast slot is attached
     /// (`captureControlQueue`), so an already-armed selection change never
     /// re-attaches it.
@@ -1571,7 +1576,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
 
     /// Runs the backed-off retries (`.processNotYetAudible`, rebind recovery,
     /// whole-system capture), the companion audition's preparation, lease and
-    /// stop deadlines, and the Cast offset's room-move settle. Only the tests pass anything but ``dispatchDelayClock``:
+    /// stop deadlines, the Cast offset's room-move settle, and a Cast feed gate's held-back open. Only the tests pass anything but ``dispatchDelayClock``:
     /// on the wall clock, a loaded test run let a 0.05 s backoff burn every
     /// rebind attempt before the test's next step, and a 4 s stop deadline
     /// expire mid-restoration.
@@ -2611,6 +2616,8 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             self.syncedLocalCoalescedCount = 0
             for work in self.pendingCastOffsetSettles.values { work.cancel() }
             self.pendingCastOffsetSettles.removeAll()
+            for work in self.pendingCastFeedGateOpens.values { work.cancel() }
+            self.pendingCastFeedGateOpens.removeAll()
             // The horizon is per-session: a later start() must not inherit a
             // pre-stop transition and arm the re-sync off it.
             self.syncedLocalTransitionTimes.removeAll()

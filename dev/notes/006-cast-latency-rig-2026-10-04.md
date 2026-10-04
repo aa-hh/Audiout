@@ -22,6 +22,11 @@ It cannot read the receiver's output stage below about 15 ms, and it changes no 
 constant, prime, cushion or room-delay rule. It only measures. The receiver's own buffer
 is read from its self-reported lead (`lead_ms`, rtt-gated, about plus or minus 10 ms).
 
+Note, 2026-10-04: PR #283, stacked on this rig, set the ring's standing queue to 80 ms
+(`CastFeedRing.standingQueueMs`) and added the feed gate and the 20 ms raise threshold
+(`CastRoomDelay.raiseThresholdMs`). The "about 500 ms" ring row and the "+500" expectation
+below apply to the rig commit alone.
+
 ## Where the time goes
 
 Rows are in stream order.

@@ -184,7 +184,8 @@ import Testing
     /// A by-ear advance raises the room only past the receiver's own slack:
     /// it is added to the receiver's last settle, never to its high-water
     /// term, and an unsettled receiver adds it to the lead it is assumed at.
-    /// Turns red if the advance is added to the high-water term instead of the receiver's last settle, or an unsettled receiver's advance is dropped.
+    /// The advanced term stops at `maxTermMs`.
+    /// Turns red if the advance is added to the high-water term instead of the receiver's last settle, an unsettled receiver's advance is dropped, or an advance carries the term past `maxTermMs`.
     @Test func anAdvanceRaisesTheTermOnlyPastTheReceiversLastSettle() {
         var policy = CastRoomDelay()
         policy.setReceivers(["tv"])
@@ -201,6 +202,12 @@ import Testing
         unsettled.setReceivers(["fresh"])
         #expect(unsettled.setAdvanceMs(80, forID: "fresh") == true)
         #expect(unsettled.termMs == CastRoomDelay.defaultLeadMs + 80)
+
+        var deep = CastRoomDelay()
+        deep.setReceivers(["far"])
+        feed(&deep, 9_400, id: "far")
+        #expect(deep.setAdvanceMs(1_000, forID: "far") == true)
+        #expect(deep.termMs == CastRoomDelay.maxTermMs)
     }
 
     // MARK: - R_max

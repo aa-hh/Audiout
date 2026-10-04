@@ -898,15 +898,19 @@ extension NativeBackend {
     /// CAST-SYNC: recompute which Cast receivers contribute a room-delay term
     /// — every SELECTED one whose session has not failed — and apply each
     /// one's stored by-ear offset as its advance. A deselected receiver's
-    /// pending offset settle is dropped. Returns whether `R` moved. On
-    /// `stateQueue`; with `stop()`'s reset, the only writer of the policy's
-    /// receiver set.
+    /// pending offset settle and pending feed-gate open are dropped. Returns
+    /// whether `R` moved. On `stateQueue`; with `stop()`'s reset, the only
+    /// writer of the policy's receiver set.
     @discardableResult
     func updateCastRoomDelayLocked() -> Bool {   // on stateQueue
         let before = castRoomDelay.termMs
         for (id, work) in pendingCastOffsetSettles where !castSelectedIDs.contains(id) {
             work.cancel()
             pendingCastOffsetSettles[id] = nil
+        }
+        for (id, work) in pendingCastFeedGateOpens where !castSelectedIDs.contains(id) {
+            work.cancel()
+            pendingCastFeedGateOpens[id] = nil
         }
         let offsets = castOffsetLock.withLock { castOffsetsByID }
         let contributing = castSelectedIDs.filter { id in
@@ -943,12 +947,29 @@ extension NativeBackend {
                 // them can see.
                 pushCastFeedDelaysLocked()
             }
+            pendingCastFeedGateOpens.removeValue(forKey: id)?.cancel()
+            // The gate acts on the audio leaving the Mac now, but the new share
+            // only enters with the next pushed block, which reaches the
+            // receiver's play head after the Mac's hold plus the settled lead.
+            // A share that moved past the band keeps the gate shut until then.
+            let hold = castRoomDelay.holdMs(forID: id)
+            if let settled = castRoomDelay.settledLeadMs(forID: id),
+               abs(Swift.max(0, roomDelayLocked() - settled - hold) - feedDelayMs)
+                   > CastRoomDelay.feedGateBandMs {
+                let work = DispatchWorkItem { [weak self] in
+                    guard let self else { return }
+                    self.pendingCastFeedGateOpens[id] = nil
+                    self.castOutputManager?.setCastFeedGate(open: true, forDeviceID: id, generation: generation)
+                }
+                pendingCastFeedGateOpens[id] = work
+                delayClock(Double(settled + hold) / 1000, stateQueue, work)
+            }
         }
         // What the listener hears from this receiver: its lead, the Mac's hold
         // in front of it, and the share its feed was delayed by. The user's
         // trim is left out; it covers the output stage the lead cannot see.
         castOutputManager?.setCastFeedGate(
-            open: castRoomDelay.feedGateOpen(
+            open: pendingCastFeedGateOpens[id] == nil && castRoomDelay.feedGateOpen(
                 forID: id,
                 playOutMs: leadMs + (holdMs ?? CastFeedRing.macHoldMs) + feedDelayMs,
                 roomMs: roomDelayLocked()),

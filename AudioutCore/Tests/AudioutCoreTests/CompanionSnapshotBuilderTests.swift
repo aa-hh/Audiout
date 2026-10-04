@@ -399,6 +399,35 @@ import AudioutProtocol
         #expect(stored.connection.credentialKind == nil)
     }
 
+    /// Dropping `access` from any state in `CompanionSnapshotBuilder.connectionInfo`
+    /// turns it red.
+    @Test func connectionCarriesTheSpeakersAccessKind() async throws {
+        let backend = try await makeBackend()
+        let controller = makeGroupController(backend: backend)
+        let appRouting = makeAppRouting()
+
+        let snapshot = CompanionSnapshotBuilder.build(
+            devices: backend.devices.map { device in
+                var device = device
+                device.airPlayAccess = device.id == "speaker-b" ? .password : .open
+                return device
+            },
+            groupController: controller, appRouting: appRouting,
+            excludedBundleIDs: noExcludedBundleIDs, iconFor: iconFor, addableApps: noAddableApps,
+            runningRouted: noRunningRouted, liveRoutedAppNames: noLiveRoutedAppNames,
+            localFallbackActive: false, takeoverStatus: nil, serverName: defaultServerName,
+            connectVolume: defaultConnectVolume, connectVolumeMin: defaultConnectVolumeMin,
+            connectVolumeMax: defaultConnectVolumeMax, startBufferMs: defaultStartBufferMs,
+            startBufferOptionsMs: defaultStartBufferOptionsMs
+        )
+        let protected = try #require(snapshot.devices.first { $0.id == "speaker-b" })
+        #expect(protected.connection.state == "failed")
+        #expect(protected.connection.access == "password")
+        let openSpeaker = try #require(snapshot.devices.first { $0.id == "local" })
+        #expect(openSpeaker.connection.state == "off")
+        #expect(openSpeaker.connection.access == "open")
+    }
+
     // MARK: Passthrough fields
 
     @Test func passthroughFieldsReachTheSnapshotUnchanged() async throws {

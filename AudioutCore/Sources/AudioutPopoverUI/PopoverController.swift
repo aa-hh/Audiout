@@ -1191,6 +1191,9 @@ public final class PopoverController: NSObject {
     /// The exact banner copy from PLAN-RELIABILITY Wave 2.
     static let localFallbackBannerText = "Speakers unreachable. Playing on your Mac. Will resume automatically."
 
+    /// The password sheet's answer to a refused password; the phone shows its own copy.
+    static let passwordRejectedText = "That password didn't work. Check it and try again."
+
     /// Whether the generalized silence watchdog (R11) has fallen back to local
     /// playback because zero desired devices stayed connected. Drives the banner;
     /// re-applied on every `rebuild()` so a rebuild mid-fallback keeps it pinned.
@@ -3619,7 +3622,7 @@ public final class PopoverController: NSObject {
                    case .failed(let failure) = current {
                     passwordSheetSubmitted = false
                     passwordSheet?.showResult(failure.cause == .authRequired
-                        ? "That password didn't work. Check it and try again."
+                        ? Self.passwordRejectedText
                         : failure.headline)
                 }
             case .connected, .off:

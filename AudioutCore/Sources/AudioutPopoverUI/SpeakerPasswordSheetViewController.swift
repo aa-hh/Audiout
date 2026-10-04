@@ -17,6 +17,11 @@ public final class SpeakerPasswordSheetViewController: NSViewController {
 
     private static let sheetContentWidth: CGFloat = 320
 
+    // The phone shows its own copy of these; `CompanionCopyTripwireTests` holds the two in step.
+    static let emptyPasswordText = "Enter the speaker's password."
+    static let connectingText = "Connecting…"
+    nonisolated static func headingText(deviceName: String) -> String { "Enter the password for “\(deviceName)”" }
+
     private let deviceName: String
     private let passwordField = NSSecureTextField()
     private let resultLine = NSTextField(wrappingLabelWithString: "")
@@ -36,7 +41,7 @@ public final class SpeakerPasswordSheetViewController: NSViewController {
     public required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     public override func loadView() {
-        let heading = NSTextField(labelWithString: "Enter the password for “\(deviceName)”")
+        let heading = NSTextField(labelWithString: Self.headingText(deviceName: deviceName))
         heading.font = .boldSystemFont(ofSize: NSFont.systemFontSize)
         heading.lineBreakMode = .byTruncatingTail
 
@@ -105,12 +110,12 @@ public final class SpeakerPasswordSheetViewController: NSViewController {
     @objc private func connectTapped() {
         let text = passwordField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else {
-            show(result: "Enter the speaker's password.")
+            show(result: Self.emptyPasswordText)
             return
         }
         passwordField.isEnabled = false
         connectButton.isEnabled = false
-        show(result: "Connecting…")
+        show(result: Self.connectingText)
         onSubmit?(text)
     }
 

@@ -288,22 +288,24 @@ public enum CompanionSnapshotBuilder {
     private static func connectionInfo(_ device: Device) -> DeviceState.ConnectionInfo {
         let credentialKind: String? =
             device.airPlayAccess == .password && !device.hasStoredPassword ? "password" : nil
+        let access = device.airPlayAccess.rawValue
         switch device.connectionState {
         case .off:
-            return DeviceState.ConnectionInfo(state: "off", credentialKind: credentialKind)
+            return DeviceState.ConnectionInfo(state: "off", credentialKind: credentialKind, access: access)
         case .connecting:
-            return DeviceState.ConnectionInfo(state: "connecting", credentialKind: credentialKind)
+            return DeviceState.ConnectionInfo(state: "connecting", credentialKind: credentialKind, access: access)
         case .connected:
-            return DeviceState.ConnectionInfo(state: "connected", credentialKind: credentialKind)
+            return DeviceState.ConnectionInfo(state: "connected", credentialKind: credentialKind, access: access)
         case .reconnecting:
-            return DeviceState.ConnectionInfo(state: "reconnecting", credentialKind: credentialKind)
+            return DeviceState.ConnectionInfo(state: "reconnecting", credentialKind: credentialKind, access: access)
         case .failed(let failure):
             return DeviceState.ConnectionInfo(
                 state: "failed",
                 failureHeadline: failure.headline,
                 failureSuggestion: failure.suggestion,
                 failureCause: String(describing: failure.cause),
-                credentialKind: credentialKind
+                credentialKind: credentialKind,
+                access: access
             )
         }
     }

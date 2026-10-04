@@ -29,6 +29,10 @@ import Testing
     static let mirroredOnThePhone = [
         "Speakers unreachable. Playing on your Mac. Will resume automatically.",
         "Your Mac's system output is also set to AirPlay. Audio may play twice. Switch it back to avoid an echo.",
+        "Enter the speaker's password.",
+        "Connecting…",
+        "That password didn't work. Check it and try again.",
+        "Enter the password for “Kitchen”",
     ]
 
     @Test func mirroredBannersStillSayWhatThePhoneWasToldTheySay() {
@@ -42,5 +46,20 @@ import Testing
             StatusBanners, so change audiout-remote to match, then update
             `mirroredOnThePhone` above.
             """)
+    }
+
+    /// Changing any password-sheet string in `SpeakerPasswordSheetViewController`
+    /// or `PopoverController.passwordRejectedText` turns it red.
+    @Test func mirroredPasswordSheetCopyStillSaysWhatThePhoneWasToldItSays() {
+        let note = """
+            This password-sheet line changed. The phone hardcodes its own copy of it
+            in SpeakerPasswordSheet, so change audiout-remote to match, then update
+            `mirroredOnThePhone` above.
+            """
+        #expect(SpeakerPasswordSheetViewController.emptyPasswordText == Self.mirroredOnThePhone[2], "\(note)")
+        #expect(SpeakerPasswordSheetViewController.connectingText == Self.mirroredOnThePhone[3], "\(note)")
+        #expect(PopoverController.passwordRejectedText == Self.mirroredOnThePhone[4], "\(note)")
+        #expect(SpeakerPasswordSheetViewController.headingText(deviceName: "Kitchen") == Self.mirroredOnThePhone[5],
+                "\(note)")
     }
 }

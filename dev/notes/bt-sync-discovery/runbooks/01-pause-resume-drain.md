@@ -60,7 +60,9 @@ does).
 
 Repeat steps 1–5 with the Mac speakers at a moderate level, save as `runB.m4a`. Expected
 size if the drain is real: the Bluetooth speaker comes back roughly `R − L` early, i.e.
-several hundred ms, which you will hear as a clear double click.
+several hundred ms, which you will hear as a clear double click. Run the script with
+`--max-offset-ms 1500` here: its default of 500 ms drops a drain-sized offset as a
+neighbouring click.
 
 ## Run C (optional, 12 min): pause past the keep-alive
 

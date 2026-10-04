@@ -1382,9 +1382,15 @@ public final class DeviceRowView: NSView {
         (centered ? feedStackCenterConstraint : feedStackLeadingConstraint)?.isActive = true
     }
 
+    /// At most this many value pills are ever named on the row (owner's
+    /// call, 2026-10-04): the first two, then "+N" for the rest, with the
+    /// hover tooltip carrying every name. Three or more named pills read as
+    /// a list, not a status.
+    static let maxNamedFeedPills = 2
+
     /// Compose `segments` (main-mix + app tokens, already colored) into ONE
     /// PILL EACH, with the spec item 3 STATIC overflow
-    /// rule: try showing every value's pill first; if the row of pills
+    /// rule: try showing the first `maxNamedFeedPills` values; if that row of pills
     /// doesn't fit the row's own slot — `PopoverColumnGrid.feedColumnWidth`,
     /// or `btFeedSlotWidth` on a row that also carries the SYNC chip — drop
     /// values from the TAIL one at a time (never cut a pill mid-string) and append a trailing
@@ -1439,7 +1445,7 @@ public final class DeviceRowView: NSView {
         // accurate, legible count beats a barely-visible fragment of one.
         let minVisibleCount = segments.count > 1 ? 0 : 1
 
-        var visibleCount = segments.count
+        var visibleCount = min(segments.count, Self.maxNamedFeedPills)
         var committed: [NSAttributedString] = []
         while true {
             let overflowCount = segments.count - visibleCount

@@ -619,10 +619,11 @@ extension NativeBackend {
             // timeline by the time the Cast device starts filling its buffer.
             if castTermMoved {
                 self.roomDelayChangedLocked(cause: "cast_selection")
-            } else if self._castTermMs != nil {
+            } else if self._castTermMs != nil || self.btRoomTermMs != nil {
                 // The room did not move, but who has to meet it may have: an
-                // AirPlay device joining a Cast room needs the line from its
-                // first buffer, and re-publishing the same depth costs nothing.
+                // AirPlay device joining a room a Cast or Bluetooth term already
+                // holds needs the line from its first buffer, and re-publishing
+                // the same depth costs nothing.
                 self.publishAirPlayPreDelayLocked()
             }
 

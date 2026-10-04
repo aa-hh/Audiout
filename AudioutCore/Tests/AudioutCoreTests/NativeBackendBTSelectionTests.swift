@@ -530,7 +530,7 @@ import CoreAudio
         // Headroom is 100 ms, so this lands exactly on the buffer, not over it.
         backend.endBTWizardLatencyPreview(forDevice: btMove.id, keepMs: Double(startBuffer - 100))
         waitFor { backend.btMeasuredLatencyMs(forDevice: self.btMove.id) == Double(startBuffer - 100) }
-        waitFor(timeout: 0.3) { false }   // let the async recompute settle
+        SuiteWait.settle(0.3)   // let the async recompute settle
 
         #expect(capture.preDelayMs.isEmpty, "got \(capture.preDelayMs)")
         #expect(backend.btReferenceDelayMs() == startBuffer)
@@ -564,6 +564,32 @@ import CoreAudio
         #expect(sink.calls.contains("reanchorAll"), "the BT sinks re-anchor on the moved room delay")
     }
 
+    /// The wizard's ceiling is solved against the room delay the Bluetooth
+    /// sinks really render on: with a slow speaker's term standing, that is
+    /// its latency plus headroom, not the start buffer. Turns red if
+    /// `btWizardLatencyRangeMs` solves the ceiling against the start buffer
+    /// instead of the room delay the Bluetooth sinks render on.
+    @Test func btWizardCeilingFollowsTheStandingRoomTerm() {
+        let (backend, engine, discovery, bt, sink, capture) = makeBackend()
+        defer { backend.stop() }
+        backend.start()
+        let ap = ap2Device()
+        discovery.fire(.appeared(ap))
+        bt.fire([btMove])
+        waitFor { self.device(backend, ap.id) != nil && self.device(backend, self.btMove.id) != nil }
+        waitFor { engine.fedIDs.contains(ap.outputID) }
+        backend.setOutputSet([ap.id, btMove.id])
+        waitFor { engine.addedIDs.contains(ap.outputID) && sink.calls.contains("start") }
+        let startBuffer = backend.startBufferMs
+        let slow = startBuffer + 300
+
+        backend.endBTWizardLatencyPreview(forDevice: btMove.id, keepMs: Double(slow))
+        waitFor { capture.preDelayMs.last == slow + NativeBackend.btReferenceHeadroomMs - startBuffer }
+
+        #expect(backend.btWizardLatencyRangeMs(forDevice: btMove.id).upperBound
+                == Double(slow + NativeBackend.btReferenceHeadroomMs - BTSyncedSink.defaultBTOnlyBufferMs))
+    }
+
     /// Hysteresis, the Cast term's rule applied to Bluetooth: a re-measurement
     /// that comes in LOWER leaves the room delay where it is (a move is one
     /// gap for the whole house), and only the speaker leaving the selection
@@ -588,7 +614,7 @@ import CoreAudio
 
         backend.endBTWizardLatencyPreview(forDevice: btMove.id, keepMs: Double(startBuffer + 100))
         waitFor { backend.btMeasuredLatencyMs(forDevice: self.btMove.id) == Double(startBuffer + 100) }
-        waitFor(timeout: 0.3) { false }
+        SuiteWait.settle(0.3)
         #expect(backend.btReferenceDelayMs() == raised, "a lower re-measurement never lowers the room")
         #expect(capture.preDelayMs.last == raised - startBuffer, "got \(capture.preDelayMs)")
 

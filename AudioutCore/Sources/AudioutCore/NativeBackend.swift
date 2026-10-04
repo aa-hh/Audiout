@@ -5224,7 +5224,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 // discovery edge, an engine good-state transition, a membership
                 // edge, or `retryOutput` — a same-descriptor re-announce keeps it.
                 // Two exceptions: a failure while a typed password still awaits
-                // its extra attempt skips all of this, and
+                // its extra attempt skips the park and the failed state, and
                 // `applyPasswordFailureLocked` sets a password speaker nobody gave
                 // a password back to available.
                 let wasStreaming = self.added.remove(id) != nil
@@ -5296,6 +5296,10 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                     }
                 }
             case .stopped:
+                // The engine throws `sessionFailed` for a `.stopped` terminal
+                // too, so this can be the echo the catch expects: drop it.
+                if self.expectStaleFailure.remove(id) != nil { return nil }
+                self.failureEchoSeen.insert(id)
                 device.isSelected = false
                 eqNeedsReconcile = self.added.remove(id) != nil
                 // A stopped session for a device the user hasn't re-desired-off is
@@ -5308,6 +5312,9 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                     device.connectionState = .off
                 }
             case .startup:
+                // The engine also throws `sessionFailed` for a `.startup`
+                // terminal, so this can be the echo the catch expects.
+                if self.expectStaleFailure.remove(id) == nil { self.failureEchoSeen.insert(id) }
                 return nil // non-terminal progress; nothing to render yet
             }
             guard device != before else {

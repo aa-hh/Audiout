@@ -24,15 +24,12 @@ import Testing
 /// this repo alone, so a cross-repo read would simply never run.
 @Suite struct CompanionCopyTripwireTests {
 
-    /// Every Mac string the phone keeps its own copy of. Changing copy here is
-    /// meant to be a stop: update audiout-remote to match, then update this.
+    /// Every banner the phone keeps its own copy of; the password-sheet lines
+    /// sit as literals in their own test. Changing copy here is meant to be a
+    /// stop: update audiout-remote to match, then update this.
     static let mirroredOnThePhone = [
         "Speakers unreachable. Playing on your Mac. Will resume automatically.",
         "Your Mac's system output is also set to AirPlay. Audio may play twice. Switch it back to avoid an echo.",
-        "Enter the speaker's password.",
-        "Connecting…",
-        "That password didn't work. Check it and try again.",
-        "Enter the password for “Kitchen”",
     ]
 
     @Test func mirroredBannersStillSayWhatThePhoneWasToldTheySay() {
@@ -54,12 +51,13 @@ import Testing
         let note = """
             This password-sheet line changed. The phone hardcodes its own copy of it
             in SpeakerPasswordSheet, so change audiout-remote to match, then update
-            `mirroredOnThePhone` above.
+            the literal in this test.
             """
-        #expect(SpeakerPasswordSheetViewController.emptyPasswordText == Self.mirroredOnThePhone[2], "\(note)")
-        #expect(SpeakerPasswordSheetViewController.connectingText == Self.mirroredOnThePhone[3], "\(note)")
-        #expect(PopoverController.passwordRejectedText == Self.mirroredOnThePhone[4], "\(note)")
-        #expect(SpeakerPasswordSheetViewController.headingText(deviceName: "Kitchen") == Self.mirroredOnThePhone[5],
+        #expect(SpeakerPasswordSheetViewController.emptyPasswordText == "Enter the speaker's password.", "\(note)")
+        #expect(SpeakerPasswordSheetViewController.connectingText == "Connecting…", "\(note)")
+        #expect(PopoverController.passwordRejectedText == "That password didn't work. Check it and try again.",
+                "\(note)")
+        #expect(SpeakerPasswordSheetViewController.headingText(deviceName: "Kitchen") == "Enter the password for “Kitchen”",
                 "\(note)")
     }
 }

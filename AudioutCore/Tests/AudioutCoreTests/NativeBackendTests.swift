@@ -3439,6 +3439,38 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         #expect(backend.devices.first { $0.id == device.id }?.isAvailable == false)
     }
 
+    /// Leaving the `.stopped` arm blind to `expectStaleFailure` (so the stale
+    /// flag outlives that echo and swallows the next genuine failure) turns it red.
+    @Test func staleFailureEchoArrivingAsStoppedStillLetsTheNextFailurePark() async {
+        let store = InMemoryAirPlayPasswordStore()
+        let (backend, engine, discovery) = makeBackend(passwordStore: store)
+        defer { backend.stop() }
+        let device = ap2Device(access: .password)
+        await startAndDiscover(backend, engine, discovery, device)
+        // The scripted add failure throws with no state report, so the catch
+        // expects one; it arrives below as `.stopped`.
+        let firstAdd = HoldPoint()
+        let sawFirst = OnceFlag()
+        engine.addFailures = [device.outputID.rawValue]
+        engine.onAddOutputHold = { id, _ in
+            guard id == device.outputID else { return }
+            if sawFirst.testAndSet() { engine.addFailures = [] } else { await firstAdd.hold() }
+        }
+
+        backend.setOutputSet([device.id])
+        await pollUntil { firstAdd.entered }
+        backend.submitAirPlayPassword("secret", for: device.id, source: "mac")
+        backend.retryOutput(device.id)
+        firstAdd.open()
+        await pollUntil { backend.devices.first { $0.id == device.id }?.connectionState == .connected }
+
+        engine.pushState(device.outputID, .stopped)
+        engine.pushState(device.outputID, .failed)
+        await pollUntil { self.failureCause(backend, device.id) != nil }
+        #expect(failureCause(backend, device.id) == .droppedMidStream)
+        #expect(backend.devices.first { $0.id == device.id }?.isAvailable == false)
+    }
+
     /// Letting a password typed with no connect in progress hide a live
     /// session's drop (no `.failed`, no park) turns it red.
     @Test func pendingPasswordWithNoConnectInProgressStillReportsADroppedSession() async {

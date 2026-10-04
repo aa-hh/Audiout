@@ -523,7 +523,9 @@ extension NativeBackend {
             where self.known[id]?.isBluetooth == true {
                 if ids.contains(id) {
                     if self.known[id]?.isAvailable == true { self.beginBTConnectingLocked(id) }
-                } else {
+                } else if !self.btPerAppClaimedUIDs.contains(id) {
+                    // The per-app claim owns the story until its own release at
+                    // the claim reconcile (`NativeBackend+PerAppRouting.swift` claim loop).
                     self.btConnectingDeadlines[id] = nil
                     if case .failed = self.known[id]?.connectionState {} else {
                         self.setConnectionState(.off, for: id)
@@ -1030,11 +1032,13 @@ extension NativeBackend {
                 // the row onto last time's number.
                 self.btSpeakerTiming.noteConnected(uid: id)
                 // BT-LIFECYCLE: a baseband connect is not yet audio. A SELECTED
-                // id keeps breathing until its sink renders; an UNSELECTED one
-                // goes straight to `.off` — nothing will flow to it by design,
+                // id keeps breathing until its sink renders; an unselected,
+                // unclaimed one goes straight to `.off` — nothing will flow to it by design,
                 // so a hold there could only spin forever.
                 if self.expectedSelected.contains(id) {
                     self.beginBTConnectingLocked(id)
+                } else if self.btPerAppClaimedUIDs.contains(id) {
+                    self.beginBTConnectingLocked(id, perApp: true)
                 } else {
                     self.setConnectionState(.off, for: id)
                 }

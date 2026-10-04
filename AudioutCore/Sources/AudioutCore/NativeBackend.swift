@@ -5066,7 +5066,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 // the converging slot (if free) and re-kick so the loop tears the
                 // stale session down. If it's already converging, the running loop
                 // will chase `desiredOn` when its current op settles — nothing to do.
-                if self.desiredOn[id] == false {
+                // `nil` (a device discovered after the last `setOutputSet`, including a
+                // per-app-only target) carries no whole-system intent and takes this
+                // branch too; a per-app session is never in `added`, so the branch is a
+                // no-op for it.
+                if self.desiredOn[id] != true {
                     let out = self.outputIDs[id]
                     if let out, !self.converging.contains(id), self.added.contains(id) {
                         self.converging.insert(id)
@@ -5145,6 +5149,24 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                                        "state": "\(state)",
                                        "cause": "\(cause)",
                                        "wasStreaming": wasStreaming ? "true" : "false",
+                                   ])
+                } else if self.streamBindings[id] != nil, !self.isWholeSystemOperationallyClaimedLocked(id) {
+                    // A per-app-only session never joins `added`, so whether it
+                    // was streaming reads off the state the bind path reported.
+                    let wasConnected = device.connectionState == .connected
+                    let cause: ConnectionFailure.Cause =
+                        state == .passwordRequired
+                            ? .authRequired
+                            : (wasConnected ? .droppedMidStream : .unknown)
+                    device.connectionState = .failed(
+                        ConnectionFailure(cause: cause, detail: "engine state: \(state)")
+                    )
+                    Telemetry.fail(.airplay, "airplay:session_failed",
+                                   local: ["device": id],
+                                   shared: [
+                                       "state": "\(state)",
+                                       "cause": "\(cause)",
+                                       "wasStreaming": wasConnected ? "true" : "false",
                                    ])
                 }
             case .stopped:

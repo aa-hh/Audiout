@@ -73,21 +73,21 @@ import AppKit
         // The rail curving into this ring is gold here, so the ring is gold too:
         // a grey `rim` rimmed ring under a gold wire read as two unrelated
         // things touching.
-        #expect(sameInk(row.test_ringStrokeColor, Tokens.Color.spineTone(armed: true)),
+        #expect(sameInk(row.test_ringStrokeColor, Tokens.Color.spineTone),
                 "the resting ring wears the rail's own ink, never the grey rim")
     }
 
     /// A rail that exists but is not armed (speakers selected, none connected,
-    /// nothing playing locally) rests in the wire's IDLE tone — still never the
-    /// grey rim.
-    @Test func restingRingWearsTheIdleToneWhenTheRailIsNotArmed() {
+    /// nothing playing locally) is still gold — the line has no idle tone
+    /// (owner's ruling, 2026-10-04) — and never the grey rim.
+    @Test func restingRingStaysGoldWhenTheRailIsNotArmed() {
         let row = MainOutRowView()
         row.setRailLive(true)
         row.apply(options: makeOptions(), current: .selectedDevices, master: 50,
                   connectionState: .off)
         #expect(row.test_ringForm == .resting, "a live rail always has a ring to land on")
-        #expect(sameInk(row.test_ringStrokeColor, Tokens.Color.spineTone(armed: false)),
-                "an idle rail's ring is the idle spine tone")
+        #expect(sameInk(row.test_ringStrokeColor, Tokens.Color.gold),
+                "an unarmed rail's ring is still gold")
     }
 
     @Test func noRingWhileThereIsNoRail() {

@@ -97,37 +97,40 @@ public final class MainOutRowView: NSView {
     /// §3.2 Main Out note): reflects the AGGREGATE connection lifecycle of the
     /// active Audio Out target's members — **pending** (dashed breathing) during
     /// a destination-switch handshake so the multi-second gap never reads as
-    /// dead/broken (spec §6), **connected** (solid `ringConnected`) once ≥1
+    /// dead/broken (spec §6), **connected** (solid, the rail's spine tone) once ≥1
     /// member is live, no ring when idle. The host computes the aggregate and
     /// passes it to ``apply(options:current:master:isMuted:connectionState:)``.
     private let haloRingView: HaloRingView = {
         let ring = HaloRingView()
-        // Bespoke terminus sizing (Warm Signal nitpicks — Main Audio's ring is
-        // the rail's terminus, not a peer of the device rows' rings): matches
-        // the rail's own stroke weight so the join reads as one line.
+        // Bespoke terminus size (Warm Signal nitpicks — Main Audio's ring is
+        // the rail's terminus, not a peer of the device rows' rings). Its
+        // stroke is the shared `ringStrokeWidth`, like every other ring.
         ring.diameterOverride = PopoverColumnGrid.mainAudioRingDiameter
-        ring.connectedStrokeWidthOverride = PopoverColumnGrid.mainAudioRingConnectedStroke
+        // The ring's CONNECTED stroke wears the rail's own SPINE TONE (Warm
+        // Signal nitpicks, "rail into the ring"), so the join reads as one
+        // continuous line, not a gold line touching a hue-neutral ring.
+        ring.joinsSpine = true
         return ring
     }()
     /// The **gold route-armed corner dot** on the Main Out icon (Warm Signal
-    /// v3 §3.3, S2): lit iff the active target set has a connected member AND
-    /// the master is unmuted — the aggregate `.connected` ring state already
-    /// implies "target set non-empty ∧ ≥1 member connected", so armed =
-    /// `connectionState == .connected ∧ !isMuted`. Pure model state, never RMS
+    /// v3 §3.3, S2): lit whenever the spine is live (`isSpineLive`): the active
+    /// target has a connected member and the master is unmuted, or the
+    /// local-only armed case (`localOnlyArmed`) where the Mac plays on its own.
+    /// Pure model state, never RMS
     /// (R3): paused and playing render identically; only the meter differs.
     private let armedDotView = RouteArmedDotView()
     /// Whether the master mute is currently engaged — gates the armed dot and
     /// coerces incoming meter pushes to 0 so the drained master meter stays
     /// down while muted (S3).
     private var isMasterMuted = false
-    /// Whether the Main Audio spine is LIVE — the continuous rail overlay reads
-    /// this to tone the origin hook AND the member segments below it, gold vs
-    /// ember. Live = the armed target (connected ∧ unmuted) **or** the
+    /// Whether the Main Audio spine is LIVE. It feeds the armed dot, the rail's
+    /// connect-pulse gate and the VoiceOver "armed" word; it never tones the
+    /// rail line, which is always gold (`Tokens.Color.spineTone`,
+    /// `BusRailOverlayView.originColor(for:)`). Live = the armed target
+    /// (connected ∧ unmuted) **or** the
     /// local-only armed case, where audio genuinely plays through the
     /// Mac and no remote handshake exists for `connectionState` to report. Both
-    /// carry real audio to a member node, so both must read live: the hook's
-    /// corner and the rail leaving it are one stroke, and a truth that covers
-    /// only the remote case draws them in two tones.
+    /// carry real audio to a member node, so both must read live.
     private var isSpineLive = false
     /// Whether a rail exists at all — the host pushes it through
     /// ``setRailLive(_:)``, resolved from the same rule the wire itself draws by
@@ -238,17 +241,13 @@ public final class MainOutRowView: NSView {
         if case .connected = connectionState { isConnected = true } else { isConnected = false }
         let armed = isConnected && !isMuted
         isSpineLive = armed || localOnlyArmed
-        // The ring's CONNECTED stroke wears the rail's own SPINE TONE (Warm
-        // Signal nitpicks, "rail into the ring"), so the join reads as one
-        // continuous line, not a gold line touching a hue-neutral ring. The
-        // row hands over the armed STATE only — `HaloRingView` resolves the
-        // tone through the same `Tokens.Color.spineTone` the rail overlay
-        // uses, at stamp time, so the two cannot drift and the accent dial
-        // moves both.
-        haloRingView.connectedSpineArmed = isSpineLive
-        armedDotView.apply(armed: armed)
-        // The master fader's engaged (gold) fill reuses the EXACT same armed
-        // predicate the dot renders — one armed truth, two instruments.
+        // Gold whenever the spine is live (a connected member playing, or
+        // the Mac playing on its own); otherwise a hollow ring in the ring's
+        // own colour, pushed by `haloRingView.cutoutDot`. Shown whenever the
+        // ring is.
+        armedDotView.apply(armed: isSpineLive)
+        // The master fader's engaged (gold) fill takes `armed` alone; the dot
+        // also lights for the Mac playing on its own (`localOnlyArmed`).
         faderCell.isRouteArmed = armed
         // The readout agrees with the fill beside it: gold while the master is
         // actually sounding, ember while it only holds a stored level.
@@ -392,16 +391,9 @@ public final class MainOutRowView: NSView {
         // screen's Main Audio page: `DeviceIcon.mainAudioSymbolName` owns the
         // owner's `hifispeaker.arrow.forward.fill` and its below-macOS-15
         // fallback, so the two surfaces can never draw different speakers.
-        // Match the device rows' glyph sizing (2026-07-17): size the symbol to
-        // fill the shared 26pt icon box so the Main Out icon reads at the same
-        // scale as the device icons below it (without a config it renders at the
-        // small default size and floats in a big box).
-        let iconConfig = NSImage.SymbolConfiguration(pointSize: PopoverColumnGrid.iconGlyphPointSize,
-                                                     weight: .regular)
+        // Sized and centred by the same table as the device rows' glyphs.
         iconView.imageScaling = .scaleProportionallyDown
-        iconView.image = NSImage(systemSymbolName: DeviceIcon.mainAudioSymbolName,
-                                 accessibilityDescription: "Main Audio")?
-            .withSymbolConfiguration(iconConfig)
+        iconView.image = DeviceIcon.rowGlyph(DeviceIcon.mainAudioSymbolName)
         // The icon is the visible door to this row's menu. Main Audio always
         // has an Equalizer, so unlike a device row it is armed once, here, and
         // never disarmed.
@@ -508,6 +500,7 @@ public final class MainOutRowView: NSView {
         addSubview(iconView)
         addSubview(haloRingView)
         addSubview(armedDotView)
+        haloRingView.cutoutDot = armedDotView
         addSubview(identityStack)
         addSubview(muteButton)
         addSubview(slider)
@@ -734,7 +727,7 @@ public final class MainOutRowView: NSView {
         // dot — the spoken equivalents shipped with the drawing.
         var valueParts: [String] = []
         if isMasterMuted { valueParts.append("muted") }
-        if armedDotView.test_isLit { valueParts.append("armed") }
+        if isSpineLive { valueParts.append("armed") }
         setAccessibilityValue(valueParts.joined(separator: ", "))
         slider.setAccessibilityRole(.slider)
         slider.setAccessibilityLabel("Main Audio master volume")
@@ -806,19 +799,20 @@ public final class MainOutRowView: NSView {
     /// drawn ink, not a re-derived token.
     public var test_ringStrokeColor: NSColor? { haloRingView.test_strokeColor }
 
-    /// Whether the Main Out route-armed corner dot is LIT (spec §3.3: active
-    /// target has a connected member ∧ master unmuted) — reads the dot view's
-    /// rendered state, so it can't drift from the pixels.
+    /// Whether the Main Out route-armed corner dot is LIT: a connected member
+    /// with the master unmuted, or the Mac playing on its own
+    /// (`localOnlyArmed`). Read off the dot itself.
     public var test_routeArmed: Bool { armedDotView.test_isLit }
 
     /// Whether the master fader would render its ENGAGED (gold-gradient) fill
-    /// — the cell's own gate, so the test can't drift from the pixels. Must
-    /// track `test_routeArmed` (one armed truth, two instruments).
+    /// — the cell's own gate, so the test can't drift from the pixels. Tracks
+    /// `test_routeArmed` except while the Mac plays on its own, which lights
+    /// the dot but not the fader.
     public var test_isFaderEngaged: Bool { faderCell.test_isEngagedFill }
 
     /// Whether the master slider is wearing the Warm fader skin (structural).
     public var test_hasWarmFaderSkin: Bool { slider.cell is WarmFaderCell }
-    /// The dot's current fill color (resolved) — gold armed / socket dark.
+    /// The dot's current fill color (resolved) — gold armed, `nil` (hollow) otherwise.
     public var test_dotFillColor: NSColor? { armedDotView.test_fillColor }
     /// Whether the master-mute button is drawing its ENGAGED symbol — a
     /// raster comparison against the same symbol built from the same ink,
@@ -963,10 +957,11 @@ extension MainOutRowView: RailHookProviding {
     /// The Main Audio ring's own geometry (Warm Signal nitpicks — "rail into
     /// the ring"): the icon's centre, converted into `view`'s coordinates,
     /// plus the ring's radius (a distance, unaffected by the sibling-view
-    /// coordinate conversion) and whether the spine is armed (gold vs ember).
+    /// coordinate conversion) and whether the spine is armed (gates the connect
+    /// pulse; the line is always gold).
     /// The overlay curves the rail up to meet this ring's left edge directly,
     /// replacing the old bare gutter-dot terminus.
-    public func railHookAnchor(in view: NSView) -> (centerY: CGFloat, ringCenterX: CGFloat, ringRadius: CGFloat, gold: Bool)? {
+    public func railHookAnchor(in view: NSView) -> (centerY: CGFloat, ringCenterX: CGFloat, ringRadius: CGFloat, armed: Bool)? {
         layoutSubtreeIfNeeded()
         let iconRectInSelf = iconView.convert(iconView.bounds, to: self)
         let iconCenter = convert(NSPoint(x: iconRectInSelf.midX, y: iconRectInSelf.midY), to: view)

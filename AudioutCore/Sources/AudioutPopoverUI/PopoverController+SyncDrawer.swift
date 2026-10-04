@@ -210,48 +210,42 @@ extension PopoverController {
     }
 
     /// Re-point the membership rail at the mounted device rows (Warm Signal v4
-    /// §Call-1). The rail's two ends are the overlay's to derive: the recessed
-    /// channel spans the whole device band, and the gold signal inside it reaches
-    /// the LOWEST member. What the host still owns is WHICH rows exist, WHERE the
-    /// rail is cut, and whether the whole path is dormant.
+    /// §Call-1). The rail's ends are the overlay's to derive (owner's ruling,
+    /// 2026-10-04 — DESIGN.md "Membership rail extent"). What the host still
+    /// owns is WHICH rows exist, WHICH collapsed subsections hide a speaker the
+    /// rail reaches, and whether the whole path is dormant.
     ///
-    /// The rail runs to the LOWEST device the rail reaches
-    /// (`BusRailOverlayView.railReaches`) in the FULL order (`deviceSections()`),
-    /// hidden or not. When that device sits inside a collapsed subsection, the
-    /// rail is cut at that subsection's header with a dot, exactly as a collapsed
-    /// CARD cuts at its own. Otherwise there is no cut: the overlay already ends
-    /// the rail at the lowest reached mounted row. A collapsed subsection hiding
-    /// only devices the rail does not reach never cuts. A hidden device has no
-    /// row, so its node comes from `DeviceRowView.busNode`, the same function the
-    /// rows use. A device the BT-LIST filter never listed is not in
-    /// `deviceSections()` at all, so it never decides the cut.
+    /// Every collapsed subsection holding a device the rail reaches
+    /// (`BusRailOverlayView.railReaches`) is named to the overlay, which dots
+    /// its header; one hiding only devices the rail does not reach is not
+    /// named and gets nothing. A hidden device has no row, so its node comes
+    /// from `DeviceRowView.busNode`, the same function the rows use. A device
+    /// the BT-LIST filter never listed is not in `deviceSections()` at all, so
+    /// it never counts.
     func updateRailRows() {
         let sections = deviceSections()
         let fullOrder = sections.flatMap(\.devices)
         // Only MOUNTED rows go to the overlay — a collapsed subsection's rows are
-        // already out of the model; the cut below speaks for them.
+        // already out of the model; their header dots speak for them.
         let railRows = fullOrder.compactMap { deviceRowsByID[$0.id] }
-        let lowestReachedID = fullOrder.last { device in
-            BusRailOverlayView.railReaches(railNode(for: device))
-        }?.id
-        let cutSubsectionTitle = lowestReachedID.flatMap { id in
-            sections.first {
-                isSubsectionCollapsed($0.title) && $0.devices.contains { $0.id == id }
-            }?.title
-        }
+        let anyReached = fullOrder.contains { BusRailOverlayView.railReaches(railNode(for: $0)) }
+        let foldedTitles = sections.filter { section in
+            isSubsectionCollapsed(section.title)
+                && section.devices.contains { BusRailOverlayView.railReaches(railNode(for: $0)) }
+        }.map(\.title)
         // Feed the continuous rail overlay the Main Audio row + device rows in
         // display order so it can draw the spine as one line through the gutter.
         panel.setRailRows(mainOut: mainOutRow, deviceRows: railRows,
                           originCardTitle: Self.mainAudioCardTitle,
                           deviceCardTitle: Self.outputDevicesCardTitle,
-                          cutSubsectionTitle: cutSubsectionTitle,
+                          foldedSubsectionTitles: foldedTitles,
                           dormant: devicesCardDivergence() != nil)
         // Whether there is a rail at all, decided ONCE here and read by both
         // ends of it: the wire resolves the same rule against the stops it
         // draws (`RailPlan.isLive`), the Main Audio ring takes it from this
         // push. A room hidden inside a collapsed subsection still counts — the
-        // rail cuts to that fold's dot rather than vanishing.
-        mainOutRow.setRailLive(lowestReachedID != nil)
+        // rail runs to that fold's dot rather than vanishing.
+        mainOutRow.setRailLive(anyReached)
     }
 
     /// A device's rail node: the mounted row's own, or — for a device hidden in a

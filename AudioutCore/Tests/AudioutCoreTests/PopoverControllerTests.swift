@@ -884,19 +884,19 @@ import AudioutProtocol
     }
 
     /// Muting does not un-select anything, so the rail (and the ring) stay —
-    /// what changes is the TONE: both drop from gold to the idle ember.
-    @Test func mutingTheLocalOnlyTargetKeepsTheRingAndDropsItToTheIdleTone() async throws {
+    /// and stay gold: the line has no idle tone (owner's ruling, 2026-10-04).
+    @Test func mutingTheLocalOnlyTargetKeepsTheRingGold() async throws {
         let (popover, controller, backend) = try await makePopover()
         controller.setMainOutMuted(true)
         popover.update(devices: backend.devices)
         #expect(popover.test_mainOutRow.test_ringForm == .resting,
                 "a muted room is still selected — the wire is still drawn, so the ring is too")
         let ink = popover.test_mainOutRow.test_ringStrokeColor?.usingColorSpace(.sRGB)
-        let idle = Tokens.Color.spineTone(armed: false).usingColorSpace(.sRGB)
-        #expect(abs((ink?.redComponent ?? -1) - (idle?.redComponent ?? 0)) <= 0.02
-                && abs((ink?.greenComponent ?? -1) - (idle?.greenComponent ?? 0)) <= 0.02
-                && abs((ink?.blueComponent ?? -1) - (idle?.blueComponent ?? 0)) <= 0.02,
-                "muted ⇒ the idle spine tone on the ring, matching the wire")
+        let gold = Tokens.Color.gold.usingColorSpace(.sRGB)
+        #expect(abs((ink?.redComponent ?? -1) - (gold?.redComponent ?? 0)) <= 0.02
+                && abs((ink?.greenComponent ?? -1) - (gold?.greenComponent ?? 0)) <= 0.02
+                && abs((ink?.blueComponent ?? -1) - (gold?.blueComponent ?? 0)) <= 0.02,
+                "muted ⇒ the ring is still gold, matching the wire")
     }
 
     /// A FAILED room is not reached by the wire, so a mix of nothing but failed
@@ -3304,11 +3304,11 @@ import AudioutProtocol
         #expect(popover.test_mainOutRow.test_ringForm == .resting,
                 "…so the ring the wire curves into is drawn")
         let ink = popover.test_mainOutRow.test_ringStrokeColor?.usingColorSpace(.sRGB)
-        let gold = Tokens.Color.spineTone(armed: true).usingColorSpace(.sRGB)
+        let gold = Tokens.Color.spineTone.usingColorSpace(.sRGB)
         #expect(abs((ink?.redComponent ?? -1) - (gold?.redComponent ?? 0)) <= 0.02
                 && abs((ink?.greenComponent ?? -1) - (gold?.greenComponent ?? 0)) <= 0.02
                 && abs((ink?.blueComponent ?? -1) - (gold?.blueComponent ?? 0)) <= 0.02,
-                "the Mac is audibly playing, so the ring wears the armed spine tone")
+                "the ring wears the spine tone")
 
         popover.setLocalFallbackActive(false)
         popover.test_applyExactFitSize()
@@ -4049,11 +4049,11 @@ import AudioutProtocol
     @Test func cardTitlesTintGoldWhileTheirRowsSound() async throws {
         let (popover, _, backend) = try await makePopover()
         // The fixture opens with only the Mac selected, so Main Out is
-        // local-only armed — sounding, even though no remote ring is lit and
-        // the row's armed dot stays dark.
+        // local-only armed — sounding, and the row's dot is lit gold with it,
+        // even though no remote speaker is connected.
         assertSameRGBA(popover.test_cardHeaderTitleColor(title: "System Audio"),
                        Tokens.Color.goldText, "the Mac alone is still the mix")
-        #expect(popover.test_mainOutRow.test_routeArmed == false)
+        #expect(popover.test_mainOutRow.test_routeArmed == true)
         for title in ["Output Speakers", "App Routing"] {
             assertSameRGBA(popover.test_cardHeaderTitleColor(title: title),
                            Tokens.Color.label2, "\(title) starts silent")

@@ -641,7 +641,7 @@ public final class PopoverController: NSObject {
     /// The device ids currently showing the energize PENDING beat (item 9): the
     /// members of the just-switched Main-Audio target that hadn't started
     /// connecting yet (`connectionState == .off`) at the switch instant. Their
-    /// rows render `MembershipBusView.Node.connecting` (gold dashed, on-spine) —
+    /// rows render `MembershipBusView.Node.connecting` (ember dashed, on-spine) —
     /// the instant "press-play" drop — until their real `connectionState`
     /// advances (`→ .connecting`, then `→ .member`), at which point
     /// `reconcileEnergize()` prunes them and the model state carries the node.
@@ -2309,8 +2309,8 @@ public final class PopoverController: NSObject {
     /// The devices `rebuild()` would mount rows for right now: visible, and
     /// inside an EXPANDED subsection. Compared against `deviceRowsByID` to
     /// decide whether `update(devices:)` needs a structural rebuild. The rail
-    /// deliberately does NOT read this — its cut follows the lowest reached device
-    /// in the FULL order (`updateRailRows`).
+    /// deliberately does NOT read this — it judges folded subsections in the
+    /// FULL order (`updateRailRows`).
     func renderedDeviceOrder() -> [Device] {
         deviceSections().filter { !isSubsectionCollapsed($0.title) }.flatMap(\.devices)
     }
@@ -2951,9 +2951,11 @@ public final class PopoverController: NSObject {
     /// AMONG, not "all of": the mixed set {local, AirPlay…} is reachable
     /// (`GroupController.setDeviceSelected` auto-swaps the Mac out only when it
     /// is the SOLE member), and the Mac keeps rendering audio in it. Requiring
-    /// every member to be local dropped the wire to its idle tone for the whole
-    /// time a speaker sat selected-but-not-connected beside the Mac, while the
-    /// Mac was audibly playing. When a member does connect,
+    /// every member to be local turned this term off for the whole time a
+    /// speaker sat selected-but-not-connected beside the Mac. The term keeps
+    /// the Main Audio armed dot, the rail's connect-pulse gate and the
+    /// VoiceOver "armed" word live while the Mac is audibly playing; the rail
+    /// line itself is always gold and does not depend on it. When a member does connect,
     /// `mainOutConnectionState` reports `.connected` and the armed term above
     /// covers it regardless of what this returns.
     private func mainOutIsLocalOnlyArmed(_ controller: GroupController) -> Bool {

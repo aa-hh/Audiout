@@ -9,7 +9,7 @@ import AudioutCore
 /// S2+S3 coverage (Warm Signal v3 §3.3 / §3.5): the **route-armed corner
 /// dot**'s normative predicate — walked as a truth table over
 /// member × connected × rowMute × masterMute × liveApps — plus the paused
-/// test (R3: the dot is pure model state, never RMS), the dot's gold/socket
+/// test (R3: the dot is pure model state, never RMS), the dot's gold/hollow
 /// hues and static glow, the arm bloom's gating, the Main Out row's dot, the
 /// **mute channel** (engaged pill, ballistic meter drain, MUTED sublabel
 /// token with no reflow), the warm meter gradient (ember → gold,
@@ -140,7 +140,7 @@ import AudioutCore
         #expect(!(dark.test_routeArmed), "RMS can never light a dot the model didn't arm")
     }
 
-    // MARK: Dot rendering — flat gold armed, dark socket at rest
+    // MARK: Dot rendering — gold armed, hollow in the ring colour, hidden with no ring
 
     @Test func armedDotIsGoldWithNoHalo() {
         let row = DeviceRowView(device: makeDevice())
@@ -149,11 +149,85 @@ import AudioutCore
         #expect(!(row.test_dotIsBlooming), "no transient on a first render — steady states render settled (spec §6)")
     }
 
-    @Test func unarmedDotIsTheSocket() {
+    /// Whenever a glyph ring is drawn its gap holds a dot, hollow in the
+    /// ring's own colour; no ring, no dot (owner's ruling, 2026-10-03).
+    @Test func everyDrawnRingHoldsAHollowDotInItsOwnColour() {
+        for (state, token) in [(ConnectionState.connecting, Tokens.Color.ember),
+                               (.failed(.init(cause: .notResponding)), Tokens.Color.failure)] {
+            let row = DeviceRowView(device: makeDevice(connectionState: state))
+            // A per-app feed arms the row, but only a connected speaker goes gold.
+            row.apply(makeDevice(connectionState: state), selected: true, liveAppNames: ["Spotify"])
+            #expect(row.test_dotIsShown, "\(state): the ring's gap holds a dot")
+            #expect(row.test_dotFillColor == nil, "\(state): the dot is hollow")
+            assertSameHue(row.test_dotStrokeColor, token, "\(state): the dot wears the ring's token")
+            assertSameHue(row.test_dotStrokeColor, row.test_ringStrokeColor, "\(state): dot and ring match")
+        }
+
+        let off = DeviceRowView(device: makeDevice(connectionState: .off))
+        off.apply(makeDevice(connectionState: .off), selected: true)
+        #expect(!off.test_dotIsShown, "no ring, no dot")
+    }
+
+    /// Turns red if a per-app-fed connected speaker loses its gold dot, a fed-then-silent one loses its hollow rim dot, or a dot survives the ring going.
+    @Test func perAppFedConnectedSpeakerDrawsRingAndGoldDot() {
         let row = DeviceRowView(device: makeDevice())
-        row.apply(makeDevice(), selected: false)
-        assertSameHue(row.test_dotFillColor, Tokens.Color.socket,
-                      "not armed renders the dark/empty socket, not an absence")
+        row.apply(makeDevice(), selected: false, liveAppNames: ["Spotify"])
+        #expect(row.test_dotIsShown, "a fed connected speaker holds the dot")
+        assertSameHue(row.test_dotFillColor, Tokens.Color.gold, "the feed lights the dot gold")
+        assertSameHue(row.test_ringStrokeColor, Tokens.Color.rim, "the ring is the connected ring")
+        #expect(row.test_accessibilityValue?.contains("playing here") == true, "VoiceOver says it plays here")
+
+        row.apply(makeDevice(), selected: false, liveAppNames: [])
+        #expect(row.test_dotIsShown, "fed then silent keeps the ring's dot")
+        #expect(row.test_dotFillColor == nil, "the dot is hollow again")
+        assertSameHue(row.test_dotStrokeColor, Tokens.Color.rim, "the hollow dot wears the rim token")
+
+        let off = DeviceRowView(device: makeDevice(connectionState: .off))
+        off.apply(makeDevice(connectionState: .off), selected: false, liveAppNames: [])
+        #expect(!off.test_dotIsShown, "no ring, no dot")
+    }
+
+    /// The dot's cut-out carries the row's gold wash whenever the row paints
+    /// it, including a connecting speaker with a per-app feed, whose dot stays
+    /// hollow ember while the row washes gold; pointer-over a connected row
+    /// that is not playing paints the neutral hover wash, and the cut-out
+    /// wears that same wash, not a plain panel disc.
+    /// Turns red if the cut-out stops taking `rowWash`, or the connecting dot turns gold.
+    @Test func dotsCutOutTakesTheLiveWashOnAConnectingFeedAndTheHoverWashOnAnIdleRow() {
+        let row = DeviceRowView(device: makeDevice(connectionState: .connecting))
+        row.apply(makeDevice(connectionState: .connecting), selected: true, liveAppNames: ["Spotify"])
+        #expect(row.test_isShowingLiveWash, "a per-app feed washes the row")
+        #expect(!row.armedDotView.test_isLit, "a connecting speaker's dot is not gold")
+        assertSameHue(row.armedDotView.test_cutoutWashColor,
+                      Tokens.Color.gold.withAlphaComponent(PopoverColumnGrid.rowLiveWashAlpha),
+                      "the cut-out matches the washed row")
+
+        row.apply(makeDevice(connectionState: .connecting), selected: true, liveAppNames: [])
+        #expect(row.armedDotView.test_cutoutWashColor == nil, "no wash on the row, none in the cut-out")
+
+        let hoverRow = DeviceRowView(device: makeDevice(isMuted: true))
+        hoverRow.apply(makeDevice(isMuted: true), selected: true)
+        #expect(!hoverRow.test_isShowingLiveWash, "a muted row does not play")
+        hoverRow.test_setHovered(true)
+        let hover = Tokens.Color.engagedChrome.withAlphaComponent(PopoverColumnGrid.rowHoverWashAlpha)
+        assertSameHue(hoverRow.armedDotView.test_cutoutWashColor, hover, "the cut-out matches the hovered row")
+        let cutAlpha = hoverRow.armedDotView.test_cutoutWashColor?.usingColorSpace(.sRGB)?.alphaComponent ?? -1
+        let hoverAlpha = hover.usingColorSpace(.sRGB)?.alphaComponent ?? -2
+        #expect(abs(cutAlpha - hoverAlpha) < 0.01, "at the hover wash's strength")
+
+        hoverRow.test_setHovered(false)
+        #expect(hoverRow.armedDotView.test_cutoutWashColor == nil, "the pointer left, the cut-out is plain again")
+    }
+
+    /// Turns red if a connected speaker that is in the mix but not playing
+    /// drops its ring (and so its dot), or strokes the hollow dot in any token but `rim`.
+    @Test func mutedConnectedDotIsAHollowRingInTheConnectedRingColour() {
+        let row = DeviceRowView(device: makeDevice(isMuted: true))
+        row.apply(makeDevice(isMuted: true), selected: true)
+        #expect(row.test_dotIsShown, "connected and in the mix keeps the dot")
+        #expect(row.test_dotFillColor == nil, "not playing is hollow")
+        assertSameHue(row.test_dotStrokeColor, Tokens.Color.rim,
+                      "the hollow dot follows the connected ring's colour token")
     }
 
     // MARK: Arm bloom — only on a transition INTO armed while visible
@@ -407,6 +481,18 @@ import AudioutCore
         #expect(!(row.test_routeArmed), "master mute darkens the Main Out dot")
         #expect(row.test_isMutePillEngaged, "the master mute pill engages")
         #expect(row.test_accessibilityValue == "muted")
+    }
+
+    /// Turns red if the spoken "armed" or `test_routeArmed` stops reading the
+    /// dot's own state and goes back to the fader's connected-only flag.
+    @Test func mainOutLocalOnlyPlaybackLightsTheDotAndSpeaksArmed() {
+        let row = MainOutRowView()
+        row.setRailLive(true)
+        row.apply(options: mainOutOptions(), current: .selectedDevices, master: 60,
+                  isMuted: false, connectionState: .off, localOnlyArmed: true)
+        #expect(row.test_routeArmed, "the Mac playing on its own lights the dot")
+        assertSameHue(row.test_dotFillColor, Tokens.Color.gold, "lit means gold")
+        #expect(row.test_accessibilityValue == "armed", "VoiceOver says what the dot shows")
     }
 
     @Test func mainOutDarkWhenNotConnected() {

@@ -56,8 +56,8 @@ extension DeviceRowView {
     /// use distinct hues.
     public var test_ringStrokeColor: NSColor? { haloRingView.test_strokeColor }
 
-    /// The halo ring's current stroke width — asserts the failed ring's heavier
-    /// weight (`haloRingFailedStroke`) vs the connected ring.
+    /// The halo ring's current stroke width — asserts every state strokes at
+    /// the shared `ringStrokeWidth`.
     public var test_ringLineWidth: CGFloat { haloRingView.test_lineWidth }
 
     /// Whether the halo ring is currently DASHED — the connecting/reconnecting
@@ -385,13 +385,19 @@ extension DeviceRowView {
     // MARK: Route-armed dot (spec §3.3) test hooks
 
     /// Whether the gold route-armed corner dot is currently LIT — reads the
-    /// dot view's rendered state (the §3.3 predicate's outcome), so it can't
-    /// drift from the pixels.
+    /// dot view's rendered state, which is the §3.3 predicate AND a connected
+    /// speaker, so it is false for a fed speaker that is still connecting.
     public var test_routeArmed: Bool { armedDotView.test_isLit }
 
-    /// The dot's current fill color (resolved) — gold when armed, the
-    /// dark/empty `socket` otherwise.
+    /// The dot's current fill color (resolved) — gold when armed, `nil`
+    /// (hollow) otherwise.
     public var test_dotFillColor: NSColor? { armedDotView.test_fillColor }
+
+    /// Whether the status dot is drawn at all.
+    public var test_dotIsShown: Bool { !armedDotView.isHidden }
+
+    /// The status dot's edge / hollow-ring colour.
+    public var test_dotStrokeColor: NSColor? { armedDotView.test_strokeColor }
 
     /// Whether the one-shot arm bloom is currently mid-flight (fires only on a
     /// transition INTO armed after the first apply, on screen, Reduce Motion

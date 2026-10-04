@@ -291,6 +291,16 @@ extension SerializedSharedState {
             }
         }
 
+        // Dark Subtle `ember` is the hollow connecting dot's ring and the
+        // connecting rail node, so it holds the non-text floor on the two grounds the Mixer
+        // puts behind them (2026-10-04: `#7D6B44`, 3.47:1 panel / 3.05:1
+        // raised; the old `#6D5B34` sat at 2.73:1 / 2.40:1).
+        for (groundName, ground) in [("panel", panel), ("raised", Tokens.Color.raised)] {
+            let ratio = measuredRatio(Tokens.Color.ember, over: ground, appearanceName: .darkAqua)
+            #expect(ratio >= nonTextFloor,
+                "ember/subtle vs \(groundName) dark: \(String(format: "%.2f", ratio)):1 under \(nonTextFloor):1")
+        }
+
         let textFloor: CGFloat = 4.5
         for (name, token) in [("goldText", Tokens.Color.goldText), ("emberText", Tokens.Color.emberText)] {
             for (groundName, ground) in grounds {
@@ -327,9 +337,8 @@ extension SerializedSharedState {
 
     // MARK: - Test D: the unlit seat vs the ring around it
 
-    /// `socket` fills two instruments that are always RINGED — the
-    /// route-armed dot on its icon corner, and a dimmed membership node inside
-    /// the rail's own rim — so the pairing that decides whether it reads is
+    /// `socket` fills an instrument that is always RINGED — a dimmed
+    /// membership node inside the rail's own rim — so the pairing that decides whether it reads is
     /// seat-vs-ring, not seat-vs-ground. It carries no ground floor by design
     /// (Tokens.swift), so nothing else in this matrix measures it at all.
     ///

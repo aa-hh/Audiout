@@ -3202,10 +3202,13 @@ public final class PopoverController: NSObject {
         if device.isLocalDevice, controller.localRowDrivesMain {
             device.volume = controller.mainOutMasterVolume
         }
-        // The Mac reports `.off` whenever it is outside the main mix, but an app
-        // sent to "This Mac" is playing on it right now — draw the same
-        // connected ring every other speaker carrying a routed app draws.
-        if device.isLocalDevice, device.isAvailable, !liveAppNames(for: device).isEmpty {
+        // The Mac has no connection to make, so its snapshot can sit at `.off`
+        // while it is carrying audio — in the main mix (the default Mac-only
+        // setup the rail already draws as connected) or for an app sent to
+        // "This Mac". Draw the connected ring and status dot any speaker in
+        // that position draws.
+        if device.isLocalDevice, device.isAvailable, device.connectionState == .off,
+           controller.isMainOutMember(device.id) || !liveAppNames(for: device).isEmpty {
             device.connectionState = .connected
         }
         // T-UI-ALLOW: the Phase-1 local-mix block is gone — the Mac row's

@@ -2612,6 +2612,19 @@ import AudioutProtocol
                 "the Devices card header agrees with the row it summarises")
     }
 
+    /// Turns red if the Mac row stops drawing as connected while it is the
+    /// default main-mix member: the rail node fills but the ring and status
+    /// dot stay off, unlike any other speaker in the mix.
+    @Test func theDefaultMacOnlyMixDrawsTheMacRowConnected() async throws {
+        let (popover, controller, backend) = try await makePopover()
+        #expect(controller.isMainOutMember("local-mac"))
+        popover.update(devices: backend.devices)
+
+        let row = try #require(popover.test_deviceRow(for: "local-mac"))
+        #expect(row.test_ringForm == .connected)
+        #expect(row.test_dotIsShown)
+    }
+
     /// A non-empty `.routedApps` event overrides the intent-based label with
     /// the confirmed live set.
     @Test func applyRoutedAppsOverridesIntentLabelWhenNonEmpty() async throws {

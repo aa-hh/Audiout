@@ -301,11 +301,14 @@ azure at 213° came within ΔE 6.4 of `permissionSystemAudio`, and a violet at
 
 **The Equalizer-Hue Fence.** One token, `Tokens.Color.equalizer` (`#41B07A`
 dark / `#007835` light), means one thing: this speaker's curve is not flat.
-Its only call site is `DeviceRowView`, which inks two marks with it: the
-device row's engaged Equalizer door (`DeviceRowView.updateEQButton()`) and
-the mark beside the speaker page's Equalizer summary, which takes its image
-from `DeviceRowView.equalizerEngagedMarkImage(in:)`. Both are the door's
-custom square symbol drawn in this hue. It is not a general "on"
+Its only call site is `DeviceRowView`, which inks the token on a non-flat
+curve in two places: the Mixer row's Equalizer door
+(`DeviceRowView.updateEQButton()`) and the icon leading the "Equalizer"
+heading on the speaker page and the Main Audio page. A flat curve shows the
+door's rest ink instead. All three images come from
+`DeviceRowView.equalizerEngagedMarkImage(in:)` and
+`DeviceRowView.equalizerRestMarkImage(in:)`; each is the door's custom square
+symbol, in this hue when the curve is shaped. It is not a general "on"
 green, not a success tone, and not available to a second control that happens
 to be engaged; `DeviceRowMutedStateTests` fails if a second call site appears
 in `Sources/`. The door wore `goldText` until 2026-09-04, and gold means
@@ -530,7 +533,9 @@ inside the shape's top edge), and `SetupPreviewFrameView` (the onboarding demo
 frame, which blends the same 0.18 lip and a 0.06 darkening of its own `well`
 fill, because it is layer-backed rather than hand-drawn). `.well` is the page card recessed: the
 `Tokens.Color.well` fill in place of `.card`'s `raised`, the same
-`containerEdge` stroke and the same `panel` radius. Both Equalizers wear it —
+`containerEdge` stroke and, by default, the `panel` radius; both Equalizer
+wells take the `row` radius (16 pt), the speaker page's Volume box's radius, so
+each of those pages carries one corner. Both Equalizers wear it —
 `DeviceDetailViewController`'s `eqWell` and `MainOutDetailViewController`'s —
 because `.card`'s `raised` fill IS the flat `#FAFAFB` ground in light,
 identical to the `canvas`/`panel` it sits on, so a card there is a 1pt outline
@@ -578,6 +583,11 @@ body and the quit-in-progress HUD, previously two independent literals) and
 **grouped section** (10pt — onboarding's permission card, matching System
 Settings' own inset-list card radius, not the shared `control` value by
 intent even though the number happens to match).
+
+On the speaker page and the Main Audio page every box (the Equalizer well, the
+Volume box and the list) rounds at **row** (16pt), so the page carries one
+corner. The scene editor's checklist and the Speakers page list stay at
+**panel**.
 
 ## Components
 
@@ -694,15 +704,22 @@ Cancel, and refuses when a scene would be left with no speaker, naming the
 scene to delete first.
 
 Every window page opens with a 48 pt icon well, a 16 pt semibold name and one
-caption line. A speaker's caption is its kind and status ("Sonos · Ready"),
-"This Mac", or the failure glyph and "Can't be found". The Equalizer sits open
-below: its title row carries the green engaged mark, a one-line summary
-("Bass 3 dB, Loudness on", or "Flat") and a Reset button hidden while the
-curve is flat. A speaker the Mac can't find shows no editor, only a note that
-its curve is kept when it is shaped, and a Forget button. Then a two-row
-outlined list: **Show in Mixer**, whose caption explains the current choice
-beside its pop-up (absent for This Mac), and **Scenes**, linking each scene the
-speaker belongs to.
+caption line. The icon well starts on the page's own 14 pt inset, level with
+the "Equalizer" heading below it, and the name and caption sit as one block
+centred on the well. A speaker's caption is its kind and status ("Sonos ·
+Ready"), "This Mac", or the failure glyph and "Can't be found". The Equalizer
+sits open below. Its heading is a 20 pt icon, then the word "Equalizer": the
+icon is green on a shaped curve and the door's rest ink on a flat one. The
+summary ("Bass 3 dB, Loudness on", or "Flat") is read out by VoiceOver and
+shown as a tooltip on the heading, never as text. Reset sits at the trailing
+edge and is hidden while the curve is flat. An unavailable speaker keeps its
+editor, which carries the note "Changes will be applied when the speaker is
+back." A speaker the Mac can't find shows no editor; when its curve is shaped
+it shows "Changes will be applied when the speaker is found again.", and it
+always shows a Forget button. Then a two-row outlined list whose rows start on
+the same 14 pt inset: **Show in Mixer**, whose caption explains the current
+choice beside its pop-up (absent for This Mac), and **Scenes**, linking each
+scene the speaker belongs to, one link per line on the row's trailing side.
 
 The Speakers plate's page lists no speakers. Under a subtitle counting the
 speakers in the Mixer and hidden, one outlined list holds only the rows that
@@ -730,7 +747,8 @@ is, and colour then tells engaged from resting.
 The door is green, not gold, because it wore `goldText` until the symbols
 landed and gold means "audio is flowing here" everywhere else, including the
 live wash this row draws behind the door. The Equalizer-Hue Fence under
-Colors holds the hue to this mark and the speaker page's summary mark. No
+Colors holds the hue to this mark and the Equalizer heading icon on the
+speaker page and the Main Audio page. No
 magenta either: magenta is group identity. No editor, no curve and no tone
 control lives on the Mixer itself; the door opens `DeviceDetailViewController`,
 where the Equalizer sits open.

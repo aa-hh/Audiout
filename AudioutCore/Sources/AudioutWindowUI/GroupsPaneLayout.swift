@@ -65,18 +65,14 @@ enum GroupsPaneLayout {
     /// exclusively. Derived from the popover's own grid so the two surfaces
     /// can't drift.
     ///
-    /// **The HEADER of both panes uses this**, rail or no rail, because the
-    /// icon + name are what visibly jump when the sidebar selection switches
-    /// between a group and a device — keeping them locked is worth carrying an
-    /// unused lane in the device pane's header (design review 2026-07-25).
+    /// The scene editor's header and rail, and the Speakers page's header, use this.
     static let contentLeadingInset: CGFloat = PopoverColumnGrid.firstElementLeading(indented: false)
 
-    /// Where content starts inside a section that has NO rail running past it —
-    /// the device pane's metadata rows. Reserving the full spine gutter there
-    /// left those sections looking hollow on their leading edge, since nothing
-    /// occupies the lane (design review 2026-07-25: *"it looks empty in devices
-    /// because there's no rail"*). Only rows below the header take this; the
-    /// header keeps ``contentLeadingInset`` so it stays pinned to the editor's.
+    /// Where content starts inside a section that has NO rail running past it.
+    /// The speaker page and the Main Audio page start everything here, their
+    /// header icon included, so the icon lines up with the "Equalizer" heading;
+    /// the scene editor and the Speakers page start their header icon at
+    /// `contentLeadingInset` instead.
     static let railFreeContentLeadingInset: CGFloat = PopoverColumnGrid.leadingInset
     /// Where content STOPS inside a section, measured from the section's
     /// trailing edge.

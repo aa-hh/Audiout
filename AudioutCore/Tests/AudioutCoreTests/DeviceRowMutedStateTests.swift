@@ -231,8 +231,10 @@ extension SerializedSharedState {
                                    "MainOutRowView.swift"])
     }
 
-    /// `Tokens.Color.equalizer` is fenced the same way, to its one consumer:
-    /// the device row's engaged Equalizer door.
+    /// `Tokens.Color.equalizer` is fenced the same way, to `DeviceRowView`,
+    /// which inks the Equalizer door and, through its two mark helpers, the
+    /// icon leading the Equalizer heading on the speaker page and the Main
+    /// Audio page.
     @Test func theEqualizerHueOnlyDressesTheEqualizerDoor() throws {
         try expectTokenIsFencedTo("Tokens.Color.equalizer",
                                   ["DeviceRowView.swift", "DeviceRowView+TestSupport.swift"])

@@ -114,6 +114,10 @@ public final class GroupEditorViewController: NSViewController {
     /// The group's identity light, mounted behind the well.
     private let iconGlow = GroupIdentityGlowView()
     private let nameField = NSTextField(string: "")
+    /// The rename field over the "Playing" marker, as one block centred on
+    /// the icon well. A hidden marker drops out of the stack, so the name
+    /// alone is centred while nothing plays.
+    private let headerTextStack = NSStackView()
     private let membershipStack = RailRepaintingStackView()
     /// THIS PAGE'S ONE INSTRUMENT, so it is the one `.card` here — a `raised`
     /// fill with a `containerEdge` edge behind the Speakers checklist, plus
@@ -434,7 +438,11 @@ public final class GroupEditorViewController: NSViewController {
         }
         // Identity is bare; the checklist is the page's one card.
         headerWell.style = .bare
-        for v in [iconGlow, iconWell, nameField, playingBadge, speakersLabel, membershipStack] {
+        headerTextStack.orientation = .vertical
+        headerTextStack.alignment = .leading
+        headerTextStack.spacing = 2
+        headerTextStack.setViews([nameField, playingBadge], in: .leading)
+        for v in [iconGlow, iconWell, headerTextStack, speakersLabel, membershipStack] {
             v.translatesAutoresizingMaskIntoConstraints = false
             column.addSubview(v)
         }
@@ -576,9 +584,9 @@ public final class GroupEditorViewController: NSViewController {
             iconGlow.widthAnchor.constraint(equalToConstant: Self.iconGlowSide),
             iconGlow.heightAnchor.constraint(equalToConstant: Self.iconGlowSide),
 
-            nameField.leadingAnchor.constraint(equalTo: iconWell.trailingAnchor,
-                                               constant: GroupsPaneLayout.iconToTitleGap),
-            nameField.centerYAnchor.constraint(equalTo: iconWell.centerYAnchor),
+            headerTextStack.leadingAnchor.constraint(equalTo: iconWell.trailingAnchor,
+                                                     constant: GroupsPaneLayout.iconToTitleGap),
+            headerTextStack.centerYAnchor.constraint(equalTo: iconWell.centerYAnchor),
             nameField.heightAnchor.constraint(equalToConstant: PopoverColumnGrid.titleFieldHeight),
             // REQUIRED floor: an editable text field has no intrinsic width, so
             // without this auto layout is free to collapse it to zero (it
@@ -586,12 +594,6 @@ public final class GroupEditorViewController: NSViewController {
             nameField.widthAnchor.constraint(greaterThanOrEqualToConstant: Self.titleFieldMinWidth),
             titleWidth,
             titleCap,
-
-            // The "Playing" marker tucks UNDER the name, inside the header
-            // band's own padding — it hangs off the field, never off the
-            // section's bottom, so the band's pinned height can't follow it.
-            playingBadge.leadingAnchor.constraint(equalTo: nameField.leadingAnchor),
-            playingBadge.topAnchor.constraint(equalTo: nameField.bottomAnchor, constant: 4),
 
             // Sits BETWEEN the two sections, on bare pane — the gap below the
             // header section's bottom border, above the list section's top.
@@ -1627,6 +1629,13 @@ public final class GroupEditorViewController: NSViewController {
     public var test_headerSectionFrame: NSRect {
         view.layoutSubtreeIfNeeded()
         return headerWell.convert(headerWell.bounds, to: view)
+    }
+
+    /// The name-and-marker block's laid-out frame in the pane's own
+    /// coordinates.
+    public var test_headerTextBlockFrame: NSRect {
+        view.layoutSubtreeIfNeeded()
+        return headerTextStack.convert(headerTextStack.bounds, to: view)
     }
 
     /// T5: the number of rows currently fed to the checklist's recessed

@@ -43,9 +43,12 @@ public final class MainOutDetailViewController: NSViewController {
     private let nameLabel = NSTextField(labelWithString: MainOutDetailViewController.title)
     private let headerWell = GroupedSectionView()
     private let eqWell = GroupedSectionView()
-    /// Titles the page's one recessed section, the same idiom (and geometry)
-    /// as the device pane's "Equalizer" label above its own.
+    /// The Equalizer title row: the Equalizer icon, then the label — the
+    /// same idiom (and geometry) as the device pane's title row above its
+    /// own recessed section.
+    private let eqTitleRow = NSStackView()
     private let eqTitleLabel = NSTextField(labelWithString: "Equalizer")
+    private let eqMarkView = EqualizerMarkView()
     /// The Equalizer card's Reset button, on the title line beside
     /// `eqTitleLabel` — same idiom as `DeviceDetailViewController`.
     private let eqResetButton = NSButton()
@@ -115,10 +118,10 @@ public final class MainOutDetailViewController: NSViewController {
         let column = NSView()
         column.translatesAutoresizingMaskIntoConstraints = false
 
-        // The header keeps the full spine-gutter inset so its icon + name stay
-        // pinned to the other two panes'; the Equalizer below it takes the
-        // rail-free inset, like the device pane's sections.
-        headerWell.contentLeadingInset = GroupsPaneLayout.contentLeadingInset
+        // The whole page starts at the rail-free inset, the header's icon
+        // included, so the icon lines up with the Equalizer heading below it,
+        // as on the device pane.
+        headerWell.contentLeadingInset = GroupsPaneLayout.railFreeContentLeadingInset
         eqWell.contentLeadingInset = GroupsPaneLayout.railFreeContentLeadingInset
         // Identity is bare; the Equalizer is this page's one box.
         headerWell.style = .bare
@@ -126,6 +129,18 @@ public final class MainOutDetailViewController: NSViewController {
         eqTitleLabel.translatesAutoresizingMaskIntoConstraints = false
         eqTitleLabel.font = Tokens.Font.body
         eqTitleLabel.textColor = Tokens.Color.label2
+        eqTitleRow.orientation = .horizontal
+        eqTitleRow.alignment = .centerY
+        eqTitleRow.spacing = 6
+        eqTitleRow.setViews([eqMarkView, eqTitleLabel], in: .leading)
+        // The row is what VoiceOver reads: "Equalizer", then the tone's
+        // summary as its value. The label inside it stays silent so the word
+        // is not read twice; Reset is a sibling, reachable on its own.
+        eqTitleRow.setAccessibilityElement(true)
+        eqTitleRow.setAccessibilityRole(.staticText)
+        eqTitleRow.setAccessibilityLabel("Equalizer")
+        eqTitleLabel.setAccessibilityElement(false)
+        eqTitleRow.translatesAutoresizingMaskIntoConstraints = false
 
         eqResetButton.translatesAutoresizingMaskIntoConstraints = false
         eqResetButton.bezelStyle = .rounded
@@ -140,11 +155,13 @@ public final class MainOutDetailViewController: NSViewController {
         // device page: `raised` resolves to the pane's own ground in light, so
         // a `.card` here is an outline around nothing.
         eqWell.style = .well
+        // Rounds at the row radius, like every box on the speaker page.
+        eqWell.radiusOverride = Tokens.Layout.Radius.row
         for well in [headerWell, eqWell] {
             well.translatesAutoresizingMaskIntoConstraints = false
             column.addSubview(well)
         }
-        for v in [iconWell, nameLabel, eqTitleLabel, eqResetButton, eqEditor, noteLabel] { column.addSubview(v) }
+        for v in [iconWell, nameLabel, eqTitleRow, eqResetButton, eqEditor, noteLabel] { column.addSubview(v) }
 
         let document = FlippedView()
         document.translatesAutoresizingMaskIntoConstraints = false
@@ -183,9 +200,9 @@ public final class MainOutDetailViewController: NSViewController {
             column.widthAnchor.constraint(lessThanOrEqualToConstant: GroupsPaneLayout.contentMaxWidth),
             columnFill,
 
-            // HEADER PARITY, geometric: the same five constraints the device
-            // pane and the group editor use, off the same enum, so switching
-            // sidebar selection never shifts the icon or the title.
+            // The icon starts at the rail-free inset, level with the Equalizer
+            // heading, as on the device pane; the band height comes from the
+            // same enum the device pane and the group editor read.
             headerWell.leadingAnchor.constraint(equalTo: column.leadingAnchor),
             headerWell.trailingAnchor.constraint(equalTo: column.trailingAnchor),
             headerWell.topAnchor.constraint(equalTo: column.topAnchor),
@@ -195,7 +212,7 @@ public final class MainOutDetailViewController: NSViewController {
             iconWell.topAnchor.constraint(equalTo: column.topAnchor,
                                           constant: GroupsPaneLayout.headerPadding),
             iconWell.leadingAnchor.constraint(equalTo: column.leadingAnchor,
-                                              constant: GroupsPaneLayout.contentLeadingInset),
+                                              constant: GroupsPaneLayout.railFreeContentLeadingInset),
 
             nameLabel.leadingAnchor.constraint(equalTo: iconWell.trailingAnchor,
                                                constant: GroupsPaneLayout.iconToTitleGap),
@@ -205,9 +222,9 @@ public final class MainOutDetailViewController: NSViewController {
 
             // "Equalizer" on bare pane above its card — a label is never a
             // section (the device pane's identical break).
-            eqTitleLabel.topAnchor.constraint(equalTo: headerWell.bottomAnchor,
-                                              constant: GroupsPaneLayout.sectionGap),
-            eqTitleLabel.leadingAnchor.constraint(
+            eqTitleRow.topAnchor.constraint(equalTo: headerWell.bottomAnchor,
+                                            constant: GroupsPaneLayout.sectionGap),
+            eqTitleRow.leadingAnchor.constraint(
                 equalTo: column.leadingAnchor,
                 constant: GroupsPaneLayout.railFreeContentLeadingInset),
 
@@ -222,7 +239,7 @@ public final class MainOutDetailViewController: NSViewController {
             // `cardContentInset` rather than the narrower `verticalPadding` a
             // bare row list would use.
             eqEditor.topAnchor.constraint(
-                equalTo: eqTitleLabel.bottomAnchor,
+                equalTo: eqTitleRow.bottomAnchor,
                 constant: GroupsPaneLayout.labelToSectionGap + GroupsPaneLayout.cardContentInset),
             eqEditor.leadingAnchor.constraint(
                 equalTo: column.leadingAnchor,
@@ -252,6 +269,7 @@ public final class MainOutDetailViewController: NSViewController {
         ])
 
         view = container
+        refreshEQTitleRow()
     }
 
     // MARK: Model
@@ -268,17 +286,22 @@ public final class MainOutDetailViewController: NSViewController {
             pendingEdit = nil
         }
         eqEditor.apply(eq: pendingEdit?.eq ?? eq, bypassReason: nil)
-        refreshResetEnabled()
+        refreshEQTitleRow()
     }
 
     @objc private func resetTapped(_ sender: NSButton) {
         eqEditor.resetToFlat()
     }
 
-    /// The editor's own rendered model IS the source of truth here — it
-    /// already received `pendingEdit?.eq ?? eq`.
-    private func refreshResetEnabled() {
-        eqResetButton.isEnabled = !eqEditor.currentEQ.isFlat
+    /// Reset, the heading icon's ink and the heading's spoken summary and
+    /// tooltip. The editor's own rendered model IS the source of truth here —
+    /// it already received `pendingEdit?.eq ?? eq`.
+    private func refreshEQTitleRow() {
+        let eq = eqEditor.currentEQ
+        eqResetButton.isEnabled = !eq.isFlat
+        eqMarkView.isShaped = !eq.isFlat
+        eqTitleRow.setAccessibilityValue(DeviceDetailViewController.eqSummary(eq))
+        eqTitleRow.toolTip = DeviceDetailViewController.eqSummary(eq)
     }
 
     // MARK: Test-support hooks
@@ -324,6 +347,19 @@ public final class MainOutDetailViewController: NSViewController {
         return headerWell.convert(headerWell.bounds, to: view)
     }
 
+    /// The title block's laid-out frame: this page has no caption, so the
+    /// block is the name alone.
+    public var test_headerTextBlockFrame: NSRect {
+        view.layoutSubtreeIfNeeded()
+        return nameLabel.alignmentRect(forFrame: nameLabel.convert(nameLabel.bounds, to: view))
+    }
+
+    /// Whether the Equalizer heading's icon is inked for a shaped curve.
+    public var test_eqMarkIsEngaged: Bool { eqMarkView.isShaped }
+
+    /// What VoiceOver says for the Equalizer heading's summary.
+    public var test_eqHeadingSpokenValue: String? { eqTitleRow.accessibilityValue() as? String }
+
     /// The Equalizer EDITOR's own laid-out frame, in the page's own
     /// coordinates — mirrors `DeviceDetailViewController.test_eqEditorFrame`.
     public var test_eqEditorFrame: NSRect {
@@ -359,7 +395,7 @@ extension MainOutDetailViewController: EQEditorViewDelegate {
         // and until it matches this exact value the snapshot must not win.
         pendingEdit = (eq, committed)
         onSetEQ?(eq, committed)
-        refreshResetEnabled()
+        refreshEQTitleRow()
         if committed { Analytics.capture("eq:adjusted", ["target": "main_out"]) }
     }
 
@@ -367,7 +403,7 @@ extension MainOutDetailViewController: EQEditorViewDelegate {
         // One committed action; the editor has already flattened its controls.
         pendingEdit = (.flat, true)
         onSetEQ?(.flat, true)
-        refreshResetEnabled()
+        refreshEQTitleRow()
         Analytics.capture("eq:reset", ["target": "main_out"])
     }
 }

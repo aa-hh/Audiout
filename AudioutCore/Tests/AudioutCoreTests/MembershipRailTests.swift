@@ -505,12 +505,11 @@ import AppKit
     }
 
     @Test func theActiveMarkersNeverMoveTheHeaderBand() throws {
-        // Header parity is geometric (`GroupsHeaderParityTests`): the badge sits
-        // INSIDE the band, hanging off the rename field, so activating a group
-        // may not shift the icon, the title, or the section around them.
+        // The badge joins the name in one block centred on the icon well, so
+        // activating a group may move the name, but the block stays centred
+        // and the icon and the band stay put.
         let (editor, controller, devices) = try makeEditor()
         let icon = editor.test_headerIconFrame
-        let title = editor.test_headerTitleAlignmentFrame
         let header = editor.test_headerSectionFrame
 
         let group = try #require(controller.groups.first)
@@ -521,7 +520,7 @@ import AppKit
         #expect(abs(editor.test_headerSectionFrame.height - header.height) <= 0.01)
         #expect(abs(editor.test_headerIconFrame.minY - icon.minY) <= 0.01)
         #expect(abs(editor.test_headerIconFrame.minX - icon.minX) <= 0.01)
-        #expect(abs(editor.test_headerTitleAlignmentFrame.minY - title.minY) <= 0.01)
+        #expect(abs(editor.test_headerTextBlockFrame.midY - editor.test_headerIconFrame.midY) <= 0.01)
     }
 
     /// At a seven-device fleet the pane has no spare points: the shipping

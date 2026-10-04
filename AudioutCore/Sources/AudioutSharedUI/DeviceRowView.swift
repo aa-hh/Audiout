@@ -1065,15 +1065,20 @@ public final class DeviceRowView: NSView {
         // One shape, two inks.
         eqButton.image = isEQShaped
             ? Self.equalizerEngagedMarkImage(in: effectiveAppearance)
-            : RowAccessorySymbol.image(named: Self.eqRestSymbolName, ink: Self.restInk(in: effectiveAppearance))
+            : Self.equalizerRestMarkImage(in: effectiveAppearance)
     }
 
-    /// The engaged equalizer mark, for the speaker page's Equalizer summary
-    /// as well as this row's door, so the green stays drawn from this file.
+    /// The engaged and at-rest equalizer marks. Both serve this row's door
+    /// and the icon leading the Equalizer heading on the speaker page and the
+    /// Main Audio page, so the green stays drawn from this file.
     public static func equalizerEngagedMarkImage(in appearance: NSAppearance) -> NSImage? {
         RowAccessorySymbol.image(
             named: eqRestSymbolName,
             ink: engagedInk(fill: Tokens.Color.equalizer, in: appearance))
+    }
+
+    public static func equalizerRestMarkImage(in appearance: NSAppearance) -> NSImage? {
+        RowAccessorySymbol.image(named: eqRestSymbolName, ink: restInk(in: appearance))
     }
 
     /// The engaged ink: `fill` over everything the symbol draws — on mute's

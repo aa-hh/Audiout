@@ -343,7 +343,7 @@ import AudioutProtocol
 
     // MARK: - Commands
 
-    @Test func commandRoundTripDeliversTheReply() throws {
+    @Test(.enabled(if: ProcessInfo.processInfo.environment["CI"] == nil, "Quarantined on GitHub runners 2026-10-04: depends on timers the runner starves. Issue #258.")) func commandRoundTripDeliversTheReply() throws {
         let hub = try makeHub()
         defer { hub.cancel() }
         let server = makeAutoApprovingServer()

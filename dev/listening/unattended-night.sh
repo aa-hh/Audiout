@@ -343,7 +343,7 @@ print -n -- - > "$OUT/.block"
   done
 ) &
 LOAD_PID=$!
-trap 'kill $LOAD_PID 2>/dev/null; [[ -n $PLAY_PID ]] && kill $PLAY_PID 2>/dev/null' EXIT
+trap 'kill $LOAD_PID 2>/dev/null; [[ -n $PLAY_PID ]] && kill $PLAY_PID 2>/dev/null; [[ -n $REC_PID ]] && kill -TERM $REC_PID 2>/dev/null' EXIT
 [[ -n $BLUE_PROBLEM ]] && note "$BLUE_PROBLEM: Block A's disconnect and the connection checks are skipped"
 if (( DRY )); then
   [[ -n $KEY_PROBLEM ]] && note "a real run would stop here: $KEY_PROBLEM"
@@ -1028,7 +1028,7 @@ for line in list(open(f"{out}/blocks.tsv"))[1:]:
                f"| right after resume (first 3 periods) | {median(after[:3])} |",
                f"| one minute after resume (last 10 periods) | {median(after[-10:])} |"]
     else:
-        offs = [o if o is not None else 0.0 for _, o in rows]
+        offs = [abs(o) for _, o in rows if o is not None]
         jumps = sum(1 for x, y in zip(offs, offs[1:]) if abs(y - x) > jump_ms)
         md += ["", f"Linear fit: {fit or 'fewer than 4 periods, no fit'}",
                f"Clean periods: {clean or 'not reported'}",

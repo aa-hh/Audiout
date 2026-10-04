@@ -1384,7 +1384,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         surface.groupsCancelHandler = { [weak self] in
             self?.mixerWindowController?.dismissEditor() ?? false
         }
+        // The screen published before this one; `nil` means the window was closed.
+        var previousScreen: SurfaceScreen?
         surface.onVisibleScreenChange = { [weak self] screen in
+            let openedOntoMixer = previousScreen == nil && screen == .mixer
+            previousScreen = screen
             self?.mixerWindowController?.setHostVisible(screen == .groups)
             // Settings' panes are built once and cached for the process's
             // life, so a phone-driven connect-volume/buffer change would show
@@ -1401,7 +1405,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     }
                 }
                 // The consent ask comes on the open after the thank-you card.
-                if settings.licenseThankYouShown { presentConversionConsentAskIfDue() }
+                // Only an open from closed counts: a tab switch away from the
+                // Mixer retires the card, and switching back must not raise the
+                // ask seconds after the thanks.
+                if openedOntoMixer, settings.licenseThankYouShown { presentConversionConsentAskIfDue() }
             }
         }
 

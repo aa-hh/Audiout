@@ -105,6 +105,17 @@ public enum LicenseGatePresentation {
 /// and the recovery.
 public enum LicenseCopy {
 
+    /// A refused key on a limited install, named by the server's `reason`
+    /// (`AppSettings.licenseReason`): the popover's standing note and the
+    /// Settings status line both read it, so the two never disagree.
+    public static func oneSpeakerKeyRefusedLine(reason: String?) -> String {
+        switch reason {
+        case "refund": return "This key was refunded, so Audiout plays on one speaker at a time."
+        case "chargeback": return "This key\u{2019}s payment was reversed, so Audiout plays on one speaker at a time."
+        default: return "This key was revoked, so Audiout plays on one speaker at a time."
+        }
+    }
+
     /// The shape of a key, in ONE place — field placeholders and the
     /// `.invalid` verdict both read it. `AUDT` is the prefix the license
     /// worker issues.

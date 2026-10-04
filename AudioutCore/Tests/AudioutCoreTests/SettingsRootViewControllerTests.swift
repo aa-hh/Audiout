@@ -203,7 +203,7 @@ import AudioutSharedUI
         transport.replies(#"{"status":"revoked"}"#)
         general.test_setLicenseKey("AUDT-AAAAA-BBBBB-CCCCC-DDDDD")
         await drainMainQueue()
-        #expect(general.test_licenseStatusText == "This key was refunded or revoked. Buy a new one to keep using Audiout.")
+        #expect(general.test_licenseStatusText == "This key was revoked, so Audiout plays on one speaker at a time.")
 
         transport.replies(#"{"status":"unknown"}"#)
         general.test_setLicenseKey("AUDT-AAAAA-BBBBB-CCCCC-DDDDD")
@@ -279,6 +279,26 @@ import AudioutSharedUI
         #expect(general.test_buyButtonIsVisible)
         #expect(general.test_licenseStatusText
                 == "Your trial has ended. Audiout plays on one speaker at a time until you buy.")
+    }
+
+    /// Red if Settings told a limited install something untrue: an ended
+    /// trial, which the server answers with `revoked` and reason
+    /// `trial_expired`, read "refunded or revoked", or a refused key stopped
+    /// naming the server's reason the way the popover note does.
+    @Test(arguments: [
+        ("trial_expired", "Your trial has ended. Audiout plays on one speaker at a time until you buy."),
+        ("refund", "This key was refunded, so Audiout plays on one speaker at a time."),
+        ("chargeback", "This key\u{2019}s payment was reversed, so Audiout plays on one speaker at a time."),
+        (nil, "This key was revoked, so Audiout plays on one speaker at a time."),
+    ] as [(String?, String)])
+    func aRevokedKeyNamesTheServersReason(reason: String?, expected: String) {
+        let settings = makePaidBuildSettings()
+        settings.licenseKey = "AUDT-AAAAA-BBBBB-CCCCC-DDDDD"
+        settings.licenseStatus = .revoked
+        settings.licenseReason = reason
+        let general = GeneralSettingsViewController(loginItem: FakeLoginItem(enabled: false),
+                                                    settings: settings)
+        #expect(general.test_licenseStatusText == expected)
     }
 
     /// The sheet is the ONE commit path, and its edges hold: Cancel discards

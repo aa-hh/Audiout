@@ -9,7 +9,7 @@ import AudioutSharedUI
 /// app is actively streaming a captured whole-system mix to AirPlay, which
 /// risks the same audio going out twice (echo). The iOS Status Banner recipe:
 /// the tier's tint at 12 % on the
-/// control radius, no border, a glyph and a wrapping label. `.info` (the
+/// control radius, no border (a 1 pt one under Increase Contrast), a glyph and a wrapping label. `.info` (the
 /// default) carries this note and the takeover strip; `.warning` carries
 /// T-UI's routing-blocked-needs-default note, the urgent tier that reuses the
 /// silence banner's own tint rather than forking a second banner class. No
@@ -193,7 +193,17 @@ final class SystemAirPlayNoteBannerView: NSView {
         setAccessibilityElement(true)
         setAccessibilityRole(.group)
         setAccessibilityLabel(text.stringValue)
+
+        // Increase Contrast changes no appearance, so it needs its own repaint
+        // (DESIGN.md, the Variant Rule) for the edge `stampLayerColors` adds.
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self, selector: #selector(accessibilityDisplayChanged),
+            name: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification, object: nil)
     }
+
+    deinit { NSWorkspace.shared.notificationCenter.removeObserver(self) }
+
+    @objc private func accessibilityDisplayChanged() { needsDisplay = true }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
@@ -248,11 +258,18 @@ final class SystemAirPlayNoteBannerView: NSView {
     /// effective appearance, the `ConnectionDiagnosisView.applyBackgroundTint`
     /// idiom, so a dynamic token resolves for the appearance actually on screen
     /// rather than whatever was current at build time.
-    private func stampLayerColors() {
+    ///
+    /// Under Increase Contrast a 12 % tint alone gives the banner no edge, so
+    /// it gains a 1 pt border in the same tint at full strength.
+    func stampLayerColors(
+        increaseContrast: Bool = NSWorkspace.shared.accessibilityDisplayShouldIncreaseContrast
+    ) {
         effectiveAppearance.performAsCurrentDrawingAppearance {
             layer?.backgroundColor = severity.tintColor
                 .withAlphaComponent(0.12).cgColor
+            layer?.borderColor = severity.tintColor.cgColor
         }
+        layer?.borderWidth = increaseContrast ? 1 : 0
     }
 
     /// The layer's currently-stamped fill, read back as `NSColor` — asserts it

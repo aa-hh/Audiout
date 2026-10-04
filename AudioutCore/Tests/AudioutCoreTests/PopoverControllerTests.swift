@@ -3612,6 +3612,42 @@ import AudioutProtocol
                 "a new open goes back to the standing text")
     }
 
+    /// Red if a refused second speaker were silent to VoiceOver: the click
+    /// changes nothing on screen a screen reader can find, so only the spoken
+    /// note explains it.
+    @Test func aRefusedSecondSpeakerAnnouncesTheNote() async throws {
+        let (popover, controller, _) = try await makePopover()
+        limitToOffice(popover, controller)
+
+        popover.test_deviceRow(for: "homepod-bed")?.test_fireCheckboxAction(settingStateTo: true)
+
+        #expect(popover.test_lastEnergizeAnnouncement == PopoverController.oneSpeakerLimitNoteText)
+    }
+
+    /// Red if a licence landing mid-open left the old limit's leftovers up:
+    /// clicking a stale "Play here instead" after buying would cut a legal
+    /// multi-speaker selection to one, and the Main Out menu would keep its
+    /// scenes dimmed until the next open.
+    @Test func liftingTheLimitMidOpenRetiresTheOfferAndUndimsTheScenes() async throws {
+        let (popover, controller, _) = try await makePopover()
+        let group = try controller.createGroup(name: "Both",
+                                               memberIDs: ["office", "homepod-bed"]).group
+        limitToOffice(popover, controller)
+        popover.test_deviceRow(for: "homepod-bed")?.test_fireCheckboxAction(settingStateTo: true)
+        #expect(popover.test_deviceRow(for: "homepod-bed")?.test_switchOfferOffered == true)
+        #expect(popover.test_mainOutRow.test_menuItem(for: .group(id: group.id))?.attributedTitle != nil,
+                "dimmed under the limit")
+
+        controller.limitsToOneSpeaker = false
+        popover.setUnregisteredNote(nil)
+
+        #expect(popover.test_deviceRow(for: "homepod-bed")?.test_switchOfferOffered == false,
+                "the offer goes with the limit")
+        #expect(popover.test_mainOutRow.test_menuItem(for: .group(id: group.id))?.attributedTitle == nil,
+                "the scene reads normally again")
+        #expect(popover.test_systemAirPlayNoteText == nil)
+    }
+
     /// Red if a group could still be turned on under the limit, or the click
     /// on it went unanswered.
     @Test func choosingAGroupUnderTheLimitLeavesMainOutAndRaisesTheNote() async throws {

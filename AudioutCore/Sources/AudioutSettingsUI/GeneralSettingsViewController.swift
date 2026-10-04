@@ -422,6 +422,20 @@ public final class GeneralSettingsViewController: NSViewController {
         return LicenseSheetViewController.statusLine(for: status)
     }
 
+    /// The line for a limited install, which must agree with the limit:
+    /// an ended trial reads the trial sentence whatever verdict is cached (the
+    /// server answers one with `revoked`, reason `trial_expired`, and an offline
+    /// one keeps `active`), and a refused key names the server's reason, the
+    /// popover note's own wording. `nil` defers to the verdict line.
+    private func limitedStatusLine() -> String? {
+        guard LicenseGate.limitsToOneSpeaker(settings: settings) else { return nil }
+        if TrialClock.hasEnded(settings: settings) {
+            return "Your trial has ended. Audiout plays on one speaker at a time until you buy."
+        }
+        guard settings.licenseStatus == .revoked else { return nil }
+        return LicenseCopy.oneSpeakerKeyRefusedLine(reason: settings.licenseReason)
+    }
+
     /// Re-read the stored license state into the row, then tell the app
     /// layer. Every path that can change the state — the launch build, the
     /// sheet closing, a validator answer — ends here, so there is one place
@@ -440,13 +454,9 @@ public final class GeneralSettingsViewController: NSViewController {
 
         let key = settings.licenseKey ?? ""
         let status = settings.licenseStatus
-        // An expired trial with a cached `.active` verdict is limited but not
-        // `licenseUnregistered`; the row must agree with the limit.
-        let limited = LicenseGate.limitsToOneSpeaker(settings: settings)
         if serverConfigured {
-            licenseStatusHint.stringValue = limited && status == .active
-                ? "Your trial has ended. Audiout plays on one speaker at a time until you buy."
-                : Self.licenseStatusLine(keyIsEmpty: key.isEmpty, status: status)
+            licenseStatusHint.stringValue = limitedStatusLine()
+                ?? Self.licenseStatusLine(keyIsEmpty: key.isEmpty, status: status)
         }
 
         // Only where it can do something: a key is stored, and no verdict has
@@ -471,6 +481,7 @@ public final class GeneralSettingsViewController: NSViewController {
 
         // Buying is offered only where it can work (a server) and only where it
         // would help (no key, or a key the server won’t honour).
+        let limited = LicenseGate.limitsToOneSpeaker(settings: settings)
         buyButton.isHidden = !(serverConfigured && (limited || settings.licenseUnregistered) && settings.buyURL != nil)
 
         onLicenseChanged?()

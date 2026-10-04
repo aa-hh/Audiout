@@ -1325,11 +1325,7 @@ public final class PopoverController: NSObject {
     /// A refused key's note names what happened to it: a refund, a reversed
     /// payment, or, for any other or no reason, a revoke.
     static func unregisteredKeyRefusedNoteText(reason: String?) -> String {
-        switch reason {
-        case "refund": return "This key was refunded, so Audiout plays on one speaker at a time."
-        case "chargeback": return "This key\u{2019}s payment was reversed, so Audiout plays on one speaker at a time."
-        default: return "This key was revoked, so Audiout plays on one speaker at a time."
-        }
+        LicenseCopy.oneSpeakerKeyRefusedLine(reason: reason)
     }
     /// Shown for the rest of an open once a trial-ended install hits the limit.
     static let oneSpeakerLimitNoteText = "Your trial has ended, so Audiout plays on one speaker at a time."
@@ -1350,10 +1346,22 @@ public final class PopoverController: NSObject {
     public var onEnterLicenseKey: (() -> Void)?
 
     /// Show or clear the one-speaker-limit note. Called by the host
-    /// (`AppDelegate`) directly. Idempotent: a repeat is a no-op.
+    /// (`AppDelegate`) directly, after it has moved the limit on
+    /// `GroupController`. Idempotent: a repeat is a no-op.
+    ///
+    /// A change retires everything the old licence state raised in this open:
+    /// the limit text, "Play here instead" (clicked after a purchase it would
+    /// cut a legal multi-speaker selection to one) and the Main Out menu's
+    /// dimmed scenes.
     public func setUnregisteredNote(_ note: UnregisteredNote?) {
         guard note != unregisteredNote else { return }
         unregisteredNote = note
+        limitNoteRaised = false
+        clearSwitchOffer()
+        if isEffectivelyShown {
+            refreshDeviceRows()
+            refreshMainOutRow()
+        }
         applyNoteSlot()
     }
 
@@ -1568,19 +1576,23 @@ public final class PopoverController: NSObject {
         if let trialDaysLeft {
             return (Self.trialPillText(daysLeft: trialDaysLeft), trialBuyAction, enterLicenseKeyAction, .info)
         }
-        if let unregisteredNote {
-            // A refused-key install keeps its standing text when it hits the
-            // limit: the spec gives no refused-key limit copy.
-            let text: String
-            switch unregisteredNote {
-            case .trialEnded:
-                text = limitNoteRaised ? Self.oneSpeakerLimitNoteText : Self.unregisteredTrialEndedNoteText
-            case .keyRefused(let reason):
-                text = Self.unregisteredKeyRefusedNoteText(reason: reason)
-            }
+        if let text = unregisteredNoteText {
             return (text, trialBuyAction, enterLicenseKeyAction, .info)
         }
         return (nil, nil, nil, .info)
+    }
+
+    /// The one-speaker note's words, or `nil` when the install is not limited.
+    /// A refused-key install keeps its standing text when it hits the limit:
+    /// the spec gives no refused-key limit copy.
+    private var unregisteredNoteText: String? {
+        switch unregisteredNote {
+        case nil: return nil
+        case .trialEnded:
+            return limitNoteRaised ? Self.oneSpeakerLimitNoteText : Self.unregisteredTrialEndedNoteText
+        case .keyRefused(let reason):
+            return Self.unregisteredKeyRefusedNoteText(reason: reason)
+        }
     }
 
     /// The trial notes' "I have a key" text action.
@@ -3774,6 +3786,9 @@ extension PopoverController: DeviceRowView.Delegate {
             limitNoteRaised = true
             offerSwitch(for: id)
             applyNoteSlot()
+            // The refused click changes nothing a screen reader can see, so
+            // the note that explains it is spoken.
+            if let text = unregisteredNoteText { postAnnouncement(text) }
         } else {
             clearSwitchOffer()
         }

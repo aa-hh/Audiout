@@ -49,6 +49,8 @@ final class ThankYouCardView: NSView, FoldFollowing {
         closeButton = NSButton(title: "Close", target: nil, action: nil)
         closeButton.bezelStyle = .rounded
         closeButton.controlSize = .small
+        // "Close" alone does not say what it closes once VoiceOver has left the card.
+        closeButton.setAccessibilityLabel("Close this message")
         ringLayers = [SettledLightLayer.make(), SettledLightLayer.make()].compactMap { $0 }
 
         super.init(frame: NSRect(x: 0, y: 0, width: width, height: Self.height))
@@ -125,11 +127,16 @@ final class ThankYouCardView: NSView, FoldFollowing {
         stampLayerColors()
     }
 
-    /// Resolved under the view's own appearance, the banner's idiom.
-    private func stampLayerColors() {
+    /// Resolved under the view's own appearance, the banner's idiom, with the
+    /// banner's 1 pt Increase Contrast edge in the card's own tint.
+    func stampLayerColors(
+        increaseContrast: Bool = NSWorkspace.shared.accessibilityDisplayShouldIncreaseContrast
+    ) {
         effectiveAppearance.performAsCurrentDrawingAppearance {
             layer?.backgroundColor = Tokens.Color.gold.withAlphaComponent(0.12).cgColor
+            layer?.borderColor = Tokens.Color.gold.cgColor
         }
+        layer?.borderWidth = increaseContrast ? 1 : 0
     }
 
     @objc private func restampColors() {

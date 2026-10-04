@@ -92,6 +92,21 @@ import AppKit
         #expect(note.layer?.borderWidth == 0)
     }
 
+    /// Red if Increase Contrast stopped giving the banner an edge (a 12 % tint
+    /// alone barely separates it from the ground), or the edge outlived it.
+    @Test func increaseContrastAddsAOnePointEdgeInTheTint() {
+        let banner = SystemAirPlayNoteBannerView(text: "Note", maxTextWidth: 200)
+        banner.stampLayerColors(increaseContrast: true)
+        #expect(banner.layer?.borderWidth == 1)
+        if let edge = banner.layer?.borderColor {
+            assertSameRGBA(NSColor(cgColor: edge), Tokens.Color.ring, "edge")
+        } else {
+            Issue.record("no border colour")
+        }
+        banner.stampLayerColors(increaseContrast: false)
+        #expect(banner.layer?.borderWidth == 0)
+    }
+
     /// The silence banner is no longer a dead end: given an action it renders a
     /// real button and dispatches through it.
     @Test func theSilenceBannerRendersAndFiresItsAction() {

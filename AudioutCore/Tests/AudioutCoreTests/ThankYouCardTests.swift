@@ -43,6 +43,22 @@ import AppKit
         #expect(card.accessibilityLabel() == ThankYouCardView.headline + " " + ThankYouCardView.body)
     }
 
+    /// Defect: VoiceOver reads the button as a bare "Close", which says
+    /// nothing about what it closes once focus has left the card.
+    @Test func closeButtonSaysWhatItCloses() {
+        #expect(ThankYouCardView(width: 625).test_closeButton.accessibilityLabel() == "Close this message")
+    }
+
+    /// Defect: under Increase Contrast the card has no edge, or keeps one
+    /// after the setting goes off.
+    @Test func increaseContrastAddsAOnePointEdge() {
+        let card = ThankYouCardView(width: 625)
+        card.stampLayerColors(increaseContrast: true)
+        #expect(card.layer?.borderWidth == 1)
+        card.stampLayerColors(increaseContrast: false)
+        #expect(card.layer?.borderWidth == 0)
+    }
+
     /// Defect: the fill is a raw colour or the wrong token/alpha instead of
     /// the banner recipe with gold.
     @Test func fillIsGoldAtTwelvePercent() {

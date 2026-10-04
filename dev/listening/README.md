@@ -101,7 +101,7 @@ In Terminal on the second Mac (Screen Sharing is fine), from `~/listening`:
 ```
 
 It runs `--check` first (missing tool, empty or unknown id, Audiout Dev not
-running), loads `~/Library/LaunchAgents/com.audiout.listening-night.plist` with
+running), loads `~/Library/LaunchAgents/com.audiout.dev.listening-night.plist` with
 `launchctl bootstrap`, and keeps the Mac awake with `caffeinate -dims` until the
 agent fires, removes itself and runs the driver. It prints how to cancel.
 

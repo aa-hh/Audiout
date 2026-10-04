@@ -476,6 +476,25 @@ else
 fi
 echo
 
+# ----------------------------------------------------------------------------
+# The listening-night driver (dev/listening): its LaunchAgent,
+# com.audiout.dev.listening-night, is swept above. What the sweep cannot see
+# is a night already running: the Terminal wrapper, the driver and the
+# caffeinate holding the Mac awake. launch-tonight.sh's pre-start caffeinate
+# has its own -t deadline and ends by itself.
+echo "==> Listening-night driver processes"
+night_pids="$(pgrep -f 'listening/results/night.command|unattended-night.sh' || true)"
+if [ -z "$night_pids" ]; then
+  echo "    none running"
+else
+  echo "    pids: $(echo $night_pids | tr '\n' ' ')"
+  if [ "$APPLY" -eq 1 ]; then
+    kill $night_pids 2>/dev/null || true
+    removed_anything=1
+  fi
+fi
+echo
+
 # ============================================================================
 # 6. Test-suite preference residue
 # ============================================================================

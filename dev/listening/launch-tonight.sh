@@ -11,7 +11,7 @@
 # holds the Mac awake from now until the driver exits.
 set -euo pipefail
 HERE=${0:A:h}
-LABEL=com.audiout.listening-night
+LABEL=com.audiout.dev.listening-night
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 WRAPPER="$HERE/results/night.command"
 DOMAIN="gui/$(id -u)"

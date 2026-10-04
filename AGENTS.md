@@ -189,7 +189,8 @@ repo. `AudioutCore` pins it by version.
   Mule pool (remote M3 Air): `git config audiout.remoteSlots` (set to 2).
   Entry points: `scripts/run-tests.sh`, `scripts/build.sh`, `scripts/make-app.sh`,
   `scripts/ios.sh`, `scripts/run-app.sh`, and pre-commit Guard 6 all acquire a
-  permit before work starts. Mule-full falls back to local at once (no wait).
+  permit before work starts. A full suite run on the mule takes one permit per
+  shard (up to three). Mule-full falls back to local at once (no wait).
   Local-full waits up to 600s, printing progress; ceiling reached → proceeds
   uncapped with a loud warning (never refuses). Sweep on acquire reclaims stale
   permits (dead holder, unrecognised job, or held >45 min). `bash scripts/capacity.sh status`

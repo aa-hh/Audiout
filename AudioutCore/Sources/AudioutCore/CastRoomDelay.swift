@@ -24,14 +24,24 @@ import Foundation
 ///    samples agree to within ±``settleBandMs``; the settled figure is their
 ///    median. A Cast session's first seconds contain two or three re-buffers,
 ///    and following each one would silence the whole house three times.
+///  - What is compared, raised to and remembered is the settled lead adjusted
+///    to the fallback hold: `settled + hold − CastFeedRing.macHoldMs`, where
+///    `hold` is the median Mac hold measured in the settle window, or the
+///    fallback before the receiver's first settle.
 ///  - **The term never falls while a receiver stays in the mix.** A receiver
-///    that turns out to play LATER than assumed raises it once, by the excess.
-///    One that plays earlier is absorbed by delaying its own feed instead —
-///    chasing a lead downwards makes every other output jump forward for a
-///    number the next stall would undo.
+///    whose adjusted lead lands more than ``raiseThresholdMs`` past its term
+///    raises the term to that lead. One that plays earlier is absorbed by
+///    delaying its own feed instead — chasing a lead downwards makes every
+///    other output jump forward for a number the next stall would undo.
+///  - A by-ear advance (a negative offset) is added to the receiver's last
+///    adjusted lead, never to its term: an advance that fits inside the
+///    receiver's own share moves nothing.
 ///  - A receiver settling past ``maxTermMs`` is REFUSED for sync: it keeps
 ///    playing, unsynced, and contributes no term. Holding the rest of the
 ///    house that far behind live to reach it is not a trade anyone would take.
+///  - A receiver's feed plays once it has settled (refused included) or its
+///    play-out lands within ±``feedGateBandMs`` of the room; until then it is
+///    silent, so a startup still climbing towards the room is never heard.
 struct CastRoomDelay {
 
     /// What a receiver is assumed to lead by until it has been measured — the
@@ -53,15 +63,26 @@ struct CastRoomDelay {
     /// granularity.
     static let settleBandMs = 100
 
-    /// How far a settled receiver has to move before it is worth acting on —
-    /// the same number in both directions it can move. Later than the term
-    /// raises the term; different from the settled lead re-opens the settle.
-    /// It covers a mid-song stall (seconds) and slow clock drift (~3 ms/min,
-    /// so roughly once an hour) with one rule, and below it the error is
-    /// inaudible while the correction would not be.
+    /// How far a settled receiver's lead has to move, in either direction,
+    /// before its settle re-opens. It covers a mid-song stall (seconds) and
+    /// slow clock drift (~3 ms/min, so roughly once an hour) with one rule, and
+    /// below it the error is inaudible while a re-settle would not be.
     static let correctionThresholdMs = 150
 
-    /// What one settle decided. `nil` from ``ingest(leadMs:forID:)`` means the
+    /// How far past its term a receiver's adjusted settle has to land to raise
+    /// the term.
+    /// razor: this TV's settles on 2026-10-04 spread 5474 to 5505; 20 keeps a
+    /// re-measure from moving the room and caps uncorrected lateness at 20 ms.
+    /// Lower it if the loop's median sits above +10.
+    static let raiseThresholdMs = 20
+
+    /// How close an unsettled receiver's play-out has to land to the room for
+    /// its feed to play.
+    /// razor: inside the 150 ms correction threshold; opening on a settle
+    /// covers the rest.
+    static let feedGateBandMs = 100
+
+    /// What one settle decided. `nil` from ``ingest(leadMs:holdMs:forID:)`` means the
     /// sample changed nothing — still settling, or already on target.
     struct Settlement: Equatable {
         let deviceID: String
@@ -76,11 +97,15 @@ struct CastRoomDelay {
 
     private struct Receiver {
         /// This receiver's own high-water term: the assumed lead until it has
-        /// settled, then the largest steady lead it has shown.
+        /// settled, then the largest adjusted lead it has shown.
         var termMs: Int
         var settledLeadMs: Int?
-        var window: [Int] = []
+        var window: [(leadMs: Int, holdMs: Int?)] = []
         var refused = false
+        /// The median Mac hold of the last settle window that measured one.
+        var holdMs: Int?
+        /// The last settle's lead adjusted to the fallback hold.
+        var adjustedLeadMs: Int?
     }
 
     private var receivers: [String: Receiver] = [:]
@@ -90,8 +115,14 @@ struct CastRoomDelay {
     /// starts from its real lead instead of the generic guess.
     private var rememberedLeadMs: [String: Int] = [:]
 
+    /// Each receiver's by-ear advance: how much earlier than the room it is
+    /// asked to play, 0 for none.
+    private var advanceMs: [String: Int] = [:]
+
     /// `castTermMs`: how far behind live the furthest Cast receiver in the mix
-    /// plays, or `nil` when none contributes a term. That `nil` is the
+    /// plays, adjusted to the fallback hold, or `nil` when none contributes a
+    /// term. Each receiver contributes its term, or its last adjusted lead plus
+    /// its advance when that is later. That `nil` is the
     /// invariant — an absent operand makes the room delay's `max` the
     /// identity, so a Cast-free room reduces to exactly today's numbers.
     private(set) var termMs: Int?
@@ -112,17 +143,17 @@ struct CastRoomDelay {
     /// One lead sample the caller already judged trustworthy (brief §4: the
     /// receiver reported PLAYING and answered inside 100 ms). A sample for a
     /// receiver that is not in the mix is dropped.
-    mutating func ingest(leadMs: Int, forID id: String) -> Settlement? {
+    mutating func ingest(leadMs: Int, holdMs: Int? = nil, forID id: String) -> Settlement? {
         guard var receiver = receivers[id] else { return nil }
         if let settled = receiver.settledLeadMs {
             guard abs(leadMs - settled) > Self.correctionThresholdMs else { return nil }
             receiver.settledLeadMs = nil
         }
-        receiver.window.append(leadMs)
+        receiver.window.append((leadMs, holdMs))
         // A jump ejects the samples it disagrees with rather than the whole
         // window, so a stall's new plateau starts counting from its first
         // sample instead of one settle later.
-        while let low = receiver.window.min(), let high = receiver.window.max(),
+        while let low = receiver.window.map(\.leadMs).min(), let high = receiver.window.map(\.leadMs).max(),
               high - low > 2 * Self.settleBandMs {
             receiver.window.removeFirst()
         }
@@ -130,7 +161,10 @@ struct CastRoomDelay {
             receivers[id] = receiver
             return nil
         }
-        let settled = Self.median(of: receiver.window)
+        let settled = Self.median(of: receiver.window.map(\.leadMs))
+        // A window with no hold keeps the last one measured.
+        let holds = receiver.window.compactMap(\.holdMs)
+        if !holds.isEmpty { receiver.holdMs = Self.median(of: holds) }
         receiver.window = []
         receiver.settledLeadMs = settled
         receiver.refused = settled > Self.maxTermMs
@@ -139,8 +173,10 @@ struct CastRoomDelay {
             // not a verdict to start the next session from.
             rememberedLeadMs[id] = nil
         } else {
-            rememberedLeadMs[id] = settled
-            if settled > receiver.termMs + Self.correctionThresholdMs { receiver.termMs = settled }
+            let adjusted = settled + (receiver.holdMs ?? CastFeedRing.macHoldMs) - CastFeedRing.macHoldMs
+            receiver.adjustedLeadMs = adjusted
+            rememberedLeadMs[id] = adjusted
+            if adjusted > receiver.termMs + Self.raiseThresholdMs { receiver.termMs = adjusted }
         }
         receivers[id] = receiver
         return Settlement(deviceID: id, leadMs: settled,
@@ -149,7 +185,7 @@ struct CastRoomDelay {
 
     /// This receiver's measured steady lead, or `nil` while it is still
     /// settling (or refused). The Cast feed's own delay is
-    /// `roomDelay − settledLeadMs`: everything the receiver adds by itself is
+    /// `roomDelay − settledLeadMs − holdMs(forID:)`: everything the receiver adds by itself is
     /// already in this number, and the delay inserted ahead of it is not
     /// (inserting silence changes the age of the content, not the depth of the
     /// receiver's buffer, so the lead metric cannot see it).
@@ -158,13 +194,40 @@ struct CastRoomDelay {
         return receiver.settledLeadMs
     }
 
+    /// Whether this receiver's feed should play: `false` for one not in the
+    /// mix, else settled (refused included) or `playOutMs` within
+    /// ``feedGateBandMs`` of `roomMs`. Reads the settled field directly,
+    /// because ``settledLeadMs(forID:)`` hides a refused receiver.
+    func feedGateOpen(forID id: String, playOutMs: Int, roomMs: Int) -> Bool {
+        guard let receiver = receivers[id] else { return false }
+        return receiver.settledLeadMs != nil || abs(playOutMs - roomMs) <= Self.feedGateBandMs
+    }
+
+    /// The Mac's measured hold in front of this receiver, or
+    /// ``CastFeedRing/macHoldMs`` before its first settle measured one.
+    func holdMs(forID id: String) -> Int {
+        receivers[id]?.holdMs ?? CastFeedRing.macHoldMs
+    }
+
+    /// Store this receiver's by-ear advance, floored at 0. Returns whether
+    /// ``termMs`` moved.
+    @discardableResult
+    mutating func setAdvanceMs(_ ms: Int, forID id: String) -> Bool {
+        advanceMs[id] = max(0, ms)
+        return commitTerm()
+    }
+
     /// Receivers refused for sync — they play unsynced (brief §6).
     var refusedIDs: Set<String> {
         Set(receivers.filter { $0.value.refused }.keys)
     }
 
     private mutating func commitTerm() -> Bool {
-        let updated = receivers.values.filter { !$0.refused }.map(\.termMs).max()
+        let updated = receivers.filter { !$0.value.refused }.map { id, receiver -> Int in
+            let advance = advanceMs[id] ?? 0
+            guard advance > 0 else { return receiver.termMs }
+            return max(receiver.termMs, (receiver.adjustedLeadMs ?? receiver.termMs) + advance)
+        }.max()
         guard updated != termMs else { return false }
         termMs = updated
         return true

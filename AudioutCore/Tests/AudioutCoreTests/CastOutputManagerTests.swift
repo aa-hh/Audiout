@@ -157,6 +157,63 @@ import Testing
         #expect(head.prefix(4) == Data("RIFF".utf8))
     }
 
+    // Turns red if `setCastFeedGate` stops ignoring an open before the session reaches PLAYING.
+    @Test func feedGateIgnoresAnOpenBeforePlaying() throws {
+        guard #available(macOS 15, *) else { return }
+        // The fetch delay holds the receiver in BUFFERING, so the session is
+        // still short of PLAYING when the stale open arrives.
+        let (fake, endpoint) = try startFake(fetchDelay: 2)
+        defer { fake.stop() }
+        let manager = makeManager()
+        defer { manager.stopAll() }
+        let log = watch(manager, deviceID: "dev1")
+
+        manager.setDevices([record(endpoint)])
+        let sessionRing = try #require(manager.test_ring(forDevice: "dev1"))
+        manager.setCastFeedGate(open: true, forDeviceID: "dev1",
+                                generation: try #require(manager.test_generation(forDevice: "dev1")))
+        _ = manager.test_ring(forDevice: "dev1")
+        #expect(!log.contains(.playing))
+        #expect(sessionRing.test_feedGateOpen == false)
+
+        #expect(waitUntil(timeout: 10) { log.contains(.playing) },
+                Comment(rawValue: "never reached PLAYING, saw \(log.all)"))
+        manager.setCastFeedGate(open: true, forDeviceID: "dev1",
+                                generation: try #require(manager.test_generation(forDevice: "dev1")))
+        _ = manager.test_ring(forDevice: "dev1")
+        #expect(sessionRing.test_feedGateOpen == true)
+    }
+
+    // Turns red if `setCastFeedGate` stops dropping an open whose generation belongs to an earlier attempt.
+    @Test func feedGateIgnoresAnOpenFromAnEarlierAttempt() throws {
+        guard #available(macOS 15, *) else { return }
+        let (fake, endpoint) = try startFake()
+        defer { fake.stop() }
+        let manager = makeManager()
+        defer { manager.stopAll() }
+        let log = watch(manager, deviceID: "dev1")
+
+        manager.setDevices([record(endpoint)])
+        #expect(waitUntil(timeout: 10) { log.contains(.playing) },
+                Comment(rawValue: "never reached PLAYING, saw \(log.all)"))
+        let oldGeneration = try #require(manager.test_generation(forDevice: "dev1"))
+
+        manager.retry(deviceID: "dev1")
+        #expect(waitUntil(timeout: 10) { log.all.filter { $0 == .playing }.count >= 2 },
+                Comment(rawValue: "retry never reached PLAYING, saw \(log.all)"))
+        let newGeneration = try #require(manager.test_generation(forDevice: "dev1"))
+        #expect(newGeneration != oldGeneration)
+        let sessionRing = try #require(manager.test_ring(forDevice: "dev1"))
+
+        manager.setCastFeedGate(open: true, forDeviceID: "dev1", generation: oldGeneration)
+        _ = manager.test_ring(forDevice: "dev1")
+        #expect(sessionRing.test_feedGateOpen == false)
+
+        manager.setCastFeedGate(open: true, forDeviceID: "dev1", generation: newGeneration)
+        _ = manager.test_ring(forDevice: "dev1")
+        #expect(sessionRing.test_feedGateOpen == true)
+    }
+
     @Test func feedAudioReachesTheReceiver() throws {
         guard #available(macOS 15, *) else { return }
         // Past the 44-byte WAV header AND the 1 s silent prime (176 400 bytes),
@@ -183,8 +240,22 @@ import Testing
         defer { writer.cancel() }
 
         manager.setDevices([record(endpoint)])
+        // A new session's feed starts silent; playing alone opens it, and a
+        // receiver no longer alone keeps it open once it plays with the room.
+        // `test_ring` is `queue`-synchronous, so each read flushes the setters.
+        let sessionRing = try #require(manager.test_ring(forDevice: "dev1"))
+        #expect(sessionRing.test_feedGateOpen == false)
+        manager.setCastPlaysAlone(true, forDeviceID: "dev1")
+        _ = manager.test_ring(forDevice: "dev1")
+        #expect(sessionRing.test_feedGateOpen == true)
         #expect(waitUntil(timeout: 10) { log.contains(.playing) },
                 Comment(rawValue: "never reached PLAYING, saw \(log.all)"))
+        // Open first, then leave "alone": a last-call-wins gate would close here.
+        manager.setCastFeedGate(open: true, forDeviceID: "dev1",
+                                generation: try #require(manager.test_generation(forDevice: "dev1")))
+        manager.setCastPlaysAlone(false, forDeviceID: "dev1")
+        _ = manager.test_ring(forDevice: "dev1")
+        #expect(sessionRing.test_feedGateOpen == true)
         // PLAYING lands as soon as PLAY is answered; the 300 000th byte only
         // after ~0.7 s of real-time stream past the instant prime burst.
         try #require(waitUntil(timeout: 5) { fetched.value != nil },
@@ -209,8 +280,8 @@ import Testing
         #expect(ring.render(frames: 441).contains { $0 != 0 })
     }
 
-    /// Turns red if the served stream stops carrying the 1 s prime, the 500 ms
-    /// cushion, or the applied feed delay as readable numbers.
+    /// Turns red if the served stream stops carrying the 1 s prime, the 80 ms
+    /// standing queue, or the applied feed delay as readable numbers.
     @Test func theServedStreamReportsItsPrimeCushionAndFeedDelay() throws {
         guard #available(macOS 15, *) else { return }
         let (fake, endpoint) = try startFake()
@@ -247,12 +318,12 @@ import Testing
         let stats = ring.stats
         let last = try #require(timing.lastRender)
         #expect(last.delayLineMs == 0)
-        #expect((300...1500).contains(last.queueAheadMs), "queueAheadMs \(last.queueAheadMs)")
+        #expect((40...200).contains(last.queueAheadMs), "queueAheadMs \(last.queueAheadMs)")
         #expect((0...250).contains(last.pacingPhaseMs), "pacingPhaseMs \(last.pacingPhaseMs)")
         #expect((-1...100).contains(last.ioprocToPushMs), "ioprocToPushMs \(last.ioprocToPushMs)")
-        // The prime, less at most one block pushed between the reset and the
-        // prime render; the top allows a loaded machine.
-        #expect((43_218...88_200).contains(stats.underrunFrames), "underrunFrames \(stats.underrunFrames)")
+        // The prime, rendered whole as silence: a refilling ring takes nothing
+        // for it. The top allows a loaded machine.
+        #expect((44_100...88_200).contains(stats.underrunFrames), "underrunFrames \(stats.underrunFrames)")
         #expect(timing.renderedFramesSinceReset >= 44_100 + 66_150,
                 "renderedFramesSinceReset \(timing.renderedFramesSinceReset)")
 

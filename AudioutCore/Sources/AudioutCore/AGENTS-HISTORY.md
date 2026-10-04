@@ -310,3 +310,5 @@ repo-wide and are detailed in [../AGENTS.md](../AGENTS.md): subclass
 `IsolatedTestCase` instead of touching `UserDefaults.standard`/shared temp
 dirs directly, and use `Telemetry._installTestSink(_:)` to assert a
 subsystem's own emissions rather than adding ad hoc logging hooks.
+
+2026-10-04, Cast timing (supersedes the "neither ever disturbs the other" line in `AudioutCore/AGENTS-HISTORY.md` about the by-ear Cast offset): a Cast feed stays silent until its receiver's lead is within 100 ms of the room delay (or it plays alone); the Mac holds a standing 80 ms queue and trims any excess at start. The room term uses each receiver's measured Mac-side hold (median of age minus delay line) and raises when the adjusted lead passes the term by more than 20 ms. The feed ring's producers take only `producerLock` (three callers, apart by timing); the render side never waits on them, so no block is dropped for a busy lock. A negative by-ear offset larger than the receiver's own share now raises the room delay, once, 500 ms after the dial stops moving; before, `max(0, room + offset)` made the "earlier" direction do nothing.

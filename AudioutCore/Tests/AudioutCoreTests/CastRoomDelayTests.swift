@@ -15,10 +15,11 @@ import Testing
     @discardableResult
     private func feed(_ policy: inout CastRoomDelay, _ leadMs: Int,
                       count: Int = CastRoomDelay.settleSampleCount,
-                      id: String = "tv") -> CastRoomDelay.Settlement? {
+                      id: String = "tv",
+                      holdMs: Int? = nil) -> CastRoomDelay.Settlement? {
         var last: CastRoomDelay.Settlement?
         for _ in 0..<count {
-            if let settlement = policy.ingest(leadMs: leadMs, forID: id) { last = settlement }
+            if let settlement = policy.ingest(leadMs: leadMs, holdMs: holdMs, forID: id) { last = settlement }
         }
         return last
     }
@@ -143,6 +144,63 @@ import Testing
         let nudge = CastRoomDelay.correctionThresholdMs - 10
         #expect(feed(&policy, Self.steadyLeadMs + nudge, count: 30) == nil)
         #expect(policy.settledLeadMs(forID: "tv") == Self.steadyLeadMs)
+    }
+
+    /// A settle exactly at the raise band leaves the room alone; one past it,
+    /// as this TV's latest settle was, raises it to the settle.
+    /// Turns red if a raise stops using `raiseThresholdMs`, so a settle at the band raises or one 59 ms late does not.
+    @Test func aSettleRaisesTheTermOnlyPastTheRaiseBand() {
+        var policy = CastRoomDelay()
+        policy.setReceivers(["edge", "tv"])
+        let edge = feed(&policy, CastRoomDelay.defaultLeadMs + CastRoomDelay.raiseThresholdMs, id: "edge")
+        #expect(edge?.termMoved == false)
+
+        let tv = feed(&policy, 5_559, id: "tv")
+        #expect(tv?.termMoved == true)
+        #expect(policy.termMs == 5_559)
+    }
+
+    /// The Mac's measured hold moves the settled lead onto the fallback hold
+    /// the room adds back: an 84 ms hold is 31 ms the fallback overstates.
+    /// Turns red if the settle stops taking the median of the window's holds, or raises or remembers the raw lead instead of the adjusted one.
+    @Test func aMeasuredHoldAdjustsTheSettleToTheFallbackHold() {
+        var policy = CastRoomDelay()
+        policy.setReceivers(["tv"])
+        var settlement: CastRoomDelay.Settlement?
+        for hold in [80, 84, 84, 90, 84, 84, 84, 200, 84, 84] {
+            if let landed = policy.ingest(leadMs: 5_559, holdMs: hold, forID: "tv") { settlement = landed }
+        }
+        #expect(settlement?.leadMs == 5_559, "the settlement carries the raw lead")
+        #expect(settlement?.termMoved == true)
+        #expect(policy.holdMs(forID: "tv") == 84)
+        #expect(policy.termMs == 5_528)
+
+        policy.setReceivers([])
+        policy.setReceivers(["tv"])
+        #expect(policy.termMs == 5_528, "a reselect starts from the adjusted lead")
+        #expect(policy.holdMs(forID: "tv") == CastFeedRing.macHoldMs)
+    }
+
+    /// A by-ear advance raises the room only past the receiver's own slack:
+    /// it is added to the receiver's last settle, never to its high-water
+    /// term, and an unsettled receiver adds it to the lead it is assumed at.
+    /// Turns red if the advance is added to the high-water term instead of the receiver's last settle, or an unsettled receiver's advance is dropped.
+    @Test func anAdvanceRaisesTheTermOnlyPastTheReceiversLastSettle() {
+        var policy = CastRoomDelay()
+        policy.setReceivers(["tv"])
+        feed(&policy, 7_000)
+        feed(&policy, 6_000)
+        #expect(policy.setAdvanceMs(500, forID: "tv") == false)
+        #expect(policy.termMs == 7_000)
+        #expect(policy.setAdvanceMs(1_500, forID: "tv") == true)
+        #expect(policy.termMs == 7_500)
+        #expect(policy.setAdvanceMs(0, forID: "tv") == true)
+        #expect(policy.termMs == 7_000)
+
+        var unsettled = CastRoomDelay()
+        unsettled.setReceivers(["fresh"])
+        #expect(unsettled.setAdvanceMs(80, forID: "fresh") == true)
+        #expect(unsettled.termMs == CastRoomDelay.defaultLeadMs + 80)
     }
 
     // MARK: - R_max
@@ -287,5 +345,34 @@ import Testing
         #expect(policy.settledLeadMs(forID: "e7af49b4") == 5_470)
         #expect(policy.termMs == CastRoomDelay.defaultLeadMs,
                 "5.47 s sits inside the assumed 5.5 s, so the room is not raised")
+    }
+
+    // MARK: - The feed gate
+
+    /// A receiver's feed opens once it plays with the room: settled (refused
+    /// included, since a refused receiver plays unsynced by policy), or an
+    /// unsettled play-out within the band of the room.
+    /// Turns red if the gate opens for an unknown receiver, moves off its 100 ms band, or reads `settledLeadMs(forID:)`, which hides a refused receiver.
+    @Test func theFeedGateOpensOnASettleOrInsideTheBand() {
+        var policy = CastRoomDelay()
+        #expect(policy.feedGateOpen(forID: "nobody", playOutMs: 5_500, roomMs: 5_500) == false)
+
+        policy.setReceivers(["tv", "far"])
+        let room = 5_615
+        let band = CastRoomDelay.feedGateBandMs
+        #expect(policy.feedGateOpen(forID: "tv", playOutMs: room + band, roomMs: room))
+        #expect(policy.feedGateOpen(forID: "tv", playOutMs: room - band, roomMs: room))
+        #expect(policy.feedGateOpen(forID: "tv", playOutMs: room + band + 1, roomMs: room) == false)
+        #expect(policy.feedGateOpen(forID: "tv", playOutMs: room - band - 1, roomMs: room) == false)
+
+        feed(&policy, Self.steadyLeadMs)
+        #expect(policy.feedGateOpen(forID: "tv", playOutMs: 0, roomMs: room), "settled, far from the room")
+        feed(&policy, CastRoomDelay.maxTermMs + 500, id: "far")
+        #expect(policy.refusedIDs == ["far"])
+        #expect(policy.feedGateOpen(forID: "far", playOutMs: 0, roomMs: room), "refused counts as settled")
+
+        // A sample past the correction threshold re-opens the settle.
+        _ = policy.ingest(leadMs: Self.steadyLeadMs + 400, forID: "tv")
+        #expect(policy.feedGateOpen(forID: "tv", playOutMs: Self.steadyLeadMs + 400, roomMs: room) == false)
     }
 }

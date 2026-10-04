@@ -48,7 +48,7 @@ import CoreAudio
         private let lock = NSLock()
         private var _onStateChange: (@Sendable (String, CastSessionState) -> Void)?
         private var _onVolumeLagChange: (@Sendable (String, Int?) -> Void)?
-        private var _onLeadSample: (@Sendable (String, Int) -> Void)?
+        private var _onLeadSample: (@Sendable (String, Int, Int, Int?, Int) -> Void)?
         private var _deviceSets: [[CastDeviceRecord]] = []
         private var _levels: [(level: Double, id: String)] = []
         private var _retries: [String] = []
@@ -64,7 +64,7 @@ import CoreAudio
             get { lock.withLock { _onVolumeLagChange } }
             set { lock.withLock { _onVolumeLagChange = newValue } }
         }
-        var onLeadSample: (@Sendable (String, Int) -> Void)? {
+        var onLeadSample: (@Sendable (String, Int, Int, Int?, Int) -> Void)? {
             get { lock.withLock { _onLeadSample } }
             set { lock.withLock { _onLeadSample = newValue } }
         }
@@ -75,11 +75,28 @@ import CoreAudio
         /// CAST-SYNC: every by-ear offset written onto the live feed, in order.
         var castUserOffsets: [(ms: Int, id: String)] { lock.withLock { _castUserOffsets } }
         private var _castUserOffsets: [(ms: Int, id: String)] = []
+        /// Every room-delay share, feed-gate decision and plays-alone flag the
+        /// backend handed the manager, in order.
+        var castRoomDelays: [(ms: Int, id: String)] { lock.withLock { _castRoomDelays } }
+        private var _castRoomDelays: [(ms: Int, id: String)] = []
+        var feedGates: [(open: Bool, id: String)] { lock.withLock { _feedGates } }
+        private var _feedGates: [(open: Bool, id: String)] = []
+        var playsAlone: [(alone: Bool, id: String)] { lock.withLock { _playsAlone } }
+        private var _playsAlone: [(alone: Bool, id: String)] = []
 
         func setDevices(_ records: [CastDeviceRecord]) { lock.withLock { _deviceSets.append(records) } }
         func setLevel(_ level: Double, forDevice id: String) { lock.withLock { _levels.append((level, id)) } }
         func setCastUserOffsetMs(_ ms: Int, forDeviceID id: String) {
             lock.withLock { _castUserOffsets.append((ms, id)) }
+        }
+        func setCastRoomDelayMs(_ ms: Int, forDeviceID id: String) {
+            lock.withLock { _castRoomDelays.append((ms, id)) }
+        }
+        func setCastFeedGate(open: Bool, forDeviceID id: String, generation: Int) {
+            lock.withLock { _feedGates.append((open, id)) }
+        }
+        func setCastPlaysAlone(_ alone: Bool, forDeviceID id: String) {
+            lock.withLock { _playsAlone.append((alone, id)) }
         }
         func retry(deviceID: String) { lock.withLock { _retries.append(deviceID) } }
         func stopAll() { lock.withLock { _stopAllCount += 1 } }
@@ -97,9 +114,9 @@ import CoreAudio
         /// CAST-SYNC: `count` believed lead measurements, as the real manager
         /// delivers them — one a second, already gated on PLAYING and on a
         /// round trip fast enough to trust.
-        func fireLead(id: String, leadMs: Int, count: Int = 1) {
+        func fireLead(id: String, leadMs: Int, count: Int = 1, feedDelayMs: Int = 0, holdMs: Int? = nil) {
             let handler = lock.withLock { _onLeadSample }
-            for _ in 0..<count { handler?(id, leadMs) }
+            for _ in 0..<count { handler?(id, leadMs, feedDelayMs, holdMs, 0) }
         }
     }
 
@@ -244,7 +261,8 @@ import CoreAudio
         withBT: Bool = false,
         silenceFallbackDelay: TimeInterval = NativeBackend.defaultSilenceFallbackDelay,
         castAbsenceGrace: TimeInterval = 0.05,
-        castOffsetStore: BTTrimStore? = nil
+        castOffsetStore: BTTrimStore? = nil,
+        delayClock: @escaping NativeBackend.DelayClock = NativeBackend.dispatchDelayClock
     ) -> Rig {
         let cast = FakeCastEnumerator()
         let manager = FakeCastOutputManager()
@@ -260,6 +278,7 @@ import CoreAudio
             castOffsetStore: castOffsetStore,
             dacpEndpoint: FakeDACPEndpoint(),
             systemVolume: NoOpSystemVolume(),
+            delayClock: delayClock,
             silenceFallbackDelay: silenceFallbackDelay,
             castAbsenceGrace: castAbsenceGrace,
             aggregateControl: NoOpAggregateControl(),
@@ -659,8 +678,10 @@ import CoreAudio
 
     /// An AirPlay speaker and a Cast receiver, selected together, and the
     /// receiver already playing — the room every CAST-SYNC test below is set in.
-    private func castRoom() -> (rig: Rig, ap: DiscoveredDevice) {
-        let rig = makeBackend()
+    private func castRoom(
+        delayClock: @escaping NativeBackend.DelayClock = NativeBackend.dispatchDelayClock
+    ) -> (rig: Rig, ap: DiscoveredDevice) {
+        let rig = makeBackend(delayClock: delayClock)
         let ap = Self.ap2Device()
         rig.discovery.fire(.appeared(ap))
         rig.cast.fire([Self.record])
@@ -682,7 +703,7 @@ import CoreAudio
 
         rig.backend.setOutputSet([ap.id, Self.record.id])
         waitFor { !rig.capture.preDelayMs.isEmpty }
-        let assumed = CastRoomDelay.defaultLeadMs
+        let assumed = CastRoomDelay.defaultLeadMs + CastFeedRing.macHoldMs
         #expect(rig.backend.localSinkReferenceDelayMs() == assumed,
                 "the room now plays at the receiver's assumed lead")
         #expect(rig.capture.preDelayMs.last == assumed - rig.backend.startBufferMs,
@@ -723,7 +744,7 @@ import CoreAudio
         waitFor { Self.device(rig.backend, Self.record.id) != nil }
 
         rig.backend.setOutputSet([Self.record.id])
-        waitFor { rig.backend.localSinkReferenceDelayMs() == CastRoomDelay.defaultLeadMs }
+        waitFor { rig.backend.localSinkReferenceDelayMs() == CastRoomDelay.defaultLeadMs + CastFeedRing.macHoldMs }
         #expect(rig.capture.preDelayMs.allSatisfy { $0 == 0 }, "got \(rig.capture.preDelayMs)")
     }
 
@@ -767,8 +788,8 @@ import CoreAudio
         let late = 7_000
         rig.manager.fireLead(id: Self.record.id, leadMs: late,
                              count: CastRoomDelay.settleSampleCount)
-        waitFor { rig.capture.preDelayMs.last == late - rig.backend.startBufferMs }
-        #expect(rig.backend.localSinkReferenceDelayMs() == late)
+        waitFor { rig.capture.preDelayMs.last == late + CastFeedRing.macHoldMs - rig.backend.startBufferMs }
+        #expect(rig.backend.localSinkReferenceDelayMs() == late + CastFeedRing.macHoldMs)
 
         // Still there, still reporting: a settled receiver is left alone.
         rig.manager.fireLead(id: Self.record.id, leadMs: late, count: 30)
@@ -788,7 +809,136 @@ import CoreAudio
                              count: CastRoomDelay.settleSampleCount)
         SuiteWait.settle(0.3)
         #expect(rig.capture.preDelayMs.count == published, "got \(rig.capture.preDelayMs)")
-        #expect(rig.backend.localSinkReferenceDelayMs() == CastRoomDelay.defaultLeadMs)
+        #expect(rig.backend.localSinkReferenceDelayMs() == CastRoomDelay.defaultLeadMs + CastFeedRing.macHoldMs)
+        // Its own share is the room less its lead less the Mac hold, which
+        // the feed already carries.
+        waitFor { rig.manager.castRoomDelays.last?.ms == CastRoomDelay.defaultLeadMs - 4_000 }
+        #expect(rig.manager.castRoomDelays.last?.ms == CastRoomDelay.defaultLeadMs - 4_000)
+        #expect(rig.manager.castRoomDelays.last?.id == Self.record.id)
+    }
+
+    /// A receiver's measured hold replaces the fallback hold both in its share
+    /// and in the term it raises, and a share of 0 is still handed over.
+    /// Turns red if the share or the room keeps the fixed `macHoldMs` where the receiver's measured hold belongs, or a zero share stops being pushed.
+    @Test func aMeasuredHoldSetsTheReceiversShareAndTheRoom() {
+        let (rig, ap) = castRoom()
+        rig.backend.setOutputSet([ap.id, Self.record.id])
+        waitFor { !rig.capture.preDelayMs.isEmpty }
+        let id = Self.record.id
+        let room0 = CastRoomDelay.defaultLeadMs + CastFeedRing.macHoldMs
+
+        rig.manager.fireLead(id: id, leadMs: 4_000, count: CastRoomDelay.settleSampleCount, holdMs: 84)
+        waitFor { rig.manager.castRoomDelays.last?.ms == room0 - 4_084 }
+        #expect(rig.manager.castRoomDelays.last?.ms == room0 - 4_084)
+        #expect(rig.backend.localSinkReferenceDelayMs() == room0)
+
+        rig.manager.fireLead(id: id, leadMs: 5_559, count: CastRoomDelay.settleSampleCount, holdMs: 84)
+        waitFor { rig.backend.localSinkReferenceDelayMs() == 5_643 }
+        #expect(rig.backend.localSinkReferenceDelayMs() == 5_643)
+        #expect(rig.manager.castRoomDelays.last?.ms == 0)
+    }
+
+    /// Every by-ear offset reaches the receiver's feed at once, but the room
+    /// moves only when the dial has been still: one move for a burst, one
+    /// back for a clear, none for a delay, and none after a deselect.
+    /// Turns red if an offset change moves the room before the settle fires, a burst moves it more than once, or a deselect stops cancelling the pending settle.
+    @Test func aNegativeOffsetRaisesTheRoomOnceTheDialIsStill() {
+        let clock = ManualDelayClock()
+        let (rig, ap) = castRoom(delayClock: clock.clock)
+        let id = Self.record.id
+        let startBuffer = rig.backend.startBufferMs
+        rig.backend.setOutputSet([ap.id, id])
+        rig.manager.fireLead(id: id, leadMs: CastRoomDelay.defaultLeadMs, count: CastRoomDelay.settleSampleCount)
+        waitFor { rig.manager.castRoomDelays.last?.ms == 0 }
+        let room0 = CastRoomDelay.defaultLeadMs + CastFeedRing.macHoldMs
+        waitFor { rig.capture.preDelayMs.last == room0 - startBuffer }
+        // The arm re-pushes the stored offsets on this queue; let it land first.
+        rig.backend.captureControlQueue.sync {}
+        let published = rig.capture.preDelayMs.count
+
+        // B3: a burst.
+        for offset in [-30, -60, -80] {
+            rig.backend.setCastUserOffsetMs(Double(offset), forDevice: id)
+            #expect(rig.manager.castUserOffsets.last?.ms == offset)
+        }
+        #expect(rig.backend.localSinkReferenceDelayMs() == room0)
+        #expect(clock.pendingCount == 1)
+        rig.backend.stateQueue.sync { clock.fireAll() }
+        #expect(rig.backend.localSinkReferenceDelayMs() == room0 + 80)
+        waitFor { rig.capture.preDelayMs.last == room0 + 80 - startBuffer }
+        #expect(rig.capture.preDelayMs.count == published + 1, "got \(rig.capture.preDelayMs)")
+        #expect(rig.manager.castRoomDelays.last?.ms == 80)
+
+        // B4: a clear.
+        rig.backend.clearCastUserOffset(forDevice: id)
+        #expect(rig.manager.castUserOffsets.last?.ms == 0)
+        #expect(rig.backend.localSinkReferenceDelayMs() == room0 + 80)
+        #expect(clock.pendingCount == 1)
+        rig.backend.stateQueue.sync { clock.fireAll() }
+        #expect(rig.backend.localSinkReferenceDelayMs() == room0)
+        waitFor { rig.capture.preDelayMs.last == room0 - startBuffer }
+        #expect(rig.capture.preDelayMs.count == published + 2, "got \(rig.capture.preDelayMs)")
+        #expect(rig.manager.castRoomDelays.last?.ms == 0)
+
+        // B5: a delay fits inside the receiver's own share.
+        rig.backend.setCastUserOffsetMs(40, forDevice: id)
+        #expect(rig.manager.castUserOffsets.last?.ms == 40)
+        rig.backend.stateQueue.sync { clock.fireAll() }
+        #expect(rig.backend.localSinkReferenceDelayMs() == room0)
+        rig.backend.captureControlQueue.sync {}
+        #expect(rig.capture.preDelayMs.count == published + 2, "got \(rig.capture.preDelayMs)")
+
+        // B6: a deselect mid-drag.
+        rig.backend.setCastUserOffsetMs(-80, forDevice: id)
+        rig.backend.setOutputSet([ap.id])
+        waitFor { rig.capture.preDelayMs.last == 0 }
+        rig.backend.stateQueue.sync {}
+        #expect(clock.pendingCount == 0)
+        rig.backend.stateQueue.sync { clock.fireAll() }
+        #expect(rig.backend.localSinkReferenceDelayMs() == startBuffer)
+    }
+
+    /// An unsettled receiver's feed opens when what it plays (its lead, plus
+    /// the Mac hold, plus the feed delay the manager reported with the
+    /// sample) lands on the room, and stays shut otherwise.
+    /// Turns red if the gate decision drops the Mac hold or the reported feed delay before comparing the play-out with the room.
+    @Test func aLeadSampleOpensTheFeedGateOnlyWhenItsPlayOutMeetsTheRoom() {
+        let (rig, ap) = castRoom()
+        rig.backend.setOutputSet([ap.id, Self.record.id])
+        waitFor { !rig.capture.preDelayMs.isEmpty }
+        let id = Self.record.id
+
+        rig.manager.fireLead(id: id, leadMs: CastRoomDelay.defaultLeadMs)
+        waitFor { rig.manager.feedGates.count == 1 }
+        #expect(rig.manager.feedGates.last?.open == true)
+        #expect(rig.manager.feedGates.last?.id == id)
+        rig.manager.fireLead(id: id, leadMs: 4_000)
+        waitFor { rig.manager.feedGates.count == 2 }
+        #expect(rig.manager.feedGates.last?.open == false)
+
+        rig.manager.fireLead(id: id, leadMs: 2_885, feedDelayMs: 2_615)
+        waitFor { rig.manager.feedGates.count == 3 }
+        #expect(rig.manager.feedGates.last?.open == true, "2885 + 115 + 2615 is the room")
+        rig.manager.fireLead(id: id, leadMs: 2_885)
+        waitFor { rig.manager.feedGates.count == 4 }
+        #expect(rig.manager.feedGates.last?.open == false)
+    }
+
+    /// A receiver that is the only output has nothing to fall out of step
+    /// with, so its feed plays from the first byte; another output joining
+    /// takes that back.
+    /// Turns red if the selection pass stops telling the manager a lone Cast receiver plays alone, or stops withdrawing it when another output joins.
+    @Test func aLoneCastReceiverIsToldItPlaysAlone() {
+        let (rig, ap) = castRoom()
+        rig.backend.setOutputSet([Self.record.id])
+        waitFor { rig.manager.playsAlone.last?.alone == true }
+        #expect(rig.manager.playsAlone.last?.alone == true)
+        #expect(rig.manager.playsAlone.last?.id == Self.record.id)
+
+        rig.backend.setOutputSet([ap.id, Self.record.id])
+        waitFor { rig.manager.playsAlone.last?.alone == false }
+        #expect(rig.manager.playsAlone.last?.alone == false)
+        #expect(rig.manager.playsAlone.last?.id == Self.record.id)
     }
 
     /// A receiver that fails stops holding the room back — the others must not

@@ -323,11 +323,10 @@ public final class CastLiveAudioServer: @unchecked Sendable {
         }
     }
 
-    /// How much the ring must hold before the pacing clock starts. Generous on
-    /// purpose: the room-delay controller MEASURES whatever lead this produces
-    /// and takes it out of the other outputs, so a cushion costs nothing in
-    /// sync terms — only a little more total latency on a leg already seconds
-    /// deep. The ring holds 2 s, so this leaves ample headroom.
+    /// How much the ring must hold before the pacing clock starts. The feed
+    /// ring trims back to its own standing queue when it starts playing, so
+    /// this cushion costs startup time only, never latency. The ring holds
+    /// 2 s, so this leaves ample headroom.
     static let cushionFrames = sampleRate / 2          // 500 ms
 
     /// How long the clock will wait for that cushion before starting anyway.

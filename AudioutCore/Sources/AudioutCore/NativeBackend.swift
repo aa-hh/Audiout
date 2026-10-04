@@ -4889,14 +4889,16 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     private func feedEngineIfAvailable(_ discovered: DiscoveredDevice, password: String?, appearing: Bool) {
         guard discovered.isAvailable else { return }
         let id = discovered.id
-        let descriptor = Self.withPassword(discovered.descriptor, password)
-        let shouldFeed: Bool = stateQueue.sync {
-            if let fed = self.fedDescriptors[id], Self.descriptorsEqual(fed, descriptor) {
-                return false
-            }
-            return true
+        // A discovery re-feed never drops a password the engine holds: the store
+        // may not hold a just-typed one yet. Forget still clears it, because
+        // `descriptorToFeed` re-syncs the password before every add.
+        let descriptor: DeviceDescriptor? = stateQueue.sync {
+            let fed = self.fedDescriptors[id]
+            let descriptor = Self.withPassword(discovered.descriptor, password ?? fed?.password)
+            if let fed, Self.descriptorsEqual(fed, descriptor) { return nil }
+            return descriptor
         }
-        guard shouldFeed else { return }
+        guard let descriptor else { return }
         let engine = self.engine
         Task { [weak self] in
             do {

@@ -3439,6 +3439,59 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         await pollUntil { store.password(for: device.id) == "secret" }
     }
 
+    /// Building a discovery re-feed's password from the store alone (dropping
+    /// the fed one in `feedEngineIfAvailable`) turns it red: the `.updated`
+    /// lands before the Keychain write and feeds the engine no password.
+    @Test func discoveryUpdateDuringTheExtraAttemptKeepsTheTypedPassword() async {
+        let store = ScriptedPasswordStore()
+        let writeGate = DispatchSemaphore(value: 0)
+        store.onWillSet = { writeGate.wait() }
+        let (backend, engine, discovery) = makeBackend(passwordStore: store)
+        defer { backend.stop() }
+        let device = ap2Device(access: .password)
+        await startAndDiscover(backend, engine, discovery, device)
+        let firstAdd = HoldPoint()
+        let extraAdd = HoldPoint()
+        let sawFirst = OnceFlag()
+        engine.addFailures = [device.outputID.rawValue]
+        engine.onAddOutputHold = { id, _ in
+            guard id == device.outputID else { return }
+            if sawFirst.testAndSet() {
+                engine.addFailures = []
+                await extraAdd.hold()
+            } else {
+                await firstAdd.hold()
+            }
+        }
+
+        backend.setOutputSet([device.id])
+        await pollUntil { firstAdd.entered }
+        backend.submitAirPlayPassword("secret", for: device.id, source: "mac") {}
+        await pollUntil { backend.devices.first { $0.id == device.id }?.hasStoredPassword == true }
+        firstAdd.open()
+        await pollUntil { extraAdd.entered }
+        #expect(engine.fedDescriptorList.last?.password == "secret")
+
+        // A changed port makes the re-feed happen either way, so the test can
+        // wait for it and read the password it carried.
+        let moved = DiscoveredDevice(
+            id: device.id,
+            descriptor: DeviceDescriptor(
+                name: device.descriptor.name, address: device.descriptor.address,
+                family: .ipv4, port: device.descriptor.port + 1,
+                txtRecord: device.descriptor.txtRecord),
+            outputID: device.outputID, isAirPlay2Supported: true, access: .password)
+        discovery.fire(.updated(moved))
+        await pollUntil { engine.fedDescriptorList.last?.port == moved.descriptor.port }
+        #expect(engine.fedDescriptorList.last?.port == moved.descriptor.port)
+        #expect(engine.fedDescriptorList.last?.password == "secret")
+        #expect(store.password(for: device.id) == nil)
+
+        extraAdd.open()
+        writeGate.signal()
+        await pollUntil { store.password(for: device.id) == "secret" }
+    }
+
     /// Parking the speaker or showing it refused when the state stream reports
     /// the failed connect before the catch runs (so the typed password never
     /// reaches the receiver) turns it red.

@@ -595,14 +595,11 @@ public final class GroupController {
 
     /// Store the AirPlay password the user typed for `id`, then retry it
     /// through `retryConnection(for:)` once the backend has written it, on the
-    /// main thread. The retry's own result is dropped, so this returns `.ok`.
-    /// `source` is `"mac"` or `"phone"`, for analytics only.
-    @discardableResult
-    public func submitAirPlayPassword(_ password: String, for id: String, source: String) -> SelectionResult {
+    /// main thread. `source` is `"mac"` or `"phone"`, for analytics only.
+    public func submitAirPlayPassword(_ password: String, for id: String, source: String) {
         backend.submitAirPlayPassword(password, for: id, source: source) { [weak self] in
             self?.retryConnection(for: id)
         }
-        return .ok
     }
 
     /// A membership-FREE reconnect kick (BT-UI): clicking a greyed

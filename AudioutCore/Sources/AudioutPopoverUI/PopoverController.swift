@@ -3775,7 +3775,7 @@ public final class PopoverController: NSObject {
         sheet.onSubmit = { [weak self] text in
             guard let self else { return }
             self.passwordSheetSubmitted = true
-            _ = self.groupController?.submitAirPlayPassword(text, for: id, source: "mac")
+            self.groupController?.submitAirPlayPassword(text, for: id, source: "mac")
         }
         sheet.onCancel = { [weak self] in self?.dismissPasswordSheet() }
         passwordSheet = sheet

@@ -26,6 +26,6 @@ When a finding rests on an `AGENTS.md` rule, quote the exact sentence from the `
 
 Readability findings (LOW) come from `docs/REVIEW-RUBRIC.md`: change-log narration, stale claims, narration of the next line, reviewer-speak, hedges, misleading or journey/type-echo names, redundant doc comments, commented-out code or debug prints. Never flag long why-heavy trap comments, `SPEC §`/`D#`/`Q#`/`R-*`/`STABILITY(...)` tags, `razor:` notes, trailing `isolation-ok`/`slop-ok`/`screen-ok` markers, string literals, or vendored C.
 
-Score each candidate finding 0-100 for confidence that it is real (0 false positive or pre-existing; 50 verified but a nitpick; 75 very likely hit in practice or named by an `AGENTS.md`; 100 certain). Output only findings scoring 80 or more.
+Score each candidate finding 0-100 for confidence that it is real (0 false positive or pre-existing; 50 verified but a nitpick; 75 very likely hit in practice or named by an `AGENTS.md`; 100 certain). Output only findings scoring 75 or more.
 
 If the diff needs more than this pass can give it (you need to read a caller or a store format to judge a change; a change in audio-thread, timing, licensing or persistence code; a change you cannot follow from the diff alone), output one line `ESCALATE: <one sentence why>` and nothing else. A deeper review then runs.

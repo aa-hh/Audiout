@@ -90,9 +90,25 @@ got="$(scope_for "$SRC/AudioutCore/OutputBackend.swift")"
 [ "$got" = FULL ] && ok "unmatched AudioutCore file runs FULL" \
   || fail "unmatched AudioutCore file printed '$got', expected FULL"
 
+# Turns red if CastSender falls back to FULL again (every Cast commit then ran
+# the whole suite) or widens past the files importing CastSender directly.
+got="$(scope_for "$SRC/CastSender/CastSpikeRun.swift")"
+if [ "$got" = FULL ] || has_suite "$got" PopoverControllerTests; then
+  fail "unmatched CastSender file printed '$got', expected CastSender importers only"
+else
+  ok "unmatched CastSender file runs CastSender importers only"
+fi
+
+# Turns red if an executable-target file (which no test can import) goes back
+# to FULL instead of a compile.
 got="$(scope_for "$SRC/AudioutApp/AppDelegate.swift")"
-[ "$got" = FULL ] && ok "AudioutApp file runs FULL" \
-  || fail "AudioutApp file printed '$got', expected FULL"
+[ "$got" = BUILD ] && ok "AudioutApp file runs BUILD" \
+  || fail "AudioutApp file printed '$got', expected BUILD"
+
+want="$(scope_for "$SRC/AudioutCore/NativeBackend.swift")"
+got="$(scope_for "$SRC/AudioutApp/AppDelegate.swift" "$SRC/AudioutCore/NativeBackend.swift")"
+[ "$got" = "$want" ] && ok "AudioutApp file beside a library file runs the library's suites" \
+  || fail "AudioutApp + NativeBackend printed '$got', expected '$want'"
 
 # --- Existing fail-closed rule: a deletion is FULL ----------------------------
 

@@ -8,6 +8,7 @@
 #
 # Prints ONE line on stdout:
 #   FULL      — run the whole suite
+#   BUILD     — no test can reach the change; compile only
 #   <regex>   — pass to the runner as `--filter <regex>`
 #
 # pre-commit calls it with no arguments, so it reads the staged index. Runnable
@@ -23,14 +24,19 @@
 #   2. By target. A file under `AudioutCore/Sources/<Target>/` selects every
 #      test file that imports <Target> or any target that depends on it,
 #      directly or through another target (the table in `dependents_of` below,
-#      copied from AudioutCore/Package.swift). Not done when that set of
-#      targets includes AudioutCore itself: 172 of the 209 test files import
-#      it, so the selection would be close to the full suite anyway.
+#      copied from AudioutCore/Package.swift). When that set includes
+#      AudioutCore (172 of the 209 test files import it, so it would be close
+#      to the full suite), only the test files importing <Target> itself are
+#      selected instead (owner's call, 2026-10-04: CastSender's new files were
+#      sending every Cast commit to the full suite). The full suite on the pull
+#      request covers what that leaves out.
+#   3. A file in an executable target (AudioutApp, cast-spike, the harnesses)
+#      selects nothing: no test can import it. If every staged file is one of
+#      these, the output is BUILD (owner's call, 2026-10-04).
 #
 # It fails CLOSED — anything it cannot map prints FULL:
-#   - a staged source file that neither rule above maps to any test file,
-#     including every file in AudioutCore (rule 2 skipped, see above) and in
-#     AudioutApp or any other executable target (no test imports those)
+#   - a staged library source file that neither rule above maps to any test
+#     file, including every unmatched file in AudioutCore itself
 #   - any deletion or rename (a deleted file has no suites of its own, and
 #     removing one breaks callers that live elsewhere)
 #   - AUDIOUT_FULL_SUITE=1, the switch agents already use for a deliberate full
@@ -108,10 +114,25 @@ tests_by_target() {
     done
     alts=$(echo $closure | tr ' ' '|')
     IFS=$caller_ifs
+    case "$target" in AudioutCore) return ;; esac
     case "$closure" in
-        *" AudioutCore "*) return ;;
+        *" AudioutCore "*) alts=$target ;;
     esac
     grep -rlE "^(@testable )?import ($alts)\$" "$root/AudioutCore/Tests" 2>/dev/null
+}
+
+# Rule 3: a file under AudioutCore/Sources/<target>/ where <target> is not a
+# library target.
+is_executable_source() {
+    case "$1" in
+        AudioutCore/Sources/*/*) ;;
+        *) return 1 ;;
+    esac
+    rest=${1#AudioutCore/Sources/}
+    case "$library_targets" in
+        *" ${rest%%/*} "*) return 1 ;;
+    esac
+    return 0
 }
 
 # Name mapping (rule 1), deliberately dumb so it is obvious what it will do:
@@ -143,6 +164,9 @@ for f in $changed; do
                     matches=$(tests_by_target "$f")
                 fi ;;
     esac
+    if [ -z "$matches" ] && is_executable_source "$f"; then
+        continue
+    fi
     if [ -z "$matches" ]; then
         IFS=$old_ifs
         echo FULL
@@ -168,6 +192,10 @@ done
 IFS=$old_ifs
 
 regex=$(printf '%s\n' "$suites" | grep -v '^[[:space:]]*$' | sort -u | paste -sd '|' -)
+if [ -z "$regex" ] && [ -n "$changed" ]; then
+    echo BUILD
+    exit 0
+fi
 if [ -z "$regex" ]; then
     echo FULL
     exit 0

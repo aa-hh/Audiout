@@ -332,6 +332,14 @@ warn-only 3/5) are documented in the hook file itself:
 - **Guard 7 blocks** a Swift commit whose added comments match near-certain
   slop patterns (`slop-ok` exempts a line; rubric
   [docs/REVIEW-RUBRIC.md](docs/REVIEW-RUBRIC.md)).
+- **Guard 11 blocks** a commit whose new `@Test` has no comment sentence naming
+  the code change that turns it red, a `print(` in a test (`print-ok` exempts),
+  or a new test file holding one test (`new-suite-ok` exempts);
+  `bash scripts/test-guard-test-discipline.sh` self-tests it.
+- **Guard 12 blocks** a folder AGENTS.md that gains ruling phrasing or grows
+  while over its 300-word budget, and any removed line in an AGENTS-HISTORY.md;
+  it warns on a new date. Root `AGENTS.md` and merges are exempt;
+  `bash scripts/test-guard-agents-docs.sh` self-tests it.
 - **Guard 10 blocks** a merge onto `main` until `scripts/review-branch.sh` has
   reviewed the branch's committed diff: it picks skip, cheap (one sonnet pass)
   or full (four parallel reviewers plus a confidence scorer, instructions in
@@ -352,6 +360,16 @@ warn-only 3/5) are documented in the hook file itself:
   the full suite when main's side changes AudioutCore Swift, and the merge
   onto `main` then skips it; otherwise the full suite runs at the merge onto
   `main`. Either way it runs once.
+- **A change inside a Guard 10 risk path is scoped before it is built.** The
+  paths are the `is_risk_path` list at the top of `scripts/review-branch.sh`
+  (the Bluetooth sinks, the sync and drift code, `NativeBackend*`, the capture
+  coordinators, the stores, licence and trial, AirPlayEngine). However small
+  the finding reads, the first launch is a scoper (`fable-scoper` or
+  `/scope-and-run`) that states the function's invariants and enumerates the
+  cases; the builder writes those cases as tests first, then the code. On
+  2026-10-04 a "one-line" safety-margin clamp in `BTSyncedSink` took six
+  builder rounds and six reviews because each review's smallest fix became
+  the next spec instead of one design pass up front.
 
 ## UI / Design Conventions (all targets)
 
@@ -387,8 +405,9 @@ This app must feel like a native macOS citizen, not a cross-platform port.
 - **`DESIGN.md` records the shipped design; nothing mirrors it elsewhere.**
   The Figma design system was abandoned on 2026-09-03. When a change to
   `Tokens`, `PopoverColumnGrid`, a custom-drawn view, or a screen lands, the
-  record is regenerated from the code by the `impeccable-documenter` agent
-  (`.claude/agents/impeccable-documenter.md`), never hand-mirrored.
+  same commit updates the sections of `DESIGN.md` that describe it, written
+  from the code as shipped; it never describes a planned change, and never
+  restates a rule into a folder AGENTS.md.
 - Deviating is fine when the system has no equivalent — but note *why* in the
   nearest AGENTS.md, so the next agent doesn't "fix" it back to a system control
   that doesn't fit.

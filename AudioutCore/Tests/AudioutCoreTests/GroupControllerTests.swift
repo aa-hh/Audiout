@@ -1516,6 +1516,30 @@ import Testing
         #expect(!controller.isMuted("local-mac"))
     }
 
+    // Turns red if the main mute (button, mute key, Touch Bar) stops reaching the Mac's hardware mute while the Mac plays alone, or stops reading a keyboard mute back.
+    @Test func mainMuteWithTheMacAloneIsTheMacsHardwareMute() async throws {
+        let (controller, backend) = try await makeRecordingController()
+        controller.ensureDefaultSelection()
+        #expect(controller.isSpeakerSelected("local-mac") && controller.localRowDrivesMain)
+
+        controller.setMainOutMuted(true)
+        #expect(backend.muteWrites.last?.id == "local-mac" && backend.muteWrites.last?.muted == true)
+        #expect(!backend.volumeWrites.contains { $0.id == "local-mac" })
+        #expect(controller.isMainOutMuted)
+
+        controller.setMainOutMuted(false)
+        #expect(backend.muteWrites.last?.id == "local-mac" && backend.muteWrites.last?.muted == false)
+        #expect(!controller.isMainOutMuted)
+
+        let keyboardMuted = backend.devices.map { device in
+            var device = device
+            if device.isLocalDevice { device.isMuted = true }
+            return device
+        }
+        controller.updateDevices(keyboardMuted)
+        #expect(controller.isMainOutMuted, "a keyboard mute shows on the main mute too")
+    }
+
     // Turns red if `saveGroup` stops calling `setOutputSet` for the active group, or starts routing through `activateGroup` (which would lift the mute).
     @Test func savingTheActiveGroupReappliesItsMembersToTheBackend() async throws {
         let (controller, backend) = try await makeRecordingController()

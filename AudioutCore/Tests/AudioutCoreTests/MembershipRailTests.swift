@@ -455,12 +455,13 @@ import AppKit
 
     // MARK: "Playing now" + the reassurance line
 
+    // Turns red when the active editor stops saying what is playing is untouched, or either state loses the Speakers pointer.
     @Test func everyEditorSaysEditsAreSavedAndOnlyTheActiveOneSaysPlayingNow() throws {
         let (editor, controller, devices) = try makeEditor()
         #expect(!editor.test_playingBadgeVisible,
                 "an inactive group is not playing, so it must not claim to be")
         #expect(editor.test_reassuranceVisible)
-        #expect(editor.test_reassuranceText == "Scene membership only. Mixer visibility is managed in Speakers.")
+        #expect(editor.test_reassuranceText == "Saved as you go. Mixer visibility is managed in Speakers.")
 
         let group = try #require(controller.groups.first)
         controller.activateGroup(id: group.id)
@@ -469,7 +470,7 @@ import AppKit
         #expect(editor.test_playingBadgeVisible)
         #expect(editor.test_reassuranceVisible)
         #expect(editor.test_reassuranceText
-                == "Scene membership only. Mixer visibility is managed in Speakers.")
+                == "Saved as you go; what\u{2019}s playing now doesn\u{2019}t change. Mixer visibility is managed in Speakers.")
     }
 
     @Test func thePrimaryLeavesTheEditorTheWayGroupsDoes() throws {

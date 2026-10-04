@@ -171,9 +171,10 @@ public final class GroupEditorViewController: NSViewController {
     }()
 
     /// The line that says edits are saved as they are made — nothing on this
-    /// pane waits for a button. Every group's editor shows it; an ACTIVE
-    /// group's, where "Playing" is on screen while membership is being
-    /// edited, adds that nothing playing changes (``show(groupID:devices:)``).
+    /// pane waits for a button — and points to Speakers for Mixer visibility.
+    /// An ACTIVE group's, where "Playing" is on screen while membership is
+    /// being edited, also says that edits do not touch what is playing
+    /// (``show(groupID:devices:)``).
     ///
     /// HEIGHT BUDGET: it sits BESIDE "Delete scene…", centred on it, with no
     /// bottom pin, so it rides inside the button's existing bottom margin and
@@ -210,9 +211,9 @@ public final class GroupEditorViewController: NSViewController {
 
     private static let titleFieldMinWidth: CGFloat = 140
 
-    private static let savedAsYouGo = "Changes are saved as you go."
+    private static let savedAsYouGo = "Saved as you go. Mixer visibility is managed in Speakers."
     private static let savedAsYouGoActive =
-        "Changes are saved as you go. They don\u{2019}t change what\u{2019}s playing now."
+        "Saved as you go; what\u{2019}s playing now doesn\u{2019}t change. Mixer visibility is managed in Speakers."
 
     /// The primary's resting title. Every edit on this pane autosaves, so
     /// there is normally nothing outstanding to save and the button only has
@@ -789,12 +790,12 @@ public final class GroupEditorViewController: NSViewController {
         isActiveGroup = isActive
         iconWell.isActiveGroup = isActive
         iconWell.setAccessibilityValue(isActive ? "Playing" : "")
-        // The ring is colour alone; these two say it in words — the marker
-        // states that this group IS playing, and the line answers the question
-        // that raises while its membership is being edited. An inactive group
-        // moves nothing either way, so its line only says edits are saved.
+        // The ring is colour alone; these two say it in words — the badge
+        // states that this group IS playing; the line says edits save as made
+        // and, for the active group, that they do not touch what is playing.
+        // Both states point to Speakers for Mixer visibility.
         playingBadge.isHidden = !isActive
-        reassuranceLabel.stringValue = "Scene membership only. Mixer visibility is managed in Speakers."
+        reassuranceLabel.stringValue = isActive ? Self.savedAsYouGoActive : Self.savedAsYouGo
         // The origin hook's tone follows the same active-group truth the well's
         // gold ring does (`railHookAnchor`), so repaint the rail with it.
         railOverlay.needsDisplay = true

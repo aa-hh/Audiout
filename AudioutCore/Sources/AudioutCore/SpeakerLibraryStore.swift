@@ -17,7 +17,7 @@ public enum SpeakerMixerVisibility: String, Codable, CaseIterable, Sendable {
 }
 
 /// Remembered identity only. Live capabilities and playback stay in Device.
-public struct SpeakerMetadata: Equatable, Codable, Sendable {
+public struct SpeakerMetadata: Equatable, Sendable {
     public var name: String
     public var kind: Device.Kind
 
@@ -25,27 +25,9 @@ public struct SpeakerMetadata: Equatable, Codable, Sendable {
         self.name = name
         self.kind = kind
     }
-
-    private enum CodingKeys: String, CodingKey { case name, kind }
-
-    public init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        name = try container.decode(String.self, forKey: .name)
-        let rawKind = try container.decode(String.self, forKey: .kind)
-        guard let kind = Device.Kind(rawValue: rawKind) else {
-            throw DecodingError.dataCorruptedError(forKey: .kind, in: container, debugDescription: "Unknown speaker kind")
-        }
-        self.kind = kind
-    }
-
-    public func encode(to encoder: Encoder) throws {
-        var container = encoder.container(keyedBy: CodingKeys.self)
-        try container.encode(name, forKey: .name)
-        try container.encode(kind.rawValue, forKey: .kind)
-    }
 }
 
-public struct SpeakerLibraryState: Equatable, Codable, Sendable {
+public struct SpeakerLibraryState: Equatable, Sendable {
     public var metadata: [String: SpeakerMetadata]
     public var visibility: [String: SpeakerMixerVisibility]
 
@@ -56,10 +38,16 @@ public struct SpeakerLibraryState: Equatable, Codable, Sendable {
 }
 
 public struct SpeakerLibraryStore: Sendable {
+    /// Raw strings, so one unknown kind or visibility drops that entry instead of failing the whole file.
     private struct Envelope: Codable {
+        struct Metadata: Codable {
+            var name: String
+            var kind: String
+        }
+
         var schemaVersion: Int
-        var metadata: [String: SpeakerMetadata]
-        var visibility: [String: SpeakerMixerVisibility]
+        var metadata: [String: Metadata]
+        var visibility: [String: String]
     }
 
     private let fileURL: URL
@@ -90,15 +78,21 @@ public struct SpeakerLibraryStore: Sendable {
             StoreRecovery.quarantine(fileURL)
             return nil
         }
-        return SpeakerLibraryState(metadata: envelope.metadata, visibility: envelope.visibility)
+        let metadata = envelope.metadata.compactMapValues { entry in
+            Device.Kind(rawValue: entry.kind).map { SpeakerMetadata(name: entry.name, kind: $0) }
+        }
+        return SpeakerLibraryState(metadata: metadata,
+                                   visibility: envelope.visibility.compactMapValues(SpeakerMixerVisibility.init(rawValue:)))
     }
 
     public func save(_ state: SpeakerLibraryState) throws {
         try FileManager.default.createDirectory(at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        let data = try encoder.encode(Envelope(schemaVersion: 1, metadata: state.metadata,
-                                              visibility: state.visibility.filter { $0.value != .whenAvailable }))
+        let visibility = state.visibility.filter { $0.value != .whenAvailable }
+        let data = try encoder.encode(Envelope(schemaVersion: 1,
+                                              metadata: state.metadata.mapValues { .init(name: $0.name, kind: $0.kind.rawValue) },
+                                              visibility: visibility.mapValues(\.rawValue)))
         try data.write(to: fileURL, options: .atomic)
     }
 }

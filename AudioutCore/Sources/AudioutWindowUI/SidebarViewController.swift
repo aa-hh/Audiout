@@ -142,8 +142,8 @@ public final class SidebarViewController: NSViewController {
     // The sidebar is the one control ALWAYS present regardless of which
     // content pane is showing (overview/editor/detail), so it's the natural
     // anchor: force AppKit to (re)compute the window's automatic key-view
-    // loop (`autorecalculatesKeyViewLoop`, on by default for a window built
-    // entirely in code, as this one is — but recalculation is reactive and
+    // loop (`autorecalculatesKeyViewLoop`, off by default for a code-built window;
+    // the surface's shell panel turns it on — and recalculation is reactive and
     // nothing here ever explicitly nudged it either) and claim first
     // responder for the outline view, the top-leading control.
     //
@@ -355,9 +355,9 @@ public final class SidebarViewController: NSViewController {
     /// reports on them — the row shows the gold "playing" marker whenever one
     /// of the saved groups is the active Main Out — but NO group row is built
     /// any more (direction C): the cards in the content pane are the group
-    /// list. Both sections are flat leaf lists, and the Speakers section lists
-    /// EVERY device, grouped or not (hiding one here would just make it
-    /// unreachable).
+    /// list. The Speakers header is itself the selectable `.speakersOverview`
+    /// row (it opens the overview, which lists remembered records too); its
+    /// children are every live device, grouped or not.
     public func reload(groups: [Group], activeGroupID: String?, devices: [Device],
                        presentationRecords: [SpeakerPresentationRecord] = []) {
         presentationByID = Dictionary(uniqueKeysWithValues: presentationRecords.map { ($0.id, $0) })
@@ -378,8 +378,8 @@ public final class SidebarViewController: NSViewController {
         //    Equalizer) is reached.
         newRoots.append(Node(.header("System Audio"), children: [Node(.mainOut)]))
 
-        // 3. Speakers section — every device, grouped or not, so it stays
-        //    reachable now that membership isn't previewed via expansion.
+        // 3. Speakers section — the `.speakersOverview` row, with every live
+        //    device, grouped or not, as its children.
         let devicesHeader = Node(.speakersOverview)
         devicesHeader.children = devices.map { Node(.device($0)) }
         newRoots.append(devicesHeader)

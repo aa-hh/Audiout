@@ -76,9 +76,11 @@ public final class MembershipRowView: NSView {
     private let checkbox = NSButton()
     private let iconView = NSImageView()
     private let nameLabel = NSTextField(labelWithString: "")
-    /// Small secondary annotation shown only for an unavailable member
-    /// ("Unavailable") — never a routing/status claim, just presence.
     private var presentation: SpeakerPresentationRecord?
+    /// The trailing caption, never a routing claim. Without a presentation
+    /// record it shows only "Unavailable"/"Not connected" for an unavailable
+    /// member (`apply`); with a record it always shows the status line (when
+    /// unavailable) plus the Mixer-visibility context (`applyPresentation`).
     private let unavailableLabel = NSTextField(labelWithString: "")
 
     /// The checkbox's DRAWN skin on `.warmPane` (Warm Signal v4 §Call-1): a

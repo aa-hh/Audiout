@@ -768,17 +768,14 @@ private final class UnconstrainedDeviceRowWindow: NSWindow {
             let node = row.test_busNode
             row.test_clickName()
             #expect(delegate.reconnects == ["offline"])
-            let name = try #require(findNameLabel(in: row))
-            #expect(window.makeFirstResponder(name))
-            #expect(window.firstResponder === name)
             let countBeforeReturn = delegate.reconnects.count
-            try sendKey(code: 36, characters: "\r", through: window)
+            row.test_pressNameKey(36)
             #expect(delegate.reconnects.count == countBeforeReturn + 1)
             #expect(delegate.toggledFor == nil)
             #expect(row.test_busNode == node)
             #expect(!row.test_isEnabledOn)
             let countBeforeSpace = delegate.reconnects.count
-            try sendKey(code: 49, characters: " ", through: window)
+            row.test_pressNameKey(49)
             #expect(delegate.reconnects.count == countBeforeSpace + 1)
             #expect(delegate.toggledFor == nil)
             #expect(row.test_busNode == node)
@@ -799,6 +796,59 @@ private final class UnconstrainedDeviceRowWindow: NSWindow {
         }
     }
 
+    // Letting `DeviceNameLabel` accept first responder with keyboard navigation off, dropping its Tab forwarding, or guarding its accessibility press on recovery alone turns red.
+    @Test func availableNameTogglesOnKeysAndHandsTabOn() throws {
+        let device = Device(id: "dev-1", name: "Test Speaker", kind: .homePod)
+        let row = DeviceRowView(device: device, showsBus: true)
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 300, height: 24))
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 653, height: 200))
+        row.frame = NSRect(x: 0, y: 100, width: 653, height: 100)
+        container.addSubview(row)
+        container.addSubview(field)
+        let window = UnconstrainedDeviceRowWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 653, height: 200),
+            styleMask: [.titled], backing: .buffered, defer: false)
+        window.setFrameOrigin(NSPoint(x: -10_000, y: -10_000))
+        window.contentView = container
+        window.recalculateKeyViewLoop()
+        defer { window.makeFirstResponder(nil) }
+        #expect(!NSScreen.screens.contains { $0.frame.intersects(window.frame) })
+
+        let delegate = RecordingDelegate()
+        row.delegate = delegate
+        row.apply(device, selected: false, controllable: true)
+        let name = row.nameLabel
+        let keyboardNavigation = NSApplication.shared.isFullKeyboardAccessEnabled
+        #expect(name.acceptsFirstResponder == keyboardNavigation)
+        row.test_pressNameKey(36)
+        #expect(delegate.toggledFor == device.id)
+        #expect(delegate.toggledOn == true)
+        #expect(row.test_isEnabledOn)
+        row.test_pressNameKey(49)
+        #expect(delegate.toggledOn == false)
+        #expect(delegate.reconnects.isEmpty)
+        #expect(row.test_pressNameAccessibility())
+        #expect(delegate.toggledOn == true)
+        #expect(name.focusRingMaskBounds == name.bounds)
+
+        window.initialFirstResponder = field
+        row.test_pressNameKey(48)
+        #expect((window.firstResponder as? NSTextView)?.delegate === field)
+        window.makeFirstResponder(nil)
+        window.initialFirstResponder = nil
+        // A label can be made first responder only when it accepts it.
+        if keyboardNavigation {
+            window.makeFirstResponder(name)
+            try sendKey(code: 48, characters: "\u{19}", modifierFlags: [.shift], through: window)
+            #expect(window.firstResponder !== name && window.firstResponder !== window)
+        }
+
+        let row2 = DeviceRowView(device: device, showsToggle: false)
+        row2.apply(device, selected: true, controllable: true)
+        #expect(!row2.nameLabel.acceptsFirstResponder)
+        #expect(!row2.test_pressNameAccessibility())
+    }
+
     private func findNameLabel(in view: NSView) -> DeviceNameLabel? {
         if let name = view as? DeviceNameLabel { return name }
         for subview in view.subviews {
@@ -807,9 +857,10 @@ private final class UnconstrainedDeviceRowWindow: NSWindow {
         return nil
     }
 
-    private func sendKey(code: UInt16, characters: String, through window: NSWindow) throws {
+    private func sendKey(code: UInt16, characters: String, modifierFlags: NSEvent.ModifierFlags = [],
+                         through window: NSWindow) throws {
         let event = try #require(NSEvent.keyEvent(
-            with: .keyDown, location: .zero, modifierFlags: [],
+            with: .keyDown, location: .zero, modifierFlags: modifierFlags,
             timestamp: ProcessInfo.processInfo.systemUptime,
             windowNumber: window.windowNumber, context: nil,
             characters: characters, charactersIgnoringModifiers: characters,

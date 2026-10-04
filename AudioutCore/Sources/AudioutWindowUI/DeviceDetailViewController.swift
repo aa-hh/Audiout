@@ -754,10 +754,10 @@ public final class DeviceDetailViewController: NSViewController {
     /// facts the form used to split across two rows — "Status: Not connected"
     /// sitting over "On the network: Yes" reads as a contradiction to anyone
     /// not holding the model in their head. Availability only ever changes the
-    /// IDLE word: a speaker mid-connect is mid-connect whatever the network
-    /// says, and a failure is a failure. "Ready" (not "Not connected") because
-    /// a reachable idle speaker is a thing you can use, not a thing that's
-    /// broken. The busy words keep `DeviceRowView`'s existing vocabulary.
+    /// IDLE word: "Available"/"Unavailable" for a network speaker,
+    /// "Connected"/"Not connected" for Bluetooth. The busy and failed words are
+    /// shared with `DeviceRowView`. When the speaker has a presentation record,
+    /// its status text wins (`refreshUI`).
     private static func statusText(for device: Device) -> String {
         switch device.connectionState {
         case .connected:     return "Connected"

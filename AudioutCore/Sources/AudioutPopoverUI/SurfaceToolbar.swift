@@ -161,7 +161,7 @@ final class SurfaceToolbarController: NSObject {
         pinItem?.view as? SurfaceToolbarSeatButton
     }
 
-    private func tabButton(_ screen: SurfaceScreen) -> SurfaceToolbarSeatButton? {
+    func tabButton(_ screen: SurfaceScreen) -> SurfaceToolbarSeatButton? {
         tabButtons[screen]
     }
 

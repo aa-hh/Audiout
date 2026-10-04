@@ -288,6 +288,8 @@ public final class AppSurfaceController {
             // `contentLayoutRect` until AppKit's first layout pass), so
             // `chromeTopInset` measures the real strip from the first mount.
             window.layoutIfNeeded()
+            // The Mixer tab is the first key view in visual order, and the seed in `mount` selects it.
+            window.initialFirstResponder = toolbarController.tabButton(.mixer)
         }
         syncToolbar()
 
@@ -796,6 +798,12 @@ public final class AppSurfaceController {
         if let window = shell.window {
             window.contentViewController?.preferredContentSize =
                 window.contentRect(forFrameRect: window.frame).size
+        }
+        // Assigning `contentViewController` drops the first responder to the window, which never handles Tab.
+        // `canBecomeKeyView` is false for a button unless Full Keyboard Access is on, so a mouse user gets no ring and focus never jumps into a slider or field after a swap.
+        if let window = shell.window, window.firstResponder === window,
+           let first = window.initialFirstResponder, first.canBecomeKeyView {
+            window.makeFirstResponder(first)
         }
     }
 

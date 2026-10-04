@@ -597,7 +597,7 @@ import AppKit
         #expect(popover.test_subsectionTitles() == [kind == .cast ? castTitle : airPlayTitle])
     }
 
-    // Restricting current use to checked speakers hides active scene/app targets; announcing volume invents a value for missing members.
+    // Restricting current use to checked speakers hides active scene/app targets; announcing volume invents a value for missing members. It also turns red when unknown speakers render before a Bluetooth row or the Pair footer stops following them.
     @Test func hiddenRowsFollowActiveMainSceneAndDeviceAndGroupAppIntent() throws {
         let fleet = [local(), airplay()]
         let backend = RecordingRetryBackend(MockBackend(fleet: fleet, staggerDiscovery: false,
@@ -625,7 +625,15 @@ import AppKit
         #expect(popover.test_deviceRow(for: "missing")?.accessibilityHelp() == "Missing speaker, missing")
         #expect(popover.test_deviceRow(for: "missing")?.test_accessibilityLabel?.contains("volume") == false)
         #expect(popover.deviceSections().first { $0.title == airPlayTitle }?.devices.contains { $0.id == "missing" } == false)
-        #expect(popover.test_renderedDeviceIDs().prefix(2) == ["mac", "missing"])
+        let desk = bt("desk", name: "Desk", available: true, state: .connected)
+        popover.update(devices: fleet + [desk])
+        let order = popover.test_renderedDeviceIDs()
+        #expect(order.first == "mac")
+        let missingIndex = try #require(order.firstIndex(of: "missing"))
+        let deskIndex = try #require(order.firstIndex(of: "desk"))
+        #expect(missingIndex > deskIndex, "unknown speakers close the list, after every Bluetooth row")
+        #expect(popover.test_pairBluetoothIsLastCardRow, "the Pair footer still follows the unknown row")
+        popover.update(devices: fleet)
         #expect(popover.test_deviceRow(for: "missing")?.test_showsSyncControls == false)
         #expect(popover.test_deviceRow(for: "missing")?.test_contextMenu()?.items.map(\.title)
                 == ["Show in Mixer", "When available", "Always", "Hide when not in use", "", "Speaker settings…"])

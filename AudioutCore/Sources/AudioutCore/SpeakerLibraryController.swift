@@ -55,6 +55,40 @@ public struct SpeakerCurrentUse: Equatable, Sendable {
     }
 }
 
+/// What the Speakers screen says and does about Bluetooth access; the host owns the prompt itself.
+public struct SpeakerBluetoothAccessPresentation: Equatable, Sendable {
+    public enum Action: Equatable, Sendable {
+        case none
+        case openSettings(SystemSettingsPane)
+        case prime
+    }
+
+    public let explanation: String?
+    public let actionTitle: String?
+    public let action: Action
+
+    public init(status: PermissionStatus, priming: Bool) {
+        switch status {
+        case .granted:
+            explanation = nil
+            actionTitle = nil
+            action = .openSettings(.bluetooth)
+        case .denied:
+            explanation = "Allow Bluetooth access in System Settings to see paired speakers that are not connected."
+            actionTitle = "Open Bluetooth privacy…"
+            action = .openSettings(.bluetoothPrivacy)
+        case .unsupported:
+            explanation = "Bluetooth access is unavailable on this Mac."
+            actionTitle = nil
+            action = .none
+        case .unknown, .requested:
+            explanation = "Allow Bluetooth access to see paired speakers that are not connected."
+            actionTitle = priming ? nil : "Allow Bluetooth…"
+            action = priming ? .none : .prime
+        }
+    }
+}
+
 public struct SpeakerPresentationRecord: Identifiable, Equatable, Sendable {
     public let id: String
     public let displayName: String
@@ -171,6 +205,29 @@ public final class SpeakerLibraryController {
         publishIfChanged(force: persistedChange)
     }
 
+    /// Derives current use from the host's routing state: the main output's members, connected ones, and live app feeds.
+    public func update(liveDevices: [Device], groups: [Group], mainOut: MainOutTarget, selectedDeviceIDs: Set<String>,
+                       appRouteDestinations: [AppRouteDestination], routedAppNamesByDeviceID: [String: [String]],
+                       recoveryIDs: Set<String>) {
+        let mainMembers: Set<String>
+        switch mainOut {
+        case .selectedDevices:
+            mainMembers = selectedDeviceIDs
+        case .group(let id):
+            mainMembers = Set(groups.first { $0.id == id }?.memberIDs ?? [])
+        }
+        let liveIDs = Set(liveDevices.map(\.id))
+        let liveFeeds = Set(routedAppNamesByDeviceID.compactMap { id, names in
+            !names.isEmpty && liveIDs.contains(id) ? id : nil
+        })
+        let connectedMembers = Set(liveDevices.compactMap { device in
+            mainMembers.contains(device.id) && device.connectionState == .connected ? device.id : nil
+        })
+        update(liveDevices: liveDevices, groups: groups, confirmedUsedIDs: connectedMembers.union(liveFeeds),
+               currentUse: SpeakerCurrentUse(mainAudioMemberIDs: mainMembers, appRouteDestinations: appRouteDestinations,
+                                             liveFeedIDs: liveFeeds, recoveryIDs: recoveryIDs))
+    }
+
     @discardableResult
     public func setVisibility(_ visibility: SpeakerMixerVisibility, for id: String) -> Bool {
         setVisibility(visibility, for: [id])
@@ -180,8 +237,10 @@ public final class SpeakerLibraryController {
     @discardableResult
     public func setVisibility(_ visibility: SpeakerMixerVisibility, for ids: Set<String>) -> Bool {
         var candidate = state
+        var written = 0
         for id in ids {
             guard record(for: id)?.isLocalDevice != true else { continue }
+            written += 1
             if visibility == .whenAvailable { candidate.visibility.removeValue(forKey: id) }
             else { candidate.visibility[id] = visibility }
             if visibility == .always, let device = liveDevices.first(where: { $0.id == id }) {
@@ -191,6 +250,7 @@ public final class SpeakerLibraryController {
         guard candidate != state else { return true }
         guard save(candidate) else { return false }
         state = candidate
+        Analytics.capture("speaker:visibility_changed", ["visibility": visibility.rawValue, "count": String(written)])
         publishIfChanged(force: true)
         return true
     }

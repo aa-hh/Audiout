@@ -82,16 +82,15 @@ import AudioutCore
         #expect(row.test_accessibilityLabel?.contains("through") != true)
     }
 
-    @Test func manualMemberPlusTwoApps() {
-        // Without the colour chips each pill carries text plus its own
-        // padding only, so all three values fit: three bare pills measure
-        // ~130 pt of the 136 pt `feedColumnWidth` budget. The chips were what
-        // used to tip this into the STATIC "+N" overflow.
+    /// Turns red if `setFeedSegments` stops capping named pills at
+    /// `maxNamedFeedPills` (2): three short values fit the 196 pt column
+    /// easily, so only the cap can turn the third into "+1".
+    @Test func manualMemberPlusTwoAppsNamesTwoAndCountsTheRest() {
         let row = makeBusRow()
         row.apply(makeDevice(), selected: true, controllable: true,
                   routedAppNames: ["Music", "Safari"])
-        #expect(row.test_feedText == "System · Music · Safari")
-        #expect(!(row.test_feedHasOverflow))
+        #expect(row.test_feedText == "System · Music · +1")
+        #expect(row.test_feedHasOverflow)
         // The tooltip is uncapped (VoiceOver/hover have no viewport to
         // overflow) — every name, no "+N".
         #expect(row.test_feedTooltip == "Playing System, Music, Safari")
@@ -289,6 +288,34 @@ import AudioutCore
         #expect(!(row.test_feedText?.hasSuffix("…") ?? true))
     }
 
+    /// Turns red if `setFeedSegments` goes back to measuring every row against
+    /// the full `feedColumnWidth`: a sync-capable row only has `btFeedSlotWidth`
+    /// (112 pt) for its pills, so "System" plus a long app name must collapse
+    /// to "+N" there instead of passing the check and being clipped mid-word.
+    @Test func aSyncCapableRowOverflowsAgainstItsOwnNarrowerSlot() {
+        let plain = makeBusRow()
+        plain.apply(makeDevice(), selected: true, controllable: true,
+                    routedAppNames: ["Alpha Streaming App"])
+        #expect(!plain.test_feedHasOverflow, "the full-width column still fits both pills")
+
+        let synced = DeviceRowView(device: makeDevice(), showsToggle: true, showsMeter: true,
+                                   showsBus: true, showsSyncControls: true)
+        synced.apply(makeDevice(), selected: true, controllable: true,
+                     routedAppNames: ["Alpha Streaming App"])
+        #expect(synced.test_feedHasOverflow, "the same two values do not fit beside the sync chip")
+        #expect(synced.test_feedTooltip == "Playing System, Alpha Streaming App",
+                "the tooltip still names every value")
+    }
+
+    /// Turns red if a sync-capable row's slot shrinks back below "System" plus
+    /// one ordinary app name — the width the owner widened the window for.
+    @Test func aSyncCapableRowNamesSystemAndOneApp() {
+        let synced = DeviceRowView(device: makeDevice(), showsToggle: true, showsMeter: true,
+                                   showsBus: true, showsSyncControls: true)
+        synced.apply(makeDevice(), selected: true, controllable: true, routedAppNames: ["Spotify"])
+        #expect(synced.test_feedText == "System · Spotify")
+    }
+
     @Test func shortCompositeNeverOverflows() {
         let row = makeBusRow()
         row.apply(makeDevice(), selected: true, controllable: true, routedAppNames: ["Music"])
@@ -306,12 +333,14 @@ import AudioutCore
 
     // MARK: Pill tint (D7)
 
-    @Test func mainMixPillIsGoldTextWhileSoundingAndLabel2Otherwise() {
+    /// Turns red if a sounding pill goes back to `goldText` (too low contrast
+    /// on the pill fill) or stops differing from a silent pill's `label2`.
+    @Test func mainMixPillIsPrimaryLabelWhileSoundingAndLabel2Otherwise() {
         let live = makeBusRow()
         let device = makeDevice(connectionState: .connected)
         live.apply(device, selected: true, controllable: true)
-        assertSameHue(live.test_feedNeutralColor, Tokens.Color.goldText,
-                      "the main-mix pill is goldText while the main mix sounds here")
+        assertSameHue(live.test_feedNeutralColor, Tokens.Color.label,
+                      "the main-mix pill is primary label while the main mix sounds here")
 
         let idle = makeBusRow(device: makeDevice(connectionState: .off))
         idle.apply(makeDevice(connectionState: .off), selected: true, controllable: true)
@@ -319,7 +348,7 @@ import AudioutCore
                       "a silent row's main-mix pill is the chrome label2")
     }
 
-    /// Assert two colors resolve to the same sRGB components — `goldText` is a
+    /// Assert two colors resolve to the same sRGB components — a token is a
     /// computed `static var`, so `==` never holds on it.
     private func assertSameHue(_ a: NSColor?, _ b: NSColor?, _ message: String,
                                sourceLocation: SourceLocation = #_sourceLocation) {

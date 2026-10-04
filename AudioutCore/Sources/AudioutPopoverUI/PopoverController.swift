@@ -163,7 +163,8 @@ public final class PopoverController: NSObject {
     /// because it was never a redirect target, or because a route exists but
     /// hasn't started producing audio yet (e.g. still connecting). See
     /// `DeviceRowView.apply`'s `liveAppNames` doc for the precedence rule this
-    /// feeds into.
+    /// feeds into. The Mac never appears here; ``liveAppNames(for:)`` stands
+    /// its "This Mac" routes in instead, since local playback has no connect phase.
     private var liveRoutedAppNames: [String: [String]] = [:]
 
     /// Bundle IDs of routed apps whose process is currently NOT running (T4).
@@ -625,6 +626,15 @@ public final class PopoverController: NSObject {
     /// The mounted `ConnectionDiagnosisView` per device id — the view-layer
     /// mirror of `openDiagnosisIDs`, rebuilt by `reconcileDiagnosisPanels`.
     var diagnosisPanelsByID: [String: ConnectionDiagnosisView] = [:]
+
+    /// The AirPlay password sheet while it is up, and the speaker it asks for.
+    /// Opened only by a user act (the diagnosis panel's button or a join of a
+    /// protected speaker), never by a background reconnect.
+    var passwordSheet: SpeakerPasswordSheetViewController?
+    var passwordSheetDeviceID: String?
+    /// Set on Connect, cleared by the next failure edge for that speaker, so a
+    /// failure that happened before the submit never reads as its answer.
+    var passwordSheetSubmitted = false
 
     /// Name-click Bluetooth attempts retain their outcome until the surface closes.
     var btConnectAttemptIDs: Set<String> = []
@@ -1178,6 +1188,9 @@ public final class PopoverController: NSObject {
 
     /// The exact banner copy from PLAN-RELIABILITY Wave 2.
     static let localFallbackBannerText = "Speakers unreachable. Playing on your Mac. Will resume automatically."
+
+    /// The password sheet's answer to a refused password; the phone shows its own copy.
+    static let passwordRejectedText = "That password didn't work. Check it and try again."
 
     /// Whether the generalized silence watchdog (R11) has fallen back to local
     /// playback because zero desired devices stayed connected. Drives the banner;
@@ -2618,9 +2631,9 @@ public final class PopoverController: NSObject {
         }()
         let anyDeviceSounding = deviceRowsByID.keys.contains { id in
             guard let device = devicesByID[id] else { return false }
-            if !(liveRoutedAppNames[id] ?? []).isEmpty { return true }
+            if !liveAppNames(for: device).isEmpty { return true }
             guard let controller, controller.isMainOutMember(id) else { return false }
-            guard case .connected = device.connectionState else { return false }
+            guard drawsConnected(device, controller: controller) else { return false }
             return !(device.isMuted || controller.isMuted(id)) && !controller.isMainOutMuted
         }
         let anyRouteSounding = appRouting.appRoutes.contains { route in
@@ -3011,7 +3024,30 @@ public final class PopoverController: NSObject {
     /// Whether an app route currently redirects to this device — the canonical
     /// `isRedirectTarget` source (backs `controllable` and the Q4 retry path).
     private func isRedirectTarget(_ id: String) -> Bool {
-        !appRouting.routedAppNames(for: id, groupTargets: groupRouteTargets()).isEmpty
+        !appRouting.routedAppNames(for: id, isLocalDevice: devicesByID[id]?.isLocalDevice ?? false,
+                                   groupTargets: groupRouteTargets()).isEmpty
+    }
+
+    /// Whether `device` draws as connected. The Mac has no connection to make,
+    /// so its snapshot can sit at `.off` while it carries audio — in the main
+    /// mix (the default Mac-only setup the rail already draws as connected) or
+    /// for an app sent to "This Mac" — and then draws the ring and status dot
+    /// any speaker in that position draws. One answer for the row and the
+    /// Devices card header, so the two cannot disagree.
+    private func drawsConnected(_ device: Device, controller: GroupController) -> Bool {
+        if case .connected = device.connectionState { return true }
+        return device.isLocalDevice && device.isAvailable && device.connectionState == .off
+            && (controller.isMainOutMember(device.id) || !liveAppNames(for: device).isEmpty)
+    }
+
+    /// The apps confirmed playing on `device`. An AirPlay or Bluetooth target
+    /// learns this from the backend once its stream is up; the Mac has no
+    /// connect phase to wait through — a "This Mac" app renders locally the
+    /// moment it is picked — so its routes count as live, which gives its row
+    /// the same connected ring, gold dot and primary-text pills any target gets.
+    private func liveAppNames(for device: Device) -> [String] {
+        guard device.isLocalDevice else { return liveRoutedAppNames[device.id] ?? [] }
+        return appRouting.routedAppNames(for: device.id, isLocalDevice: true)
     }
 
     /// The Devices card's genuinely-DIVERGING dormant state (spec §4.7 FINAL
@@ -3157,8 +3193,9 @@ public final class PopoverController: NSObject {
             row.apply(device, selected: false, controllable: false,
                       selectionDimmed: dimmed,
                       routedAppNames: appRouting.routedAppNames(for: device.id,
+                                                              isLocalDevice: device.isLocalDevice,
                                                               groupTargets: groupRouteTargets()),
-                      liveAppNames: liveRoutedAppNames[device.id] ?? [],
+                      liveAppNames: liveAppNames(for: device),
                       appRouteGroupNames: appRouteGroupNames(),
                       mainOutTargetsGroupName: activeMainOutGroupName,
                       energizePending: energizePendingIDs.contains(device.id),
@@ -3197,6 +3234,9 @@ public final class PopoverController: NSObject {
         if device.isLocalDevice, controller.localRowDrivesMain {
             device.volume = controller.mainOutMasterVolume
         }
+        if drawsConnected(device, controller: controller) {
+            device.connectionState = .connected
+        }
         // T-UI-ALLOW: the Phase-1 local-mix block is gone — the Mac row's
         // select-ability gate went with it (T-GROUPCTL / Q5, synced local sink),
         // so the Mac row is never blocked/greyed any more. This no longer computes
@@ -3218,8 +3258,9 @@ public final class PopoverController: NSObject {
                   controllable: controller.isMainOutMember(device.id) || isRedirectTarget(device.id),
                   selectionDimmed: dimmed,
                   routedAppNames: appRouting.routedAppNames(for: device.id,
+                                                              isLocalDevice: device.isLocalDevice,
                                                               groupTargets: groupRouteTargets()),
-                  liveAppNames: liveRoutedAppNames[device.id] ?? [],
+                  liveAppNames: liveAppNames(for: device),
                   appRouteGroupNames: appRouteGroupNames(),
                   masterMuted: controller.isMainOutMuted,
                   inActiveTarget: inActiveTarget,
@@ -3500,7 +3541,17 @@ public final class PopoverController: NSObject {
                 // "Try again → fails again" (`.failed → .connecting → .failed`).
                 dismissedDiagnosisIDs.remove(device.id)
                 openDiagnosisIDs.insert(device.id)
+                if device.id == passwordSheetDeviceID, passwordSheetSubmitted,
+                   case .failed(let failure) = current {
+                    passwordSheetSubmitted = false
+                    passwordSheet?.showResult(failure.cause == .authRequired
+                        ? Self.passwordRejectedText
+                        : failure.headline)
+                }
             case .connected, .off:
+                if current == .connected && device.id == passwordSheetDeviceID {
+                    dismissPasswordSheet()
+                }
                 // Same gate as the failure above, for the same reason: a
                 // speaker nobody asked for is the backend's business.
                 if current == .connected && previous != .connected && !device.isLocalDevice
@@ -3584,6 +3635,7 @@ public final class PopoverController: NSObject {
         view.onRetry = { [weak self] in self?.retryConnection(for: id) }
         view.onCopyDetails = { [weak self] in self?.copyDiagnosisDetails(for: id) }
         view.onDismiss = { [weak self] in self?.dismissDiagnosisPanel(for: id) }
+        view.onEnterPassword = { [weak self] in self?.presentPasswordSheet(for: id) }
         diagnosisPanelsByID[id] = view
         panel.insertRow(view, after: row, animated: animated)
     }
@@ -3616,6 +3668,38 @@ public final class PopoverController: NSObject {
         Analytics.capture("connection:retry_clicked")
         let result = groupController?.retryConnection(for: id) ?? .ok
         handleSelection(result, deviceID: id)
+    }
+
+    /// Ask for `id`'s AirPlay password. Connect stores it and retries through
+    /// `GroupController.submitAirPlayPassword`; the sheet stays up until the
+    /// speaker connects (dismiss) or fails again (`showResult`), both read off
+    /// the connection edges in `handleConnectionTransitions`.
+    func presentPasswordSheet(for id: String) {
+        guard passwordSheet == nil else { return }
+        Analytics.capture("airplay:code_prompt_shown", ["kind": "password"])
+        let sheet = SpeakerPasswordSheetViewController(deviceName: devicesByID[id]?.name ?? "")
+        sheet.onSubmit = { [weak self] text in
+            guard let self else { return }
+            self.passwordSheetSubmitted = true
+            self.groupController?.submitAirPlayPassword(text, for: id, source: "mac")
+        }
+        sheet.onCancel = { [weak self] in self?.dismissPasswordSheet() }
+        passwordSheet = sheet
+        passwordSheetDeviceID = id
+        passwordSheetSubmitted = false
+        // Headless runs (host never shown) keep the reference and drive the
+        // sheet through its test hooks.
+        if let host = panel.viewIfLoaded?.window, host.isVisible {
+            panel.presentAsSheet(sheet)
+        }
+    }
+
+    private func dismissPasswordSheet() {
+        let sheet = passwordSheet
+        passwordSheet = nil
+        passwordSheetDeviceID = nil
+        passwordSheetSubmitted = false
+        if sheet?.presentingViewController != nil { sheet?.dismiss(nil) }
     }
 
     /// "Copy details": the raw evidence when the diagnosis captured any, else
@@ -3705,6 +3789,10 @@ extension PopoverController: DeviceRowView.Delegate {
             clearSwitchOffer()
         }
         handleSelection(result, deviceID: id)
+        if on, result.refusalReason == nil, let device = devicesByID[id],
+           device.airPlayAccess == .password, !device.hasStoredPassword {
+            presentPasswordSheet(for: id)
+        }
     }
 
     /// "Play here": the clicked speaker replaces the whole selection

@@ -147,14 +147,14 @@ import AppKit
                                             settings: AppSettings(defaults: isolation.isolatedDefaults))
         // A name long enough that the sentence cannot fit one line at the
         // page's real width; "Bedroom" alone fits.
-        detail.show(device: makeDevice(id: "bedroom", name: "Living Room HomePod Pair", isAvailable: false))
+        detail.show(device: makeDevice(id: "bedroom", name: "Upstairs Living Room HomePod Stereo Pair", isAvailable: false))
         _ = detail.view
         detail.view.setFrameSize(NSSize(width: SurfaceLayout.contentPaneWidth,
                                         height: AppSurfaceController.minimumContentSize.height))
         detail.view.layoutSubtreeIfNeeded()
         #expect(detail.test_eqSectionShown)
         #expect(detail.test_eqEditor.test_bypassNoteText
-                == "Not applied while Living Room HomePod Pair is unavailable; kept for when it\u{2019}s back.")
+                == "Not applied while Upstairs Living Room HomePod Stereo Pair is unavailable; kept for when it\u{2019}s back.")
         #expect(detail.test_eqEditor.test_bypassNoteLineCount > 1)
         var writes = 0
         detail.onSetEQ = { _, _, _ in writes += 1 }
@@ -248,6 +248,26 @@ import AppKit
         detail.refresh(device: makeDevice(isAvailable: false))
         #expect(detail.test_subtitleText == "AirPlay Speaker \u{00B7} Unavailable")
         #expect(detail.test_shownDeviceID == "d1")
+    }
+
+    // MARK: The outlined list — the Password row
+
+    // Showing the row without `hasStoredPassword`, or "Forget" not firing `onForgetPassword` with the id, turns it red.
+    @Test func passwordRowShowsOnlyWithAStoredPasswordAndForgetReportsTheID() {
+        let detail = DeviceDetailViewController(groupController: makeController(),
+                                            settings: AppSettings(defaults: isolation.isolatedDefaults))
+        detail.show(device: makeDevice())
+        #expect(detail.test_passwordCaption == nil)
+
+        var device = makeDevice()
+        device.hasStoredPassword = true
+        detail.show(device: device)
+        #expect(detail.test_passwordCaption == "Saved")
+
+        var forgotten: [String] = []
+        detail.onForgetPassword = { forgotten.append($0) }
+        detail.test_tapForgetPassword()
+        #expect(forgotten == ["d1"])
     }
 
     // MARK: The caption — kind

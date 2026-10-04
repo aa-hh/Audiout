@@ -171,16 +171,23 @@ public final class AppRoutingController {
     /// (`DeviceRowView.apply(routedAppNames:)`) in both host controllers
     /// (popover + window).
     ///
+    /// - Parameter isLocalDevice: whether `deviceID` is the Mac's own output.
+    ///   A "This Mac" pick is stored as `.currentDevice`, not as a `.device`
+    ///   route to the Mac's id, so without this the Mac's row never learns an
+    ///   app was sent to it and its Source column reads "System" alone.
     /// - Parameter groupTargets: the resolved membership of every saved group,
     ///   from ``resolveGroupTargets(_:devices:)``. Empty (the default) means no
     ///   group route can name any device — correct for a host with no groups
     ///   to resolve against.
     public func routedAppNames(
-        for deviceID: String, groupTargets: [String: GroupRouteTarget] = [:]
+        for deviceID: String, isLocalDevice: Bool = false,
+        groupTargets: [String: GroupRouteTarget] = [:]
     ) -> [String] {
         appRoutes.compactMap { route in
             switch route.destination {
             case .device(let id) where id == deviceID:
+                return route.displayName
+            case .currentDevice where isLocalDevice:
                 return route.displayName
             case .group(let id) where groupTargets[id]?.memberVolumes[deviceID] != nil:
                 return route.displayName

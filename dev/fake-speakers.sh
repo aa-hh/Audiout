@@ -16,6 +16,7 @@
 #   ./fake-speakers.sh                       # launches the 3 defaults
 #   ./fake-speakers.sh "Kitchen" "Garage"    # launches named speakers
 #   SILENT=0 ./fake-speakers.sh              # actually play audio (default: silent)
+#   FAKE_SPEAKER_PASSWORD=secret ./fake-speakers.sh   # require an AirPlay password
 #
 # Stop them with ./stop-fake-speakers.sh
 set -euo pipefail
@@ -75,11 +76,16 @@ for name in "${SPEAKERS[@]}"; do
   # Generate a per-instance config: name + distinct RTSP port + backend.
   # (CLI -p is ignored in this build; config `general.port` is honoured.)
   cfgfile="$RUN_DIR/$slug.conf"
+  password_line=""
+  if [[ -n "${FAKE_SPEAKER_PASSWORD:-}" ]]; then
+    password_line="  password = \"$FAKE_SPEAKER_PASSWORD\";"
+  fi
   cat >"$cfgfile" <<EOF
 general = {
   name = "$name";
   port = $port;
   output_backend = "$BACKEND";
+$password_line
 };
 EOF
 

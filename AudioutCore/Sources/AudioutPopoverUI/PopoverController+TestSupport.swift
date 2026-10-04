@@ -208,6 +208,8 @@ extension PopoverController {
     public func test_isCardCollapsed(title: String) -> Bool? {
         panel.test_isCardCollapsed(title: title)
     }
+    /// Whether the card header `title` is drawn live (`refreshCardHeaderLiveness`).
+    public func test_isCardHeaderLive(title: String) -> Bool? { panel.test_isCardHeaderLive(title: title) }
     /// Toggle the card titled `title` (drives the chevron/title-click path,
     /// including the T-5 transient-state bookkeeping so a later mid-open
     /// `rebuild()` preserves it). Returns the new collapsed state (`nil` if no
@@ -385,6 +387,9 @@ extension PopoverController {
     public func test_diagnosisPanel(for id: String) -> ConnectionDiagnosisView? {
         diagnosisPanelsByID[id]
     }
+
+    /// The AirPlay password sheet while it is up, or `nil`.
+    public func test_passwordSheet() -> SpeakerPasswordSheetViewController? { passwordSheet }
 
     /// Simulate clicking "Try again" in the device's open diagnosis panel.
     public func test_tapRetry(for id: String) {

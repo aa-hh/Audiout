@@ -676,6 +676,17 @@ choices, the current one checked, then **Speaker settings…**, which opens
 that speaker's page. A speaker in current use remains
 visible even when its saved choice is Hide when not in use.
 
+A speaker that asks for a password, an on-screen code or a Home member
+carries a stock `lock.fill` (10pt semibold, template) 4pt after its name. It
+takes the name's own ink (`rowTextColor`), never gold, and the name truncates
+before the lock gives way. Its spoken label names the kind of lock. Joining a
+password speaker with nothing saved, or the diagnosis panel's
+"Enter Password…" button, raises a sheet on the panel
+(`SpeakerPasswordSheetViewController`): a bold one-line heading, a stock secure
+field, then Cancel and a gold `ProminentButton` Connect, right-aligned. A
+caption-size result line appears only once Connect is pressed: "Connecting…",
+then the reason if the attempt fails. A connect dismisses the sheet.
+
 ### Speakers Sidebar and Pages
 The sidebar is the only speaker list. Under the System Audio row and the
 Speakers plate it holds two groups that are the Mixer visibility setting:
@@ -702,10 +713,11 @@ caption line. A speaker's caption is its kind and status ("Sonos · Ready"),
 below: its title row carries the green engaged mark, a one-line summary
 ("Bass 3 dB, Loudness on", or "Flat") and a Reset button hidden while the
 curve is flat. A speaker the Mac can't find shows no editor, only a note that
-its curve is kept when it is shaped, and a Forget button. Then a two-row
-outlined list: **Show in Mixer**, whose caption explains the current choice
-beside its pop-up (absent for This Mac), and **Scenes**, linking each scene the
-speaker belongs to.
+its curve is kept when it is shaped, and a Forget button. Then an outlined
+list: **Show in Mixer**, whose caption explains the current choice beside its
+pop-up (absent for This Mac), **Scenes**, linking each scene the speaker
+belongs to, and, only while a password is saved for the speaker, **Password**,
+captioned "Saved", with a small stock Forget button.
 
 The Speakers plate's page lists no speakers. Its caption line is the search
 result: a small spinner and the count found so far while looking, then a

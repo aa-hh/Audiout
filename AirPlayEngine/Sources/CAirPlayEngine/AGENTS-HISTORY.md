@@ -127,3 +127,5 @@ accessors), not inside this folder.
 | `PTPHelperIPCTests.swift` | PTP helper daemon IPC (see `Sources/PTPHelperTestSupport/ptp_test_support.c`). |
 | `RemoteEventStreamTests.swift` | Receiver->sender remote control (`airplayengine_remote_event_cb`/`_fire`). |
 | `ShimUnitTests.swift`, `EngineProbeParsingTests.swift`, `StateStreamTests.swift`, `WriteCadenceTests.swift`, `StartBufferAndLatencyProbeTests.swift`, `E1StabilityTests.swift`, `AirPlayEngineScaffoldTests.swift`, `AirPlayEngineAPITests.swift` | Shim correctness, state/event streams, buffering/latency, and general session-API coverage. |
+
+2026-10-04: per-device AirPlay passwords reach the vendored sender through `conffile_set_device_password` (`shims/conffile.c`), which the Swift `feedDescriptor` calls on every appearing feed, keyed by the name the device callback passes to `cfg_gettsec` (AirPlay 2: the instance name; RAOP: the part after `@`). The table never frees a replaced password string, because the C device and its session alias it (`airplay.c:4129`, `:1706`, `raop.c:4472`, `shims/outputs.c:143`); freeing it would leave them pointing at released memory.

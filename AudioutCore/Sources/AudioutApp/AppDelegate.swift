@@ -1016,6 +1016,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         (backend as? NativeBackend)?.selectedDevicesQuery = { [weak self] id in
             self?.groupController?.isMainOutMember(id) ?? false
         }
+        (backend as? NativeBackend)?.localRowDrivesMainQuery = { [weak self] in
+            self?.groupController?.localRowDrivesMain ?? true
+        }
         // T6-rev: every user action that routes audio funnels into exactly two
         // backend methods (`setOutputSet` / `updateAppRoutes`), and both fire
         // this. Kicking from there rather than from the four `GroupController`
@@ -2437,6 +2440,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         controller.onSetMainOutEQ = { [weak self] eq, committed in
             self?.backend.setMainOutEQ(eq, commit: committed)
+        }
+        controller.onForgetAirPlayPassword = { [weak self] deviceID in
+            self?.backend.forgetAirPlayPassword(for: deviceID)
+            self?.devicesByID[deviceID]?.hasStoredPassword = false
+            self?.repaintFromCurrentState()
         }
         controller.mainOutEQProvider = { [weak self] in self?.backend.mainOutEQ ?? .flat }
         controller.update(devices: Array(devicesByID.values))

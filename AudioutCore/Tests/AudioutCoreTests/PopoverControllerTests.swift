@@ -722,6 +722,77 @@ import AudioutProtocol
         #expect(popover.test_deviceRow(for: "office") == nil, "row gone with the device")
     }
 
+    // MARK: AirPlay password sheet
+
+    /// `devices` with `office` rewritten by `change`, pushed to the popover
+    /// directly so the connection edges are exact and need no backend timing.
+    private func pushOffice(_ popover: PopoverController, _ backend: MockBackend,
+                            _ change: (inout Device) -> Void) {
+        var devices = backend.devices
+        for i in devices.indices where devices[i].id == "office" { change(&devices[i]) }
+        popover.update(devices: devices)
+    }
+
+    // Dropping the `onEnterPassword` wiring in `mountDiagnosisPanel` turns it red.
+    @Test func passwordPanelButtonOpensTheSheet() async throws {
+        let (popover, _, backend) = try await makePopover()
+        _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
+        pushOffice(popover, backend) { $0.connectionState = .failed(ConnectionFailure(cause: .authRequired)) }
+        let panel = try #require(popover.test_diagnosisPanel(for: "office"))
+        #expect(popover.test_passwordSheet() == nil)
+
+        panel.test_tapRetry()
+        #expect(popover.test_passwordSheet() != nil)
+    }
+
+    // Removing the access check at the end of `deviceRow(_:didToggleEnabled:for:)` turns it red.
+    @Test func joiningAPasswordSpeakerWithNoStoredPasswordOpensTheSheet() async throws {
+        let (popover, _, backend) = try await makePopover()
+        pushOffice(popover, backend) { $0.airPlayAccess = .password }
+        let row = try #require(popover.test_deviceRow(for: "office"))
+        popover.deviceRow(row, didToggleEnabled: true, for: "office")
+        #expect(popover.test_passwordSheet() != nil)
+    }
+
+    /// A protected `office` the user just joined, with the password sheet up.
+    private func popoverWithPasswordSheet() async throws
+        -> (PopoverController, MockBackend, SpeakerPasswordSheetViewController) {
+        let (popover, _, backend) = try await makePopover()
+        pushOffice(popover, backend) {
+            $0.airPlayAccess = .password
+            $0.connectionState = .connecting
+        }
+        let row = try #require(popover.test_deviceRow(for: "office"))
+        popover.deviceRow(row, didToggleEnabled: true, for: "office")
+        return (popover, backend, try #require(popover.test_passwordSheet()))
+    }
+
+    // Dropping the `.connected` dismissal in `handleConnectionTransitions` turns it red.
+    @Test func passwordSheetDismissesWhenTheSpeakerConnects() async throws {
+        let (popover, backend, sheet) = try await popoverWithPasswordSheet()
+        sheet.test_setPasswordText("secret")
+        sheet.test_tapConnect()
+        pushOffice(popover, backend) {
+            $0.airPlayAccess = .password
+            $0.connectionState = .connected
+        }
+        #expect(popover.test_passwordSheet() == nil)
+    }
+
+    // Dropping the `showResult` call on the `.failed` edge in `handleConnectionTransitions` turns it red.
+    @Test func passwordSheetShowsRejectionAfterSubmitFailsOnAuth() async throws {
+        let (popover, backend, sheet) = try await popoverWithPasswordSheet()
+        sheet.test_setPasswordText("wrong")
+        sheet.test_tapConnect()
+        pushOffice(popover, backend) {
+            $0.airPlayAccess = .password
+            $0.connectionState = .failed(ConnectionFailure(cause: .authRequired))
+        }
+        #expect(sheet.test_resultText == "That password didn't work. Check it and try again.")
+        #expect(sheet.test_connectButton.isEnabled)
+        #expect(popover.test_passwordSheet() != nil)
+    }
+
     /// C1 regression: the auto-expanded panel must actually be attached in the
     /// live view tree, directly under its failed device's row — not merely
     /// recorded in `diagnosisPanelsByID`. `test_diagnosisPanel(for:)` alone can't
@@ -2595,6 +2666,43 @@ import AudioutProtocol
     // goes back to empty (see `DeviceRowView.apply`'s `liveAppNames` doc for the
     // full precedence rule this exercises end-to-end).
 
+    /// Turns red if the Mac's row stops treating a "This Mac" pick as a live
+    /// routed app: with the Mac outside the main mix it would go back to no
+    /// ring, a dark dot, a locked slider and an empty Source column.
+    @Test func aThisMacPickLightsTheMacRowLikeAnyRoutedSpeaker() async throws {
+        let appRouting = tempAppRoutingController()
+        seedRoute(appRouting, bundleID: "com.example.music", displayName: "Music",
+                  destination: .currentDevice)
+        let (popover, controller, backend) = try await makePopover(appRouting: appRouting,
+                                                                    runningAppsProvider: routedApps)
+        _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)   // drops the Mac
+        #expect(!controller.isMainOutMember("local-mac"))
+        popover.update(devices: backend.devices)
+
+        let row = try #require(popover.test_deviceRow(for: "local-mac"))
+        #expect(row.test_feedText == "Music")
+        #expect(row.test_ringForm == .connected)
+        #expect(row.test_routeArmed)
+        #expect(row.test_isSliderEnabled)
+        #expect(popover.test_isCardHeaderLive(title: PopoverController.outputDevicesCardTitle) == true,
+                "the Devices card header agrees with the row it summarises")
+    }
+
+    /// Turns red if the Mac row stops drawing as connected while it is the
+    /// default main-mix member: the rail node fills but the ring and status
+    /// dot stay off, unlike any other speaker in the mix.
+    @Test func theDefaultMacOnlyMixDrawsTheMacRowConnected() async throws {
+        let (popover, controller, backend) = try await makePopover()
+        #expect(controller.isMainOutMember("local-mac"))
+        popover.update(devices: backend.devices)
+
+        let row = try #require(popover.test_deviceRow(for: "local-mac"))
+        #expect(row.test_ringForm == .connected)
+        #expect(row.test_dotIsShown)
+        #expect(popover.test_isCardHeaderLive(title: PopoverController.outputDevicesCardTitle) == true,
+                "the Devices card header agrees with the Mac row it summarises")
+    }
+
     /// A non-empty `.routedApps` event overrides the intent-based label with
     /// the confirmed live set.
     @Test func applyRoutedAppsOverridesIntentLabelWhenNonEmpty() async throws {
@@ -4083,10 +4191,13 @@ import AudioutProtocol
         assertSameRGBA(popover.test_cardHeaderTitleColor(title: "System Audio"),
                        Tokens.Color.goldText, "the Mac alone is still the mix")
         #expect(popover.test_mainOutRow.test_routeArmed == true)
-        for title in ["Output Speakers", "App Routing"] {
-            assertSameRGBA(popover.test_cardHeaderTitleColor(title: title),
-                           Tokens.Color.label2, "\(title) starts silent")
-        }
+        // The Mac's own row draws connected and armed in that mix, so the
+        // Output Speakers title it sits under lights with it.
+        #expect(popover.test_deviceRow(for: "local-mac")?.test_routeArmed == true)
+        assertSameRGBA(popover.test_cardHeaderTitleColor(title: "Output Speakers"),
+                       Tokens.Color.goldText, "the Mac row sounds, so its card does")
+        assertSameRGBA(popover.test_cardHeaderTitleColor(title: "App Routing"),
+                       Tokens.Color.label2, "App Routing starts silent")
 
         _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
         try await waitForConnectionState(backend, id: "office") { $0 == .connected }

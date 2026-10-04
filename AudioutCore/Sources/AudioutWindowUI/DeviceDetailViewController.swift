@@ -33,7 +33,8 @@ import AudioutSharedUI
 ///   with the visibility pop-up and one sentence of effect, then "Scenes" with
 ///   one link per saved scene this speaker belongs to. A link NAVIGATES: it
 ///   reports out through ``onSelectGroup`` and the host opens that scene's
-///   editor. Selecting is NOT activating.
+///   editor. Selecting is NOT activating. "Password" ("Saved" and a Forget
+///   button) joins them only while the backend has a password on file.
 ///
 /// The whole column SCROLLS (`../AGENTS.md`): the Equalizer's Advanced fold
 /// exceeds the screen's height budget, and the surface frame is FIXED for
@@ -96,7 +97,7 @@ public final class DeviceDetailViewController: NSViewController {
     private let btVolumeCheckbox = NSButton()
     private let btVolumeHintLabel =
         NSTextField(labelWithString: "The volume slider moves the speaker's own volume.")
-    /// The outlined list: "Show in Mixer" and "Scenes".
+    /// The outlined list: "Show in Mixer", "Scenes" and "Password".
     private let listWell = GroupedSectionView()
     private let listStack = NSStackView()
     /// The scene links, laid side by side as the "Scenes" row's accessory.
@@ -104,6 +105,10 @@ public final class DeviceDetailViewController: NSViewController {
     private lazy var showInMixerRow = ListRowView(title: "Show in Mixer", caption: "",
                                                   accessory: visibilityPopup)
     private lazy var scenesRow = ListRowView(title: "Scenes", accessory: groupsStack)
+    private let forgetPasswordButton = NSButton(title: "Forget", target: nil, action: nil)
+    /// Shown only while the backend has a password on file for the speaker.
+    private lazy var passwordRow = ListRowView(title: "Password", caption: "Saved",
+                                               accessory: forgetPasswordButton)
 
     /// The list sits one section-gap below whatever precedes it, and WHICH
     /// slot that is depends on the speaker — the Equalizer well, the Bluetooth
@@ -154,6 +159,9 @@ public final class DeviceDetailViewController: NSViewController {
     /// reaches no store itself; read once per `show` and kept until the next.
     public var storedDeviceEQ: ((String) -> DeviceEQ?)?
     private var storedEQCache: (id: String, eq: DeviceEQ)?
+
+    /// "Forget" on the list's Password row, with the shown device's id.
+    public var onForgetPassword: ((String) -> Void)?
 
     /// The EQ this pane has SENT for a device while a gesture is IN FLIGHT, and
     /// whether that send was the COMMIT (`awaitingEcho`). Without it a mid-scrub
@@ -239,7 +247,12 @@ public final class DeviceDetailViewController: NSViewController {
         listStack.orientation = .vertical
         listStack.alignment = .leading
         listStack.spacing = 0
-        for row in [showInMixerRow, scenesRow] {
+        forgetPasswordButton.bezelStyle = .rounded
+        forgetPasswordButton.controlSize = .small
+        forgetPasswordButton.font = .systemFont(ofSize: NSFont.systemFontSize(for: .small))
+        forgetPasswordButton.target = self
+        forgetPasswordButton.action = #selector(forgetPasswordTapped)
+        for row in [showInMixerRow, scenesRow, passwordRow] {
             listStack.addArrangedSubview(row)
             row.widthAnchor.constraint(equalTo: listStack.widthAnchor).isActive = true
         }
@@ -737,6 +750,7 @@ public final class DeviceDetailViewController: NSViewController {
         }
 
         showInMixerRow.isHidden = isThisMac
+        passwordRow.isHidden = shownDevice?.hasStoredPassword != true
         listWell.rows = listStack.arrangedSubviews.filter { !$0.isHidden }
 
         for pin in [listBelowEQWell, listBelowBTVolume, listBelowForget, listBelowHeader] {
@@ -767,6 +781,11 @@ public final class DeviceDetailViewController: NSViewController {
     @objc private func forgetTapped(_ sender: NSButton) {
         guard isLost, let id = shownDevice?.id else { return }
         onForget?(id)
+    }
+
+    @objc private func forgetPasswordTapped() {
+        guard let id = shownDevice?.id else { return }
+        onForgetPassword?(id)
     }
 
     /// Human word for a device kind. No existing shared mapping for this
@@ -1186,6 +1205,10 @@ public final class DeviceDetailViewController: NSViewController {
     public var test_forgetButtonTitle: String { forgetButton.title }
     public func test_clickForget() { forgetButton.performClick(nil) }
     public var test_keptNoteText: String? { keptNoteLabel.isHidden ? nil : keptNoteLabel.stringValue }
+    /// The Password row's caption, `nil` while the row is hidden.
+    public var test_passwordCaption: String? { passwordRow.isHidden ? nil : passwordRow.caption }
+    /// Invoke the Password row's "Forget" as a click would.
+    public func test_tapForgetPassword() { forgetPasswordTapped() }
 
     /// True while the form column is wrapped in the scroll view the Equalizer
     /// made necessary (`../AGENTS.md`; roadmap 039).

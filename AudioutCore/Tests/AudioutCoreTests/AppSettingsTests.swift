@@ -19,6 +19,16 @@ import Testing
         #expect(settings.reconnectAtLaunch == false)
     }
 
+    /// Generating a fresh seed on every read, or ignoring the store it was
+    /// given, turns it red.
+    @Test func engineInstallSeedIsStablePerStoreAndDiffersAcrossStores() {
+        let first = AppSettings(defaults: defaults).engineInstallSeed
+        #expect(first != 0)
+        #expect(AppSettings(defaults: defaults).engineInstallSeed == first)
+        let other = TestIsolation(owner: "AppSettingsTests.seed")
+        #expect(AppSettings(defaults: other.isolatedDefaults).engineInstallSeed != first)
+    }
+
     @Test func themeRoundTrips() {
         let settings = AppSettings(defaults: defaults)
         settings.theme = .dark

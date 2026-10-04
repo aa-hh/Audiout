@@ -43,6 +43,20 @@ private final class UnconstrainedDeviceRowWindow: NSWindow {
         Device(id: "dev-1", name: "Test Speaker", kind: .homePod, connectionState: connectionState)
     }
 
+    // MARK: Lock glyph
+
+    // Showing the lock for `.open`, or dropping its accessibility label, turns it red.
+    @Test func lockGlyphShowsOnlyForProtectedSpeakers() {
+        let openRow = DeviceRowView(device: makeDevice())
+        #expect(!openRow.test_lockGlyphIsVisible)
+
+        var device = makeDevice()
+        device.airPlayAccess = .password
+        let row = DeviceRowView(device: device)
+        #expect(row.test_lockGlyphIsVisible)
+        #expect(row.lockGlyphView.accessibilityLabel() == "Password protected")
+    }
+
     // MARK: Four states → four ring renderings (+ failed-only sublabel)
 
     @Test func offShowsNoRingAndNoSublabel() {

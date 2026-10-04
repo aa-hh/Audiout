@@ -86,6 +86,7 @@ The menu-bar popover UI (pure AppKit), and — since U3 — the **one-surface ho
 | `AlignmentWizardViewController` | Sheet content controller hosting the wizard (canvas + room spill); presented on the panel via `presentAsSheet`. |
 | `GroupRowView` | Group's master row; built for the window, unused here. Its `draw(_:)` paints the same inset rounded active/hover pill as the `AudioutSharedUI` rows (unified `PopoverColumnGrid` alphas) — its stack host provides no system row highlight. |
 | `RunningAppInfo` | Snapshot of a running app for the add picker. |
+| `SpeakerPasswordSheetViewController` | The AirPlay password sheet; opens on a user join or the panel's button, never on a background reconnect. |
 
 
 ## Archived folder rules

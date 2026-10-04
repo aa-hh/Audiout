@@ -148,6 +148,7 @@ extension SerializedSharedState {
         Exception(token: "gold", ground: $0, appearance: .aqua, icOn: false)
     }
 
+    // Turns red if any listed token (including `rim` on `panel`) falls under its floor on a listed ground.
     @Test func everyInstrumentClearsItsFloorAcrossAppearanceAndIncreaseContrast() {
         Tokens.accentStyle = .fullGold
         defer { Tokens.test_increaseContrastOverride = nil }
@@ -232,7 +233,8 @@ extension SerializedSharedState {
             ContrastEntry(name: "panel knocked out of muted", token: panel, floor: 4.5,
                          groundsFor: sameGrounds([("muted", Tokens.Color.muted)])),
             ContrastEntry(name: "rim", token: Tokens.Color.rim, floor: 3.0,
-                         groundsFor: sameGrounds([("canvas", canvas), ("raised", raised), ("well", well)])),
+                         groundsFor: sameGrounds([("canvas", canvas), ("panel", panel),
+                                                  ("raised", raised), ("well", well)])),
             ContrastEntry(name: "railDormant", token: Tokens.Color.railDormant, floor: 3.0,
                          groundsFor: sameGrounds([("canvas", canvas), ("panel", panel), ("raised", raised)])),
             ContrastEntry(name: "scopeFlatLine", token: Tokens.Color.scopeFlatLine, floor: 3.0,
@@ -291,9 +293,8 @@ extension SerializedSharedState {
             }
         }
 
-        // Dark Subtle `ember` is the hollow connecting dot's ring and the
-        // connecting rail node, so it holds the non-text floor on the two grounds the Mixer
-        // puts behind them (2026-10-04: `#7D6B44`, 3.47:1 panel / 3.05:1
+        // Dark Subtle `ember` is the non-member node's hollow rim, so it holds
+        // the non-text floor on the two grounds the Mixer puts behind it (2026-10-04: `#7D6B44`, 3.47:1 panel / 3.05:1
         // raised; the old `#6D5B34` sat at 2.73:1 / 2.40:1).
         for (groundName, ground) in [("panel", panel), ("raised", Tokens.Color.raised)] {
             let ratio = measuredRatio(Tokens.Color.ember, over: ground, appearanceName: .darkAqua)

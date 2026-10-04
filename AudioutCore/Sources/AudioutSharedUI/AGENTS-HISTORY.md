@@ -102,3 +102,5 @@ SharedUI also hosts shared WINDOW CHROME, not only row views: `ControlPanelWindo
 | `SurfaceLayout` | The one surface frame's fixed width (`width`) plus the sidebar numbers the Groups and Settings source-list sidebars share (`sidebarWidth`, `contentPaneWidth`, `sidebarIconSize`, `sidebarIconToLabelGap`). Every consumer reads these, never a literal. |
 | `SidebarWarmSurfaceView` | Non-interactive warm wash behind both source-list sidebars' outline views (Groups, Settings); draws its own opaque warm backing by default — the surface's plain split items put no system material behind it — with the tint-over-material branch kept for hosts that supply one. |
 | `VolumeHUDPanel` | Transient non-interactive HUD replacing the system volume readout with a segmented level bar (not a percentage); holds, fades out. |
+
+- The rail line's colour never carries a connecting state, but its length does: it stops `busConnectingNodeRailGap` short of a connecting node, which is a plain gold circle; the glyph ring and status dot are dashed `rim`.

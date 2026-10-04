@@ -318,9 +318,8 @@ import Testing
 
     /// The Mixer's wire is one colour from hook to terminus, armed or not: a
     /// detour past a non-member, and the segments feeding a connecting and a
-    /// failed node, all wear the spine tone. A speaker's state lives in its
-    /// node and glyph ring, never in the line (owner's rulings, 2026-10-03 and
-    /// 2026-10-04).
+    /// failed node, all wear the spine tone. The line's length, not its colour,
+    /// marks a connecting node (owner's rulings, 2026-10-03 and 2026-10-04).
     @Test func theMixerWireIsOneColourPastEveryKindOfNode() {
         for armed in [true, false] {
             let plan = RailPlan.resolve(toneInput(armed: armed,
@@ -330,6 +329,30 @@ import Testing
             #expect(runs.allSatisfy { sameInk($0.color, Tokens.Color.spineTone) },
                     "every run wears the spine tone (armed=\(armed))")
         }
+    }
+
+    // Turns red if the connecting gap drops back to `busNodeRailGap` or the line starts colouring the segment.
+    @Test func theWireStopsShortOfAConnectingNode() {
+        let plan = RailPlan.resolve(toneInput(armed: true,
+                                              nodes: [.member, .connecting, .member, .nonMember]))
+        let runs = BusRailOverlayView().wireRuns(for: plan)
+        let ys = runs.map { run -> [CGFloat] in
+            (0..<run.path.elementCount).map { i -> CGFloat in
+                var points = [NSPoint](repeating: .zero, count: 3)
+                run.path.element(at: i, associatedPoints: &points)
+                return points[0].y
+            }
+        }
+        let r: CGFloat = 7.5
+        func has(_ y: CGFloat, _ pick: ([CGFloat]) -> CGFloat?) -> Bool {
+            ys.contains { pick($0).map { abs($0 - y) < 0.01 } ?? false }
+        }
+        let connectingGap = r + PopoverColumnGrid.busConnectingNodeRailGap
+        #expect(has(380 + connectingGap, { $0.min() }), "a run ends 7.5 + 9 above the connecting node")
+        #expect(has(380 - connectingGap, { $0.max() }), "the next run resumes 7.5 + 9 below it")
+        #expect(PopoverColumnGrid.busConnectingNodeRailGap == 9, "the connecting gap is 9 pt")
+        #expect(has(420 + r + 3, { $0.min() }), "the member above keeps the 3 pt gap")
+        #expect(runs.allSatisfy { sameInk($0.color, Tokens.Color.spineTone) }, "the line stays the spine tone")
     }
 
     // MARK: Folded subsections (owner's ruling, 2026-10-04)

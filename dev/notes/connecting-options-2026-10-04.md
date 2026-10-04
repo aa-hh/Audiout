@@ -45,6 +45,8 @@ The common thread is a grey spinner at the selection mark, which is option 6.
 
 ## Recommendation
 
+Shipped: option 3 (the break, no arc); the glyph ring and dot went to dashed `rim`.
+
 Option 7. The break in the line says "not joined yet" through shape alone, so it survives light mode's 1.77:1 gold and Reduce Motion with no extra work. The turning arc adds the "working on it" motion in gold, and it resolves into the existing connect pulse with no special-case code.
 
 If cost matters more, ship option 3 alone (size S) and add the arc later.

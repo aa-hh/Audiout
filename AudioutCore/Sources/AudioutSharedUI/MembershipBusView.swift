@@ -22,8 +22,9 @@ import QuartzCore
 /// host row) to place the rail's gap (on-spine) or detour arc (off-spine).
 ///
 /// **Node vocabulary (v4 §Call-1, the static states the energize agent drives):**
-/// `.member` (filled gold — connected member), `.connecting` (`ember` dashed
-/// hollow, the same colour the glyph ring wears while connecting),
+/// `.member` (filled gold — connected member), `.connecting` (a plain hollow
+/// gold circle; the rail line stops short of it and the glyph ring beside it
+/// is dashed `rim`),
 /// `.failed` (failure-red ring), `.nonMember` (hollow, detoured).
 /// The energize "pending" beat has NO node form of its own; it renders as
 /// `.connecting`. Every node rim strokes at `ringStrokeWidth`. Every rail
@@ -43,8 +44,9 @@ public final class MembershipBusView: NSView {
         /// running straight through it in gold (spec §Call-1 "member / connected
         /// = filled gold").
         case member
-        /// A member whose session is establishing — a HOLLOW node with an
-        /// `ember` DASHED rim, matching the glyph ring beside it. The controls
+        /// A member whose session is establishing — a plain HOLLOW gold circle;
+        /// the rail line stops `busConnectingNodeRailGap` short of it, above and
+        /// below, and the glyph ring beside it is dashed `rim`. The controls
         /// render muted (not adjustable yet). The energize "press-play" beat
         /// (v4.1 item 9) also renders here: a host-raised
         /// `DeviceRowView.energizePending` on a still-`.off` member draws this
@@ -267,40 +269,34 @@ public final class MembershipBusView: NSView {
                 let fill = dimmed ? Tokens.Color.socket : rim
                 fill.setFill()
                 NSBezierPath(ovalIn: rect).fill()
-                strokeNodeRim(in: rect, color: rim, dashed: false)
+                strokeNodeRim(in: rect, color: rim)
             } else {
-                // Hollow node: connecting = ember dashed, failed =
+                // Hollow node: connecting = plain gold, failed =
                 // failure-red ring, non-member/blocked = plain ember rim.
                 // `dimmed` has nothing to reach here — there is no fill.
-                strokeNodeRim(in: rect, color: rimColor(for: node),
-                              dashed: isDashed(node))
+                strokeNodeRim(in: rect, color: rimColor(for: node))
             }
         }
     }
 
     /// Stroke a node's rim (hollow node border, or the filled node's edge).
-    private func strokeNodeRim(in rect: NSRect, color: NSColor, dashed: Bool) {
+    private func strokeNodeRim(in rect: NSRect, color: NSColor) {
         let width = node == .member && dimmed && emphasizesDimmedMemberRim
             ? PopoverColumnGrid.busNodeDimmedRimWidth
             : PopoverColumnGrid.ringStrokeWidth
         let rim = NSBezierPath(ovalIn: rect.insetBy(dx: width / 2, dy: width / 2))
         rim.lineWidth = width
-        if dashed {
-            rim.setLineDash([PopoverColumnGrid.haloRingDashLength,
-                             PopoverColumnGrid.haloRingDashGap], count: 2, phase: 0)
-        }
         color.setStroke()
         rim.stroke()
     }
 
     /// The rim colour for a hollow node. Never dimmed: the rim is the rail's.
     private func rimColor(for node: Node) -> NSColor {
-        node == .failed ? Tokens.Color.failure : Tokens.Color.ember
-    }
-
-    /// Whether a node's rim is dashed (the "incomplete" connecting form).
-    private func isDashed(_ node: Node) -> Bool {
-        node == .connecting
+        switch node {
+        case .connecting: return Tokens.Color.gold
+        case .failed: return Tokens.Color.failure
+        default: return Tokens.Color.ember
+        }
     }
 
     /// The drawn disc radius for a node kind (Warm Signal v4.1 item 4 "larger
@@ -376,6 +372,11 @@ public final class MembershipBusView: NSView {
     /// Whether the node currently renders in the armed (gold) tone vs the quiet
     /// ember idle tone — the same flag `draw` reads for `.member`'s fill.
     public var test_armed: Bool { armed }
+    /// The colour `draw` strokes the node's rim in (`.member`: gold while
+    /// armed, else ember; every other node: `rimColor(for:)`).
+    public var test_rimColor: NSColor {
+        node == .member ? (armed ? Tokens.Color.gold : Tokens.Color.ember) : rimColor(for: node)
+    }
     /// Whether the node is settling on its POST-CLICK size rather than its
     /// resting one — true for a growing non-member and a shrinking member alike
     /// (structural hook — derived from the RADII the drawing resolves, never

@@ -414,16 +414,19 @@ public final class BusRailOverlayView: NSView {
             // from the hook to the terminus, so every segment wears
             // `originColor` — the spine tone, the host's unarmed tone, or
             // `railDormant` when the whole rail is dormant.
-            // A segment feeding a connecting or failed node does NOT step: the
-            // speaker's state lives in its node and its glyph ring, never in
-            // the line. Reusing the hook's own resolution rather than naming a
-            // tone here keeps the hook's corner and the line leaving it one
-            // continuous stroke.
+            // A segment feeding a connecting or failed node keeps `originColor`:
+            // the speaker's state lives in its node and its glyph ring, never
+            // in the line's colour. A connecting node changes the line's LENGTH
+            // (the wider gap below), never its colour. Reusing the hook's own
+            // resolution rather than naming a tone here keeps the hook's corner
+            // and the line leaving it one continuous stroke.
             let segColor = originColor
 
             if onSpine {
                 // The rail runs THROUGH the node with a breathing gap above.
-                let gap = stopR + PopoverColumnGrid.busNodeRailGap
+                let gap = stopR + (stop.node == .connecting
+                    ? PopoverColumnGrid.busConnectingNodeRailGap
+                    : PopoverColumnGrid.busNodeRailGap)
                 appendVertical(from: currentY, to: stop.y + gap, x: cx,
                                lineWidth: lw, color: segColor, into: &runs)
                 if index == plan.signalTerminusIndex { return runs }

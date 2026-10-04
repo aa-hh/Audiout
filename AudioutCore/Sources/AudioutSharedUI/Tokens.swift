@@ -561,7 +561,7 @@ public enum Tokens {
         // `#E8B84B` measures 10.73:1 vs `canvas` / 9.74:1 vs `panel` / 8.55:1
         // vs `raised` / 11.04:1 vs `well` (Increase Contrast `#F2C75E` 12.35 /
         // 11.21 / 9.84 / 12.71). `ember` is dimmer by design — it is the
-        // connecting line, not the node — at 3.94 / 3.58 / 3.14 / 4.06.
+        // idle tone, never a live one — at 3.94 / 3.58 / 3.14 / 4.06.
         //
         // LIGHT `ember` IS MEASURED AGAINST `well`, NOT ONLY THE FLAT GROUND:
         // the Groups editor's sections are filled with `well`, so the rail
@@ -637,9 +637,9 @@ public enum Tokens {
         /// ground / 5.04:1 vs `well`, light Increase Contrast `#5E4922` =
         /// 8.21:1 / 7.11:1. SUBTLE column: dark `#7D6B44` = 3.82:1 vs
         /// `canvas` / 3.47:1 vs `panel` / 3.05:1 vs `raised` / 3.94:1 vs
-        /// `well` (2026-10-04: the old `#6D5B34` gave the hollow 1.5 pt
-        /// connecting dot 2.73:1 on `panel`; same OKLab hue and chroma, only
-        /// lightness raised until the dot clears 3:1 on `raised`, the brighter
+        /// `well` (2026-10-04: the old `#6D5B34` gave the hollow 1.6 pt
+        /// non-member node rim 2.73:1 on `panel`; same OKLab hue and chroma, only
+        /// lightness raised until the rim clears 3:1 on `raised`, the brighter
         /// ground). It stays 1.94:1 dimmer than Subtle dark `gold`, since it is
         /// the idle tone. Dark IC `#877146` = 4.22 / 3.83 / 3.36 / 4.34, still
         /// further from the ground than the base. Light `#71613B` = 5.79:1 vs

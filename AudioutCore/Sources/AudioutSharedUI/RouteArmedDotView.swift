@@ -19,8 +19,8 @@ import AppKit
 ///   halo. The edge keeps the dot ≥3:1 against the ground where light gold
 ///   alone is 1.77:1.
 /// - **ring drawn, not armed** → a hollow ring in the ring's own colour:
-///   `ember` while connecting, `failure` red when failed, `rim` when
-///   connected but not playing (Main Audio: its spine tone).
+///   `rim` while connecting or connected, `failure` red when failed
+///   (Main Audio: its spine tone when connected).
 /// - **no ring** → no dot and no cut-out (the whole view hides).
 ///
 /// A shown dot sits on a `routeArmedDotCutoutDiameter` disc in the popover

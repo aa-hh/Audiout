@@ -730,15 +730,21 @@ still read apart, on the tooltip and in the spoken value.
 Every ring on a Mixer row strokes at one width,
 `PopoverColumnGrid.ringStrokeWidth` (1.6 pt): the glyph ring in every form,
 Main Audio's ring, and the rail's node circles. Weight never carries state;
-colour and dash do. `HaloRingView` draws one form per connection state: no
-ring while off; dashed `ember` while connecting or reconnecting; solid `rim`
-while connected; solid `failure` when failed. Connecting is dashed `ember` on
-both the glyph ring and the rail node (`MembershipBusView`'s `.connecting`),
-so one row never shows connecting in two colours. The connecting pulse only
+colour and dash do on the glyph ring, fill and the line gap on the rail node.
+`HaloRingView` draws one form per connection state: no
+ring while off; dashed `rim` while connecting or reconnecting; solid `rim`
+while connected; solid `failure` when failed. The rail node for a connecting
+speaker (`MembershipBusView`'s `.connecting`) is a plain hollow `gold` circle
+at `ringStrokeWidth`, and the line stops `busConnectingNodeRailGap` (9 pt)
+short of it above and below, against `busNodeRailGap` (3 pt) for a member:
+the state reads by the break in the line, not by colour, because `gold` alone
+is 1.77:1 in light mode. The connecting pulse only
 grows the ring outward from its resting radius, by at most
 `PopoverColumnGrid.haloRingBreathGrowth` (2 pt), so it never crosses the
 glyph; under Reduce Motion the dashed ring stays, still.
-`DeviceRowConnectionStateTests` pins the forms, dashes and colours.
+`DeviceRowConnectionStateTests` pins the forms, dashes and colours;
+`MembershipBusTests` pins the node's rim colours and `MainOutRowRingTests`
+pins Main Audio's connecting ring as `rim`.
 
 Main Audio's ring sets `joinsSpine`, so where a device row's connected ring
 is `rim`, Main Audio's is `Tokens.Color.spineTone`, the rail's own tone. It
@@ -757,14 +763,14 @@ ring hands the dot its stroke colour on every repaint
 (`HaloRingView.cutoutDot` sets the dot's `ringColor`, `nil` when no ring is
 drawn), so a ring colour change moves both, and a speaker with no ring has
 no dot and no cut-out. Not playing, the dot is a hollow 1.5 pt ring
-(`routeArmedDotRingWidth`) in the ring's own colour: hollow `ember` while
+(`routeArmedDotRingWidth`) in the ring's own colour: hollow `rim` while
 connecting, hollow `failure` when failed, hollow `rim` when connected but
 silent or muted, and hollow `spineTone` on Main Audio. Playing, it is a
 `gold` disc with a 1 pt `ember` edge (`routeArmedDotEdgeWidth`), because
 light `gold` alone measures 1.77:1 against the ground. A device row's dot
 turns gold only while the row is route-armed AND its speaker is connected
 (`DeviceRowView.apply`): a per-app feed arms a row whose speaker is still
-connecting, and that dot stays hollow `ember`. The backend reports a
+connecting, and that dot stays hollow `rim`. The backend reports a
 speaker fed only by a per-app route `.connecting` while its leg starts,
 `.connected` once it streams (AirPlay when the bind returns, Bluetooth when
 the sink reports it rendering), `.failed` when the bind fails, and `.off`
@@ -772,10 +778,11 @@ when the route is removed, unless the speaker's own failure dropped the
 route, which keeps `.failed`, so its row draws the same ring and dot as a
 member while its rail node stays hollow. Main Audio's dot is gold
 while the spine is live, a connected member playing unmuted or the Mac
-playing on its own. Subtle dark `ember` is `#7D6B44` so the hollow 1.5 pt
-connecting dot clears 3:1 on `raised`, the brighter ground (3.47:1 on
+playing on its own. Subtle dark `ember` is `#7D6B44` so the non-member node's
+hollow 1.6 pt rim clears 3:1 on `raised`, the brighter ground (3.47:1 on
 `panel`); it stays 1.94:1 dimmer than Subtle dark `gold`. `RouteArmedSignalTests`
 pins the armed rules, the gold disc, and a hollow dot in each ring's colour.
+`BusRailCollapseResolveTests` pins the 9 pt gap before a connecting node.
 
 Row glyphs are sized and optically centred per symbol by one table,
 `DeviceIcon.rowGlyphFits`, drawn by `DeviceIcon.rowGlyph` (derivation in
@@ -814,11 +821,10 @@ connected, so an idle Mixer rail never occurs. The Groups editor sets
 `unarmedLineTone` to `ember` (`GroupEditorViewController`), and its spine is
 armed only while the group is the active one, so the editor's line is `ember`
 for an inactive group, matching its saved member discs, and `gold` for the
-active group (`MembershipRailTests`). A segment feeding a connecting or
-failed speaker keeps the line's colour; the speaker's state shows in its
-node (dashed `ember` while connecting, `failure` red when failed) and its
-glyph ring, never in the line (`BusRailCollapseResolveTests`). `armed` also
-gates the connect pulse.
+active group (`MembershipRailTests`). A segment feeding a connecting
+speaker keeps the line's colour and stops 9 pt short of its plain `gold` node
+above and below (`BusRailCollapseResolveTests`); a failed speaker is not
+reached. `armed` also gates the connect pulse.
 
 #### Membership rail extent
 Where the Mixer rail starts and stops. The situations behind it are drawn in

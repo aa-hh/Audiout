@@ -152,7 +152,7 @@ import AudioutCore
     /// Whenever a glyph ring is drawn its gap holds a dot, hollow in the
     /// ring's own colour; no ring, no dot (owner's ruling, 2026-10-03).
     @Test func everyDrawnRingHoldsAHollowDotInItsOwnColour() {
-        for (state, token) in [(ConnectionState.connecting, Tokens.Color.ember),
+        for (state, token) in [(ConnectionState.connecting, Tokens.Color.rim),
                                (.failed(.init(cause: .notResponding)), Tokens.Color.failure)] {
             let row = DeviceRowView(device: makeDevice(connectionState: state))
             // A per-app feed arms the row, but only a connected speaker goes gold.
@@ -189,7 +189,7 @@ import AudioutCore
 
     /// The dot's cut-out carries the row's gold wash whenever the row paints
     /// it, including a connecting speaker with a per-app feed, whose dot stays
-    /// hollow ember while the row washes gold; pointer-over a connected row
+    /// hollow `rim` while the row washes gold; pointer-over a connected row
     /// that is not playing paints the neutral hover wash, and the cut-out
     /// wears that same wash, not a plain panel disc.
     /// Turns red if the cut-out stops taking `rowWash`, or the connecting dot turns gold.

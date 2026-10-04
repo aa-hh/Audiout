@@ -17,12 +17,12 @@ import AudioutCore
 ///   the caller passes `restingArmed: true` (Main Audio only — see
 ///   `apply(_:restingArmed:)`), in which case it renders the **resting**
 ///   form instead.
-/// - `.connecting` / `.reconnecting` → **dashed `ember` ring, breathing**
+/// - `.connecting` / `.reconnecting` → **dashed `rim` ring, breathing**
 ///   (opacity + radius pulse that only ever GROWS the ring outward from its
 ///   resting radius, so it can never touch the glyph). Under Reduce Motion
 ///   the dashed FORM survives, STATIC (no animation) — "incomplete", legible
-///   frozen. `ember` is the same colour the rail's connecting node wears, so
-///   one row never shows connecting in two colours.
+///   frozen. The rail's connecting node is a plain gold circle and the
+///   line stops short of it, so the break carries the state, not the colour.
 /// - `.connected` → **solid quiet ring**, `Tokens.Color.rim`.
 ///   Tested ≥3:1 vs the panel at `haloRingDiameter`, both themes.
 /// - `.failed` → **red solid ring**, `failure` token.
@@ -240,7 +240,7 @@ public final class HaloRingView: NSView {
             // Hidden anyway; nothing meaningful to stamp.
             strokeToken = .clear
         case .connecting:
-            strokeToken = Tokens.Color.ember
+            strokeToken = Tokens.Color.rim
         case .connected, .resting:
             // The resting ring appears exactly when the rail does, so it wears
             // the rail's own ink, as Main Audio's connected ring does. A grey

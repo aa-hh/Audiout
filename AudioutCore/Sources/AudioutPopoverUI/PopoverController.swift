@@ -2951,9 +2951,11 @@ public final class PopoverController: NSObject {
     /// AMONG, not "all of": the mixed set {local, AirPlay…} is reachable
     /// (`GroupController.setDeviceSelected` auto-swaps the Mac out only when it
     /// is the SOLE member), and the Mac keeps rendering audio in it. Requiring
-    /// every member to be local dropped the wire to its idle tone for the whole
-    /// time a speaker sat selected-but-not-connected beside the Mac, while the
-    /// Mac was audibly playing. When a member does connect,
+    /// every member to be local turned this term off for the whole time a
+    /// speaker sat selected-but-not-connected beside the Mac. The term keeps
+    /// the Main Audio armed dot, the rail's connect-pulse gate and the
+    /// VoiceOver "armed" word live while the Mac is audibly playing; the rail
+    /// line itself is always gold and does not depend on it. When a member does connect,
     /// `mainOutConnectionState` reports `.connected` and the armed term above
     /// covers it regardless of what this returns.
     private func mainOutIsLocalOnlyArmed(_ controller: GroupController) -> Bool {

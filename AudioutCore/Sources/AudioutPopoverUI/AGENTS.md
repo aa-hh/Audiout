@@ -17,8 +17,7 @@ folder renders; routing arithmetic lives in Core.
 - `insertRow`/`removeRow` own the re-fit; never add your own height republish.
 - Two rebuild flavors: `rebuildForOpen()` discards manual toggles, `rebuild()` preserves them.
 - A subsection collapses by animating its own clip height, never rebuilding (2026-08-10).
-- Where the rail starts and stops is DESIGN.md "Membership rail extent"; the summary is in AGENTS-HISTORY.md.
-- `updateRailRows` names EVERY collapsed subsection hiding a reached device (`foldedSubsectionTitles`), judged in the full `deviceSections()` order; hidden nodes come from `DeviceRowView.busNode`. A subsection hiding none is never named.
+- Rail extent: DESIGN.md "Membership rail extent". `updateRailRows` names every collapsed subsection hiding a reached device (`foldedSubsectionTitles`), in full `deviceSections()` order; hidden nodes come from `DeviceRowView.busNode`.
 - Hidden means idle: ingest skips behind `isEffectivelyShown`, and every open rebuilds.
 - The footer "−" hides a speaker from the LIST only (`HiddenSpeakersController`, display-only, persisted); a SELECTED speaker always renders and its "Hide" item disables — nothing may play from an invisible row (2026-09-15). The way back is the "+" menu's "Hidden speakers" section, discovered devices only.
 - At most one sync drawer is open; `expandedSyncDeviceID` is the single owner.

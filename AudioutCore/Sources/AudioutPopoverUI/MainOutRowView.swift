@@ -113,10 +113,10 @@ public final class MainOutRowView: NSView {
         return ring
     }()
     /// The **gold route-armed corner dot** on the Main Out icon (Warm Signal
-    /// v3 §3.3, S2): lit iff the active target set has a connected member AND
-    /// the master is unmuted — the aggregate `.connected` ring state already
-    /// implies "target set non-empty ∧ ≥1 member connected", so armed =
-    /// `connectionState == .connected ∧ !isMuted`. Pure model state, never RMS
+    /// v3 §3.3, S2): lit whenever the spine is live (`isSpineLive`): the active
+    /// target has a connected member and the master is unmuted, or the
+    /// local-only armed case (`localOnlyArmed`) where the Mac plays on its own.
+    /// Pure model state, never RMS
     /// (R3): paused and playing render identically; only the meter differs.
     private let armedDotView = RouteArmedDotView()
     /// Whether the master mute is currently engaged — gates the armed dot and

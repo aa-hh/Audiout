@@ -2104,11 +2104,11 @@ extension NativeBackend {
     ) {
         stateQueue.sync {
             guard let deviceID = self.outputIDs.first(where: { $0.value == outputID })?.key else { return }
-            Telemetry.log(.airplay, "bind_failed", [
-                "device": deviceID, "op": op, "stream": "\(stream)", "error": "\(error)",
-            ])
             let cause: ConnectionFailure.Cause =
                 error is PTPClockUnavailableError ? .timingUnavailable : .unknown
+            Telemetry.fail(.airplay, "airplay:connect_failed",
+                           local: ["device": deviceID, "op": op, "stream": "\(stream)", "error": "\(error)"],
+                           shared: ["cause": "\(cause)"])
             if self.streamBindings[deviceID] != nil {
                 self.setPerAppConnectionStateLocked(
                     .failed(ConnectionFailure(cause: cause, detail: String(describing: error))), for: deviceID)

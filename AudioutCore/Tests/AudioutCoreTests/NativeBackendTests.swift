@@ -7764,6 +7764,27 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
                 "a per-app session is not a whole-system session")
     }
 
+    /// Turns red if `applyEngineState`'s good-transition arm reads `desiredOn[id] == nil` as desired on and marks a per-app-only session selected and added.
+    @Test func aStreamingReportForAPerAppSessionNeverSelectsADeviceWithNoWholeSystemIntent() async {
+        let (backend, engine, discovery) = makeBackend(
+            injectedPerAppCapture: workingPerAppCapture(bundleIDs: ["com.foo"]))
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:C8", name: "Never Selected")
+        await startAndDiscover(backend, engine, discovery, device)
+
+        backend.updateAppRoutes([route("com.foo", name: "Foo", toDevice: device.id)])
+        await pollUntil { self.connectionState(backend, device.id) == .connected }
+        engine.pushState(device.outputID, .streaming)
+        try? await Task.sleep(nanoseconds: 100_000_000)
+
+        #expect(backend.devices.first { $0.id == device.id }?.isSelected == false,
+                "no whole-system intent: a streaming report must not select the device")
+        #expect(backend.stateQueue.sync { backend.added.isEmpty },
+                "a per-app session is not a whole-system session")
+        #expect(connectionState(backend, device.id) == .connected)
+        #expect(backend.stateQueue.sync { backend.desiredOn[device.id] == nil })
+    }
+
     /// Turns red if a thrown per-app bind stops reporting `.failed(.unknown)`.
     @Test func perAppOnlyBindThatThrowsReportsFailed() async {
         let (backend, engine, discovery) = makeBackend(
@@ -10406,6 +10427,59 @@ extension SerializedSharedState {
                 "a synced-local sink that will not start must be reported — otherwise the Mac goes silent in a play-everywhere selection with nothing logged")
     }
 
+    /// Turns red if the per-app branch of the engine-state `.failed` handler stops reporting `airplay:session_failed`.
+    @Test func aPerAppSessionFailingOutOfBandIsReported() async {
+        let (backend, engine, discovery) = makeBackend(
+            injectedPerAppCapture: workingPerAppCapture(bundleIDs: ["com.foo"]))
+        defer { backend.stop() }
+        let box = TelemetryLineBox()
+        Telemetry._installTestSink { box.append($0) }
+        defer { Telemetry._installTestSink(nil) }
+
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:D1", name: "Reported Drop")
+        await startAndDiscover(backend, engine, discovery, device)
+        func state() -> ConnectionState? { backend.devices.first { $0.id == device.id }?.connectionState }
+        backend.updateAppRoutes([route("com.foo", name: "Foo", toDevice: device.id)])
+        await pollUntil { state() == .connected }
+        engine.pushState(device.outputID, .failed)
+
+        func lines() -> [String] {
+            box.snapshot().filter {
+                $0.contains("\"evt\":\"airplay:session_failed\"") && $0.contains("\"level\":\"error\"")
+            }
+        }
+        await pollUntil { !lines().isEmpty }
+        let line = lines().first ?? ""
+        #expect(line.contains("\"cause\":\"droppedMidStream\""))
+        #expect(line.contains("\"device\":\"\(device.id)\""))
+    }
+
+    /// Turns red if `handleBindFailure` goes back to `Telemetry.log("bind_failed")` instead of `Telemetry.fail`.
+    @Test func aPerAppBindThatThrowsIsReportedAsConnectFailed() async {
+        let (backend, engine, discovery) = makeBackend(
+            injectedPerAppCapture: workingPerAppCapture(bundleIDs: ["com.foo"]))
+        defer { backend.stop() }
+        let box = TelemetryLineBox()
+        Telemetry._installTestSink { box.append($0) }
+        defer { Telemetry._installTestSink(nil) }
+
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:D2", name: "Reported Refusal")
+        await startAndDiscover(backend, engine, discovery, device)
+        engine.addFailures = [device.outputID.rawValue]
+        backend.updateAppRoutes([route("com.foo", name: "Foo", toDevice: device.id)])
+
+        func lines() -> [String] {
+            box.snapshot().filter {
+                $0.contains("\"evt\":\"airplay:connect_failed\"") && $0.contains("\"level\":\"error\"")
+            }
+        }
+        await pollUntil { !lines().isEmpty }
+        let line = lines().first ?? ""
+        #expect(line.contains("\"op\":\"bind\""))
+        #expect(line.contains("\"cause\":\"unknown\""))
+        #expect(!box.snapshot().contains { $0.contains("\"evt\":\"bind_failed\"") })
+    }
+
     /// Selecting a device (the gate's false->true edge) must re-arm the poll —
     /// and the poll's own immediate synchronous call (inside
     /// `startSchedulingSnapshotPolling()`) must actually log `send_sched`,
@@ -11263,6 +11337,7 @@ extension SerializedSharedState {
                 "no remove may follow the re-engaged bind — the stale unbind must never fire")
     }
 
+    /// Turns red if the failed bind stops reporting `airplay:connect_failed` at error level with the device id in its local line.
     /// The failed-bind fallback above must ALSO leave a Telemetry trail — a
     /// silently-swallowed engine failure is invisible to any post-hoc diagnosis.
     /// Uses `Telemetry._installTestSink` (the documented capture seam,
@@ -11288,10 +11363,10 @@ extension SerializedSharedState {
             else { return nil }
             return obj
         }
-        func bindFailedLines() -> [[String: Any]] {
+        func connectFailedLines() -> [[String: Any]] {
             box.snapshot().compactMap(parsed).filter {
-                $0["cat"] as? String == "airplay" && $0["evt"] as? String == "bind_failed"
-                    && $0["device"] as? String == device.id
+                $0["cat"] as? String == "airplay" && $0["evt"] as? String == "airplay:connect_failed"
+                    && $0["level"] as? String == "error" && $0["device"] as? String == device.id
             }
         }
         // `Telemetry.log` is non-blocking (its own writer queue), so poll for the
@@ -11299,10 +11374,10 @@ extension SerializedSharedState {
         // `.routedApps` event that's emitted from the same `stateQueue.sync` block
         // — same pattern as
         // `testRebindRecoveryEmitsTelemetryWithIncrementingGenerationAndAttempt`.
-        await pollUntil { !bindFailedLines().isEmpty }
-        #expect(!bindFailedLines().isEmpty,
-                "a failed bind must log a Telemetry(.airplay, \"bind_failed\", ...) line")
-        #expect(bindFailedLines().first?["op"] as? String == "bind",
+        await pollUntil { !connectFailedLines().isEmpty }
+        #expect(!connectFailedLines().isEmpty,
+                "a failed bind must report an error-level `airplay:connect_failed` line carrying this device")
+        #expect(connectFailedLines().first?["op"] as? String == "bind",
                 "the logged op must identify this as a bind (not rebind) failure")
     }
 

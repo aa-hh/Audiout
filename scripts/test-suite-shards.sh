@@ -103,7 +103,7 @@ if [ -n "\${SHARD_FAIL_MATCH:-}" ]; then
     esac
 fi
 if [ -n "\${SHARD_NO_SUMMARY:-}" ]; then
-    case "\$*" in *"\$SHARD_NO_SUMMARY"*) exit 0 ;; esac
+    case "\$*" in *"\$SHARD_NO_SUMMARY"*) exit "\${SHARD_NO_SUMMARY_RC:-0}" ;; esac
 fi
 # Only a run on this Mac lacks --disable-keychain.
 if [ -n "\${LOCAL_FAIL:-}" ]; then
@@ -146,10 +146,12 @@ EOF
 
     unset AUDIOUT_TEST_NO_CACHE AUDIOUT_TEST_SHARDS AUDIOUT_TEST_MODE \
           AUDIOUT_TRUST_REMOTE_FAILURE AUDIOUT_TEST_PACKAGE AUDIOUT_TEST_REMOTE_ROOT \
-          SHARD_FAIL_MATCH MULE_TABLE SHARD_NO_SUMMARY LOCAL_FAIL MULE_REFUSE_MATCH
+          SHARD_FAIL_MATCH MULE_TABLE SHARD_NO_SUMMARY SHARD_NO_SUMMARY_RC LOCAL_FAIL \
+          MULE_REFUSE_MATCH KEEP_STAMPS
     STAMPS="$TMP_DIR/stamps"
     runner() {
-        rm -rf "$STAMPS" "$SWIFT_LOG" "$SSH_LOG"
+        [ -n "${KEEP_STAMPS:-}" ] || rm -rf "$STAMPS"
+        rm -rf "$SWIFT_LOG" "$SSH_LOG"
         (cd "$CLONE" && PATH="$TMP_DIR/bin:$PATH" \
             AUDIOUT_TEST_REMOTE_HOST=fake AUDIOUT_TEST_PREFER=remote \
             AUDIOUT_TEST_REMOTE_SLOTS=3 AUDIOUT_TEST_CACHE_DIR="$STAMPS" \
@@ -217,26 +219,27 @@ EOF
         || { fail "d: --shard 2 call was wrong"; show "$out"; }
 
     # Catches: a failing shard reported as a pass, its failure not named, the
-    # full suite stamped green, or the shards that passed losing their stamps.
+    # full suite stamped green, or a passing shard stamped per name rather than
+    # under its exact arguments: a later plain --filter is a substring match
+    # that reaches other shards' suites, so a per-name stamp skips them unrun.
     out=$(SHARD_FAIL_MATCH="[./]($L2)\\b" runner); rc=$?
     first1=${suite_shard_1%% *}
-    stamped2=0
-    for n in $suite_shard_2; do
-        if ls "$STAMPS"/*".suite.$n" >/dev/null 2>&1; then stamped2=1; fi
-    done
+    h1=$(printf '%s' "--filter [./]($L1)\\b" | shasum -a 256 | awk '{print $1}')
     if [ "$rc" -ne 0 ] && printf '%s\n' "$out" | grep -q 'shard 2/3 FAILED' \
         && printf '%s\n' "$out" | grep -q 'broken()'; then
         ok "d: a failing shard fails the run and is named"
     else
         fail "d: failing shard: rc $rc"; show "$out"
     fi
-    if ! ls "$STAMPS"/*.full >/dev/null 2>&1 \
-        && ls "$STAMPS"/*".suite.$first1" >/dev/null 2>&1 \
-        && [ "$stamped2" -eq 0 ]; then
-        ok "d: only the passing listed shard is stamped"
+    if [ "$(ls "$STAMPS" | grep -c .)" -eq 1 ] && ls "$STAMPS"/*".$h1" >/dev/null 2>&1; then
+        ok "d: only the passing listed shard is stamped, under its exact arguments"
     else
         fail "d: stamps after a failing shard:"; ls "$STAMPS" 2>&1 | head -5 | sed 's/^/    /'
     fi
+    out=$(KEEP_STAMPS=1 runner --filter "$first1")
+    single "test --disable-keychain --parallel --filter $first1" \
+        && ok "d: a later plain --filter of a passed shard's suite still runs" \
+        || { fail "d: --filter $first1 was skipped after its shard passed"; show "$out"; }
 
     # Catches: a shard that exits 0 with no summary line crashing the sum or
     # counting as a pass, instead of being no verdict and re-run here in full.
@@ -249,6 +252,20 @@ EOF
         ok "d: a shard with no summary line is no verdict and the suite re-runs here"
     else
         fail "d: shard with no summary line: rc $rc"; show "$out"
+    fi
+
+    # Catches: a shard whose test process dies without naming a failing test
+    # being reported as a build that did not finish (it runs --skip-build, so
+    # it never prints "Build complete!"), instead of as no verdict.
+    out=$(SHARD_NO_SUMMARY="[./]($L2)\\b" SHARD_NO_SUMMARY_RC=1 LOCAL_FAIL=1 runner); rc=$?
+    if [ "$rc" -ne 0 ] && ! ls "$STAMPS"/*.full >/dev/null 2>&1 \
+        && printf '%s\n' "$out" | grep -q 'shard 2/3 FAILED — its test process ended (exit 1) without naming a failing test' \
+        && ! printf '%s\n' "$out" | grep -q 'build did not finish' \
+        && printf '%s\n' "$out" | grep -q 'shard 2/3 gave no verdict — re-running the full suite' \
+        && [ "$(tail -1 "$SWIFT_LOG")" = "test --parallel" ]; then
+        ok "d: a shard that dies without naming a test is no verdict and the suite re-runs here"
+    else
+        fail "d: shard that died without naming a test: rc $rc"; show "$out"
     fi
 
     # Catches: a shard the mule refuses a permit to sending the whole suite

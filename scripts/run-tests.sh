@@ -304,6 +304,13 @@ run_remote() {
                     fi
                 elif [ "$src" -eq 1 ]; then
                     why="could not run on the remote"
+                elif [ "$skind" = nobuild ]; then
+                    # A shard runs --skip-build, which never prints "Build
+                    # complete!", so remote_run calls any failure without a
+                    # named test a build that did not finish. The build passed
+                    # above; this is a test process that died.
+                    skind=noverdict
+                    why="its test process ended (exit $sst) without naming a failing test"
                 elif [ -z "$why" ]; then
                     why=$(grep '  remote: ran and FAILED there — ' "$slog" | tail -1 | sed 's/^ *//' || true)
                 fi
@@ -332,11 +339,14 @@ run_remote() {
             return 0
         fi
 
-        # A listed shard that passed keeps its suites green for later filtered
-        # runs. The last shard has no name list, so it stamps nothing.
+        # A listed shard that passed is stamped under its exact arguments, so
+        # only the same shard run again (`--shard i`) reuses it. Never per-name
+        # stamps: a later plain `--filter AnalyticsTests` is a substring match
+        # that also runs WizardDoorAnalyticsTests and others from other shards,
+        # and would skip them as passed. The last shard stamps nothing.
         for i in $passed; do
-            # shellcheck disable=SC2046
-            suite_cache_record "$key" --filter "$(printf '%s\n' $(suite_shards_names "$i") | paste -sd '|' -)"
+            suite_shards_args "$i" "$k"
+            suite_cache_record "$key" "$suite_shards_flag" "$suite_shards_regex"
         done
         if [ -n "$verdict" ]; then
             echo "  suite: full output in $suite_log — grep 'recorded an issue' for the assertion." >&2
@@ -481,14 +491,15 @@ if [ "$suite_cache_kind" = "suites" ] && [ "$suite_cache_missing" != "$suite_cac
 fi
 
 # --- prefer-remote ----------------------------------------------------------
-# With `audiout.testPrefer = permits` (the setting 2026-09-11 to 2026-10-04; `remote` since), go to
-# the other Mac FIRST only when it has at least as many free capacity permits
-# as this one — see remote_permits_win. `= remote` goes there first
-# unconditionally, which keeps THIS machine free but piles every job onto the
-# mule while the local permits idle; `= cpu` compares load average, which
-# misreports this wait-bound suite. Local slots remain the fallback in every
-# mode, so an asleep/offline/unmeasurable remote costs one 5s probe and
-# behaves exactly as if none were configured.
+# With `audiout.testPrefer = remote` (the setting since 2026-10-04), every job
+# goes to the other Mac FIRST and comes back here only when every mule permit
+# is held (remote_run's exit 98), so this machine takes only the overflow.
+# `= permits` (2026-09-11 to 2026-10-04) goes there first only when it has at
+# least as many free capacity permits as this one — see remote_permits_win.
+# `= cpu` compares load average, which misreports this wait-bound suite.
+# Local slots remain the fallback in every mode, so an asleep/offline/
+# unmeasurable remote costs one 5s probe and behaves exactly as if none were
+# configured.
 # `|| true` under `set -e`: "stay local" is a non-zero return from remote_wins,
 # and a bare call would abort the whole script instead of falling through.
 try_remote_first=0

@@ -337,7 +337,9 @@ warn-only 3/5) are documented in the hook file itself:
   grouped HIGH, MEDIUM, LOW, and sets the status on HEAD. Only a surviving HIGH
   fails it (exit 1, with fix groups, one per file, for builder subagents);
   fix, commit, push and run it again, and round 2 reviews only the fix. A
-  third run refuses. A push after the review clears the status, since a status
+  third run refuses. The round is read from a marker line at the top of the
+  script's own PR comments, not from local files, so a fresh checkout counts
+  the same. A push after the review clears the status, since a status
   belongs to one commit. `bash scripts/test-review-branch.sh` self-tests it.
 
 ## UI / Design Conventions (all targets)

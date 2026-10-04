@@ -9,10 +9,15 @@
 # findings and appends one line to <git-common-dir>/audiout-branch-reviews.log.
 # Instruction files: docs/review/<pass>.md.
 #
-# At most two rounds per branch, counted in .review-pending/.review-round.
-# Round 2 reviews only what was committed since round 1's head (the fix for
-# its HIGH findings) and never skips; a third run refuses. Only a HIGH finding
-# fails the status; MEDIUM and LOW are posted and do not block.
+# At most two rounds per PR. The round state lives on the PR, not in local
+# files, so a fresh checkout works the same: every comment this script posts
+# starts with a marker line
+#   <!-- audiout-review round=<n> head=<sha> level=<level> high=<k> -->
+# and the next run reads the PR's comments, highest round wins. Round 2
+# reviews only what was committed since round 1's head (the fix for its HIGH
+# findings) and never skips; a third run refuses. No PR yet means round 1
+# against main. Only a HIGH finding fails the status; MEDIUM and LOW are
+# posted and do not block.
 #
 # The reviewers run as subagents of the Claude session that owns the branch,
 # because headless Claude CLI runs are refused on this account. The script hands
@@ -116,25 +121,47 @@ common=$(cd "$(git rev-parse --git-common-dir)" && pwd) || exit 2
 GH=${GH:-gh}
 tip=$(git rev-parse --verify HEAD) || exit 2
 pending_root="$PWD/.review-pending"
-round_file="$pending_root/.review-round"        # "<rounds done> <branch>"
-round_head_file="$pending_root/.review-round-head"   # round 1's head
-done_rounds=0
-if [ -f "$round_file" ]; then
-  read -r n b < "$round_file"
-  [ "$b" = "$branch" ] && done_rounds=$n
+review_log="$common/audiout-branch-reviews.log"
+
+# post_status <state> <description>: the `review` commit status on HEAD.
+post_status() {
+  $GH api "repos/aa-hh/Audiout/statuses/$tip" -f context=review -f "state=$1" \
+      -f "description=$2" > /dev/null \
+    || { echo "Review result not posted: the review status on $tip failed. Push the branch (git push -u origin HEAD) and run the same command again." >&2; exit 2; }
+  echo "Review status: $1 ($2) on ${tip:0:12}."
+}
+
+# The last round posted on this branch's PR: prev_round, prev_head,
+# prev_level, prev_high (prev_round 0 when none or no PR).
+pr=$($GH pr view --json number -q .number 2>/dev/null)
+prev_round=0; prev_head=""; prev_level=""; prev_high=0
+if [ -n "$pr" ]; then
+  bodies=$($GH api --paginate "repos/aa-hh/Audiout/issues/$pr/comments" --jq '.[].body') \
+    || { echo "Could not read the comments on PR #$pr, so the review round is unknown." >&2; exit 2; }
+  last=$(printf '%s\n' "$bodies" \
+    | sed -n 's/^<!-- audiout-review round=\([0-9][0-9]*\) head=\([0-9a-f][0-9a-f]*\) level=\([a-z-]*\) high=\([0-9][0-9]*\) -->.*/\1 \2 \3 \4/p' \
+    | sort -n | tail -n 1)
+  [ -n "$last" ] && read -r prev_round prev_head prev_level prev_high <<< "$last"
 fi
-round=$((done_rounds + 1))
+round=$((prev_round + 1))
+# This head already has a posted round (its status post may have failed, or
+# the run is a repeat): post that round's status again rather than review the
+# same commit twice.
+if [ -n "$prev_head" ] && [ "$prev_head" = "$tip" ]; then
+  echo "This commit was already reviewed in round $prev_round (PR #$pr)."
+  if [ "$prev_level" = skip ]; then d=skip; else d="$prev_level, round $prev_round, $prev_high HIGH"; fi
+  if [ "$prev_high" -gt 0 ]; then post_status failure "$d"; exit 1; fi
+  post_status success "$d"
+  exit 0
+fi
 if [ "$round" -gt 2 ] && [ "$mode" != --continue ]; then
   echo "two rounds done; remaining findings are on the PR"
   exit 1
 fi
 if [ "$round" = 2 ]; then
-  base=$(cat "$round_head_file" 2>/dev/null)
-  git rev-parse --verify -q "$base^{commit}" > /dev/null || { echo "Round 1's head is missing ($round_head_file)." >&2; exit 2; }
-  if [ "$base" = "$tip" ]; then
-    echo "Nothing committed since round 1. Fix the HIGH findings, commit, push, then run this again." >&2
-    exit 2
-  fi
+  base=$prev_head
+  git rev-parse --verify -q "$base^{commit}" > /dev/null \
+    || { echo "Round 1's head $base (from PR #$pr) is not in this clone; git fetch, then run again." >&2; exit 2; }
 else
   base=$(git merge-base main "$tip") || { echo "No merge base with main." >&2; exit 2; }
 fi
@@ -164,7 +191,6 @@ elif [ "$lines" -gt "$FULL_OVER_LINES" ]; then level=full
 else level=cheap
 fi
 
-review_log="$common/audiout-branch-reviews.log"
 state="$pending_root/$hash"
 
 if [ "$mode" = --continue ]; then
@@ -194,36 +220,30 @@ log_line() {
     "$branch" "$level" "$1" "$2" "$3" "$4" "$files" >> "$review_log"
 }
 
-# post_result <high> [comment file]: the PR comment (when given), then the
-# `review` status on HEAD, then count the round. A failed post exits 2 with the
-# round uncounted, so the same step can be run again.
+# post_result <high> <comment file>: the PR comment, marker line first (or the
+# body printed when there is no PR), then the `review` status on HEAD. A
+# failed status post exits 2; running again re-posts it from the marker.
 post_result() {
-  local st=success desc pr
+  local st=success desc
   [ "$1" -gt 0 ] && st=failure
   if [ "$level" = skip ]; then desc=skip; else desc="$level, round $round, $1 HIGH"; fi
-  if [ -n "${2:-}" ]; then
-    pr=$($GH pr view --json number -q .number 2>/dev/null)
-    if [ -n "$pr" ]; then
-      $GH pr comment "$pr" --body-file "$2" > /dev/null \
-        || { echo "Review result not posted: gh pr comment failed for PR #$pr." >&2; exit 2; }
-      echo "Review comment posted to PR #$pr."
-    else
-      echo "No pull request for $branch, so no comment was posted. Its body:"
-      cat "$2"
-    fi
+  { echo "<!-- audiout-review round=$round head=$tip level=$level high=$1 -->"; cat "$2"; } > "$2.post" || exit 2
+  if [ -n "$pr" ]; then
+    $GH pr comment "$pr" --body-file "$2.post" > /dev/null \
+      || { echo "Review result not posted: gh pr comment failed for PR #$pr." >&2; exit 2; }
+    echo "Review comment posted to PR #$pr."
+  else
+    echo "No pull request for $branch, so no comment was posted (and no round recorded). Its body:"
+    cat "$2.post"
   fi
-  $GH api "repos/aa-hh/Audiout/statuses/$tip" -f context=review -f "state=$st" \
-      -f "description=$desc" > /dev/null \
-    || { echo "Review result not posted: the review status on $tip failed. Push the branch (git push -u origin HEAD) and run the same command again." >&2; exit 2; }
-  echo "Review status: $st ($desc) on ${tip:0:12}."
-  mkdir -p "$pending_root" || exit 2
-  echo "$round $branch" > "$round_file" || exit 2
-  [ "$round" = 1 ] && { echo "$tip" > "$round_head_file" || exit 2; }
-  return 0
+  post_status "$st" "$desc"
 }
 
 if [ "$level" = skip ]; then
-  post_result 0
+  skip_body=$(mktemp "${TMPDIR:-/tmp}/review-skip.XXXXXX") || exit 2
+  printf '## Review: skip, round %s\n\nReview: no findings (%s, below the review threshold)\n' "$round" "$summary" > "$skip_body"
+  post_result 0 "$skip_body"
+  rm -f "$skip_body" "$skip_body.post"
   log_line 0 0 0 0
   exit 0
 fi

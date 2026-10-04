@@ -2,7 +2,7 @@
 # Proves scripts/review-branch.sh picks the right review level, hands the
 # right passes and models to the Claude session, scores and drops findings,
 # posts one PR comment and a `review` commit status, blocks only on HIGH, and
-# stops after two rounds.
+# stops after two rounds, reading the round from the PR's comments.
 #
 # Clones the current checkout into a temp dir and brings over this checkout's
 # review script and instruction files. A helper plays the Claude session: it
@@ -33,15 +33,18 @@ mkdir -p "$ANSWERS" "$PROMPTS"
 
 # The gh stub. GH_CALLS gets one line per call; `pr view` prints the number in
 # GH_PR (fails when the file is missing, as gh does with no PR); `pr comment`
-# copies the body to GH_COMMENT; `api` exits with the number in GH_API_EXIT.
-GH_CALLS="$TMP_DIR/gh-calls"; GH_PR="$TMP_DIR/gh-pr"
+# copies the body to GH_COMMENT and appends it to GH_THREAD, the PR's comment
+# history; reading the comments prints GH_THREAD; a status post exits with
+# the number in GH_API_EXIT.
+GH_CALLS="$TMP_DIR/gh-calls"; GH_PR="$TMP_DIR/gh-pr"; GH_THREAD="$TMP_DIR/gh-thread"
 GH_COMMENT="$TMP_DIR/gh-comment"; GH_API_EXIT="$TMP_DIR/gh-api-exit"
 cat > "$TMP_DIR/gh" <<EOF
 #!/bin/bash
 echo "\$*" >> "$GH_CALLS"
-case "\$1 \$2" in
-  "pr view") [ -f "$GH_PR" ] && cat "$GH_PR" || exit 1 ;;
-  "pr comment") cp "\$5" "$GH_COMMENT" ;;
+case "\$*" in
+  "pr view"*) [ -f "$GH_PR" ] && cat "$GH_PR" || exit 1 ;;
+  "pr comment"*) cp "\$5" "$GH_COMMENT"; cat "\$5" >> "$GH_THREAD" ;;
+  *"/comments"*) cat "$GH_THREAD" 2> /dev/null; true ;;
   "api "*) exit "\$(cat "$GH_API_EXIT")" ;;
 esac
 EOF
@@ -70,6 +73,7 @@ REVIEW_LOG="$COMMON/audiout-branch-reviews.log"
 # carry the branch name: the pending review is keyed on the diff, so two
 # branches with the same diff would share one.
 make_branch() {
+  rm -f "$GH_THREAD"   # a new branch is a new PR
   git checkout -q -b "$1" main
   mkdir -p "$(dirname "$2")"
   for i in $(seq 1 "$3"); do echo "// review test line $i ($1)" >> "$2"; done
@@ -136,20 +140,23 @@ printed() { grep -c -F -- "$1" "$PRINTED"; }
 last_log() { tail -n 1 "$REVIEW_LOG"; }
 show() { cat "$out" >&2; }
 # status_call: the one `api` call, or nothing. statuses: how many were made.
-status_call() { grep '^api ' "$GH_CALLS"; }
-statuses() { grep -c '^api ' "$GH_CALLS"; }
+status_call() { grep '^api repos/aa-hh/Audiout/statuses/' "$GH_CALLS"; }
+statuses() { grep -c '^api repos/aa-hh/Audiout/statuses/' "$GH_CALLS"; }
 comments() { grep -c '^pr comment ' "$GH_CALLS"; }
 
-# (a) Docs only: no model, no comment, a success status "skip".
-# Catches: docs counting as product lines, or a skip that posts no status.
+# (a) Docs only: no model; a comment that records the round, and a success
+# status "skip".
+# Catches: docs counting as product lines, or a skip that posts no status or
+# leaves no round on the PR.
 reset_answers
 make_branch docs-only docs/review-test-notes.md 80
 review
 grep -q '^Review level: skip' "$out" && ok "a: level skip" || { fail "a: not skip"; show; }
 [ "$rc" = 0 ] && [ ! -s "$PRINTED" ] && ok "a: no pass handed over" || fail "a: rc $rc, passes: $(cat "$PRINTED")"
-if [ "$(statuses)" = 1 ] && [ "$(comments)" = 0 ] \
+if [ "$(statuses)" = 1 ] && [ "$(comments)" = 1 ] \
+   && head -n 1 "$GH_COMMENT" | grep -qx "<!-- audiout-review round=1 head=$(git rev-parse HEAD) level=skip high=0 -->" \
    && [ "$(status_call)" = "api repos/aa-hh/Audiout/statuses/$(git rev-parse HEAD) -f context=review -f state=success -f description=skip" ]; then
-  ok "a: success status 'skip' on HEAD, no comment"
+  ok "a: success status 'skip' on HEAD, comment carries the round marker"
 else fail "a: gh calls: $(cat "$GH_CALLS")"; fi
 
 # (b) 10 product lines: skip. Catches: a small change paying for a model.
@@ -176,8 +183,9 @@ grep -q 'Then run: bash scripts/review-branch.sh --continue' "$out" && ok "c: ha
 [ ! -e "$(pending_path)" ] && ok "c: pending directory removed" || fail "c: pending directory left"
 [ "$rc" = 0 ] && ok "c: exit 0" || fail "c: exit $rc"
 grep -q '^pr comment 42 --body-file ' "$GH_CALLS" && [ "$(comments)" = 1 ] \
-  && head -n 1 "$GH_COMMENT" | grep -qx '## Review: cheap, round 1' && grep -qx 'Review: no findings' "$GH_COMMENT" \
-  && ok "c: one comment on PR 42: heading, then 'Review: no findings'" || { fail "c: comment wrong"; cat "$GH_CALLS" "$GH_COMMENT" >&2; }
+  && head -n 1 "$GH_COMMENT" | grep -qx "<!-- audiout-review round=1 head=$(git rev-parse HEAD) level=cheap high=0 -->" \
+  && sed -n 2p "$GH_COMMENT" | grep -qx '## Review: cheap, round 1' && grep -qx 'Review: no findings' "$GH_COMMENT" \
+  && ok "c: one comment on PR 42: marker, heading, then 'Review: no findings'" || { fail "c: comment wrong"; cat "$GH_CALLS" "$GH_COMMENT" >&2; }
 status_call | grep -q -- '-f state=success -f description=cheap, round 1, 0 HIGH$' \
   && ok "c: success status 'cheap, round 1, 0 HIGH'" || fail "c: status: $(status_call)"
 [ "$(head -n 1 "$GH_CALLS" | cut -d' ' -f1-2)" = "pr view" ] && [ "$(tail -n 1 "$GH_CALLS" | cut -d' ' -f1)" = api ] \
@@ -253,9 +261,12 @@ if [ "$(sed -n '/^### HIGH$/,/^### /p' "$GH_COMMENT" | grep -c '^- a.swift:1: x$
 else fail "g: comment wrong"; cat "$GH_COMMENT" >&2; fi
 
 # (g2) Round 2 reviews only the fix, never skips, and a clean result passes.
-# Catches: round 2 re-reviewing the whole branch, or a small fix skipped unseen.
+# The round comes from the PR comments alone: local review files are wiped.
+# Catches: round 2 re-reviewing the whole branch, a small fix skipped unseen,
+# or round state kept in the checkout instead of on the PR.
 reset_answers
 echo "// the fix" >> "$analytics"; git commit -q --no-verify -am "fix"
+rm -rf .review-pending
 review
 grep -q '^Review level: cheap (1 product lines), round 2' "$out" && ok "g2: round 2 is cheap over the one fix line" || { fail "g2: level line"; show; }
 grep -q '^+// the fix$' "$PROMPTS/cheap.prompt" && ! grep -q 'review test line' "$PROMPTS/cheap.prompt" \
@@ -264,13 +275,17 @@ grep -q '^+// the fix$' "$PROMPTS/cheap.prompt" && ! grep -q 'review test line' 
   && ok "g2: exit 0, success status for round 2" || { fail "g2: exit $rc, status $(status_call)"; show; }
 
 # (g3) A third run refuses.
+# Catches: the two-round limit dropped, or the round read from anything but
+# the highest marker on the PR.
 reset_answers
 echo "// more" >> "$analytics"; git commit -q --no-verify -am "more"
 review
-[ "$rc" = 1 ] && grep -qx 'two rounds done; remaining findings are on the PR' "$out" && [ ! -s "$GH_CALLS" ] \
+[ "$rc" = 1 ] && grep -qx 'two rounds done; remaining findings are on the PR' "$out" \
+  && [ "$(statuses)" = 0 ] && [ "$(comments)" = 0 ] \
   && ok "g3: third run refused, exit 1, nothing posted" || { fail "g3: exit $rc"; show; }
 
 # (g4) A HIGH that survives round 2 exits 1 with no fix group.
+# Catches: fix groups printed for a third round that will be refused.
 reset_answers
 echo 'HIGH | a.swift:1 | x' > "$ANSWERS/comments"
 make_branch high-twice "$license" 20
@@ -281,7 +296,8 @@ review
   && status_call | tail -n 1 | grep -q -- '-f state=failure -f description=full, round 2, 1 HIGH$' \
   && ok "g4: HIGH after round 2 → exit 1, failure status, no fix group" || { fail "g4: exit $rc"; show; }
 
-# (g5) Round 2 with nothing committed since round 1 does not run or count.
+# (g5) Re-running on a head already reviewed re-posts that round's status
+# and reviews nothing.
 # Catches: re-running on the same head turning a failed status into a skip.
 reset_answers
 echo 'HIGH | a.swift:1 | x' > "$ANSWERS/comments"
@@ -289,8 +305,9 @@ make_branch high-norerun "$license" 20
 review
 reset_answers
 review
-[ "$rc" = 2 ] && grep -q 'Nothing committed since round 1' "$out" && [ ! -s "$GH_CALLS" ] \
-  && ok "g5: same head → exit 2, nothing posted" || { fail "g5: exit $rc"; show; }
+[ "$rc" = 1 ] && grep -q 'already reviewed in round 1' "$out" && [ "$(comments)" = 0 ] && [ ! -s "$PRINTED" ] \
+  && status_call | grep -q -- '-f state=failure -f description=full, round 1, 1 HIGH$' \
+  && ok "g5: same head → failure status re-posted, exit 1, no new review" || { fail "g5: exit $rc"; show; }
 
 # (h) A HIGH the scorer doubts is dropped and does not block.
 # Catches: dropped findings still counting toward the block.
@@ -330,7 +347,9 @@ make_branch cheap-broken "$analytics" 120
 review
 [ "$rc" = 2 ] && [ "$(statuses)" = 0 ] && ok "k: unparseable answer → exit 2, no status" || { fail "k: exit $rc"; show; }
 
-# (l) No pull request: the body is printed instead, and the status still posts.
+# (l) No pull request: round 1 against main, the body is printed instead, and
+# the status still posts.
+# Catches: a missing PR aborting before the status posts.
 reset_answers
 rm -f "$GH_PR"
 make_branch no-pr "$analytics" 120
@@ -339,16 +358,20 @@ review
   && [ "$(comments)" = 0 ] && [ "$(statuses)" = 1 ] \
   && ok "l: no PR → body printed, status posted, exit 0" || { fail "l: exit $rc"; show; }
 
-# (m) A failed status post exits 2 and leaves the round uncounted.
-# Catches: an unpushed head silently counting as reviewed.
+# (m) A failed status post exits 2; running again re-posts it from the marker.
+# Catches: an unpushed head silently counting as reviewed, or a retry
+# starting a second round on the same commit.
 reset_answers
 echo 1 > "$GH_API_EXIT"
 make_branch unpushed "$analytics" 120
 review
 [ "$rc" = 2 ] && grep -q 'Push the branch' "$out" && ok "m: failed status → exit 2" || { fail "m: exit $rc"; show; }
 echo 0 > "$GH_API_EXIT"
+: > "$GH_CALLS"
 bash scripts/review-branch.sh --continue > "$out" 2>&1; rc=$?
-[ "$rc" = 0 ] && grep -q 'round 1' "$out" && ok "m: --continue again posts it as round 1" || { fail "m: retry exit $rc"; show; }
+[ "$rc" = 0 ] && grep -q 'already reviewed in round 1' "$out" && [ "$(comments)" = 0 ] \
+  && status_call | grep -q -- '-f state=success -f description=cheap, round 1, 0 HIGH$' \
+  && ok "m: running again re-posts round 1's status" || { fail "m: retry exit $rc"; show; }
 
 # (v) A commit between the handover and --continue means no review.
 # Catches: replies about older code recorded against the new code.
@@ -406,7 +429,7 @@ else fail "y: one-file group wrong (rc $rc)"; show; fi
 git checkout -q main
 reset_answers
 review
-[ "$rc" != 0 ] && [ ! -s "$GH_CALLS" ] && ok "o: refused on main, nothing posted" || { fail "o: exit $rc"; show; }
+[ "$rc" != 0 ] && [ ! -s "$GH_CALLS" ] && ok "o: refused on main, gh never called" || { fail "o: exit $rc"; show; }
 
 if [ "$FAILURES" -gt 0 ]; then
   echo "$FAILURES branch review test(s) FAILED" >&2

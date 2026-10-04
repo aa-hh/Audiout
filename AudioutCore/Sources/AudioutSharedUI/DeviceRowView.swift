@@ -221,6 +221,9 @@ public final class DeviceRowView: NSView {
     /// speak its equivalent.
     private var volumePendingApply = false
     let nameLabel = NSTextField(labelWithString: "")
+    /// Stock `lock.fill` after the name, shown for any speaker that asks for a
+    /// password, an on-screen code or a Home member. Row ink, never gold.
+    let lockGlyphView = NSImageView()
     /// The single sublabel line under the name (Warm Signal v4.1 item 3 —
     /// re-scoped from the retired routing ladder): carries ONLY state words now.
     /// The one remaining rung is the Muted token, shown iff the device is
@@ -623,6 +626,13 @@ public final class DeviceRowView: NSView {
             : { [weak self] in self?.presentIconMenu() }
         iconView.setAccessibilityLabel("Speaker options")
         nameLabel.stringValue = device.name
+        lockGlyphView.isHidden = device.airPlayAccess == .open
+        switch device.airPlayAccess {
+        case .open: lockGlyphView.setAccessibilityLabel(nil)
+        case .password: lockGlyphView.setAccessibilityLabel("Password protected")
+        case .onScreenCode: lockGlyphView.setAccessibilityLabel("Code required")
+        case .homeMembersOnly: lockGlyphView.setAccessibilityLabel("Home members only")
+        }
         alphaValue = 1.0
 
         // Connection halo ring: driven off `connectionState` ALONE (spec §3.2 /
@@ -659,6 +669,7 @@ public final class DeviceRowView: NSView {
         // speaker's dot stays the connecting ring's hollow `rim`.
         armedDotView.apply(armed: isRouteArmed && isConnected)
         nameLabel.textColor = rowTextColor
+        lockGlyphView.contentTintColor = rowTextColor
 
         // FEED column (v4.1 item 3): main-mix segment wording — "System" for a
         // manual member, the active group's name for a group-target member;
@@ -1580,6 +1591,13 @@ public final class DeviceRowView: NSView {
         nameLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
         nameLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
+        lockGlyphView.image = NSImage(systemSymbolName: "lock.fill", accessibilityDescription: nil)?
+            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 10, weight: .semibold))
+        lockGlyphView.image?.isTemplate = true
+        lockGlyphView.setContentHuggingPriority(.required, for: .horizontal)
+        lockGlyphView.setContentCompressionResistancePriority(.required, for: .horizontal)
+        lockGlyphView.isHidden = true
+
         // Status sublabel (2026-07-17): one line driven by the precedence ladder
         // (failed / unavailable / routing). Small and secondary; `resolveSublabel`
         // shows/hides it and `applyNameStackLayout` centers the name accordingly.
@@ -1693,7 +1711,13 @@ public final class DeviceRowView: NSView {
         identityStack.alignment = .leading
         identityStack.spacing = 2
         identityStack.distribution = .fill
-        identityStack.addArrangedSubview(nameLabel)
+        // The lock rides after the name; the name keeps its low priorities, so
+        // it truncates first and the lock is never squeezed out.
+        let nameLine = NSStackView(views: [nameLabel, lockGlyphView])
+        nameLine.orientation = .horizontal
+        nameLine.spacing = 4
+        nameLine.translatesAutoresizingMaskIntoConstraints = false
+        identityStack.addArrangedSubview(nameLine)
         if showsMeter {
             identityStack.addArrangedSubview(meterView)
             meterView.isHidden = true   // shown only on armed rows (gated in `apply`)
@@ -2686,13 +2710,12 @@ public final class DeviceRowView: NSView {
             // without an `apply` — a menu redraw is its only signal, so only
             // this path still needs a draw-time re-stamp (perf P3-11 / P2-2).
             nameLabel.textColor = rowTextColor
+            lockGlyphView.contentTintColor = rowTextColor
         } else {
             // Menu-less host (popover card / mixer window). A rounded pill behind
-            // the row: a gold 12 % wash while the row is SOUNDING (D1 —
-            // `isRouteArmed`, the iPhone's "gold at 12% behind a live row"),
-            // else a fainter neutral hover wash on pointer-over. Both are driven
-            // off state that ``apply`` resets, so a row that stops sounding
-            // returns to a fully clean background (T-U8 bug fix).
+            // the row: only a neutral hover wash on pointer-over, driven off
+            // state that ``apply`` resets, so a row never keeps a stale
+            // background (T-U8 bug fix).
             let rect = bounds.insetBy(dx: PopoverColumnGrid.selectionHighlightInsetX,
                                       dy: PopoverColumnGrid.selectionHighlightInsetY)
             let path = NSBezierPath(roundedRect: rect,
@@ -2706,12 +2729,12 @@ public final class DeviceRowView: NSView {
         super.draw(dirtyRect)
     }
 
-    /// The wash `draw(_:)` paints behind a menu-less row right now, `nil` for
-    /// none. The status dot's cut-out wears the same value (`isHovered` and
-    /// `isRouteArmed` push it), so it never shows as a ring on the wash.
+    /// The wash `draw(_:)` paints behind a menu-less row: the neutral hover
+    /// wash on pointer-over, else `nil`. The status dot's cut-out wears the
+    /// same value (`isHovered` and `isRouteArmed` push it), so it never shows
+    /// as a ring on the wash.
     private var rowWash: NSColor? {
         guard !isInMenu else { return nil }
-        if isRouteArmed { return Tokens.Color.gold.withAlphaComponent(PopoverColumnGrid.rowLiveWashAlpha) }
         if isHovered { return Tokens.Color.engagedChrome.withAlphaComponent(PopoverColumnGrid.rowHoverWashAlpha) }
         return nil
     }
@@ -2781,9 +2804,8 @@ public final class DeviceRowView: NSView {
     /// Simulate a host asking this row to flash (A4 test hook).
     public func test_flashRow() { flashRow() }
 
-    /// Whether the row is currently painting its live gold wash. It follows the
-    /// armed predicate (D1) — a row that stops sounding MUST report `false`.
-    public var test_isShowingLiveWash: Bool { !isInMenu && isRouteArmed }
+    /// The wash `draw(_:)` paints behind the row right now, `nil` for none.
+    public var test_rowWash: NSColor? { rowWash }
     /// Whether a transient hover wash is currently active (must reset on deselect).
     public var test_isHovered: Bool { isHovered }
 

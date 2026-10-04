@@ -703,6 +703,24 @@ public actor AirPlayEngine {
         // port > 0 => appeared/updated; port < 0 => disappeared.
         let port: Int32 = appearing ? Int32(descriptor.port) : -1
 
+        if appearing {
+            // The key the vendored device callback passes to cfg_gettsec: RAOP
+            // names are "<deviceid>@<name>" and raop.c keys on the part after '@'.
+            let key: Substring
+            if descriptor.kind == .raop, let at = descriptor.name.firstIndex(of: "@") {
+                key = descriptor.name[descriptor.name.index(after: at)...]
+            } else {
+                key = Substring(descriptor.name)
+            }
+            String(key).withCString { k in
+                if let pw = descriptor.password {
+                    pw.withCString { conffile_set_device_password(k, $0) }
+                } else {
+                    conffile_set_device_password(k, nil)
+                }
+            }
+        }
+
         descriptor.name.withCString { name in
             descriptor.hostname.withCString { host in
                 descriptor.address.withCString { addr in

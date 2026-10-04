@@ -26,8 +26,14 @@ extension NativeBackend {
     /// unreachable, which is also what makes launch safe — persisted routes are
     /// pushed in before discovery has found anything, and each one engages as its
     /// device shows up.
+    ///
+    /// A speaker waiting for a password or code (`.failed` with `.authRequired`
+    /// or `.codeRequired`) stays available so its row offers "Enter password",
+    /// but it cannot carry audio until one is entered, so it reads unreachable
+    /// here; its `.connected` edge replays the route.
     func isRouteTargetReachableLocked(_ id: String) -> Bool {   // on stateQueue
-        guard let device = known[id], device.isAvailable else { return false }
+        guard let device = known[id], device.isAvailable,
+              !Self.waitsForPasswordEntry(device.connectionState) else { return false }
         return outputIDs[id] != nil || device.isBluetooth || device.isCast
     }
 
@@ -63,12 +69,21 @@ extension NativeBackend {
     }
 
     /// Whether a route leaving `id` was dropped by the speaker's own failure
-    /// (unavailable and `.failed`) rather than removed by the user; such a
-    /// route keeps its `.failed`. On `stateQueue`.
+    /// (unavailable and `.failed`, or available and waiting for a password or
+    /// code) rather than removed by the user; such a route keeps its `.failed`,
+    /// so a password speaker keeps its "Enter password" prompt and its `.off`
+    /// cannot make it reachable again and re-bind into the same refusal. The
+    /// Bluetooth caller is unaffected: Bluetooth never reports those causes.
+    /// On `stateQueue`.
     func droppedByOwnFailureLocked(_ id: String) -> Bool {   // on stateQueue
-        guard let device = known[id], !device.isAvailable,
-              case .failed = device.connectionState else { return false }
-        return true
+        guard let device = known[id], case .failed = device.connectionState else { return false }
+        return !device.isAvailable || Self.waitsForPasswordEntry(device.connectionState)
+    }
+
+    /// Whether `state` is a password or code demand the user has yet to answer.
+    static func waitsForPasswordEntry(_ state: ConnectionState) -> Bool {
+        guard case .failed(let failure) = state else { return false }
+        return failure.cause == .authRequired || failure.cause == .codeRequired
     }
 
     /// `setPerAppConnectionStateLocked` for an engine handle, from the bind
@@ -2110,8 +2125,23 @@ extension NativeBackend {
     ) {
         stateQueue.sync {
             guard let deviceID = self.outputIDs.first(where: { $0.value == outputID })?.key else { return }
-            let cause: ConnectionFailure.Cause =
-                error is PTPClockUnavailableError ? .timingUnavailable : .unknown
+            // The same mapping as the whole-system converge catch, so a
+            // password speaker's refused bind reads `.authRequired` whichever of
+            // this and the state stream's report lands first.
+            let access = self.known[deviceID]?.airPlayAccess
+            let cause: ConnectionFailure.Cause
+            switch error {
+            case is PTPClockUnavailableError:
+                cause = .timingUnavailable
+            case AirPlayEngineError.passwordRequired:
+                cause = Self.accessCause(access, passwordRequired: true)
+            case AirPlayEngineError.opTimedOut:
+                cause = .timedOut
+            case AirPlayEngineError.sessionFailed:
+                cause = Self.accessCause(access, passwordRequired: false)
+            default:
+                cause = .unknown
+            }
             Telemetry.fail(.airplay, "airplay:connect_failed",
                            local: ["device": deviceID, "op": op, "stream": "\(stream)", "error": "\(error)"],
                            shared: ["cause": "\(cause)"])

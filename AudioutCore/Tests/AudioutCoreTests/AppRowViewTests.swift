@@ -360,6 +360,14 @@ import AppKit
                      "a click routed to the slider's own frame must never request row selection")
     }
 
+    /// Turns red if `isInSelectableDeadZone` stops carving out `destinationPopUp.frame`.
+    @Test func destinationPopUpClickDoesNotFireDidRequestSelect() {
+        let (row, delegate) = makeRow()
+        row.test_simulateDestinationPopUpClick()
+        #expect(delegate.selectRequestedAppID == nil,
+                     "a click routed to the destination popup's own frame must never request row selection")
+    }
+
     @Test func removeButtonClickDoesNotAlsoRequestSelect() {
         let (row, delegate) = makeRow()
         row.test_remove()
@@ -454,11 +462,11 @@ import AppKit
     }
 
     @Test func hoverWashUsesUnifiedHoverAlpha() {
-        // Hover is the faintest of the three, so it needs a row that is not
-        // sounding to be the wash that shows.
-        let (row, _) = makeRowWithThreeStates(selected: "no-redirect")
+        let (row, _) = makeRow(selected: "device-1")
         row.test_setHovered(true)
-        #expect(row.test_highlightAlpha == PopoverColumnGrid.rowHoverWashAlpha)
+        #expect(row.test_isFaderEngaged, "the fixture row must be sounding for this test to mean anything")
+        #expect(row.test_highlightAlpha == PopoverColumnGrid.rowHoverWashAlpha,
+                "hover still paints on a sounding row")
     }
 
     @Test func selectionWashTakesPriorityOverHoverWash() {
@@ -469,17 +477,18 @@ import AppKit
                        "selection must win when both selected and hovered")
     }
 
-    @Test func liveWashUsesTheLiveAlphaWhenNeitherSelectedNorHovered() {
+    /// Turns red if `currentHighlightColor` paints a wash for `faderCell.isRouteArmed` again.
+    @Test func soundingRowPaintsNoWash() {
         let (row, _) = makeRow(selected: "device-1")
-        #expect(row.test_highlightAlpha == PopoverColumnGrid.rowLiveWashAlpha,
-                       "a sounding row paints the gold live wash")
+        #expect(row.test_highlightAlpha == nil,
+                       "a sounding row paints no wash of its own")
     }
 
-    @Test func selectionWashOutranksLiveWash() {
+    @Test func selectionWashPaintsOnASoundingRow() {
         let (row, _) = makeRow(selected: "device-1")
         row.test_setSelected(true)
         #expect(row.test_highlightAlpha == PopoverColumnGrid.rowSelectionWashAlpha,
-                       "keyboard selection must stay visible over a live row (D3)")
+                       "selection stays visible on a sounding row")
     }
 
     // MARK: Readout colour (V7)

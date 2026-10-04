@@ -450,7 +450,7 @@ import AudioutProtocol
         _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
         let row = try #require(popover.test_deviceRow(for: "office"))
         #expect(row.isSelectedInSet, "selected after ON")
-        #expect(row.test_isShowingLiveWash == row.test_routeArmed, "the wash follows the armed predicate, not selection")
+        #expect(row.test_rowWash == nil, "a sounding row paints no wash")
         #expect(row.test_isEnabledOn, "switch is ON")
         // The icon is neutral in BOTH states now (2026-07-17 redesign): identity
         // only, no accent-when-selected fill. Selection reads from the switch.
@@ -459,7 +459,7 @@ import AudioutProtocol
         // Toggle it OFF — the row must return to the unselected appearance.
         _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: false)
         #expect(!(row.isSelectedInSet), "not selected after OFF")
-        #expect(!(row.test_isShowingLiveWash), "a deselected row is not armed, so no wash")
+        #expect(row.test_rowWash == nil, "a deselected row paints no wash")
         #expect(!(row.test_isHovered), "no stale hover wash after deselect")
         #expect(!(row.test_isEnabledOn), "switch returned to OFF")
         #expect(row.test_iconTint == Tokens.Color.secondaryLabel, "icon tint stays neutral (always secondary)")
@@ -715,6 +715,77 @@ import AudioutProtocol
         popover.update(devices: backend.devices.filter { $0.id != "office" })
         #expect(popover.test_diagnosisPanel(for: "office") == nil, "panel torn down on removal")
         #expect(popover.test_deviceRow(for: "office") == nil, "row gone with the device")
+    }
+
+    // MARK: AirPlay password sheet
+
+    /// `devices` with `office` rewritten by `change`, pushed to the popover
+    /// directly so the connection edges are exact and need no backend timing.
+    private func pushOffice(_ popover: PopoverController, _ backend: MockBackend,
+                            _ change: (inout Device) -> Void) {
+        var devices = backend.devices
+        for i in devices.indices where devices[i].id == "office" { change(&devices[i]) }
+        popover.update(devices: devices)
+    }
+
+    // Dropping the `onEnterPassword` wiring in `mountDiagnosisPanel` turns it red.
+    @Test func passwordPanelButtonOpensTheSheet() async throws {
+        let (popover, _, backend) = try await makePopover()
+        _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
+        pushOffice(popover, backend) { $0.connectionState = .failed(ConnectionFailure(cause: .authRequired)) }
+        let panel = try #require(popover.test_diagnosisPanel(for: "office"))
+        #expect(popover.test_passwordSheet() == nil)
+
+        panel.test_tapRetry()
+        #expect(popover.test_passwordSheet() != nil)
+    }
+
+    // Removing the access check at the end of `deviceRow(_:didToggleEnabled:for:)` turns it red.
+    @Test func joiningAPasswordSpeakerWithNoStoredPasswordOpensTheSheet() async throws {
+        let (popover, _, backend) = try await makePopover()
+        pushOffice(popover, backend) { $0.airPlayAccess = .password }
+        let row = try #require(popover.test_deviceRow(for: "office"))
+        popover.deviceRow(row, didToggleEnabled: true, for: "office")
+        #expect(popover.test_passwordSheet() != nil)
+    }
+
+    /// A protected `office` the user just joined, with the password sheet up.
+    private func popoverWithPasswordSheet() async throws
+        -> (PopoverController, MockBackend, SpeakerPasswordSheetViewController) {
+        let (popover, _, backend) = try await makePopover()
+        pushOffice(popover, backend) {
+            $0.airPlayAccess = .password
+            $0.connectionState = .connecting
+        }
+        let row = try #require(popover.test_deviceRow(for: "office"))
+        popover.deviceRow(row, didToggleEnabled: true, for: "office")
+        return (popover, backend, try #require(popover.test_passwordSheet()))
+    }
+
+    // Dropping the `.connected` dismissal in `handleConnectionTransitions` turns it red.
+    @Test func passwordSheetDismissesWhenTheSpeakerConnects() async throws {
+        let (popover, backend, sheet) = try await popoverWithPasswordSheet()
+        sheet.test_setPasswordText("secret")
+        sheet.test_tapConnect()
+        pushOffice(popover, backend) {
+            $0.airPlayAccess = .password
+            $0.connectionState = .connected
+        }
+        #expect(popover.test_passwordSheet() == nil)
+    }
+
+    // Dropping the `showResult` call on the `.failed` edge in `handleConnectionTransitions` turns it red.
+    @Test func passwordSheetShowsRejectionAfterSubmitFailsOnAuth() async throws {
+        let (popover, backend, sheet) = try await popoverWithPasswordSheet()
+        sheet.test_setPasswordText("wrong")
+        sheet.test_tapConnect()
+        pushOffice(popover, backend) {
+            $0.airPlayAccess = .password
+            $0.connectionState = .failed(ConnectionFailure(cause: .authRequired))
+        }
+        #expect(sheet.test_resultText == "That password didn't work. Check it and try again.")
+        #expect(sheet.test_connectButton.isEnabled)
+        #expect(popover.test_passwordSheet() != nil)
     }
 
     /// C1 regression: the auto-expanded panel must actually be attached in the

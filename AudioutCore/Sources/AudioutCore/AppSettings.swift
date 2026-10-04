@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+import AirPlayEngine
 import Foundation
 
 /// How the app resolves its light/dark appearance (Settings › Appearance).
@@ -115,6 +116,20 @@ public struct AppSettings {
         static let touchBarControls = "general.touchBarControls"
         static let mixerMembershipHintDismissed = "mixer.membershipHintDismissed"
         static let installMoveUnreported = "install.moveUnreported"
+        static let engineInstallSeed = "engine.installSeed"
+    }
+
+    /// The AirPlay engine's per-install seed, stable across launches so a
+    /// receiver that remembers this sender keeps recognising it. Stored as 16
+    /// hex digits; generated and stored on first read.
+    public var engineInstallSeed: UInt64 {
+        if let stored = defaults.string(forKey: Keys.engineInstallSeed),
+           stored.count == 16, let seed = UInt64(stored, radix: 16) {
+            return seed
+        }
+        let seed = SystemRandomNumberGenerator.freshInstallSeed()
+        defaults.set(String(format: "%016llx", seed), forKey: Keys.engineInstallSeed)
+        return seed
     }
 
     /// The user-selectable sender start-buffer options in ms (Settings › Audio

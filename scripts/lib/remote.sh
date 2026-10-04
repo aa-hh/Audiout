@@ -20,7 +20,7 @@
 # Config (git config, NOT a committed file or a shell export — see the
 # audiout.remoteHost note in AudioutCore/AGENTS.md for why):
 #   git config --local audiout.remoteHost 'user@host.local'
-#   git config --local audiout.testPrefer permits # local (default) | remote | cpu | permits
+#   git config --local audiout.testPrefer remote  # local (default) | remote | cpu | permits
 #   git config --local audiout.testRemoteBias 40  # cpu mode only
 #
 # What each testPrefer value means:
@@ -251,14 +251,20 @@ remote_sweep_orphans() {
 # Delete remote trees to keep the disk usable. Two rules, applied in order:
 #   1. AGE  — a tree unused for 24h+ goes, unconditionally.
 #   2. SPACE — while free space is under the floor, evict the least recently
-#      used tree, until it clears or nothing is left to take.
+#      used tree not touched in the last hour, until it clears or nothing is
+#      left to take.
 #
 # Rule 1 was 7 days and bounded nothing -- twice that took the remote down.
 # `.last-used` is re-stamped every run, so with a fleet of agents cycling
 # branches no tree ever reached 7 days and the rule never fired once. 24h is
 # short enough to actually bite. NOTE the BSD find quirk: `-mtime +1` means
 # older than TWO days (the fraction is truncated), so "older than 24h" is
-# `-mtime +0` -- the same predicate rule 2 uses to protect a live run.
+# `-mtime +0`.
+# Rule 2 used that same 24h predicate until 2026-10-04, which made it dead
+# code: rule 1 had already deleted every tree it could pick. 54 trees used
+# within the day held 82 GB, the disk sat at 4.4 GB free, and suites fell back
+# to local again. One hour still spares a live run: `.last-used` is stamped at
+# run start and a mule permit expires at 45 minutes.
 # Cost of cutting it this fine: returning to a worktree after a day pays one
 # re-sync plus one cold build, a few minutes.
 # Each tree carries a ~1.6 GB .build cache, and `.last-used` is re-stamped on
@@ -280,7 +286,7 @@ remote_prune_stale() {
          done; \
          while [ \"\$(df -m . | awk 'NR==2{print \$4}')\" -lt $remote_free_floor ]; do \
              _v=\$(for d in */; do d=\${d%/}; s=\"\$d/.last-used\"; [ -f \"\$s\" ] || s=\"\$d\"; \
-                     [ -n \"\$(find \"\$s\" -maxdepth 0 -mtime +0 2>/dev/null)\" ] && \
+                     [ -n \"\$(find \"\$s\" -maxdepth 0 -mmin +60 2>/dev/null)\" ] && \
                          echo \"\$(date -r \"\$s\" +%s) \$d\"; \
                    done | sort -n | head -1 | cut -d' ' -f2-); \
              [ -n \"\$_v\" ] || break; \

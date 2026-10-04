@@ -1,16 +1,20 @@
 #!/bin/bash
-# Code review for one branch before it merges to main (Guard 10 checks the
-# receipt this writes; the hook itself never calls a model).
+# Code review for one branch's pull request. The result goes to the PR as one
+# comment and as the `review` commit status on HEAD, one of the two checks
+# main's merge queue requires.
 #
 # Picks a level from the committed diff against main: skip (no model), cheap
 # (one sonnet pass) or full (four parallel reviewers, then one haiku
 # confidence score per finding, findings under 80 dropped). Prints the
-# findings, appends one line to <git-common-dir>/audiout-branch-reviews.log,
-# and writes a receipt keyed to the branch's own committed changes, so a later
-# commit that changes them needs a new review (merging main in does not).
+# findings and appends one line to <git-common-dir>/audiout-branch-reviews.log.
 # Instruction files: docs/review/<pass>.md.
 #
-# The reviewers run as subagents of the Claude session merging the branch,
+# At most two rounds per branch, counted in .review-pending/.review-round.
+# Round 2 reviews only what was committed since round 1's head (the fix for
+# its HIGH findings) and never skips; a third run refuses. Only a HIGH finding
+# fails the status; MEDIUM and LOW are posted and do not block.
+#
+# The reviewers run as subagents of the Claude session that owns the branch,
 # because headless Claude CLI runs are refused on this account. The script hands
 # work over through .review-pending/<key>/ in this worktree (git-ignored; a
 # session's subagents may write there but not into the shared .git folder):
@@ -20,15 +24,14 @@
 # and either prints the next set of passes (escalation, scoring) or records
 # the result and deletes the pending directory.
 #
-# Usage: bash scripts/review-branch.sh [--continue | --already-reviewed]
-#   (no flag)           start the review; re-running starts it over.
-#   --continue          read the saved replies and go on to the next step.
-#   --already-reviewed  record work a /scope-and-run reviewer already approved;
-#                       writes the receipt without any model.
-# Exit: 0 reviewed + receipt; 1 findings to fix (any severity), no receipt,
-#       fix groups printed;
-#       2 the review did not run, no receipt; 3 reviewer subagents needed
-#       (run the printed passes, then --continue).
+# Usage: bash scripts/review-branch.sh [--continue]
+#   (no flag)    start the next round; re-running before it finishes starts it over.
+#   --continue   read the saved replies and go on to the next step.
+# Exit: 0 reviewed, no HIGH finding; 1 a HIGH finding survived scoring (fix
+#       groups printed in round 1), or two rounds are done;
+#       2 the review did not run or its result could not be posted;
+#       3 reviewer subagents needed (run the printed passes, then --continue).
+# GH overrides the gh command (the self-test points it at a stub).
 
 set -uo pipefail
 
@@ -97,8 +100,8 @@ EOF
 mode=""
 case "${1:-}" in
   "") ;;
-  --already-reviewed|--continue) mode="$1" ;;
-  *) echo "usage: bash scripts/review-branch.sh [--continue | --already-reviewed]" >&2; exit 2 ;;
+  --continue) mode="$1" ;;
+  *) echo "usage: bash scripts/review-branch.sh [--continue]" >&2; exit 2 ;;
 esac
 
 branch=$(git symbolic-ref --short HEAD 2>/dev/null) || branch=detached
@@ -110,16 +113,38 @@ top=$(git rev-parse --show-toplevel) || exit 2
 cd "$top" || exit 2
 common=$(cd "$(git rev-parse --git-common-dir)" && pwd) || exit 2
 
+GH=${GH:-gh}
 tip=$(git rev-parse --verify HEAD) || exit 2
-base=$(git merge-base main "$tip") || { echo "No merge base with main." >&2; exit 2; }
-# Same changes keep the same key after main is merged into the branch; a conflict resolution that changes the branch's own lines changes it.
+pending_root="$PWD/.review-pending"
+round_file="$pending_root/.review-round"        # "<rounds done> <branch>"
+round_head_file="$pending_root/.review-round-head"   # round 1's head
+done_rounds=0
+if [ -f "$round_file" ]; then
+  read -r n b < "$round_file"
+  [ "$b" = "$branch" ] && done_rounds=$n
+fi
+round=$((done_rounds + 1))
+if [ "$round" -gt 2 ] && [ "$mode" != --continue ]; then
+  echo "two rounds done; remaining findings are on the PR"
+  exit 1
+fi
+if [ "$round" = 2 ]; then
+  base=$(cat "$round_head_file" 2>/dev/null)
+  git rev-parse --verify -q "$base^{commit}" > /dev/null || { echo "Round 1's head is missing ($round_head_file)." >&2; exit 2; }
+  if [ "$base" = "$tip" ]; then
+    echo "Nothing committed since round 1. Fix the HIGH findings, commit, push, then run this again." >&2
+    exit 2
+  fi
+else
+  base=$(git merge-base main "$tip") || { echo "No merge base with main." >&2; exit 2; }
+fi
+# Keys the pending review to the reviewed changes, so a commit between the
+# handover and --continue is caught.
 hash=$(git diff -U0 --no-renames "$base" "$tip" | git patch-id --stable | cut -d' ' -f1)
 [ -n "$hash" ] || hash=empty
-git merge-base --is-ancestor main "$tip" \
-  || echo "Note: this branch does not contain the latest main. The review still counts; merge main in before landing."
 
 if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
-  echo "Warning: uncommitted changes are not part of this review; the receipt covers committed work only." >&2
+  echo "Warning: uncommitted changes are not part of this review; it covers committed work only." >&2
 fi
 
 # --no-renames so a renamed file shows its real new path to the risk check.
@@ -132,16 +157,14 @@ while IFS=$'\t' read -r added deleted path; do
   is_risk_path "$path" && risk+=("$path")
 done < <(git diff --numstat --no-renames "$base" "$tip")
 
-if [ "$mode" = --already-reviewed ]; then level=external
-elif [ ${#risk[@]} -gt 0 ]; then level=full
-elif [ "$lines" -lt "$SKIP_UNDER_LINES" ]; then level=skip
+if [ ${#risk[@]} -gt 0 ]; then level=full
+elif [ "$lines" -lt "$SKIP_UNDER_LINES" ] && [ "$round" = 1 ]; then level=skip
+elif [ "$lines" -lt "$SKIP_UNDER_LINES" ]; then level=cheap
 elif [ "$lines" -gt "$FULL_OVER_LINES" ]; then level=full
 else level=cheap
 fi
 
-reviews_dir="$common/audiout-branch-reviews"
 review_log="$common/audiout-branch-reviews.log"
-pending_root="$PWD/.review-pending"
 state="$pending_root/$hash"
 
 if [ "$mode" = --continue ]; then
@@ -163,23 +186,45 @@ if [ ${#risk[@]} -gt 0 ]; then
   joined=$(printf ', %s' "${risk[@]}")
   summary="$summary, risk: ${joined:2}"
 fi
-echo "Review level: $level ($summary)"
+echo "Review level: $level ($summary), round $round"
 
 # log_line <high> <medium> <low> <dropped>
 log_line() {
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     "$branch" "$level" "$1" "$2" "$3" "$4" "$files" >> "$review_log"
 }
-write_receipt() {
-  mkdir -p "$reviews_dir" || exit 2
-  echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ) branch=$branch level=$level tip=$tip" \
-    > "$reviews_dir/$hash" || exit 2
-  echo "Receipt written: ${hash:0:12}"
+
+# post_result <high> [comment file]: the PR comment (when given), then the
+# `review` status on HEAD, then count the round. A failed post exits 2 with the
+# round uncounted, so the same step can be run again.
+post_result() {
+  local st=success desc pr
+  [ "$1" -gt 0 ] && st=failure
+  if [ "$level" = skip ]; then desc=skip; else desc="$level, round $round, $1 HIGH"; fi
+  if [ -n "${2:-}" ]; then
+    pr=$($GH pr view --json number -q .number 2>/dev/null)
+    if [ -n "$pr" ]; then
+      $GH pr comment "$pr" --body-file "$2" > /dev/null \
+        || { echo "Review result not posted: gh pr comment failed for PR #$pr." >&2; exit 2; }
+      echo "Review comment posted to PR #$pr."
+    else
+      echo "No pull request for $branch, so no comment was posted. Its body:"
+      cat "$2"
+    fi
+  fi
+  $GH api "repos/aa-hh/Audiout/statuses/$tip" -f context=review -f "state=$st" \
+      -f "description=$desc" > /dev/null \
+    || { echo "Review result not posted: the review status on $tip failed. Push the branch (git push -u origin HEAD) and run the same command again." >&2; exit 2; }
+  echo "Review status: $st ($desc) on ${tip:0:12}."
+  mkdir -p "$pending_root" || exit 2
+  echo "$round $branch" > "$round_file" || exit 2
+  [ "$round" = 1 ] && { echo "$tip" > "$round_head_file" || exit 2; }
+  return 0
 }
 
-if [ "$level" = skip ] || [ "$level" = external ]; then
+if [ "$level" = skip ]; then
+  post_result 0
   log_line 0 0 0 0
-  write_receipt
   exit 0
 fi
 
@@ -351,15 +396,31 @@ else
 fi
 
 echo "Findings: $high high, $medium medium, $low low ($dropped dropped)"
+
+comment="$state/comment.md"
+{
+  echo "## Review: $level, round $round"
+  echo
+  if [ ${#survivors[@]} -eq 0 ]; then
+    echo "Review: no findings"
+  fi
+  for sev in HIGH MEDIUM LOW; do
+    group=$(for l in ${survivors[@]+"${survivors[@]}"}; do printf '%s\n' "$l"; done \
+      | sed -n "s/^$sev | \([^|]*[^| ]\) | \(.*\)/- \1: \2/p")
+    if [ -n "$group" ]; then printf '### %s\n\n%s\n\n' "$sev" "$group"; fi
+  done
+} > "$comment" || exit 2
+post_result "$high" "$comment"
 log_line "$high" "$medium" "$low" "$dropped"
 rm -rf "$state"
-if [ ${#survivors[@]} -eq 0 ]; then
-  write_receipt
-  exit 0
+[ "$high" -eq 0 ] && exit 0
+if [ "$round" = 2 ]; then
+  echo "two rounds done; remaining findings are on the PR"
+  exit 1
 fi
 
-# Every surviving finding is fixed before the branch merges: group them by the
-# file in their path:line field, one builder subagent per group.
+# Only HIGH findings block. Group them by the file in their path:line field,
+# one builder subagent per group.
 # razor: one group per file; upgrade path is merging groups whose files the
 # findings name together.
 file_of() {
@@ -367,8 +428,10 @@ file_of() {
   f=$(printf '%s\n' "$1" | sed -n 's/^[A-Z]* | \([^|:]*[^|: ]\):[0-9][^|]* | .*/\1/p')
   [ -n "$f" ] && echo "$f" || echo "$1"
 }
-keys=(); groups=()
+highs=(); keys=(); groups=()
 for l in "${survivors[@]}"; do
+  case "$l" in HIGH*) ;; *) continue ;; esac
+  highs+=("$l")
   k=$(file_of "$l"); keys+=("$k")
   seen=0
   for g in ${groups[@]+"${groups[@]}"}; do [ "$g" = "$k" ] && seen=1; done
@@ -380,11 +443,11 @@ for g in "${groups[@]}"; do
   n=$((n + 1))
   echo "fix-$n  file=$g"
   i=0
-  for l in "${survivors[@]}"; do
+  for l in "${highs[@]}"; do
     [ "${keys[$i]}" = "$g" ] && echo "    $l"
     i=$((i + 1))
   done
 done
 echo
-echo "Fix every finding above. Launch one builder subagent (work-order-executor, model opus) per fix group, all in parallel in this worktree; give each its group's finding lines verbatim plus: edit only the named file and its own test file, read the nearest AGENTS.md first, do not commit. Two groups never share a file. When all return, run the tests covering the changed files, commit, then start a fresh review: bash scripts/review-branch.sh"
+echo "Fix every HIGH finding above. Launch one builder subagent (work-order-executor, model opus) per fix group, all in parallel in this worktree; give each its group's finding lines verbatim plus: edit only the named file and its own test file, read the nearest AGENTS.md first, do not commit. Two groups never share a file. When all return, run the tests covering the changed files, commit, push, then run round 2, which reviews only the fix: bash scripts/review-branch.sh"
 exit 1

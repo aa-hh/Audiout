@@ -663,7 +663,9 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// Derived by ``updateBTRoomTermLocked()``; on `stateQueue`.
     var btRoomTermMs: Int?
     /// A Bluetooth-target wizard run is under way, so the reference is pinned
-    /// wide open (``btWizardReferenceBufferMs``) for the duration. On `stateQueue`.
+    /// wide open (``btWizardReferenceBufferMs``) for the duration, except in a
+    /// presentation-timeline room, where the room delay is the reference and
+    /// the wizard's ceiling follows it. On `stateQueue`.
     var btWizardReferenceRaised = false
     /// Whether the wizard tick is currently on, so a redundant edge costs
     /// nothing — both edges re-anchor every sink, and the panel fires a second
@@ -3880,13 +3882,17 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// agree with each other by construction rather than by each deriving its
     /// own reference.
     ///
-    /// With no Cast device it is the Wave-4 rule unchanged: a presentation
+    /// With no Cast device and no Bluetooth term it is the Wave-4 rule
+    /// unchanged: a presentation
     /// timeline in the selection (or no BT at all) → the live start-buffer;
     /// BT+Mac without one → the BT-only buffer, the same reference every BT
     /// sink uses, otherwise the Mac would lead each BT speaker by
     /// `startBufferMs − btOnlyBufferMs`. A Cast receiver authors a
     /// presentation timeline exactly as AirPlay does, which is why the branch
-    /// asks `usesPresentationReference` rather than about AirPlay alone.
+    /// asks `usesPresentationReference` rather than about AirPlay alone. The
+    /// Bluetooth term (`btRoomTermMs`) raises it the same way the Cast term
+    /// does, when the slowest selected Bluetooth speaker's latency plus
+    /// headroom exceeds the start buffer.
     func roomDelayLocked() -> Int {   // on stateQueue
         let today = (btSinkEnabled && !btComposition.usesPresentationReference)
             ? btReferenceBufferMs : _startBufferMs
@@ -3998,9 +4004,10 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         // `R − startBufferMs`, so moving the start buffer moves the line in
         // front of the engine by the same amount in the opposite direction.
         // Done HERE, between the teardown and the re-adds, because that is the
-        // one moment in this method when nothing is streaming. Guarded on the
-        // Cast term for the invariant's sake: with no Cast device there is no
-        // line, and this must not be what creates one.
+        // one moment in this method when nothing is streaming. Guarded on a
+        // standing Cast or Bluetooth term, or a Bluetooth term this buffer
+        // change just moved: with neither there is no line, and this must not
+        // be what creates one.
         stateQueue.sync {
             // The Bluetooth term is measured against the start buffer, so a
             // buffer that grew past it retires it here, before the room delay

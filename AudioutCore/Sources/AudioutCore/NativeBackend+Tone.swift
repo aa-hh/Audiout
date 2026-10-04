@@ -621,10 +621,11 @@ extension NativeBackend {
             // timeline by the time the Cast device starts filling its buffer.
             if castTermMoved {
                 self.roomDelayChangedLocked(cause: "cast_selection")
-            } else if self._castTermMs != nil {
+            } else if self._castTermMs != nil || self.btRoomTermMs != nil {
                 // The room did not move, but who has to meet it may have: an
-                // AirPlay device joining a Cast room needs the line from its
-                // first buffer, and re-publishing the same depth costs nothing.
+                // AirPlay device joining a room a Cast or Bluetooth term already
+                // holds needs the line from its first buffer, and re-publishing
+                // the same depth costs nothing.
                 self.publishAirPlayPreDelayLocked()
             }
 
@@ -998,8 +999,9 @@ extension NativeBackend {
         // No AirPlay device, no line: nothing would read it, and it is a
         // megabyte and a memcpy per buffer. An output also cannot be delayed by
         // less than nothing — and `0` publishes NO line rather than an empty
-        // one, which is the whole bypass: a room that leaves Cast is back to
-        // today's exact bytes on the very next buffer.
+        // one, which is the whole bypass: a room that leaves Cast and holds
+        // no Bluetooth term either is back to today's exact bytes on the very
+        // next buffer.
         //
         // Read from the SELECTION, never from `btComposition`: that memo is
         // only refreshed when the Bluetooth side moves, so in an AirPlay+Cast

@@ -2664,6 +2664,11 @@ extension NativeBackend: BTOutputControlling {
         // latency, collapsed the range onto 0 and bowed the run out as
         // `.unreachable`.
         //
+        // The reference is the live one the sinks render on: in an AirPlay or
+        // Cast room, the room delay (`roomDelayLocked()`), which a standing
+        // Bluetooth or Cast term raises above the start buffer; otherwise the
+        // wizard's raised buffer.
+        //
         // The CEILING is the reference less one default BT-only buffer, not the
         // reference itself: at `latency == reference` the delay is 0, the ring
         // is seeked completely dry, and the speaker is silent for the rest of
@@ -2681,7 +2686,7 @@ extension NativeBackend: BTOutputControlling {
         // wrong early answer, so the range gives it somewhere to go.
         let reference = stateQueue.sync { () -> Int in
             btComposition.usesPresentationReference
-                ? _startBufferMs : Self.btWizardReferenceBufferMs
+                ? roomDelayLocked() : Self.btWizardReferenceBufferMs
         }
         let lower = -BTSyncTrim.rangeMs
         let upper = Double(reference) - Double(BTSyncedSink.defaultBTOnlyBufferMs)

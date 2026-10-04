@@ -352,6 +352,16 @@ warn-only 3/5) are documented in the hook file itself:
   the full suite when main's side changes AudioutCore Swift, and the merge
   onto `main` then skips it; otherwise the full suite runs at the merge onto
   `main`. Either way it runs once.
+- **A change inside a Guard 10 risk path is scoped before it is built.** The
+  paths are the `is_risk_path` list at the top of `scripts/review-branch.sh`
+  (the Bluetooth sinks, the sync and drift code, `NativeBackend*`, the capture
+  coordinators, the stores, licence and trial, AirPlayEngine). However small
+  the finding reads, the first launch is a scoper (`fable-scoper` or
+  `/scope-and-run`) that states the function's invariants and enumerates the
+  cases; the builder writes those cases as tests first, then the code. On
+  2026-10-04 a "one-line" safety-margin clamp in `BTSyncedSink` took six
+  builder rounds and six reviews because each review's smallest fix became
+  the next spec instead of one design pass up front.
 
 ## UI / Design Conventions (all targets)
 

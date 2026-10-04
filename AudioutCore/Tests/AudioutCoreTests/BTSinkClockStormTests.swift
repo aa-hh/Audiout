@@ -93,12 +93,19 @@ import Testing
     /// the measurement, which throws each remainder away. Red if the re-base
     /// keys on a shortfall of at least `pullRealignThresholdMs` rather than on
     /// a device gap: the 1680-frame row then measured ~23 ms over the punctual
-    /// run, against ~3 ms with the gap rule.
-    @Test(arguments: zip([752, 1680], [2.0, 4.0]))
-    func aCaptureThatDeliversMoreThanOneCycleLateDoesNotMoveThePlayoutOffset(lagFrames: Int, boundMs: Double) throws {
-        let punctual = try Self.worstStormOffsetMs(anchoredDelayMs: Self.delayMs)
+    /// run, against ~3 ms with the gap rule. Red if the re-base compares the
+    /// raw device gap to the threshold: a 1024-frame cycle (21.3 ms) is itself
+    /// a gap of a threshold or more, so the 2400-frame (50 ms) row on that cycle
+    /// re-bases on every clamped forward re-alignment and measured ~18 ms over
+    /// the punctual run, against ~0 ms with the gap's excess over the cycle.
+    @Test(arguments: [(752, 2.0, 512), (1680, 4.0, 512), (2400, 4.0, 1024)])
+    func aCaptureThatDeliversMoreThanOneCycleLateDoesNotMoveThePlayoutOffset(
+        lagFrames: Int, boundMs: Double, cycleFrames: Int
+    ) throws {
+        let punctual = try Self.worstStormOffsetMs(anchoredDelayMs: Self.delayMs, cycleFrames: cycleFrames)
         let late = try Self.worstStormOffsetMs(
-            anchoredDelayMs: Self.delayMs, captureLagFrames: lagFrames, lagFromSecond: 1)
+            anchoredDelayMs: Self.delayMs, captureLagFrames: lagFrames, lagFromSecond: 1,
+            cycleFrames: cycleFrames)
         #expect(late - punctual <= boundMs,
                 "a late capture left the Move \(String(format: "%+.1f", late)) ms off, a punctual one \(String(format: "%+.1f", punctual)) ms")
     }
@@ -121,10 +128,11 @@ import Testing
     /// past its start pts have gone by on wall time, from `lagFromSecond` seconds
     /// after the anchor on (before that, as soon as it starts); `trim`, if any,
     /// is applied and committed `atSecond` seconds after the anchor, and the
-    /// offset is then measured against the trimmed delay.
+    /// offset is then measured against the trimmed delay. The device renders
+    /// `cycleFrames` per cycle.
     static func worstStormOffsetMs(
         anchoredDelayMs delayMs: Int64, captureLagFrames: Int = 0, lagFromSecond: Double = 0,
-        trim: (atSecond: Double, ms: Double)? = nil
+        trim: (atSecond: Double, ms: Double)? = nil, cycleFrames: Int = 512
     ) throws -> Double {
         let manager = BTSyncedSink(
             renderSampleRate: Self.sampleRate, channelCount: 1,
@@ -135,7 +143,6 @@ import Testing
         let sink = try #require(manager.sinkForTesting(uid: "move-2"))
 
         let chunkFrames = 480   // the tap's 10 ms delivery
-        let cycleFrames = 512
         var written = 0         // producer frames so far; frame i carries value i + 1
         var chunk = [Float](repeating: 0, count: chunkFrames)
         var out = [Float](repeating: 0, count: cycleFrames)

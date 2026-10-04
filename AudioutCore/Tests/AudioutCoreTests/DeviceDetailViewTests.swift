@@ -296,6 +296,26 @@ import AppKit
         #expect(detail.test_shownDeviceID == "d1")
     }
 
+    // MARK: The outlined list — the Password row
+
+    // Showing the row without `hasStoredPassword`, or "Forget" not firing `onForgetPassword` with the id, turns it red.
+    @Test func passwordRowShowsOnlyWithAStoredPasswordAndForgetReportsTheID() {
+        let detail = DeviceDetailViewController(groupController: makeController(),
+                                            settings: AppSettings(defaults: isolation.isolatedDefaults))
+        detail.show(device: makeDevice())
+        #expect(detail.test_passwordCaption == nil)
+
+        var device = makeDevice()
+        device.hasStoredPassword = true
+        detail.show(device: device)
+        #expect(detail.test_passwordCaption == "Saved")
+
+        var forgotten: [String] = []
+        detail.onForgetPassword = { forgotten.append($0) }
+        detail.test_tapForgetPassword()
+        #expect(forgotten == ["d1"])
+    }
+
     // MARK: The caption — kind
 
     // Swapping two words in `kindText(for:)` turns it red.
@@ -934,6 +954,21 @@ import AppKit
     private func documentHeight(_ detail: DeviceDetailViewController) -> CGFloat {
         let scroll = detail.view.subviews.compactMap { $0 as? NSScrollView }.first
         return scroll?.documentView?.frame.height ?? 0
+    }
+
+    // Leaving the list without a top pin, or pinning it under the header instead of the Equalizer well, on a speaker shown before its pane loads turns it red.
+    @Test func aSpeakerPaneShownBeforeItIsMountedPutsTheListUnderTheEqualizer() {
+        let detail = makeShownThenLoadedPane(device: makeDevice())
+
+        #expect(detail.test_eqSectionShown)
+        // The pane's own view is NOT flipped, so "below" is a SMALLER y.
+        #expect(detail.test_listSectionFrame.maxY <= detail.test_eqSectionFrame.minY + 0.5,
+                "the list sits under the Equalizer well, what precedes it on a speaker")
+
+        let slots = detail.test_headerSectionFrame.height + detail.test_eqSectionFrame.height
+            + detail.test_listSectionFrame.height
+        #expect(documentHeight(detail) > slots,
+                "the document holds the whole stack — a collapsed one is shorter than its own slots")
     }
 
     // Leaving the list without a top pin when the pane is shown before it loads turns it red.

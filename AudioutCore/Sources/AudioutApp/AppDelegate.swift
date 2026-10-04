@@ -1016,6 +1016,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         (backend as? NativeBackend)?.selectedDevicesQuery = { [weak self] id in
             self?.groupController?.isMainOutMember(id) ?? false
         }
+        (backend as? NativeBackend)?.localRowDrivesMainQuery = { [weak self] in
+            self?.groupController?.localRowDrivesMain ?? true
+        }
         // T6-rev: every user action that routes audio funnels into exactly two
         // backend methods (`setOutputSet` / `updateAppRoutes`), and both fire
         // this. Kicking from there rather than from the four `GroupController`
@@ -1097,7 +1100,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.popoverController.refreshSpeakerPresentation()
             self.mixerWindowController?.refreshSpeakerPresentation()
         }
-        speakerSearch.onDone = { [weak self] in self?.mixerWindowController?.speakersPage.isSearchDone = true }
+        speakerSearch.onDone = { [weak self] in self?.mixerWindowController?.setSpeakerSearchDone(true) }
         popoverController.onSpeakerRecoveryChanged = { [weak self] in
             self?.updateSpeakerLibrary()
         }
@@ -2416,7 +2419,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.requestSpeakerBluetoothAccess()
         }
         controller.speakersPage.onPairBluetooth = Self.openBluetoothPairing
-        controller.speakersPage.isSearchDone = speakerSearch.isDone
+        controller.setSpeakerSearchDone(speakerSearch.isDone)
         // A speaker the Mac can't find has no backend entry to ask, so its
         // saved tone is read from the same store the backend writes.
         controller.storedDeviceEQ = { id in (try? DeviceEQStore().load())?.devices[id] }
@@ -2437,6 +2440,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         controller.onSetMainOutEQ = { [weak self] eq, committed in
             self?.backend.setMainOutEQ(eq, commit: committed)
+        }
+        controller.onForgetAirPlayPassword = { [weak self] deviceID in
+            self?.backend.forgetAirPlayPassword(for: deviceID)
+            self?.devicesByID[deviceID]?.hasStoredPassword = false
+            self?.repaintFromCurrentState()
         }
         controller.mainOutEQProvider = { [weak self] in self?.backend.mainOutEQ ?? .flat }
         controller.update(devices: Array(devicesByID.values))
@@ -3063,7 +3071,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func refreshSpeakerBluetoothAccess() {
         let access = SpeakerBluetoothAccessPresentation(status: permissionProviders.bluetoothReader.currentStatus(),
                                                         priming: primingSpeakerBluetooth)
-        mixerWindowController?.speakersPage.setBluetoothAccess(access)
+        mixerWindowController?.setSpeakerBluetoothAccess(access)
         popoverController?.refreshSpeakerPresentation()
     }
 

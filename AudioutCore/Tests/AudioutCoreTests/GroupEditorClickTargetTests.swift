@@ -47,7 +47,7 @@ struct GroupEditorClickTargetTests {
         #expect(groups.activeGroupID == nil)
     }
 
-    // A connected Cast member stays available even when discovery no longer advertises it.
+    // Turns red when the membership row reads availability from discovery alone, dimming a connected Cast member or captioning it unavailable.
     @Test func connectedCastMemberUsesSharedAvailabilityInDrawnNode() throws {
         let device = Device(id: "cast", name: "Cast", kind: .cast, isAvailable: false,
                             connectionState: .connected)

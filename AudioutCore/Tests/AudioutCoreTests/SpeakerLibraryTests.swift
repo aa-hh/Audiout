@@ -241,6 +241,28 @@ extension SerializedSharedState {
             #expect(FileManager.default.fileExists(atPath: file.path))
         }
 
+        // The controller's init not saving the cleaned library after a load that dropped an entry turns it red: the
+        // second launch drops the same entry again and keeps a second copy.
+        @Test func aDroppedEntryIsCopiedOnceNotOnEveryLaunch() throws {
+            let file = scratchDir.appendingPathComponent("speaker-library.json")
+            try Data(#"""
+            {"schemaVersion": 1, "visibility": {},
+             "metadata": {"ok": {"name": "Kitchen", "kind": "homePod"}, "weird": {"name": "Pod", "kind": "teleporter"}}}
+            """#.utf8).write(to: file)
+            func copies() throws -> [String] {
+                try FileManager.default.contentsOfDirectory(atPath: scratchDir.path)
+                    .filter { $0.hasPrefix("speaker-library.corrupt-") }
+            }
+            _ = library()
+            // A copy is named by the second it was made, so a second copy in the same second would land on the
+            // first one's name and fail silently; moving the first aside lets every later copy show.
+            let first = try #require(try copies().first)
+            try FileManager.default.moveItem(at: scratchDir.appendingPathComponent(first),
+                                             to: scratchDir.appendingPathComponent("speaker-library.corrupt-0.json"))
+            #expect(library().record(for: "ok")?.displayName == "Kitchen")
+            #expect(try copies() == ["speaker-library.corrupt-0.json"])
+        }
+
         // The capture moving before the save, firing on a no-op gesture, or counting the local Mac turns it red.
         @Test func visibilityChangeCapturesOneEventAfterARealWrite() {
             let captured = CapturedEvents()
@@ -295,6 +317,25 @@ extension SerializedSharedState {
             #expect(try controller.forget(["live"], scenes: scenes) == 0)
             #expect(scenes.groups.first?.memberIDs == ["live", "x"])
             #expect(controller.record(for: "live") != nil)
+        }
+
+        // Forget dropping a lost speaker that Main Audio or an app route still names, or skipping one only a retained recovery lookup keeps in use, turns it red.
+        @Test func forgetSkipsOnlyALostSpeakerStillRouted() throws {
+            let controller = library()
+            let scenes = try sceneController([Group(id: "k", name: "Kitchen",
+                                                    memberIDs: ["live", "main", "routed", "looked-for", "gone"],
+                                                    memberVolumes: [:])])
+            controller.update(liveDevices: [speaker("live")], groups: scenes.groups,
+                              currentUse: SpeakerCurrentUse(mainAudioMemberIDs: ["main"],
+                                                            appRouteDestinations: [.device(id: "routed")],
+                                                            recoveryIDs: ["looked-for"]))
+            #expect(controller.record(for: "looked-for")?.isInUse == true)
+            #expect(try controller.forget(["main", "routed", "looked-for", "gone"], scenes: scenes) == 1)
+            #expect(scenes.groups.first?.memberIDs == ["live", "main", "routed"])
+            #expect(controller.record(for: "main") != nil)
+            #expect(controller.record(for: "routed") != nil)
+            #expect(controller.record(for: "looked-for") == nil)
+            #expect(controller.record(for: "gone") == nil)
         }
 
         // Forget deleting or emptying a scene instead of refusing, or writing one store before the refusal, turns it red.

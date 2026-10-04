@@ -214,8 +214,11 @@ public enum PopoverColumnGrid {
     /// sized (116 → 140, Warm Signal C1) so the two longest fixed dropdown
     /// titles, "Follows main output" (the app-row bridge phrase, decision 3) and
     /// the count-free "Selected Speakers" (decision m), fit a small-control
-    /// `NSPopUpButton` untruncated (measured fitting width 137 pt).
-    public static let trailingControlWidth: CGFloat = 140
+    /// `NSPopUpButton` untruncated (measured fitting width 137 pt). Grown
+    /// 140 → 200 on 2026-10-04, paid for by `SurfaceLayout.width`, so the
+    /// Mac's, a Bluetooth or a Cast row can show "System" plus one app pill
+    /// beside the 84 pt Offset chip instead of "+2" alone.
+    public static let trailingControlWidth: CGFloat = 200
     /// The FEED column's available text width (Warm Signal v4.1 item 3) — the
     /// same physical slot as `trailingControlWidth` (the reserved-but-empty
     /// trailing column on a bus row, since the membership control moved to the
@@ -631,7 +634,7 @@ public enum PopoverColumnGrid {
 
     /// Height of the inline rename field. Tall enough to read as a control
     /// (rather than a label with a box around it) while still fitting beside
-    /// the 64 pt icon well in the side-by-side header band.
+    /// the 48 pt icon well in the side-by-side header band.
     public static let titleFieldHeight: CGFloat = 28
     /// Corner radius of the inline rename field — the control radius every
     /// field and button in the app wears.
@@ -699,7 +702,7 @@ public enum PopoverColumnGrid {
     /// Gap between the FEED pill slot and the SYNC chip that follows it.
     public static let btFeedToSyncGap: CGFloat = 4
     /// The sync-capable row's FEED slot: the trailing-control column's LEADING
-    /// portion — everything the chip and their gap leave (140 − 84 − 4 = 52).
+    /// portion — everything the chip and their gap leave (200 − 84 − 4 = 112).
     /// The pills left-align on `feedColumnLeadingFromTrailing`, and this width
     /// is both their ceiling and the feed stack's clipping bound (the stack
     /// masks to its own bounds), so an overlong pill is cut off at the chip's
@@ -716,9 +719,9 @@ public enum PopoverColumnGrid {
     /// syncChipWidth`), so the title LEFT-ALIGNS over its column exactly as
     /// "Source" left-aligns on `feedColumnLeadingFromTrailing` (sibling
     /// anchor, same card header line). At `Tokens.Font.captionMedium`
-    /// "Source" measures 37.7 pt and starts at 154, ending at 116.3;
+    /// "Source" measures 37.7 pt and starts at 214, ending at 176.3;
     /// "Offset" measures 33.6 pt and starts here at 98, ending at 64.4 —
-    /// **18.3 pt of clear air** between them. Re-anchoring the chip
+    /// **78.3 pt of clear air** between them. Re-anchoring the chip
     /// re-anchors this title, which is the point: the title always sits
     /// over the chip it names. This legend prints exactly once, on the card
     /// header, never on a subsection line.

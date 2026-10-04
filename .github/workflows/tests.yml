@@ -46,21 +46,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Shard 1 is the suites whose files still hold blocking waits
-        # (Thread.sleep, RunLoop.run(until:), .wait(timeout:)); those hold a
-        # cooperative thread and starve Swift concurrency process-wide (see
-        # SuiteWait.swift and 8a1016d9), so they get a process of their own.
-        # Shards 2 and 3 are every other suite file, split in half
-        # alphabetically by file. Each regex names whole suite types after
-        # `.` (top level) or `/` (nested, e.g. under SerializedSharedState).
-        # A new suite file must be added to shard 2 or 3 or it will not run.
-        include:
-          - shard: 1
-            filter: '[./](AggregateOutputDeviceIdentityTests|AggregateOutputDeviceTests|AggregateOutputDeviceWiringTests|AppRouteMixerTests|CastFakeReceiverLoopTests|CastLiveAudioServerRefusalTests|CastLiveAudioServerTests|CastOutputManagerTests|CompanionEndToEndTests|DACPServerTests|DriftCorrectionApplierAnalyticsTests|DriftCorrectionApplierSinkTests|DriftCorrectionApplierTests|LeveledAppInjectorTests|NativeBackendGlobalStateTests|NativeBackendTests|NativeCaptureCoordinatorTests|NativeDiscoveryLiveTests|NativeDiscoveryTests|PassiveDriftSamplerAnalyticsTests|PassiveDriftSamplerTests|PassiveDriftTrackerTests|PerAppCaptureCoordinatorTests|SyncDrawerCloseVetoTests|SyncDrawerMountedKeyTests)\b'
-          - shard: 2
-            filter: '[./](AboutSectionTests|AccessibilitySignalSweepTests|AirPlayHandoffWatcherTests|AlignmentPlateCellTests|AlignmentStageViewTests|AlignmentTickInjectorTests|AlignmentTokenContrastTests|AnalyticsTests|AppIconCacheTests|AppRelaunchCommandTests|AppRouteStoreTests|AppRouteTargetEligibilityTests|AppRoutingControllerTests|AppRowViewTests|AppSettingsTests|AppSurfaceControllerTests|AppTranslocationTests|AudioCapturePermissionProbeTests|AudioDiagTests|AudioProcessResolverTests|AudioSettingsLatencyTests|AudioSettingsRemoteReloadTests|AudioSettingsWakeRestoreTests|BTAlignmentPosteriorTests|BTAlignmentWizardProposalTelemetryTests|BTAlignmentWizardSessionTests|BTClockStabilityTests|BTConnectionManagerTests|BTDeviceEnumeratorTests|BTDeviceRowTests|BTFanoutTests|BTHardwareVolumeStoreTests|BTHardwareVolumeTests|BTPopoverRowsTests|BTSinkClockStormTests|BTSpeakerTimingTests|BTSyncDrawerAccordionTests|BTSyncDrawerLayoutTests|BTSyncDrawerViewTests|BTSyncedSinkProtocolWitnessTests|BTSyncedSinkTests|BTSyncedSinkTestsRebuildTelemetry|BTTrimStoreTests|BackendKindResolutionTests|BrandMarkTests|BusRailCollapseResolveTests|CardViewCollapseTrajectoryTests|CastBrowserTests|CastFeedDelayTests|CastMessageCodecTests|CastRoomDelayTests|CastVolumePendingTests|CompanionAlignmentOwnershipTests|CompanionApprovalStoreTests|CompanionCommandDispatcherTests|CompanionCommandRateLimiterTests|CompanionCopyTripwireTests|CompanionLicenseActivationTests|CompanionServerTests|CompanionSnapshotBuilderTests|CompanionWiringTests|CompositedTokenContrastTests|ConnectionDiagnosisViewTests|ConnectionDiagnosticsTests|ConnectionStateTests|ControlPanelBackingViewTests|ControlPanelWindowControllerTests|DefaultOutputDeviceMonitorTests|DefaultOutputSwitcherTests|DeviceBluetoothKindTests|DeviceCastKindTests|DeviceDetailViewTests|DeviceEQStoreTests|DeviceEQTests|DeviceIconResolverTests|DeviceIconStoreTests|DeviceIconWellViewTests|DeviceIdentityTests|DeviceLocalNetworkProofTests|DeviceRowAirPlay1LiveTests|DeviceRowConnectBrightenTests|DeviceRowConnectionStateTests|DeviceRowMutedStateTests|DiagnosticsBundleTests|DiscoverySettleTrackerTests|DriftCorrectionPolicyTests|EQEditorViewTests|EQProcessorTests|EQResponseCurveTests|EmitterFieldTests|EnergizeTests|EqualizerEngagedMarkTests|ExcludedAppsTests|FeedColumnTests|FoldAnimatorTests|GeneralSettingsCompanionTests|GeneralSettingsRememberedPhonesTests|GroupControllerSyncedLocalFlipTests|GroupControllerTests|GroupEditorClickTargetTests|GroupIconPersistenceTests|GroupIdentityGlowViewTests|GroupMasterVolumePersistenceTests)\b'
-          - shard: 3
-            filter: '[./](GroupRenameFieldTests|GroupsHeaderParityTests|GroupsInkTemperatureTests|GroupsOverviewViewControllerTests|HaloRingGapTests|HeadlessRuntimeTests|IconPickerTests|IncreaseContrastLiveReconcileTests|LevelMeterViewTests|LicenseCheckInTests|LicenseDeepLinkTests|LicenseGateTests|LicenseGateTrialAnalyticsTests|LicenseValidatorTests|LocalNetworkPrimerTests|LocalOutputLatencyTests|LocalPlaybackEngineTests|MainOutRowMenuDispatchTests|MainOutRowRingTests|MembershipBusTests|MembershipRailTests|MembershipWellContrastTests|MenuBarStatusTests|MicProbeSessionTests|MixerWindowControllerTests|MockBackendTests|NativeBackendBTAlignmentInterceptTests|NativeBackendBTDevicesTests|NativeBackendBTHardwareVolumeTests|NativeBackendBTSelectionTests|NativeBackendBTSelectionTestsTelemetry|NativeBackendCastTests|NativeBackendSyncedLocalSelectionTests|NoteBannerColorTests|ObjCExceptionCatchingTests|OnboardingPermissionColorTests|OnboardingUITests|OnboardingWindowLevelTests|OutputSelectorGuardTests|PCMDelayLineTests|PTPHelperActivationTests|PTPHelperReconcilerTests|PermissionModeTests|PermissionStateObserverTests|PhaseControllerTests|PopoverBTAlignmentUITests|PopoverCastSyncOffsetTests|PopoverConnectionAnalyticsTests|PopoverControllerRowRevealMotionTests|PopoverControllerRowRevealTests|PopoverControllerTests|PopoverDeviceListOverflowTests|PopoverDeviceVisibilityTests|PopoverEqualizerEntryTests|PopoverExcludedAppsTests|PopoverIconTests|PopoverLocalSyncTrimTests|PopoverPanelHeaderTests|PreviewPaletteTokenPinTests|RailConnectPulseControllerTests|RailConnectPulseTests|ReferenceAudioRingTests|RemoteInviteViewTests|RemovalUndoTests|RingRailToneLockTests|RouteArmedSignalTests|RowAccessorySymbolTests|SettingsAccentAndHintsTests|SettingsRootViewControllerTests|SettledLightLayerTests|SetupFlowModelTests|SetupModelTests|SetupTelemetryTests|SetupUsageStatsTests|SidebarActionsTests|SpeakerLibraryTests|SpeakersPageTests|StatusItemIconTests|StatusRoutingIndicatorTests|StoreRecoveryTests|StructuralStateGateTests|SurfaceScreenSwitchCostTests|SurfaceToolbarRevealedTabHitArea|SurfaceToolbarTests|SyncValueFieldLiveKeyTests|SyncedLocalFanoutTests|SyncedLocalFanoutTestsFeedGapTelemetry|SyncedLocalSinkRingOverflowTelemetryTests|SyncedLocalSinkTests|SyncedLocalSinkTestsAnchorTelemetry|SystemAudioCaptureTCCTests|TCCProbeRunnerTests|TapRebuildLifecycleTests|TelemetryTests|TestKeySilencerTests|TokenContrastMatrixTests|TrialClockTests|TrialReachabilityTests|TrialRegistrarTests|VolumeHUDPanelTests|VolumeKeyInterceptionTests|WarmFaderCellTests|WizardDoorAnalyticsTests|WizardMeasuredProposalTests|WorkgroupLifecycleTests)\b'
+        # The shard lists live in scripts/lib/suite-shards.sh, which the
+        # runner reads for `--shard N`. Shard 1 is the suites whose files
+        # still hold blocking waits (Thread.sleep, RunLoop.run(until:),
+        # .wait(timeout:)); those hold a cooperative thread and starve Swift
+        # concurrency process-wide (see SuiteWait.swift and 8a1016d9), so
+        # they get a process of their own. Shard 2 is half of every other
+        # suite file, split alphabetically by file. Shard 3 is everything
+        # else, via `--skip`, so a new suite file needs no edit here.
+        shard: [1, 2, 3]
     steps:
       - uses: actions/checkout@v4
 
@@ -91,7 +85,7 @@ jobs:
           echo "in -help-hidden: $(swiftc -help-hidden | grep -c file-hashing || true)"
 
       - name: AudioutCore suite
-        run: bash scripts/run-tests.sh --filter '${{ matrix.filter }}' --disable-index-store -Xswiftc -enable-incremental-file-hashing -Xswiftc -driver-show-incremental
+        run: bash scripts/run-tests.sh --shard ${{ matrix.shard }} --disable-index-store -Xswiftc -enable-incremental-file-hashing -Xswiftc -driver-show-incremental
 
       # One saver, so three shards do not race on one key.
       - name: Save SwiftPM build caches

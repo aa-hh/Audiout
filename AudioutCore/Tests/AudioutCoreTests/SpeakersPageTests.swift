@@ -48,6 +48,7 @@ extension SerializedSharedState {
         #expect(page.test_rowTitles == ["Pair Bluetooth speaker\u{2026}"])
 
         page.isSearchDone = true
+        page.reload()
         #expect(!page.test_discoveryShowsSpinner)
         #expect(page.test_subtitleText == "Done looking \u{00B7} \u{25CF} 2 found")
         #expect(page.test_rowTitles == ["1 speaker can\u{2019}t be found", "Pair Bluetooth speaker\u{2026}"])

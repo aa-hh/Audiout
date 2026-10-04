@@ -141,9 +141,10 @@ public final class SidebarViewController: NSViewController {
     // window front at all, see `HeadlessRuntime` / `../../AGENTS.md`), so
     // seeding here is safe unconditionally and costs nothing headless.
     //
-    // The sidebar is the one control ALWAYS present regardless of which
-    // content pane is showing (overview/editor/detail), so it's the natural
-    // anchor: force AppKit to (re)compute the window's automatic key-view
+    // On the Speakers screen the sidebar is the one control ALWAYS present,
+    // whichever page shows beside it (the Speakers page, a speaker's page or
+    // Main Audio), so it's the natural anchor there: force AppKit to
+    // (re)compute the window's automatic key-view
     // loop (`autorecalculatesKeyViewLoop`, off by default for a code-built window;
     // the surface's shell panel turns it on — and recalculation is reactive and
     // nothing here ever explicitly nudged it either) and claim first
@@ -465,8 +466,7 @@ public final class SidebarViewController: NSViewController {
 
     private func dotState(for device: Device) -> SidebarPresenceDotView.State {
         guard let record = presentationByID[device.id] else { return device.isAvailable ? .found : .away }
-        guard let live = record.liveDevice else { return .lost }
-        if live.connectionState == .connected { return .playing }
+        guard record.liveDevice != nil else { return .lost }
         return record.isAvailable ? .found : .away
     }
 
@@ -947,10 +947,10 @@ final class PlateRowView: NSTableRowView {
 
 /// A speaker row's presence dot: whether the Mac sees the speaker on the
 /// network, never where audio is routed. Filled ember = found, hollow ember =
-/// away, gold with an ember ring = playing, the Mixer failure pill's glyph =
-/// can't be found. Drawing only: the row's spoken label says the same state.
+/// away, the Mixer failure pill's glyph = can't be found. Drawing only: the
+/// row's spoken label says the same state.
 final class SidebarPresenceDotView: NSView {
-    enum State: Equatable { case none, found, away, playing, lost }
+    enum State: Equatable { case none, found, away, lost }
 
     static let side: CGFloat = 9
 
@@ -983,13 +983,6 @@ final class SidebarPresenceDotView: NSView {
             ring.lineWidth = 1.5
             Tokens.Color.ember.setStroke()
             ring.stroke()
-        case .playing:
-            let disc = NSBezierPath(ovalIn: bounds.insetBy(dx: 0.5, dy: 0.5))
-            Tokens.Color.gold.setFill()
-            disc.fill()
-            disc.lineWidth = 1
-            Tokens.Color.ember.setStroke()
-            disc.stroke()
         case .lost:
             let config = NSImage.SymbolConfiguration(pointSize: 11, weight: .regular)
                 .applying(NSImage.SymbolConfiguration(paletteColors: [Tokens.Color.failure]))
@@ -1313,7 +1306,6 @@ extension SidebarViewController: NSOutlineViewDelegate {
         switch dotState {
         case .lost: spoken += ", can\u{2019}t be found"
         case .away: spoken += ", unavailable"
-        case .playing: spoken += ", playing"
         case .found, .none: break
         }
         if caption != nil { spoken += ", in the Mixer while it plays" }

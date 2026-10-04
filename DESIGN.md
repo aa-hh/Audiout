@@ -468,9 +468,10 @@ sheet that measured it.
 
 ## Layout
 
-The popover is the primary shell: `AppSurfaceController` swaps Mixer/Groups/
-Settings through one hosted panel, sized through `preferredContentSize` —
-height flows from content, pinned top and bottom. It has one ceiling. The
+The popover is the primary shell: `AppSurfaceController` swaps its four
+screens (Mixer, Scenes, Speakers, Settings) through one hosted panel, sized
+through `preferredContentSize` — height flows from content, pinned top and
+bottom. It has one ceiling. The
 Output Speakers card's list of speakers stops at twelve rows
 (`PopoverPanelViewController.deviceListMaxHeight`, twelve times the 42pt body
 row = 504pt) and scrolls past that, so a large fleet cannot push the surface
@@ -699,6 +700,17 @@ choices, the current one checked, then **Speaker settings…**, which opens
 that speaker's page. A speaker in current use remains
 visible even when its saved choice is Hide when not in use.
 
+A speaker that asks for a password, an on-screen code or a Home member
+carries a stock `lock.fill` (10pt semibold, template) 4pt after its name. It
+takes the name's own ink (`rowTextColor`), never gold, and the name truncates
+before the lock gives way. Its spoken label names the kind of lock. Joining a
+password speaker with nothing saved, or the diagnosis panel's
+"Enter Password…" button, raises a sheet on the panel
+(`SpeakerPasswordSheetViewController`): a bold one-line heading, a stock secure
+field, then Cancel and a gold `ProminentButton` Connect, right-aligned. A
+caption-size result line appears only once Connect is pressed: "Connecting…",
+then the reason if the attempt fails. A connect dismisses the sheet.
+
 ### Speakers Sidebar and Pages
 The sidebar is the only speaker list. Under the System Audio row and the
 Speakers plate it holds two groups that are the Mixer visibility setting:
@@ -706,16 +718,18 @@ Speakers plate it holds two groups that are the Mixer visibility setting:
 when it has rows, **Hidden unless playing**, which folds through the stock
 hover Show/Hide control. Rows are one line. A 9 pt dot before the icon shows
 presence, never routing: a filled `ember` disc for a speaker on the network, a
-1.5 pt `ember` ring for one that is away, a `gold` disc with a 1 pt `ember`
-ring for one that is playing, and the `failure` `exclamationmark.triangle` at
-11 pt for one the Mac can't find. The one caption is **In the Mixer while it
-plays**, on a 40 pt row, for a hidden speaker in use. The right-click menu
+1.5 pt `ember` ring for one that is away, and the `failure`
+`exclamationmark.triangle` at 11 pt for one the Mac can't find. The one
+caption is **In the Mixer while it plays**, on a 40 pt row, for a hidden
+speaker in use. The right-click menu
 offers **Hide from Mixer** or **Show in Mixer**, **Keep in Mixer when
 unavailable** (checked for Always), **Speaker settings…**, and **Forget…** for
 speakers the Mac can't find; dragging rows onto the other group's header moves
 them between groups. Forget asks first in a warning sheet whose Return key is
-Cancel, and refuses when a scene would be left with no speaker, naming the
-scene to delete first.
+Cancel. It refuses when a scene would be left with no speaker, naming the
+scene to delete first, and when Main Audio or an app is still set to play on
+the speaker. A failed Forget shows the scene editor's "couldn't be updated"
+alert.
 
 Every window page opens with a 48 pt icon well, a 16 pt semibold name and one
 caption line. The icon well starts on the page's own 14 pt inset, level with
@@ -736,18 +750,21 @@ edge and is hidden while the curve is flat. An unavailable speaker keeps its
 editor, which carries the note "Changes will be applied when the speaker is
 back." A speaker the Mac can't find shows no editor; when its curve is shaped
 it shows "Changes will be applied when the speaker is found again.", and it
-always shows a Forget button. Then a two-row outlined list whose rows start on
+always shows a Forget button. Then an outlined list whose rows start on
 the same 14 pt inset: **Show in Mixer**, whose caption explains the current
-choice beside its pop-up (absent for This Mac), and **Scenes**, linking each
-scene the speaker belongs to, one link per line on the row's trailing side.
+choice beside its pop-up (absent for This Mac), **Scenes**, linking each
+scene the speaker belongs to, one link per line on the row's trailing side,
+and, only while a password is saved for the speaker, **Password**, captioned
+"Saved", with a small stock Forget button.
 
-The Speakers plate's page lists no speakers. Under a subtitle counting the
-speakers in the Mixer and hidden, one outlined list holds only the rows that
-are true: the discovery result (a `systemGreen` `checkmark.circle.fill` when
-every speaker is found, a small spinner while looking), Bluetooth access while
-it is off, the speakers that can't be found with a Forget button, and **Pair
-Bluetooth speaker…** last. The found mark is stock `systemGreen` because the
-equalizer green is fenced.
+The Speakers plate's page lists no speakers. Its caption line is the search
+result: a small spinner and the count found so far while looking, then a
+`systemGreen` `checkmark.circle.fill` with "All N speakers found", or "Done
+looking" with the found and away counts. One outlined card follows. Its first
+row counts every kept speaker by kind; after it come only the rows that are
+true: Bluetooth access while it is off, the speakers that can't be found with
+a Forget button once the search is done, and **Pair Bluetooth speaker…** last. The found mark is stock
+`systemGreen` because the equalizer green is fenced.
 
 Scene checkboxes change membership. Their rows give an unavailable member's
 status and nothing about visibility; scene cards count unavailable members

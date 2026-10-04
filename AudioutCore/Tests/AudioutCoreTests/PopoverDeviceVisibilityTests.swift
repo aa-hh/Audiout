@@ -584,7 +584,7 @@ import AppKit
         #expect(openedEqualizers == ["office"])
     }
 
-    // Hiding current use must retain its row and a connected, undiscovered receiver must keep its known volume.
+    // Turns red when "Hide when not in use" drops the row of a speaker still in current use, or a connected receiver discovery stopped advertising loses its known volume.
     @Test(arguments: [Device.Kind.homePod, .cast])
     func hidingAPlayingSpeakerKeepsItVisibleUntilUseEnds(kind: Device.Kind) throws {
         let receiver = kind == .cast ? cast("office", name: "Office") : airplay()
@@ -708,7 +708,7 @@ import AppKit
         #expect(popover.devicesByID["bt"] == nil)
     }
 
-    // A name reconnect must use retryOutput without turning playback on.
+    // Turns red when a Bluetooth name click reaches anything but `retryOutput`, changes the selection, or its failure row outlives the surface's close.
     @Test func bluetoothNameReconnectRetainsFailureOnlyForTheOpenSurface() throws {
         let device = bt("bt", name: "Bluetooth", available: false)
         let backend = RecordingRetryBackend(MockBackend(fleet: [local(), device], staggerDiscovery: false,
@@ -808,7 +808,7 @@ import AppKit
         #expect(controller.selectedDeviceIDs == selectedBeforeClose)
     }
 
-    // Discovery absence must not hide a connected Cast session.
+    // Turns red when the Mixer hides, or greys out, a Cast row whose discovery ended while its session is still connected.
     @Test func connectedUndiscoveredCastKeepsItsLiveRow() {
         let (popover, _) = makePopover()
         var receiver = cast("cast", name: "TV")

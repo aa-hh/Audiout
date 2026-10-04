@@ -68,6 +68,11 @@ private final class SpyEngine: EngineControlling, @unchecked Sendable {
     /// connect path surfaces `.authRequired` instead of flattening to
     /// `.unknown`.
     var addFailureError: AirPlayEngineError = .sessionFailed
+    /// When set, an `addFailures` add also reports its failure on the state
+    /// stream, as the real engine does (shims/outputs.c fires the completion
+    /// hook, then the state hook). The hook is awaited after that report and
+    /// before the add throws, so a test can let the backend apply it first.
+    var onMirroredAddFailure: (@Sendable (OutputID) async -> Void)?
     /// Ids whose `setVolume` should THROW (still recording the call) — a
     /// receiver that refuses the write, which the fader must not keep lying about.
     var volumeFailures: Set<UInt64> = []
@@ -179,7 +184,7 @@ private final class SpyEngine: EngineControlling, @unchecked Sendable {
             hook?(id)
             let hold = self.lock.withLock { self.onAddOutputHold }
             if let hold { await hold(id, 0) }
-            if self.addFailures.contains(id.rawValue) { throw self.addFailureError }
+            try await self.failScriptedAdd(id)
             // Engine idempotency: an already-live session is NOT re-bound.
             self.lock.withLock { if self.liveStreams[id.rawValue] == nil { self.liveStreams[id.rawValue] = 0 } }
         }
@@ -277,7 +282,7 @@ private final class SpyEngine: EngineControlling, @unchecked Sendable {
             hook?(id)
             let hold = self.lock.withLock { self.onAddOutputHold }
             if let hold { await hold(id, streamId) }
-            if self.addFailures.contains(id.rawValue) { throw self.addFailureError }
+            try await self.failScriptedAdd(id)
             // Engine idempotency: an already-live session is NOT re-bound to
             // `streamId` — that silent no-op is exactly defect B.
             self.lock.withLock {
@@ -309,6 +314,17 @@ private final class SpyEngine: EngineControlling, @unchecked Sendable {
         lock.withLock { cadenceSnapshotToReturn = snapshot }
     }
     func writeCadenceSnapshot() -> WriteCadenceSnapshot { lock.withLock { cadenceSnapshotToReturn } }
+
+    /// Throw the scripted add failure for `id`, mirrored onto the state stream
+    /// when `onMirroredAddFailure` is set.
+    private func failScriptedAdd(_ id: OutputID) async throws {
+        guard addFailures.contains(id.rawValue) else { return }
+        if let mirror = lock.withLock({ onMirroredAddFailure }) {
+            pushState(id, addFailureError == .passwordRequired ? .passwordRequired : .failed)
+            await mirror(id)
+        }
+        throw addFailureError
+    }
 
     /// Run a device op, tracking concurrent-in-flight-per-device (to catch
     /// overlapping ops) and applying the artificial latency. The body is
@@ -620,18 +636,22 @@ private struct NoOpAggregateControl: AggregateDeviceControlling {
     func setDefaultOutputDevice(_ deviceID: AudioObjectID) -> Bool { false }
 }
 
-private func ap2Device(id: String = "AA:BB:CC:DD:EE:01", name: String = "Sonos Move", model: String = "S13") -> DiscoveredDevice {
+private func ap2Device(id: String = "AA:BB:CC:DD:EE:01", name: String = "Sonos Move", model: String = "S13",
+                       access: AirPlayAccess = .open) -> DiscoveredDevice {
     let txt = ["deviceid": id, "model": model, "features": "0x445F8A00,0x1C340"]
     let (parsedID, outputID) = NativeDiscovery.parseDeviceID(txt)!
     let desc = DeviceDescriptor(name: name, address: "192.168.1.10", family: .ipv4, port: 7000, txtRecord: txt)
-    return DiscoveredDevice(id: parsedID, descriptor: desc, outputID: outputID, isAirPlay2Supported: true)
+    return DiscoveredDevice(id: parsedID, descriptor: desc, outputID: outputID, isAirPlay2Supported: true,
+                            access: access)
 }
 
-private func ap1Device(id: String = "AA:BB:CC:DD:EE:99", name: String = "Old Express") -> DiscoveredDevice {
+private func ap1Device(id: String = "AA:BB:CC:DD:EE:99", name: String = "Old Express",
+                       access: AirPlayAccess = .open) -> DiscoveredDevice {
     let txt = ["deviceid": id, "model": "AirPort4,107"]
     let (parsedID, outputID) = NativeDiscovery.parseDeviceID(txt)!
     let desc = DeviceDescriptor(name: name, address: "192.168.1.20", family: .ipv4, port: 5000, txtRecord: txt)
-    return DiscoveredDevice(id: parsedID, descriptor: desc, outputID: outputID, isAirPlay2Supported: false)
+    return DiscoveredDevice(id: parsedID, descriptor: desc, outputID: outputID, isAirPlay2Supported: false,
+                            access: access)
 }
 
 /// `systemVolume` defaults to a fresh ``FakeSystemVolume`` so EVERY call
@@ -646,6 +666,7 @@ private func makeBackend(
     /// only, exactly like `btTrimStore`. The EQ tests pass a store over an
     /// isolated scratch directory so nothing touches real Application Support.
     eqStore: DeviceEQStore? = nil,
+    passwordStore: AirPlayPasswordStoring? = nil,
     systemVolume: SystemVolumeControlling = FakeSystemVolume(),
     ptpHelperActivator: PTPHelperActivating = AlwaysReadyPTPHelperActivator(),
     connectVolume: @escaping @Sendable () -> Int = { AppSettings.defaultConnectVolume },
@@ -671,6 +692,7 @@ private func makeBackend(
     let discovery = FakeDiscovery()
     let backend = NativeBackend(
         engineControl: engine, discoverySource: discovery, eqStore: eqStore,
+        passwordStore: passwordStore,
         dacpEndpoint: FakeDACPEndpoint(),
         systemVolume: systemVolume, ptpHelperActivator: ptpHelperActivator,
         connectVolume: connectVolume, processResolver: processResolver,
@@ -1189,6 +1211,39 @@ private final class HoldPoint: @unchecked Sendable {
     }
 }
 
+/// Every connection state a device's `deviceUpdated` events carried, in order.
+private final class StateLog: @unchecked Sendable {
+    private let lock = NSLock()
+    private var states: [ConnectionState] = []
+    func append(_ state: ConnectionState) { lock.withLock { states.append(state) } }
+    var all: [ConnectionState] { lock.withLock { states } }
+}
+
+/// A password store whose writes run `onWillSet` before storing and `onSet`
+/// after, unless `dropsWrites` makes them no-ops (a refused or denied
+/// Keychain write).
+private final class ScriptedPasswordStore: AirPlayPasswordStoring, @unchecked Sendable {
+    private let inner = InMemoryAirPlayPasswordStore()
+    private let lock = NSLock()
+    private var removes = 0
+    let dropsWrites: Bool
+    var onWillSet: (@Sendable () -> Void)?
+    var onSet: (@Sendable () -> Void)?
+    init(dropsWrites: Bool = false) { self.dropsWrites = dropsWrites }
+    var removeCount: Int { lock.withLock { removes } }
+    func password(for deviceID: String) -> String? { inner.password(for: deviceID) }
+    func setPassword(_ password: String, for deviceID: String) {
+        guard !dropsWrites else { return }
+        onWillSet?()
+        inner.setPassword(password, for: deviceID)
+        onSet?()
+    }
+    func removePassword(for deviceID: String) {
+        lock.withLock { removes += 1 }
+        inner.removePassword(for: deviceID)
+    }
+}
+
 /// A once-latch for hooks that must act on their first invocation only.
 private final class OnceFlag: @unchecked Sendable {
     private let lock = NSLock()
@@ -1346,6 +1401,10 @@ private final class SpyLocalPlayback: LocalPlaybackControlling, @unchecked Senda
     private var _meteringActive = false
     func setMeteringActive(_ active: Bool) { lock.withLock { _meteringActive = active } }
     var meteringActive: Bool { lock.withLock { _meteringActive } }
+
+    private var _outputGains: [Float] = []
+    func setOutputGain(_ gain: Float) { lock.withLock { _outputGains.append(gain) } }
+    var outputGains: [Float] { lock.withLock { _outputGains } }
 
     var addedApps: [(bundleID: String, volume: Float)] { lock.withLock { _added } }
     var removedApps: [String] { lock.withLock { _removed } }
@@ -3117,6 +3176,533 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         }
         #expect(failure.cause == .authRequired,
                 "the add-throw catch maps the engine's passwordRequired, not .unknown")
+    }
+
+    // MARK: AirPlay passwords
+
+    /// Submits `password` for `id` and returns once the backend has stored it,
+    /// where `GroupController` would retry.
+    private func submitAndWait(_ backend: NativeBackend, _ password: String, for id: String) async {
+        await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
+            backend.submitAirPlayPassword(password, for: id, source: "mac") { done.resume() }
+        }
+    }
+
+    private func failureCause(_ backend: NativeBackend, _ id: String) -> ConnectionFailure.Cause? {
+        if case .failed(let f)? = backend.devices.first(where: { $0.id == id })?.connectionState { return f.cause }
+        return nil
+    }
+
+    /// The retry not feeding the stored password to the engine (the
+    /// converge's descriptor compare ignoring `password`) turns it red.
+    @Test func submittedPasswordIsFedToTheEngineOnRetry() async {
+        let store = InMemoryAirPlayPasswordStore()
+        let (backend, engine, discovery) = makeBackend(passwordStore: store)
+        let device = ap2Device(access: .password)
+        engine.addFailures = [device.outputID.rawValue]
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+
+        backend.setOutputSet([device.id])
+        await pollUntil { self.failureCause(backend, device.id) == .authRequired }
+
+        engine.addFailures = []
+        await submitAndWait(backend, "secret", for: device.id)
+        backend.retryOutput(device.id)
+        await pollUntil { backend.devices.first { $0.id == device.id }?.connectionState == .connected }
+        #expect(engine.fedDescriptorList.last?.password == "secret")
+        #expect(backend.devices.first { $0.id == device.id }?.hasStoredPassword == true)
+    }
+
+    /// Keeping a stored password after the receiver refused it (so every
+    /// later retry repeats the wrong password) turns it red.
+    @Test func refusedStoredPasswordIsDeleted() async {
+        let store = InMemoryAirPlayPasswordStore()
+        let device = ap2Device(access: .password)
+        store.setPassword("wrong", for: device.id)
+        let (backend, engine, discovery) = makeBackend(passwordStore: store)
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+        #expect(backend.devices.first { $0.id == device.id }?.hasStoredPassword == true)
+
+        backend.setOutputSet([device.id])
+        await pollUntil { backend.devices.first { $0.id == device.id }?.connectionState == .connected }
+        #expect(engine.fedDescriptorList.last?.password == "wrong")
+
+        engine.pushState(device.outputID, .passwordRequired)
+        await pollUntil { backend.devices.first { $0.id == device.id }?.hasStoredPassword == false }
+        #expect(store.password(for: device.id) == nil)
+        #expect(failureCause(backend, device.id) == .authRequired)
+    }
+
+    /// Mapping a password speaker's unexplained connect failure to `.unknown`
+    /// (AirPlay 2 reports a refused password as a plain failure) turns it red.
+    @Test func passwordSpeakerConnectFailureReadsAsAuthRequired() async {
+        let (backend, engine, discovery) = makeBackend()
+        let device = ap2Device(access: .password)
+        engine.addFailures = [device.outputID.rawValue]
+        engine.addFailureError = .sessionFailed
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+
+        backend.setOutputSet([device.id])
+        await pollUntil { self.failureCause(backend, device.id) != nil }
+        #expect(failureCause(backend, device.id) == .authRequired)
+    }
+
+    /// Mapping a password demand from an on-screen-code receiver to
+    /// `.authRequired` (offering a password sheet an Apple TV can't use) turns it red.
+    @Test func passwordRequiredOnOnScreenCodeSpeakerReadsAsCodeRequired() async {
+        let (backend, engine, discovery) = makeBackend()
+        let device = ap2Device(access: .onScreenCode)
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+
+        backend.setOutputSet([device.id])
+        await pollUntil { backend.devices.first { $0.id == device.id }?.isSelected == true }
+        engine.pushState(device.outputID, .passwordRequired)
+        await pollUntil { self.failureCause(backend, device.id) != nil }
+        #expect(failureCause(backend, device.id) == .codeRequired)
+    }
+
+    /// Deleting the stored password on a plain `sessionFailed` (a guessed
+    /// refusal, which a Wi-Fi blip also produces) turns it red.
+    @Test func sessionFailedOnPasswordSpeakerKeepsTheStoredPassword() async {
+        let store = InMemoryAirPlayPasswordStore()
+        let device = ap2Device(access: .password)
+        store.setPassword("right", for: device.id)
+        let (backend, engine, discovery) = makeBackend(passwordStore: store)
+        defer { backend.stop() }
+        engine.addFailures = [device.outputID.rawValue]
+        engine.addFailureError = .sessionFailed
+        await startAndDiscover(backend, engine, discovery, device)
+
+        backend.setOutputSet([device.id])
+        await pollUntil { self.failureCause(backend, device.id) != nil }
+        #expect(failureCause(backend, device.id) == .authRequired)
+        #expect(backend.devices.first { $0.id == device.id }?.hasStoredPassword == true)
+        #expect(store.password(for: device.id) == "right")
+    }
+
+    /// Reading any connect error on a password speaker as a refused password
+    /// (instead of only `sessionFailed`) turns it red.
+    @Test func operationRejectedOnPasswordSpeakerReadsAsUnknown() async {
+        let (backend, engine, discovery) = makeBackend()
+        defer { backend.stop() }
+        let device = ap2Device(access: .password)
+        engine.addFailures = [device.outputID.rawValue]
+        engine.addFailureError = .operationRejected
+        await startAndDiscover(backend, engine, discovery, device)
+
+        backend.setOutputSet([device.id])
+        await pollUntil { self.failureCause(backend, device.id) != nil }
+        #expect(failureCause(backend, device.id) == .unknown)
+    }
+
+    /// Parking the speaker when a password arrives while its connect is still
+    /// failing (so the typed password never reaches the receiver) turns it red.
+    @Test func passwordSubmittedDuringAFailingConnectReachesTheNextAttempt() async {
+        let store = InMemoryAirPlayPasswordStore()
+        let (backend, engine, discovery) = makeBackend(passwordStore: store)
+        defer { backend.stop() }
+        let device = ap2Device(access: .password)
+        await startAndDiscover(backend, engine, discovery, device)
+        let addHold = HoldPoint()
+        let secondAdd = OnceFlag()
+        engine.addFailures = [device.outputID.rawValue]
+        engine.onAddOutputHold = { id, _ in
+            guard id == device.outputID else { return }
+            if secondAdd.testAndSet() { engine.addFailures = [] } else { await addHold.hold() }
+        }
+
+        backend.setOutputSet([device.id])
+        await pollUntil { addHold.entered }
+        await submitAndWait(backend, "secret", for: device.id)
+        backend.retryOutput(device.id)
+        addHold.open()
+
+        await pollUntil { backend.devices.first { $0.id == device.id }?.connectionState == .connected }
+        #expect(backend.devices.first { $0.id == device.id }?.connectionState == .connected)
+        #expect(engine.fedDescriptorList.last?.password == "secret")
+    }
+
+    /// Leaving the typed password in place after the attempt that carried it
+    /// (so a later Try again feeds a password the store never kept) turns it red.
+    @Test func passwordTheStoreNeverKeepsBuysExactlyOneExtraAttempt() async {
+        let store = ScriptedPasswordStore(dropsWrites: true)
+        let (backend, engine, discovery) = makeBackend(passwordStore: store)
+        defer { backend.stop() }
+        let device = ap2Device(access: .password)
+        await startAndDiscover(backend, engine, discovery, device)
+        let firstAdd = HoldPoint()
+        let sawFirst = OnceFlag()
+        engine.addFailures = [device.outputID.rawValue]
+        engine.onAddOutputHold = { id, _ in
+            guard id == device.outputID, !sawFirst.testAndSet() else { return }
+            await firstAdd.hold()
+        }
+        let adds = { engine.addedIDs.filter { $0 == device.outputID }.count }
+
+        backend.setOutputSet([device.id])
+        await pollUntil { firstAdd.entered }
+        await submitAndWait(backend, "secret", for: device.id)
+        firstAdd.open()
+        await pollUntil { self.failureCause(backend, device.id) != nil }
+        #expect(adds() == 2)
+        #expect(engine.fedDescriptorList.last?.password == "secret")
+
+        backend.retryOutput(device.id)
+        await pollUntil { adds() == 3 && self.failureCause(backend, device.id) != nil }
+        #expect(adds() == 3)
+        #expect(engine.fedDescriptorList.last?.password == nil)
+        #expect(failureCause(backend, device.id) == .authRequired)
+    }
+
+    /// Setting the typed-password mark after the store write (so a
+    /// `.passwordRequired` catch in between deletes the password just typed)
+    /// turns it red.
+    @Test func passwordRequiredLandingRightAfterASubmitKeepsTheTypedPassword() async {
+        let store = ScriptedPasswordStore()
+        let device = ap2Device(access: .password)
+        store.setPassword("old", for: device.id)
+        let (backend, engine, discovery) = makeBackend(passwordStore: store)
+        defer { backend.stop() }
+        await startAndDiscover(backend, engine, discovery, device)
+        let firstAdd = HoldPoint()
+        let sawFirst = OnceFlag()
+        engine.addFailures = [device.outputID.rawValue]
+        engine.addFailureError = .passwordRequired
+        engine.onAddOutputHold = { id, _ in
+            guard id == device.outputID else { return }
+            if sawFirst.testAndSet() { engine.addFailures = [] } else { await firstAdd.hold() }
+        }
+        // The failed add lands at the store write, after the mark: the hook
+        // lets it fail and waits until the catch has either deleted a password
+        // or looped into the next attempt.
+        store.onSet = {
+            firstAdd.open()
+            let deadline = Date().addingTimeInterval(30)
+            while store.removeCount == 0,
+                  engine.addedIDs.filter({ $0 == device.outputID }).count < 2,
+                  Date() < deadline {
+                Thread.sleep(forTimeInterval: 0.002)
+            }
+        }
+
+        backend.setOutputSet([device.id])
+        await pollUntil { firstAdd.entered }
+        #expect(engine.fedDescriptorList.last?.password == "old")
+        await submitAndWait(backend, "new", for: device.id)
+
+        await pollUntil { backend.devices.first { $0.id == device.id }?.connectionState == .connected }
+        #expect(store.removeCount == 0)
+        #expect(store.password(for: device.id) == "new")
+        #expect(backend.devices.first { $0.id == device.id }?.hasStoredPassword == true)
+    }
+
+    /// Feeding the catch's extra attempt from the store (dropping
+    /// `passwordForNextFeed`) while the Keychain write has not landed turns it red.
+    @Test func extraAttemptCarriesTheTypedPasswordBeforeTheStoreWriteLands() async {
+        let store = ScriptedPasswordStore()
+        let writeGate = DispatchSemaphore(value: 0)
+        store.onWillSet = { writeGate.wait() }
+        let (backend, engine, discovery) = makeBackend(passwordStore: store)
+        defer { backend.stop() }
+        let device = ap2Device(access: .password)
+        await startAndDiscover(backend, engine, discovery, device)
+        let firstAdd = HoldPoint()
+        let sawFirst = OnceFlag()
+        engine.addFailures = [device.outputID.rawValue]
+        engine.onAddOutputHold = { id, _ in
+            guard id == device.outputID else { return }
+            if sawFirst.testAndSet() { engine.addFailures = [] } else { await firstAdd.hold() }
+        }
+
+        backend.setOutputSet([device.id])
+        await pollUntil { firstAdd.entered }
+        backend.submitAirPlayPassword("secret", for: device.id, source: "mac") {}
+        await pollUntil { backend.devices.first { $0.id == device.id }?.hasStoredPassword == true }
+        firstAdd.open()
+
+        await pollUntil { backend.devices.first { $0.id == device.id }?.connectionState == .connected }
+        #expect(engine.fedDescriptorList.last?.password == "secret")
+        #expect(store.password(for: device.id) == nil)
+        writeGate.signal()
+        await pollUntil { store.password(for: device.id) == "secret" }
+    }
+
+    /// Building a discovery re-feed's password from the store alone (dropping
+    /// the fed one in `feedEngineIfAvailable`) turns it red: the `.updated`
+    /// lands before the Keychain write and feeds the engine no password.
+    @Test func discoveryUpdateDuringTheExtraAttemptKeepsTheTypedPassword() async {
+        let store = ScriptedPasswordStore()
+        let writeGate = DispatchSemaphore(value: 0)
+        store.onWillSet = { writeGate.wait() }
+        let (backend, engine, discovery) = makeBackend(passwordStore: store)
+        defer { backend.stop() }
+        let device = ap2Device(access: .password)
+        await startAndDiscover(backend, engine, discovery, device)
+        let firstAdd = HoldPoint()
+        let extraAdd = HoldPoint()
+        let sawFirst = OnceFlag()
+        engine.addFailures = [device.outputID.rawValue]
+        engine.onAddOutputHold = { id, _ in
+            guard id == device.outputID else { return }
+            if sawFirst.testAndSet() {
+                engine.addFailures = []
+                await extraAdd.hold()
+            } else {
+                await firstAdd.hold()
+            }
+        }
+
+        backend.setOutputSet([device.id])
+        await pollUntil { firstAdd.entered }
+        backend.submitAirPlayPassword("secret", for: device.id, source: "mac") {}
+        await pollUntil { backend.devices.first { $0.id == device.id }?.hasStoredPassword == true }
+        firstAdd.open()
+        await pollUntil { extraAdd.entered }
+        #expect(engine.fedDescriptorList.last?.password == "secret")
+
+        // A changed port makes the re-feed happen either way, so the test can
+        // wait for it and read the password it carried.
+        let moved = DiscoveredDevice(
+            id: device.id,
+            descriptor: DeviceDescriptor(
+                name: device.descriptor.name, address: device.descriptor.address,
+                family: .ipv4, port: device.descriptor.port + 1,
+                txtRecord: device.descriptor.txtRecord),
+            outputID: device.outputID, isAirPlay2Supported: true, access: .password)
+        discovery.fire(.updated(moved))
+        await pollUntil { engine.fedDescriptorList.last?.port == moved.descriptor.port }
+        #expect(engine.fedDescriptorList.last?.port == moved.descriptor.port)
+        #expect(engine.fedDescriptorList.last?.password == "secret")
+        #expect(store.password(for: device.id) == nil)
+
+        extraAdd.open()
+        writeGate.signal()
+        await pollUntil { store.password(for: device.id) == "secret" }
+    }
+
+    /// Parking the speaker or showing it refused when the state stream reports
+    /// the failed connect before the catch runs (so the typed password never
+    /// reaches the receiver) turns it red.
+    @Test func passwordSubmittedDuringAFailingConnectSurvivesTheStateStreamReport() async {
+        let store = InMemoryAirPlayPasswordStore()
+        let (backend, engine, discovery) = makeBackend(passwordStore: store)
+        defer { backend.stop() }
+        let device = ap2Device(access: .password)
+        let marker = ap2Device(id: "AA:BB:CC:DD:EE:02", name: "Marker")
+        await startAndDiscoverPair(backend, engine, discovery, device, marker)
+        let log = StateLog()
+        let stream = backend.makeEventStream()
+        let task = Task {
+            for await event in stream {
+                if case .deviceUpdated(let d) = event, d.id == device.id { log.append(d.connectionState) }
+            }
+        }
+        defer { task.cancel() }
+        let addHold = HoldPoint()
+        let secondAdd = OnceFlag()
+        engine.addFailures = [device.outputID.rawValue]
+        engine.onAddOutputHold = { id, _ in
+            guard id == device.outputID else { return }
+            if secondAdd.testAndSet() { engine.addFailures = [] } else { await addHold.hold() }
+        }
+        engine.onMirroredAddFailure = { _ in
+            // The state stream is applied in order, so once the marker's
+            // report shows, the echo before it has been applied too.
+            engine.pushState(marker.outputID, .failed)
+            await pollUntil { backend.devices.first { $0.id == marker.id }?.isAvailable == false }
+        }
+
+        backend.setOutputSet([device.id])
+        await pollUntil { addHold.entered }
+        await submitAndWait(backend, "secret", for: device.id)
+        backend.retryOutput(device.id)
+        addHold.open()
+
+        await pollUntil { log.all.contains(.connected) }
+        #expect(log.all.contains(.connected))
+        #expect(engine.fedDescriptorList.last?.password == "secret")
+        #expect(!log.all.contains { if case .failed = $0 { return true } else { return false } })
+    }
+
+    /// Dropping `expectStaleFailure` (so the state-stream echo of a failed add
+    /// that lands after the catch has looped parks the speaker and shows the
+    /// typed password refused), or never consuming it (so a later genuine
+    /// failure is swallowed), turns it red.
+    @Test func passwordSubmittedDuringAFailingConnectSurvivesALateStateStreamReport() async {
+        let store = InMemoryAirPlayPasswordStore()
+        let (backend, engine, discovery) = makeBackend(passwordStore: store)
+        defer { backend.stop() }
+        let device = ap2Device(access: .password)
+        let marker = ap2Device(id: "AA:BB:CC:DD:EE:02", name: "Marker")
+        await startAndDiscoverPair(backend, engine, discovery, device, marker)
+        let log = StateLog()
+        let stream = backend.makeEventStream()
+        let task = Task {
+            for await event in stream {
+                if case .deviceUpdated(let d) = event, d.id == device.id { log.append(d.connectionState) }
+            }
+        }
+        defer { task.cancel() }
+        // The spy's scripted add failure throws with no state report, so the
+        // test sends that report itself, after the catch has looped.
+        let firstAdd = HoldPoint()
+        let secondAdd = HoldPoint()
+        let sawFirst = OnceFlag()
+        engine.addFailures = [device.outputID.rawValue]
+        engine.onAddOutputHold = { id, _ in
+            guard id == device.outputID else { return }
+            if sawFirst.testAndSet() {
+                engine.addFailures = []
+                await secondAdd.hold()
+            } else {
+                await firstAdd.hold()
+            }
+        }
+
+        backend.setOutputSet([device.id])
+        await pollUntil { firstAdd.entered }
+        await submitAndWait(backend, "secret", for: device.id)
+        backend.retryOutput(device.id)
+        firstAdd.open()
+        await pollUntil { secondAdd.entered }
+        #expect(engine.fedDescriptorList.last?.password == "secret")
+
+        engine.pushState(device.outputID, .failed)
+        engine.pushState(marker.outputID, .failed)
+        await pollUntil { backend.devices.first { $0.id == marker.id }?.isAvailable == false }
+        secondAdd.open()
+
+        // Wait on the log, not `backend.devices`: the log's consumer task can
+        // trail the backend's own state on a loaded machine.
+        await pollUntil { log.all.contains(.connected) }
+        #expect(log.all.contains(.connected))
+        #expect(!log.all.contains { if case .failed = $0 { return true } else { return false } })
+
+        engine.pushState(device.outputID, .failed)
+        await pollUntil { self.failureCause(backend, device.id) != nil }
+        #expect(failureCause(backend, device.id) == .droppedMidStream)
+        #expect(backend.devices.first { $0.id == device.id }?.isAvailable == false)
+    }
+
+    /// Leaving `expectStaleFailure` set after the engine's good report for the
+    /// extra attempt (so a later genuine failure is dropped) turns it red.
+    @Test func goodStateReportClearsAnUnspentStaleFailureExpectation() async {
+        let store = InMemoryAirPlayPasswordStore()
+        let (backend, engine, discovery) = makeBackend(passwordStore: store)
+        defer { backend.stop() }
+        let device = ap2Device(access: .password)
+        await startAndDiscover(backend, engine, discovery, device)
+        // The scripted add failure throws with no state report, so the catch
+        // expects one that never comes.
+        let firstAdd = HoldPoint()
+        let sawFirst = OnceFlag()
+        engine.addFailures = [device.outputID.rawValue]
+        engine.onAddOutputHold = { id, _ in
+            guard id == device.outputID else { return }
+            if sawFirst.testAndSet() { engine.addFailures = [] } else { await firstAdd.hold() }
+        }
+
+        backend.setOutputSet([device.id])
+        await pollUntil { firstAdd.entered }
+        await submitAndWait(backend, "secret", for: device.id)
+        backend.retryOutput(device.id)
+        firstAdd.open()
+        await pollUntil { backend.devices.first { $0.id == device.id }?.connectionState == .connected }
+
+        engine.pushState(device.outputID, .connected)
+        engine.pushState(device.outputID, .failed)
+        await pollUntil { self.failureCause(backend, device.id) != nil }
+        #expect(failureCause(backend, device.id) == .droppedMidStream)
+        #expect(backend.devices.first { $0.id == device.id }?.isAvailable == false)
+    }
+
+    /// Leaving the `.stopped` arm blind to `expectStaleFailure` (so the stale
+    /// flag outlives that echo and swallows the next genuine failure) turns it red.
+    @Test func staleFailureEchoArrivingAsStoppedStillLetsTheNextFailurePark() async {
+        let store = InMemoryAirPlayPasswordStore()
+        let (backend, engine, discovery) = makeBackend(passwordStore: store)
+        defer { backend.stop() }
+        let device = ap2Device(access: .password)
+        await startAndDiscover(backend, engine, discovery, device)
+        // The scripted add failure throws with no state report, so the catch
+        // expects one; it arrives below as `.stopped`.
+        let firstAdd = HoldPoint()
+        let sawFirst = OnceFlag()
+        engine.addFailures = [device.outputID.rawValue]
+        engine.onAddOutputHold = { id, _ in
+            guard id == device.outputID else { return }
+            if sawFirst.testAndSet() { engine.addFailures = [] } else { await firstAdd.hold() }
+        }
+
+        backend.setOutputSet([device.id])
+        await pollUntil { firstAdd.entered }
+        await submitAndWait(backend, "secret", for: device.id)
+        backend.retryOutput(device.id)
+        firstAdd.open()
+        await pollUntil { backend.devices.first { $0.id == device.id }?.connectionState == .connected }
+
+        engine.pushState(device.outputID, .stopped)
+        engine.pushState(device.outputID, .failed)
+        await pollUntil { self.failureCause(backend, device.id) != nil }
+        #expect(failureCause(backend, device.id) == .droppedMidStream)
+        #expect(backend.devices.first { $0.id == device.id }?.isAvailable == false)
+    }
+
+    /// Letting a password typed with no connect in progress hide a live
+    /// session's drop (no `.failed`, no park) turns it red.
+    @Test func pendingPasswordWithNoConnectInProgressStillReportsADroppedSession() async {
+        let store = InMemoryAirPlayPasswordStore()
+        let (backend, engine, discovery) = makeBackend(passwordStore: store)
+        defer { backend.stop() }
+        let device = ap2Device(access: .password)
+        await startAndDiscover(backend, engine, discovery, device)
+        backend.setOutputSet([device.id])
+        await pollUntil { backend.devices.first { $0.id == device.id }?.connectionState == .connected }
+
+        await submitAndWait(backend, "secret", for: device.id)
+        engine.pushState(device.outputID, .failed)
+
+        await pollUntil { self.failureCause(backend, device.id) != nil }
+        #expect(failureCause(backend, device.id) == .droppedMidStream)
+    }
+
+    /// Marking a password speaker unavailable before anyone supplied a
+    /// password (hiding its "Enter password" offer) turns it red.
+    @Test func passwordDemandLeavesSpeakerAvailableUntilAPasswordIsRefused() async {
+        let store = InMemoryAirPlayPasswordStore()
+        let (backend, engine, discovery) = makeBackend(passwordStore: store)
+        defer { backend.stop() }
+        let device = ap2Device(access: .password)
+        engine.addFailures = [device.outputID.rawValue]
+        engine.addFailureError = .passwordRequired
+        await startAndDiscover(backend, engine, discovery, device)
+
+        backend.setOutputSet([device.id])
+        await pollUntil { self.failureCause(backend, device.id) == .authRequired }
+        #expect(backend.devices.first { $0.id == device.id }?.isAvailable == true)
+
+        await submitAndWait(backend, "wrong", for: device.id)
+        backend.retryOutput(device.id)
+        await pollUntil { backend.devices.first { $0.id == device.id }?.isAvailable == false }
+        #expect(engine.fedDescriptorList.last?.password == "wrong")
+        #expect(backend.devices.first { $0.id == device.id }?.isAvailable == false)
+        #expect(failureCause(backend, device.id) == .authRequired)
     }
 
     /// A MUTED AirPlay-1 receiver that drops and reconnects must come back TRULY
@@ -7391,6 +7977,63 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
             "setLocalPlaybackVolume(40) must reach the local engine as 0.4 for com.local")
     }
 
+    /// Turns red if the Mac row's level stops reaching the engine that plays
+    /// "This Mac" apps, or if it keeps applying while the Mac row is driving
+    /// Main (no non-local output selected), where it must stay at unity.
+    @Test func macRowLevelScalesLocalPlaybackOnlyBesideARealOutput() async {
+        let (backend, engine, _) = makeBackend()
+        let localPlayback = SpyLocalPlayback()
+        backend.localPlaybackEngine = localPlayback
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        backend.setVolume(40, for: NativeBackend.localDeviceID)
+        await pollUntil { !localPlayback.outputGains.isEmpty }
+        #expect(localPlayback.outputGains.last == 1, "with nothing else selected the Mac row drives Main")
+
+        let other = backend.devices.first { !$0.isLocalDevice }?.id ?? "dev-1"
+        backend.setOutputSet([other])
+        backend.setVolume(40, for: NativeBackend.localDeviceID)
+        await pollUntil { localPlayback.outputGains.last.map { abs($0 - 0.4) < 0.001 } ?? false }
+        #expect(abs((localPlayback.outputGains.last ?? -1) - 0.4) < 0.001)
+
+        // The host's membership answer wins over the discovered set: a group
+        // whose only speaker is off still has the Mac row driving its own level.
+        backend.localRowDrivesMainQuery = { false }
+        backend.setOutputSet([])
+        backend.setVolume(25, for: NativeBackend.localDeviceID)
+        await pollUntil { localPlayback.outputGains.last.map { abs($0 - 0.25) < 0.001 } ?? false }
+        #expect(abs((localPlayback.outputGains.last ?? -1) - 0.25) < 0.001)
+    }
+
+    /// Turns red if starting a "This Mac" app stops re-pushing the Mac row's
+    /// level: an engine swapped in after the last slider move would then play
+    /// the app at unity instead of the level the row shows.
+    @Test func aLocalAppStartingRepushesTheMacLevelToASwappedInEngine() async {
+        let perAppCapture = PerAppCaptureCoordinator(
+            makeTap: { AlwaysSucceedsTap() },
+            processResolver: singleProcessResolver(["com.local": 4242]),
+            muteBehavior: .mutedWhenTapped)
+        let (backend, engine, _) = makeBackend(injectedPerAppCapture: perAppCapture)
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+        let original = SpyLocalPlayback()
+        backend.localPlaybackEngine = original
+        backend.setOutputSet(["dev-1"])
+        backend.setVolume(30, for: NativeBackend.localDeviceID)
+        // Let the slider's own push land on the original engine first, so only
+        // the start-time re-push can reach the swapped-in one.
+        await pollUntil { original.outputGains.contains { abs($0 - 0.3) < 0.001 } }
+
+        let localPlayback = SpyLocalPlayback()
+        backend.localPlaybackEngine = localPlayback
+        backend.updateAppRoutes([
+            AppRoute(bundleID: "com.local", displayName: "Local App", destination: .currentDevice),
+        ])
+        await pollUntil { localPlayback.addedApps.contains { $0.bundleID == "com.local" } }
+        #expect(localPlayback.outputGains.contains { abs($0 - 0.3) < 0.001 })
+    }
+
     // MARK: Bug 2 — `.currentDevice` apps must clean up capture on quit/relaunch
     //
     // `AppRoutingController.resetDeviceRoute` deliberately leaves a `.currentDevice`
@@ -7810,6 +8453,45 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
             Issue.record("a failed per-app bind must leave the row failed"); return
         }
         #expect(failure.cause == .unknown)
+    }
+
+    /// Turns red if `isRouteTargetReachableLocked` stops reading a speaker that waits for a password as unreachable (the app stays out of the system mix, bound to a refused session), or if `droppedByOwnFailureLocked` stops keeping that `.failed` through the unbind (the `.off` re-arms the route and it binds again).
+    @Test func perAppRouteToAPasswordSpeakerAwaitingAPasswordRejoinsTheSystemMix() async {
+        let perApp = workingPerAppCapture(bundleIDs: ["com.foo"])
+        let (backend, engine, discovery) = makeBackend(injectedPerAppCapture: perApp)
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:C9", name: "Locked Speaker", access: .password)
+        await startAndDiscover(backend, engine, discovery, device)
+        engine.addFailures = [device.outputID.rawValue]
+        engine.addFailureError = .passwordRequired
+        engine.onMirroredAddFailure = { _ in
+            await pollUntil { self.failureCause(backend, device.id) == .authRequired }
+        }
+        let binds = { engine.streamAddCalls.filter { $0.0 == device.outputID }.count }
+
+        backend.updateAppRoutes([route("com.foo", name: "Foo", toDevice: device.id)])
+        await pollUntil { binds() == 1 }
+        await pollUntil {
+            perApp.state(for: "com.foo") == .idle
+                && backend.stateQueue.sync { backend.streamBindings[device.id] == nil }
+        }
+        try? await Task.sleep(nanoseconds: 300_000_000)
+
+        #expect(perApp.state(for: "com.foo") == .idle,
+                "its per-app tap stops, so the app rejoins the whole-system mix while the speaker waits for a password")
+        #expect(backend.devices.first { $0.id == device.id }?.isAvailable == true,
+                "the row stays available so it offers Enter password")
+        #expect(failureCause(backend, device.id) == .authRequired,
+                "the unbind keeps the password demand instead of writing .off")
+        #expect(binds() == 1, "no second bind into the same refusal")
+
+        engine.addFailures = []
+        backend.stateQueue.sync { backend.setConnectionState(.connected, for: device.id) }
+        await pollUntil { binds() == 2 }
+        await pollUntil { perApp.state(for: "com.foo") != .idle }
+        #expect(binds() == 2, "the .connected edge re-binds the route")
+        #expect(perApp.state(for: "com.foo") != .idle,
+                "the replayed route restarts the app's own tap")
     }
 
     /// Turns red if a per-app bind refused for want of a clock stops reporting `.failed(.timingUnavailable)`, or if removing that route leaves the row `.failed` instead of `.off`.

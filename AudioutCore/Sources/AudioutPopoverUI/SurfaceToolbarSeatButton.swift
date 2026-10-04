@@ -94,7 +94,7 @@ enum SurfaceToolbarSeat {
     /// costs nothing, because the arithmetic does not depend on any of those
     /// numbers: only ONE tab is ever expanded, so the widest the strip can be
     /// is `widestCapsuleWidth` plus Pin, 254.5 + 28 = 282.5 pt against a
-    /// fixed 653 pt surface.
+    /// fixed 713 pt surface.
     /// `SurfaceToolbarTests.theStripCannotOutgrowTheSurfaceInAnyLanguage`
     /// asserts that with a name no language could produce.
     static let maxNameWidth: CGFloat = 120
@@ -110,9 +110,11 @@ enum SurfaceToolbarSeat {
     /// differently. The ink is measured instead (`inkRect`), the method the
     /// ring glyphs were sized by (`DeviceIcon.rowGlyphFits`), and a glyph
     /// whose ink overflows this box is drawn smaller until it fits. 18 x 15
-    /// brings the four glyphs' visual weight closest together: Mixer,
-    /// Speakers and Settings stand 15 tall, and Scenes' wide group of
-    /// rectangles is held to 18 wide.
+    /// brings the four glyphs' visual weight closest together: the 15 pt
+    /// height is the limit Mixer, Speakers and Settings shrink to, which
+    /// leaves their ink 13.5, 14.5 and 15 pt wide, and the 18 pt width is the
+    /// limit for Scenes' wide group of rectangles. DESIGN.md "Surface Header
+    /// Strip" lists the point size each glyph is drawn at.
     static let glyphBox = NSSize(width: 18, height: 15)
 
     /// The ONE gap around a tab's ink: before the glyph, between the glyph
@@ -548,6 +550,12 @@ final class SurfaceToolbarSeatButton: NSButton {
         nameLabel.maximumNumberOfLines = 1
         nameLabel.setAccessibilityElement(false)
         nameLabel.translatesAutoresizingMaskIntoConstraints = false
+        // Hidden while the seat is collapsed, because the clip alone leaks:
+        // the name's first letter starts exactly at a collapsed seat's edge,
+        // and a 1x display snaps the seat's width and the label's origin to
+        // whole points separately, so up to a point of that letter was drawn
+        // beside every idle tab's glyph. `setNameRevealed` shows it.
+        nameLabel.isHidden = true
         addSubview(nameLabel)
 
         widthConstraint = widthAnchor.constraint(equalToConstant: SurfaceToolbarSeat.size.width)
@@ -688,16 +696,24 @@ final class SurfaceToolbarSeatButton: NSButton {
     func setNameRevealed(_ revealed: Bool, animated: Bool) {
         guard revealed != isNameRevealed else { return }
         isNameRevealed = revealed
+        // Shown before an opening seat travels, hidden once a closing one has
+        // arrived: the clip wipes the name only while the seat is moving.
+        if revealed { nameLabel.isHidden = false }
         let target = SurfaceToolbarSeat.tabWidth(nameWidth: revealed ? nameWidth : 0,
                                                  glyphWidth: glyphWidth)
         guard animated else {
             widthConstraint.constant = target
+            nameLabel.isHidden = !revealed
             revealFollower?.foldAnimatorDidTick()
             settleToolbarLayout()
             return
         }
         FoldAnimator.shared.animate(widthConstraint, to: target, follower: revealFollower) {
-            [weak self] in self?.settleToolbarLayout()
+            [weak self] in
+            guard let self else { return }
+            // A replaced travel never completes, so this one is the last.
+            nameLabel.isHidden = !isNameRevealed
+            settleToolbarLayout()
         }
     }
 

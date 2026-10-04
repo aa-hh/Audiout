@@ -160,8 +160,9 @@ public enum Tokens {
         /// `DeviceRowView`). Alias of
         /// `NSColor.selectedContentBackgroundColor`.
         public static var selectedContentBackground: NSColor { .selectedContentBackgroundColor }
-        /// Opaque shadow color for card/panel drop shadows (`CardView`). Alias
-        /// of `NSColor.black`.
+        /// Black for flat inset shades clipped inside a recess (a fader's
+        /// trough, the Equalizer `.well`, a plate's lip) and for darkening
+        /// blends; never an `NSShadow` drop shadow. Alias of `NSColor.black`.
         public static var shadow: NSColor { .black }
         /// Fully transparent fill, used to make a layer's background see
         /// through to a view behind it (`ControlPanelWindowController`). Alias

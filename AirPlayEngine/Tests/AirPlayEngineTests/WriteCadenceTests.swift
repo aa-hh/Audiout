@@ -22,12 +22,12 @@ import CAirPlayEngine
 
     // MARK: - WriteCadenceTracker unit tests
 
-    /// A nominal (real-time-paced) feed should stay ~zero on both deficit and
-    /// overrun: each write's wall-clock gap to the audio time it represents is
-    /// small and roughly symmetric, so it should not accumulate a meaningful
-    /// running deficit OR overrun.
-    @Test(.enabled(if: ProcessInfo.processInfo.environment["CI"] == nil, "Quarantined on GitHub runners 2026-10-04: 3-core shared host misses the cadence window; passes on the owner's Macs. Issue #258.")) func nominalFeedStaysNearZero() async throws {
-        let tracker = WriteCadenceTracker()
+    /// An exactly paced feed must land in neither bucket: each write's clock
+    /// gap equals the audio time it represents, so deficit and overrun both
+    /// stay at zero.
+    @Test func nominalFeedStaysNearZero() {
+        var simulatedSeconds: Double = 0
+        let tracker = WriteCadenceTracker(now: { simulatedSeconds })
         let sampleRate = 44100
         let samplesPerWrite = 352 // AirPlay frame size
         let audioSeconds = Double(samplesPerWrite) / Double(sampleRate)
@@ -37,20 +37,15 @@ import CAirPlayEngine
         tracker.record(samples: samplesPerWrite, sampleRate: sampleRate)
 
         for _ in 0..<20 {
-            // Sleep for exactly the audio duration this write represents, so
-            // wall-clock elapsed ~= audio time delivered (nominal cadence).
-            try await Task.sleep(nanoseconds: UInt64(audioSeconds * 1e9))
+            // Advance the clock by exactly the audio this write represents.
+            simulatedSeconds += audioSeconds
             tracker.record(samples: samplesPerWrite, sampleRate: sampleRate)
         }
 
         let snapshot = tracker.snapshot()
         #expect(snapshot.writeCount == 21)
-        // Scheduling jitter under CI/parallel-agent load is real but bounded;
-        // the nominal feed should never accumulate anywhere near the underfed
-        // feed's magnitude (asserted below at >> 0.15s over a much shorter,
-        // deliberately-stalled run).
-        #expect(snapshot.deficitSeconds < 0.15, "nominal feed should not accrue a meaningful deficit")
-        #expect(snapshot.overrunSeconds < 0.15, "nominal feed should not accrue a meaningful overrun")
+        #expect(abs(snapshot.deficitSeconds) <= 1e-9, "an exactly paced feed must not accrue a deficit")
+        #expect(abs(snapshot.overrunSeconds) <= 1e-9, "an exactly paced feed must not accrue an overrun")
     }
 
     /// A paced/underfed feed — where each write's wall-clock gap is much
@@ -236,14 +231,15 @@ import CAirPlayEngine
     /// paused, the Mac slept, the tap was rebuilt — not slow feeding. It must
     /// land in `stalledSeconds`, leaving the drift totals alone: charged to the
     /// deficit, a single sleep contributes more than every real gap combined.
-    @Test(.enabled(if: ProcessInfo.processInfo.environment["CI"] == nil, "Quarantined on GitHub runners 2026-10-04: 3-core shared host misses the cadence window; passes on the owner's Macs. Issue #258.")) func longGapIsChargedToStallNotDrift() {
+    @Test func longGapIsChargedToStallNotDrift() {
         // Threshold injected so the discontinuity is reachable without a real
         // five-second sleep; production keeps the default.
-        let tracker = WriteCadenceTracker(stallGapSeconds: 0.05)
+        var simulatedSeconds: Double = 0
+        let tracker = WriteCadenceTracker(stallGapSeconds: 0.05, now: { simulatedSeconds })
         let sampleRate = 44100
 
         tracker.record(samples: 64, sampleRate: sampleRate) // seed
-        Thread.sleep(forTimeInterval: 0.15)                 // the "pause"
+        simulatedSeconds += 0.15                            // the "pause"
         tracker.record(samples: 64, sampleRate: sampleRate)
 
         let snap = tracker.snapshot()
@@ -253,7 +249,7 @@ import CAirPlayEngine
         #expect(snap.netDriftSeconds == 0)
 
         // A gap under the threshold still counts as ordinary deficit.
-        Thread.sleep(forTimeInterval: 0.01)
+        simulatedSeconds += 0.01
         tracker.record(samples: 64, sampleRate: sampleRate)
         #expect(tracker.snapshot().deficitSeconds > 0)
         #expect(tracker.snapshot().stallCount == 1)
@@ -387,7 +383,7 @@ extension SerializedEngineState {
 
     /// A nominal feed through the public API stays ~zero, mirroring the unit
     /// test above but exercised through the actual hot path.
-    @Test(.enabled(if: ProcessInfo.processInfo.environment["CI"] == nil, "Quarantined on GitHub runners 2026-10-04: 3-core shared host misses the cadence window; passes on the owner's Macs. Issue #258.")) func engineWritePathNominalFeedStaysNearZero() async throws {
+    @Test(.enabled(if: ProcessInfo.processInfo.environment["CI"] == nil, "Quarantined on GitHub runners 2026-10-04: measures real Task.sleep pacing through the engine hot path and AirPlayEngine.cadence has no clock seam; the paced arithmetic is pinned by nominalFeedStaysNearZero and the wiring by engineWritePathFeedsCadenceTracker. Issue #258.")) func engineWritePathNominalFeedStaysNearZero() async throws {
         let engine = AirPlayEngine()
         await engine.enterHeadlessTestMode()
 

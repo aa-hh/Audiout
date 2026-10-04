@@ -28,6 +28,10 @@ with `scripts/ios.sh build --root <that checkout>`.
 ```bash
 # Enable the pre-commit guards (once per clone)
 git config core.hooksPath .githooks
+
+# Keep local main a fast-forward mirror of origin/main (every 2 minutes)
+cp scripts/launchd/com.audiout.sync-main.plist ~/Library/LaunchAgents/ && launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.audiout.sync-main.plist
+# Remove it with: launchctl bootout gui/$(id -u)/com.audiout.sync-main
 ```
 
 Guards: **Guard 1** blocks every commit on `main`. **Guard 4/6** run the test suites on any commit touching Swift sources — Guard 4 runs only the suites covering the staged files (`.githooks/guard-test-scope.sh` derives them: a staged file matches tests by name with any `+Aspect` part dropped, so `NativeBackend+Bluetooth.swift` runs the `NativeBackend*Tests` files; a file that matches no test by name runs every test file importing its target or a target built on it; anything in `AudioutCore` or a target it depends on, any deleted file, and anything the script cannot map still runs the full suite. `bash scripts/test-guard-test-scope.sh` tests these rules and checks the script's target table against `AudioutCore/Package.swift`). `AUDIOUT_FULL_SUITE=1` forces the full run. The full suite runs on GitHub: the `tests` workflow, on every pull request and again in the merge queue. Guard 6 (AirPlayEngine, ~2s) always runs in full. **Guard 9** blocks any newly-added line that could put a window on a real screen during a test run (see "Tests must stay invisible" in [`AudioutCore/AGENTS.md`](AudioutCore/AGENTS.md)). **Guard 7** blocks a Swift commit whose added comments match near-certain slop patterns (rubric in [`docs/REVIEW-RUBRIC.md`](docs/REVIEW-RUBRIC.md)).
@@ -159,11 +163,12 @@ The mule runs macOS 26.5 with only the Xcode 27 beta installed, so `remote_run` 
 
 ## Critical workflow rules
 
-- **`main` accepts nothing but the merge queue.** Never commit or merge into `main` locally (Guard 1 refuses a commit there) and never push to it; GitHub's ruleset refuses anything that does not come through the queue. Work in a worktree branch.
+- **`main` accepts nothing but the merge queue.** Never commit or merge into `main` locally (Guard 1 refuses a commit there) and never push to it; GitHub's ruleset refuses anything that does not come through the queue. Work in a worktree branch. Local `main` is a fast-forward mirror of `origin/main`, kept by `scripts/sync-main.sh` on a 2-minute launchd timer (`bash scripts/test-sync-main.sh` self-tests it); never commit on it (Guard 1 still refuses), and cut worktrees from `origin/main` after `git fetch`.
 - **Work in worktrees, not the `main` checkout.** Worktrees live in `.claude/worktrees/<slug>/`. Never edit files in the `main` checkout.
 - **Every worktree branch must have a GitHub counterpart.** When creating a worktree, immediately push the branch to origin:
   ```bash
-  git worktree add .claude/worktrees/<slug> -b claude/<slug>
+  git fetch origin
+  git worktree add .claude/worktrees/<slug> -b claude/<slug> origin/main
   cd .claude/worktrees/<slug>
   git push -u origin claude/<slug>
   ```
@@ -174,7 +179,7 @@ The mule runs macOS 26.5 with only the Xcode 27 beta installed, so `remote_run` 
   bash scripts/review-branch.sh   # run the passes it prints as subagents, then: bash scripts/review-branch.sh --continue
   gh pr merge --merge --auto
   ```
-  The two required checks are `tests` (the full suite on GitHub) and `review` (the commit status `--continue` posts, with one PR comment listing the findings). `--auto` queues the PR once both are green; don't wait for the queue. The reviewers run as subagents of your session because headless `claude -p` is refused on this account. Only a HIGH finding fails `review`: fix it, commit, push, and run the script again, which reviews only the fix; a third run refuses. A status belongs to one commit, so run the script after every push: when the push left the branch's own non-Markdown lines unchanged (main merged in, a docs-only commit) it re-posts the last round's status on the new HEAD without using a round; otherwise it is the next round.
+  The two required checks are `tests` (the full suite on GitHub) and `review` (the commit status `--continue` posts, with one PR comment listing the findings). `--auto` queues the PR once both are green; don't wait for the queue. The reviewers run as subagents of your session because headless `claude -p` is refused on this account. Only a HIGH finding fails `review`: fix it, commit, push, and run the script again, which reviews only the fix; a third run refuses. A status belongs to one commit, so run the script after every push: when the push left the branch's own non-Markdown lines unchanged (main merged in, a docs-only commit) it re-posts the last round's status on the new HEAD without using a round; otherwise it is the next round. A PR whose two rounds are used up and whose head then changes needs either a `review` status posted by the owner or the ruleset's owner bypass; that is the intended point where the owner decides.
 - **If you find uncommitted edits in the `main` checkout: stop and ask.** Never stash, reset, or discard them — they belong to another session.
 - **Finished with a worktree (branch merged + live-verified, or abandoned-but-pushed)?** `touch .claude/worktrees/<slug>/.prunable` — `scripts/housekeeping.sh` removes it safely at the next build, and also collects stale build caches — every `.build` in the tree plus Xcode's `iOS DeviceSupport` and `DerivedData` (see AGENTS.md).
 

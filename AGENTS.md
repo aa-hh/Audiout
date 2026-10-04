@@ -283,6 +283,10 @@ bash scripts/review-branch.sh   # run the passes it prints as subagents, then: b
 gh pr merge --merge --auto
 ```
 
+Local `main` is a fast-forward mirror of `origin/main`, kept by
+`scripts/sync-main.sh` on a 2-minute launchd timer; never commit on it (Guard 1
+still refuses), and cut worktrees from `origin/main` after `git fetch`.
+
 `tests` (the full suite, on GitHub) and `review` (the status
 `review-branch.sh --continue` posts) are the two required checks; `--auto`
 queues the PR once both are green, and the session does not wait for it.

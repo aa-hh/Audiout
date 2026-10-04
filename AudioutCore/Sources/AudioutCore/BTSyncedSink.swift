@@ -1482,7 +1482,7 @@ final class BTDeviceSink: @unchecked Sendable {
         framesPulledSinceOrigin += frameCount
         let pending = (t &- origin) &- pulledNanos &- pullRealignedNanos
         guard Double(abs(pending)) >= Self.pullRealignThresholdMs * 1_000_000 else { return }
-        let frames = Int((Double(pending) / 1e9 * renderSampleRate).rounded())
+        var frames = Int((Double(pending) / 1e9 * renderSampleRate).rounded())
         if frames > 0 {
             // The ring holds the anchored delay less the capture lag, so the
             // margin is capped at its room at release less one chunk, followed
@@ -1496,16 +1496,21 @@ final class BTDeviceSink: @unchecked Sendable {
                 steadyRoomFramesPtr.pointee)
             let room = Swift.max(0, held - marginFrames)
             if frames > room {
-                // Capture writes on wall time, so the ring comes up short only
-                // when capture stalled together with the device and the
-                // shortfall never refills: take what fits and measure from here
-                // like the stall branch, or the stuck remainder hides the
-                // backward move a later over-pull needs.
-                delayLine.shift(byFrames: room)
-                pullOriginNanos = t
-                framesPulledSinceOrigin = frameCount
-                pullRealignedNanos = 0
-                return
+                // A shortfall of a threshold or more means capture stalled
+                // together with the device and never refills, so take what fits
+                // and measure from here like the stall branch, or the stuck
+                // remainder hides the backward move a later over-pull needs. A
+                // smaller one is a capture chunk landing later than it did at
+                // release, so take what fits and leave the rest pending for a
+                // later cycle.
+                guard Double(frames - room) < Self.pullRealignThresholdMs / 1_000 * renderSampleRate else {
+                    delayLine.shift(byFrames: room)
+                    pullOriginNanos = t
+                    framesPulledSinceOrigin = frameCount
+                    pullRealignedNanos = 0
+                    return
+                }
+                frames = room
             }
         }
         let applied = delayLine.shift(byFrames: frames)

@@ -83,6 +83,22 @@ import Testing
                 "the Move's playout offset built up to \(String(format: "%+.1f", worst)) ms (positive = late)")
     }
 
+    /// A capture that starts handing over its chunks 752 frames (~15.7 ms, more
+    /// than one render cycle, under the 20 ms threshold) later than it did at
+    /// release leaves the ring a little short of the margin at a few forward
+    /// re-alignments; the late chunks then land. The loss is ~5 ms over the
+    /// storm, too little to reach the 25 ms limit, so the offset is held to
+    /// that of a punctual capture. Red if every clamped forward re-alignment
+    /// re-bases the measurement instead of only a shortfall of at least
+    /// `pullRealignThresholdMs`, which throws each remainder away.
+    @Test func aCaptureThatDeliversMoreThanOneCycleLateDoesNotMoveThePlayoutOffset() throws {
+        let punctual = try Self.worstStormOffsetMs(anchoredDelayMs: Self.delayMs)
+        let late = try Self.worstStormOffsetMs(
+            anchoredDelayMs: Self.delayMs, captureLagFrames: 752, lagFromSecond: 1)
+        #expect(late - punctual <= 2,
+                "a late capture left the Move \(String(format: "%+.1f", late)) ms off, a punctual one \(String(format: "%+.1f", punctual)) ms")
+    }
+
     /// A −115 ms trim committed at 200 ms while the first 42 ms under-pull is
     /// still below the re-alignment threshold spends that pending under-pull as
     /// room, so the ring settles at 85 ms, under the 100 ms margin. (At an
@@ -98,11 +114,12 @@ import Testing
     /// Replays the storm against a sink anchored at `anchoredDelayMs` and
     /// returns the worst 5 s median of (playout − pts − delay), positive =
     /// late. The capture side hands over each chunk once `captureLagFrames`
-    /// past its start pts have gone by on wall time; `trim`, if any, is applied
-    /// and committed `atSecond` seconds after the anchor, and the offset is then
-    /// measured against the trimmed delay.
+    /// past its start pts have gone by on wall time, from `lagFromSecond` seconds
+    /// after the anchor on (before that, as soon as it starts); `trim`, if any,
+    /// is applied and committed `atSecond` seconds after the anchor, and the
+    /// offset is then measured against the trimmed delay.
     static func worstStormOffsetMs(
-        anchoredDelayMs delayMs: Int64, captureLagFrames: Int = 0,
+        anchoredDelayMs delayMs: Int64, captureLagFrames: Int = 0, lagFromSecond: Double = 0,
         trim: (atSecond: Double, ms: Double)? = nil
     ) throws -> Double {
         let manager = BTSyncedSink(
@@ -129,7 +146,8 @@ import Testing
             var errors: [Double] = []
             while host < secondEnd {
                 // The capture tap runs on wall time: everything captured by now.
-                while Double(Self.anchorNanos) + Double(written + captureLagFrames) * Self.nsPerFrame <= host {
+                let lag = host >= Double(Self.anchorNanos) + lagFromSecond * 1e9 ? captureLagFrames : 0
+                while Double(Self.anchorNanos) + Double(written + lag) * Self.nsPerFrame <= host {
                     for i in 0..<chunkFrames { chunk[i] = Float(written + i + 1) }
                     let ptsNanos = Self.anchorNanos + Int64((Double(written) * Self.nsPerFrame).rounded())
                     chunk.withUnsafeBufferPointer {

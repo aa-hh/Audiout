@@ -20,7 +20,7 @@ import AudioutProtocol
     // MARK: - Concurrency-safe test plumbing
 
     /// A lock-guarded value box; network callbacks fire on `netQueue`, the
-    /// server's callbacks on its own queue, and the test thread spins —
+    /// server's callbacks on its own queue, and the test task polls —
     /// three threads, one lock. (Same rationale as `DACPServerTests.Signal`,
     /// generalized because these tests accumulate messages, not just flags.)
     private final class LockedBox<T>: @unchecked Sendable {

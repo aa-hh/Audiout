@@ -199,6 +199,13 @@ extension SerializedSharedState {
                          groundsFor: sidebarGrounds),
             ContrastEntry(name: "labelCool2 on sidebar", token: Tokens.Color.labelCool2, floor: 3.0,
                          groundsFor: sidebarGrounds),
+            // GLYPHS, floor 3:1: the sidebar's reachable and unreachable speaker icons.
+            ContrastEntry(name: "unavailableGlyph on sidebar", token: Tokens.Color.unavailableGlyph, floor: 3.0,
+                         groundsFor: sidebarGrounds),
+            ContrastEntry(name: "unavailableGlyph", token: Tokens.Color.unavailableGlyph, floor: 3.0,
+                         groundsFor: sameGrounds(textGrounds)),
+            ContrastEntry(name: "speakersAccent on sidebar", token: Tokens.Color.speakersAccent, floor: 3.0,
+                         groundsFor: sidebarGrounds),
             ContrastEntry(name: "goldText", token: Tokens.Color.goldText, floor: 4.5,
                          groundsFor: sameGrounds(textGrounds)),
             ContrastEntry(name: "emberText", token: Tokens.Color.emberText, floor: 4.5,

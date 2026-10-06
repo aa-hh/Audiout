@@ -426,8 +426,11 @@ the dark half sat at 2.66:1 on the gold wash rows painted behind a sounding spea
 near-black rather than as green.
 
 **Unavailable speakers.** A speaker the Mac can't reach keeps its name in
-`labelCool` and its icon in `labelCool2`, on every screen that lists it: the
-sidebar and the scene editor's membership rows.
+`labelCool` and its icon in `unavailableGlyph`, on every screen that lists it:
+the sidebar and the scene editor's membership rows. In the sidebar a reachable
+speaker's icon is `speakersAccent` green, so the icon carries the difference;
+the names stay at the 4.5:1 text floor and the glyphs at 3:1 (owner's call
+2026-10-06, after unavailable rows read more active than available ones).
 
 **`engagedChrome` washes.** Every hover, selection and press highlight is
 `Tokens.Color.engagedChrome` (an alias of `label`) on one alpha ladder: 0.06

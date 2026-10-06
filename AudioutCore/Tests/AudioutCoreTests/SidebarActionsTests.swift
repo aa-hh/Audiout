@@ -215,8 +215,10 @@ import AudioutSharedUI
     // Turns red when applySelectionInks leaves any of the name, icon, caption or chevron on its resting ink under either pill, or keeps a pill ink once the row is deselected.
     @Test func everyInkInASelectedRowFollowsThePill() throws {
         let (sidebar, _) = makeFleetSidebar()
-        let resting: [NSColor?] = [Tokens.Color.label, Tokens.Color.label, Tokens.Color.labelCool, Tokens.Color.labelCool2]
-        for target in [SidebarSelection.device(id: "onkyo"), .speakersOverview] {
+        // A reachable speaker's icon rests green; the Overview plate's rests in `label`.
+        for (target, restingIcon) in [(SidebarSelection.device(id: "onkyo"), Tokens.Color.speakersAccent),
+                                      (.speakersOverview, Tokens.Color.label)] {
+            let resting: [NSColor?] = [Tokens.Color.label, restingIcon, Tokens.Color.labelCool, Tokens.Color.labelCool2]
             sidebar.select(target, notify: false)
             let rowView = try #require(sidebar.test_rowView(for: target))
             let cell = try #require(rowView.view(atColumn: 0) as? IconLabelCellView)

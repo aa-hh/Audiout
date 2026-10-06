@@ -252,8 +252,9 @@ public final class MembershipRowView: NSView {
     ///
     /// An unavailable speaker takes the sidebar's ink, so the same fact reads
     /// the same on both sides of the window: the name in `labelCool`, the
-    /// glyph and the "Unavailable" word in `labelCool2` — authored, all four
-    /// variants, 4.59:1 on dark `raised` and 5.30:1 on the light ground.
+    /// glyph in `unavailableGlyph` (a 3:1 glyph tone, fainter than the name)
+    /// and the "Unavailable" word in `labelCool2` (4.59:1 on dark `raised`,
+    /// 5.30:1 on the light ground).
     ///
     /// NOT `.disabledControlTextColor`: it is black at 24.7% alpha, so it
     /// composites against its ground to 1.80:1 on `raised` — under half the
@@ -274,7 +275,7 @@ public final class MembershipRowView: NSView {
         case .warmPane:
             guard isAvailable else {
                 nameLabel.textColor = Tokens.Color.labelCool
-                iconView.contentTintColor = Tokens.Color.labelCool2
+                iconView.contentTintColor = Tokens.Color.unavailableGlyph
                 unavailableLabel.textColor = Tokens.Color.labelCool2
                 return
             }

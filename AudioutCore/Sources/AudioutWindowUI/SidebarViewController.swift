@@ -1892,7 +1892,7 @@ extension SidebarViewController: NSOutlineViewDelegate {
         cell.statusLabel.isHidden = caption == nil
         cell.setDisclosureVisible(false)
         cell.setRestingInks(name: reachable ? Tokens.Color.label : Tokens.Color.labelCool,
-                            icon: reachable ? Tokens.Color.label : Tokens.Color.labelCool2)
+                            icon: reachable ? Tokens.Color.speakersAccent : Tokens.Color.unavailableGlyph)
         // Order and ink are all the row shows of its state, so the spoken
         // label says it. Set on EVERY pass, unconditionally — cells are
         // reused, so a conditional set would leave the previous row's suffix

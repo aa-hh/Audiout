@@ -230,7 +230,7 @@ import AppKit
         let row = MembershipRowView(device: makeDevice(isAvailable: false), checked: true, surface: .warmPane)
         row.railArmed = true
         expectSameToken(row.test_nameColor, Tokens.Color.labelCool, "unavailable member name")
-        expectSameToken(row.test_glyphTint, Tokens.Color.labelCool2, "unavailable member glyph")
+        expectSameToken(row.test_glyphTint, Tokens.Color.unavailableGlyph, "unavailable member glyph")
         expectSameToken(row.test_unavailableLabelColor, Tokens.Color.labelCool2, "the \"Unavailable\" word")
         #expect(row.test_drawsGlyphTile)
     }
@@ -290,10 +290,11 @@ import AppKit
         let mainAudio = try cell(.mainOut)
         let reachable = try #require(try cell(.device(makeDevice())) as? IconLabelCellView)
         expectSameToken(reachable.nameLabel.textColor, Tokens.Color.label, "reachable name")
+        expectSameToken(reachable.imageView?.contentTintColor, Tokens.Color.speakersAccent, "reachable icon")
         let unreachable = try #require(try cell(.device(makeDevice(id: "dev-2", isAvailable: false)))
                                        as? IconLabelCellView)
         expectSameToken(unreachable.nameLabel.textColor, Tokens.Color.labelCool, "unreachable name")
-        expectSameToken(unreachable.imageView?.contentTintColor, Tokens.Color.labelCool2, "unreachable icon")
+        expectSameToken(unreachable.imageView?.contentTintColor, Tokens.Color.unavailableGlyph, "unreachable icon")
 
         // A bare node has no record, so it never carries the caption: build
         // that row from a hidden speaker in use.

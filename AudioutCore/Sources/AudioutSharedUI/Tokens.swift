@@ -553,6 +553,21 @@ public enum Tokens {
             name: "labelCool2", dark: 0x818C94, darkHighContrast: 0xA6AEB3,
             light: 0x5F6A73, lightHighContrast: 0x464E55)
 
+        /// The glyph of a speaker that can't be reached, in the Speakers
+        /// sidebar and the scene editor's member rows: a GLYPH, so it answers
+        /// the 3:1 non-text floor, not text's 4.5:1, and sits visibly fainter
+        /// than the reachable glyph (`speakersAccent`) and the names beside it.
+        /// The names keep `labelCool`; dimming them further would break the
+        /// text floor on the light sidebar (owner's call 2026-10-06).
+        ///
+        /// CONTRAST RATIONALE (floor 3:1): light `#7A838A` = 3.15 on the
+        /// assumed light sidebar `#E8E8EA` / 3.7 on the flat ground; dark
+        /// `#737C83` = 3.2 on the assumed dark sidebar `#2C2C2E` / 3.71 on
+        /// `raised`. Increase Contrast reuses `labelCool2`'s pair.
+        public static let unavailableGlyph: NSColor = warmDynamic(
+            name: "unavailableGlyph", dark: 0x737C83, darkHighContrast: 0xA6AEB3,
+            light: 0x7A838A, lightHighContrast: 0x464E55)
+
         /// The membership rail's ONE dormancy tone (§4.7 — dormancy is one
         /// flag, one tone): one cool chrome grey — the same values as ``rim``,
         /// so a dormant wire, an idle connected ring and an unarmed fader fill

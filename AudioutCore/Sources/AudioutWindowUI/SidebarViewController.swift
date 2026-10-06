@@ -1337,9 +1337,7 @@ final class SidebarHeaderCellView: NSTableCellView {
         label.translatesAutoresizingMaskIntoConstraints = false
         label.textColor = Tokens.Color.labelCool
         label.lineBreakMode = .byTruncatingTail
-        // VoiceOver's heading rotor stops here; the raw value is
-        // `kAXHeadingRole`, as the Mixer's headers set it.
-        label.setAccessibilityRole(NSAccessibility.Role(rawValue: "AXHeading"))
+        label.setAccessibilityHeading()
         label.redrawOnAccessibilityDisplayChange()
         return label
     }()

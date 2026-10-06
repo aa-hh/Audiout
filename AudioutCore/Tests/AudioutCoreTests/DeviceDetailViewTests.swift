@@ -179,10 +179,10 @@ import AppKit
     @Test func theSummaryNamesWhatIsShaped() {
         var bands = Array(repeating: 0.0, count: DeviceEQ.bandCount)
         bands[0] = 2
-        #expect(DeviceDetailViewController.eqSummary(DeviceEQ(bandGainsDB: bands)) == "1 band set")
+        #expect(EqualizerMarkView.summary(DeviceEQ(bandGainsDB: bands)) == "1 band set")
         bands[4] = -1.5
-        #expect(DeviceDetailViewController.eqSummary(DeviceEQ(bandGainsDB: bands)) == "2 bands set")
-        #expect(DeviceDetailViewController.eqSummary(DeviceEQ(trebleDB: -2, balance: -0.3))
+        #expect(EqualizerMarkView.summary(DeviceEQ(bandGainsDB: bands)) == "2 bands set")
+        #expect(EqualizerMarkView.summary(DeviceEQ(trebleDB: -2, balance: -0.3))
                 == "Treble \u{2212}2 dB, Balance L 30%")
     }
 

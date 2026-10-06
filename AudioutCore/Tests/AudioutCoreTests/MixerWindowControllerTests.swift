@@ -1822,10 +1822,10 @@ import AppKit
         window.speakersContentController.view.layoutSubtreeIfNeeded()
 
         let detail = window.test_mainOutDetail
-        #expect(detail.test_resetEnabled == false)
+        #expect(detail.test_resetShown == false, "hidden while the curve is flat, as on the speaker page")
 
         detail.show(eq: DeviceEQ(bassDB: 2))
-        #expect(detail.test_resetEnabled == true)
+        #expect(detail.test_resetShown == true)
 
         let reset = detail.test_eqResetButtonFrame
         let titleAlign = detail.test_eqSectionTitleAlignmentFrame
@@ -1837,7 +1837,7 @@ import AppKit
         detail.test_fireResetClick()
         #expect(reported.last?.0 == .flat)
         #expect(reported.last?.1 == true)
-        #expect(detail.test_resetEnabled == false)
+        #expect(detail.test_resetShown == false)
     }
 
     @Test func deviceEditsReportWithTheDeviceID() async throws {

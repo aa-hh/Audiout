@@ -1370,15 +1370,10 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
 
     /// Give a card/subsection TITLE label the AX **heading** role, so
     /// VoiceOver users can jump section-to-section (VO-⌘-H) instead of
-    /// walking every row. The raw string is the value of `kAXHeadingRole`
-    /// (HIServices) and of AppKit's macOS-26 `NSAccessibilityHeadingRole` —
-    /// spelled out because the AppKit constant does not import into Swift on
-    /// every toolchain this repo builds with, and the AX runtime has
-    /// recognized the role since long before AppKit named it. The label
-    /// still speaks its string as its value; the composed row-label design
-    /// elsewhere is untouched.
+    /// walking every row. The label still speaks its string as its value;
+    /// the composed row-label design elsewhere is untouched.
     private static func markAsAccessibilityHeading(_ label: NSTextField) {
-        label.setAccessibilityRole(NSAccessibility.Role(rawValue: "AXHeading"))
+        label.setAccessibilityHeading()
     }
 
     /// A column-header label (Output / Source / Offset / Redirect), placed over

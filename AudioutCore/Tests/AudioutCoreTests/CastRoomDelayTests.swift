@@ -158,17 +158,17 @@ import Testing
         feed(&policy, Self.steadyLeadMs)
 
         for _ in 0..<(CastRoomDelay.trackingWindowSamples - 1) {
-            #expect(policy.ingest(leadMs: 5_989, forID: "tv") == nil)
+            #expect(policy.ingest(leadMs: 5_979, forID: "tv") == nil)
         }
-        let tracked = policy.ingest(leadMs: 5_989, forID: "tv")
+        let tracked = policy.ingest(leadMs: 5_979, forID: "tv")
         #expect(tracked?.tracked == true)
-        #expect(tracked?.leadMs == 5_989)
+        #expect(tracked?.leadMs == 5_979)
         #expect(tracked?.termMoved == false)
-        #expect(policy.settledLeadMs(forID: "tv") == 5_989)
+        #expect(policy.settledLeadMs(forID: "tv") == 5_979)
         #expect(policy.termMs == 6_000)
 
         #expect(feed(&policy, 5_999, count: CastRoomDelay.trackingWindowSamples) == nil)
-        #expect(policy.settledLeadMs(forID: "tv") == 5_989)
+        #expect(policy.settledLeadMs(forID: "tv") == 5_979)
 
         // 30 ms under the term: past `raiseThresholdMs`, tracked, term kept.
         var lower = CastRoomDelay()
@@ -183,30 +183,30 @@ import Testing
         var jumped = CastRoomDelay()
         jumped.setReceivers(["tv"])
         feed(&jumped, Self.steadyLeadMs)
-        #expect(feed(&jumped, 5_989, count: CastRoomDelay.trackingWindowSamples)?.tracked == true)
+        #expect(feed(&jumped, 5_979, count: CastRoomDelay.trackingWindowSamples)?.tracked == true)
         for _ in 0..<(CastRoomDelay.trackingWindowSamples - 1) {
-            #expect(jumped.ingest(leadMs: 5_880, forID: "tv") == nil)
+            #expect(jumped.ingest(leadMs: 5_870, forID: "tv") == nil)
         }
-        let resettled = jumped.ingest(leadMs: 5_880, forID: "tv")
+        let resettled = jumped.ingest(leadMs: 5_870, forID: "tv")
         #expect(resettled?.tracked == false)
         #expect(resettled?.termMoved == true)
-        #expect(jumped.settledLeadMs(forID: "tv") == 5_880)
-        #expect(jumped.termMs == 5_880)
+        #expect(jumped.settledLeadMs(forID: "tv") == 5_870)
+        #expect(jumped.termMs == 5_870)
 
         // 139 ms off the basis on the trimmed samples, but the raw window straddles a 280 ms jump.
         var split = CastRoomDelay()
         split.setReceivers(["tv"])
         feed(&split, 5_490)
-        #expect(feed(&split, 5_501, count: CastRoomDelay.trackingWindowSamples)?.tracked == true)
-        for lead in Array(repeating: 5_360, count: 12) + Array(repeating: 5_640, count: 48) {
+        #expect(feed(&split, 5_511, count: CastRoomDelay.trackingWindowSamples)?.tracked == true)
+        for lead in Array(repeating: 5_370, count: 12) + Array(repeating: 5_650, count: 48) {
             #expect(split.ingest(leadMs: lead, forID: "tv") == nil)
         }
-        #expect(split.settledLeadMs(forID: "tv") == 5_501)
+        #expect(split.settledLeadMs(forID: "tv") == 5_511)
     }
 
     /// Tracking compares lead plus hold, and its hold is the median of the
     /// window's samples that carry one: here the lead never moves, but the
-    /// hold measured since the settle is 15 ms over the fallback.
+    /// hold measured since the settle is 25 ms under the fallback.
     /// Turns red if tracking counts a sample without a hold as the fallback hold, keeps the hold its settle measured, or compares the lead alone instead of lead plus hold.
     @Test func trackingCountsOnlyTheSamplesThatCarryAHold() {
         var policy = CastRoomDelay()
@@ -216,13 +216,13 @@ import Testing
 
         var last: CastRoomDelay.Settlement?
         for _ in 0..<6 {
-            for hold in [nil, nil, nil, nil, 130, 130, 140, nil, nil, 130] as [Int?] {
+            for hold in [nil, nil, nil, nil, 90, 90, 80, nil, nil, 90] as [Int?] {
                 last = policy.ingest(leadMs: 5_500, holdMs: hold, forID: "tv")
             }
         }
         #expect(last?.tracked == true)
         #expect(last?.termMoved == false)
-        #expect(policy.holdMs(forID: "tv") == 130)
+        #expect(policy.holdMs(forID: "tv") == 90)
         #expect(policy.settledLeadMs(forID: "tv") == 5_500)
         #expect(policy.termMs == 5_500)
     }
@@ -230,40 +230,45 @@ import Testing
     /// A tracked move raises the term only once the receiver would need more
     /// than `raiseThresholdMs` of negative share, measured against what it
     /// contributes, by-ear advance included, and the raise is remembered.
+    /// A tracked move is always past `trackingStepMs`, which equals `raiseThresholdMs`, so the move that stays inside the band follows one down.
     /// Turns red if a tracked move inside `raiseThresholdMs` moves the term, one past it leaves the term where it is or is not remembered, or the raise ignores the receiver's by-ear advance.
     @Test func aTrackedMovePastTheRaiseBandRaisesTheTermAndIsRemembered() {
         var policy = CastRoomDelay()
         policy.setReceivers(["tv"])
         feed(&policy, 5_500)
+        let down = feed(&policy, 5_470, count: CastRoomDelay.trackingWindowSamples)
+        #expect(down?.tracked == true)
+        #expect(down?.termMoved == false)
         let inside = feed(&policy, 5_515, count: CastRoomDelay.trackingWindowSamples)
         #expect(inside?.tracked == true)
         #expect(inside?.termMoved == false)
         #expect(policy.termMs == 5_500)
-        let past = feed(&policy, 5_530, count: CastRoomDelay.trackingWindowSamples)
+        let past = feed(&policy, 5_545, count: CastRoomDelay.trackingWindowSamples)
         #expect(past?.tracked == true)
         #expect(past?.termMoved == true)
-        #expect(policy.termMs == 5_530)
+        #expect(policy.termMs == 5_545)
         policy.setReceivers([])
         policy.setReceivers(["tv"])
-        #expect(policy.termMs == 5_530)
+        #expect(policy.termMs == 5_545)
 
         var advanced = CastRoomDelay()
         advanced.setReceivers(["tv"])
         feed(&advanced, 5_500)
         #expect(advanced.setAdvanceMs(94, forID: "tv") == true)
         #expect(advanced.termMs == 5_594)
+        #expect(feed(&advanced, 5_470, count: CastRoomDelay.trackingWindowSamples)?.termMoved == false)
         #expect(feed(&advanced, 5_515, count: CastRoomDelay.trackingWindowSamples)?.termMoved == false)
         #expect(advanced.termMs == 5_594)
-        #expect(feed(&advanced, 5_530, count: CastRoomDelay.trackingWindowSamples)?.termMoved == true)
-        #expect(advanced.termMs == 5_624)
+        #expect(feed(&advanced, 5_536, count: CastRoomDelay.trackingWindowSamples)?.termMoved == true)
+        #expect(advanced.termMs == 5_630)
     }
 
     /// A Google TV Streamer reports its position in ~20 ms steps and flips
     /// between two of them every few seconds, with a stray reading 80–100 ms
     /// high: none of that moves its share, while a 0.7 ms/min drift moves it
-    /// 11 ms at a time, a minute's window apart.
-    /// Turns red if the tracking window shrinks from `trackingWindowSamples`, its lead stops being the trimmed mean, the step drops below 10 ms, the settle goes back to the median, or the trimmed mean truncates instead of rounding.
-    @Test func positionStepsAreNeverTrackedAndSlowDriftIsTrackedInElevenMsMoves() {
+    /// 21 ms at a time.
+    /// Turns red if the tracking window shrinks from `trackingWindowSamples`, its lead stops being the trimmed mean, the step drops below 20 ms, the settle goes back to the median, or the trimmed mean truncates instead of rounding.
+    @Test func positionStepsAreNeverTrackedAndSlowDriftIsTrackedInTwentyOneMsMoves() {
         var policy = CastRoomDelay()
         policy.setReceivers(["tv"])
         let runLengths = [5, 3, 4]
@@ -293,8 +298,130 @@ import Testing
                 moves.append([i, landed.leadMs, landed.tracked ? 1 : 0, landed.termMoved ? 1 : 0])
             }
         }
-        #expect(moves == [[9, 5_550, 0, 1], [972, 5_561, 1, 0], [1_915, 5_572, 1, 1], [2_858, 5_583, 1, 0]])
-        #expect(drifting.termMs == 5_572)
+        #expect(moves == [[9, 5_550, 0, 1], [1_829, 5_571, 1, 1]])
+        #expect(drifting.termMs == 5_571)
+    }
+
+    // MARK: - Speed matching
+
+    /// A settled receiver's feed rate is the gain times the trimmed mean of
+    /// its last `trackingWindowSamples` play-out errors, once it has
+    /// `speedMatchMinimumSamples` of them, within ±`speedMatchMaxPpm`.
+    /// Turns red if speed matching acts before `speedMatchMinimumSamples` errors, its estimate stops being the trimmed mean of the last `trackingWindowSamples` errors, its gain or sign changes, or its rate passes `speedMatchMaxPpm`.
+    @Test func speedMatchingWaitsForItsMinimumThenFollowsTheTrimmedErrorUpToTheClamp() {
+        var policy = CastRoomDelay()
+        policy.setReceivers(["tv"])
+        #expect(policy.speedMatch(errorMs: 5, forID: "tv") == nil, "unsettled")
+        feed(&policy, 5_500)
+
+        for _ in 0..<(CastRoomDelay.speedMatchMinimumSamples - 1) {
+            #expect(policy.speedMatch(errorMs: 3, forID: "tv") == nil)
+        }
+        let first = policy.speedMatch(errorMs: 3, forID: "tv")
+        #expect(first?.ppm == 30)
+        #expect(first?.errorMs == 3)
+
+        var match: (ppm: Double, errorMs: Int)?
+        for _ in 0..<40 { match = policy.speedMatch(errorMs: 25, forID: "tv") }
+        #expect(match?.errorMs == 20)
+        #expect(match?.ppm == CastRoomDelay.speedMatchMaxPpm)
+
+        for _ in 0..<60 { match = policy.speedMatch(errorMs: -4, forID: "tv") }
+        #expect(match?.errorMs == -4)
+        #expect(match?.ppm == -40)
+
+        for i in 0..<60 { match = policy.speedMatch(errorMs: i % 10 == 9 ? 86 : -4, forID: "tv") }
+        #expect(match?.errorMs == -4, "a stray high error is trimmed away")
+        #expect(match?.ppm == -40)
+    }
+
+    /// Clock-rate mismatch survives a settle or a tracked move, but the errors
+    /// measured against the old share do not: each starts the speed window over.
+    /// Turns red if a settle or a tracked move leaves the speed window's earlier errors in place.
+    @Test func aSettleATrackedMoveOrAReopenedSettleEmptiesTheSpeedWindow() {
+        var policy = CastRoomDelay()
+        policy.setReceivers(["tv"])
+        feed(&policy, 5_500)
+        var match: (ppm: Double, errorMs: Int)?
+        for _ in 0..<CastRoomDelay.speedMatchMinimumSamples { match = policy.speedMatch(errorMs: 7, forID: "tv") }
+        #expect(match?.ppm == 70)
+
+        #expect(policy.ingest(leadMs: 5_900, forID: "tv") == nil)
+        #expect(policy.speedMatch(errorMs: 7, forID: "tv") == nil, "a re-opened settle")
+        #expect(feed(&policy, 5_500)?.tracked == false)
+        for _ in 0..<(CastRoomDelay.speedMatchMinimumSamples - 1) {
+            #expect(policy.speedMatch(errorMs: -2, forID: "tv") == nil)
+        }
+        #expect(policy.speedMatch(errorMs: -2, forID: "tv")?.ppm == -20)
+
+        #expect(feed(&policy, 5_525, count: CastRoomDelay.trackingWindowSamples)?.tracked == true)
+        for _ in 0..<(CastRoomDelay.speedMatchMinimumSamples - 1) {
+            #expect(policy.speedMatch(errorMs: 4, forID: "tv") == nil)
+        }
+        #expect(policy.speedMatch(errorMs: 4, forID: "tv")?.ppm == 40)
+
+        #expect(feed(&policy, 5_400, count: CastRoomDelay.trackingWindowSamples)?.tracked == false)
+        for _ in 0..<(CastRoomDelay.speedMatchMinimumSamples - 1) {
+            #expect(policy.speedMatch(errorMs: -6, forID: "tv") == nil)
+        }
+        #expect(policy.speedMatch(errorMs: -6, forID: "tv")?.ppm == -60)
+    }
+
+    /// Half an hour of a receiver drifting against the Mac, on this TV's
+    /// position steps and stray readings, with the rate fed back into the hold
+    /// the way the ring's queue would carry it: a 20 ppm drift either way is
+    /// held with no move after the settle, and a 150 ppm drift falls back to
+    /// tracked moves with the rate at its clamp.
+    /// Turns red if the rate's sign is reversed, the gain is zero or ten times larger, the clamp sits below a 20 ppm drift, a drift the rate can carry triggers a settle or tracked move, or a drift past `speedMatchMaxPpm` stops falling back to tracked moves with the rate at the clamp.
+    @Test func speedMatchingHoldsADriftingReceiverOnTheRoomAndFallsBackToTrackingPastTheClamp() {
+        func simulate(driftPpm: Double) -> (settlements: [(i: Int, settlement: CastRoomDelay.Settlement)],
+                                            rates: [Double], last: (ppm: Double, errorMs: Int)?) {
+            let runLengths = [5, 3, 4]
+            var offsets: [Int] = []
+            var run = 0
+            while offsets.count < 1_800 {
+                offsets += Array(repeating: run.isMultiple(of: 2) ? 0 : 20, count: runLengths[run % 3])
+                run += 1
+            }
+            offsets = Array(offsets.prefix(1_800))
+            for i in offsets.indices where i % 10 == 9 { offsets[i] = 90 }
+
+            var policy = CastRoomDelay()
+            policy.setReceivers(["tv"])
+            var settlements: [(i: Int, settlement: CastRoomDelay.Settlement)] = []
+            var rates: [Double] = []
+            var last: (ppm: Double, errorMs: Int)?
+            var ppm = 0.0
+            var correctionMs = 0.0
+            for (i, offset) in offsets.enumerated() {
+                let lead = 5_500 + offset + Int((driftPpm * Double(i) / 1_000).rounded())
+                let hold = Int((115 - correctionMs).rounded())
+                if let landed = policy.ingest(leadMs: lead, holdMs: hold, forID: "tv") {
+                    settlements.append((i, landed))
+                } else if let match = policy.speedMatch(
+                    errorMs: lead + hold - (policy.termMs! + CastFeedRing.macHoldMs), forID: "tv") {
+                    ppm = match.ppm
+                    last = match
+                }
+                rates.append(ppm)
+                correctionMs += ppm / 1_000
+            }
+            return (settlements, rates, last)
+        }
+
+        for drift in [20.0, -20.0] {
+            let held = simulate(driftPpm: drift)
+            #expect(held.settlements.count == 1, "drift \(drift) ppm")
+            #expect(held.last.map { abs($0.errorMs) <= 3 } == true, "drift \(drift) ppm")
+            #expect(held.rates.suffix(600).allSatisfy { abs($0 - drift) <= 25 }, "drift \(drift) ppm")
+        }
+
+        let fast = simulate(driftPpm: 150)
+        let firstTracked = fast.settlements.first { $0.settlement.tracked }
+        #expect(firstTracked != nil)
+        if let firstTracked {
+            #expect(fast.rates[firstTracked.i - 1] == CastRoomDelay.speedMatchMaxPpm)
+        }
     }
 
     /// A settle exactly at the raise band leaves the room alone; one past it,

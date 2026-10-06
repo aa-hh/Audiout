@@ -98,6 +98,12 @@ import CoreAudio
         func setCastPlaysAlone(_ alone: Bool, forDeviceID id: String) {
             lock.withLock { _playsAlone.append((alone, id)) }
         }
+        /// Every feed rate the backend handed the manager, in order.
+        var castRates: [(ppm: Double, id: String)] { lock.withLock { _castRates } }
+        private var _castRates: [(ppm: Double, id: String)] = []
+        func setCastRatePpm(_ ppm: Double, forDeviceID id: String) {
+            lock.withLock { _castRates.append((ppm, id)) }
+        }
         func retry(deviceID: String) { lock.withLock { _retries.append(deviceID) } }
         func stopAll() { lock.withLock { _stopAllCount += 1 } }
 
@@ -853,8 +859,8 @@ import CoreAudio
         rig.backend.captureControlQueue.sync {}
         let published = rig.capture.preDelayMs.count
 
-        rig.manager.fireLead(id: id, leadMs: 5_489, count: CastRoomDelay.trackingWindowSamples)
-        waitFor { rig.manager.castRoomDelays.last?.ms == 11 }
+        rig.manager.fireLead(id: id, leadMs: 5_479, count: CastRoomDelay.trackingWindowSamples)
+        waitFor { rig.manager.castRoomDelays.last?.ms == 21 }
         rig.backend.stateQueue.sync {}
         rig.backend.captureControlQueue.sync {}
         #expect(rig.capture.preDelayMs.count == published, "got \(rig.capture.preDelayMs)")
@@ -867,6 +873,41 @@ import CoreAudio
         #expect(rig.backend.localSinkReferenceDelayMs() == 5_645)
         waitFor { rig.manager.castRoomDelays.last?.ms == 0 }
         #expect(rig.manager.castRoomDelays.last?.ms == 0)
+    }
+
+    /// A settled receiver's feed rate follows what the listener hears from it
+    /// against the room plus its by-ear trim: lead, Mac hold and applied feed
+    /// delay, with a negative trim the floor at 0 swallowed still counted.
+    /// Turns red if the backend's error drops the Mac hold, the applied feed delay or the by-ear trim, lets the floor at 0 hide a negative trim, or feeds the speed window the sample that settled.
+    @Test func aSettledReceiversErrorAgainstTheRoomAndTrimSetsItsFeedRate() {
+        let clock = ManualDelayClock()
+        let (rig, ap) = castRoom(delayClock: clock.clock)
+        let id = Self.record.id
+        rig.backend.setOutputSet([ap.id, id])
+        waitFor { !rig.capture.preDelayMs.isEmpty }
+
+        rig.manager.fireLead(id: id, leadMs: 5_500, count: CastRoomDelay.settleSampleCount, holdMs: 115)
+        waitFor { rig.manager.castRoomDelays.last?.ms == 0 }
+        rig.manager.fireLead(id: id, leadMs: 5_500, count: CastRoomDelay.speedMatchMinimumSamples - 1, holdMs: 120)
+        rig.backend.stateQueue.sync {}
+        #expect(rig.manager.castRates.isEmpty, "got \(rig.manager.castRates)")
+
+        rig.manager.fireLead(id: id, leadMs: 5_500, holdMs: 120)
+        rig.backend.stateQueue.sync {}
+        #expect(rig.manager.castRates.count == 1)
+        #expect(rig.manager.castRates.last?.ppm == 50)
+        #expect(rig.manager.castRates.last?.id == id)
+
+        rig.backend.setCastUserOffsetMs(-3, forDevice: id)
+        rig.manager.fireLead(id: id, leadMs: 5_500, count: CastRoomDelay.trackingWindowSamples, holdMs: 120)
+        rig.backend.stateQueue.sync {}
+        #expect(rig.manager.castRates.last?.ppm == 80)
+
+        rig.backend.setCastUserOffsetMs(4, forDevice: id)
+        rig.manager.fireLead(id: id, leadMs: 5_500, count: CastRoomDelay.trackingWindowSamples, holdMs: 120)
+        rig.backend.stateQueue.sync {}
+        #expect(rig.manager.castRates.last?.ppm == 50)
+        #expect(rig.backend.localSinkReferenceDelayMs() == 5_615)
     }
 
     /// Every by-ear offset reaches the receiver's feed at once, but the room

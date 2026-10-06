@@ -46,6 +46,12 @@ import Foundation
 ///    ``settleBandMs``; until then its oldest sample drops and the receiver
 ///    stays settled. That re-settle keeps every tracked move within
 ///    ``feedGateBandMs``.
+///  - A settled receiver's feed keeps pace with the room by its rate
+///    (``speedMatch(errorMs:forID:)``): ``speedMatchGainPpmPerMs`` per ms of
+///    the trimmed mean of its last ``trackingWindowSamples`` play-out errors,
+///    within ±``speedMatchMaxPpm``, once it has ``speedMatchMinimumSamples`` of
+///    them. A settle, a tracked move or a re-opened settle empties that window,
+///    and the feed keeps its last rate until it refills.
 ///  - A by-ear advance (a negative offset) is added to the receiver's last
 ///    adjusted lead, never to its term: an advance that fits inside the
 ///    receiver's own share moves nothing. The sum stops at ``maxTermMs``, and
@@ -108,11 +114,14 @@ struct CastRoomDelay {
     /// follows: the trimmed-mean lead plus the median hold over its last
     /// ``trackingWindowSamples`` kept samples, against the settled lead plus
     /// hold its share was computed from.
-    /// razor: replayed on the 2026-10-04 Google TV Streamer session (55
-    /// minutes, drift 0.64 ms/min) this step and window re-push 5 times, each
-    /// 11 ms in the drift's direction. Widen the window, not this step, if the
-    /// moves are heard.
-    static let trackingStepMs = 10
+    /// razor: speed matching holds slow drift, so tracking only catches what
+    /// the feed rate cannot: a jump, a drift past ``speedMatchMaxPpm``, or a
+    /// receiver running late with nothing above the ring's standing queue to
+    /// drain. On the 2026-10-04 session the TV's ~22 ms position steps swing a
+    /// minute's trimmed mean by up to 13 ms, which a 10 ms step tracked three
+    /// times in two minutes on top of the rate; 20 sits above those swings and
+    /// equals ``raiseThresholdMs``.
+    static let trackingStepMs = 20
 
     /// How close an unsettled receiver's play-out has to land to the room for
     /// its feed to play. Also the largest move tracking makes (a tracking
@@ -121,6 +130,24 @@ struct CastRoomDelay {
     /// razor: inside the 150 ms correction threshold; opening on a settle
     /// covers the rest.
     static let feedGateBandMs = 100
+
+    /// ppm per ms of the trimmed mean of a settled receiver's last
+    /// ``trackingWindowSamples`` play-out errors against the room.
+    /// razor: proportional only. Replayed on the 2026-10-04 and 2026-10-06
+    /// sessions (drift −0.64 and +1.19 ms/min) it holds the error's median at
+    /// +0.1 and +1.8 ms; a receiver drifting 60 ppm would sit about 6 ms off.
+    /// Add an integral term if a live session's median sits past 5 ms.
+    static let speedMatchGainPpmPerMs: Double = 10
+
+    /// The furthest a receiver's feed rate moves from the server's clock,
+    /// either way.
+    /// razor: five times the 20 ppm recorded, 0.17 cents of pitch, inside the
+    /// ±200 ppm ``FractionalResampler`` was validated for.
+    static let speedMatchMaxPpm: Double = 100
+
+    /// Errors a settled receiver's speed window needs before it sets a rate;
+    /// until then its feed keeps its last rate.
+    static let speedMatchMinimumSamples = 20
 
     /// What one settle decided. `nil` from ``ingest(leadMs:holdMs:forID:)`` means the
     /// sample changed nothing — still settling, already on target, or tracking
@@ -153,6 +180,9 @@ struct CastRoomDelay {
         var holdMs: Int?
         /// The last settle or tracked raise's lead adjusted to the fallback hold.
         var adjustedLeadMs: Int?
+        /// Play-out errors against the room since the last settle or tracked
+        /// move, the newest ``trackingWindowSamples``.
+        var speedWindow: [Int] = []
     }
 
     private var receivers: [String: Receiver] = [:]
@@ -230,6 +260,7 @@ struct CastRoomDelay {
                 } else {
                     let have = contributionMs(of: receiver, id: id)
                     receiver.tracking = []
+                    receiver.speedWindow = []
                     receiver.settledLeadMs = trackedLead
                     receiver.holdMs = trackedHold
                     let adjusted = trackedLead + (trackedHold ?? CastFeedRing.macHoldMs) - CastFeedRing.macHoldMs
@@ -261,6 +292,7 @@ struct CastRoomDelay {
         let holds = receiver.window.compactMap(\.holdMs)
         if !holds.isEmpty { receiver.holdMs = Self.median(of: holds) }
         receiver.window = []
+        receiver.speedWindow = []
         receiver.settledLeadMs = settled
         receiver.refused = settled > Self.maxTermMs
         if receiver.refused {
@@ -302,6 +334,29 @@ struct CastRoomDelay {
     /// ``CastFeedRing/macHoldMs`` before its first settle measured one.
     func holdMs(forID id: String) -> Int {
         receivers[id]?.holdMs ?? CastFeedRing.macHoldMs
+    }
+
+    /// One kept sample's play-out error in ms, positive when the receiver
+    /// plays later than the room plus its by-ear trim. Returns the feed rate it
+    /// now asks for and the error estimate behind it, or nil while the
+    /// receiver is not in the mix, unsettled or refused or has fewer than
+    /// ``speedMatchMinimumSamples`` errors since its last settle or tracked
+    /// move.
+    mutating func speedMatch(errorMs: Int, forID id: String) -> (ppm: Double, errorMs: Int)? {
+        guard var receiver = receivers[id] else { return nil }
+        guard receiver.settledLeadMs != nil, !receiver.refused else {
+            receiver.speedWindow = []
+            receivers[id] = receiver
+            return nil
+        }
+        receiver.speedWindow.append(errorMs)
+        if receiver.speedWindow.count > Self.trackingWindowSamples { receiver.speedWindow.removeFirst() }
+        receivers[id] = receiver
+        guard receiver.speedWindow.count >= Self.speedMatchMinimumSamples else { return nil }
+        let estimate = Self.trimmedMean(of: receiver.speedWindow)
+        let ppm = min(Self.speedMatchMaxPpm,
+                      max(-Self.speedMatchMaxPpm, Self.speedMatchGainPpmPerMs * Double(estimate)))
+        return (ppm, estimate)
     }
 
     /// Store this receiver's by-ear advance, floored at 0. Returns whether

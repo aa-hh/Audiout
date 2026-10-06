@@ -927,10 +927,12 @@ extension NativeBackend {
     /// CAST-SYNC (brief §4): one lead measurement the session manager judged
     /// trustworthy, with the room-delay share its feed held back when it was
     /// taken. A settle or a tracked move changes a delay; only a settle holds
-    /// its gate back. Every sample decides the receiver's feed gate. On
-    /// `stateQueue`.
+    /// its gate back. Every sample decides the receiver's feed gate, and every
+    /// sample with a hold that neither settles nor moves a share goes into its
+    /// speed window. On `stateQueue`.
     func applyCastLeadSample(_ id: String, _ leadMs: Int, _ feedDelayMs: Int, _ holdMs: Int?, _ generation: Int) {   // on stateQueue
-        if let settlement = castRoomDelay.ingest(leadMs: leadMs, holdMs: holdMs, forID: id) {
+        let settlement = castRoomDelay.ingest(leadMs: leadMs, holdMs: holdMs, forID: id)
+        if let settlement {
             if settlement.tracked {
                 if settlement.termMoved {
                     roomDelayChangedLocked(cause: "cast_lead_tracked")
@@ -955,6 +957,8 @@ extension NativeBackend {
                     "refused": settlement.refused ? "1" : "0",
                     "term_ms": _castTermMs.map(String.init) ?? "nil",
                 ])
+                // A refused receiver is out of the room, so its feed goes back to the server's clock.
+                if settlement.refused { castOutputManager?.setCastRatePpm(0, forDeviceID: id) }
                 if settlement.termMoved {
                     roomDelayChangedLocked(cause: "cast_lead")
                 } else {
@@ -993,6 +997,21 @@ extension NativeBackend {
                 playOutMs: leadMs + (holdMs ?? CastFeedRing.macHoldMs) + feedDelayMs,
                 roomMs: roomDelayLocked()),
             forDeviceID: id, generation: generation)
+        // Speed matching: what the listener hears against the room plus the
+        // by-ear trim; a share the floor at 0 swallowed still counts, so the
+        // rate can take it back.
+        if settlement == nil, let holdMs {
+            let trimMs = Int(castOffsetLock.withLock { castOffsetsByID[id] ?? 0 })
+            let errorMs = leadMs + holdMs + Swift.max(0, feedDelayMs + trimMs) - roomDelayLocked() - trimMs
+            if let match = castRoomDelay.speedMatch(errorMs: errorMs, forID: id) {
+                castOutputManager?.setCastRatePpm(match.ppm, forDeviceID: id)
+                Telemetry.log(.cast, "cast_speed_match", [
+                    "device": id,
+                    "ppm": String(format: "%.0f", match.ppm),
+                    "error_ms": String(match.errorMs),
+                ])
+            }
+        }
     }
 
     /// CAST-SYNC: hand every settled receiver the part of the room delay it

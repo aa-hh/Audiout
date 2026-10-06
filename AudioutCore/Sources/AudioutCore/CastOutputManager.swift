@@ -74,6 +74,12 @@ protocol CastOutputControlling: AnyObject, Sendable {
     /// for its feed to fall out of step with and it plays from the first byte.
     func setCastPlaysAlone(_ alone: Bool, forDeviceID id: String)
 
+    /// CAST-SYNC speed matching: read this receiver's feed `ppm` parts per
+    /// million faster than the server's wall clock (negative: slower), so its
+    /// play-out keeps pace with the room with no share push. The server's byte
+    /// rate never changes. An id with no session is ignored.
+    func setCastRatePpm(_ ppm: Double, forDeviceID id: String)
+
     /// What one leg's feed is actually doing, for the room-delay controller and
     /// for a live test. `nil` for an id with no session.
     func castFeedStats(forDevice id: String) -> CastFeedStats?
@@ -86,6 +92,7 @@ extension CastOutputControlling {
     func setCastUserOffsetMs(_ ms: Int, forDeviceID id: String) {}
     func setCastFeedGate(open: Bool, forDeviceID id: String, generation: Int) {}
     func setCastPlaysAlone(_ alone: Bool, forDeviceID id: String) {}
+    func setCastRatePpm(_ ppm: Double, forDeviceID id: String) {}
     func castFeedStats(forDevice id: String) -> CastFeedStats? { nil }
 }
 
@@ -187,6 +194,25 @@ struct CastFeedTiming: Sendable, Equatable {
 /// BUFFERING, `secondsSent` freezes while `currentTime` runs on, and the lead
 /// measurement the room-delay controller reads is poisoned.
 ///
+/// CAST-SYNC speed matching: a nonzero ``setRatePpm(_:)`` reads the ring
+/// through ``FractionalResampler`` a few ppm fast or slow, so a receiver's
+/// play-out keeps pace with the room while the server still serves exactly its
+/// wall clock's bytes. A rate above 1 never takes the ring below its standing
+/// queue; that render runs at 1. A ring never given a nonzero rate renders the
+/// plain copy, byte for byte. Once a ring has resampled it stays on the
+/// resampler until its next ``reset()`` or refill, each of which restarts the
+/// resampler with nothing stored; at rate 0 the resampler holds its last
+/// fractional phase, so the cubic's top-octave dip (up to 4.6 dB at 16 kHz near
+/// half a frame) holds steady instead of passing. A resampled render's timing
+/// stamp sits up to 3 frames (0.07 ms) late: it uses the read position before
+/// the pull, while the first rendered frame comes from the resampler's stored
+/// frames, so age and hold read up to 0.07 ms short. razor: the cubic dips the
+/// top octave (about 0.7 dB at 10 kHz, 4.6 dB at 16 kHz) while its phase passes
+/// half a frame, about once a second at 20 ppm; the synced Mac sink runs the
+/// same resampler. Switching back to the plain copy mid-stream would skip 1-2
+/// frames, so a ring that has resampled keeps resampling. A windowed-sinc
+/// resampler is the upgrade that removes the dip.
+///
 /// `razor:` ceiling — one scalar gain with a linear ramp. Mute-click
 /// suppression or a dB mapping belongs here, in the ramp target, not at the
 /// call sites.
@@ -231,6 +257,16 @@ final class CastFeedRing: CastPCMSource, @unchecked Sendable {
     private var feedGateOpen = true
     /// Lock-guarded, and `nil` until the first delay request, zero included.
     private var delayLine: PCMDelayLine?
+    /// How much faster than the server's wall clock the render reads captured
+    /// frames, in ppm; negative reads slower.
+    private var ratePpm: Double = 0
+    /// Whether renders go through ``resampler``. Set by the first render that
+    /// takes frames at a nonzero rate; cleared by ``reset()`` and by the render
+    /// that ends a refill.
+    private var resampling = false
+    /// Touched only by `render` and `reset()`, under `lock`, on the server's
+    /// queue.
+    private let resampler = FractionalResampler(channelCount: 2)
     /// Serialises producers against each other, never against the consumer:
     /// ``CastFanOut`` reaches ``push(_:pts:nowNanos:)`` from the capture
     /// callback, the wizard pacing queue and the leveled-app fallback clock.
@@ -502,9 +538,43 @@ final class CastFeedRing: CastPCMSource, @unchecked Sendable {
             consumed += excess
             available -= excess
             refilling = false
+            resampler.reset()
+            resampling = false
         }
-        let taken = standingQueueFrames > 0 && refilling ? 0 : min(frames, available)
-        if taken > 0 {
+        let takes = !(standingQueueFrames > 0 && refilling)
+        if takes, ratePpm != 0 { resampling = true }
+        var pulled = 0
+        var written = 0
+        if takes, resampling {
+            var ratio = 1 + ratePpm * 1e-6
+            if ratio > 1,
+               available - (Int((Double(frames) * ratio).rounded(.up)) + 3) < standingQueueFrames {
+                ratio = 1
+            }
+            var samples = [Float](repeating: 0, count: frames * 2)
+            var index = consumed
+            written = samples.withUnsafeMutableBufferPointer { buffer in
+                resampler.render(into: buffer, outFrameOffset: 0, outFrames: frames, ratio: ratio) { frame in
+                    guard index < pushed else { return false }
+                    let source = storage + (index % Self.capacityFrames) * 2
+                    frame[0] = Float(source[0])
+                    frame[1] = Float(source[1])
+                    index += 1
+                    return true
+                }
+            }
+            pulled = index - consumed
+            out.withUnsafeMutableBytes { raw in
+                let samplesOut = raw.bindMemory(to: Int16.self)
+                for sample in 0..<(written * 2) {
+                    samplesOut[sample] = Int16(max(-32_768, min(32_767, samples[sample].rounded())))
+                }
+            }
+        } else if takes {
+            pulled = min(frames, available)
+            written = pulled
+        }
+        if pulled > 0 {
             // Forward only, bounded by the blocks queued ahead.
             stampCursor = max(stampCursor, stampsWritten - Self.stampCapacity)
             while stampCursor + 1 < stampsWritten,
@@ -522,19 +592,21 @@ final class CastFeedRing: CastPCMSource, @unchecked Sendable {
                 pushedAtNanos: stamp.pushedAtNanos,
                 delayFramesAtPush: stamp.delayFramesAtPush,
                 framesAhead: stamp.framesAheadAtPush + offset)
-            let readFrame = consumed % Self.capacityFrames
-            let firstRun = min(taken, Self.capacityFrames - readFrame)
-            out.withUnsafeMutableBytes { raw in
-                guard let base = raw.baseAddress else { return }
-                memcpy(base, storage + readFrame * 2, firstRun * 4)
-                if taken > firstRun {
-                    memcpy(base + firstRun * 4, storage, (taken - firstRun) * 4)
+            if !resampling {
+                let readFrame = consumed % Self.capacityFrames
+                let firstRun = min(pulled, Self.capacityFrames - readFrame)
+                out.withUnsafeMutableBytes { raw in
+                    guard let base = raw.baseAddress else { return }
+                    memcpy(base, storage + readFrame * 2, firstRun * 4)
+                    if pulled > firstRun {
+                        memcpy(base + firstRun * 4, storage, (pulled - firstRun) * 4)
+                    }
                 }
             }
-            consumed += taken
+            consumed += pulled
         }
-        if standingQueueFrames > 0, !refilling, taken < frames { refilling = true }
-        underrunFrames += frames - taken
+        if standingQueueFrames > 0, !refilling, written < frames { refilling = true }
+        underrunFrames += frames - written
         renderedFramesSinceReset += frames
         let gain = currentGain
         let target = feedGateOpen ? targetGain : 0
@@ -543,8 +615,9 @@ final class CastFeedRing: CastPCMSource, @unchecked Sendable {
         lock.unlock()
         // The gain loop and the peak scan run over every sample, so they run
         // off the lock the producer is waiting to take.
-        // Unity on both ends is the whole attenuation-receiver path: the
-        // memcpy above is all it costs.
+        // Unity on both ends is the whole attenuation-receiver path: for a
+        // plain-copy ring the memcpy above is all it costs; a resampling ring
+        // runs the resampler and the float conversion under `lock` instead.
         var finalGain = gain
         if gain != 1 || target != 1 {
             finalGain = Self.applyGain(&out, frames: frames, from: gain, to: target)
@@ -594,7 +667,15 @@ final class CastFeedRing: CastPCMSource, @unchecked Sendable {
         lock.withLock { feedGateOpen = open }
     }
 
+    /// Positive reads the captured audio faster, so the receiver plays earlier
+    /// as the ring's queue shrinks; negative slower. The bytes served per
+    /// second never change.
+    func setRatePpm(_ ppm: Double) {
+        lock.withLock { ratePpm = ppm }
+    }
+
     var test_feedGateOpen: Bool { lock.withLock { feedGateOpen } }
+    var test_ratePpm: Double { lock.withLock { ratePpm } }
 
     func test_withLockHeld(_ body: () -> Void) {
         lock.lock()
@@ -665,6 +746,8 @@ final class CastFeedRing: CastPCMSource, @unchecked Sendable {
         // gate is closed. A standing-queue ring refills before it plays.
         refilling = true
         currentGain = feedGateOpen ? targetGain : 0
+        resampler.reset()
+        resampling = false
         lock.unlock()
         return discardedFrames * 1000 / Self.sampleRate
     }
@@ -934,6 +1017,13 @@ final class CastOutputManager: CastOutputControlling, @unchecked Sendable {
             guard let self, let session = self.sessions[id] else { return }
             session.playsAlone = alone
             self.applyGate(session)
+        }
+    }
+
+    func setCastRatePpm(_ ppm: Double, forDeviceID id: String) {
+        queue.async { [weak self] in
+            guard let self, let session = self.sessions[id] else { return }
+            session.ring.setRatePpm(ppm)
         }
     }
 

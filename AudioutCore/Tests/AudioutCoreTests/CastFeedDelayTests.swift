@@ -436,6 +436,63 @@ import Testing
         #expect(ring.stats.writes == 1)
     }
 
+    // MARK: - The feed rate
+
+    /// At 100 ppm a render of 882 frames reads 882.0882 captured frames, the
+    /// fraction carried from one render to the next.
+    /// Turns red if the rate stops reaching the render, the resampler restarts at each render (about 2,000 frames off), or a render rounds the rate to whole frames instead of carrying the fraction (90 frames off).
+    @Test func aFeedRateConsumesItsShareOfCapturedFramesExactlyOverALongRun() {
+        let ring = CastFeedRing()
+        ring.setRatePpm(100)
+        for _ in 0..<50 { ring.push(tone(frames: 882)) }
+        for _ in 0..<1_000 {
+            ring.push(tone(frames: 882))
+            _ = ring.render(frames: 882)
+        }
+        #expect(ring.bufferedFrames == 44_010)
+        #expect(ring.stats.underrunFrames == 0)
+    }
+
+    /// A rate of 0 is the plain copy whether or not it was ever set, and a GET
+    /// takes a ring that once had a rate back to it.
+    /// Turns red if a rate of 0 sends the feed through the resampler (its primed frames leave a 2-frame silent tail), or `reset()` leaves a ring that once had a rate on the resampler.
+    @Test func aFeedRateOfZeroIsTheByteForBytePathAndAGETReturnsToIt() {
+        let untouched = CastFeedRing()
+        let zero = CastFeedRing()
+        zero.setRatePpm(0)
+        for ring in [untouched, zero] {
+            for block in 0..<3 { ring.push(Self.ramp(block: block)) }
+        }
+        let first = Self.ramp(block: 0) + Self.ramp(block: 1) + Self.ramp(block: 2)
+        #expect(untouched.render(frames: 1_536) == first)
+        #expect(zero.render(frames: 1_536) == first)
+        #expect(zero.stats.underrunFrames == 0)
+
+        let regot = CastFeedRing()
+        regot.setRatePpm(50)
+        for block in 0..<3 { regot.push(Self.ramp(block: block)) }
+        _ = regot.render(frames: 882)
+        regot.reset()
+        regot.setRatePpm(0)
+        for block in 3..<6 { regot.push(Self.ramp(block: block)) }
+        #expect(regot.render(frames: 1_536) == Self.ramp(block: 3) + Self.ramp(block: 4) + Self.ramp(block: 5))
+    }
+
+    /// A faster rate that would read the ring below its standing queue runs
+    /// at 1 instead, so the queue holds and nothing underruns past the refill.
+    /// Turns red if a rate above 1 is applied when it would take the ring below its standing queue (3,262 left), or the rate is ignored (3,528 left).
+    @Test func aFasterFeedRateNeverTakesTheStandingQueue() {
+        let ring = CastFeedRing(standingQueueMs: 80)
+        ring.setRatePpm(100)
+        ring.reset()
+        for _ in 0..<3_005 {
+            ring.push(tone(frames: 882))
+            _ = ring.render(frames: 882)
+        }
+        #expect(ring.stats.underrunFrames == 3_528)
+        #expect(ring.bufferedFrames == 3_526)
+    }
+
     // MARK: - The controller's and the user's terms compose
 
     @Test func roomDelayAndUserOffsetComposeAndClampAtTheFloor() {
@@ -463,6 +520,10 @@ import Testing
         #expect(appliedDelayMs(manager) == 0)
 
         #expect(manager.castFeedStats(forDevice: "nobody") == nil)
+
+        // Turns red if `setCastRatePpm` stops reaching the session's own ring.
+        manager.setCastRatePpm(40, forDeviceID: "dev1")
+        #expect(manager.test_ring(forDevice: "dev1")?.test_ratePpm == 40)
     }
 
     /// One block through the fan-out so the line adopts the pending value, then

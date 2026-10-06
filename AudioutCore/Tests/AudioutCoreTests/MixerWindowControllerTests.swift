@@ -463,7 +463,7 @@ import AppKit
         #expect(window.test_isShowingScenesOverview, "⌘[ leaves the editor")
     }
 
-    // Turns red when a deep link to the Speakers plate stops showing the Speakers page or stops lighting its row.
+    // Turns red when a deep link to the Overview plate stops showing the Overview or stops lighting its row.
     @Test func selectingTheSpeakersPlateShowsTheSpeakersPage() async throws {
         let (window, _, _) = try await makeWindow()
         window.select(.device(id: "office"))

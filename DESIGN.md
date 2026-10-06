@@ -558,7 +558,8 @@ in over 0.18 s when it arrives. Under Reduce Motion there are no placeholders:
 the tiles show "–" and the caption "Looking for speakers…". The can't-be-found
 list stays empty until that 10 s mark, and never holds a Bluetooth speaker
 without Bluetooth access, or a network speaker while Local Network is denied
-or before any network speaker has answered.
+or before any network speaker has answered, so when every network speaker
+is gone none of them is offered Forget.
 
 **Onboarding** is a floating first-run window: a spine of status rows beside
 one hero panel, gating Done until every check passes.
@@ -767,8 +768,9 @@ even when unavailable** (checked for Always), **Speaker settings…**, and
 **Forget…** only for speakers on the search's can't-be-found list;
 Command-Delete forgets the selected ones on that list. Dragging rows onto the
 other group's header moves them between groups. Forget asks first in a
-warning sheet whose Return key is Cancel. It names up to two speakers and
-counts the rest, and says that a speaker which turns up again comes back to
+warning sheet whose Return key is Cancel. It names every speaker when there
+are at most three and each has saved details, otherwise the first two and a
+count of the rest, and says that a speaker which turns up again comes back to
 the speaker list but not to its scenes. It refuses when a scene would be left
 with no speaker, naming the scene to delete first, and when Main Audio or an
 app is still set to play on the speaker. A failed Forget shows the scene

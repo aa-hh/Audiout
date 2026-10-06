@@ -33,7 +33,7 @@ public enum SurfaceScreen: Int, CaseIterable, Sendable {
     /// playing rather than a control being adjusted, and it collides with
     /// nothing else on screen: the rows use `speaker.wave.2.fill` and
     /// `speaker.slash.fill`, Scenes uses the default scene glyph
-    /// (`Group.defaultIconSymbolName`), Speakers the Speakers plate's
+    /// (`Group.defaultIconSymbolName`), Speakers the Overview plate's
     /// `hifispeaker.2`, Settings `gearshape`, and the alignment wizard
     /// `tuningfork`.
     var symbolName: String {

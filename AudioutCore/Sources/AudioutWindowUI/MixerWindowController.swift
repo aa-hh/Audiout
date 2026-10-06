@@ -15,8 +15,8 @@ import AudioutSharedUI
 /// (`GroupEditorViewController`, pushed in place when a card is opened).
 /// `speakersContentController` is an `NSSplitViewController` whose sidebar
 /// item is a source-list `NSOutlineView` (`SidebarViewController`, the speaker
-/// list) and whose content item is a second host swapped between the Speakers
-/// page (`SpeakersPageViewController`, the sidebar's "Speakers" plate), a
+/// list) and whose content item is a second host swapped between the Overview
+/// (`SpeakersPageViewController`, the sidebar's "Overview" plate), a
 /// speaker's page (`DeviceDetailViewController`) and the whole-mix
 /// `MainOutDetailViewController` (the sidebar's "Main Audio" row). It owns NO
 /// window: the app's `AppSurfaceController` hosts the roots and tells this

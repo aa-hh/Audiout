@@ -81,8 +81,9 @@ public final class SpeakerSearch {
     /// an AirPlay speaker is listed only once a test connection opens, and
     /// Bonjour waits at least 1 s before asking again.
     public static let networkQuietWindow: TimeInterval = 2.0
-    /// razor: a fixed backstop from the first speaker seen; tune it if a real
-    /// network's discovery routinely outlasts it.
+    /// razor: a fixed backstop, armed from the first speaker seen for the
+    /// counts event and from `start()` for the can't-be-found hold; tune it if a
+    /// real network's discovery routinely outlasts it.
     public static let ceiling: TimeInterval = 10
 
     public private(set) var isDone = false

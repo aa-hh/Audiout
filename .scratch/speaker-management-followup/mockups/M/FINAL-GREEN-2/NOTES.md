@@ -14,6 +14,7 @@ One view of the Speakers tab as it would ship after the owner's rulings on the g
 
 ## For the owner
 
+- Ruled 2026-10-04: all three green touches are kept (Available and counts above 0, the Pair plus, Ready/Connected).
 - If 3 is kept alongside the kept mark, a shaped speaker's page shows the same green twice with two meanings: the Mac can reach it ("Ready") and its curve is shaped (the mark). The top-right window shows exactly that.
 
 ## Not edited

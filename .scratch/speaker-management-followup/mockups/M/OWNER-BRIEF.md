@@ -53,3 +53,4 @@ Open owner calls carried from the harden/clarify passes (use their defaults, lis
 - NO green tab highlight in the header strip (and so no gold on the Mixer tab either): the header stays neutral as today.
 - KEEP the green equalizer engaged mark on the speaker page (do not remove it; equalizerEngagedMarkImage stays public).
 - The other three touches (Available counts, Pair + glyph, Ready/Connected word) are undecided: owner wants one mock-up of the whole setup as it would ship, then he'll say which to keep. Draw all three, each labelled.
+- Ruled after FINAL-GREEN-2 (2026-10-04): all three touches KEPT.

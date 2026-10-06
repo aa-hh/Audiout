@@ -4,6 +4,7 @@ import Testing
 import Foundation
 import AppKit
 @testable import AudioutCore
+import AudioutSharedUI
 @testable import AudioutWindowUI
 
 /// The speaker sidebar: its two groups (the Mixer visibility setting), the
@@ -175,12 +176,59 @@ import AppKit
         #expect(sidebar.test_groupRows(inGroupTitled: "Shown in Mixer") == ["attic", "kitchen", "office", "patio"])
     }
 
-    // Turns red when shouldSelectItem falls back to !isGroupItem so the divider takes a click, or a proposed selection keeps the divider or pulls the Overview plate into a range.
+    // Turns red when the selection filter keeps a header or divider a click proposes (or clears the selection there), keeps the divider in a range, or pulls the Overview plate into one.
     @Test func theDividerAndThePlatesStayOutOfSelections() {
         let (sidebar, _) = makeFleetSidebar()
-        #expect(sidebar.test_dividerIsSelectable(inGroupTitled: "Shown in Mixer") == false)
+        sidebar.test_selectDevices(["alpha"])
+        for key in ["System Audio", "Speakers", "Shown in Mixer", "2 unavailable", "Hidden unless in use"] {
+            #expect(sidebar.test_filteredSelection(ofRowKeys: [key]) == ["alpha"], "a click on \(key) changes nothing")
+        }
         #expect(sidebar.test_filteredSelection(ofRowKeys: ["alpha", "2 unavailable", "kitchen"]) == ["alpha", "kitchen"])
         #expect(sidebar.test_filteredSelection(ofRowKeys: ["Overview", "alpha"]) == ["alpha"])
+    }
+
+    // Turns red when the selection filter lets an arrow key land on a header or divider (reporting nil, which resets the page to Overview) or stops it there instead of moving on to the next row it may select.
+    @Test func arrowKeysStepOverHeadersAndDividers() {
+        let (sidebar, _) = makeFleetSidebar()
+        var reported: [SidebarSelection?] = []
+        sidebar.onSelect = { reported.append($0) }
+
+        sidebar.select(.device(id: "zeta"), notify: false)
+        sidebar.test_pressArrow(down: true)
+        #expect(sidebar.currentSelection == .device(id: "kitchen"), "down from the last reachable speaker skips the divider")
+
+        sidebar.select(.device(id: "study"), notify: false)
+        sidebar.test_pressArrow(down: true)
+        #expect(sidebar.currentSelection == .device(id: "den"), "down across the Hidden header")
+
+        sidebar.select(.device(id: "mac"), notify: false)
+        sidebar.test_pressArrow(down: false)
+        #expect(sidebar.currentSelection == .speakersOverview, "up across the Shown in Mixer header")
+        sidebar.test_pressArrow(down: false)
+        #expect(sidebar.currentSelection == .mainOut, "up across the Speakers title")
+        sidebar.test_pressArrow(down: false)
+        #expect(sidebar.currentSelection == .mainOut, "the System Audio title above stays out of reach")
+
+        #expect(reported == [.device(id: "kitchen"), .device(id: "den"), .speakersOverview, .mainOut])
+    }
+
+    // Turns red when applySelectionInks leaves any of the name, icon, caption or chevron on its resting ink under either pill, or keeps a pill ink once the row is deselected.
+    @Test func everyInkInASelectedRowFollowsThePill() throws {
+        let (sidebar, _) = makeFleetSidebar()
+        let resting: [NSColor?] = [Tokens.Color.label, Tokens.Color.label, Tokens.Color.labelCool, Tokens.Color.labelCool2]
+        for target in [SidebarSelection.device(id: "onkyo"), .speakersOverview] {
+            sidebar.select(target, notify: false)
+            let rowView = try #require(sidebar.test_rowView(for: target))
+            let cell = try #require(rowView.view(atColumn: 0) as? IconLabelCellView)
+            let inks = { [cell.nameLabel.textColor, cell.imageView?.contentTintColor,
+                          cell.statusLabel.textColor, cell.disclosureView.contentTintColor] }
+            rowView.isEmphasized = true
+            #expect(inks() == Array(repeating: NSColor.alternateSelectedControlTextColor, count: 4), "\(target) focused pill")
+            rowView.isEmphasized = false
+            #expect(inks() == Array(repeating: Tokens.Color.label, count: 4), "\(target) grey pill")
+            sidebar.select(.groupsOverview, notify: false)
+            #expect(inks() == resting, "\(target) deselected")
+        }
     }
 
     // Turns red when the hidden group's header is built with no rows under it, or a reload re-expands a group the user folded.

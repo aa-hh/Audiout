@@ -66,10 +66,10 @@ public final class SidebarViewController: NSViewController {
         }
     }
 
-    /// Called when the selection changes. `nil` when the selection is cleared
-    /// or lands on a non-selectable header row. Reports the *primary* (first)
-    /// selected row so the detail pane still follows a single selection; the full
-    /// multi-selection is available via ``selectedDeviceIDs``.
+    /// Called when the selection changes. `nil` when the selection is cleared.
+    /// Reports the *primary* (first) selected row so the detail pane still
+    /// follows a single selection; the full multi-selection is available via
+    /// ``selectedDeviceIDs``.
     public var onSelect: ((SidebarSelection?) -> Void)?
 
     /// Called when the user clicks the "+" (new empty group) button at the bottom
@@ -209,8 +209,8 @@ public final class SidebarViewController: NSViewController {
         outlineView.allowsExpansionToolTips = true
         outlineView.autosaveExpandedItems = false
         // Multi-select so the user can cmd/shift-click several speakers and make
-        // a group from exactly those (SPEC.md §9). Headers stay non-selectable
-        // via `shouldSelectItem`.
+        // a group from exactly those (SPEC.md §9). Headers and dividers stay
+        // non-selectable via `selectionIndexesForProposedSelection`.
         outlineView.allowsMultipleSelection = true
         outlineView.dataSource = self
         outlineView.delegate = self
@@ -997,13 +997,13 @@ public final class SidebarViewController: NSViewController {
         roots.compactMap { if case .header(let title) = $0.payload { return title } else { return nil } }
     }
 
-    /// Whether the pinned Speakers row is drawn as a plate.
+    /// Whether the Overview row is drawn as a plate.
     public var test_speakersRowIsPlate: Bool {
         guard let node = findNode(matching: .speakersOverview) else { return false }
         return self.outlineView(outlineView, rowViewForItem: node) is PlateRowView
     }
 
-    /// The pinned Speakers row's cell, built through the delegate path.
+    /// The Overview plate's cell, built through the delegate path.
     var test_speakersRowCell: IconLabelCellView? {
         guard let node = findNode(matching: .speakersOverview) else { return nil }
         return self.outlineView(outlineView, viewFor: nil, item: node) as? IconLabelCellView
@@ -1029,15 +1029,15 @@ public final class SidebarViewController: NSViewController {
     /// A divider row's text.
     static func dividerTitle(_ count: Int) -> String { "\(count) unavailable" }
 
-    /// A row as the hooks name it: a device id, a divider's text, "Overview"
-    /// or "Main Audio". Headers have no key.
+    /// A row as the hooks name it: a device id, a divider's text, "Overview",
+    /// "Main Audio" or a header's title.
     private static func test_rowKey(_ node: Node) -> String? {
         switch node.payload {
         case .device(let device): return device.id
         case .divider(let count): return dividerTitle(count)
         case .speakersOverview: return "Overview"
         case .mainOut: return "Main Audio"
-        case .header: return nil
+        case .header(let title): return title
         }
     }
 
@@ -1059,12 +1059,22 @@ public final class SidebarViewController: NSViewController {
         outlineView.keyDown(with: event)
     }
 
-    /// Whether the group's divider row may be selected; nil when the group has no divider.
-    func test_dividerIsSelectable(inGroupTitled title: String) -> Bool? {
-        guard let divider = findNode(titled: title)?.children.first(where: {
-            if case .divider = $0.payload { return true } else { return false }
-        }) else { return nil }
-        return self.outlineView(outlineView, shouldSelectItem: divider)
+    /// Press the down (or up) arrow in the outline view: a real key event through its `keyDown(with:)`.
+    func test_pressArrow(down: Bool) {
+        let character = down ? "\u{F701}" : "\u{F700}"
+        guard let event = NSEvent.keyEvent(with: .keyDown, location: .zero,
+                                           modifierFlags: [.function, .numericPad], timestamp: 0,
+                                           windowNumber: 0, context: nil,
+                                           characters: character, charactersIgnoringModifiers: character,
+                                           isARepeat: false, keyCode: down ? 125 : 126) else { return }
+        outlineView.keyDown(with: event)
+    }
+
+    /// The row view `target`'s row rides, made when it has none yet.
+    func test_rowView(for target: SidebarSelection) -> NSTableRowView? {
+        guard let node = findNode(matching: target), case let row = outlineView.row(forItem: node),
+              row >= 0 else { return nil }
+        return outlineView.rowView(atRow: row, makeIfNecessary: true)
     }
 
     /// The rows the delegate keeps from a proposed selection of `keys`
@@ -1663,26 +1673,25 @@ extension SidebarViewController: NSOutlineViewDelegate {
         if isHiddenHeader(notification.userInfo?["NSObject"]) { hiddenGroupCollapsed = false }
     }
 
-    public func outlineView(_ outlineView: NSOutlineView, shouldSelectItem item: Any) -> Bool {
-        // Headers aren't selectable (source-list convention), and neither is
-        // a divider, which is not a group item.
-        if let node = item as? Node, case .divider = node.payload { return false }
-        return !self.outlineView(outlineView, isGroupItem: item)
-    }
-
-    /// A range never holds a divider, and never pulls a plate in: Shift-Up
-    /// from the first speaker would otherwise add Overview and switch pages.
+    /// AppKit asks this instead of `shouldSelectItem`, for clicks and arrow
+    /// keys alike. Headers (source-list convention) and dividers are never
+    /// selected, and a range never pulls a plate in: Shift-Up from the first
+    /// speaker would otherwise add Overview and switch pages. A click that
+    /// leaves nothing keeps the current selection, and AppKit moves an arrow
+    /// key on past any row this leaves out.
     public func outlineView(_ outlineView: NSOutlineView,
                             selectionIndexesForProposedSelection proposedSelectionIndexes: IndexSet) -> IndexSet {
         let isRange = proposedSelectionIndexes.count > 1
-        return proposedSelectionIndexes.filteredIndexSet { row in
+        let kept = proposedSelectionIndexes.filteredIndexSet { row in
             guard let node = outlineView.item(atRow: row) as? Node else { return true }
             switch node.payload {
-            case .divider: return false
+            case .header, .divider: return false
             case .speakersOverview, .mainOut: return !isRange
-            case .header, .device: return true
+            case .device: return true
             }
         }
+        // An empty proposal is the user clearing the selection, not a refused row.
+        return kept.isEmpty && !proposedSelectionIndexes.isEmpty ? outlineView.selectedRowIndexes : kept
     }
 
     public func outlineView(_ outlineView: NSOutlineView, typeSelectStringFor tableColumn: NSTableColumn?,

@@ -27,7 +27,7 @@ Configuration-only Speakers and Scenes content: no window, no backend.
 
 - `MixerWindowController` → Scenes and Speakers content and navigation.
 - `ContentPaneHostViewController` → Swapped content and footer.
-- `SpeakersPageViewController` → Overview; sanctioned custom shimmer.
+- `SpeakersPageViewController` → Overview; shimmer: AppKit has none.
 - `ListRowView` → One outlined-list row.
 - `GroupsOverviewViewController` → Saved-scene cards.
 - `SidebarViewController` → The speaker list.

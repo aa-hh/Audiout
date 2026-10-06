@@ -315,7 +315,9 @@ public enum Tokens {
         }
 
         /// The under-name level meter's EMPTY-track fill (`LevelMeterView`'s
-        /// `trackLayer`). A meter reads a RATIO, so its full length (the
+        /// `trackLayer`), also the Speakers Overview's count placeholders
+        /// (`CountPlaceholderView`) and, blended toward white, their moving
+        /// highlight. A meter reads a RATIO, so its full length (the
         /// denominator) must be visible at every level, including 0 — but it is
         /// a RECESS, deliberately quiet, so the gold/ember fill drawn over it
         /// still wins. No contrast floor of its own.

@@ -224,6 +224,33 @@ import AppKit
                 "list text lines up with the page's icon and headings")
     }
 
+    // Moving the Overview's well back to the rail inset, changing its band height, or hanging its caption under a name centred alone turns it red.
+    @Test func overviewHeaderMatchesTheSpeakerPageAndLinesUpWithItsList() throws {
+        let (window, _, _, _) = try makeWindow()
+        window.test_select(.device(id: "d0"))
+        settle(window)
+        let detailIcon = window.test_detail.test_headerIconFrame
+        let detailHeader = window.test_detail.test_headerSectionFrame
+
+        window.test_select(.speakersOverview)
+        settle(window)
+        let page = window.test_speakersPage
+        let overview = page.test_headerFrames
+        let iconInset = overview.icon.minX - overview.band.minX
+
+        let slack = 0.01 + halfPointSlack()
+        #expect(abs(iconInset - GroupsPaneLayout.railFreeContentLeadingInset) <= slack,
+                "the Overview has no rail, so its well starts on the rail-free inset")
+        #expect(abs(overview.icon.minX - detailIcon.minX) <= slack,
+                "the well lands where the speaker page's does")
+        #expect(abs(overview.band.height - detailHeader.height) <= 0.01,
+                "identical header band height, so the content below starts at the same y")
+        #expect(abs(overview.textBlock.midY - overview.icon.midY) <= slack,
+                "the name and the caption are one block centred on the well")
+        let rowInset = try #require(page.test_listRowContentInset)
+        #expect(abs(rowInset - iconInset) <= slack, "the well lines up with the list's text")
+    }
+
     // MARK: The elastic column
 
     @Test func sectionsStretchWithThePaneInsteadOfHuggingTheirContent() throws {

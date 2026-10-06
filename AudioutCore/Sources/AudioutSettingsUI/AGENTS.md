@@ -12,7 +12,7 @@ Settings screen. There is no standalone Settings window.
 - Never hand a host an empty controller: AppKit's 500x500 fallback never self-corrects.
 - Every view here sets `translatesAutoresizingMaskIntoConstraints = false`, or a transient size freezes into a required constraint.
 - A pane's own `fittingSize` grows but never shrinks; measure the column stack instead.
-- `NSStackView` never gives back a shown child's height; collapse through a clipped wrapper.
+- `NSStackView` never gives back a shown child's height; collapse through `FoldingClipView`.
 - The surface frame is fixed: publish no pane size (a `preferredContentSize` becomes a priority-501 height constraint; a windowless over-measure stretched General and left 124pt of slack in its first row, 2026-09-03), and never make a pane width required.
 - The pane host's root view is an opaque `WarmPanelView`; without it dark mode is illegible.
 - `selectSection(at:)` drives real sidebar selection, not a direct pane swap, so tests exercise it.

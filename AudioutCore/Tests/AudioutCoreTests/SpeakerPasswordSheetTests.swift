@@ -39,4 +39,21 @@ import AppKit
         #expect(sheet.test_connectButton.isEnabled)
         #expect(sheet.test_resultText == "That password didn't work. Check it and try again.")
     }
+
+    // Turns red if the `.onScreenCode` sheet keeps the password heading or the password empty-submit line.
+    @Test func codeSheetAsksForTheCodeShownOnTheScreen() {
+        let sheet = SpeakerPasswordSheetViewController(deviceName: "Kitchen", kind: .onScreenCode)
+        let labels = Self.textFields(in: sheet.view).map(\.stringValue)
+        #expect(labels.contains("Enter the code shown on “Kitchen”"))
+        #expect(!labels.contains("Enter the password for “Kitchen”"))
+
+        sheet.test_tapConnect()
+        #expect(sheet.test_resultText == "Enter the code on the screen.")
+    }
+
+    static func textFields(in view: NSView) -> [NSTextField] {
+        view.subviews.flatMap { sub -> [NSTextField] in
+            ((sub as? NSTextField).map { [$0] } ?? []) + textFields(in: sub)
+        }
+    }
 }

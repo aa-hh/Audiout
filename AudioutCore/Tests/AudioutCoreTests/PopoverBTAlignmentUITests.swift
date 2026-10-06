@@ -181,6 +181,16 @@ import AppKit
                 "a re-offer in the same session stays hidden")
     }
 
+    /// Escape on the open Mixer runs `AppSurfaceController`'s order (ruled
+    /// 2026-08-07: Escape closes the bubble), so the note's ✕ carries no key
+    /// equivalent. Passing Escape to the note's shared dismiss button lets a
+    /// visible note eat Escape ahead of that order, and this test turns red.
+    @Test func theNoteDoesNotClaimEscape() {
+        let (popover, _) = makePopover()
+        showNote(popover)
+        #expect(popover.test_btAlignmentNoteView("bt-a:output")?.test_hideKeyEquivalent == "")
+    }
+
     /// Decision 3: the note stands until the speaker is MEASURED. A run
     /// stopped before it measures anything leaves the speaker exactly as
     /// unaligned as the note said, so the invitation has to come back.

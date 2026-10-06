@@ -42,6 +42,9 @@ protocol EngineControlling: Sendable {
     /// third stream. Default is the historical stop-then-re-add pair.
     func rebindOutput(_ id: OutputID, toStreamId streamId: UInt32) async throws
     func removeOutput(_ id: OutputID) async throws
+    /// Run pair-setup with the code `id`'s receiver shows and return the pairing
+    /// key it earns (see ``AirPlayEngine/AirPlayEngine/authorize(_:pin:)``).
+    func authorize(_ id: OutputID, pin: String) async throws -> String
     /// Re-anchor `id`'s receiver timeline in place via RTSP FLUSH, WITHOUT tearing
     /// down the session (F-REANCHOR — see ``AirPlayEngine/AirPlayEngine/flushOutput(_:)``).
     /// Returns `true` only if a flush was ACTUALLY issued; `false` means the vendored
@@ -128,6 +131,12 @@ extension EngineControlling {
     /// behavior, because every caller falls back to the plain add path on `nil`.
     func boundStreamId(for id: OutputID) async -> UInt32? { nil }
 
+    /// Default: no pairing earned, so a conformer that predates on-screen codes
+    /// compiles unchanged. ``EngineAdapter`` overrides this with the real call.
+    func authorize(_ id: OutputID, pin: String) async throws -> String {
+        throw AirPlayEngineError.sessionFailed
+    }
+
     /// Default: the historical stop-then-re-add pair (T7). The tolerated
     /// `removeOutput` throw matches the old inline `.rebind` op — the device may
     /// not currently be added, and a no-op teardown is fine; only the add half
@@ -197,6 +206,9 @@ struct EngineAdapter: EngineControlling {
         try await engine.rebindOutput(id, toStreamId: streamId)
     }
     func removeOutput(_ id: OutputID) async throws { try await engine.removeOutput(id) }
+    func authorize(_ id: OutputID, pin: String) async throws -> String {
+        try await engine.authorize(id, pin: pin)
+    }
     func flushOutput(_ id: OutputID) async throws -> Bool { try await engine.flushOutput(id) }
     func setVolume(_ id: OutputID, _ volume: Double) async throws { try await engine.setVolume(id, volume) }
     func setStartBufferMs(_ ms: Int) async { await engine.setStartBufferMs(ms) }

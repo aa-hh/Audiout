@@ -95,9 +95,11 @@ public final class IconPickerViewController: NSViewController {
     public override func loadView() {
         // Appearance-observing root so the cells' layer colours re-resolve on
         // a live theme flip (layer colors don't re-resolve on their own the
-        // way `draw(_:)` fills do).
+        // way `draw(_:)` fills do), and when the picker's window gains or
+        // loses key status, which moves the selection highlight between its
+        // emphasized and unemphasized colours.
         let container = AppearanceObservingView()
-        container.onAppearanceChange = { [weak self] in
+        container.onRestyle = { [weak self] in
             self?.restampCellColors()
         }
         // Every cell is a LAYER fill — a stamped `CGColor` that keeps showing
@@ -211,7 +213,7 @@ public final class IconPickerViewController: NSViewController {
         // explicit `removeFromSuperview()` every rebuild stacked the old
         // buttons behind the new ones, so a search-narrowed grid still drew
         // the full curated set underneath (latent; surfaced by the selected
-        // cell's gold fill rendering on the stale copies too).
+        // cell's fill rendering on the stale copies too).
         while grid.numberOfRows > 0 {
             for column in 0..<grid.numberOfColumns {
                 grid.cell(atColumnIndex: column, rowIndex: 0).contentView?.removeFromSuperview()
@@ -250,11 +252,11 @@ public final class IconPickerViewController: NSViewController {
         // an `NSImage`'s `accessibilityDescription` alone isn't guaranteed to
         // surface through a borderless, image-only `NSButton`.
         var plainLabel = Self.accessibilityLabel(forSymbol: name)
-        // A BINARY, not a ring (audiout-remote DESIGN.md:950-953): the current
-        // icon's cell is one solid gold surface carrying an `inkOnFill` glyph;
-        // every other cell is the chassis's own `well` recess with a cool
-        // glyph. VoiceOver equivalent baked in alongside it: the label says
-        // "current icon" so the state is never colour-only.
+        // A BINARY, not a ring: the current icon's cell wears the stock
+        // selection highlight, the way a selected item in any AppKit list
+        // does; every other cell is the chassis's own `well` recess with a
+        // cool glyph. VoiceOver equivalent baked in alongside it: the label
+        // says "current icon" so the state is never colour-only.
         let isCurrent = name == effectiveCurrentSymbolName
         if isCurrent {
             plainLabel += ", current icon"
@@ -294,13 +296,18 @@ public final class IconPickerViewController: NSViewController {
         // `NSApp?.` per the UI-target rule in `AudioutSharedUI/AGENTS.md`; the
         // fallback covers a headless run with no NSApplication at all.
         let appearance = isViewLoaded ? view.effectiveAppearance : (NSApp?.effectiveAppearance ?? .currentDrawing())
+        // Emphasized while the picker's window is key, unemphasized otherwise,
+        // as AppKit's own selection does.
+        let emphasized = isViewLoaded && view.window?.isKeyWindow == true
         appearance.performAsCurrentDrawingAppearance {
             for button in curatedButtons {
                 guard let layer = button.layer else { continue }
                 if button === selectedButton {
-                    layer.backgroundColor = Tokens.Color.gold.cgColor
+                    layer.backgroundColor = (emphasized ? NSColor.selectedContentBackgroundColor
+                        : NSColor.unemphasizedSelectedContentBackgroundColor).cgColor
                     layer.borderWidth = 0
-                    button.contentTintColor = Tokens.Color.inkOnFill
+                    button.contentTintColor = emphasized ? .alternateSelectedControlTextColor
+                        : .unemphasizedSelectedTextColor
                 } else {
                     layer.backgroundColor = Tokens.Color.well.cgColor
                     layer.borderWidth = 1
@@ -354,7 +361,7 @@ public final class IconPickerViewController: NSViewController {
 
     /// Configure the picker before presenting it. The effective current
     /// symbol (`currentSymbolName`, falling back to `defaultSymbolName`) is
-    /// marked in the curated grid with a solid gold cell + a ", current icon"
+    /// marked in the curated grid with the selection highlight + a ", current icon"
     /// VoiceOver label suffix, so the grid rebuilds here in case the view was
     /// already loaded.
     public func configure(currentSymbolName: String?, defaultSymbolName: String) {
@@ -507,7 +514,7 @@ public final class IconPickerViewController: NSViewController {
         accessibilityLabel(forSymbol: name)
     }
 
-    /// The curated symbol currently wearing the gold "current icon" cell, or
+    /// The curated symbol currently wearing the "current icon" highlight, or
     /// `nil` when the current icon isn't in the visible grid (filtered out, or
     /// the picker is unconfigured).
     public var test_selectedCellSymbolName: String? {
@@ -535,14 +542,33 @@ public final class IconPickerViewController: NSViewController {
 
 // MARK: - Warm Signal helper views (drawing-only)
 
-/// Root view that reports effective-appearance flips to its owner so
-/// layer-color styling (the curated cells) can re-resolve live.
+/// Root view that reports effective-appearance flips and its window's key
+/// changes to its owner so layer-color styling (the curated cells) can
+/// re-resolve live.
 private final class AppearanceObservingView: NSView {
-    var onAppearanceChange: (() -> Void)?
+    var onRestyle: (() -> Void)?
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
-        onAppearanceChange?()
+        onRestyle?()
     }
+
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        super.viewWillMove(toWindow: newWindow)
+        let center = NotificationCenter.default
+        for name in [NSWindow.didBecomeKeyNotification, NSWindow.didResignKeyNotification] {
+            center.removeObserver(self, name: name, object: window)
+            if let newWindow {
+                center.addObserver(self, selector: #selector(keyStateChanged), name: name, object: newWindow)
+            }
+        }
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        onRestyle?()
+    }
+
+    @objc private func keyStateChanged() { onRestyle?() }
 }
 
 /// The mini canvas tile the exact-name preview glyph renders on: a rounded

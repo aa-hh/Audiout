@@ -458,7 +458,7 @@ import AudioutProtocol
         #expect(row.test_isEnabledOn, "switch is ON")
         // The icon is neutral in BOTH states now (2026-07-17 redesign): identity
         // only, no accent-when-selected fill. Selection reads from the switch.
-        #expect(row.test_iconTint == Tokens.Color.secondaryLabel, "icon is always neutral")
+        #expect(row.test_iconTint == Tokens.Color.label2, "icon is always neutral")
 
         // Toggle it OFF — the row must return to the unselected appearance.
         _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: false)
@@ -466,7 +466,7 @@ import AudioutProtocol
         #expect(row.test_rowWash == nil, "a deselected row paints no wash")
         #expect(!(row.test_isHovered), "no stale hover wash after deselect")
         #expect(!(row.test_isEnabledOn), "switch returned to OFF")
-        #expect(row.test_iconTint == Tokens.Color.secondaryLabel, "icon tint stays neutral (always secondary)")
+        #expect(row.test_iconTint == Tokens.Color.label2, "icon tint stays neutral (always secondary)")
     }
 
     /// T-U9a — the last-row sticky-highlight bug. A row hovered by the pointer
@@ -792,6 +792,170 @@ import AudioutProtocol
         #expect(popover.test_diagnosisPanel(for: "office") == nil)
         #expect(sheet.test_connectButton.isEnabled)
         #expect(popover.test_passwordSheet() != nil)
+    }
+
+    // Turns red if the `.failed` edge in `handleConnectionTransitions` shows the password line or the headline for a refused code.
+    @Test func codeSheetShowsTheCodeRejectionAfterSubmitFails() async throws {
+        let (popover, _, backend) = try await makePopover()
+        pushOffice(popover, backend) {
+            $0.airPlayAccess = .onScreenCode
+            $0.connectionState = .awaitingPassword
+        }
+        let row = try #require(popover.test_deviceRow(for: "office"))
+        row.test_clickEnterPassword()
+        let sheet = try #require(popover.test_passwordSheet())
+        sheet.test_setPasswordText("1234")
+        sheet.test_tapConnect()
+        pushOffice(popover, backend) {
+            $0.airPlayAccess = .onScreenCode
+            $0.connectionState = .failed(ConnectionFailure(cause: .codeRequired))
+        }
+        #expect(sheet.test_resultText == "That code didn't work. Check the screen and try again.")
+        #expect(popover.test_passwordSheet() === sheet)
+    }
+
+    /// The heading text of `sheet`, read off its labels.
+    private func headings(of sheet: SpeakerPasswordSheetViewController) -> [String] {
+        SpeakerPasswordSheetTests.textFields(in: sheet.view).map(\.stringValue)
+    }
+
+    // Turns red if the clicked-join record is not consumed by the first `.awaitingPassword` edge, or if the toggle opens the sheet before the wait.
+    @Test func joiningACodeSpeakerOpensTheCodeSheetWhenTheJoinStartsWaiting() async throws {
+        let (popover, _, backend) = try await makePopover()
+        pushOffice(popover, backend) {
+            $0.airPlayAccess = .onScreenCode
+            $0.connectionState = .off
+        }
+        let row = try #require(popover.test_deviceRow(for: "office"))
+        popover.deviceRow(row, didToggleEnabled: true, for: "office")
+        #expect(popover.test_passwordSheet() == nil)
+
+        pushOffice(popover, backend) {
+            $0.airPlayAccess = .onScreenCode
+            $0.connectionState = .connecting
+        }
+        #expect(popover.test_passwordSheet() == nil)
+
+        pushOffice(popover, backend) {
+            $0.airPlayAccess = .onScreenCode
+            $0.connectionState = .awaitingPassword
+        }
+        let sheet = try #require(popover.test_passwordSheet())
+        #expect(headings(of: sheet).contains("Enter the code shown on “\(row.device.name)”"))
+
+        pushOffice(popover, backend) {
+            $0.airPlayAccess = .onScreenCode
+            $0.connectionState = .awaitingPassword
+        }
+        #expect(popover.test_passwordSheet() === sheet)
+    }
+
+    // Turns red if the `.awaitingPassword` arm opens the code sheet while the popover is hidden, where the retained sheet cannot present and blocks every later link click.
+    @Test func aCodeWaitWhileThePopoverIsHiddenOpensNoSheetAndTheLinkStillWorks() async throws {
+        let (popover, _, backend) = try await makePopover()
+        pushOffice(popover, backend) {
+            $0.airPlayAccess = .onScreenCode
+            $0.connectionState = .off
+        }
+        let row = try #require(popover.test_deviceRow(for: "office"))
+        popover.deviceRow(row, didToggleEnabled: true, for: "office")
+
+        popover.test_isShownOverride = false
+        pushOffice(popover, backend) {
+            $0.airPlayAccess = .onScreenCode
+            $0.connectionState = .awaitingPassword
+        }
+        #expect(popover.test_passwordSheet() == nil)
+
+        popover.test_isShownOverride = true
+        pushOffice(popover, backend) {
+            $0.airPlayAccess = .onScreenCode
+            $0.connectionState = .awaitingPassword
+        }
+        #expect(popover.test_passwordSheet() == nil, "the hidden wait spent the click")
+        try #require(popover.test_deviceRow(for: "office")).test_clickEnterPassword()
+        #expect(popover.test_passwordSheet() != nil)
+    }
+
+    // Turns red if the `.awaitingPassword` arm opens the sheet for a speaker missing from `codeJoinClickedIDs`.
+    @Test func aCodeWaitNobodyClickedHereOpensNoSheet() async throws {
+        let (popover, _, backend) = try await makePopover()
+        pushOffice(popover, backend) {
+            $0.airPlayAccess = .onScreenCode
+            $0.connectionState = .awaitingPassword
+        }
+        #expect(popover.test_passwordSheet() == nil)
+
+        let row = try #require(popover.test_deviceRow(for: "office"))
+        row.test_clickEnterPassword()
+        #expect(popover.test_passwordSheet() != nil)
+    }
+
+    // Turns red if `retryConnection(for:)` stops recording a code speaker's retry in `codeJoinClickedIDs`.
+    @Test func tryAgainOnARefusedCodeReopensTheSheetWhenTheJoinWaits() async throws {
+        let (popover, _, backend) = try await makePopover()
+        _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
+        pushOffice(popover, backend) {
+            $0.airPlayAccess = .onScreenCode
+            $0.connectionState = .failed(ConnectionFailure(cause: .codeRequired))
+        }
+        #expect(popover.test_diagnosisPanel(for: "office") != nil)
+        #expect(popover.test_passwordSheet() == nil)
+
+        popover.test_tapRetry(for: "office")
+        pushOffice(popover, backend) {
+            $0.airPlayAccess = .onScreenCode
+            $0.connectionState = .awaitingPassword
+        }
+        #expect(popover.test_passwordSheet() != nil)
+    }
+
+    // Turns red if `retryConnection(for:)` records a code speaker in `codeJoinClickedIDs` when the retry was refused.
+    @Test func aRefusedTryAgainDoesNotArmTheCodeSheet() async throws {
+        let (popover, controller, backend) = try await makePopover()
+        _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
+        pushOffice(popover, backend) {
+            $0.airPlayAccess = .onScreenCode
+            $0.connectionState = .failed(ConnectionFailure(cause: .codeRequired))
+        }
+        #expect(popover.test_diagnosisPanel(for: "office") != nil)
+        // Another speaker takes the one-speaker limit, so the retry's add is refused.
+        for id in controller.selectedDeviceIDs { _ = controller.setDeviceSelected(id, false) }
+        _ = controller.setDeviceSelected("homepod-bed", true)
+        controller.limitsToOneSpeaker = true
+
+        popover.test_tapRetry(for: "office")
+        #expect(!controller.isSpeakerSelected("office"), "the limit refused the retry")
+        pushOffice(popover, backend) {
+            $0.airPlayAccess = .onScreenCode
+            $0.connectionState = .awaitingPassword
+        }
+        #expect(popover.test_passwordSheet() == nil)
+    }
+
+    // Turns red if `dismissPasswordSheet` leaves the speaker in `codeJoinClickedIDs`, so a later wait reopens a cancelled sheet.
+    @Test func cancellingTheCodeSheetStopsItReopeningByItself() async throws {
+        let (popover, _, backend) = try await makePopover()
+        pushOffice(popover, backend) {
+            $0.airPlayAccess = .onScreenCode
+            $0.connectionState = .awaitingPassword
+        }
+        let row = try #require(popover.test_deviceRow(for: "office"))
+        // A click recorded while the speaker already waits, then the link opens the sheet: only Cancel can drop the record.
+        popover.deviceRow(row, didToggleEnabled: true, for: "office")
+        try #require(popover.test_deviceRow(for: "office")).test_clickEnterPassword()
+        try #require(popover.test_passwordSheet()).test_tapCancel()
+        #expect(popover.test_passwordSheet() == nil)
+
+        pushOffice(popover, backend) {
+            $0.airPlayAccess = .onScreenCode
+            $0.connectionState = .connecting
+        }
+        pushOffice(popover, backend) {
+            $0.airPlayAccess = .onScreenCode
+            $0.connectionState = .awaitingPassword
+        }
+        #expect(popover.test_passwordSheet() == nil)
     }
 
     // Dropping the `passwordSheetDeviceID` check around the panel open on the `.failed` edge in `handleConnectionTransitions` turns it red.

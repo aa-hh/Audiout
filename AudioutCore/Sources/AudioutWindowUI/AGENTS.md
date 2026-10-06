@@ -7,7 +7,7 @@ Configuration-only Speakers and Scenes content: no window, no backend.
 ## Rules
 
 - Selection and scene editing configure; neither activates a scene or creates playback intent.
-- Speaker visibility is global and never changes scene membership, routing or saved intent; membership controls never double as visibility controls.
+- Speaker visibility is global and never changes membership, routing or saved intent; membership controls never set visibility.
 - The sidebar, scene editor and speaker pages share identity; remembered records stay outside backend collections and route pickers.
 - The sidebar shows reachability, never routing; its two groups are the visibility setting.
 - Unavailable members stay editable; unknown IDs stay Missing speaker, with no invented transport or playback.
@@ -16,7 +16,7 @@ Configuration-only Speakers and Scenes content: no window, no backend.
 - Never let the sidebar collapse; nothing can restore it.
 - Panes fit the shared surface geometry; never widen the shell.
 - Gold means live audio; magenta, group identity; green, a reachable speaker. Stock sidebar chrome remains native.
-- `GroupedSectionView`'s custom-drawn `.well` recesses both Equalizer pages with a flat, clipped `Tokens.Color.shadow` band: in light, `raised` matches the pane, so a `.card` outlines nothing.
+- Custom-drawn: `GroupedSectionView` (`.well` recesses both Equalizers; in light a `.card` outlines nothing), `DeviceIconWellView`, `IconPickerViewController` cells, `EqualizerMarkView`.
 - Report persistence failures in plain words; never swallow them.
 - Preserve keyboard focus seeding in visible hosts; headless absence is not dead code.
 - Never regenerate the unreproducible macOS 27 device-detail goldens.
@@ -25,13 +25,16 @@ Configuration-only Speakers and Scenes content: no window, no backend.
 
 ## Map
 
-- `MixerWindowController` → Scenes and Speakers content and navigation.
+- `MixerWindowController` → Scenes and Speakers navigation.
 - `ContentPaneHostViewController` → Swapped content and footer.
 - `SpeakersPageViewController` → Overview; shimmer: AppKit has none.
-- `ListRowView` → One outlined-list row.
+- `ListRowView` → Outlined-list row.
 - `GroupsOverviewViewController` → Saved-scene cards.
-- `SidebarViewController` → The speaker list.
-- `GroupEditorViewController` → Scene name, membership and deletion.
-- `GroupCreationSheetController` → Scene creation without activation.
-- `DeviceDetailViewController` → A speaker's page.
+- `SidebarViewController` → Speaker list.
+- `GroupEditorViewController` → Scene editor.
+- `GroupCreationSheetController` → Scene creation.
+- `DeviceDetailViewController` → Speaker page.
 - `MainOutDetailViewController` → Main Audio configuration.
+- `PageHeaderView` → Every page's icon, name, caption.
+- `FlippedView` → Top-down page document.
+- `EqualizerMarkView` → Equalizer heading icon.

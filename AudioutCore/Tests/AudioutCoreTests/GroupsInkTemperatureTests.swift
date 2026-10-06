@@ -225,10 +225,11 @@ import AppKit
         expectSameToken(row.test_nameColor, Tokens.Color.labelCool, "non-member name in an armed group")
     }
 
-    @Test func unavailableMemberRowIsOneCoolTone() {
+    // Inking the unavailable name in anything but the sidebar's labelCool, or warming it when the scene plays, turns it red.
+    @Test func unavailableMemberRowTakesTheSidebarsInk() {
         let row = MembershipRowView(device: makeDevice(isAvailable: false), checked: true, surface: .warmPane)
         row.railArmed = true
-        expectSameToken(row.test_nameColor, Tokens.Color.labelCool2, "unavailable member name")
+        expectSameToken(row.test_nameColor, Tokens.Color.labelCool, "unavailable member name")
         expectSameToken(row.test_glyphTint, Tokens.Color.labelCool2, "unavailable member glyph")
         expectSameToken(row.test_unavailableLabelColor, Tokens.Color.labelCool2, "the \"Unavailable\" word")
         #expect(row.test_drawsGlyphTile)
@@ -383,15 +384,17 @@ import AppKit
 
     // MARK: 13. The icon picker's binary
 
-    @Test func pickerSelectedCellIsGoldWithInkOnFillAndUnselectedIsCool() {
+    // Filling the current icon's cell gold, or with anything but AppKit's own selection colours, turns it red.
+    @Test func pickerSelectedCellWearsTheStockSelectionAndUnselectedIsCool() {
         let picker = IconPickerViewController()
         picker.configure(currentSymbolName: "airpods", defaultSymbolName: "hifispeaker.fill")
         _ = picker.view
 
-        expectSameToken(picker.test_cellGlyphTint(for: "airpods"), Tokens.Color.inkOnFill,
+        // No window, so not key: AppKit's unemphasized selection.
+        expectSameToken(picker.test_cellGlyphTint(for: "airpods"), .unemphasizedSelectedTextColor,
                         "selected cell glyph")
         expectSameStampedColor(picker.test_cellFillColor(for: "airpods"),
-                               Tokens.Color.gold, "selected cell fill")
+                               .unemphasizedSelectedContentBackgroundColor, "selected cell fill")
 
         expectSameToken(picker.test_cellGlyphTint(for: "hifispeaker.fill"), Tokens.Color.labelCool,
                         "unselected cell glyph")

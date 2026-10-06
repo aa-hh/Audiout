@@ -377,20 +377,23 @@ import AudioutProtocol
 
     /// Dropping `failureCause`, or sending `credentialKind` for a speaker that
     /// already has a stored password (or never sending it), turns it red;
-    /// so does sending a password wait as `"failed"` or with a cause.
+    /// so does sending a password wait as `"failed"` or with a cause, or sending
+    /// no `"onScreenCode"` credential kind for a code speaker with no pairing.
     @Test func connectionCarriesFailureHeadlineAndSuggestion() async throws {
         let backend = try await makeBackend()
         let controller = makeGroupController(backend: backend)
         let appRouting = makeAppRouting()
 
-        func build(storedPassword: Bool, awaitingPassword: Bool = false) -> Snapshot {
+        func build(storedPassword: Bool, awaitingPassword: Bool = false,
+                   access: AirPlayAccess = .password, cause: ConnectionFailure.Cause? = nil) -> Snapshot {
             CompanionSnapshotBuilder.build(
                 devices: backend.devices.map { device in
                     var device = device
                     if device.id == "speaker-b" {
-                        device.airPlayAccess = .password
+                        device.airPlayAccess = access
                         device.hasStoredPassword = storedPassword
                         if awaitingPassword { device.connectionState = .awaitingPassword }
+                        if let cause { device.connectionState = .failed(ConnectionFailure(cause: cause)) }
                     }
                     return device
                 },
@@ -431,6 +434,19 @@ import AudioutProtocol
         #expect(waiting.connection.failureHeadline == nil)
         #expect(waiting.connection.failureSuggestion == nil)
         #expect(waiting.connection.failureCause == nil)
+
+        let code = try #require(
+            build(storedPassword: false, access: .onScreenCode).devices.first { $0.id == "speaker-b" })
+        #expect(code.connection.credentialKind == "onScreenCode")
+        let paired = try #require(
+            build(storedPassword: true, access: .onScreenCode).devices.first { $0.id == "speaker-b" })
+        #expect(paired.connection.credentialKind == nil)
+        let everyTime = try #require(
+            build(storedPassword: false, access: .onScreenCodeEveryTime, cause: .codeEveryTimeUnsupported)
+                .devices.first { $0.id == "speaker-b" })
+        #expect(everyTime.connection.access == "onScreenCodeEveryTime")
+        #expect(everyTime.connection.credentialKind == nil)
+        #expect(everyTime.connection.failureCause == "codeEveryTimeUnsupported")
     }
 
     /// Dropping `access` from the `off` or `failed` state in

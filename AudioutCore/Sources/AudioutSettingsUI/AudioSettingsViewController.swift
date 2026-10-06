@@ -139,8 +139,10 @@ public final class AudioSettingsViewController: NSViewController {
     // is an expert control and doesn't deserve a standing row.
     private let advancedDisclosure = NSButton()
     private let advancedContent = NSStackView()
-    private let advancedClip = NSView()
-    private lazy var advancedClipCollapsed = advancedClip.heightAnchor.constraint(equalToConstant: 0)
+    // 4pt inside the clip + the column's own 8pt spacing = the standard 12pt
+    // section gap when expanded; collapsed, only the stack's 8pt remains above
+    // the pane's bottom padding.
+    private lazy var advancedClip = FoldingClipView(content: advancedContent, topInset: 4)
     // The pane's column stack, kept because `republishFittedHeight()` measures
     // IT rather than the root (see that method's trap note).
     private weak var columnStack: NSStackView?
@@ -547,33 +549,8 @@ public final class AudioSettingsViewController: NSViewController {
             contentView.widthAnchor.constraint(equalTo: advancedContent.widthAnchor).isActive = true
         }
 
-        // Collapsed by default via the app's one collapse idiom — the
-        // `CardView` clip (AudioutPopoverUI): the content sits inside a
-        // layer-clipped container whose REQUIRED height==0 constraint is the
-        // single controlled value; the content's bottom pin is `.defaultHigh`,
-        // so the clip always wins without a conflict. Probed alternatives that
-        // do NOT work in-place on a stack child once it has been shown:
-        // `isHidden`, `setVisibilityPriority(.notVisible)`, and a 999
-        // zero-height constraint fighting the stack directly — the stack kept
-        // demanding the expanded height for all three.
-        advancedClip.translatesAutoresizingMaskIntoConstraints = false
-        advancedClip.wantsLayer = true
-        advancedClip.layer?.masksToBounds = true
-        advancedClip.addSubview(advancedContent)
-        let bottomPin = advancedContent.bottomAnchor.constraint(equalTo: advancedClip.bottomAnchor)
-        bottomPin.priority = .defaultHigh
-        NSLayoutConstraint.activate([
-            advancedContent.leadingAnchor.constraint(equalTo: advancedClip.leadingAnchor),
-            advancedContent.trailingAnchor.constraint(equalTo: advancedClip.trailingAnchor),
-            // 4pt inside the clip + the column's own 8pt spacing = the
-            // standard 12pt section gap when expanded; collapsed, only the
-            // stack's 8pt remains above the pane's bottom padding.
-            advancedContent.topAnchor.constraint(equalTo: advancedClip.topAnchor, constant: 4),
-            bottomPin,
-        ])
-        advancedClipCollapsed.isActive = true
-        advancedContent.isHidden = true
-
+        // Collapsed by default: `FoldingClipView` explains why a clip, not
+        // `isHidden`, folds a stack child.
         return [hairline, header, advancedClip]
     }
 
@@ -596,50 +573,12 @@ public final class AudioSettingsViewController: NSViewController {
                 && !HeadlessRuntime.isActive)
     }
 
-    /// The same choreography as `CardView.setBodyCollapsed` (the app's one fold
-    /// gesture, `Tokens.Motion.collapseRevealDuration`): the clip height is the
-    /// single animated value on `FoldAnimator`'s clock, this pane republishes
-    /// its `preferredContentSize` from it every tick (`foldAnimatorDidTick`),
-    /// and the surface follows each published size instantly — no second clock.
-    /// Expand un-hides before travel and hands the rest height back to the
-    /// content's bottom pin on arrival; collapse seeds the constraint from the
-    /// LIVE clip height (so a first-ever or retargeted fold travels instead of
-    /// snapping) and hides only on arrival. `animated == false` (Reduce
-    /// Motion) applies the end state directly.
+    /// The fold runs on `FoldAnimator`'s clock through `FoldingClipView`; this
+    /// pane republishes its `preferredContentSize` from every tick
+    /// (`foldAnimatorDidTick`) and once more at the end state.
     private func setAdvancedExpanded(_ expanded: Bool, animated: Bool) {
-        if expanded {
-            advancedContent.isHidden = false
-            guard animated else {
-                advancedClipCollapsed.isActive = false
-                republishFittedHeight()
-                return
-            }
-            advancedContent.layoutSubtreeIfNeeded()
-            let target = advancedContent.fittingSize.height + 4
-            advancedClipCollapsed.isActive = true
-            FoldAnimator.shared.animate(advancedClipCollapsed, to: target, follower: self) { [weak self] in
-                guard let self else { return }
-                self.advancedClipCollapsed.isActive = false
-                self.republishFittedHeight()
-            }
-        } else {
-            guard animated else {
-                advancedClipCollapsed.constant = 0
-                advancedClipCollapsed.isActive = true
-                advancedContent.isHidden = true
-                republishFittedHeight()
-                return
-            }
-            if !advancedClipCollapsed.isActive {
-                advancedClipCollapsed.constant = advancedClip.frame.height
-                advancedClipCollapsed.isActive = true
-                view.layoutSubtreeIfNeeded()
-            }
-            FoldAnimator.shared.animate(advancedClipCollapsed, to: 0, follower: self) { [weak self] in
-                guard let self else { return }
-                self.advancedContent.isHidden = true
-                self.republishFittedHeight()
-            }
+        advancedClip.setExpanded(expanded, animated: animated, follower: self) { [weak self] in
+            self?.republishFittedHeight()
         }
     }
 

@@ -264,7 +264,7 @@ import Testing
     }
 
     /// A 15 s capture whose first sample was taken 3 s before the arm gate
-    /// opened: two seconds of loud broadband sound at the head (music still
+    /// opened, on a pinned clock (not wall time): two seconds of loud broadband sound at the head (music still
     /// draining out of the speakers), then quiet room, the reference lane at
     /// 3.6 s + one lane spacing and, when `bluetoothSkewMs` is set, the
     /// Bluetooth lane one spacing earlier, late by that skew.
@@ -288,11 +288,11 @@ import Testing
                                        skewSamples: Int(bluetoothSkewMs / 1000 * rate))
             for (i, v) in lane.enumerated() { scene[targetAt + i] += 0.02 * v }
         }
-        var now = timespec()
-        clock_gettime(CLOCK_MONOTONIC, &now)
+        let armGateNanos: Int64 = 1_000_000_000_000
         let recorder = FakeRecorder(rate: rate, scene: scene,
-                                    firstSampleHostNanos: SyncTiming.monotonicNanos(now) - 3_000_000_000)
-        let session = MicProbeSession(recorder: recorder, timeout: 5, pipelineTail: 0.05)
+                                    firstSampleHostNanos: armGateNanos - 3_000_000_000)
+        let session = MicProbeSession(recorder: recorder, timeout: 5, pipelineTail: 0.05,
+                                      now: { armGateNanos })
         return await withCheckedContinuation { cont in
             session.start(stage: { _, onStarted, onFinished in onStarted(0); onFinished() },
                           completion: { cont.resume(returning: $0) })

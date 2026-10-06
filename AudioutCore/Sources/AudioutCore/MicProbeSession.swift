@@ -345,6 +345,7 @@ public final class MicProbeSession {
     private let recorder: MicProbeRecording
     private let timeout: TimeInterval
     private let pipelineTail: TimeInterval
+    private let now: () -> Int64
     private let queue = DispatchQueue(label: "mic-probe-session")
     private var sampleRate: Double = 0
     /// Monotonic nanoseconds, the clock `firstSampleHostNanos` is on.
@@ -357,12 +358,15 @@ public final class MicProbeSession {
     private var ambientDBFS: Double?
     private var pipelineDelaySeconds: TimeInterval?
 
+    /// `now` is the monotonic clock `startedAt` and `recordingBegan` are stamped from; tests pin it.
     public init(recorder: MicProbeRecording = BuiltInMicRecorder(),
                 timeout: TimeInterval = 40,
-                pipelineTail: TimeInterval = MicProbeSession.pipelineTailMarginSeconds) {
+                pipelineTail: TimeInterval = MicProbeSession.pipelineTailMarginSeconds,
+                now: (() -> Int64)? = nil) {
         self.recorder = recorder
         self.timeout = timeout
         self.pipelineTail = pipelineTail
+        self.now = now ?? Self.nowNanos
     }
 
     /// Kick the measurement off. `completion` is called exactly once, on the
@@ -379,7 +383,7 @@ public final class MicProbeSession {
                 finish(analyze: false)
                 return
             }
-            recordingBegan = Self.nowNanos()
+            recordingBegan = now()
             let recorder = recorder
             stage({ [weak self] in
                 // The quietest of the last three half-second slices: music the
@@ -390,7 +394,7 @@ public final class MicProbeSession {
                 self?.queue.async { self?.levelStepDB = step; self?.ambientDBFS = rms }
                 return step
             }, { [weak self] delay in
-                self?.queue.async { self?.startedAt = Self.nowNanos(); self?.pipelineDelaySeconds = delay }
+                self?.queue.async { self?.startedAt = self?.now(); self?.pipelineDelaySeconds = delay }
             }, { [weak self] in
                 guard let self else { return }
                 self.queue.async {

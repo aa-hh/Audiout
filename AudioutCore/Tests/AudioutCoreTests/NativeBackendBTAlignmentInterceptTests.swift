@@ -438,9 +438,14 @@ extension SerializedSharedState {
     }
 
     /// Replacing the wizard pacer with capture-fed companion ticks loses clicks when music is paused.
-    @Test(.enabled(if: ProcessInfo.processInfo.environment["CI"] == nil, "Quarantined on GitHub runners 2026-10-04: the audition start reports 'The speaker pair changed before clicks could start' and the test runs 140 to 160 s on the 3-core runner (three of four runs across PRs #228 and #264); passes locally in 18 s. Issue #258.")) @MainActor func auditionUsesIndependentWizardPacerAndKeepsOnlyPairAudible() async {
+    @Test @MainActor func auditionUsesIndependentWizardPacerAndKeepsOnlyPairAudible() async {
         let dir = scratchDir
-        let (backend, bt, sink, _) = makeBackend(storeDirectory: dir)
+        // The audition's start deadline runs on this clock, so a stalled runner cannot expire it.
+        let clock = ManualDelayClock()
+        let (backend, bt, sink, _) = makeBackend(
+            storeDirectory: dir,
+            delayClock: { d, q, w in clock.clock(d, q, DispatchWorkItem { q.async(execute: w) }) },
+            uptimeClock: clock.uptime)
         defer { backend.stop() }
         let capture = ProbeStagingCapture()
         backend.captureCoordinator = capture

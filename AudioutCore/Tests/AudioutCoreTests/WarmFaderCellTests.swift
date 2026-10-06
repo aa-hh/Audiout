@@ -403,4 +403,26 @@ import AppKit
             }
         }
     }
+
+    /// The shared pending curve: Reduce Motion holds 0.7; otherwise, after
+    /// the 160 ms ramp, one 1.4 s cycle stays within 0.35…1 and touches both
+    /// ends, and the arrival peaks at 1 then goes out by 550 ms. Turns red if
+    /// any of `PendingPulse`'s timings or bounds change.
+    @Test func pendingPulseCurveStaysInItsBandAndReachesBothEnds() {
+        for t in [0.0, 0.1, 0.9, 5.0] {
+            #expect(PendingPulse.strength(elapsed: t, reduceMotion: true) == 0.7)
+        }
+        let samples = stride(from: 0.16, through: 0.16 + 1.4, by: 0.001).map {
+            PendingPulse.strength(elapsed: $0, reduceMotion: false)
+        }
+        #expect(samples.allSatisfy { $0 >= 0.35 - 1e-9 && $0 <= 1 + 1e-9 })
+        #expect((samples.max() ?? 0) > 0.999)
+        #expect((samples.min() ?? 1) < 0.351)
+        #expect(PendingPulse.strength(elapsed: 0, reduceMotion: false) == 0,
+                "the ramp starts dark")
+
+        #expect(PendingPulse.arrival(sinceEnd: 0.1, from: 0.5) == 1)
+        #expect(PendingPulse.arrival(sinceEnd: 0.549, from: 0.5) != nil)
+        #expect(PendingPulse.arrival(sinceEnd: 0.551, from: 0.5) == nil)
+    }
 }

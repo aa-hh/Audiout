@@ -12379,6 +12379,9 @@ extension SerializedSharedState {
         backend.setOutputSet([])   // converge teardown: the removeOutput runs the hook
 
         await pollUntil { onAPerAppStream(engine, device.outputID) }
+        // The telemetry sink is delivered on its own queue, so the re-drive's
+        // line can trail the stream it produced.
+        await pollUntil { !telemetryLines(box, evt: "per_app_redrive").isEmpty }
         let live = engine.liveStream(of: device.outputID)
         #expect(onAPerAppStream(engine, device.outputID),
                 "the re-driven bind must land after the whole-system release")

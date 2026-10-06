@@ -360,7 +360,7 @@ public final class DeviceRowView: NSView {
     private static let muteEngagedSymbolName = RowAccessorySymbol.muteEngaged
     /// The Equalizer door's at-rest symbol — the outline square.
     private static let eqRestSymbolName = RowAccessorySymbol.equalizerRest
-    /// The Equalizer door's ENGAGED symbol — the filled square.
+    /// The filled square: the heading icon's shaped state (`equalizerShapedHeadingMarkImage(in:pointSize:)`), never drawn on the door.
     private static let eqEngagedSymbolName = RowAccessorySymbol.equalizerEngaged
     /// The point size every accessory glyph on this row that is NOT one of the
     /// four custom symbols is drawn at. The symbols carry their own
@@ -1050,15 +1050,13 @@ public final class DeviceRowView: NSView {
         muteButton.setAccessibilityLabel(engaged ? "Unmute \(device.name)" : "Mute \(device.name)")
     }
 
-    /// The Equalizer door's active MARK: a shaped curve draws
-    /// ``RowAccessorySymbol/equalizerEngaged`` — the FILLED square, its
-    /// enclosure in an opaque ``Tokens/Color/equalizer``, the two band
-    /// sliders punched through it as transparency — the row shows through
-    /// the marks, the treatment the owner approved (2026-09-05). A flat curve draws
-    /// ``RowAccessorySymbol/equalizerRest``, the outline square in the same
-    /// neutral ink mute wears at rest. Mute sits 6 pt trailing wearing the
-    /// same square: the two engaged marks are one object in two colours
-    /// (owner's call, 2026-09-04), and hue alone says which control it is.
+    /// The Equalizer door's MARK: the door draws
+    /// ``RowAccessorySymbol/equalizerRest``, the OUTLINE square, in both
+    /// states — in ``Tokens/Color/equalizer`` when the curve is shaped and in
+    /// the neutral ink mute wears at rest when it is flat (the owner kept the
+    /// outline on the row, 2026-09-26). The filled
+    /// ``RowAccessorySymbol/equalizerEngaged`` is the heading icon's shaped
+    /// state only (``equalizerShapedHeadingMarkImage(in:pointSize:)``), never the door's.
     ///
     /// WHY GREEN AND NOT GOLD. The door wore ``Tokens/Color/goldText`` until
     /// the symbols landed, and gold means "audio is flowing here" everywhere
@@ -1076,15 +1074,36 @@ public final class DeviceRowView: NSView {
         // One shape, two inks.
         eqButton.image = isEQShaped
             ? Self.equalizerEngagedMarkImage(in: effectiveAppearance)
-            : RowAccessorySymbol.image(named: Self.eqRestSymbolName, ink: Self.restInk(in: effectiveAppearance))
+            : Self.equalizerRestMarkImage(in: effectiveAppearance)
     }
 
-    /// The engaged equalizer mark, for the speaker page's Equalizer summary
-    /// as well as this row's door, so the green stays drawn from this file.
+    /// The engaged and at-rest equalizer marks, drawn from this file so the
+    /// green stays here. The row's door uses the outline in both inks. The
+    /// icon leading the Equalizer heading on the speaker page and the Main
+    /// Audio page uses the outline at rest and
+    /// ``equalizerShapedHeadingMarkImage(in:pointSize:)``, the filled square, when shaped.
     public static func equalizerEngagedMarkImage(in appearance: NSAppearance) -> NSImage? {
         RowAccessorySymbol.image(
             named: eqRestSymbolName,
             ink: engagedInk(fill: Tokens.Color.equalizer, in: appearance))
+    }
+
+    public static func equalizerRestMarkImage(
+        in appearance: NSAppearance,
+        pointSize: CGFloat = RowAccessorySymbol.pointSize
+    ) -> NSImage? {
+        RowAccessorySymbol.image(
+            named: eqRestSymbolName, ink: restInk(in: appearance), pointSize: pointSize)
+    }
+
+    public static func equalizerShapedHeadingMarkImage(
+        in appearance: NSAppearance,
+        pointSize: CGFloat = RowAccessorySymbol.pointSize
+    ) -> NSImage? {
+        RowAccessorySymbol.image(
+            named: eqEngagedSymbolName,
+            ink: engagedInk(fill: Tokens.Color.equalizer, in: appearance),
+            pointSize: pointSize)
     }
 
     /// The engaged ink: `fill` over everything the symbol draws — on mute's

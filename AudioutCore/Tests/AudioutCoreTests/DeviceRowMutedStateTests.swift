@@ -231,11 +231,18 @@ extension SerializedSharedState {
                                    "MainOutRowView.swift"])
     }
 
-    /// `Tokens.Color.equalizer` is fenced the same way, to its one consumer:
-    /// the device row's engaged Equalizer door.
-    @Test func theEqualizerHueOnlyDressesTheEqualizerDoor() throws {
+    /// `Tokens.Color.equalizer` is fenced the same way. `DeviceRowView` inks
+    /// the door and, through its mark helpers, the heading icon on both pages;
+    /// `EQEditorView` inks the moved stretch of each EQ slider;
+    /// `EQResponseCurveView` draws the Advanced scope's shaped trace and band
+    /// gridlines; a fifth file is a design decision. Chosen over a colour-returning helper in
+    /// `DeviceRowView` because such a helper would only launder the literal;
+    /// the fence names the files that draw the hue. Turns red if the literal
+    /// appears in any other source file, or disappears from one of these four.
+    @Test func theEqualizerHueIsFencedToTheDoorTheHeadingAndTheSliderFills() throws {
         try expectTokenIsFencedTo("Tokens.Color.equalizer",
-                                  ["DeviceRowView.swift", "DeviceRowView+TestSupport.swift"])
+                                  ["DeviceRowView.swift", "DeviceRowView+TestSupport.swift",
+                                   "EQEditorView.swift", "EQResponseCurveView.swift"])
     }
 
     private func expectTokenIsFencedTo(_ token: String, _ expected: Set<String>,

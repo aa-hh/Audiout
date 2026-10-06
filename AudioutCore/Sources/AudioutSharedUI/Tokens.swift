@@ -491,8 +491,22 @@ public enum Tokens {
         /// hue could deepen". Chroma is the lever, not lightness: at 0.091 no
         /// ratio saves it, and 0.111 at the old hue was still not enough to
         /// read as a colour on paper.
+        ///
+        /// CONTRAST RATIONALE FOR INCREASE CONTRAST (measured; floor 3:1):
+        /// dark Increase Contrast `#5FD597` = 10.79 canvas / 9.79 panel /
+        /// 8.60 raised / 11.10 well / 7.42 hover wash. Light Increase
+        /// Contrast `#005A28` = 8.08 flat ground / 7.00 well / 6.45 hover
+        /// wash. The token now also sits on `well`, the EQ pages' recessed
+        /// section under the slider fills, and on `panel`/`canvas` behind
+        /// the heading icon: standard dark `#41B07A` is 7.48 on well,
+        /// standard light `#007835` is 4.67 on well. It also draws the Advanced
+        /// scope's shaped trace and band gridlines on `scopeGround`, always
+        /// with its dark hexes: `#41B07A` 6.92, `#5FD597` 10.65 (the trace's
+        /// figures).
         public static var equalizer: NSColor {
-            warmDynamic(name: "equalizer", dark: 0x41B07A, light: 0x007835)
+            warmDynamic(
+                name: "equalizer", dark: 0x41B07A, darkHighContrast: 0x5FD597,
+                light: 0x007835, lightHighContrast: 0x005A28)
         }
 
         /// The COOL body ink — the same second-rung job as ``label2`` on a
@@ -822,12 +836,13 @@ public enum Tokens {
         //
         // CONTRAST RATIONALE for the whole block — everything that carries
         // meaning is measured against `scopeGround`, not against `panel`,
-        // because the ground is what it is drawn on: dark `gold` ≈ 10.2:1,
-        // subtle-dial `gold` ≈ 7.1:1, `scopeFlatLine` ≈ 6.0:1,
-        // `scopeBypassLine` ≈ 4.7:1 — all clear the ≥3:1 non-text floor.
-        // The grid is a GRIDLINE (pure reference, never the state), so the
-        // floor does not apply to it; the dotted zero line reuses
-        // `scopeFlatLine`.
+        // because the ground is what it is drawn on: `equalizer`, the shaped
+        // trace, ≈ 6.9:1 (Increase Contrast ≈ 10.7:1; only its dark hexes
+        // reach the scope, which draws under a pinned dark appearance),
+        // `scopeFlatLine` ≈ 6.0:1, `scopeBypassLine` ≈ 4.7:1 — all clear the
+        // ≥3:1 non-text floor. The grid is a GRIDLINE (pure reference, never
+        // the state, drawn in `equalizer` at 0.14 alpha), so the floor does
+        // not apply to it; the dotted zero line reuses `scopeFlatLine`.
 
         /// The scope's ground — the near-black screen the trace is drawn on.
         public static var scopeGround: NSColor {

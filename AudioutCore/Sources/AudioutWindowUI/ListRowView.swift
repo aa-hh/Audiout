@@ -8,11 +8,12 @@ import AudioutSharedUI
 /// an optional trailing accessory (a button, a pop-up, a spinner, a link
 /// stack). Rows are stacked over a ``GroupedSectionView`` in `.card` style,
 /// whose inset hairlines start at ``leadingInset`` so they line up with the
-/// row's content.
+/// row's content. The insets are the page's own rail-free lane, so list text
+/// lines up with the headings above the list.
 final class ListRowView: NSView {
 
-    static let leadingInset: CGFloat = 18
-    static let trailingInset: CGFloat = 16
+    static let leadingInset: CGFloat = GroupsPaneLayout.railFreeContentLeadingInset
+    static let trailingInset: CGFloat = GroupsPaneLayout.contentTrailingInset
     static let verticalPadding: CGFloat = 9
     static let minimumHeight: CGFloat = 44
     private static let glyphSide: CGFloat = 16

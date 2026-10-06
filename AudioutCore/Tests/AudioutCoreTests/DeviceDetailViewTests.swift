@@ -104,10 +104,10 @@ import AppKit
         }
         detail.show(record: try #require(library.record(for: "study")))
         #expect(!detail.test_eqSectionShown)
-        #expect(detail.test_eqSummaryText == "Bass 2 dB")
-        #expect(detail.test_eqMarkShown)
+        #expect(detail.test_eqHeadingSpokenValue == "Bass 2 dB")
+        #expect(detail.test_eqMarkIsEngaged)
         #expect(!detail.test_resetShown)
-        #expect(detail.test_keptNoteText == "Kept for when Study is found again.")
+        #expect(detail.test_keptNoteText == "Changes will be applied when the speaker is found again.")
         #expect(detail.test_forgetButtonShown)
         #expect(detail.test_forgetButtonTitle == "Forget \u{201C}Study\u{201D}\u{2026}")
         #expect(reads == ["study"], "read once per show")
@@ -118,7 +118,8 @@ import AppKit
 
         detail.storedDeviceEQ = { _ in nil }
         detail.show(record: try #require(library.record(for: "study")))
-        #expect(detail.test_eqSummaryText == "Flat")
+        #expect(detail.test_eqHeadingSpokenValue == "Flat")
+        #expect(!detail.test_eqMarkIsEngaged)
         #expect(detail.test_keptNoteText == nil, "a flat stored tone has nothing to keep")
 
         reads.removeAll()
@@ -141,21 +142,18 @@ import AppKit
         #expect(!detail.test_showInMixerRowShown)
     }
 
-    // Hiding the editor for an away speaker, or truncating its note to one line, turns it red.
-    @Test func anAwaySpeakerKeepsItsEditorAndAWrappedNote() {
+    // Hiding the editor for an away speaker, or changing its note, turns it red.
+    @Test func anAwaySpeakerKeepsItsEditorAndItsNote() {
         let detail = DeviceDetailViewController(groupController: makeController(),
                                             settings: AppSettings(defaults: isolation.isolatedDefaults))
-        // A name long enough that the sentence cannot fit one line at the
-        // page's real width; "Bedroom" alone fits.
-        detail.show(device: makeDevice(id: "bedroom", name: "Upstairs Living Room HomePod Stereo Pair", isAvailable: false))
+        detail.show(device: makeDevice(id: "bedroom", name: "Living Room HomePod Pair", isAvailable: false))
         _ = detail.view
         detail.view.setFrameSize(NSSize(width: SurfaceLayout.contentPaneWidth,
                                         height: AppSurfaceController.minimumContentSize.height))
         detail.view.layoutSubtreeIfNeeded()
         #expect(detail.test_eqSectionShown)
         #expect(detail.test_eqEditor.test_bypassNoteText
-                == "Not applied while Upstairs Living Room HomePod Stereo Pair is unavailable; kept for when it\u{2019}s back.")
-        #expect(detail.test_eqEditor.test_bypassNoteLineCount > 1)
+                == "Changes will be applied when the speaker is back.")
         var writes = 0
         detail.onSetEQ = { _, _, _ in writes += 1 }
         detail.test_eqEditor.test_dragBass(to: 2)
@@ -173,25 +171,103 @@ import AppKit
                 == "Treble \u{2212}2 dB, Balance L 30%")
     }
 
-    // Showing the mark or Reset for a flat tone, or hiding them for a shaped one, turns it red.
-    @Test func theTitleRowShowsTheMarkAndResetOnlyForAShapedTone() {
+    // Hiding the icon for a flat tone, inking it for a flat one, or dropping the spoken summary turns it red.
+    @Test func theHeadingIconIsAlwaysShownAndInkedOnlyForAShapedTone() {
         let detail = makeLoadedPane(device: makeDevice(id: "office"))
-        #expect(detail.test_eqSummaryText == "Flat")
-        #expect(!detail.test_eqMarkShown)
+        #expect(detail.test_eqMarkShown)
+        #expect(!detail.test_eqMarkIsEngaged)
+        #expect(detail.test_eqMarkShapedSymbolName == RowAccessorySymbol.equalizerRest)
+        #expect(detail.test_eqHeadingSpokenValue == "Flat")
         #expect(!detail.test_resetShown)
 
         var shaped = makeDevice(id: "office")
         shaped.eq = DeviceEQ(bassDB: 3, loudness: true)
         detail.refresh(device: shaped)
-        #expect(detail.test_eqSummaryText == "Bass 3 dB, Loudness on")
         #expect(detail.test_eqMarkShown)
+        #expect(detail.test_eqMarkIsEngaged)
+        #expect(detail.test_eqMarkShapedSymbolName == RowAccessorySymbol.equalizerEngaged)
+        #expect(detail.test_eqMarkLastFlipEffect == .none, "a snapshot never animates the icon")
+        #expect(detail.test_eqMarkLastAnnouncement == nil, "a snapshot never speaks")
+        #expect(detail.test_eqHeadingSpokenValue == "Bass 3 dB, Loudness on")
         #expect(detail.test_resetShown)
 
         detail.onSetEQ = { _, _, _ in }
         detail.test_fireResetClick()
-        #expect(detail.test_eqSummaryText == "Flat")
-        #expect(!detail.test_eqMarkShown)
+        #expect(detail.test_eqMarkShown)
+        #expect(!detail.test_eqMarkIsEngaged)
+        #expect(detail.test_eqMarkShapedSymbolName == RowAccessorySymbol.equalizerRest)
+        #expect(detail.test_eqHeadingSpokenValue == "Flat")
         #expect(!detail.test_resetShown)
+
+        detail.show(device: makeDevice(id: "local", name: "This Mac", kind: .localMac))
+        #expect(!detail.test_eqMarkShown)
+    }
+
+    // Animating a scrub's second crossing, skipping the grow going shaped, growing under Reduce Motion, or dropping the announcement turns it red.
+    @Test func onlyTheUsersGestureAnimatesTheHeadingIconOncePerGesture() {
+        let detail = makeLoadedPane(device: makeDevice(id: "office"))
+        detail.onSetEQ = { _, _, _ in }
+        detail.test_eqMarkReduceMotionOverride = false
+        let editor = detail.test_eqEditor
+        editor.test_pointerGestureOverride = false
+        editor.test_committedGestureOverride = false
+
+        editor.test_dragBass(to: 3)
+        #expect(detail.test_eqMarkLastFlipEffect == .crossFadeAndScale)
+        #expect(detail.test_eqMarkLastAnnouncement == "Equalizer shaped")
+
+        editor.test_dragBass(to: 0)
+        #expect(detail.test_eqMarkLastFlipEffect == .none, "one effect per gesture")
+        editor.test_dragBass(to: 3)
+        #expect(detail.test_eqMarkLastFlipEffect == .none, "one effect per gesture")
+
+        editor.test_committedGestureOverride = true
+        editor.test_dragBass(to: 3)
+        editor.test_committedGestureOverride = false
+        editor.test_dragBass(to: 0)
+        #expect(detail.test_eqMarkLastFlipEffect == .crossFadeOnly)
+        #expect(detail.test_eqMarkLastAnnouncement == "Equalizer flat")
+
+        // Commit at 0 to end that gesture before the Reduce Motion step.
+        editor.test_committedGestureOverride = true
+        editor.test_dragBass(to: 0)
+        detail.test_eqMarkReduceMotionOverride = true
+        editor.test_dragBass(to: 3)
+        #expect(detail.test_eqMarkLastFlipEffect == .crossFadeOnly, "no grow under Reduce Motion")
+
+        detail.test_fireResetClick()
+        #expect(detail.test_eqMarkLastFlipEffect == .crossFadeOnly)
+        #expect(detail.test_eqMarkLastAnnouncement == "Equalizer flat")
+    }
+
+    // Moving `refreshEQTitleRow(userCaused: true)` back after `onSetEQ` in either EQ delegate method turns it red.
+    @Test func aCommittedFlipAnimatesAndSpeaksWhenTheAppRepaintsThePageAtOnce() {
+        let base = makeDevice(id: "office")
+        let detail = makeLoadedPane(device: base)
+        detail.test_eqMarkReduceMotionOverride = false
+        // The real app repaints this page inside a committed `onSetEQ`. The
+        // icon's last-effect hook resets on every refresh, so it is read as
+        // the repaint arrives, before the repaint's own refresh clears it.
+        var effectsAtRepaint: [EqualizerMarkView.FlipEffect] = []
+        detail.onSetEQ = { [unowned detail] eq, _, committed in
+            guard committed else { return }
+            effectsAtRepaint.append(detail.test_eqMarkLastFlipEffect)
+            var echoed = base
+            echoed.eq = eq
+            detail.refresh(device: echoed)
+        }
+        let editor = detail.test_eqEditor
+        editor.test_pointerGestureOverride = false
+        editor.test_committedGestureOverride = true
+
+        editor.test_dragBass(to: 3)
+        #expect(detail.test_eqMarkIsEngaged)
+        #expect(detail.test_eqMarkLastAnnouncement == "Equalizer shaped")
+
+        detail.test_fireResetClick()
+        #expect(!detail.test_eqMarkIsEngaged)
+        #expect(detail.test_eqMarkLastAnnouncement == "Equalizer flat")
+        #expect(effectsAtRepaint == [.crossFadeAndScale, .crossFadeOnly])
     }
 
     private let isolation = TestIsolation(owner: "DeviceDetailViewTests")
@@ -549,6 +625,34 @@ import AppKit
         }
     }
 
+    // Laying the scene links side by side again, or letting one run past the list's box or under the "Scenes" title, turns it red.
+    @Test func sixSceneLinksStackOnePerLineInsideTheList() throws {
+        let controller = makeController()
+        for n in 1...6 {
+            try controller.saveGroup(Group(id: "g\(n)", name: "Scene \(n)",
+                                           memberIDs: ["office"], memberVolumes: ["office": 50]))
+        }
+        let detail = DeviceDetailViewController(groupController: controller,
+                                            settings: AppSettings(defaults: isolation.isolatedDefaults))
+        detail.show(device: makeDevice(id: "office"))
+        _ = detail.view
+        detail.view.setFrameSize(AppSurfaceController.minimumContentSize)
+        detail.view.layoutSubtreeIfNeeded()
+
+        let frames = detail.test_groupRowButtonFrames
+        #expect(frames.count == 6)
+        let list = detail.test_listSectionFrame.insetBy(dx: -0.5, dy: -0.5)
+        let title = detail.test_scenesTitleFrame
+        for frame in frames {
+            #expect(list.contains(frame), "every link sits inside the list's box")
+            #expect(frame.minX >= title.maxX, "no link runs under the \"Scenes\" title")
+        }
+        let sorted = frames.sorted { $0.minY < $1.minY }
+        for (upper, lower) in zip(sorted, sorted.dropFirst()) {
+            #expect(upper.maxY <= lower.minY + 0.5, "the links stack one per line, never overlapping")
+        }
+    }
+
     /// A speaker pane in one saved group, mounted and laid out at the screen's
     /// real content size — the shared setup for the slot-order assertions.
     private func laidOutPaneWithOneGroup() throws -> DeviceDetailViewController {
@@ -750,6 +854,24 @@ import AppKit
             settings: AppSettings(defaults: isolation.isolatedDefaults))
         page.loadViewIfNeeded()
         #expect(page.test_eqSectionIsRecessed)
+    }
+
+    // Dropping the Main Audio heading's icon state or its spoken summary turns it red.
+    @Test func theMainAudioHeadingIsInkedAndSpokenLikeTheSpeakerPages() {
+        let page = MainOutDetailViewController(
+            settings: AppSettings(defaults: isolation.isolatedDefaults))
+        page.loadViewIfNeeded()
+        #expect(!page.test_eqMarkIsEngaged)
+        #expect(page.test_eqMarkShapedSymbolName == RowAccessorySymbol.equalizerRest)
+        #expect(page.test_eqHeadingSpokenValue == "Flat")
+        page.show(eq: DeviceEQ(bassDB: 3, loudness: true))
+        #expect(page.test_eqMarkIsEngaged)
+        #expect(page.test_eqMarkShapedSymbolName == RowAccessorySymbol.equalizerEngaged)
+        #expect(page.test_eqMarkLastFlipEffect == .none, "a snapshot never animates the icon")
+        #expect(page.test_eqHeadingSpokenValue == "Bass 3 dB, Loudness on")
+        page.show(eq: .flat)
+        #expect(!page.test_eqMarkIsEngaged)
+        #expect(page.test_eqHeadingSpokenValue == "Flat")
     }
 
     /// Proves `settings:` actually threads from the host's `init` down to the

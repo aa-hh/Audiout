@@ -26,19 +26,21 @@ import AudioutCore
 /// grid, 0 dB line) is nothing but a function of the view's size, so it is
 /// rasterized once into a cached `NSImage` and only the trace is stroked per
 /// drag frame. That cache is dropped on exactly two triggers — a size change,
-/// and the accessibility/accent notification that re-tints the tokens.
+/// and the accessibility-display notification that re-tints the tokens.
 ///
 /// **It never themes.** The scope is authored dark in BOTH appearances, the
 /// way a hardware analyser's screen is dark whatever room it sits in — a
 /// light-mode scope would be a chart, not an instrument. That is enforced by
 /// drawing the whole figure inside `NSAppearance(named: .darkAqua)`'s drawing
-/// appearance, so every token still resolves LIVE (Increase Contrast and the
-/// accent dial reach it) while the light/dark axis is pinned.
+/// appearance, so every token still resolves LIVE (Increase Contrast reaches
+/// it) while the light/dark axis is pinned.
 ///
-/// **Gold at rest is forbidden.** Gold means signal, so a flat EQ draws only
-/// the neutral ``Tokens/Color/scopeFlatLine`` hairline — nothing pretends to
-/// be engaged. Shaping deviates in gold; a bypassed shape goes dashed and
-/// hollow, stating that the settings exist but are not reaching the air.
+/// **The curve itself carries the state.** A flat EQ draws only the neutral
+/// ``Tokens/Color/scopeFlatLine`` hairline. Shaping draws the green line and
+/// wash (``Tokens/Color/equalizer``, the Equalizer-Hue Fence in DESIGN.md). A
+/// bypassed shape goes dashed and hollow, stating that the settings exist but
+/// are not reaching the air. The faint green band gridlines are reference
+/// marks drawn in every state, not state.
 ///
 /// The iPhone companion's `lampWell` (`#050507` dark / `#14120F` light, dark
 /// in both appearances so a lit thing has a dark surround to read against) is
@@ -103,7 +105,7 @@ public final class EQResponseCurveView: NSView {
         public enum State: Equatable, Sendable {
             /// No shaping at all: the neutral hairline on the zero line.
             case flat
-            /// Shaping that is reaching the audio: the gold trace + fill.
+            /// Shaping that is reaching the audio: the green trace + fill.
             case shaped
             /// Shaping that is stored but inaudible right now: dashed, hollow.
             case bypassed
@@ -219,20 +221,15 @@ public final class EQResponseCurveView: NSView {
         setAccessibilityLabel("Response curve")
         setAccessibilityValue(Self.summary(eq: .flat, bypassed: false))
 
-        // Mid-session accessibility-display and accent-dial changes reconcile
-        // LIVE (SharedUI AGENTS.md rules 35/36): neither arrives through
-        // `apply`, and this instrument's tokens are re-read every draw, so an
-        // invalidation is the whole fix. Selector-based observation needs no
-        // matching removal (post-10.11 AppKit auto-unregisters).
+        // A mid-session Increase Contrast change reconciles LIVE: it does not
+        // arrive through `apply`, and this instrument's tokens are re-read
+        // every draw, so an invalidation is the whole fix. Selector-based
+        // observation needs no matching removal (post-10.11 AppKit
+        // auto-unregisters).
         NSWorkspace.shared.notificationCenter.addObserver(
             self,
             selector: #selector(displayOptionsDidChange),
             name: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification,
-            object: nil)
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(displayOptionsDidChange),
-            name: Tokens.accentStyleDidChangeNotification,
             object: nil)
     }
 
@@ -370,7 +367,7 @@ public final class EQResponseCurveView: NSView {
     }
 
     private func drawGrid(in plot: NSRect) {
-        let gridColor = (Tokens.Color.gold.usingColorSpace(.sRGB) ?? Tokens.Color.gold)
+        let gridColor = (Tokens.Color.equalizer.usingColorSpace(.sRGB) ?? Tokens.Color.equalizer)
             .withAlphaComponent(Self.gridAlpha)
         gridColor.setStroke()
         let grid = NSBezierPath()
@@ -414,8 +411,8 @@ public final class EQResponseCurveView: NSView {
             trace.stroke()
 
         case .shaped:
-            let gold = Tokens.Color.gold
-            let fill = (gold.usingColorSpace(.sRGB) ?? gold)
+            let shaped = Tokens.Color.equalizer
+            let fill = (shaped.usingColorSpace(.sRGB) ?? shaped)
                 .withAlphaComponent(Self.shapedFillAlpha)
             let area = NSBezierPath()
             area.append(trace)
@@ -426,7 +423,7 @@ public final class EQResponseCurveView: NSView {
             area.fill()
 
             trace.lineWidth = Self.shapedLineWidth
-            gold.setStroke()
+            shaped.setStroke()
             trace.stroke()
 
         case .bypassed:

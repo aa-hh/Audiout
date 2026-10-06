@@ -221,9 +221,12 @@ extension SerializedSharedState {
             // had NO entry here until 2026-09-14, which is why `#227950` could
             // ship at 2.66:1 on the live wash — the same omission this file
             // already records against `gold`, repeated one token later.
+            // Measured on the row grounds for the door and on `well` for the
+            // EQ sliders' green fills.
             ContrastEntry(name: "equalizer", token: Tokens.Color.equalizer, floor: 3.0,
                          groundsFor: { appearanceName in
-                             [("canvas", canvas), ("panel", panel), ("raised", raised)]
+                             [("canvas", canvas), ("panel", panel), ("raised", raised),
+                              ("well", well)]
                                  + rowWashGrounds(appearanceName)
                          }),
             // `panel` is a BACKDROP everywhere else; on the mute pill it is the
@@ -263,6 +266,19 @@ extension SerializedSharedState {
                     }
                 }
             }
+        }
+    }
+
+    // Turns red if either dark equalizer hex falls under 3:1 on scopeGround, the ground the scope's shaped trace draws on in both appearances.
+    @Test func equalizerTraceClearsTheFloorOnTheScopeGround() {
+        defer { Tokens.test_increaseContrastOverride = nil }
+        for icOn in [false, true] {
+            Tokens.test_increaseContrastOverride = icOn
+            let ratio = measuredRatio(Tokens.Color.equalizer, over: Tokens.Color.scopeGround,
+                                      appearanceName: .darkAqua)
+            let ratioString = String(format: "%.2f", ratio)
+            let message = "equalizer vs scopeGround darkAqua ic=\(icOn): \(ratioString):1 under 3.0:1"
+            #expect(ratio >= 3.0, Comment(rawValue: message))
         }
     }
 

@@ -141,6 +141,21 @@ import AppKit
         #expect(fleet.test_hiddenGroupCollapsed, "the fold is the user's, not the reload's")
     }
 
+    // Turns red when the method drifts off AppKit's `outlineView(_:shouldShowOutlineCellForItem:)` selector, so AppKit never asks and every header gets the default Show/Hide, or when a header other than the hidden group answers true.
+    @Test func onlyTheHiddenGroupHeaderShowsTheFoldControl() throws {
+        let (sidebar, _) = makeFleetSidebar()
+        let outlineView = try #require(sidebar.view.subviews.lazy
+            .compactMap { ($0 as? NSScrollView)?.documentView as? NSOutlineView }.first)
+        let delegate = try #require(outlineView.delegate)
+        let answers: [String: Bool?] = Dictionary(uniqueKeysWithValues:
+            (0..<outlineView.numberOfChildren(ofItem: nil)).compactMap { index -> (String, Bool?)? in
+                guard let node = outlineView.child(index, ofItem: nil) as? SidebarViewController.Node,
+                      case .header(let title) = node.payload else { return nil }
+                return (title, delegate.outlineView?(outlineView, shouldShowOutlineCellForItem: node))
+            })
+        #expect(answers == ["System Audio": false, "In the Mixer": false, SidebarViewController.hiddenTitle: true])
+    }
+
     // MARK: Drag between groups
 
     // Turns red when a drop onto a speaker's own group is accepted, This Mac can be dragged into hiding, or a drop reports the wrong visibility.

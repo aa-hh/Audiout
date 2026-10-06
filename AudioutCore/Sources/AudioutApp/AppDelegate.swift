@@ -487,6 +487,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// whole bar means every control on it is one we drive.
     private lazy var touchBarFullBar: TouchBarFullBar = {
         let bar = TouchBarFullBar()
+        bar.onPresentedChange = { [weak self] presented in
+            (self?.backend as? MeteringControlling)?.setDeviceLevelsWanted(presented)
+        }
         bar.onVolumeStep = { [weak self] up in
             guard let self else { return }
             // Same step feel as the volume keys — one shared definition, so the

@@ -53,6 +53,10 @@ final class TouchBarFullBar: NSObject, NSTouchBarDelegate {
     var onVolumeStep: ((_ up: Bool) -> Void)?
     /// Mute toggle.
     var onToggleMute: (() -> Void)?
+    /// `true` when the bar goes up, `false` when it is handed back. The app
+    /// keeps the backend's levels flowing for exactly that span, because
+    /// ``noteAudioLevel(_:)`` is the play/pause glyph's only input.
+    var onPresentedChange: ((Bool) -> Void)?
 
     private var presented = false
 
@@ -97,12 +101,14 @@ final class TouchBarFullBar: NSObject, NSTouchBarDelegate {
         }
 
         presented = true
+        onPresentedChange?(true)
         reassert()
     }
 
     private func dismiss() {
         guard presented else { return }
         presented = false
+        onPresentedChange?(false)
         TouchBarPrivateAPI.dismiss(bar)
     }
 
@@ -121,7 +127,13 @@ final class TouchBarFullBar: NSObject, NSTouchBarDelegate {
     /// `MediaRemote`'s symbols still resolve on macOS 27, but
     /// `MRMediaRemoteGetNowPlayingApplicationIsPlaying` never calls back; Apple
     /// gated it. We are already tapping the system audio to route it, so "is
-    /// sound actually coming out" is a fact we own outright and costs nothing.
+    /// sound actually coming out" is a fact we own outright.
+    ///
+    /// TRAP: the backend emits levels only while someone asks for them, and the
+    /// popover asks only while it is open. A bar that relied on the popover's
+    /// request sat on play whenever the popover was closed, which is nearly
+    /// always. ``onPresentedChange`` is how the app asks on the bar's behalf
+    /// (`MeteringControlling.setDeviceLevelsWanted`), for as long as it is up.
     ///
     /// KNOWN IMPRECISION, and it is inherent to the proxy rather than a bug: it
     /// tracks AUDIBLE OUTPUT, not transport state. A notification chime while

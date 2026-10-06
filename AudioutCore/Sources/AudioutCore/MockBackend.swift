@@ -106,6 +106,9 @@ public final class MockBackend: OutputBackend, @unchecked Sendable {
     /// `setMeteringActive(true)` first fires — the level timer stays off until
     /// then, mirroring the native path's default-inactive metering.
     private var meteringActive = false
+    /// `MeteringControlling.setDeviceLevelsWanted` — the Touch Bar's own reason
+    /// to keep levels flowing while the popover is closed.
+    private var deviceLevelsWanted = false
 
     /// Bundle IDs the level timer should also fabricate `.appLevel` samples for
     /// (T7 offline fixture). `MockBackend` has no real per-app capture and
@@ -191,7 +194,7 @@ public final class MockBackend: OutputBackend, @unchecked Sendable {
                 }
             }
 
-            if self.emitsLevels && self.meteringActive { self.startLevelTimer() }
+            self.reconcileLevelTimer()
             if self.simulatesDropouts { self.startDropoutTimer() }
 
             if let observer = self.outputObserver {
@@ -723,14 +726,25 @@ extension MockBackend: MeteringControlling {
 
     public func setMeteringActive(_ active: Bool) {
         queue.async {
-            guard self.meteringActive != active else { return }
             self.meteringActive = active
-            guard self.started, self.emitsLevels else { return }
-            if active {
-                self.startLevelTimer()
-            } else {
-                self.levelTimer?.cancel(); self.levelTimer = nil
-            }
+            self.reconcileLevelTimer()
+        }
+    }
+
+    public func setDeviceLevelsWanted(_ wanted: Bool) {
+        queue.async {
+            self.deviceLevelsWanted = wanted
+            self.reconcileLevelTimer()
+        }
+    }
+
+    /// The level timer runs while started, emitting, and either gate is on.
+    /// Must be called on `queue`.
+    private func reconcileLevelTimer() {
+        if started, emitsLevels, meteringActive || deviceLevelsWanted {
+            if levelTimer == nil { startLevelTimer() }
+        } else {
+            levelTimer?.cancel(); levelTimer = nil
         }
     }
 }

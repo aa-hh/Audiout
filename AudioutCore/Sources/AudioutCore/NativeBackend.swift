@@ -1595,8 +1595,8 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     //
     // Replaces the old single whole-system RMS fanned identically to every device.
     // Three real sources now feed the meters, all through the same `BackendEvent`
-    // channel, all popover-scoped (gated on `meteringActive`, flipped by
-    // `setMeteringActive`):
+    // channel, all gated on `levelsFlowing` (the popover's `setMeteringActive`
+    // or the Touch Bar's `setDeviceLevelsWanted`):
     //   - Per-device `.level` = MAX(the whole-system-tap RMS iff the device is a
     //     Selected Device + unmuted, the loudest PRE-volume SOURCE level among the
     //     apps `.device`-routed to it). A device fed by both shows the larger
@@ -1608,11 +1608,19 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     //       `.currentDevice` -> `localPlaybackEngine.onAppLevel` (pre-volume, raw)
     //       `.noRedirect`    -> `meteringCapture` (a dedicated `.unmuted` tap)
 
-    /// Whether a meter is currently being shown (popover open). Gates every
-    /// `.level`/`.appLevel` emission and the metering-only tap lifecycle;
-    /// forwarded to `captureCoordinator`/`routeMixer`/`localPlaybackEngine` (each
-    /// gates its own RMS pass on it). Confined to `stateQueue`.
+    /// Whether a meter is currently being shown (popover open). Gates the
+    /// metering-only tap lifecycle, and with ``deviceLevelsWanted`` every
+    /// `.level`/`.appLevel` emission (see ``levelsFlowing``). Confined to `stateQueue`.
     var meteringActive = false
+
+    /// `setDeviceLevelsWanted`: the app's Touch Bar wants `.level` while the
+    /// popover is closed. Starts no metering-only tap. Confined to `stateQueue`.
+    var deviceLevelsWanted = false
+
+    /// Either reason to compute RMS and emit levels; forwarded to
+    /// `captureCoordinator`/`routeMixer`/`leveledInjector`/`localPlaybackEngine`
+    /// (each gates its own RMS pass on it). On `stateQueue`.
+    var levelsFlowing: Bool { meteringActive || deviceLevelsWanted }
 
     /// The most recent whole-system-tap RMS (stream_id 0) — a device's system
     /// contribution when it is a Selected Device (unmuted). On `stateQueue`.
@@ -2792,6 +2800,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // Metering (T3): a later start() re-decides from a clean slate — no
             // stale system/stream RMS, metering off, no metering-only targets.
             self.meteringActive = false
+            self.deviceLevelsWanted = false
             self.latestSystemRMS = 0
             self.latestAppLevel.removeAll()
             self.lastExcludedBundleIDs.removeAll()

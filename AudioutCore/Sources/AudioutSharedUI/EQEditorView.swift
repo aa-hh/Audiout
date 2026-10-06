@@ -101,7 +101,7 @@ public final class EQEditorView: NSView {
 
     private let contentStack = NSStackView()
     private let curve = EQResponseCurveView()
-    private let bypassLabel = NSTextField(labelWithString: "")
+    private let bypassLabel = NSTextField.noteLabel()
 
     private let bassSlider = NSSlider()
     private let bassReadout = NSTextField(labelWithString: "")

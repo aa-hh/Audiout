@@ -99,14 +99,17 @@ public final class SettingsRootViewController: NSSplitViewController {
 
     public required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-    /// Re-read whatever a remote client can also have changed since these
-    /// panes were built — today only Audio's connect volume and buffer (see
-    /// `AudioSettingsViewController.reloadFromSettings`). Addressed to the
-    /// panes that have something to reconcile rather than broadcast to all of
-    /// them, so a pane without remote-writable state needs no empty override.
+    /// Re-read whatever can have changed since these panes were built: Audio's
+    /// remotely writable settings, and an unanswered stored licence key when
+    /// Settings opens. Addressed to the panes that have something to reconcile
+    /// rather than broadcast to all of them, so other panes need no empty
+    /// override.
     public func reloadFromSettings() {
         for case let audio as AudioSettingsViewController in sections.map(\.viewController) {
             audio.reloadFromSettings()
+        }
+        for case let license as LicenseSettingsViewController in sections.map(\.viewController) {
+            license.revalidateIfNeeded()
         }
         refreshReadouts()
     }

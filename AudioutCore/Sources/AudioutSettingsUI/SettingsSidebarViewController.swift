@@ -125,10 +125,12 @@ final class SettingsSidebarViewController: NSViewController {
         let countChanged = node.readoutLines.count != lines.count
         node.readoutLines = lines
         node.glyphTint = glyphTint
-        outlineView.reloadItem(node)
-        guard countChanged else { return }
         let row = outlineView.row(forItem: node)
         guard row >= 0 else { return }
+        if let cell = outlineView.view(atColumn: 0, row: row, makeIfNecessary: false) as? IconLabelCellView {
+            configure(cell, for: node)
+        }
+        guard countChanged else { return }
         NSAnimationContext.runAnimationGroup { context in
             context.duration = 0
             outlineView.noteHeightOfRows(withIndexesChanged: IndexSet(integer: row))
@@ -160,6 +162,15 @@ final class SettingsSidebarViewController: NSViewController {
 
     func test_spokenLabel(at index: Int) -> String? {
         test_cell(at: index)?.nameLabel.accessibilityLabel()
+    }
+
+    /// The actual outline row, materialized by AppKit rather than the delegate.
+    func test_rowView(at index: Int) -> NSTableRowView? {
+        loadViewIfNeeded()
+        guard root.children.indices.contains(index) else { return nil }
+        let row = outlineView.row(forItem: root.children[index])
+        guard row >= 0 else { return nil }
+        return outlineView.rowView(atRow: row, makeIfNecessary: true)
     }
 
     private func test_cell(at index: Int) -> IconLabelCellView? {
@@ -270,6 +281,11 @@ extension SettingsSidebarViewController: NSOutlineViewDelegate {
         let id = NSUserInterfaceItemIdentifier("section")
         let cell = outlineView.makeView(withIdentifier: id, owner: self) as? IconLabelCellView
             ?? IconLabelCellView.make(identifier: id, isSpeakerRow: true)
+        configure(cell, for: node)
+        return cell
+    }
+
+    private func configure(_ cell: IconLabelCellView, for node: Node) {
         cell.imageView?.image = DeviceIcon.image(node.symbolName)
         cell.nameLabel.stringValue = node.title
         cell.nameLabel.setAccessibilityLabel(Self.spokenLabel(title: node.title, lines: node.readoutLines))
@@ -283,6 +299,5 @@ extension SettingsSidebarViewController: NSOutlineViewDelegate {
         // A cell with no row yet rests.
         let row = cell.superview as? NSTableRowView
         cell.applySelectionInks(selected: row?.isSelected == true, emphasized: row?.isEmphasized == true)
-        return cell
     }
 }

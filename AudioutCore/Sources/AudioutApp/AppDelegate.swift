@@ -214,12 +214,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// `GroupController` as the Mixer, so the two screens stay in lockstep.
     private var mixerWindowController: MixerWindowController?
 
-    /// The Settings screen and its General and License panes, once built
+    /// The Settings screen and its License pane, once built
     /// (`makeSettingsRoot` runs on the first visit). Weak — the surface owns
-    /// them; these exist only so `audiout://register` can reach the license
-    /// sheet without the user navigating there first.
+    /// them; these references let `audiout://register` reach the license sheet
+    /// without the user navigating to the License pane first.
     private weak var settingsRootController: SettingsRootViewController?
-    private weak var generalSettingsController: GeneralSettingsViewController?
     private weak var licenseSettingsController: LicenseSettingsViewController?
 
     /// The one surface (U4): a single window hosting the Mixer, Groups and
@@ -649,7 +648,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Launching` is still building the surface. Drained at the end of it.
     private var pendingLicenseKeyFromURL: String?
 
-    /// Bring up Settings ▸ General with the license sheet open on `key`.
+    /// Bring up Settings ▸ License with the license sheet open on `key`.
     @MainActor
     private func openLicenseSheet(registering key: String) {
         // While the first-open gate is up it IS the licence surface: the
@@ -2506,9 +2505,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let general = GeneralSettingsViewController(loginItem: SMAppServiceLoginItem(),
                                                     settings: settings,
                                                     saveDiagnostics: { [weak self] in self?.saveDiagnostics() })
-        // Weak because the surface owns the panes for as long as the
-        // Settings screen exists.
-        generalSettingsController = general
         // "Run setup again…" (General pane) re-opens the first-run priming
         // window; the backend is already running, so its onFinished is a
         // guarded no-op.

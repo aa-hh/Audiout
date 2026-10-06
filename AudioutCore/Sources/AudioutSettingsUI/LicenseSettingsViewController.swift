@@ -231,12 +231,13 @@ public final class LicenseSettingsViewController: NSViewController, SettingsRead
     }
 
     /// Re-read the stored license state into the well, the header and the
-    /// sidebar readout, then tell the app layer. Every path that can change
-    /// the state — the launch build, the sheet closing, a validator answer —
-    /// ends here, so there is one place that decides what the pane shows. A
-    /// build with no license server hides the well: it has nothing to verify
-    /// and nothing to sell, so it says nothing at all.
-    private func refreshLicenseStatus() {
+    /// sidebar readout, then optionally tell the app layer. Every path that can
+    /// change the state — the launch build, the sheet closing, a validator
+    /// answer — ends here, so there is one place that decides what the pane
+    /// shows. A display-only appearance refresh skips the app callback. A build
+    /// with no license server hides the well: it has nothing to verify and
+    /// nothing to sell, so it says nothing at all.
+    private func refreshLicenseStatus(notifyLicenseChanged: Bool = true) {
         let serverConfigured = settings.licenseServerURL != nil
         // `serverConfigured` is fixed for the pane's life and this first runs
         // before the first layout, so plain `isHidden` is safe here.
@@ -285,7 +286,7 @@ public final class LicenseSettingsViewController: NSViewController, SettingsRead
         headerCaption?.stringValue = Self.readoutFirstLine(settings: settings)
         headerGlyph?.contentTintColor = readoutGlyphTint
         onReadoutChanged?()
-        onLicenseChanged?()
+        if notifyLicenseChanged { onLicenseChanged?() }
     }
 
     /// Present the Enter License… sheet (`MixerWindowController
@@ -332,9 +333,15 @@ public final class LicenseSettingsViewController: NSViewController, SettingsRead
 
     public override func viewWillAppear() {
         super.viewWillAppear()
-        // The one retry trigger that costs the user nothing: coming back to
-        // this pane. Its own guards make it a no-op without a server or a key.
-        if settings.licenseStatus == nil { revalidate() }
+        refreshLicenseStatus(notifyLicenseChanged: false)
+        revalidateIfNeeded()
+    }
+
+    /// Retry an unanswered stored key when Settings opens or this pane appears.
+    /// The request method's guards make this a no-op without a server or key.
+    func revalidateIfNeeded() {
+        guard settings.licenseStatus == nil else { return }
+        revalidate()
     }
 
     /// Re-ask the server about the stored key, then re-display. Chosen over an

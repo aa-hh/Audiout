@@ -187,6 +187,37 @@ import AudioutSharedUI
         }
     }
 
+    /// Holds replies so tests can drive every trigger while one validation is
+    /// still pending.
+    private final class HoldingTransport: @unchecked Sendable {
+        typealias Completion = (Data?, URLResponse?, Error?) -> Void
+
+        private(set) var requestCount = 0
+        private var completions: [Completion] = []
+
+        var closure: LicenseValidator.Transport {
+            { [self] _, completion in
+                requestCount += 1
+                completions.append(completion)
+            }
+        }
+
+        @discardableResult
+        func completeNext(json: String? = nil) -> Bool {
+            guard !completions.isEmpty else { return false }
+            let completion = completions.removeFirst()
+            guard let json else {
+                completion(nil, nil, URLError(.notConnectedToInternet))
+                return true
+            }
+            completion(Data(json.utf8),
+                       HTTPURLResponse(url: URL(string: "https://license.example.com")!,
+                                       statusCode: 200, httpVersion: nil, headerFields: nil),
+                       nil)
+            return true
+        }
+    }
+
     /// Lets the validator's main-queue completion (and the refresh it drives)
     /// run before the next assertion. FIFO on the main queue is what makes this
     /// deterministic rather than a sleep.
@@ -401,6 +432,77 @@ import AudioutSharedUI
         license.viewWillAppear()
         await drainMainQueue()
         #expect(license.test_licenseStatusText == "Registered. Thank you for supporting Audiout.")
+    }
+
+    /// Red if opening Settings away from License stops retrying an unanswered
+    /// stored key, or if overlapping root and pane triggers send two requests.
+    @Test func openingSettingsRetriesOneUnansweredKeyRequestAtATime() async {
+        let settings = makePaidBuildSettings()
+        settings.licenseKey = "AUDT-AAAAA-BBBBB-CCCCC-DDDDD"
+        let transport = HoldingTransport()
+        let (root, _, _, _, _, license) = makeRoot(settings: settings,
+                                                   licenseTransport: transport.closure)
+        #expect(root.selectedSectionIndex == 0)
+        #expect(!license.isViewLoaded)
+
+        root.reloadFromSettings()
+        #expect(transport.requestCount == 1)
+        #expect(!license.isViewLoaded)
+
+        root.reloadFromSettings()
+        root.viewWillAppear()
+        root.refreshReadouts()
+        #expect(transport.requestCount == 1)
+
+        #expect(transport.completeNext())
+        await drainMainQueue()
+        #expect(settings.licenseStatus == nil)
+        #expect(root.test_readoutLines(at: 4) == ["Key saved, not verified"])
+        #expect(transport.requestCount == 1)
+        #expect(!license.isViewLoaded)
+
+        root.reloadFromSettings()
+        #expect(transport.requestCount == 2)
+        #expect(transport.completeNext(json: #"{"status":"active"}"#))
+        await drainMainQueue()
+        #expect(root.test_readoutLines(at: 4) == ["Registered"])
+        #expect(!license.isViewLoaded)
+
+        root.reloadFromSettings()
+        #expect(transport.requestCount == 2)
+
+        settings.licenseStatus = nil
+        root.reloadFromSettings()
+        #expect(transport.requestCount == 3)
+        license.viewWillAppear()
+        #expect(transport.requestCount == 3)
+    }
+
+    /// Red if Settings-open or License-appearance retries bypass the existing
+    /// missing-server, missing-key, empty-key, or finished-verdict guards.
+    @Test(arguments: [
+        (server: false, key: "AUDT-AAAAA-BBBBB-CCCCC-DDDDD", status: nil),
+        (server: true, key: nil, status: nil),
+        (server: true, key: "", status: nil),
+        (server: true, key: "AUDT-AAAAA-BBBBB-CCCCC-DDDDD", status: "active"),
+        (server: true, key: "AUDT-AAAAA-BBBBB-CCCCC-DDDDD", status: "revoked"),
+        (server: true, key: "AUDT-AAAAA-BBBBB-CCCCC-DDDDD", status: "unknown"),
+        (server: true, key: "AUDT-AAAAA-BBBBB-CCCCC-DDDDD", status: "invalid"),
+    ] as [(server: Bool, key: String?, status: String?)])
+    func retryTriggersRespectEveryNoRequestGuard(
+        row: (server: Bool, key: String?, status: String?)
+    ) {
+        let settings = row.server ? makePaidBuildSettings() : makeSettings()
+        settings.licenseKey = row.key
+        settings.licenseStatus = row.status.flatMap(LicenseStatus.init(rawValue:))
+        let transport = HoldingTransport()
+        let (root, _, _, _, _, license) = makeRoot(settings: settings,
+                                                   licenseTransport: transport.closure)
+
+        root.reloadFromSettings()
+        license.viewWillAppear()
+
+        #expect(transport.requestCount == 0)
     }
 
     /// The once-per-launch check-in is disclosed where it happens, and ONLY
@@ -768,6 +870,62 @@ import AudioutSharedUI
 
     // MARK: Sidebar readouts
 
+    /// Red if readout updates rebuild the selected row's cell with resting
+    /// colors, including when a second readout line changes its height.
+    @Test func selectedSidebarReadoutKeepsItsLiveSelectionInks() async throws {
+        let login = FakeLoginItem(enabled: false)
+        let latency = LatencySettingModel(
+            optionsMs: AppSettings.startBufferOptionsMs, initialMs: 1000,
+            envOverrideMs: nil, isStreaming: { false }, apply: { _ in (0, 0) })
+        let (root, general, _, _, audio, _) = makeRoot(loginItem: login, latency: latency)
+        let window = NSWindow(
+            contentRect: NSRect(x: -10_000, y: -10_000, width: SurfaceLayout.width, height: 800),
+            styleMask: .borderless, backing: .buffered, defer: false)
+        window.contentViewController = root
+        root.view.layoutSubtreeIfNeeded()
+        let sidebar = try #require(root.test_sidebarSplitItem.viewController as? SettingsSidebarViewController)
+
+        func expectSelectedReadout(at index: Int, lines: [String], height: CGFloat) throws {
+            let row = try #require(sidebar.test_rowView(at: index))
+            let cell = try #require(row.view(atColumn: 0) as? IconLabelCellView)
+            #expect(row.isSelected)
+            let ink = row.isEmphasized ? NSColor.alternateSelectedControlTextColor : Tokens.Color.label
+            #expect(sameInk(try #require(cell.nameLabel.textColor), ink))
+            #expect(sameInk(try #require(cell.imageView?.contentTintColor), ink))
+            #expect(sameInk(try #require(cell.statusLabel.textColor), ink))
+            #expect(cell.statusLabel.stringValue == lines.joined(separator: "\n"))
+            #expect(row.frame.height == height)
+        }
+
+        root.selectSection(at: 0)
+        let generalRow = try #require(sidebar.test_rowView(at: 0))
+        generalRow.isEmphasized = true
+        general.test_toggleLaunchAtLogin(true)
+        try expectSelectedReadout(at: 0, lines: ["Opens at login"], height: 40)
+
+        generalRow.isEmphasized = false
+        login.approvalRequired = true
+        general.test_toggleLaunchAtLogin(false)
+        try expectSelectedReadout(at: 0, lines: ["Needs Login Items approval"], height: 40)
+
+        root.selectSection(at: 3)
+        let restingGeneralCell = try #require(sidebar.test_rowView(at: 0)?.view(atColumn: 0) as? IconLabelCellView)
+        #expect(sameInk(try #require(restingGeneralCell.imageView?.contentTintColor), Tokens.Color.ring))
+        let audioRow = try #require(sidebar.test_rowView(at: 3))
+        audioRow.isEmphasized = true
+        audio.test_addExcluded(bundleID: "us.zoom.xos", displayName: "Zoom")
+        try expectSelectedReadout(at: 3, lines: ["1 app stays on this Mac"], height: 40)
+
+        await audio.test_selectLatencyOption(ms: 1500)
+        try expectSelectedReadout(at: 3, lines: ["1 app stays on this Mac", "Buffer 1500 ms"], height: 54)
+        let audioCell = try #require(sidebar.test_rowView(at: 3)?.view(atColumn: 0) as? IconLabelCellView)
+        #expect(audioCell.nameLabel.accessibilityLabel() == "Audio, 1 app stays on this Mac, Buffer 1500 ms")
+
+        await audio.test_selectLatencyOption(ms: 1000)
+        try expectSelectedReadout(at: 3, lines: ["1 app stays on this Mac"], height: 40)
+        #expect(!window.isVisible)
+    }
+
     /// Red if the License row's readout stops following the licence state,
     /// or its glyph stops taking `ring` exactly while the user must act.
     @Test func licenseReadoutFollowsEveryState() async {
@@ -818,21 +976,51 @@ import AudioutSharedUI
         #expect(sameInk(root.test_glyphTint(at: 4), Tokens.Color.labelCool))
     }
 
-    /// Red if a running trial stops reading as days left, stops naming the
-    /// day it ends, or stops offering Buy Audiout as the gold button.
-    @Test func aRunningTrialReadsItsDaysAndOffersGoldBuy() {
+    /// Red if appearance stops refreshing a loaded trial display, or if that
+    /// display-only refresh calls the host and adds a licence check-in.
+    @Test func aRunningTrialReadsItsDaysAndOffersGoldBuy() throws {
         let settings = makePaidBuildSettings()
-        let expiresAt = Date().addingTimeInterval(9 * 86_400)
+        let expiresAt = Date().addingTimeInterval(8.5 * 86_400)
         TrialClock.apply(settings: settings, startedAt: Date().addingTimeInterval(-5 * 86_400),
                          expiresAt: expiresAt, key: "AUDT-AAAAA-BBBBB-CCCCC-DDDDD")
+        settings.licenseStatus = .active
         let (root, _, _, _, _, license) = makeRoot(settings: settings)
+        root.selectSection(at: 4)
+        let pageStack = try #require(license.view.subviews.first as? NSStackView)
+        let header = try #require(pageStack.arrangedSubviews.first as? PageHeaderView)
+        let headerCaption = try #require(header.textStack.arrangedSubviews.last as? NSTextField)
 
         #expect(root.test_readoutLines(at: 4) == ["Trial · 9 days left"])
+        #expect(headerCaption.stringValue == "Trial · 9 days left")
         #expect(license.test_licenseStatusText == "Audiout plays on every speaker until your trial ends on "
                 + "\(expiresAt.formatted(.dateTime.day().month(.wide))).")
         #expect(license.test_enterLicenseButtonTitle == "Enter license…")
         #expect(license.test_buyButtonIsVisible)
         #expect(license.test_buyButtonIsProminent)
+
+        var licenseChangedCount = 0
+        license.onLicenseChanged = { licenseChangedCount += 1 }
+
+        let nextExpiry = Date().addingTimeInterval(7.5 * 86_400)
+        settings.trialExpiresAt = nextExpiry
+        license.viewWillAppear()
+        #expect(headerCaption.stringValue == "Trial · 8 days left")
+        #expect(root.test_readoutLines(at: 4) == ["Trial · 8 days left"])
+        #expect(license.test_licenseStatusText == "Audiout plays on every speaker until your trial ends on "
+                + "\(nextExpiry.formatted(.dateTime.day().month(.wide))).")
+        #expect(license.test_enterLicenseButtonTitle == "Enter license…")
+        #expect(license.test_buyButtonIsVisible)
+
+        settings.trialExpiresAt = Date().addingTimeInterval(-3_600)
+        license.viewWillAppear()
+        #expect(headerCaption.stringValue == "Trial ended")
+        #expect(root.test_readoutLines(at: 4) == ["Trial ended", "One speaker at a time"])
+        #expect(license.test_licenseStatusText
+                == "Your trial has ended. Audiout plays on one speaker at a time until you buy.")
+        #expect(license.test_enterLicenseButtonTitle == "Change…")
+        #expect(license.test_buyButtonIsVisible)
+        #expect(sameInk(license.test_headerGlyphTint, Tokens.Color.ring))
+        #expect(licenseChangedCount == 0)
     }
 
     /// Red if the General row's readout stops following the login item,

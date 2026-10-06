@@ -3792,6 +3792,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         await submitAndWait(backend, "secret", for: device.id)
         backend.retryOutput(device.id)
         await pollUntil { self.connectionState(backend, device.id) == .connected }
+        await pollUntil { capture.isCapturing }
         #expect(capture.isCapturing)
         #expect(!scheduler.hasPending)
     }
@@ -8742,7 +8743,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
     }
 
     /// Turns red if `retryOutput`'s per-app password arm stops restoring
-    /// `isAvailable` with its `.connecting` write: a refused typed password
+    /// `isAvailable` with its `.off` write: a refused typed password
     /// leaves the row unavailable, eligibility never flips, and the retyped
     /// password is never bound.
     @Test func perAppOnlyPasswordSpeakerRebindsAfterARefusedPasswordIsRetyped() async {

@@ -6230,11 +6230,16 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     // MARK: Capture gate
 
     /// Start/stop capture so the tap runs IF AND ONLY IF at least one real
-    /// receiver output is selected. On `stateQueue`, called only from `setOutputSet`.
+    /// receiver output is selected and wants the stream. On `stateQueue`, re-run
+    /// on every edge that can change `want`: `setOutputSet`, every
+    /// `setConnectionState`, the engine state stream, the silence watchdog,
+    /// wake and handoff resume.
     ///
     /// ## Why intent, not availability (deliberate)
-    /// `want` reads `expectedSelected` — what the user ASKED for — and only checks
-    /// that the id is a discovered receiver (`!isLocalDevice`), never `isAvailable`,
+    /// `want` reads `expectedSelected` — what the user ASKED for — and checks only
+    /// that the id is a discovered receiver (`!isLocalDevice`) that wants the
+    /// stream (`selectedSpeakerWantsStreamLocked`: not waiting for its password,
+    /// not refused one), never `isAvailable`,
     /// `added`, or `converging`. A selected receiver that transiently drops
     /// therefore KEEPS capture running (the Mac stays muted) until it returns or the
     /// user deselects it. That's the point: a brief dropout must not blast the Mac's

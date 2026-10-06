@@ -536,29 +536,37 @@ public enum PopoverColumnGrid {
     /// Alpha for the selection wash, drawn in ``Tokens/Color/engagedChrome``.
     /// Used by AppRowView's single-selection highlight.
     public static let rowSelectionWashAlpha: CGFloat = 0.18
-    /// Alpha of the gold wash behind a SOUNDING row (`DeviceRowView.isRouteArmed`,
-    /// `AppRowView`'s routed ∧ running) — the iPhone's 12 % (`gold.opacity(0.12)`);
-    /// measured 1.256:1 on dark `panel`, 1.140:1 on the light ground.
+    /// Alpha of the gold wash behind a sounding card or scene tile
+    /// (`GroupsOverviewViewController`, `SetupCardView`; the Mixer rows draw
+    /// none) — the iPhone's 12 % (`gold.opacity(0.12)`); measured 1.256:1 on
+    /// dark `panel`, 1.140:1 on the light ground.
     public static let rowLiveWashAlpha: CGFloat = 0.12
     /// Alpha of the tint filling an inset notice card (`TintedNoteBackgroundView`):
     /// the note banner, the thank-you card and the connection diagnosis card.
     public static let insetCardTintAlpha: CGFloat = 0.12
 
-    // MARK: The engaged fill behind a row accessory (Warm Signal v3 §3.4/§3.5, S3)
-    //
-    // A row's two engaged accessory marks — the muted speaker and the
-    // Equalizer door on a shaped curve — are ONE rounded square in two
-    // colours (owner's call, 2026-09-04: "the same object in two colours"),
-    // and that square is now part of the SYMBOL rather than a rectangle drawn
-    // behind it. `RowAccessorySymbol` owns the four images and their point
-    // size; the seat's own geometry constants, `engagedSeatSize` and
-    // `engagedSeatCornerRadius`, retired with the two `NSView`s that drew it.
+    /// Fills the shared row wash: ``Tokens/Color/engagedChrome`` at `alpha`
+    /// in a rounded rect inset ``selectionHighlightInsetX`` ×
+    /// ``selectionHighlightInsetY`` from `bounds`, radius
+    /// ``selectionHighlightCornerRadius``. Call from `draw(_:)`.
+    public static func fillRowWash(in bounds: NSRect, alpha: CGFloat) {
+        Tokens.Color.engagedChrome.withAlphaComponent(alpha).setFill()
+        NSBezierPath(roundedRect: bounds.insetBy(dx: selectionHighlightInsetX,
+                                                 dy: selectionHighlightInsetY),
+                     xRadius: selectionHighlightCornerRadius,
+                     yRadius: selectionHighlightCornerRadius).fill()
+    }
 
-    /// Alpha of an ``Tokens/Color/engagedChrome`` engaged fill — subtle,
-    /// because mute is config-adjacent, not a signal. The strongest alpha in
-    /// that token's ladder, since a seat is smaller than a row wash and needs
-    /// the extra weight to read at glyph scale.
-    public static let mutePillFillAlpha: CGFloat = 0.22
+    // MARK: The engaged fill (Warm Signal v3 §3.4/§3.5, S3)
+    //
+    // The row accessory marks no longer draw a fill: their engaged square is
+    // part of the symbol (`RowAccessorySymbol`).
+
+    /// Alpha of an ``Tokens/Color/engagedChrome`` engaged fill on a small
+    /// control: the open sync chip and a pressed toolbar seat. The strongest
+    /// step in that token's ladder (hover 0.10, selection 0.18), since a
+    /// small control needs the extra weight to read.
+    public static let engagedFillAlpha: CGFloat = 0.22
 
     // MARK: Single-selection highlight (AppRowView, 2026-07-17)
     //
@@ -850,8 +858,12 @@ public enum PopoverColumnGrid {
     /// row type. Sized to clear the readout that hangs off it, the min flex
     /// slack, and the trailing control.
     public static var sliderTrailing: CGFloat {
+        readoutTrailing + readoutWidth + sliderToReadout
+    }
+    /// Distance from the row trailing edge to the `%` readout's trailing edge —
+    /// where rows pin a `RowVolumeFader`'s trailing edge.
+    public static var readoutTrailing: CGFloat {
         trailingControlTrailing + trailingControlWidth + readoutToTrailingControl
-            + readoutWidth + sliderToReadout
     }
     // MARK: Column-center helpers (for the combined section/column header row)
     //

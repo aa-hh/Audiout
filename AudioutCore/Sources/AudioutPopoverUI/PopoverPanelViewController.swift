@@ -1893,51 +1893,29 @@ private final class ClosureActionTarget: NSObject {
 /// before commitment. Non-collapsible headers never wash. Hover needs a real
 /// pointer, so snapshot/headless renders are byte-identical to before.
 ///
-/// The pointer-position reconcile in `mouseMoved` is `DeviceRowView`'s T-U8
-/// discipline: an `NSTrackingArea` never emits `mouseExited` toward an
-/// untracked dead zone, so exit alone can leave the last header stuck lit.
+/// Hover comes from a `HoverTracker`, which re-reads the real pointer: an
+/// `NSTrackingArea` never emits `mouseExited` toward an untracked dead zone,
+/// so exit alone can leave the last header stuck lit.
 private final class HeaderHoverWashView: NSView {
     var showsHoverWash = false { didSet { updateTrackingAreas() } }
-    private var hovered = false
+    private lazy var hoverTracker = HoverTracker(view: self) { [weak self] _ in
+        guard let self else { return }
+        self.setNeedsDisplay(self.bounds)
+    }
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
-        for area in trackingAreas { removeTrackingArea(area) }
-        guard showsHoverWash else { return }
-        addTrackingArea(NSTrackingArea(
-            rect: .zero,
-            options: [.mouseEnteredAndExited, .mouseMoved, .activeInActiveApp, .inVisibleRect],
-            owner: self, userInfo: nil))
-    }
-
-    override func mouseEntered(with event: NSEvent) { setHovered(true) }
-    override func mouseExited(with event: NSEvent) { setHovered(false) }
-    override func mouseMoved(with event: NSEvent) {
-        guard let window else { return setHovered(false) }
-        let local = convert(window.mouseLocationOutsideOfEventStream, from: nil)
-        setHovered(bounds.contains(local))
+        hoverTracker.update(active: showsHoverWash)
     }
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        setHovered(false)   // a rebuild/remount never keeps a stale wash
-    }
-
-    private func setHovered(_ hovered: Bool) {
-        guard self.hovered != hovered else { return }
-        self.hovered = hovered
-        setNeedsDisplay(bounds)
+        hoverTracker.setHovered(false)   // a rebuild/remount never keeps a stale wash
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        if showsHoverWash && hovered {
-            let rect = bounds.insetBy(dx: PopoverColumnGrid.selectionHighlightInsetX,
-                                      dy: PopoverColumnGrid.selectionHighlightInsetY)
-            Tokens.Color.engagedChrome
-                .withAlphaComponent(PopoverColumnGrid.rowHoverWashAlpha).setFill()
-            NSBezierPath(roundedRect: rect,
-                         xRadius: PopoverColumnGrid.selectionHighlightCornerRadius,
-                         yRadius: PopoverColumnGrid.selectionHighlightCornerRadius).fill()
+        if showsHoverWash && hoverTracker.isHovered {
+            PopoverColumnGrid.fillRowWash(in: bounds, alpha: PopoverColumnGrid.rowHoverWashAlpha)
         }
         super.draw(dirtyRect)
     }

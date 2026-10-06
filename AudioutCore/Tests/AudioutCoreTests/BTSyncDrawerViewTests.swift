@@ -126,6 +126,28 @@ import AppKit
         #expect(!drawer.test_resetVisible, "nothing left to reset")
     }
 
+    // MARK: Cast pending glow
+
+    /// The host's pending flag shows the white glow around the field and
+    /// says so to VoiceOver, and clearing it removes both. Turns red if
+    /// `configure` drops `pendingApply` or `refreshDisplay` stops appending
+    /// ", applying" to the field's label.
+    @Test func pendingApplyShowsTheFieldGlowAndSpeaksIt() {
+        let (drawer, _) = makeDrawer()
+        drawer.test_reduceMotionOverride = true
+        #expect(!drawer.test_isPendingGlowShown)
+
+        drawer.configure(deviceName: "Living Room TV", trimMs: 24, isSet: true,
+                         usableRangeMs: -500...500, alignTickActive: false, pendingApply: true)
+        #expect(drawer.test_isPendingGlowShown)
+        #expect(drawer.test_valueField.accessibilityLabel() == "Sync offset for Living Room TV, applying")
+
+        drawer.configure(deviceName: "Living Room TV", trimMs: 24, isSet: true,
+                         usableRangeMs: -500...500, alignTickActive: false)
+        #expect(!drawer.test_isPendingGlowShown)
+        #expect(drawer.test_valueField.accessibilityLabel() == "Sync offset for Living Room TV")
+    }
+
     // MARK: One stepper pair — 1 ms a click, 10 while ⇧ is held
 
     @Test func minusStepsByOne() {

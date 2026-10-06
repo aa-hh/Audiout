@@ -33,13 +33,17 @@ import AppKit
 ///   slides inside the stock knob rect rather than centring on it, so at the
 ///   maximum its trailing edge lands on the track's end and at the minimum its
 ///   leading edge lands on the start — no strip of trough past the handle.
+/// - **Pending glow** (Cast volume not yet audible, `isPendingApply`): a white
+///   halo around the thumb and a white-blended body, breathing on a timer the
+///   cell owns; under Reduce Motion it holds still at full strength.
 ///
 /// Every color goes through `Tokens`, resolved at DRAW time under the
 /// control's effective appearance (AppKit sets the drawing appearance before
 /// calling the cell), so light/dark, Increase Contrast, and the accent dial
 /// (spec §1.3 — `gold`/`ember` remap) all land with no
-/// code here knowing about them. The drawing is steady state — no animation,
-/// no layers — so `cacheDisplay` snapshots are byte-deterministic.
+/// code here knowing about them. Apart from the pending glow's breathing the
+/// drawing is steady state with no layers, so `cacheDisplay` snapshots are
+/// byte-deterministic (and the glow is too under Reduce Motion).
 public final class WarmFaderCell: NSSliderCell {
 
     /// Whether the OWNING row is currently route-armed (spec §3.3) — the exact
@@ -67,13 +71,50 @@ public final class WarmFaderCell: NSSliderCell {
 
     /// Whether the owning row's volume/mute gesture is still pending its
     /// feed-gain apply moment (Cast fixed-volume receivers only — the row
-    /// re-stamps this on every `apply`). While true, the engaged fill draws
-    /// as DASHED gold segments — the app's connecting/"in flight" vocabulary
-    /// — instead of the solid gradient: the "not yet landed" signal.
+    /// re-stamps this on every `apply`). While true, an armed thumb glows
+    /// white and breathes: the "not yet landed" signal.
     public var isPendingApply: Bool = false {
         didSet {
-            if isPendingApply != oldValue { controlView?.needsDisplay = true }
+            guard isPendingApply != oldValue else { return }
+            reconcilePulseTimer()
+            controlView?.needsDisplay = true
         }
+    }
+
+    /// Repaints the breathing glow. Runs only while pending and motion is
+    /// allowed; `CACurrentMediaTime()` sets the phase, so a late tick never
+    /// drifts the pulse.
+    private var pulseTimer: Timer?
+
+    deinit { pulseTimer?.invalidate() }
+
+    private func reconcilePulseTimer() {
+        guard isPendingApply, !reduceMotion else {
+            pulseTimer?.invalidate()
+            pulseTimer = nil
+            return
+        }
+        guard pulseTimer == nil else { return }
+        let timer = Timer(timeInterval: Self.pulseFrameInterval, repeats: true) { [weak self] _ in
+            self?.controlView?.needsDisplay = true
+        }
+        timer.tolerance = 0.01
+        RunLoop.main.add(timer, forMode: .common)
+        pulseTimer = timer
+    }
+
+    private var reduceMotion: Bool {
+        test_reduceMotionOverride ?? NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+    }
+
+    /// The glow's strength right now, 0.45…1.0 over a 1.2 s breath; a
+    /// constant 1.0 under Reduce Motion.
+    private var pulseAlpha: CGFloat {
+        guard !reduceMotion else { return 1.0 }
+        let phase = CACurrentMediaTime()
+            .truncatingRemainder(dividingBy: Self.pulsePeriod) / Self.pulsePeriod
+        let wave = CGFloat(0.5 - 0.5 * cos(2 * .pi * phase))
+        return Self.pulseMinAlpha + (1 - Self.pulseMinAlpha) * wave
     }
 
     // MARK: Drawing
@@ -120,38 +161,11 @@ public final class WarmFaderCell: NSSliderCell {
                 let dimEnd = Tokens.Color.ember
                     .blended(withFraction: Self.armedDimEndGoldBlend,
                              of: Tokens.Color.gold) ?? Tokens.Color.ember
-                if isPendingApply {
-                    // Pending Cast feed-gain apply: the level is real but not
-                    // audible yet, so the gold renders in the app's "in
-                    // flight" vocabulary — DASHED, the same form the
-                    // connecting halo ring and bus node already use — until
-                    // the lag elapses and the solid bar returns. Two flat
-                    // tones were tried first and were LIVE-INVISIBLE at this
-                    // 5 pt track size (2026-08-23, mock-window pixel probe):
-                    // the ember-blend is indistinguishable from the gradient,
-                    // and the unarmed neutral is a same-luminance warm fill —
-                    // byte-identical to every unarmed row's fader, so a tint
-                    // swap reads as "no change". A broken bar cannot be
-                    // mistaken for a solid one. Dash phase anchors to the
-                    // TRACK, not the fill, so segments hold still while the
-                    // thumb drags. Static drawing — no animation, so Reduce
-                    // Motion and snapshot determinism are untouched.
-                    let dashes = NSBezierPath()
-                    var x = track.minX
-                    while x < fillRect.maxX {
-                        dashes.appendRect(NSRect(x: x, y: track.minY,
-                                                 width: Self.pendingDashLength,
-                                                 height: track.height))
-                        x += Self.pendingDashLength + Self.pendingDashGap
-                    }
-                    NSBezierPath(rect: fillRect).addClip()
-                    dashes.addClip()
-                    if let gradient = NSGradient(starting: dimEnd,
-                                                 ending: Tokens.Color.gold) {
-                        let leftToRight = fillRect.minX == track.minX
-                        gradient.draw(in: fillRect, angle: leftToRight ? 0 : 180)
-                    }
-                } else if let gradient = NSGradient(starting: dimEnd,
+                // A pending Cast apply keeps this solid fill; the hold shows
+                // on the thumb instead (2026-10-06, owner's call). It used to
+                // dash this fill because flat tints were live-invisible on the
+                // 5 pt track; the 10×17 pt thumb has room to carry a glow.
+                if let gradient = NSGradient(starting: dimEnd,
                                              ending: Tokens.Color.gold) {
                     let leftToRight = fillRect.minX == track.minX
                     gradient.draw(in: fillRect, angle: leftToRight ? 0 : 180)
@@ -213,8 +227,18 @@ public final class WarmFaderCell: NSSliderCell {
         let radius = PopoverColumnGrid.faderThumbCornerRadius
         let path = NSBezierPath(roundedRect: thumb, xRadius: radius, yRadius: radius)
 
-        // The raised cap body…
-        Tokens.Color.raised.withAlphaComponent(interiorAlpha).setFill()
+        // The raised cap body, white-blended under a white halo while a Cast
+        // apply is pending. Flat fills, never an `NSShadow` (folder rule).
+        var body = Tokens.Color.raised
+        if test_isPendingGlow {
+            let glow = pulseAlpha
+            let haloRect = thumb.insetBy(dx: -Self.pendingHaloOutset, dy: -Self.pendingHaloOutset)
+            let haloRadius = radius + Self.pendingHaloOutset
+            NSColor.white.withAlphaComponent(glow * Self.pendingHaloAlpha).setFill()
+            NSBezierPath(roundedRect: haloRect, xRadius: haloRadius, yRadius: haloRadius).fill()
+            body = body.blended(withFraction: glow, of: .white) ?? body
+        }
+        body.withAlphaComponent(interiorAlpha).setFill()
         path.fill()
 
         // …read by its `rim` edge, the one thing that defines it against both
@@ -282,11 +306,14 @@ public final class WarmFaderCell: NSSliderCell {
     /// (light) vs `well` — raw ember measured 3.86:1 / 1.98:1, muddy at the
     /// track's low-value end in light.
     private static let armedDimEndGoldBlend: CGFloat = 0.5
-    /// The pending-apply fill's dash geometry: painted / gap run lengths in
-    /// points. 6-on/4-off gives a ~90 pt fill about nine clearly separated
-    /// gold segments — coarse enough to read at the 5 pt track height.
-    private static let pendingDashLength: CGFloat = 6
-    private static let pendingDashGap: CGFloat = 4
+    /// The pending glow: halo reach past the thumb edge, the halo's white
+    /// alpha at full breath, and the breath itself (same 0.45 floor and
+    /// 1.2 s period as the drawer's value-field glow).
+    private static let pendingHaloOutset: CGFloat = 2.5
+    private static let pendingHaloAlpha: CGFloat = 0.40
+    private static let pulseMinAlpha: CGFloat = 0.45
+    private static let pulsePeriod: CFTimeInterval = 1.2
+    private static let pulseFrameInterval: TimeInterval = 1.0 / 30
 
     // MARK: Test-support hooks
 
@@ -294,7 +321,12 @@ public final class WarmFaderCell: NSSliderCell {
     /// armed ∧ enabled, the exact gate `drawBar` uses, so tests can't drift
     /// from the pixels.
     public var test_isEngagedFill: Bool { isRouteArmed && isEnabled }
-    public var test_isPendingFill: Bool { isPendingApply && isRouteArmed && isEnabled }
+    public var test_isPendingGlow: Bool { isPendingApply && isRouteArmed && isEnabled }
+    /// Stands in for the system Reduce Motion setting; `true` stops the
+    /// breath so a pending render is deterministic.
+    public var test_reduceMotionOverride: Bool? {
+        didSet { reconcilePulseTimer() }
+    }
 
     /// The fill rect `drawBar` would paint for `track`, at the cell's current
     /// `doubleValue`/`minValue`/`maxValue` — same geometry, so a test can

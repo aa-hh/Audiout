@@ -132,6 +132,10 @@ public final class BTSyncDrawerView: NSView {
     private let minusButton = StepperButton()
     private let plusButton = StepperButton()
     private let valueField = NSTextField()
+    /// White glow behind the value field while a Cast offset waits out the
+    /// stream lag. The bottom-most subview, so it shows only as a ring past
+    /// the field's opaque bezel and never sits over a button's click area.
+    private let pendingGlowView = NSView()
 
     private lazy var valueFieldEditor = SyncValueFieldEditor(field: valueField, initialValue: 0)
 
@@ -161,6 +165,8 @@ public final class BTSyncDrawerView: NSView {
     /// line from the source until the host clears it, which the host does when
     /// the drawer closes.
     private var movedSinceLastTimeMs: Double?
+    /// Whether the host is holding this device's offset as not yet audible.
+    private var pendingApply = false
     /// The band's leading anchor, swapped when "Align again…" is hidden: the
     /// metronome takes its place rather than leaving a 110 pt hole.
     private var alignLeadingToAlignAgain: NSLayoutConstraint?
@@ -206,6 +212,7 @@ public final class BTSyncDrawerView: NSView {
             addSubview(subview)
         }
         installConstraints()
+        installPendingGlow()
 
         valueFieldEditor.delegate = self
         // Reads `usableRangeMs` LIVE on every call (closes over `self`, not a
@@ -508,6 +515,66 @@ public final class BTSyncDrawerView: NSView {
     }
 
 
+    // MARK: Pending glow
+
+    private func installPendingGlow() {
+        pendingGlowView.translatesAutoresizingMaskIntoConstraints = false
+        pendingGlowView.wantsLayer = true
+        pendingGlowView.layer?.backgroundColor =
+            NSColor.white.withAlphaComponent(Self.pendingGlowAlpha).cgColor
+        pendingGlowView.layer?.cornerRadius = Self.pendingGlowCornerRadius
+        pendingGlowView.isHidden = true
+        addSubview(pendingGlowView, positioned: .below, relativeTo: nil)
+        let outset = Self.pendingGlowOutset
+        NSLayoutConstraint.activate([
+            pendingGlowView.leadingAnchor.constraint(equalTo: valueField.leadingAnchor, constant: -outset),
+            pendingGlowView.trailingAnchor.constraint(equalTo: valueField.trailingAnchor, constant: outset),
+            pendingGlowView.topAnchor.constraint(equalTo: valueField.topAnchor, constant: -outset),
+            pendingGlowView.bottomAnchor.constraint(equalTo: valueField.bottomAnchor, constant: outset),
+        ])
+    }
+
+    /// Show or hide the glow and its breath. The layer's model opacity stays
+    /// 1, the settled full glow, so Reduce Motion and a frame caught between
+    /// breaths both show it whole. Core Animation drops the breath when the
+    /// layer leaves the window; `viewDidMoveToWindow` puts it back.
+    private func reconcilePendingGlow() {
+        pendingGlowView.isHidden = !pendingApply
+        guard let layer = pendingGlowView.layer else { return }
+        guard pendingApply, !reduceMotion, window != nil else {
+            layer.removeAnimation(forKey: Self.pendingBreathKey)
+            return
+        }
+        guard layer.animation(forKey: Self.pendingBreathKey) == nil else { return }
+        let breath = CABasicAnimation(keyPath: "opacity")
+        breath.fromValue = Self.pendingBreathMinOpacity
+        breath.toValue = 1.0
+        breath.duration = Self.pendingBreathHalfPeriod
+        breath.autoreverses = true
+        breath.repeatCount = .infinity
+        breath.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        breath.isRemovedOnCompletion = false
+        layer.add(breath, forKey: Self.pendingBreathKey)
+    }
+
+    public override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        reconcilePendingGlow()
+    }
+
+    private var reduceMotion: Bool {
+        test_reduceMotionOverride ?? NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+    }
+
+    /// Same white, strength and 1.2 s breath as the fader thumb's pending
+    /// glow in `WarmFaderCell`, so the two Cast holds read as one signal.
+    private static let pendingGlowAlpha: CGFloat = 0.40
+    private static let pendingGlowOutset: CGFloat = 2.5
+    private static let pendingGlowCornerRadius: CGFloat = 3
+    private static let pendingBreathMinOpacity: Float = 0.45
+    private static let pendingBreathHalfPeriod: CFTimeInterval = 0.6
+    private static let pendingBreathKey = "pendingBreath"
+
     // MARK: Public API (T7)
 
     /// Push a fresh model snapshot. Guards the value field's DISPLAYED text
@@ -519,7 +586,8 @@ public final class BTSyncDrawerView: NSView {
                           usableRangeMs: ClosedRange<Double>, alignTickActive: Bool,
                           canReset: Bool = false, canAlignAgain: Bool = false,
                           offsetSource: BTOffsetSource? = nil,
-                          movedSinceLastTimeMs: Double? = nil) {
+                          movedSinceLastTimeMs: Double? = nil,
+                          pendingApply: Bool = false) {
         self.deviceName = deviceName
         self.trimMs = trimMs
         self.isSet = isSet
@@ -528,6 +596,8 @@ public final class BTSyncDrawerView: NSView {
         self.canAlignAgain = canAlignAgain
         self.offsetSource = offsetSource
         self.movedSinceLastTimeMs = movedSinceLastTimeMs
+        self.pendingApply = pendingApply
+        reconcilePendingGlow()
         alignButton.state = alignTickActive ? .on : .off
         alignButton.contentTintColor = alignTickActive
             ? Tokens.Color.engagedChrome : Tokens.Color.label2
@@ -705,7 +775,9 @@ public final class BTSyncDrawerView: NSView {
         // from jumping) and a real element when it is not.
         captionLabel.setAccessibilityElement(!captionText.isEmpty)
         spokenValue = isSet ? BTSyncTrim.spokenOffset(trimMs) : "Not set"
-        valueField.setAccessibilityLabel("Sync offset for \(deviceName)")
+        valueField.setAccessibilityLabel(pendingApply
+            ? "Sync offset for \(deviceName), applying"
+            : "Sync offset for \(deviceName)")
         valueField.setAccessibilityValue(spokenValue)
         valueField.toolTip = "\(deviceName): \(isSet ? BTSyncTrim.spokenOffset(trimMs) : "not tuned yet"). Type an exact value in whole milliseconds."
     }
@@ -741,6 +813,10 @@ public final class BTSyncDrawerView: NSView {
     // reads it via `?`, never force-unwrapped.)
 
     public var test_shiftModifierOverride: Bool?
+
+    /// Stands in for the system Reduce Motion setting.
+    public var test_reduceMotionOverride: Bool?
+    public var test_isPendingGlowShown: Bool { !pendingGlowView.isHidden }
 
     private var shiftIsHeld: Bool {
         test_shiftModifierOverride ?? (NSApp?.currentEvent?.modifierFlags.contains(.shift) ?? false)

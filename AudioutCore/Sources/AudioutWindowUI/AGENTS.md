@@ -16,7 +16,7 @@ Configuration-only Speakers and Scenes content: no window, no backend.
 - Never let the sidebar collapse; nothing can restore it.
 - Panes fit the shared surface geometry; never widen the shell.
 - Gold means live audio; magenta, group identity; green, a reachable speaker. Stock sidebar chrome remains native.
-- `GroupedSectionView`'s custom-drawn `.well` recesses both Equalizer pages with a flat, clipped `Tokens.Color.shadow` band: in light, `raised` matches the pane, so a `.card` outlines nothing.
+- Custom-drawn: `GroupedSectionView` (`.well` recesses both Equalizers; in light a `.card` outlines nothing), `DeviceIconWellView`, `IconPickerViewController` cells, `EqualizerMarkView`.
 - Report persistence failures in plain words; never swallow them.
 - Preserve keyboard focus seeding in visible hosts; headless absence is not dead code.
 - Never regenerate the unreproducible macOS 27 device-detail goldens.

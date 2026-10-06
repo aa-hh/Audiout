@@ -71,7 +71,10 @@ public final class MembershipRowView: NSView {
     /// node, because ``setCheckboxEnabled(_:tooltip:)`` has to re-decide whether
     /// that hover may still be SHOWN after the checkbox's enablement changes
     /// under a stationary pointer.
-    private var rowHovered = false
+    private var rowHovered: Bool { hoverTracker.isHovered }
+    private lazy var hoverTracker = HoverTracker(view: self) { [weak self] _ in
+        self?.applyHoverToNode()
+    }
 
     private let checkbox = NSButton()
     private let iconView = NSImageView()
@@ -247,11 +250,10 @@ public final class MembershipRowView: NSView {
     /// together from one decision, because every path that can change them
     /// (a host refresh, an arming flip, a toggle) can change all three.
     ///
-    /// ONE unavailable tone, and all three elements take it together: each
-    /// states the same fact, so splitting them across tones makes the row
-    /// argue with itself. On the warm pane that tone is `labelCool2` —
-    /// authored, all four variants, 4.59:1 on dark `raised` and 5.30:1 on the
-    /// light ground.
+    /// An unavailable speaker takes the sidebar's ink, so the same fact reads
+    /// the same on both sides of the window: the name in `labelCool`, the
+    /// glyph and the "Unavailable" word in `labelCool2` — authored, all four
+    /// variants, 4.59:1 on dark `raised` and 5.30:1 on the light ground.
     ///
     /// NOT `.disabledControlTextColor`: it is black at 24.7% alpha, so it
     /// composites against its ground to 1.80:1 on `raised` — under half the
@@ -271,7 +273,7 @@ public final class MembershipRowView: NSView {
         switch surface {
         case .warmPane:
             guard isAvailable else {
-                nameLabel.textColor = Tokens.Color.labelCool2
+                nameLabel.textColor = Tokens.Color.labelCool
                 iconView.contentTintColor = Tokens.Color.labelCool2
                 unavailableLabel.textColor = Tokens.Color.labelCool2
                 return
@@ -485,33 +487,12 @@ public final class MembershipRowView: NSView {
 
     /// One tracking area over the WHOLE row, not just the gutter: now that the
     /// body toggles, the ring has to answer a pointer anywhere on the row.
-    /// `.inVisibleRect` keeps the rect live, so no geometry is cached here.
+    /// The tracker re-reads the pointer when the area is rebuilt: every
+    /// membership toggle rebuilds this list under a stationary pointer, and no
+    /// `mouseEntered`/`mouseExited` follows that.
     public override func updateTrackingAreas() {
         super.updateTrackingAreas()
-        guard surface == .warmPane else { return }
-        trackingAreas.forEach(removeTrackingArea)
-        addTrackingArea(NSTrackingArea(
-            rect: bounds,
-            options: [.mouseEnteredAndExited, .activeInActiveApp, .inVisibleRect],
-            owner: self))
-        // Re-tracking means the row was rebuilt or moved UNDER a stationary
-        // pointer (every membership toggle rebuilds this list), and no
-        // `mouseEntered`/`mouseExited` follows that — so read the pointer's real
-        // position rather than wait for the next move.
-        refreshHoverFromPointer()
-    }
-
-    private func refreshHoverFromPointer() {
-        guard let window else { return setRowHovered(false) }
-        setRowHovered(bounds.contains(convert(window.mouseLocationOutsideOfEventStream, from: nil)))
-    }
-
-    public override func mouseEntered(with event: NSEvent) { setRowHovered(true) }
-    public override func mouseExited(with event: NSEvent) { setRowHovered(false) }
-
-    private func setRowHovered(_ hovered: Bool) {
-        rowHovered = hovered
-        applyHoverToNode()
+        hoverTracker.update(active: surface == .warmPane)
     }
 
     /// Push the hover into the node — but only from a row whose checkbox is
@@ -571,7 +552,7 @@ public final class MembershipRowView: NSView {
     /// Drive the row's pointer state headlessly — the same path the tracking
     /// area's `mouseEntered`/`mouseExited` take.
     public func test_setHovered(_ hovered: Bool) {
-        setRowHovered(hovered)
+        hoverTracker.setHovered(hovered)
     }
 
     /// Whether the node is previewing its post-click size — grown or shrunk

@@ -449,10 +449,8 @@ public final class OnboardingViewController: NSViewController {
         tile.translatesAutoresizingMaskIntoConstraints = false
 
         titleLabel = NSTextField(labelWithString: "")
-        // The window's own heading, so VoiceOver's rotor can find it. The raw
-        // AX string, not `NSAccessibilityHeadingRole`: that constant is macOS 26+
-        // and this app installs on 14.2.
-        titleLabel.setAccessibilityRole(NSAccessibility.Role(rawValue: "AXHeading"))
+        // The window's own heading, so VoiceOver's rotor can find it.
+        titleLabel.setAccessibilityHeading()
         titleLabel.font = Tokens.Font.display
         titleLabel.lineBreakMode = .byWordWrapping
         titleLabel.maximumNumberOfLines = 2

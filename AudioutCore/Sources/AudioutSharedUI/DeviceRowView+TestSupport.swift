@@ -9,16 +9,16 @@ extension DeviceRowView {
     /// asserts the WarmFaderCell swap left NSSlider behavior stock.
     public var test_sliderConfiguration:
         (isContinuous: Bool, min: Double, max: Double, type: NSSlider.SliderType) {
-        (slider.isContinuous, slider.minValue, slider.maxValue, slider.sliderType)
+        (fader.slider.isContinuous, fader.slider.minValue, fader.slider.maxValue, fader.slider.sliderType)
     }
 
     /// The value the slider is actually SHOWING — read from the control, not from
     /// the model that was handed to `apply`. That distinction is the point: it
     /// catches a row whose displayed level has drifted from what was painted.
-    public var test_sliderValue: Int { slider.integerValue }
+    public var test_sliderValue: Int { fader.slider.integerValue }
 
     /// The volume slider itself, for pixel-truth rendering in tests.
-    public var test_slider: NSSlider { slider }
+    public var test_slider: NSSlider { fader.slider }
 
     /// Which connection ring the row is currently showing — derived from
     /// `device.connectionState` (the single source the ring renders from), so it
@@ -256,16 +256,13 @@ extension DeviceRowView {
     /// A pixel comparison against the same symbol built from the same ink,
     /// so the hook reads the drawn image rather than a flag.
     public var test_eqDrawsEngagedSymbol: Bool {
-        matchesSymbol(eqButton.image, RowAccessorySymbol.equalizerRest,
-                      ink: Self.engagedInk(fill: Tokens.Color.equalizer,
-                                           in: effectiveAppearance))
+        matches(eqButton.image, RowAccessorySymbol.equalizerDoor(shaped: true, in: effectiveAppearance))
     }
 
     /// Whether the door CURRENTLY draws its AT-REST symbol — the outline
     /// square in one neutral ink.
     public var test_eqDrawsRestSymbol: Bool {
-        matchesSymbol(eqButton.image, RowAccessorySymbol.equalizerRest,
-                      ink: Self.restInk(in: effectiveAppearance))
+        matches(eqButton.image, RowAccessorySymbol.equalizerDoor(shaped: false, in: effectiveAppearance))
     }
 
     /// The door glyph's frame in the row's own coordinates, after a layout
@@ -358,26 +355,21 @@ extension DeviceRowView {
     /// ``Tokens/Color/muted`` ink resolved in this row's own appearance —
     /// a raster comparison, so the test reads pixels rather than intent.
     public var test_mutePillIsMutedHue: Bool {
-        matchesSymbol(muteButton.image, RowAccessorySymbol.muteEngaged,
-                      ink: Self.engagedInk(fill: Tokens.Color.muted,
-                                           in: effectiveAppearance))
+        matches(muteButton.image, RowAccessorySymbol.mute(engaged: true, in: effectiveAppearance))
     }
 
     /// Whether the mute button is drawing its AT-REST symbol.
     public var test_muteDrawsRestSymbol: Bool {
-        matchesSymbol(muteButton.image, RowAccessorySymbol.muteRest,
-                      ink: Self.restInk(in: effectiveAppearance))
+        matches(muteButton.image, RowAccessorySymbol.mute(engaged: false, in: effectiveAppearance))
     }
 
-    /// Whether `drawn` rasterises identically to `name` built with `ink`.
-    /// A pixel comparison rather than a name lookup: an `NSImage` reconfigured
-    /// with a `SymbolConfiguration` reports no name to read back, and
-    /// comparing rasters pins the ink, the point size and the weight in one
-    /// assertion.
-    private func matchesSymbol(_ drawn: NSImage?, _ name: String, ink: NSColor) -> Bool {
+    /// Whether `drawn` rasterises identically to `reference`. A pixel
+    /// comparison rather than a name lookup: an `NSImage` reconfigured with a
+    /// `SymbolConfiguration` reports no name to read back, and comparing
+    /// rasters pins the ink, the point size and the weight in one assertion.
+    private func matches(_ drawn: NSImage?, _ reference: NSImage?) -> Bool {
         guard let drawn = drawn?.tiffRepresentation,
-              let reference = RowAccessorySymbol.image(named: name, ink: ink)?
-                  .tiffRepresentation
+              let reference = reference?.tiffRepresentation
         else { return false }
         return drawn == reference
     }
@@ -428,23 +420,23 @@ extension DeviceRowView {
     /// The `%` readout's current text colour (D6) — `goldText` while the row is
     /// sounding, `emberText` while it holds an idle level, and `labelCool2`
     /// while the slider is disabled or the row is not adjustable.
-    public var test_readoutColor: NSColor? { readoutLabel.textColor }
+    public var test_readoutColor: NSColor? { fader.readoutLabel.textColor }
 
     /// Whether the Warm fader would render its ENGAGED (gold-gradient) fill —
     /// route-armed ∧ slider enabled, read from the cell's own gate so the test
     /// can't drift from the pixels. Must track `test_routeArmed` whenever the
     /// slider is enabled (one armed truth, two instruments).
-    public var test_isFaderEngaged: Bool { faderCell.test_isEngagedFill }
-    public var test_isFaderPending: Bool { faderCell.test_isPendingGlow }
+    public var test_isFaderEngaged: Bool { fader.faderCell.test_isEngagedFill }
+    public var test_isFaderPending: Bool { fader.faderCell.test_isPendingGlow }
 
     /// Whether the slider is wearing the Warm fader skin (the drawing-only
     /// `WarmFaderCell` swap) — structural assertion that the skin is installed.
-    public var test_hasWarmFaderSkin: Bool { slider.cell is WarmFaderCell }
+    public var test_hasWarmFaderSkin: Bool { fader.slider.cell is WarmFaderCell }
 
     /// Whether the volume slider is currently enabled (A5) — stays enabled while
     /// the device is muted (mute ≠ frozen volume); only availability/
     /// controllability/unsupported-ness gate it.
-    public var test_isSliderEnabled: Bool { slider.isEnabled }
+    public var test_isSliderEnabled: Bool { fader.slider.isEnabled }
 
     /// Whether the "Selected Speakers" membership is currently rendered dimmed (A1
     /// / §4.7) — a visual de-emphasis that does NOT disable the control. For a
@@ -629,7 +621,7 @@ extension DeviceRowView {
 
 public extension DeviceRowView {
     var test_unavailableStatusText: String? { unavailableStatusLabel.isHidden ? nil : unavailableStatusLabel.stringValue }
-    var test_liveControlsHidden: Bool { slider.isHidden && muteButton.isHidden && readoutLabel.isHidden && eqButton.isHidden && syncChipButton.isHidden }
+    var test_liveControlsHidden: Bool { fader.isHidden && muteButton.isHidden && eqButton.isHidden && syncChipButton.isHidden }
     func test_pressNameAccessibility() -> Bool { nameLabel.accessibilityPerformPress() }
     func test_pressNameKey(_ keyCode: UInt16) {
         guard let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,

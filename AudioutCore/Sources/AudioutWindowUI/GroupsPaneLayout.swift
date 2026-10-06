@@ -59,7 +59,7 @@ enum GroupsPaneLayout {
     /// sum can never exceed the one fixed surface frame:
     /// `SurfaceLayout.contentPaneWidth` (`SurfaceLayout.width` minus
     /// `MixerWindowController`'s pinned sidebar) minus both column margins,
-    /// which evaluates to 415. Raise it and the whole screen would ask to
+    /// which evaluates to 475. Raise it and the whole screen would ask to
     /// grow past the fixed frame; the sections already fill the pane exactly
     /// here, so there is nothing to gain by doing so.
     static let contentMaxWidth: CGFloat = SurfaceLayout.contentPaneWidth - columnInset - columnTrailingInset
@@ -81,6 +81,10 @@ enum GroupsPaneLayout {
     /// Where content STOPS inside a section, measured from the section's
     /// trailing edge.
     static let contentTrailingInset: CGFloat = PopoverColumnGrid.trailingInset
+    /// The width a note on a rail-free page wraps against: the column cap
+    /// minus the content lane's two insets.
+    static let railFreeContentWidth: CGFloat =
+        contentMaxWidth - railFreeContentLeadingInset - contentTrailingInset
 
     /// Inset from the header section's top/bottom borders to the icon well.
     static let headerPadding: CGFloat = 16

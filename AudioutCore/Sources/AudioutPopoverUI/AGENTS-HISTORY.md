@@ -169,3 +169,4 @@ folder renders; routing arithmetic lives in Core.
 - `AppSurfaceController` → owns the shell, swaps the three screens.
 - `SurfaceToolbar` → the window's header strip, built from bordered `NSToolbarItem`s.
 - 2026-10-04: the Speakers screen split from Scenes, so the surface has four tabs (Mixer, Scenes, Speakers, Settings; ⌘1–⌘4). `SurfaceScreen.groups` remains the Scenes case so the `surface:screen_selected` analytics value "groups" is unchanged; the new screen sends "speakers".
+- 2026-10-06: the AirPlay password sheet has a code variant, chosen by the speaker's `AirPlayAccess` (`.onScreenCode` or `.onScreenCodeEveryTime`). It opens by itself only for a join clicked in this popover (the row or the panel's Try again, recorded in `codeJoinClickedIDs` and consumed by the first `.awaitingPassword` edge), never for a launch restore or a group activation.

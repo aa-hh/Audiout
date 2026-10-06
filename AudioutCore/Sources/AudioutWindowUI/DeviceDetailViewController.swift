@@ -35,7 +35,9 @@ import AudioutSharedUI
 ///   one link per saved scene this speaker belongs to. A link NAVIGATES: it
 ///   reports out through ``onSelectGroup`` and the host opens that scene's
 ///   editor. Selecting is NOT activating. "Password" ("Saved" and a Forget
-///   button) joins them only while the backend has a password on file.
+///   button) joins them only while the backend has a password on file; for a
+///   receiver that shows a code the row reads "Pairing" and stands for the
+///   stored pairing key.
 ///
 /// The whole column SCROLLS (`../AGENTS.md`): the Equalizer's Advanced fold
 /// exceeds the screen's height budget, and the surface frame is FIXED for
@@ -102,7 +104,7 @@ public final class DeviceDetailViewController: NSViewController {
     private let btVolumeCheckbox = NSButton()
     private let btVolumeHintLabel =
         NSTextField(labelWithString: "The volume slider moves the speaker's own volume.")
-    /// The outlined list: "Show in Mixer", "Scenes" and "Password".
+    /// The outlined list: "Show in Mixer", "Scenes" and "Password" (or "Pairing").
     private let listWell = GroupedSectionView()
     private let listStack = NSStackView()
     /// The scene links, stacked one per line on the "Scenes" row's trailing
@@ -805,6 +807,9 @@ public final class DeviceDetailViewController: NSViewController {
 
         showInMixerRow.isHidden = isThisMac
         passwordRow.isHidden = shownDevice?.hasStoredPassword != true
+        let access = shownDevice?.airPlayAccess
+        passwordRow.titleLabel.stringValue =
+            access == .onScreenCode || access == .onScreenCodeEveryTime ? "Pairing" : "Password"
         listWell.rows = listStack.arrangedSubviews.filter { !$0.isHidden }
 
         for pin in [listBelowEQWell, listBelowBTVolume, listBelowForget, listBelowHeader,
@@ -1300,6 +1305,8 @@ public final class DeviceDetailViewController: NSViewController {
     public var test_keptNoteText: String? { keptNoteLabel.isHidden ? nil : keptNoteLabel.stringValue }
     /// The Password row's caption, `nil` while the row is hidden.
     public var test_passwordCaption: String? { passwordRow.isHidden ? nil : passwordRow.caption }
+    /// The Password row's title ("Password" or "Pairing").
+    public var test_passwordRowTitle: String { passwordRow.titleLabel.stringValue }
     /// Invoke the Password row's "Forget" as a click would.
     public func test_tapForgetPassword() { forgetPasswordTapped() }
 

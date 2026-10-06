@@ -731,22 +731,31 @@ choices, the current one checked, then **Speaker settings…**, which opens
 that speaker's page. A speaker in current use remains
 visible even when its saved choice is Hide when not in use.
 
-A speaker that asks for a password, an on-screen code or a Home member
-carries a stock `lock.fill` (10pt semibold, template) 4pt after its name. It
-takes the name's own ink (`rowTextColor`), never gold, and the name truncates
-before the lock gives way. Its spoken label names the kind of lock. Joining a
-password speaker with nothing saved, or the diagnosis panel's
-"Enter Password…" button, raises a sheet on the panel
+A speaker that asks for a password, an on-screen code (first time only, or on
+every join) or a Home member carries a stock `lock.fill` (10pt semibold,
+template) 4pt after its name. It takes the name's own ink (`rowTextColor`),
+never gold, and the name truncates before the lock gives way. Its spoken label
+names the kind of lock: "Password protected", "Code required" for both code
+kinds, "Home members only". Joining a password speaker with nothing saved, or
+the diagnosis panel's "Enter Password…" button, raises a sheet on the panel
 (`SpeakerPasswordSheetViewController`): a bold one-line heading, a stock secure
 field, then Cancel and a gold `ProminentButton` Connect, right-aligned. A
 caption-size result line appears only once Connect is pressed: "Connecting…",
-then the reason if the attempt fails. A connect dismisses the sheet. The
-row shows no diagnosis panel while its sheet is up; Cancel with the speaker
-still failed opens the panel. A speaker waiting for its first password draws
-the connecting ring and an underlined caption-size "Enter Password…" link in
-the trailing slot (the same slot as the Undo and Play here offers), which,
-like a click on the selected row, raises the sheet; red is reserved for a
-refused password.
+then the reason if the attempt fails ("That password didn't work. Check it and
+try again." for a refused password). A connect dismisses the sheet. The row
+shows no diagnosis panel while its sheet is up; Cancel with the speaker still
+failed opens the panel. A speaker waiting for its password or code draws the
+connecting ring and an underlined caption-size "Enter Password…" or
+"Enter Code…" link in the trailing slot (the same slot as the Undo and Play
+here offers), which, like a click on the selected row, raises the sheet; red is
+reserved for a refused password or code. A code receiver gets the sheet's code
+variant: the heading "Enter the code shown on “<name>”", a plain field (the
+code is already shown unmasked on the receiver's screen), "Enter the code on
+the screen." on an empty Connect, and "That code didn't work. Check the screen
+and try again." for a refused code. It opens by itself when a join the user
+clicked in this popover (the row, or the panel's Try again) starts waiting for
+its code, once per click; a launch restore or a group activation never opens
+it. Otherwise the row's link or a click on the waiting row opens it.
 
 ### Speakers Sidebar and Pages
 The sidebar is the only speaker list. Two section titles in
@@ -807,8 +816,9 @@ the can't-be-found list. Then an outlined list whose rows start on the same
 14 pt inset, with `labelCool` captions: **Show in Mixer**, whose caption
 explains the current choice beside its pop-up (absent for This Mac),
 **Scenes**, linking each scene the speaker belongs to, one link per line on
-the row's trailing side, and, only while a password is saved for the speaker,
-**Password**, captioned "Saved", with a small stock Forget button.
+the row's trailing side, and, only while a password or pairing is saved for
+the speaker, **Password** (**Pairing** for a receiver that shows a code),
+captioned "Saved", with a small stock Forget button.
 
 Scene checkboxes change membership. Their rows give an unavailable member's
 status and nothing about visibility; scene cards count unavailable members
@@ -897,10 +907,11 @@ Main Audio's ring, and the rail's node circles. Weight never carries state;
 colour and dash do on the glyph ring, fill and the line gap on the rail node.
 `HaloRingView` draws one form per connection state: no
 ring while off; dashed `rim` while connecting or reconnecting; solid `rim`
-while connected; solid `failure` when failed. A speaker waiting for its first
-password draws the connecting form, with an underlined caption-size
-"Enter Password…" link in the row's trailing slot (the same slot as the Undo
-and Play here offers); red is reserved for a refused password. The rail node for a connecting
+while connected; solid `failure` when failed. A speaker waiting for its
+password or on-screen code draws the connecting form, with an underlined
+caption-size "Enter Password…" or "Enter Code…" link in the row's trailing slot
+(the same slot as the Undo and Play here offers); red is reserved for a refused
+password or code. The rail node for a connecting
 speaker (`MembershipBusView`'s `.connecting`) is a plain hollow `gold` circle
 at `ringStrokeWidth`, and the line stops `busConnectingNodeRailGap` (9 pt)
 short of it above and below, against `busNodeRailGap` (3 pt) for a member:

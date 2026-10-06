@@ -45,8 +45,8 @@ import Testing
             """)
     }
 
-    /// Changing any password-sheet string in `SpeakerPasswordSheetViewController`
-    /// or `PopoverController.passwordRejectedText` turns it red.
+    /// Changing any password- or code-sheet string in `SpeakerPasswordSheetViewController`,
+    /// `PopoverController.passwordRejectedText` or `PopoverController.codeRejectedText` turns it red.
     @Test func mirroredPasswordSheetCopyStillSaysWhatThePhoneWasToldItSays() {
         let note = """
             This password-sheet line changed. The phone hardcodes its own copy of it
@@ -59,5 +59,10 @@ import Testing
                 "\(note)")
         #expect(SpeakerPasswordSheetViewController.headingText(deviceName: "Kitchen") == "Enter the password for “Kitchen”",
                 "\(note)")
+        #expect(SpeakerPasswordSheetViewController.emptyCodeText == "Enter the code on the screen.", "\(note)")
+        #expect(PopoverController.codeRejectedText == "That code didn't work. Check the screen and try again.",
+                "\(note)")
+        #expect(SpeakerPasswordSheetViewController.headingText(deviceName: "Kitchen", kind: .onScreenCode)
+                == "Enter the code shown on “Kitchen”", "\(note)")
     }
 }

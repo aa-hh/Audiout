@@ -58,8 +58,8 @@ import Testing
                 "The speaker didn't accept that password. Enter it again to connect."
             ),
             .codeRequired: (
-                "Code required",
-                "This Apple TV shows a code on its screen when a new device connects. Entering it here isn't supported yet."
+                "Code didn't work",
+                "The code wasn't accepted. Try again and enter the code shown on the screen."
             ),
             .homeMembersOnly: (
                 "Home members only",

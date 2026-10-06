@@ -27,8 +27,8 @@ public enum ConnectionState: Equatable, Sendable {
     case connecting
     case connected
     case reconnecting
-    /// The receiver demanded a password and none has been supplied. Not an
-    /// error: a refused password is `.failed(.authRequired)`.
+    /// The receiver demanded a password or an on-screen code and none has been
+    /// supplied. Not an error: a refused password is `.failed(.authRequired)`.
     case awaitingPassword
     case failed(ConnectionFailure)
 }
@@ -47,8 +47,8 @@ public struct ConnectionFailure: Equatable, Sendable {
         case vanished         // no longer advertised on the network
         case refusedOrBusy    // refused/403 — often an exclusive session elsewhere
         case authRequired     // the speaker's AirPlay password is needed
-        // An Apple TV wants the code it shows on its screen (status-flags bits
-        // 3/9). Copy only: entering the code arrives in PR 2.
+        // The receiver refused the code the user typed, or dropped the pairing
+        // it held (status-flags bits 3/9).
         case codeRequired
         // The receiver accepts only people in its Home (`act=2` or bit 10),
         // which needs a Home member's iCloud identity a third-party sender lacks.
@@ -109,7 +109,7 @@ extension ConnectionFailure {
         case .vanished:         return "Not on the network"
         case .refusedOrBusy:    return "Connection refused"
         case .authRequired:     return "Password didn't work"
-        case .codeRequired:     return "Code required"
+        case .codeRequired:     return "Code didn't work"
         case .homeMembersOnly:  return "Home members only"
         case .droppedMidStream: return "Connection dropped"
         case .timedOut:         return "Took too long"
@@ -134,7 +134,7 @@ extension ConnectionFailure {
         case .authRequired:
             return "The speaker didn't accept that password. Enter it again to connect."
         case .codeRequired:
-            return "This Apple TV shows a code on its screen when a new device connects. Entering it here isn't supported yet."
+            return "The code wasn't accepted. Try again and enter the code shown on the screen."
         case .homeMembersOnly:
             return "This speaker only accepts people who share its Home. On a Mac, set AirPlay Receiver to allow “Anyone on the same network” in System Settings; on a HomePod or Apple TV, change its AirPlay access in the Home app. Then try again."
         case .droppedMidStream:

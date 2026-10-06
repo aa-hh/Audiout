@@ -7,8 +7,12 @@ public enum AirPlayAccess: String, Sendable {
     case open
     /// A password: AirPlay 1 `pw`, or AirPlay 2 status-flags bit 7.
     case password
-    /// A code shown on the receiver's screen: status-flags bits 3 or 9. Acted on in PR 2.
+    /// A code shown on the receiver's screen the first time only: status-flags
+    /// bit 9. The receiver keeps the pairing the code earns.
     case onScreenCode
+    /// A code shown on the receiver's screen on every join: status-flags bit 3.
+    /// The receiver keeps no pairing.
+    case onScreenCodeEveryTime
     /// `act=2` or bit 10: needs a Home member's iCloud identity, which a third-party sender cannot present.
     case homeMembersOnly
 }
@@ -201,7 +205,7 @@ public struct Device: Identifiable, Equatable, Sendable {
     /// non-AirPlay kind.
     public var airPlayAccess: AirPlayAccess
 
-    /// The backend has a password on file for this speaker.
+    /// The backend has a password or a pairing key on file for this speaker.
     public var hasStoredPassword: Bool
 
     /// Product phrases that make a Bluetooth device's model unambiguous, and

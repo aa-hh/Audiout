@@ -3,7 +3,8 @@
 import AppKit
 import AudioutSharedUI
 
-/// The sheet that asks for a speaker's AirPlay password. Same shape as
+/// The sheet that asks for a speaker's AirPlay password, or for the code a
+/// receiver shows on its screen (`CredentialKind`). Same shape as
 /// `LicenseSheetViewController` (Settings): a 320-pt stack, one field, a result
 /// line that appears only after a submit, Cancel (Escape) and a gold Connect
 /// (Return).
@@ -17,13 +18,27 @@ public final class SpeakerPasswordSheetViewController: NSViewController {
 
     private static let sheetContentWidth: CGFloat = 320
 
+    /// What the sheet asks for: a password, or the code the receiver shows on its screen.
+    public enum CredentialKind { case password, onScreenCode }
+
     // The phone shows its own copy of these; `CompanionCopyTripwireTests` holds the two in step.
     static let emptyPasswordText = "Enter the speaker's password."
+    static let emptyCodeText = "Enter the code on the screen."
     static let connectingText = "Connecting…"
-    nonisolated static func headingText(deviceName: String) -> String { "Enter the password for “\(deviceName)”" }
+    nonisolated static func headingText(deviceName: String) -> String {
+        headingText(deviceName: deviceName, kind: .password)
+    }
+    nonisolated static func headingText(deviceName: String, kind: CredentialKind) -> String {
+        switch kind {
+        case .password: return "Enter the password for “\(deviceName)”"
+        case .onScreenCode: return "Enter the code shown on “\(deviceName)”"
+        }
+    }
 
     private let deviceName: String
-    private let passwordField = NSSecureTextField()
+    private let kind: CredentialKind
+    /// A code is shown unmasked on the receiver's screen, so its field hides nothing.
+    private let passwordField: NSTextField
     private let resultLine = NSTextField(wrappingLabelWithString: "")
     private let cancelButton = NSButton()
     private var connectButton: ProminentButton!
@@ -33,20 +48,22 @@ public final class SpeakerPasswordSheetViewController: NSViewController {
     /// Fired on Cancel; the host dismisses the sheet.
     public var onCancel: (() -> Void)?
 
-    public init(deviceName: String) {
+    public init(deviceName: String, kind: CredentialKind = .password) {
         self.deviceName = deviceName
+        self.kind = kind
+        passwordField = kind == .password ? NSSecureTextField() : NSTextField()
         super.init(nibName: nil, bundle: nil)
     }
 
     public required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     public override func loadView() {
-        let heading = NSTextField(labelWithString: Self.headingText(deviceName: deviceName))
+        let heading = NSTextField(labelWithString: Self.headingText(deviceName: deviceName, kind: kind))
         heading.font = .boldSystemFont(ofSize: NSFont.systemFontSize)
         heading.lineBreakMode = .byTruncatingTail
 
-        passwordField.placeholderString = "Password"
-        passwordField.setAccessibilityLabel("AirPlay password")
+        passwordField.placeholderString = kind == .password ? "Password" : "Code"
+        passwordField.setAccessibilityLabel(kind == .password ? "AirPlay password" : "AirPlay code")
         passwordField.translatesAutoresizingMaskIntoConstraints = false
         passwordField.usesSingleLineMode = true
         passwordField.cell?.isScrollable = true
@@ -110,7 +127,7 @@ public final class SpeakerPasswordSheetViewController: NSViewController {
     @objc private func connectTapped() {
         let text = passwordField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else {
-            show(result: Self.emptyPasswordText)
+            show(result: kind == .password ? Self.emptyPasswordText : Self.emptyCodeText)
             return
         }
         passwordField.isEnabled = false

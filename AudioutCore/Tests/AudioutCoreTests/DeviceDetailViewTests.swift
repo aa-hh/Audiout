@@ -361,6 +361,24 @@ import AppKit
         #expect(forgotten == ["d1"])
     }
 
+    // Turns red if `refreshUI` stops titling the row "Pairing" for a code receiver, or keeps that title for a password one.
+    @Test func passwordRowReadsPairingForACodeReceiver() {
+        let detail = DeviceDetailViewController(groupController: makeController(),
+                                            settings: AppSettings(defaults: isolation.isolatedDefaults))
+        var code = makeDevice()
+        code.airPlayAccess = .onScreenCode
+        code.hasStoredPassword = true
+        detail.show(device: code)
+        #expect(detail.test_passwordCaption == "Saved")
+        #expect(detail.test_passwordRowTitle == "Pairing")
+
+        var password = makeDevice()
+        password.airPlayAccess = .password
+        password.hasStoredPassword = true
+        detail.show(device: password)
+        #expect(detail.test_passwordRowTitle == "Password")
+    }
+
     // MARK: The caption — kind
 
     // Swapping two words in `kindText(for:)` turns it red.

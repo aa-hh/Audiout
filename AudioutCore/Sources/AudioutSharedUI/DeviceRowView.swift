@@ -99,10 +99,10 @@ public final class DeviceRowView: NSView {
         /// raised after refusing a second speaker under the one-speaker limit.
         /// Default no-op for hosts that never offer it.
         func deviceRowDidRequestSwitchHere(_ row: DeviceRowView)
-        /// The user asked to enter this speaker's AirPlay password, from the
-        /// row's "Enter Password…" link or a click on a selected row already
-        /// waiting for one. The host raises its password sheet. Default no-op
-        /// for hosts without the sheet.
+        /// The user asked to enter this speaker's AirPlay password or on-screen
+        /// code, from the row's "Enter Password…" or "Enter Code…" link or a
+        /// click on a selected row already waiting for one. The host raises its
+        /// password sheet. Default no-op for hosts without the sheet.
         func deviceRowDidRequestPasswordEntry(_ row: DeviceRowView)
     }
 
@@ -662,7 +662,7 @@ public final class DeviceRowView: NSView {
         switch device.airPlayAccess {
         case .open: lockGlyphView.setAccessibilityLabel(nil)
         case .password: lockGlyphView.setAccessibilityLabel("Password protected")
-        case .onScreenCode: lockGlyphView.setAccessibilityLabel("Code required")
+        case .onScreenCode, .onScreenCodeEveryTime: lockGlyphView.setAccessibilityLabel("Code required")
         case .homeMembersOnly: lockGlyphView.setAccessibilityLabel("Home members only")
         }
         alphaValue = 1.0
@@ -2366,7 +2366,17 @@ public final class DeviceRowView: NSView {
         enterPasswordOffered = device.connectionState == .awaitingPassword
             && !removalUndoOffered && !switchOfferOffered
         enterPasswordButton.isHidden = !enterPasswordOffered
-        enterPasswordButton.setAccessibilityLabel("Enter the password for \(device.name)")
+        let asksForCode = device.airPlayAccess == .onScreenCode || device.airPlayAccess == .onScreenCodeEveryTime
+        enterPasswordButton.attributedTitle = NSAttributedString(
+            string: asksForCode ? "Enter Code…" : "Enter Password…",
+            attributes: [
+                .font: Tokens.Font.caption,
+                .foregroundColor: Tokens.Color.label2,
+                .underlineStyle: NSUnderlineStyle.single.rawValue,
+            ])
+        enterPasswordButton.setAccessibilityLabel(asksForCode
+            ? "Enter the code for \(device.name)"
+            : "Enter the password for \(device.name)")
         if removalUndoOffered || switchOfferOffered || enterPasswordOffered {
             feedStack.isHidden = true
             if showsSyncControls { syncChipButton.isHidden = true }

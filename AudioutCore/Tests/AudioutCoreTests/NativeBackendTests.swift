@@ -347,6 +347,18 @@ private final class SpyEngine: EngineControlling, @unchecked Sendable {
     }
 
     func feedCount(for id: OutputID) -> Int { lock.withLock { feedCounts[id.rawValue] ?? 0 } }
+
+    /// Scripted `authorize` answers per output id; an unscripted id fails as `.sessionFailed`.
+    var authorizeResults: [UInt64: Result<String, AirPlayEngineError>] = [:]
+    /// Every `authorize` call, in order: the output and the code typed.
+    private(set) var authorizeCalls: [(OutputID, String)] = []
+    func authorize(_ id: OutputID, pin: String) async throws -> String {
+        let result = lock.withLock { () -> Result<String, AirPlayEngineError> in
+            authorizeCalls.append((id, pin))
+            return authorizeResults[id.rawValue] ?? .failure(.sessionFailed)
+        }
+        return try result.get()
+    }
     func setVolume(_ id: OutputID, _ volume: Double) async throws {
         lock.withLock { volumes.append((id, volume)); opLog.append("volume:\(id.rawValue)") }
         if volumeFailures.contains(id.rawValue) { throw AirPlayEngineError.sessionFailed }
@@ -1231,9 +1243,14 @@ private final class ScriptedPasswordStore: AirPlayPasswordStoring, @unchecked Se
     private let lock = NSLock()
     private var removes = 0
     let dropsWrites: Bool
+    /// Makes `removePairingKey` leave the key in place (a Keychain delete that failed).
+    let keepsPairingKeys: Bool
     var onWillSet: (@Sendable () -> Void)?
     var onSet: (@Sendable () -> Void)?
-    init(dropsWrites: Bool = false) { self.dropsWrites = dropsWrites }
+    init(dropsWrites: Bool = false, keepsPairingKeys: Bool = false) {
+        self.dropsWrites = dropsWrites
+        self.keepsPairingKeys = keepsPairingKeys
+    }
     var removeCount: Int { lock.withLock { removes } }
     func password(for deviceID: String) -> String? { inner.password(for: deviceID) }
     func setPassword(_ password: String, for deviceID: String) {
@@ -1245,6 +1262,12 @@ private final class ScriptedPasswordStore: AirPlayPasswordStoring, @unchecked Se
     func removePassword(for deviceID: String) {
         lock.withLock { removes += 1 }
         inner.removePassword(for: deviceID)
+    }
+    func pairingKey(for deviceID: String) -> String? { inner.pairingKey(for: deviceID) }
+    func setPairingKey(_ key: String, for deviceID: String) { inner.setPairingKey(key, for: deviceID) }
+    func removePairingKey(for deviceID: String) {
+        guard !keepsPairingKeys else { return }
+        inner.removePairingKey(for: deviceID)
     }
 }
 
@@ -3247,22 +3270,189 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         #expect(connectionState(backend, device.id) == .awaitingPassword)
     }
 
-    /// Mapping a password demand from an on-screen-code receiver to
-    /// `.authRequired` (offering a password sheet an Apple TV can't use) turns it red.
-    @Test func passwordRequiredOnOnScreenCodeSpeakerReadsAsCodeRequired() async {
-        let (backend, engine, discovery) = makeBackend()
-        let device = ap2Device(access: .onScreenCode)
-        backend.start(); defer { backend.stop() }
-        await waitUntilStarted(engine)
-        _ = await collect(from: backend) { events in
-            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
-        } after: { discovery.fire(.appeared(device)) }
+    /// A code speaker with no pairing, joined, whose add the receiver answers with a code demand.
+    private func joinCodeSpeaker(_ access: AirPlayAccess, store: InMemoryAirPlayPasswordStore)
+        async -> (NativeBackend, SpyEngine, DiscoveredDevice) {
+        let (backend, engine, discovery) = makeBackend(passwordStore: store)
+        let device = ap2Device(access: access)
+        engine.addFailures = [device.outputID.rawValue]
+        engine.addFailureError = .passwordRequired
+        await startAndDiscover(backend, engine, discovery, device)
+        backend.setOutputSet([device.id])
+        await pollUntil { self.connectionState(backend, device.id) == .awaitingPassword }
+        return (backend, engine, device)
+    }
 
+    /// Keeping `awaitsPassword` to `.authRequired` only, so a code demand parks as `.failed(.codeRequired)`, turns it red.
+    @Test func aCodeDemandWithNoPairingWaitsForTheCode() async {
+        let (backend, _, device) = await joinCodeSpeaker(.onScreenCode, store: InMemoryAirPlayPasswordStore())
+        defer { backend.stop() }
+        #expect(connectionState(backend, device.id) == .awaitingPassword)
+        #expect(backend.devices.first { $0.id == device.id }?.isAvailable == true)
+    }
+
+    /// Dropping `.codeRequired` from `awaitsPassword`, so a code demand the
+    /// engine reports on its state stream parks as `.failed`, turns it red.
+    @Test func aCodeDemandReportedOnTheStateStreamWaitsForTheCode() async {
+        let (backend, engine, discovery) = makeBackend(passwordStore: InMemoryAirPlayPasswordStore())
+        defer { backend.stop() }
+        let device = ap2Device(access: .onScreenCode)
+        await startAndDiscover(backend, engine, discovery, device)
         backend.setOutputSet([device.id])
         await pollUntil { backend.devices.first { $0.id == device.id }?.isSelected == true }
         engine.pushState(device.outputID, .passwordRequired)
+        await pollUntil {
+            self.failureCause(backend, device.id) != nil
+                || self.connectionState(backend, device.id) == .awaitingPassword
+        }
+        #expect(connectionState(backend, device.id) == .awaitingPassword)
+        #expect(backend.devices.first { $0.id == device.id }?.isAvailable == true)
+    }
+
+    /// Sending a typed code down the password path instead of `engine.authorize`, or not feeding the earned key on the retry, turns it red.
+    @Test func aGoodCodeStoresThePairingAndFeedsItOnTheRetry() async {
+        let store = InMemoryAirPlayPasswordStore()
+        let (backend, engine, device) = await joinCodeSpeaker(.onScreenCode, store: store)
+        defer { backend.stop() }
+        engine.authorizeResults[device.outputID.rawValue] = .success("KEY1")
+        engine.addFailures = []
+        await submitAndWait(backend, "1234", for: device.id)
+        backend.retryOutput(device.id)
+        await pollUntil { self.connectionState(backend, device.id) == .connected }
+        #expect(store.pairingKey(for: device.id) == "KEY1")
+        #expect(backend.devices.first { $0.id == device.id }?.hasStoredPassword == true)
+        #expect(engine.fedDescriptorList.last?.authKey == "KEY1")
+        #expect(engine.authorizeCalls.count == 1)
+        #expect(engine.authorizeCalls.first?.0 == device.outputID)
+        #expect(engine.authorizeCalls.first?.1 == "1234")
+    }
+
+    /// Retrying after a refused code, or reading the refusal as anything but `.codeRequired`, turns it red.
+    @Test func aWrongCodeFailsAsCodeDidntWork() async {
+        let store = InMemoryAirPlayPasswordStore()
+        let (backend, engine, device) = await joinCodeSpeaker(.onScreenCode, store: store)
+        defer { backend.stop() }
+        engine.authorizeResults[device.outputID.rawValue] = .failure(.passwordRequired)
+        let retried = OnceFlag()
+        backend.submitAirPlayPassword("0000", for: device.id, source: "mac") { _ = retried.testAndSet() }
         await pollUntil { self.failureCause(backend, device.id) != nil }
         #expect(failureCause(backend, device.id) == .codeRequired)
+        #expect(backend.devices.first { $0.id == device.id }?.isAvailable == false)
+        #expect(retried.testAndSet() == false, "a refused code must not run the caller's retry")
+        #expect(store.pairingKey(for: device.id) == nil)
+    }
+
+    /// `submitCodeLocked` arming no stale-report mark before `authorize`, so the
+    /// state stream's echo of the refused code reopens the code wait, turns it red.
+    @Test func aRefusedCodesEchoDoesNotReopenTheWait() async {
+        let (backend, engine, discovery) = makeBackend(passwordStore: InMemoryAirPlayPasswordStore())
+        defer { backend.stop() }
+        let device = ap2Device(access: .onScreenCode)
+        let marker = ap2Device(id: "AA:BB:CC:DD:EE:02", name: "Marker")
+        engine.addFailures = [device.outputID.rawValue]
+        engine.addFailureError = .passwordRequired
+        await startAndDiscoverPair(backend, engine, discovery, device, marker)
+        backend.setOutputSet([device.id])
+        await pollUntil { self.connectionState(backend, device.id) == .awaitingPassword }
+
+        engine.authorizeResults[device.outputID.rawValue] = .failure(.passwordRequired)
+        backend.submitAirPlayPassword("0000", for: device.id, source: "mac") { }
+        await pollUntil { self.failureCause(backend, device.id) != nil }
+        // The dispatcher echoes the refusal on the state stream after the
+        // completion; the marker's report shows once the echo has been applied.
+        engine.pushState(device.outputID, .passwordRequired)
+        engine.pushState(marker.outputID, .failed)
+        await pollUntil { backend.devices.first { $0.id == marker.id }?.isAvailable == false }
+        #expect(failureCause(backend, device.id) == .codeRequired)
+        #expect(backend.devices.first { $0.id == device.id }?.isAvailable == false)
+    }
+
+    /// `submitCodeLocked` arming no stale-report mark before `authorize`, so the
+    /// `.stopped` echo of the accepted code turns the retry's connecting row
+    /// `.off`, turns it red.
+    @Test func aGoodCodesStoppedEchoDoesNotStopTheRetry() async {
+        let (backend, engine, discovery) = makeBackend(passwordStore: InMemoryAirPlayPasswordStore())
+        defer { backend.stop() }
+        let device = ap2Device(access: .onScreenCode)
+        let marker = ap2Device(id: "AA:BB:CC:DD:EE:02", name: "Marker")
+        engine.addFailures = [device.outputID.rawValue]
+        engine.addFailureError = .passwordRequired
+        await startAndDiscoverPair(backend, engine, discovery, device, marker)
+        backend.setOutputSet([device.id])
+        await pollUntil { self.connectionState(backend, device.id) == .awaitingPassword }
+
+        engine.authorizeResults[device.outputID.rawValue] = .success("KEY1")
+        engine.addFailures = []
+        let retryAdd = HoldPoint()
+        engine.onAddOutputHold = { id, _ in
+            guard id == device.outputID else { return }
+            await retryAdd.hold()
+        }
+        await submitAndWait(backend, "1234", for: device.id)
+        backend.retryOutput(device.id)
+        await pollUntil { retryAdd.entered }
+        engine.pushState(device.outputID, .stopped)
+        engine.pushState(marker.outputID, .failed)
+        await pollUntil { backend.devices.first { $0.id == marker.id }?.isAvailable == false }
+        #expect(connectionState(backend, device.id) != .off)
+        retryAdd.open()
+        await pollUntil { self.connectionState(backend, device.id) == .connected }
+        #expect(engine.fedDescriptorList.last?.authKey == "KEY1")
+        #expect(engine.addedIDs.filter { $0 == device.outputID }.count == 2)
+    }
+
+    /// Keeping a pairing key the receiver refused (so every join repeats it), or retrying it forever, turns it red.
+    @Test func aRejectedStoredPairingIsDroppedAndTheJoinAsksForACodeAgain() async {
+        let store = InMemoryAirPlayPasswordStore()
+        let device = ap2Device(access: .onScreenCode)
+        store.setPairingKey("OLD", for: device.id)
+        let (backend, engine, discovery) = makeBackend(passwordStore: store)
+        defer { backend.stop() }
+        engine.addFailures = [device.outputID.rawValue]
+        engine.addFailureError = .passwordRequired
+        await startAndDiscover(backend, engine, discovery, device)
+
+        backend.setOutputSet([device.id])
+        await pollUntil { self.connectionState(backend, device.id) == .awaitingPassword }
+        #expect(store.pairingKey(for: device.id) == nil)
+        #expect(engine.addedIDs.filter { $0 == device.outputID }.count == 2)
+        #expect(engine.fedDescriptorList.last?.authKey == nil)
+        #expect(connectionState(backend, device.id) == .awaitingPassword)
+    }
+
+    /// Feeding the stored pairing key again after the receiver refused it, when
+    /// the Keychain delete left it in place (no `rejectedPairingKeyIDs` skip),
+    /// turns it red: the join refeeds the stale key and loops.
+    @Test func aRejectedPairingIsNotFedAgainEvenIfTheKeychainDeleteFails() async {
+        let store = ScriptedPasswordStore(keepsPairingKeys: true)
+        let device = ap2Device(access: .onScreenCode)
+        store.setPairingKey("OLD", for: device.id)
+        let (backend, engine, discovery) = makeBackend(passwordStore: store)
+        defer { backend.stop() }
+        engine.addFailures = [device.outputID.rawValue]
+        engine.addFailureError = .passwordRequired
+        await startAndDiscover(backend, engine, discovery, device)
+
+        backend.setOutputSet([device.id])
+        await pollUntil { self.connectionState(backend, device.id) == .awaitingPassword }
+        #expect(engine.addedIDs.filter { $0 == device.outputID }.count == 2)
+        #expect(engine.fedDescriptorList.last?.authKey == nil)
+        #expect(connectionState(backend, device.id) == .awaitingPassword)
+    }
+
+    /// Storing the key an every-time receiver (status-flags bit 3) discards anyway turns it red.
+    @Test func anEveryTimeReceiverStoresNoPairing() async {
+        let store = InMemoryAirPlayPasswordStore()
+        let (backend, engine, device) = await joinCodeSpeaker(.onScreenCodeEveryTime, store: store)
+        defer { backend.stop() }
+        engine.authorizeResults[device.outputID.rawValue] = .success("KEY1")
+        engine.addFailures = []
+        await submitAndWait(backend, "1234", for: device.id)
+        backend.retryOutput(device.id)
+        await pollUntil { self.connectionState(backend, device.id) == .connected }
+        #expect(store.pairingKey(for: device.id) == nil)
+        #expect(backend.devices.first { $0.id == device.id }?.hasStoredPassword == false)
+        #expect(engine.fedDescriptorList.last?.authKey == nil)
     }
 
     /// Mapping a password demand from a Home-only receiver (a Mac in Current

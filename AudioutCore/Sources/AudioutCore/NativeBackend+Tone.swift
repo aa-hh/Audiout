@@ -772,19 +772,29 @@ extension NativeBackend {
         case .wholeSystem(let outputID)?:
             Task { [weak self] in await self?.convergeDevice(id: id, outputID: outputID) }
         case .perAppPassword?:
-            // Feed the typed password first, as the converge does, then write
-            // `.connecting`: that flips the target eligible and replays the
-            // route table, which issues the `.bind`. A refused typed password
-            // left the row unavailable, so the same write makes it available
-            // again; otherwise eligibility never flips and nothing binds.
+            // Feed the typed password, then write `.off` so the row is available
+            // and reachable again; the route replay issues the `.bind`, and
+            // `performBindOp` writes `.connecting` when it does. An app that is
+            // not running issues no bind and the row stays `.off`.
             Task { [weak self] in
                 guard let self else { return }
                 if let descriptor = self.descriptorToFeed(id: id) {
-                    do { try await self.engine.updateDiscovery(descriptor) } catch { return }
+                    do {
+                        try await self.engine.updateDiscovery(descriptor)
+                    } catch {
+                        Telemetry.fail(.airplay, "airplay:connect_failed",
+                                       local: ["device": id, "detail": String(describing: error)],
+                                       shared: ["cause": "unknown"])
+                        self.stateQueue.sync {
+                            self.setPerAppConnectionStateLocked(
+                                .failed(ConnectionFailure(cause: .unknown, detail: String(describing: error))), for: id)
+                        }
+                        return
+                    }
                     self.stateQueue.sync { self.fedDescriptors[id] = descriptor }
                 }
                 self.stateQueue.sync {
-                    self.setPerAppConnectionStateLocked(.connecting, for: id, makingAvailable: true)
+                    self.setPerAppConnectionStateLocked(.off, for: id, makingAvailable: true)
                 }
             }
         case nil:

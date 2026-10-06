@@ -4569,22 +4569,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     ///
     /// On `stateQueue`.
     func reconcileSilenceWatchdog() {   // on stateQueue
-        let desiredNonLocal = expectedSelected.filter { id in
-            guard let device = known[id], !device.isLocalDevice else { return false }
-            switch device.connectionState {
-            case .awaitingPassword: return false
-            case .failed(let failure): return failure.cause != .authRequired
-            default: return true
-            }
-        }
-        // The password exclusion only stops a countdown arming: a fallback that
-        // already fired stays on when it alone empties the selection.
-        if silenceCaptureOverride, !suspended, desiredNonLocal.isEmpty,
-           expectedSelected.contains(where: { known[$0].map { !$0.isLocalDevice } ?? false }) {
-            silenceWatchdog?.cancel()
-            silenceWatchdog = nil
-            return
-        }
+        let desiredNonLocal = expectedSelected.filter(selectedSpeakerWantsStreamLocked)
         let wantsStream = !desiredNonLocal.isEmpty
         let anyAudible = desiredNonLocal.contains { desiredDeviceAudibleLocked($0) }
         let stranded = !suspended && wantsStream && !anyAudible
@@ -4638,6 +4623,18 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             return castPlaying.contains(id) || device.connectionState == .connecting
         }
         return device.connectionState == .connected
+    }
+
+    /// Whether one selected id is a known non-local device that wants the
+    /// stream: a speaker waiting for its password or refused one does not.
+    /// On `stateQueue`.
+    func selectedSpeakerWantsStreamLocked(_ id: String) -> Bool {   // on stateQueue
+        guard let device = known[id], !device.isLocalDevice else { return false }
+        switch device.connectionState {
+        case .awaitingPassword: return false
+        case .failed(let failure): return failure.cause != .authRequired
+        default: return true
+        }
     }
 
     /// Fix B: clear the silence-fallback override on a genuine true→false edge and
@@ -5412,6 +5409,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // arms the countdown. Runs after the commit so `known[id]` reflects the new
             // state the reconcile reads.
             self.reconcileSilenceWatchdog()
+            self.reconcileCaptureGate()
             return nil
         }
         if let rekick {
@@ -5933,8 +5931,10 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         notePasswordOutcome(id: id, newState: state)
         // Every connection-lifecycle edge can change "is any desired device audible":
         // a `→ .connected` re-engages the gate (clearing a silence fallback), a
-        // `→ .failed`/`.off` for the last connected member arms the countdown (R11).
+        // `→ .failed`/`.off` for the last connected member arms the countdown (R11),
+        // and a password wait or refusal also moves the gate.
         reconcileSilenceWatchdog()
+        reconcileCaptureGate()
     }
 
     // MARK: AirPlay passwords
@@ -6265,8 +6265,10 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         // (This replaced our branch's `captureGateWantsCaptureLocked()` helper, whose
         // only override was the narrower wake-only `wakeCaptureOverride`; the silence
         // watchdog subsumes it, so the helper had no remaining caller.)
+        // A speaker waiting for its password or refused one does not want the
+        // tap, so the Mac keeps playing with no banner (owner ruling 2026-10-06).
         let want = !suspended && !silenceCaptureOverride
-            && expectedSelected.contains { known[$0]?.isLocalDevice == false }
+            && expectedSelected.contains(where: selectedSpeakerWantsStreamLocked)
         guard want != captureRunning else { return }   // already at target
         captureRunning = want
         if want {

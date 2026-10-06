@@ -314,6 +314,26 @@ import Testing
         #expect(!controller.selectedDeviceIDs.contains("office"))
     }
 
+    /// Turns red if `submitAirPlayPassword` sends a speaker that is remembered in
+    /// `selectedDeviceIDs` but absent from the active group through
+    /// `retryConnection`, whose Selected-Devices arm returns `.ok` without calling
+    /// the backend, so the typed password is never fed and the sheet stays on
+    /// Connecting.
+    @Test func submitAirPlayPasswordForARememberedSelectedSpeakerUnderAGroupRetriesWithoutRouting() async throws {
+        let (controller, backend) = try await makeRecordingController()
+        _ = controller.setDeviceSelected("office", true)
+        try controller.saveGroup(Group(id: "g1", name: "Bedroom", memberIDs: ["homepod-bed"], memberVolumes: [:]))
+        controller.setMainOut(.group(id: "g1"))
+        #expect(controller.selectedDeviceIDs.contains("office"))
+        #expect(!controller.isMainOutMember("office"))
+        backend.reset()
+
+        controller.submitAirPlayPassword("secret", for: "office", source: "mac")
+        #expect(backend.callOrder == ["retry"])
+        #expect(controller.selectedDeviceIDs.contains("office"))
+        #expect(controller.activeGroupID == "g1")
+    }
+
     /// R12 adversarial-review fixup — `retryConnection(for:)` must decide its
     /// re-kick path off which routing is ACTUALLY active (`mainOut`), not off
     /// whichever membership set happens to contain `id` first.

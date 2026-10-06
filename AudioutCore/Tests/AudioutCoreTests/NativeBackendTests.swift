@@ -69,6 +69,8 @@ private final class SpyEngine: EngineControlling, @unchecked Sendable {
     /// was fed and surfaces `.authRequired` when one was, instead of
     /// flattening to `.unknown`.
     var addFailureError: AirPlayEngineError = .sessionFailed
+    /// When set, `updateDiscovery` throws it before recording the feed.
+    var updateDiscoveryError: Error?
     /// When set, an `addFailures` add also reports its failure on the state
     /// stream, as the real engine does (shims/outputs.c fires the completion
     /// hook, then the state hook). The hook is awaited after that report and
@@ -139,6 +141,7 @@ private final class SpyEngine: EngineControlling, @unchecked Sendable {
 
     @discardableResult
     func updateDiscovery(_ descriptor: DeviceDescriptor) async throws -> OutputID {
+        if let updateDiscoveryError { throw updateDiscoveryError }
         let id = descriptor.parsedID ?? OutputID(rawValue: 0)
         lock.withLock {
             discoveryFed.append(id)
@@ -3762,10 +3765,15 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
     /// Writing `.failed` instead of `.awaitingPassword` in the converge catch
     /// (the wait times out), or counting a password-waiting speaker in
     /// `reconcileSilenceWatchdog`'s `desiredNonLocal` (the countdown stays armed
-    /// after the wait begins), turns it red.
+    /// after the wait begins), turns it red. It also turns red if
+    /// `reconcileCaptureGate` counts a speaker in `.awaitingPassword` (the tap
+    /// keeps running and the Mac stays mute until the sheet is answered), or if
+    /// the accepted password's `.connecting` no longer re-runs the gate.
     @Test func passwordDemandWithNoPasswordFedReadsAsAwaitingPassword() async {
         let scheduler = ManualWatchdogScheduler()
         let (backend, engine, discovery) = makeBackend(watchdogScheduler: scheduler)
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
         defer { backend.stop() }
         let device = ap2Device(access: .password)
         engine.addFailures = [device.outputID.rawValue]
@@ -3775,6 +3783,40 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         backend.setOutputSet([device.id])
         await pollUntil { self.connectionState(backend, device.id) == .awaitingPassword }
         #expect(backend.devices.first { $0.id == device.id }?.isAvailable == true)
+        #expect(!scheduler.hasPending)
+        await pollUntil { !capture.isCapturing }
+        #expect(!capture.isCapturing)
+        #expect(!backend.test_silenceFallbackActive)
+
+        engine.addFailures = []
+        await submitAndWait(backend, "secret", for: device.id)
+        backend.retryOutput(device.id)
+        await pollUntil { self.connectionState(backend, device.id) == .connected }
+        #expect(capture.isCapturing)
+        #expect(!scheduler.hasPending)
+    }
+
+    /// Turns red if the gate stops capture when any selected speaker waits for
+    /// a password instead of when every one does.
+    @Test func aWaitingSpeakerBesideAConnectedOneLeavesCaptureRunning() async {
+        let scheduler = ManualWatchdogScheduler()
+        let (backend, engine, discovery) = makeBackend(watchdogScheduler: scheduler)
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        defer { backend.stop() }
+        let open = ap2Device(id: "AA:BB:CC:DD:EE:02", name: "Open Speaker")
+        let locked = ap2Device(id: "AA:BB:CC:DD:EE:03", name: "Locked Speaker", access: .password)
+        await startAndDiscoverPair(backend, engine, discovery, open, locked)
+        engine.addFailures = [locked.outputID.rawValue]
+        engine.addFailureError = .passwordRequired
+
+        backend.setOutputSet([open.id, locked.id])
+        await pollUntil {
+            self.connectionState(backend, open.id) == .connected
+                && self.connectionState(backend, locked.id) == .awaitingPassword
+        }
+        #expect(capture.isCapturing)
+        #expect(!backend.test_silenceFallbackActive)
         #expect(!scheduler.hasPending)
     }
 
@@ -3798,9 +3840,10 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         #expect(!scheduler.hasPending)
     }
 
-    /// Clearing the fallback when the password exclusion empties the selection
-    /// turns it red.
-    @Test func fallbackThatAlreadyFiredStaysOnWhenTheSpeakerThenRefusesItsPassword() async {
+    /// Turns red if the gate counts a speaker that refused its password (capture
+    /// restarts and the Mac goes mute), or if the watchdog's early return keeps
+    /// the fallback banner up for it.
+    @Test func fallbackThatAlreadyFiredEndsWithoutRestartingCaptureWhenTheLoneSpeakerRefusesItsPassword() async {
         let scheduler = ManualWatchdogScheduler()
         let store = InMemoryAirPlayPasswordStore()
         let device = ap2Device(access: .password)
@@ -3822,7 +3865,8 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         backend.retryOutput(device.id)
         await pollUntil { self.failureCause(backend, device.id) == .authRequired }
         #expect(engine.fedDescriptorList.last?.password == "secret")
-        #expect(backend.test_silenceFallbackActive)
+        await pollUntil { !backend.test_silenceFallbackActive }
+        #expect(!backend.test_silenceFallbackActive)
         #expect(!capture.isCapturing)
         #expect(!scheduler.hasPending)
     }
@@ -12547,6 +12591,57 @@ extension SerializedSharedState {
         #expect(lines.first?["will_wait"] as? String == "true")
         #expect(lines.first?["switch_away"] as? String == "none", "no defaultOutputSwitcher was injected")
         #expect(Int(lines.first?["elapsed_ms"] as? String ?? "") != nil, "elapsed_ms must be an integer")
+    }
+
+    /// Turns red if the arm's `updateDiscovery` catch returns silently: the row
+    /// stays on its refusal, no `airplay:connect_failed` line is written, and the
+    /// sheet never reacts.
+    @Test func perAppOnlyPasswordSpeakerWhoseRetypeCannotBeFedReadsFailedAndLogsIt() async {
+        let perApp = workingPerAppCapture(bundleIDs: ["com.foo"])
+        let (backend, engine, discovery) = makeBackend(injectedPerAppCapture: perApp)
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:C9", name: "Locked Speaker", access: .password)
+        let state = { backend.devices.first { $0.id == device.id }?.connectionState }
+        let failureCause = { () -> ConnectionFailure.Cause? in
+            if case .failed(let f)? = state() { return f.cause }
+            return nil
+        }
+        func submitAndWait(_ password: String) async {
+            await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
+                backend.submitAirPlayPassword(password, for: device.id, source: "mac") { done.resume() }
+            }
+        }
+        await startAndDiscover(backend, engine, discovery, device)
+        engine.addFailures = [device.outputID.rawValue]
+        engine.addFailureError = .passwordRequired
+        engine.onMirroredAddFailure = { _ in
+            await pollUntil { state() == .awaitingPassword || failureCause() == .authRequired }
+        }
+        let binds = { engine.streamAddCalls.filter { $0.0 == device.outputID }.count }
+        let isAvailable = { backend.devices.first { $0.id == device.id }?.isAvailable }
+        let unbound = { backend.stateQueue.sync { backend.streamBindings[device.id] == nil } }
+
+        backend.updateAppRoutes([route("com.foo", name: "Foo", toDevice: device.id)])
+        await pollUntil { binds() == 1 }
+        await pollUntil { perApp.state(for: "com.foo") == .idle && unbound() }
+
+        await submitAndWait("wrong")
+        backend.retryOutput(device.id)
+        await pollUntil { binds() == 2 }
+        await pollUntil { isAvailable() == false && unbound() }
+        #expect(failureCause() == .authRequired)
+        #expect(isAvailable() == false, "a refused typed password leaves the row unavailable")
+
+        let box = TelemetryLineBox()
+        Telemetry._installTestSink { box.append($0) }
+        defer { Telemetry._installTestSink(nil) }
+        engine.updateDiscoveryError = AirPlayEngineError.sessionFailed
+        await submitAndWait("right")
+        backend.retryOutput(device.id)
+        await pollUntil { failureCause() == .unknown }
+        #expect(failureCause() == .unknown)
+        #expect(binds() == 2)
+        #expect(!telemetryLines(box, evt: "airplay:connect_failed", device: device.id).isEmpty)
     }
 
 }

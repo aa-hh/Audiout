@@ -297,7 +297,7 @@ import AppKit
         #expect(row.test_syncChipChevronSymbolName == "chevron.down", "expanded ⇒ rotated down to reveal")
         #expect(row.test_syncChipIsEngaged)
         #expect(row.test_syncChipFill
-                == Tokens.Color.engagedChrome.withAlphaComponent(PopoverColumnGrid.mutePillFillAlpha),
+                == Tokens.Color.engagedChrome.withAlphaComponent(PopoverColumnGrid.engagedFillAlpha),
                 "the engaged-chrome fill at the pill alpha")
         #expect(row.test_syncChipFill != Tokens.Color.gold, "…and never the gold accent")
         #expect(row.test_syncChipTitleColor == Tokens.Color.engagedChrome)

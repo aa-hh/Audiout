@@ -148,17 +148,24 @@ public final class DeviceRowView: NSView {
     /// model `isSelectedInSet` and always reset in ``apply(_:selected:…)`` and on
     /// re-parenting, so a hover can never "stick" as a stale highlight after the
     /// pointer leaves the popover without a matching `mouseExited` (T-U8 bug).
-    private var isHovered: Bool = false {
-        didSet { armedDotView.rowWash = rowWash }
+    private var isHovered: Bool { hoverTracker.isHovered }
+    private lazy var hoverTracker = HoverTracker(view: self) { [weak self] _ in
+        guard let self else { return }
+        self.armedDotView.rowWash = self.rowWash
+        self.refreshBusHoverCue()
+        self.setNeedsDisplay(self.bounds)
     }
 
     /// Transient pointer-in-the-gutter state, the same discipline as
     /// `isHovered` (reset on `apply` and re-parenting via
-    /// ``setGutterHovered(_:)``). Stored — rather than pushed straight into
-    /// the bus skin — because the node's hover RESIZE resolves from BOTH
-    /// flags (``refreshBusHoverCue()``): the gutter resizes any live node, and
-    /// row hover additionally resizes an unselected one.
-    private var isGutterHovered: Bool = false
+    /// ``setGutterHovered(_:)``). Kept apart from row hover because the
+    /// node's hover RESIZE resolves from BOTH flags (``refreshBusHoverCue()``):
+    /// the gutter resizes any live node, and row hover additionally resizes an
+    /// unselected one.
+    private var isGutterHovered: Bool { gutterHoverTracker.isHovered }
+    private lazy var gutterHoverTracker = HoverTracker(
+        view: self, rect: { [weak self] in self?.gutterHitRect ?? .zero }
+    ) { [weak self] _ in self?.refreshBusHoverCue() }
 
     /// The PRIMARY "Selected Speakers" membership control (SPEC §9b device-row
     /// toggle). An `NSButton` **checkbox** (`.switch` button type, empty title)
@@ -594,7 +601,7 @@ public final class DeviceRowView: NSView {
         // (T-U8 root-cause fix — hover is transient, selection is model-driven).
         // The gutter's socket hover is the same kind of transient state, cleared
         // on the same beat and re-established by the row's own tracking area.
-        self.isHovered = false
+        setHovered(false)
         setGutterHovered(false)
 
         // Primary membership control: ON iff the device is in the Selected
@@ -1012,7 +1019,7 @@ public final class DeviceRowView: NSView {
     ///
     /// WHAT IT MAY NOT GO BACK TO. Three treatments are retired here, and
     /// none may return. The first was an `engagedChrome` capsule at
-    /// ``PopoverColumnGrid/mutePillFillAlpha`` behind an unslashed speaker — a
+    /// ``PopoverColumnGrid/engagedFillAlpha`` behind an unslashed speaker — a
     /// faint grey pill that read as nothing (owner's call, 2026-09-04: "the
     /// active mute state does not look like any other mute state I have seen
     /// in my life"). The second was its replacement, an opaque `muted` rounded
@@ -1044,7 +1051,7 @@ public final class DeviceRowView: NSView {
     ///
     /// WHY GREEN AND NOT GOLD. The door wore ``Tokens/Color/goldText`` until
     /// the symbols landed, and gold means "audio is flowing here" everywhere
-    /// else — including the live wash this row draws behind the door. One hue
+    /// else — the fader fill and the readout beside the door. One hue
     /// cannot carry both. ``Tokens/Color/equalizer`` carries the measurements
     /// and the separation from ``Tokens/Color/muted`` beside it.
     ///
@@ -2151,12 +2158,11 @@ public final class DeviceRowView: NSView {
     /// - **untuned** (D10) — "Not set" in `label3` inside a DASHED
     ///   border: the discoverability affordance, since zero reads as finished
     ///   while "Not set" reads as an invitation;
-    /// - **drawer open** — the app's established ENGAGED-CONTROL treatment,
-    ///   identical in recipe to the mute pill (``updateMuteTint()``): a
-    ///   translucent ``Tokens/Color/engagedChrome`` fill at
-    ///   `mutePillFillAlpha` plus a matching glyph, label and border. Its TEXT
-    ///   colour therefore matches the tuned-resting state — the FILL and border
-    ///   are what carry "open", exactly as the pill does for mute. Deliberately
+    /// - **drawer open** — the app's ENGAGED-CONTROL treatment, the one a
+    ///   pressed toolbar seat also wears: a translucent
+    ///   ``Tokens/Color/engagedChrome`` fill at `engagedFillAlpha` plus a
+    ///   matching glyph, label and border. Its TEXT colour matches the
+    ///   tuned-resting state — the FILL and border carry "open". Deliberately
     ///   not gold: gold is the route-armed/primary vocabulary and this chip is a
     ///   secondary, transient affordance.
     private func updateSyncChip() {
@@ -2576,37 +2582,13 @@ public final class DeviceRowView: NSView {
 
     // MARK: Highlight + hover (brief §2/§5 — menu host only)
 
-    /// Marks the SECOND tracking area (the bus gutter) so the shared
-    /// `mouseEntered`/`mouseExited` owner can tell the two apart.
-    private static let gutterTrackingKey = "gutter"
-
     public override func updateTrackingAreas() {
         super.updateTrackingAreas()
-        trackingAreas.forEach(removeTrackingArea)
-        // Re-tracking means the geometry moved under the pointer — drop the
-        // gutter hover rather than leaving a socket lit for a region that has
-        // shifted; the tracking area's own `.mouseMoved` stream re-establishes
-        // it on the next move.
-        setGutterHovered(false)
-        addTrackingArea(NSTrackingArea(
-            rect: bounds,
-            options: [.mouseEnteredAndExited, .mouseMoved, .activeInActiveApp, .inVisibleRect],
-            owner: self
-        ))
+        hoverTracker.update()
         // The bus gutter's own region: hovering it grows the node (its "I am
-        // clickable" affordance). Same rect as the checkbox's
-        // expanded hit box, read off the control itself so the two can't drift.
-        if busActive {
-            // Explicit rect, so NO `.inVisibleRect` here — that option makes
-            // AppKit ignore the rect and track the whole visible bounds, which
-            // would make the gutter area a duplicate of the row area above.
-            addTrackingArea(NSTrackingArea(
-                rect: gutterHitRect,
-                options: [.mouseEnteredAndExited, .activeInActiveApp],
-                owner: self,
-                userInfo: ["zone": Self.gutterTrackingKey]
-            ))
-        }
+        // clickable" affordance). Same rect as the checkbox's expanded hit
+        // box, read off the control itself so the two can't drift.
+        gutterHoverTracker.update(active: busActive)
     }
 
     /// The bus gutter's hit/hover rect in this row's coordinates — the
@@ -2616,23 +2598,6 @@ public final class DeviceRowView: NSView {
     private var gutterHitRect: NSRect {
         busActive ? enableCheckbox.frame : .zero
     }
-
-    private func isGutterArea(_ event: NSEvent) -> Bool {
-        (event.trackingArea?.userInfo?["zone"] as? String) == Self.gutterTrackingKey
-    }
-
-    public override func mouseEntered(with event: NSEvent) {
-        if isGutterArea(event) { setGutterHovered(true) } else { setHovered(true) }
-    }
-
-    public override func mouseExited(with event: NSEvent) {
-        if isGutterArea(event) { setGutterHovered(false) } else { setHovered(false) }
-    }
-
-    /// Reconciles hover against the true pointer position (P2-1) — fed by the
-    /// bounds tracking area's own `.mouseMoved` option now, not an app-wide
-    /// `NSEvent` monitor (see ``refreshHoverFromPointer()``).
-    public override func mouseMoved(with event: NSEvent) { refreshHoverFromPointer() }
 
     /// C3: a pointing-hand cursor over the NAME label only (its click toggles
     /// membership, ``nameClicked(_:)``) — scoped to `nameLabel.frame`, not the
@@ -2673,8 +2638,7 @@ public final class DeviceRowView: NSView {
     /// invite a click it would refuse.
     private func setGutterHovered(_ hovered: Bool) {
         guard busActive else { return }
-        isGutterHovered = hovered
-        refreshBusHoverCue()
+        gutterHoverTracker.setHovered(hovered)
     }
 
     /// Resolve whether the node previews its post-click size for the pointer:
@@ -2694,45 +2658,17 @@ public final class DeviceRowView: NSView {
         busView.setHovered(inviting && enableCheckbox.isEnabled)
     }
 
-    /// Set the transient hover flag and repaint only when it actually changes.
-    private func setHovered(_ hovered: Bool) {
-        guard isHovered != hovered else { return }
-        isHovered = hovered
-        refreshBusHoverCue()
-        setNeedsDisplay(bounds)
-    }
-
-    /// Re-evaluate hover from the *actual* pointer position. This is the general
-    /// root-cause fix for a hover that "sticks": the `NSTrackingArea` only emits
-    /// `mouseExited` when the pointer crosses into another tracked region, so a
-    /// row with a dead zone directly below it (the bottom-most row — under it lie
-    /// the card's bottom padding, the inter-card gap and the footer, none of them
-    /// tracked) never receives an exit. Driving hover off the real pointer
-    /// position makes the highlight clear for ANY row, last or not. Fed by the
-    /// row's OWN bounds tracking area's `.mouseMoved` stream (P2-1) — an
-    /// `NSTrackingArea` with that option delivers `mouseMoved(with:)` to its
-    /// owner without any window `acceptsMouseMovedEvents` opt-in, so no
-    /// app-wide monitor is needed any more.
-    private func refreshHoverFromPointer() {
-        guard let window = window else {
-            setHovered(false)
-            setGutterHovered(false)
-            return
-        }
-        let local = convert(window.mouseLocationOutsideOfEventStream, from: nil)
-        setHovered(bounds.contains(local))
-        setGutterHovered(gutterHitRect.contains(local))
-    }
+    /// Set the transient hover flag; the tracker repaints only on a change.
+    private func setHovered(_ hovered: Bool) { hoverTracker.setHovered(hovered) }
 
     /// Belt-and-suspenders against a sticky hover: whenever the row is added to /
     /// removed from a window (a popover rebuild, scroll, or close), drop any
     /// transient hover so it can't persist as a stale highlight (T-U8). The
     /// row's own tracking area (re-established by `updateTrackingAreas`) is
-    /// what keeps hover live going forward — no app-local monitor to
-    /// (un)install any more (P2-1).
+    /// what keeps hover live going forward.
     public override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        isHovered = false
+        setHovered(false)
         setGutterHovered(false)
         setNeedsDisplay(bounds)
     }
@@ -2755,14 +2691,8 @@ public final class DeviceRowView: NSView {
             // the row: only a neutral hover wash on pointer-over, driven off
             // state that ``apply`` resets, so a row never keeps a stale
             // background (T-U8 bug fix).
-            let rect = bounds.insetBy(dx: PopoverColumnGrid.selectionHighlightInsetX,
-                                      dy: PopoverColumnGrid.selectionHighlightInsetY)
-            let path = NSBezierPath(roundedRect: rect,
-                                    xRadius: PopoverColumnGrid.selectionHighlightCornerRadius,
-                                    yRadius: PopoverColumnGrid.selectionHighlightCornerRadius)
-            if let rowWash {
-                rowWash.setFill()
-                path.fill()
+            if isHovered {
+                PopoverColumnGrid.fillRowWash(in: bounds, alpha: PopoverColumnGrid.rowHoverWashAlpha)
             }
         }
         super.draw(dirtyRect)
@@ -2892,7 +2822,7 @@ public final class DeviceRowView: NSView {
 
         // The row's VALUE carries the live signal channels (S2/S3 — every
         // visual state has a spoken equivalent, shipped with the drawing):
-        // "muted" for the engaged mute pill / drained meter, and the armed
+        // "muted" for the engaged mute mark / drained meter, and the armed
         // dot's wording — "playing here" when a confirmed live feed lights it,
         // "armed" for the held main-mix route.
         var valueParts: [String] = []
@@ -3030,12 +2960,12 @@ extension DeviceRowView: RailNodeProviding {
 ///
 /// Colours resolve at DRAW time (never stamped into a `CALayer`), so light/
 /// dark, Increase Contrast and the accent dial all land without this cell
-/// observing anything — unlike the mute pill, whose `CGColor` fill needs a
-/// `viewDidChangeEffectiveAppearance` re-stamp.
+/// observing anything — unlike the accessory marks, whose ink is baked into
+/// the image and needs a `viewDidChangeEffectiveAppearance` re-make.
 final class SyncChipCell: NSButtonCell {
     /// The drawer for this row is open: the app's engaged-control treatment
-    /// (translucent accent fill + accent border), the exact recipe
-    /// `DeviceRowView.updateMuteTint()` uses — NOT a solid gold fill.
+    /// (translucent ``Tokens/Color/engagedChrome`` fill at
+    /// ``PopoverColumnGrid/engagedFillAlpha`` + border) — NOT a solid gold fill.
     var isEngaged = false
     /// This device has never been tuned (D10): dashed border, "Not set".
     var isUntuned = false
@@ -3063,11 +2993,11 @@ final class SyncChipCell: NSButtonCell {
     }
 
     /// The engaged fill — ``Tokens/Color/engagedChrome`` at
-    /// `mutePillFillAlpha`, never a solid gold. `nil` in every other state: a
+    /// `engagedFillAlpha`, never a solid gold. `nil` in every other state: a
     /// resting chip is an outline only.
     var fillColor: NSColor? {
         guard isEngaged else { return nil }
-        return Tokens.Color.engagedChrome.withAlphaComponent(PopoverColumnGrid.mutePillFillAlpha)
+        return Tokens.Color.engagedChrome.withAlphaComponent(PopoverColumnGrid.engagedFillAlpha)
     }
 
     /// Engaged borrows the engaged-chrome tone; untuned uses the `label3` its

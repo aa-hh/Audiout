@@ -227,8 +227,10 @@ public final class AppRowView: NSView {
     /// draw in different colours (neutral hover vs accent selection). Reconciled
     /// against the true pointer position (sticky-hover discipline) and cleared
     /// on every `apply` and re-parenting.
-    private var isHovered: Bool = false {
-        didSet { if isHovered != oldValue { setNeedsDisplay(bounds) } }
+    private var isHovered: Bool { hoverTracker.isHovered }
+    private lazy var hoverTracker = HoverTracker(view: self) { [weak self] _ in
+        guard let self else { return }
+        self.setNeedsDisplay(self.bounds)
     }
 
     public init(showsMeter: Bool = false) {
@@ -256,7 +258,7 @@ public final class AppRowView: NSView {
         // (T3) re-asserts selection across a `rebuild()` by calling
         // `apply(_:isSelected:)` or `test_setSelected` right after `apply`.
         self.isSelected = false
-        self.isHovered = false
+        hoverTracker.setHovered(false)
 
         iconView.image = configuration.icon
         self.appName = configuration.name
@@ -648,7 +650,7 @@ public final class AppRowView: NSView {
 
     // MARK: Drawing
 
-    /// Row highlight colour, `nil` when neither state applies. The order is
+    /// Row highlight alpha, `nil` when neither state applies. The order is
     /// keyboard selection > hover: `isSelected` is the host's single-selection
     /// focus, so it keeps the neutral selection wash; hover paints the fainter
     /// neutral wash only when the row is not selected. A sounding row paints
@@ -656,27 +658,15 @@ public final class AppRowView: NSView {
     /// opaque system background, which would obscure the row's slider /
     /// readout / destination popup. Factored out of `draw(_:)` so offscreen
     /// tests (which never rasterize `draw(_:)`'s actual pixels) can assert it.
-    private var currentHighlightColor: NSColor? {
-        if isSelected {
-            return Tokens.Color.engagedChrome.withAlphaComponent(PopoverColumnGrid.rowSelectionWashAlpha)
-        } else if isHovered {
-            return Tokens.Color.engagedChrome.withAlphaComponent(PopoverColumnGrid.rowHoverWashAlpha)
-        } else {
-            return nil
-        }
+    private var currentHighlightAlpha: CGFloat? {
+        if isSelected { return PopoverColumnGrid.rowSelectionWashAlpha }
+        if isHovered { return PopoverColumnGrid.rowHoverWashAlpha }
+        return nil
     }
 
     public override func draw(_ dirtyRect: NSRect) {
-        if let highlight = currentHighlightColor {
-            let rect = bounds.insetBy(
-                dx: PopoverColumnGrid.selectionHighlightInsetX,
-                dy: PopoverColumnGrid.selectionHighlightInsetY)
-            let path = NSBezierPath(
-                roundedRect: rect,
-                xRadius: PopoverColumnGrid.selectionHighlightCornerRadius,
-                yRadius: PopoverColumnGrid.selectionHighlightCornerRadius)
-            highlight.setFill()
-            path.fill()
+        if let alpha = currentHighlightAlpha {
+            PopoverColumnGrid.fillRowWash(in: bounds, alpha: alpha)
         }
         super.draw(dirtyRect)
     }
@@ -767,34 +757,16 @@ public final class AppRowView: NSView {
 
     public override func updateTrackingAreas() {
         super.updateTrackingAreas()
-        for area in trackingAreas { removeTrackingArea(area) }
-        addTrackingArea(NSTrackingArea(
-            rect: bounds,
-            options: [.mouseEnteredAndExited, .mouseMoved, .activeInActiveApp, .inVisibleRect],
-            owner: self))
-    }
-
-    public override func mouseEntered(with event: NSEvent) { isHovered = true }
-    public override func mouseExited(with event: NSEvent) { isHovered = false }
-
-    /// Sticky-hover fix (shared row idiom): a bottom-most row can miss
-    /// `mouseExited` when the pointer leaves into an untracked dead-zone below
-    /// the card, so reconcile against the true pointer position — fed by the
-    /// tracking area's own `.mouseMoved` option (P2-1), not an app-wide
-    /// `NSEvent` monitor.
-    public override func mouseMoved(with event: NSEvent) {
-        guard let window else { return }
-        let point = convert(window.mouseLocationOutsideOfEventStream, from: nil)
-        isHovered = bounds.contains(point)
+        hoverTracker.update()
     }
 
     public override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        isHovered = false
+        hoverTracker.setHovered(false)
     }
 
     /// Test hooks for the hover wash.
-    public func test_setHovered(_ hovered: Bool) { isHovered = hovered }
+    public func test_setHovered(_ hovered: Bool) { hoverTracker.setHovered(hovered) }
     public var test_isHovered: Bool { isHovered }
 
     /// The alpha component of the row-highlight colour `draw(_:)` currently
@@ -803,7 +775,7 @@ public final class AppRowView: NSView {
     /// (`PopoverColumnGrid.rowSelectionWashAlpha`/`rowHoverWashAlpha`) differ.
     /// Exposed because offscreen tests can't rasterize `draw(_:)`'s output to
     /// inspect the painted pixels directly.
-    public var test_highlightAlpha: CGFloat? { currentHighlightColor?.alphaComponent }
+    public var test_highlightAlpha: CGFloat? { currentHighlightAlpha }
 
     /// The destination `%` readout's current text colour (V7: tertiary while
     /// "Follows main output", secondary otherwise).

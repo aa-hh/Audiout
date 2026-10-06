@@ -841,7 +841,7 @@ public final class PopoverController: NSObject {
             guard let self, self.groupController?.isMainOutMember(id) == true,
                   let device = self.devicesByID[id] else { return }
             switch device.connectionState {
-            case .connecting, .reconnecting, .connected: return
+            case .connecting, .reconnecting, .connected, .awaitingPassword: return
             case .off, .failed: self.groupController?.requestReconnect(for: id)
             }
         }
@@ -2906,7 +2906,7 @@ public final class PopoverController: NSObject {
         for id in memberIDs {
             switch devicesByID[id]?.connectionState {
             case .connected:                 return .connected
-            case .connecting, .reconnecting: anyConnecting = true
+            case .connecting, .reconnecting, .awaitingPassword: anyConnecting = true
             default:                         break
             }
         }
@@ -3541,8 +3541,10 @@ public final class PopoverController: NSObject {
                 // over any prior dismissal, so clear the dismissal record before
                 // (re)opening. This is what re-surfaces the panel on a
                 // "Try again → fails again" (`.failed → .connecting → .failed`).
-                dismissedDiagnosisIDs.remove(device.id)
-                openDiagnosisIDs.insert(device.id)
+                if device.id != passwordSheetDeviceID {
+                    dismissedDiagnosisIDs.remove(device.id)
+                    openDiagnosisIDs.insert(device.id)
+                }
                 if device.id == passwordSheetDeviceID, passwordSheetSubmitted,
                    case .failed(let failure) = current {
                     passwordSheetSubmitted = false
@@ -3562,6 +3564,11 @@ public final class PopoverController: NSObject {
                 }
                 // Leaving `.failed` ends the episode — clear both the open intent
                 // and the dismissal record so a future failure re-expands afresh.
+                openDiagnosisIDs.remove(device.id)
+                dismissedDiagnosisIDs.remove(device.id)
+            case .awaitingPassword:
+                // A password wait ends any failure episode: the row's link is
+                // the door, so no panel.
                 openDiagnosisIDs.remove(device.id)
                 dismissedDiagnosisIDs.remove(device.id)
             case .connecting, .reconnecting:
@@ -3675,7 +3682,9 @@ public final class PopoverController: NSObject {
     /// Ask for `id`'s AirPlay password. Connect stores it and retries through
     /// `GroupController.submitAirPlayPassword`; the sheet stays up until the
     /// speaker connects (dismiss) or fails again (`showResult`), both read off
-    /// the connection edges in `handleConnectionTransitions`.
+    /// the connection edges in `handleConnectionTransitions`. While the sheet
+    /// is up its speaker's diagnosis panel does not open; Cancel on a
+    /// still-failed speaker opens it.
     func presentPasswordSheet(for id: String) {
         guard passwordSheet == nil else { return }
         Analytics.capture("airplay:code_prompt_shown", ["kind": "password"])
@@ -3685,7 +3694,15 @@ public final class PopoverController: NSObject {
             self.passwordSheetSubmitted = true
             self.groupController?.submitAirPlayPassword(text, for: id, source: "mac")
         }
-        sheet.onCancel = { [weak self] in self?.dismissPasswordSheet() }
+        sheet.onCancel = { [weak self] in
+            guard let self else { return }
+            self.dismissPasswordSheet()
+            if case .failed = self.devicesByID[id]?.connectionState {
+                self.dismissedDiagnosisIDs.remove(id)
+                self.openDiagnosisIDs.insert(id)
+                self.reconcileDiagnosisPanels(animated: true)
+            }
+        }
         passwordSheet = sheet
         passwordSheetDeviceID = id
         passwordSheetSubmitted = false
@@ -3809,6 +3826,12 @@ extension PopoverController: DeviceRowView.Delegate {
         if let reason = result.refusalReason { props["refusal_reason"] = reason }
         Analytics.capture("mixer:device_selected", props)
         handleSelection(result, deviceID: id)
+    }
+
+    /// The row's "Enter Password…" link, or a click on a selected row waiting
+    /// for its password.
+    public func deviceRowDidRequestPasswordEntry(_ row: DeviceRowView) {
+        presentPasswordSheet(for: row.device.id)
     }
 
     /// The user clicked the transient offer: put the membership back through

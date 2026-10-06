@@ -99,6 +99,11 @@ public final class DeviceRowView: NSView {
         /// raised after refusing a second speaker under the one-speaker limit.
         /// Default no-op for hosts that never offer it.
         func deviceRowDidRequestSwitchHere(_ row: DeviceRowView)
+        /// The user asked to enter this speaker's AirPlay password, from the
+        /// row's "Enter Password…" link or a click on a selected row already
+        /// waiting for one. The host raises its password sheet. Default no-op
+        /// for hosts without the sheet.
+        func deviceRowDidRequestPasswordEntry(_ row: DeviceRowView)
     }
 
     /// Control-Center row density: comfortable height that seats a mini switch,
@@ -292,6 +297,10 @@ public final class DeviceRowView: NSView {
     /// state, raised when a second speaker is refused under the one-speaker limit.
     let switchOfferButton = NSButton()
     var switchOfferOffered = false
+    /// "Enter Password…", in the same slot, shown while the speaker waits for
+    /// its first password (`.awaitingPassword`).
+    let enterPasswordButton = NSButton()
+    var enterPasswordOffered = false
     /// The FEED column's main-mix segment text, or `nil` when this row is not
     /// currently a member of the ACTIVE main-mix target (a redirect-only row
     /// can still show app segments alone). "System" for a manual Selected-
@@ -713,9 +722,9 @@ public final class DeviceRowView: NSView {
         // below. Stored on `self` (not just local) so `updateFeedText()`
         // reads the same value.
         switch device.connectionState {
-        case .connecting, .reconnecting, .failed: controlsMuted = true
-        case .connected:                         controlsMuted = false
-        case .off:                               controlsMuted = !device.isAvailable
+        case .connecting, .reconnecting, .awaitingPassword, .failed: controlsMuted = true
+        case .connected:                                            controlsMuted = false
+        case .off:                                                  controlsMuted = !device.isAvailable
         }
         faderCell.isMutedControl = controlsMuted
         // Cast feed-gain pending state (host-owned, id-keyed timer — the
@@ -930,9 +939,9 @@ public final class DeviceRowView: NSView {
             // §Call-1 node vocabulary): connecting/reconnecting → plain gold node, line stops short;
             // failed → failure-red ring; connected/idle → filled gold.
             switch device.connectionState {
-            case .connecting, .reconnecting: node = .connecting
-            case .failed:                    node = .failed
-            case .connected, .off:           node = .member
+            case .connecting, .reconnecting, .awaitingPassword: node = .connecting
+            case .failed:                                       node = .failed
+            case .connected, .off:                              node = .member
             }
         } else if localFallbackOutput {
             // The speakers are unreachable and the engine dropped audio back to
@@ -1736,6 +1745,23 @@ public final class DeviceRowView: NSView {
         removalUndoStack.addArrangedSubview(removalUndoButton)
         removalUndoStack.isHidden = true
         switchOfferButton.isHidden = true
+        // An underlined caption-size text link, unlike the two bordered offers
+        // above: the underline is its control signal, as on the licence gate's
+        // quiet links.
+        enterPasswordButton.translatesAutoresizingMaskIntoConstraints = false
+        enterPasswordButton.bezelStyle = .accessoryBar
+        enterPasswordButton.isBordered = false
+        enterPasswordButton.controlSize = .small
+        enterPasswordButton.attributedTitle = NSAttributedString(
+            string: "Enter Password…",
+            attributes: [
+                .font: Tokens.Font.caption,
+                .foregroundColor: Tokens.Color.label2,
+                .underlineStyle: NSUnderlineStyle.single.rawValue,
+            ])
+        enterPasswordButton.target = self
+        enterPasswordButton.action = #selector(enterPasswordClicked(_:))
+        enterPasswordButton.isHidden = true
 
         slider.translatesAutoresizingMaskIntoConstraints = false
         // Warm fader skin: install the drawing-only cell BEFORE the value/
@@ -1830,6 +1856,7 @@ public final class DeviceRowView: NSView {
             addSubview(feedStack)
             addSubview(removalUndoStack)   // same slot, shown only while offered
             addSubview(switchOfferButton)  // same slot, shown only while offered
+            addSubview(enterPasswordButton) // same slot, shown only while offered
         }
         // Bluetooth SYNC chip (T6), sharing that slot's left portion — sync
         // rows re-anchor the FEED pill to the far right below.
@@ -1947,6 +1974,12 @@ public final class DeviceRowView: NSView {
                     constant: -PopoverColumnGrid.trailingControlTrailing),
                 switchOfferButton.centerYAnchor.constraint(equalTo: centerYAnchor),
                 switchOfferButton.heightAnchor.constraint(
+                    greaterThanOrEqualToConstant: PopoverColumnGrid.removalUndoButtonHeight),
+                enterPasswordButton.trailingAnchor.constraint(
+                    equalTo: trailingAnchor,
+                    constant: -PopoverColumnGrid.trailingControlTrailing),
+                enterPasswordButton.centerYAnchor.constraint(equalTo: centerYAnchor),
+                enterPasswordButton.heightAnchor.constraint(
                     greaterThanOrEqualToConstant: PopoverColumnGrid.removalUndoButtonHeight),
                 // ≥24 pt of hit height; the small bezel draws centred inside it.
                 removalUndoButton.heightAnchor.constraint(
@@ -2315,6 +2348,10 @@ public final class DeviceRowView: NSView {
         delegate?.deviceRowDidRequestSwitchHere(self)
     }
 
+    @objc private func enterPasswordClicked(_ sender: NSButton) {
+        delegate?.deviceRowDidRequestPasswordEntry(self)
+    }
+
     /// Show/hide the offer. It borrows the reserved trailing slot, so whatever
     /// normally lives there yields for as long as the offer stands: the FEED
     /// pills (empty anyway on a just-removed device) and, on a Bluetooth row,
@@ -2326,7 +2363,11 @@ public final class DeviceRowView: NSView {
             "Undo removing \(device.name) from Main Audio")
         switchOfferButton.isHidden = !switchOfferOffered
         switchOfferButton.setAccessibilityLabel("Play on \(device.name) instead")
-        if removalUndoOffered || switchOfferOffered {
+        enterPasswordOffered = device.connectionState == .awaitingPassword
+            && !removalUndoOffered && !switchOfferOffered
+        enterPasswordButton.isHidden = !enterPasswordOffered
+        enterPasswordButton.setAccessibilityLabel("Enter the password for \(device.name)")
+        if removalUndoOffered || switchOfferOffered || enterPasswordOffered {
             feedStack.isHidden = true
             if showsSyncControls { syncChipButton.isHidden = true }
         } else if showsSyncControls {
@@ -2484,6 +2525,13 @@ public final class DeviceRowView: NSView {
     private func performNameAction() {
         if canRecoverByName {
             delegate?.deviceRowDidRequestReconnect(self)
+            return
+        }
+        // A click on the name of a selected row that waits for its password
+        // asks for the password; the checkbox still removes it.
+        if device.connectionState == .awaitingPassword && isSelectedInSet {
+            enableCheckbox.state = .on
+            delegate?.deviceRowDidRequestPasswordEntry(self)
             return
         }
         guard enableCheckbox.isEnabled else { return }
@@ -3031,6 +3079,7 @@ public final class DeviceRowView: NSView {
     private var feedAccessibilityClause: String? {
         guard busActive else { return nil }
         if case .failed = device.connectionState { return nil }
+        if device.connectionState == .awaitingPassword { return nil }
         if !hasLiveConnection { return nil }
         let names = feedNames(qualifiedByGroup: true)
         guard !names.isEmpty else { return nil }
@@ -3053,6 +3102,7 @@ public final class DeviceRowView: NSView {
         case .connecting:    return "connecting"
         case .reconnecting:  return "reconnecting"
         case .connected:     return "connected"
+        case .awaitingPassword: return "waiting for password"
         case .failed:        return "couldn't connect"
         }
     }
@@ -3152,6 +3202,7 @@ public extension DeviceRowView.Delegate {
     func deviceRowDidRequestUndoRemoval(_ row: DeviceRowView) {}
     /// Default no-op — only the popover offers "Play here".
     func deviceRowDidRequestSwitchHere(_ row: DeviceRowView) {}
+    func deviceRowDidRequestPasswordEntry(_ row: DeviceRowView) {}
 }
 
 // MARK: - Invisible switch cell (spec §4.8)

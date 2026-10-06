@@ -410,8 +410,11 @@ public protocol OutputBackend: AnyObject {
     ///
     /// Required contract: a still-desired `.failed` id gets a fresh attempt;
     /// an id the backend doesn't currently desire, or one already `.connected`,
-    /// is a no-op. Other non-connected states are CONFORMER LATITUDE:
-    /// `NativeBackend` re-kicks any still-desired non-`.connected` id (a retry
+    /// is a no-op. `NativeBackend` also re-drives, without membership, a
+    /// per-app route target that waits for a password (the per-app counterpart
+    /// of its Bluetooth arm); `MockBackend` does not. Other non-connected
+    /// states are CONFORMER LATITUDE: `NativeBackend` re-kicks any
+    /// still-desired non-`.connected` id (a retry
     /// mid-`.reconnecting` restates `.connecting` — the user pressed the
     /// button, so the attempt marker wins), while `MockBackend` acts only on
     /// `.failed` and no-ops otherwise (scripted tests want no surprise

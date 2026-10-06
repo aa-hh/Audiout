@@ -571,11 +571,13 @@ public final class NativeDiscovery: @unchecked Sendable {
         // advertised `_airplay._tcp` with the AP2 feature bits stays AP1-only.
         let isAP2 = entry.hasEverBeenAP2 || classify(airplay: entry.airplay)
         // A sticky-AP2 device that has gone offline (lost `_airplay._tcp`, only
-        // `_raop._tcp` lingers) keeps its last AP2-sourced descriptor — name,
-        // address, port, TXT all stay put — so the row doesn't cosmetically flip
-        // to the raop-decorated name just because the device powered off. It's
-        // the same physical device at the same address; only availability changed.
-        let built: DeviceDescriptor = (entry.hasEverBeenAP2 && entry.airplay == nil)
+        // `_raop._tcp` lingers) keeps its last AP2-sourced descriptor and access
+        // — name, address, port, TXT, the advertised lock all stay put — so the
+        // row doesn't cosmetically flip to the raop-decorated name, or change its
+        // lock glyph, just because the device powered off. It's the same physical
+        // device at the same address; only availability changed.
+        let carriesForward = entry.hasEverBeenAP2 && entry.airplay == nil
+        let built: DeviceDescriptor = carriesForward
             ? entry.device.descriptor
             : descriptor(from: source)
         // The `DeviceDescriptor` is the ENGINE-facing contract, so its `name`
@@ -602,7 +604,7 @@ public final class NativeDiscovery: @unchecked Sendable {
             outputID: outputID,
             isAirPlay2Supported: isAP2,
             isAvailable: available,
-            access: access(airplay: entry.airplay, raop: entry.raop)
+            access: carriesForward ? entry.device.access : access(airplay: entry.airplay, raop: entry.raop)
         )
     }
 

@@ -758,6 +758,38 @@ import AirPlayEngine
         discovery.stop()
     }
 
+    /// Recomputing `access` from the lingering `_raop._tcp` record when a sticky-AP2
+    /// device loses its `_airplay._tcp` advert (flipping the lock glyph and
+    /// `credentialKind` while only availability changed) turns it red.
+    @Test func losingTheAirplayLegKeepsTheAdvertisedAccess() {
+        let browser = FakeBrowser()
+        let discovery = makeDiscovery(browser: browser)
+        let events = EventCollector()
+        discovery.onEvent = { events.append($0) }
+        discovery.start()
+
+        let id = "AA:BB:CC:DD:EE:51"
+        browser.resolve(airplayService(id: id, name: "Sonos", features: ap2Features,
+                                       extraTXT: ["act": "2"]))
+        browser.resolve(raopService(id: id, name: "Sonos"))
+        guard case .appeared(let first)? = events.wait(count: 1).first else {
+            Issue.record("expected .appeared")
+            return
+        }
+        #expect(first.access == .homeMembersOnly)
+
+        browser.remove(RemovedService(serviceType: .airplay, deviceID: id, name: "Sonos"))
+        guard case .updated(let offline)? = events.wait(count: 2).last else {
+            Issue.record("expected the offline .updated once the grace elapses")
+            return
+        }
+        #expect(!offline.isAvailable)
+        #expect(offline.access == .homeMembersOnly,
+                "the raop record carries no act key, so only availability changed")
+
+        discovery.stop()
+    }
+
     /// A device advertising only `_airplay._tcp` gets the same debounce as a
     /// two-leg one: a blip emits nothing, a sustained loss disappears it once the
     /// grace elapses. A grace covering only the airplay-gone-raop-lingers branch

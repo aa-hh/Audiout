@@ -15,6 +15,8 @@
 #     settings and keeps showing up in Sound settings and Audio MIDI Setup
 #     long after the app that made it is deleted
 #   - an always-on ROOT PTP-helper launchd daemon
+#   - stored AirPlay speaker passwords in the login keychain (one item per
+#     speaker under `<bundle id>.airplay-password`)
 #   - possibly its own Application Support / Caches / saved-state directories
 #   - a listening night still running (dev/listening) and its scripts, never
 #     its results/ recordings
@@ -122,10 +124,11 @@ Usage: purge-dev-installs.sh [--apply|--help]
 
 Removes every trace of every NON-SHIPPING Audiout build from this Mac:
 preference domains, TCC privacy grants, persistent aggregate audio devices,
-root PTP-helper daemons, per-build support/cache/saved-state directories, and
-stray .app bundles. Also clears the preference-domain files leaked by the test
-suites, any user launch agent under either product name, and dev tooling left
-inside the app's data directories.
+root PTP-helper daemons, stored AirPlay speaker passwords in the login keychain
+(one item per speaker under <bundle id>.airplay-password), per-build
+support/cache/saved-state directories, and stray .app bundles. Also clears the
+preference-domain files leaked by the test suites, any user launch agent under
+either product name, and dev tooling left inside the app's data directories.
 
 The shipping build (com.audiout.Audiout) and its saved settings in
 ~/Library/Application Support/Audiout/ are never touched, and neither is the
@@ -178,11 +181,11 @@ removed_anything=0
 # 1. Dev bundle ids
 # ============================================================================
 # Union of every surface a dead dev build can still be named in — its
-# preferences file, its root helper daemon, its support directory, and any
-# surviving .app bundle. A build can appear in any one of those with no trace
-# in the others (its .app deleted but its daemon still registered; or the
-# reverse, an .app that was launched once and left a TCC row but no prefs), so
-# all four are searched and the results unioned.
+# preferences file, its root helper daemon, its support directory, a stored
+# AirPlay speaker password, and any surviving .app bundle. A build can appear
+# in any one of those with no trace in the others (its .app deleted but its
+# daemon still registered; or the reverse, an .app that was launched once and
+# left a TCC row but no prefs), so all five are searched and the results unioned.
 echo "==> Discovering non-shipping bundle ids"
 
 # .app bundles are identified by the id INSIDE them, never by filename — a dev
@@ -214,6 +217,10 @@ do
   done <<< "$(find "$dir" -maxdepth 4 -name "*.app" -type d 2>/dev/null || true)"
 done
 
+# One attribute-only dump of the keychain (no -d, so no password is read and no
+# prompt appears), used here to find ids and again per id below.
+KEYCHAIN_ATTRS="$(security dump-keychain 2>/dev/null || true)"
+
 DEV_IDS="$(
   {
     find "$PREFS" -maxdepth 1 -name "${NAMESPACE}*.plist" 2>/dev/null \
@@ -223,6 +230,9 @@ DEV_IDS="$(
       | sed 's|\.ptphelper$||'
     find "$HOME/Library/Application Support" -maxdepth 1 -name "${NAMESPACE}*" 2>/dev/null \
       | sed "s|.*/||"
+    printf '%s\n' "$KEYCHAIN_ATTRS" \
+      | grep -oE "\"svce\"<blob>=\"${NAMESPACE_RE}[A-Za-z0-9_.-]+\.airplay-password\"" \
+      | sed 's|^"svce"<blob>="||; s|\.airplay-password"$||'
     [ "${#dev_apps[@]}" -gt 0 ] && printf '%s\n' "${dev_apps[@]}" | cut -d'|' -f1
   } | sort -u | grep -v "^${PROD_BUNDLE_ID}\$" || true
 )"
@@ -266,6 +276,14 @@ if [ "${#dev_ids[@]}" -gt 0 ]; then
       [ -e "$dir" ] && echo "        $dir"
     done
 
+    # Stored AirPlay speaker passwords: one keychain item per speaker, service
+    # "<bundle id>.airplay-password" (KeychainAirPlayPasswordStore).
+    pw_service="$id.airplay-password"
+    pw_count="$(printf '%s\n' "$KEYCHAIN_ATTRS" | grep -cF "\"svce\"<blob>=\"$pw_service\"" || true)"
+    if [ "$pw_count" -gt 0 ]; then
+      echo "        $pw_count stored AirPlay speaker password(s) in the login keychain ($pw_service)"
+    fi
+
     if [ "$APPLY" -eq 1 ]; then
       # `defaults delete` first so cfprefsd drops its in-memory copy; deleting
       # the file alone lets the daemon write it straight back out.
@@ -280,6 +298,10 @@ if [ "${#dev_ids[@]}" -gt 0 ]; then
         "$HOME/Library/Caches/$id" \
         "$HOME/Library/HTTPStorages/$id" \
         "$HOME/Library/Saved Application State/$id.savedState"
+      # One item per call, so repeat until none is left.
+      if [ "$pw_count" -gt 0 ]; then
+        while security delete-generic-password -s "$pw_service" >/dev/null 2>&1; do :; done
+      fi
       removed_anything=1
     fi
   done

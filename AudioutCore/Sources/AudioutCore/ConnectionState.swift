@@ -19,11 +19,17 @@ import Foundation
 /// `.failed` survives the device being dropped from the expected-selected set
 /// (that removal is failure *cleanup*, not a state override), and only clears
 /// on `.off` when the device disappears entirely, or on retry (`.connecting`).
+/// A password wait: `.connecting → .awaitingPassword`, then
+/// `.awaitingPassword → .connecting` on a submitted password or a retry, and
+/// `.awaitingPassword → .off` on deselect or disappearance.
 public enum ConnectionState: Equatable, Sendable {
     case off
     case connecting
     case connected
     case reconnecting
+    /// The receiver demanded a password and none has been supplied. Not an
+    /// error: a refused password is `.failed(.authRequired)`.
+    case awaitingPassword
     case failed(ConnectionFailure)
 }
 
@@ -102,7 +108,7 @@ extension ConnectionFailure {
         case .notResponding:    return "Didn't respond"
         case .vanished:         return "Not on the network"
         case .refusedOrBusy:    return "Connection refused"
-        case .authRequired:     return "Password required"
+        case .authRequired:     return "Password didn't work"
         case .codeRequired:     return "Code required"
         case .homeMembersOnly:  return "Home members only"
         case .droppedMidStream: return "Connection dropped"
@@ -126,7 +132,7 @@ extension ConnectionFailure {
         case .refusedOrBusy:
             return "The speaker refused the connection. Another device may hold an exclusive session. Stop playback from other apps or restart the speaker, then try again."
         case .authRequired:
-            return "This speaker needs its AirPlay password. Enter it to connect."
+            return "The speaker didn't accept that password. Enter it again to connect."
         case .codeRequired:
             return "This Apple TV shows a code on its screen when a new device connects. Entering it here isn't supported yet."
         case .homeMembersOnly:

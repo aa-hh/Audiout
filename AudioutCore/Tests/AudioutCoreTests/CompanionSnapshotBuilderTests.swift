@@ -376,19 +376,21 @@ import AudioutProtocol
     // MARK: Connection fields (D9 full parity)
 
     /// Dropping `failureCause`, or sending `credentialKind` for a speaker that
-    /// already has a stored password (or never sending it), turns it red.
+    /// already has a stored password (or never sending it), turns it red;
+    /// so does sending a password wait as `"failed"` or with a cause.
     @Test func connectionCarriesFailureHeadlineAndSuggestion() async throws {
         let backend = try await makeBackend()
         let controller = makeGroupController(backend: backend)
         let appRouting = makeAppRouting()
 
-        func build(storedPassword: Bool) -> Snapshot {
+        func build(storedPassword: Bool, awaitingPassword: Bool = false) -> Snapshot {
             CompanionSnapshotBuilder.build(
                 devices: backend.devices.map { device in
                     var device = device
                     if device.id == "speaker-b" {
                         device.airPlayAccess = .password
                         device.hasStoredPassword = storedPassword
+                        if awaitingPassword { device.connectionState = .awaitingPassword }
                     }
                     return device
                 },
@@ -420,6 +422,15 @@ import AudioutProtocol
 
         let stored = try #require(build(storedPassword: true).devices.first { $0.id == "speaker-b" })
         #expect(stored.connection.credentialKind == nil)
+
+        let waiting = try #require(
+            build(storedPassword: false, awaitingPassword: true).devices.first { $0.id == "speaker-b" })
+        #expect(waiting.connection.state == "awaitingPassword")
+        #expect(waiting.connection.credentialKind == "password")
+        #expect(waiting.connection.access == "password")
+        #expect(waiting.connection.failureHeadline == nil)
+        #expect(waiting.connection.failureSuggestion == nil)
+        #expect(waiting.connection.failureCause == nil)
     }
 
     /// Dropping `access` from the `off` or `failed` state in

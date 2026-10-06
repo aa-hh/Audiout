@@ -178,7 +178,12 @@ let package = Package(
         // whitens the passive-drift correlation, makes a peak clear two more
         // gates before it counts (its height over the nearest rival lag, and
         // its score against the lags right around it), votes four sub-bands,
-        // and lets each speaker own its own peak inside a shared search window.
+        // and lets each speaker own its own peak inside a shared search window;
+        // 0.18.0 added the `submitSpeakerPassword` command and the failure
+        // cause and `credentialKind` on `ConnectionInfo`; 0.19.0 adds the
+        // speaker's `access` kind to `ConnectionInfo`, which
+        // `CompanionSnapshotBuilder` fills so the phone draws the same lock the
+        // Mac does.
         .package(url: "https://github.com/aa-hh/audiout-shared.git",
                  from: "0.19.0"),
         // Sparkle 2 (MIT) — in-app updates for the paid, notarised build only.

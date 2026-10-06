@@ -88,6 +88,8 @@ The menu-bar popover UI (pure AppKit), and — since U3 — the **one-surface ho
 | `RunningAppInfo` | Snapshot of a running app for the add picker. |
 | `SpeakerPasswordSheetViewController` | The AirPlay password sheet; opens on a user join or the panel's button, never on a background reconnect. |
 
+2026-10-04, AirPlay passwords: the diagnosis panel never opens on a `.failed` edge for the speaker whose password sheet is up (`passwordSheetDeviceID`); Cancel on a speaker still `.failed` opens it. A panel already open when its "Enter Password…" button raises the sheet stays open.
+2026-10-04, AirPlay passwords, password wait on the row: a row in `.awaitingPassword` draws the connecting ring and node with an underlined caption-size "Enter Password…" link in the trailing slot (FEED and SYNC yield to it as they do to the two offers). The link, and a click on the selected waiting row's name or checkbox, open the sheet through `deviceRowDidRequestPasswordEntry`; the click never deselects. The wait opens no diagnosis panel and sends no `connection:diagnosis_shown`; `handleConnectionTransitions` clears any open panel on entering it. The red panel is reserved for a refused password (`.failed(.authRequired)`).
 
 ## Archived folder rules
 

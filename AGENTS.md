@@ -238,9 +238,10 @@ repo. `AudioutCore` pins it by version.
   leaves permanent residue that trashing the `.app` does not remove: a
   preferences domain, TCC grants (a dead row in System Settings › Privacy &
   Security forever), a PUBLIC aggregate audio device that keeps appearing in
-  Sound settings, and a root PTP-helper daemon. This script finds every
-  non-shipping `com.audiout.*` identity across all four surfaces, unions
-  them, and removes the lot — plus the preference domains leaked by the test
+  Sound settings, a root PTP-helper daemon, and a stored AirPlay speaker
+  password in the login keychain. This script finds every non-shipping
+  `com.audiout.*` identity across all five surfaces, unions them, and removes
+  the lot — plus the preference domains leaked by the test
   suites (`swift test` creates a per-test `UserDefaults` suite and never
   removes it; this had reached **48,769 plists**, 98% of everything in
   `~/Library/Preferences`). Dry-run by default; `--apply` to act. The shipping

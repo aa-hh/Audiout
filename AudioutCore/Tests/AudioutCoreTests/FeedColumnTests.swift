@@ -371,6 +371,7 @@ import AudioutCore
         #expect(label.components(separatedBy: "playing").count - 1 == 1, "spoken exactly once")
     }
 
+    // Letting `feedAccessibilityClause` speak for `.awaitingPassword` turns it red.
     @Test func failedRowNeverSpeaksAFeedClauseSinceTheConnectionClauseAlreadyCoversIt() {
         let row = makeBusRow()
         row.apply(makeDevice(connectionState: .failed(.init(cause: .notResponding))),
@@ -378,6 +379,12 @@ import AudioutCore
         let label = row.test_accessibilityLabel ?? ""
         #expect(label.hasSuffix(", couldn't connect"), "no trailing feed clause — the connection clause already spoke the failure")
         #expect(!(label.contains("playing")))
+
+        row.apply(makeDevice(connectionState: .awaitingPassword),
+                  selected: true, controllable: true, routedAppNames: ["Music"])
+        let waitingLabel = row.test_accessibilityLabel ?? ""
+        #expect(waitingLabel.hasSuffix(", waiting for password"))
+        #expect(!waitingLabel.contains("playing"))
     }
 
     @Test func nonBusRowNeverSpeaksAFeedClauseEither() {

@@ -5232,6 +5232,17 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         #expect(!(capture.meteringActive), "stop() must leave metering inactive")
     }
 
+    /// The Touch Bar pulses its play button for `slowOutputDelayMs` after a
+    /// start or stop. Turns red if a room with nothing slow reports a delay (the
+    /// button would pulse on every play with plain AirPlay), or if a slow
+    /// output's raised room delay stops being reported (no pulse for Cast).
+    @Test func slowOutputDelayOnlyWhenAnOutputRaisesTheRoomDelay() {
+        let (backend, _, _) = makeBackend()
+        #expect(backend.slowOutputDelayMs == nil)
+        backend.stateQueue.sync { backend.btRoomTermMs = 5500 }
+        #expect(backend.slowOutputDelayMs == 5500)
+    }
+
     /// The Touch Bar's play/pause glyph reads `.level`, and the popover gate
     /// keeps `.level` off whenever the popover is closed, which is nearly always
     /// while someone uses the Touch Bar. `setDeviceLevelsWanted(true)` must keep

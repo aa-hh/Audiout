@@ -495,6 +495,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// whole bar means every control on it is one we drive.
     private lazy var touchBarFullBar: TouchBarFullBar = {
         let bar = TouchBarFullBar()
+        bar.slowOutputDelay = { [weak self] in
+            (self?.backend as? NativeBackend)?.slowOutputDelayMs.map { TimeInterval($0) / 1000 }
+        }
         bar.onPresentedChange = { [weak self] presented in
             (self?.backend as? MeteringControlling)?.setDeviceLevelsWanted(presented)
         }

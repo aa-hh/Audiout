@@ -4035,6 +4035,17 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// Bluetooth term (`btRoomTermMs`) raises it the same way the Cast term
     /// does, when the slowest selected Bluetooth speaker's latency plus
     /// headroom exceeds the start buffer.
+    /// How long, in milliseconds, sound takes to reach the room when a slow
+    /// output (a Cast receiver, a high-latency Bluetooth speaker) has pushed the
+    /// room delay past the normal start buffer; `nil` when nothing is slow.
+    /// The Touch Bar pulses its play button for this long after playback starts.
+    public var slowOutputDelayMs: Int? {
+        stateQueue.sync {
+            let room = roomDelayLocked()
+            return room > _startBufferMs ? room : nil
+        }
+    }
+
     func roomDelayLocked() -> Int {   // on stateQueue
         let today = (btSinkEnabled && !btComposition.usesPresentationReference)
             ? btReferenceBufferMs : _startBufferMs

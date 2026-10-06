@@ -57,6 +57,10 @@ final class TouchBarFullBar: NSObject, NSTouchBarDelegate {
     /// keeps the backend's levels flowing for exactly that span, because
     /// ``noteAudioLevel(_:)`` is the play/pause glyph's only input.
     var onPresentedChange: ((Bool) -> Void)?
+    /// Seconds a slow output (a Cast receiver) takes to start sounding after
+    /// the Mac starts playing, or `nil` when nothing is slow. Read each time
+    /// the glyph flips to pause, to pulse for that long.
+    var slowOutputDelay: (() -> TimeInterval?)?
 
     private var presented = false
 
@@ -158,6 +162,7 @@ final class TouchBarFullBar: NSObject, NSTouchBarDelegate {
     private func setPlaying(_ playing: Bool) {
         guard playing != isPlaying else { return }
         isPlaying = playing
+        notePlaybackStarted(playing)
         playPauseButton?.image = NSImage(
             systemSymbolName: playPauseSymbol, accessibilityDescription: "Play or pause")
         playing ? startSilenceTimer() : stopSilenceTimer()
@@ -169,7 +174,7 @@ final class TouchBarFullBar: NSObject, NSTouchBarDelegate {
         guard silenceTimer == nil else { return }
         let timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
-                guard let self, CACurrentMediaTime() - self.lastAudibleAt >= 2.0 else { return }
+                guard let self, CACurrentMediaTime() - self.lastAudibleAt >= Self.silenceHold else { return }
                 self.setPlaying(false)
             }
         }
@@ -188,24 +193,60 @@ final class TouchBarFullBar: NSObject, NSTouchBarDelegate {
     /// While a speaker has been told to play but has not yet confirmed that
     /// sound is coming out (a Cast receiver loading, which can take seconds),
     /// the play/pause button pulses its opacity so a press visibly registered.
-    /// It goes steady again once every speaker confirms or gives up. With
+    /// It goes steady again once every speaker confirms or gives up. It also
+    /// pulses after sound starts or stops leaving the Mac while a slow output
+    /// is in the room (a Cast receiver is ~5 s behind), until it catches up. With
     /// Reduce Motion on it holds at half opacity instead of pulsing. The glyph
     /// is untouched: play versus pause still follows the audio level above.
     func setAwaitingPlayback(_ waiting: Bool) {
+        speakerStillConnecting = waiting
+        reconcileAwaitingPlayback()
+    }
+
+    /// Sound has started or stopped leaving the Mac. With a slow output in the
+    /// room, that output catches up only after its delay: it starts sounding
+    /// that much later, and keeps playing its buffer that much longer after a
+    /// stop. Pulse until it has caught up. A stop is noticed only after
+    /// `silenceHold` of quiet, so that much of the delay has already passed.
+    private func notePlaybackStarted(_ playing: Bool) {
+        startWaitTimer?.invalidate()
+        startWaitTimer = nil
+        if let slow = slowOutputDelay?(), case let delay = playing ? slow : slow - Self.silenceHold, delay > 0 {
+            startWaitTimer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    self?.startWaitTimer = nil
+                    self?.reconcileAwaitingPlayback()
+                }
+            }
+        }
+        reconcileAwaitingPlayback()
+    }
+
+    private func reconcileAwaitingPlayback() {
+        let waiting = speakerStillConnecting || startWaitTimer != nil
         guard waiting != awaitingPlayback else { return }
         awaitingPlayback = waiting
         applyAwaitingPlayback()
     }
 
+    /// Quiet needed before the glyph reads "stopped".
+    private static let silenceHold: TimeInterval = 2.0
+    private var speakerStillConnecting = false
+    private var startWaitTimer: Timer?
     private var awaitingPlayback = false
-    private static let pulseKey = "com.audiout.bar.awaitingPlaybackPulse"
+    private var pulseTimer: Timer?
 
     /// Also called when the button is rebuilt and when the bar comes back after
-    /// a dim, because either can leave a fresh layer with no animation on it.
+    /// a dim, so a fresh button picks the pulse up.
+    ///
+    /// TRAP: the Touch Bar draws its buttons in a system process, which renders
+    /// `alphaValue` but ignores a Core Animation animation added to the button's
+    /// layer. The first version pulsed that way and showed nothing on hardware.
+    /// So a timer steps `alphaValue` itself.
     private func applyAwaitingPlayback() {
+        pulseTimer?.invalidate()
+        pulseTimer = nil
         guard let button = playPauseButton else { return }
-        button.wantsLayer = true
-        button.layer?.removeAnimation(forKey: Self.pulseKey)
         guard awaitingPlayback else {
             button.alphaValue = 1
             return
@@ -214,15 +255,16 @@ final class TouchBarFullBar: NSObject, NSTouchBarDelegate {
             button.alphaValue = 0.5
             return
         }
-        button.alphaValue = 1
-        let pulse = CABasicAnimation(keyPath: "opacity")
-        pulse.fromValue = 1.0
-        pulse.toValue = 0.35
-        pulse.duration = 0.8
-        pulse.autoreverses = true
-        pulse.repeatCount = .infinity
-        pulse.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-        button.layer?.add(pulse, forKey: Self.pulseKey)
+        // One full fade out and back every 1.6 s, as a cosine between 1 and 0.35.
+        let start = CACurrentMediaTime()
+        let timer = Timer.scheduledTimer(withTimeInterval: 1.0 / 20, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let button = self?.playPauseButton else { return }
+                let phase = (CACurrentMediaTime() - start) / 1.6 * 2 * .pi
+                button.alphaValue = 0.675 + 0.325 * cos(phase)
+            }
+        }
+        pulseTimer = timer
     }
 
     // MARK: - The bar

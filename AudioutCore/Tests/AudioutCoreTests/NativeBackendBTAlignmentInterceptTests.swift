@@ -369,6 +369,11 @@ extension SerializedSharedState {
             handoffWatcherFactory: { onBlockedAttempt in
                 AirPlayHandoffWatcher(spawn: NoOpLogStream(), onBlockedAttempt: onBlockedAttempt)
             })
+        // The 4 s production start deadline is wall time, and a stalled GitHub
+        // runner has taken longer than that to answer the holds, so every start
+        // was refused as "The speaker pair changed". A test about the deadline
+        // itself sets a short one.
+        backend.companionAuditionPreparationSeconds = 60
         let sink = SpyBTSink()
         backend.btSyncedSinkFactory = { sink }
         backend.btDeviceIDForUID = { uid in AudioObjectID(1000 + UInt32(abs(uid.hashValue % 1000))) }

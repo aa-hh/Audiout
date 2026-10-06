@@ -9494,7 +9494,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
     /// window but faster than deliberate use. Every click lands in its own window,
     /// so the coalesce counter reads exactly 1 every time and a `coalesced >= 2`
     /// guard alone is unreachable. Two Mac toggles about 330 ms apart against a
-    /// 0.05 s window: neither coalesces, both land inside the production 2 s
+    /// 0.05 s window: neither coalesces, both land inside the
     /// horizon, so the SECOND real transition must arm exactly one re-sync.
     ///
     /// The window here is deliberately SHORTER than the 0.15 s floor the burst
@@ -9503,11 +9503,13 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
     /// the jitter-safe choice. Merging these two clicks would need a 280 ms
     /// `stateQueue` stall, and a merge is the only way this test can go wrong
     /// (2 flips coalesced = net no-op = no transition at all).
-    @Test(.enabled(if: ProcessInfo.processInfo.environment["CI"] == nil, "Quarantined on GitHub runners 2026-10-06: the 330 ms second click lands outside the 2 s horizon when the 3-core runner stalls, so no reset arms and the poll waits its full 120 s (run 37459907744 on PR #291); passes locally in 0.6 s. Issue #258.")) func slowCadenceToggleStormArmsExactlyOneReset() async {
-        // The horizon stays at the helper's production-matching default (2 s): the
-        // point of the case is that clicks 330 ms apart are inside the REAL horizon.
-        let (backend, engine, discovery, _, sink, macSelected) =
-            makeSyncedLocalBackend(macSelectedByDefault: false, syncedLocalSettleWindow: 0.05)
+    @Test func slowCadenceToggleStormArmsExactlyOneReset() async {
+        // A 60 s horizon, not the production 2 s: the two transitions are stamped
+        // in wall time, and a stalled GitHub runner put more than 2 s between
+        // them (run 37459907744), so no reset armed. The 2 s value has its own
+        // test, `syncedLocalTransitionHorizonProductionDefaultIsUnchanged`.
+        let (backend, engine, discovery, _, sink, macSelected) = makeSyncedLocalBackend(
+            macSelectedByDefault: false, syncedLocalSettleWindow: 0.05, syncedLocalTransitionHorizon: 60)
         defer { backend.stop() }
 
         let device = ap2Device(id: "AA:BB:CC:DD:EE:94", name: "Slow Cadence Speaker")

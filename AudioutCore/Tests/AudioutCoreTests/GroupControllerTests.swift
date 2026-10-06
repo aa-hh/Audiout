@@ -24,25 +24,8 @@ import Testing
     ) async throws -> MockBackend {
         let backend = MockBackend(fleet: fleet, staggerDiscovery: false, emitsLevels: false,
                                   simulatesDropouts: false, connectScripts: connectScripts)
-        let stream = backend.makeEventStream()
-        let box = CountBox()
-        try await confirmation("fleet discovered") { discovered in
-            let task = Task {
-                for await event in stream {
-                    if case .deviceAdded = event, await box.increment() >= fleet.count {
-                        discovered(); break
-                    }
-                }
-            }
-            defer { task.cancel() }
-            backend.start()
-            try await withThrowingTaskGroup(of: Void.self) { group in
-                group.addTask { _ = await task.value }
-                group.addTask { try await Task.sleep(for: .seconds(2)) }
-                try await group.next()
-                group.cancelAll()
-            }
-        }
+        backend.start()
+        await SuiteWait.until("the fleet to be discovered") { backend.devices.count == fleet.count }
         return backend
     }
 
@@ -146,7 +129,7 @@ import Testing
         // Point Main Out at a group so composing must not re-route.
         try controller.saveGroup(Group(id: "g1", name: "Pair", memberIDs: ["sonos-move"], memberVolumes: [:]))
         controller.setMainOut(.group(id: "g1"))
-        try await Task.sleep(nanoseconds: 200_000_000)
+        await SuiteWait.until("g1 to become the active group") { controller.activeGroupID == "g1" }
         let before = Set(backend.devices.filter(\.isSelected).map(\.id))
 
         _ = controller.setDeviceSelected("office", true)
@@ -1254,7 +1237,9 @@ import Testing
         controller.activateGroup(id: "g1")
         backend.setVolume(20, for: "sonos-move")
         backend.setVolume(60, for: "office")
-        try await Task.sleep(nanoseconds: 200_000_000)
+        await SuiteWait.until("both members to reach their starting levels") {
+            volume("sonos-move", in: backend) == 20 && volume("office", in: backend) == 60
+        }
 
         controller.setMainOutMasterVolume(80)
         await SuiteWait.until("Main Out's master gain to reach 80") {
@@ -1292,7 +1277,9 @@ import Testing
         controller.activateGroup(id: "g1")
         backend.setVolume(80, for: "sonos-move")
         backend.setVolume(20, for: "office")
-        try await Task.sleep(nanoseconds: 200_000_000)
+        await SuiteWait.until("both members to reach their starting levels") {
+            volume("sonos-move", in: backend) == 80 && volume("office", in: backend) == 20
+        }
 
         controller.setMainOutMasterVolume(0)
         await SuiteWait.until("Main Out's master gain to reach 0") {
@@ -1303,7 +1290,8 @@ import Testing
         #expect(volume("office", in: backend) == 20)
 
         controller.setMainOutMasterVolume(60)
-        try await Task.sleep(nanoseconds: 100_000_000)
+        await SuiteWait.until("Main Out's master gain to reach 60") { controller.mainOutMasterVolume == 60 }
+        _ = backend.devices   // flush any member write the change enqueued
         #expect(volume("sonos-move", in: backend) == 80, "coming back up restores the exact original balance")
         #expect(volume("office", in: backend) == 20)
     }
@@ -1320,12 +1308,15 @@ import Testing
         controller.activateGroup(id: "g1")
         backend.setVolume(100, for: "sonos-move")
         backend.setVolume(50, for: "office")
-        try await Task.sleep(nanoseconds: 200_000_000)
+        await SuiteWait.until("both members to reach their starting levels") {
+            volume("sonos-move", in: backend) == 100 && volume("office", in: backend) == 50
+        }
 
         for step in [0, 25, 50, 75, 100, 75, 50, 25, 0] {
             controller.setMainOutMasterVolume(step)
         }
-        try await Task.sleep(nanoseconds: 100_000_000)
+        await SuiteWait.until("Main Out's master gain to end the sweep at 0") { controller.mainOutMasterVolume == 0 }
+        _ = backend.devices   // flush any member write the sweep enqueued
 
         #expect(volume("sonos-move", in: backend) == 100, "a member's own level has no path back to Main's sweep")
         #expect(volume("office", in: backend) == 50)
@@ -1350,7 +1341,8 @@ import Testing
         let steps = stride(from: 20, through: 95, by: 5).map { $0 }   // 16 steps
         #expect(steps.count == 16)
         for step in steps { controller.setMainOutMasterVolume(step) }
-        try await Task.sleep(nanoseconds: 150_000_000)
+        await SuiteWait.until("Main Out's master gain to end the burst at 95") { controller.mainOutMasterVolume == 95 }
+        _ = backend.devices   // flush any member write the burst enqueued
 
         #expect(volume("sonos-move", in: backend) == 83, "no per-member write happens on a Main change at all")
         #expect(volume("office", in: backend) == 17)
@@ -1444,7 +1436,7 @@ import Testing
         try controller.saveGroup(Group(id: "g1", name: "X", memberIDs: ["sonos-move"], memberVolumes: [:]))
         controller.activateGroup(id: "g1")
         backend.setVolume(65, for: "sonos-move")
-        try await Task.sleep(nanoseconds: 200_000_000)
+        await SuiteWait.until("sonos-move to reach 65") { volume("sonos-move", in: backend) == 65 }
 
         controller.setMuted(true, for: "sonos-move")
         await SuiteWait.until("sonos-move to be muted at zero") {
@@ -1468,7 +1460,7 @@ import Testing
         try controller.saveGroup(Group(id: "g1", name: "X", memberIDs: ["sonos-move"], memberVolumes: [:]))
         controller.activateGroup(id: "g1")
         backend.setVolume(70, for: "sonos-move")
-        try await Task.sleep(nanoseconds: 200_000_000)
+        await SuiteWait.until("sonos-move to reach 70") { volume("sonos-move", in: backend) == 70 }
 
         controller.setMuted(true, for: "sonos-move")
         await SuiteWait.until("sonos-move to be muted at zero") {
@@ -1478,7 +1470,7 @@ import Testing
 
         // Redundant mute (already muted) — must be a no-op, not a re-stash of 0.
         controller.setMuted(true, for: "sonos-move")
-        try await Task.sleep(nanoseconds: 100_000_000)
+        _ = backend.devices   // flush any write the redundant mute enqueued
 
         controller.setMuted(false, for: "sonos-move")
         await SuiteWait.until("sonos-move to be unmuted at its original level") {
@@ -1501,7 +1493,7 @@ import Testing
 
         controller.setMainOut(.selectedDevices)
         controller.setMainOut(.group(id: "g1"))
-        try await Task.sleep(nanoseconds: 100_000_000)
+        _ = backend.devices   // flush the restore the switch enqueued
 
         #expect(controller.isMuted("local-mac"))
         #expect(backend.devices.first { $0.id == "local-mac" }?.isMuted == true)
@@ -1828,7 +1820,7 @@ import Testing
         // reach Main, which is the stronger property and the point of the refactor.
         controller.setMainOutMasterVolume(45)
         backend.setVolume(80, for: "office")
-        try await Task.sleep(nanoseconds: 200_000_000)
+        await SuiteWait.until("office to reach 80") { volume("office", in: backend) == 80 }
         #expect(controller.mainOutMasterVolume == 45,
                        "a member's own level never moves Main — they are independent stages")
     }
@@ -2213,11 +2205,13 @@ import Testing
     /// on every repeat (that arm rides a `.systemVolumeChanged` the host already
     /// repaints from).
     @Test func memberVolumeWritesDoNotFireOnStateDidChangeButTheMainOutMasterDoes() async throws {
-        let (controller, _) = try await makeController()
+        let (controller, backend) = try await makeController()
         controller.setMainOut(.selectedDevices)
         _ = controller.setDeviceSelected("office", true)
         _ = controller.setDeviceSelected("sonos-move", true)
-        try await Task.sleep(nanoseconds: 200_000_000)
+        await SuiteWait.until("both speakers to be routed") {
+            Set(backend.devices.filter(\.isSelected).map(\.id)) == ["office", "sonos-move"]
+        }
         var fireCount = 0
         controller.onStateDidChange = { fireCount += 1 }
 
@@ -2485,7 +2479,3 @@ private final class RecordingBackend: OutputBackend {
     func reset() { volumeWrites = []; gainWrites = []; outputSetWrites = []; retryWrites = []; muteWrites = []; callOrder = [] }
 }
 
-private actor CountBox {
-    private var count = 0
-    func increment() -> Int { count += 1; return count }
-}

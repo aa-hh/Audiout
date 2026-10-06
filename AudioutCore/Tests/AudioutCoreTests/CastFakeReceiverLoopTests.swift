@@ -111,8 +111,10 @@ import Testing
         return try #require(try box.value?.get())
     }
 
-    private func startAudioServer() throws -> CastLiveAudioServer {
-        let server = CastLiveAudioServer(source: SineSource(), loopbackOnly: true)
+    private func startAudioServer(
+        uptimeClock: @escaping CastUptimeClock = castDispatchUptimeClock
+    ) throws -> CastLiveAudioServer {
+        let server = CastLiveAudioServer(source: SineSource(), loopbackOnly: true, uptimeClock: uptimeClock)
         let box = Box<UInt16>()
         server.start { result in
             if case .success(let port) = result { box.set(port) }
@@ -351,17 +353,58 @@ import Testing
         func count(of state: String) -> Int { lock.withLock { states.filter { $0 == state }.count } }
     }
 
+    /// The bytes a fake on a manual clock counts as "enough to announce
+    /// PLAYING", named so the session below can step exactly that far.
+    private static let leadFetchBytes = 65_536
+
+    /// A receiver whose play clock, stalls and fetch run on `manual`. The
+    /// manual clock runs a job on the thread that advances it, and the
+    /// receiver's state lives on its own queue, so each job hops there.
+    @available(macOS 15, *)
+    private func fakeOnManualClock(
+        _ manual: ManualDelayClock,
+        startupLead: TimeInterval,
+        steadyLead: TimeInterval,
+        startupRebufferAfter: TimeInterval = 2,
+        clockDriftPPM: Double = 0
+    ) -> FakeCastReceiver {
+        FakeCastReceiver(
+            fetchBytes: Self.leadFetchBytes,
+            startupLead: startupLead,
+            steadyLead: steadyLead,
+            startupRebufferAfter: startupRebufferAfter,
+            clockDriftPPM: clockDriftPPM,
+            uptimeClock: manual.uptime,
+            delayClock: { delay, queue, work in
+                manual.clock(delay, queue, DispatchWorkItem { queue.async(execute: work) })
+            }
+        )
+    }
+
     /// Loads the live stream into `fake` and runs `body` once it is playing.
+    /// Sender and receiver share `manual`, so no audio is served and no
+    /// playback happens except when `play` moves that clock.
+    ///
+    /// `play(seconds)` moves it in 20 ms steps, the sender's own tick, and
+    /// after each one waits until the sender has served that step's audio and
+    /// the receiver has read it, so the receiver's buffer crosses its start
+    /// threshold at the same audio position however slow the machine is.
     ///
     /// `lead` is the number the whole sync design turns on, measured exactly
     /// as the sender measures it: audio seconds handed over, minus the
-    /// position the receiver reports. `nil` means the receiver never answered.
+    /// position the receiver reports.
     @available(macOS 15, *)
     private func withPlayingSession(
-        on endpoint: NWEndpoint,
-        _ body: (_ lead: () -> Double?, _ states: StateLog) throws -> Void
-    ) throws {
-        let server = try startAudioServer()
+        _ fake: FakeCastReceiver,
+        on manual: ManualDelayClock,
+        _ body: (
+            _ play: (TimeInterval) async -> Void,
+            _ lead: () async throws -> Double,
+            _ states: StateLog
+        ) async throws -> Void
+    ) async throws {
+        let endpoint = try start(fake)
+        let server = try startAudioServer(uptimeClock: manual.uptime)
         defer { server.stop() }
         let (channel, client) = try connect(to: endpoint)
         defer { channel.close() }
@@ -375,94 +418,132 @@ import Testing
         }
         let loaded = Box<Result<CastMediaStatus, Error>>()
         client.load(url: server.url(host: "127.0.0.1"), contentType: "audio/wav", app: app) { loaded.set($0) }
-        try #require(waitUntil(timeout: 5) { loaded.value != nil }, "LOAD never answered")
-        try #require(waitFor([playing], timeout: 5), "the receiver never reached PLAYING")
+        await SuiteWait.until("LOAD is answered") { loaded.value != nil }
 
-        try body({
+        // The sender starts its pacing clock on its first tick after the GET,
+        // at whatever the manual clock reads then. Nudge the clock until
+        // that tick has happened and served some audio; a step taken before
+        // it would only move the pacing clock's origin and serve nothing.
+        await SuiteWait.until("the sender's pacing clock starts") {
+            if server.secondsSent > 0 { return true }
+            manual.advance(by: 0.001)
+            return false
+        }
+
+        let step: TimeInterval = 0.02
+        func advanceOneStep() async {
+            let sent = server.secondsSent
+            manual.advance(by: step)
+            await SuiteWait.until("the sender serves the step's audio") { server.secondsSent > sent }
+            // Received bytes carry chunk framing on top of the audio, so this
+            // holds once every audio byte served so far has been read.
+            await SuiteWait.until("the receiver reads the step's audio") {
+                Double(fake.bodyBytesReceived) >= server.secondsSent * 176_400
+            }
+        }
+        while fake.bodyBytesReceived < Self.leadFetchBytes { await advanceOneStep() }
+        await SuiteWait.until("the receiver announces PLAYING") { playing.fired }
+
+        try await body({ seconds in
+            for _ in 0..<Int((seconds / step).rounded()) { await advanceOneStep() }
+        }, {
             let box = Box<CastMediaStatus>()
             client.getMediaStatus(app: app) { result in
                 if case .success(let status) = result { box.set(status) }
             }
-            // Read the sender's side right after asking, so the two halves of
-            // the subtraction are a loopback round trip apart at worst.
+            // Nothing moves while the clock stands still, so the two halves
+            // of the subtraction describe the same instant.
             let sent = server.secondsSent
-            guard self.waitUntil(timeout: 3, { box.value != nil }), let time = box.value?.currentTime else { return nil }
+            await SuiteWait.until("GET_STATUS is answered") { box.value != nil }
+            let time = try #require(box.value?.currentTime, "the receiver reported no media position")
             return sent - time
         }, states)
     }
 
     /// The receiver starts playing once it holds `startupLead` seconds, and
-    /// the sender paces at exactly real time — so that buffer level is the
-    /// lead, and it stays put.
-    @Test(.enabled(if: ProcessInfo.processInfo.environment["CI"] == nil, "Quarantined on GitHub runners 2026-10-06: it sleeps for seconds and reads a real-time lead the 3-core runner cannot keep; the measured lead missed its target by 0.68 s (run 37462593391) on PR #291; passes locally. Issue #258.")) func theLeadSettlesAtTheStartupBuffer() throws {
+    /// the sender paces at exactly real time, so that buffer level is the
+    /// lead, and it stays put. Turns red if `startPlaybackIfBuffered` starts
+    /// the clock at any other buffer level (at `fetchBytes`, say), or if the
+    /// sender's pacing stops tracking the clock it is given.
+    @Test func theLeadSettlesAtTheStartupBuffer() async throws {
         guard #available(macOS 15, *) else { return }
-        let fake = FakeCastReceiver(startupLead: 1, steadyLead: 1)
+        let manual = ManualDelayClock()
+        let fake = fakeOnManualClock(manual, startupLead: 1, steadyLead: 1)
         defer { fake.stop() }
-        try withPlayingSession(on: try start(fake)) { lead, _ in
+        try await withPlayingSession(fake, on: manual) { play, lead, _ in
             // PLAYING is announced at `fetchBytes`, well before the buffer is
             // full, so the first second of the session is still filling.
-            Thread.sleep(forTimeInterval: 1.3)
-            let first = try #require(lead())
-            Thread.sleep(forTimeInterval: 1)
-            let second = try #require(lead())
-            #expect(abs(first - 1) < 0.15, Comment(rawValue: "expected a 1 s lead, measured \(first)"))
-            #expect(abs(second - first) < 0.1,
+            await play(1.3)
+            let first = try await lead()
+            await play(1)
+            let second = try await lead()
+            #expect(abs(first - 1) < 0.05, Comment(rawValue: "expected a 1 s lead, measured \(first)"))
+            #expect(abs(second - first) < 0.03,
                     Comment(rawValue: "the lead did not hold flat: \(first) then \(second)"))
         }
     }
 
     /// The event the whole room-delay policy exists for: the clock stands
-    /// still while the stream keeps arriving, and the sender — pacing at
-    /// exactly real time — can never give the difference back.
-    @Test(.enabled(if: ProcessInfo.processInfo.environment["CI"] == nil, "Quarantined on GitHub runners 2026-10-06: it sleeps for seconds and reads a real-time lead the 3-core runner cannot keep; same real-time lead measurement as its three siblings, which each missed on the runner on PR #291; passes locally. Issue #258.")) func aStallLeavesTheLeadPermanentlyHigher() throws {
+    /// still while the stream keeps arriving, and the sender, pacing at
+    /// exactly real time, can never give the difference back. Turns red if a
+    /// stall stops freezing the play clock, or if the clock catches up the
+    /// frozen time when it resumes.
+    @Test func aStallLeavesTheLeadPermanentlyHigher() async throws {
         guard #available(macOS 15, *) else { return }
-        let fake = FakeCastReceiver(startupLead: 1, steadyLead: 1)
+        let manual = ManualDelayClock()
+        let fake = fakeOnManualClock(manual, startupLead: 1, steadyLead: 1)
         defer { fake.stop() }
-        try withPlayingSession(on: try start(fake)) { lead, states in
-            Thread.sleep(forTimeInterval: 1.3)
-            let before = try #require(lead())
+        try await withPlayingSession(fake, on: manual) { play, lead, states in
+            await play(1.3)
+            let before = try await lead()
             let buffering = states.count(of: "BUFFERING")
 
             fake.stall(after: 0, duration: 0.5)
-            Thread.sleep(forTimeInterval: 1.5)
-            let after = try #require(lead())
+            await play(1.5)
+            let after = try await lead()
 
+            await SuiteWait.until("the stall shows as BUFFERING") { states.count(of: "BUFFERING") > buffering }
             #expect(states.count(of: "BUFFERING") > buffering,
                     Comment(rawValue: "the stall never showed as BUFFERING: \(states.all)"))
-            #expect(abs((after - before) - 0.5) < 0.15,
+            #expect(abs((after - before) - 0.5) < 0.05,
                     Comment(rawValue: "expected the stall's 0.5 s to stick: \(before) then \(after)"))
         }
     }
 
     /// The measured session shape: it does not start at its steady value, it
-    /// steps up there on one early rebuffer.
-    @Test(.enabled(if: ProcessInfo.processInfo.environment["CI"] == nil, "Quarantined on GitHub runners 2026-10-06: it sleeps for seconds and reads a real-time lead the 3-core runner cannot keep; the measured lead missed its target by 0.68 s (run 37462593391) on PR #291; passes locally. Issue #258.")) func theStartupProfileStepsUpOnce() throws {
+    /// steps up there on one early rebuffer. Turns red if the startup
+    /// rebuffer is never scheduled, or if it fires at playback start rather
+    /// than `startupRebufferAfter` into it.
+    @Test func theStartupProfileStepsUpOnce() async throws {
         guard #available(macOS 15, *) else { return }
-        let fake = FakeCastReceiver(startupLead: 0.5, steadyLead: 1, startupRebufferAfter: 1)
+        let manual = ManualDelayClock()
+        let fake = fakeOnManualClock(manual, startupLead: 0.5, steadyLead: 1, startupRebufferAfter: 1)
         defer { fake.stop() }
-        try withPlayingSession(on: try start(fake)) { lead, _ in
-            Thread.sleep(forTimeInterval: 0.7)
-            let started = try #require(lead())
-            Thread.sleep(forTimeInterval: 1.6)
-            let settled = try #require(lead())
-            #expect(abs(started - 0.5) < 0.15, Comment(rawValue: "expected the 0.5 s startup lead, measured \(started)"))
-            #expect(abs(settled - 1) < 0.15, Comment(rawValue: "expected the step to 1 s, measured \(settled)"))
+        try await withPlayingSession(fake, on: manual) { play, lead, _ in
+            await play(0.7)
+            let started = try await lead()
+            await play(1.6)
+            let settled = try await lead()
+            #expect(abs(started - 0.5) < 0.05, Comment(rawValue: "expected the 0.5 s startup lead, measured \(started)"))
+            #expect(abs(settled - 1) < 0.05, Comment(rawValue: "expected the step to 1 s, measured \(settled)"))
         }
     }
 
     /// The receiver's crystal against the Mac's. 100 000 ppm is a clock 10 %
     /// fast, which shows in two seconds; the ~100 ppm a real one might drift
     /// would take an hour to move the lead 360 ms, and that is not a test.
-    @Test(.enabled(if: ProcessInfo.processInfo.environment["CI"] == nil, "Quarantined on GitHub runners 2026-10-06: it sleeps for seconds and reads a real-time lead the 3-core runner cannot keep; the drift came in at 0.105 against a 0.1 tolerance (run 37457841094) on PR #291; passes locally. Issue #258.")) func theReceiverClockDrifts() throws {
+    /// Turns red if `currentTime()` stops applying `clockDriftPPM`.
+    @Test func theReceiverClockDrifts() async throws {
         guard #available(macOS 15, *) else { return }
-        let fake = FakeCastReceiver(startupLead: 1, steadyLead: 1, clockDriftPPM: 100_000)
+        let manual = ManualDelayClock()
+        let fake = fakeOnManualClock(manual, startupLead: 1, steadyLead: 1, clockDriftPPM: 100_000)
         defer { fake.stop() }
-        try withPlayingSession(on: try start(fake)) { lead, _ in
-            Thread.sleep(forTimeInterval: 1.3)
-            let early = try #require(lead())
-            Thread.sleep(forTimeInterval: 2)
-            let late = try #require(lead())
-            #expect(abs((early - late) - 0.2) < 0.1,
+        try await withPlayingSession(fake, on: manual) { play, lead, _ in
+            await play(1.3)
+            let early = try await lead()
+            await play(2)
+            let late = try await lead()
+            #expect(abs((early - late) - 0.2) < 0.03,
                     Comment(rawValue: "a fast clock must eat 200 ms of lead in two seconds: \(early) then \(late)"))
         }
     }

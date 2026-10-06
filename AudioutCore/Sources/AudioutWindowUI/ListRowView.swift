@@ -71,7 +71,7 @@ final class ListRowView: NSView {
 
         textStack.orientation = .vertical
         textStack.alignment = .leading
-        textStack.spacing = 2
+        textStack.spacing = Tokens.Layout.titleSubtitleSpacing
         textStack.translatesAutoresizingMaskIntoConstraints = false
         textStack.addArrangedSubview(titleLabel)
         textStack.addArrangedSubview(captionLabel)

@@ -66,7 +66,7 @@ public final class SpeakerPasswordSheetViewController: NSViewController, NSTextF
 
     public override func loadView() {
         let heading = NSTextField(labelWithString: Self.headingText(deviceName: deviceName, kind: kind))
-        heading.font = .boldSystemFont(ofSize: NSFont.systemFontSize)
+        heading.font = Tokens.Font.bodyEmphasized
         heading.lineBreakMode = .byTruncatingTail
 
         let entry: NSView

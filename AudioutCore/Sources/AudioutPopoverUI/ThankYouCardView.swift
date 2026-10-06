@@ -5,10 +5,10 @@ import AudioutSharedUI
 
 /// The one-time thanks shown in the popover's note slot after a purchase
 /// (Concept A, `dev/notes/thank-you-card-concept-2026-09-26.md`): the banner's
-/// recipe with `gold` for its tint, the emitter field's settled rings in a
+/// tinted ground in `gold`, the emitter field's settled rings in a
 /// 96 pt well at the leading edge, the words beside them, and a Close button.
 /// The rings play one surge on `appear()`, then rest. Never a loop.
-final class ThankYouCardView: NSView, FoldFollowing {
+final class ThankYouCardView: TintedNoteBackgroundView, FoldFollowing {
 
     static let height: CGFloat = 112
     static let headline = "Thank you for buying Audiout."
@@ -40,7 +40,7 @@ final class ThankYouCardView: NSView, FoldFollowing {
     init(width: CGFloat) {
         headlineLabel = NSTextField(labelWithString: Self.headline)
         headlineLabel.font = Tokens.Font.heading
-        headlineLabel.textColor = .labelColor
+        headlineLabel.textColor = Tokens.Color.label
         bodyLabel = NSTextField(wrappingLabelWithString: Self.body)
         bodyLabel.font = Tokens.Font.body
         bodyLabel.textColor = Tokens.Color.label2
@@ -53,12 +53,9 @@ final class ThankYouCardView: NSView, FoldFollowing {
         closeButton.setAccessibilityLabel("Close this message")
         ringLayers = [SettledLightLayer.make(), SettledLightLayer.make()].compactMap { $0 }
 
-        super.init(frame: NSRect(x: 0, y: 0, width: width, height: Self.height))
+        super.init(tint: Tokens.Color.gold)
+        setFrameSize(NSSize(width: width, height: Self.height))
         translatesAutoresizingMaskIntoConstraints = false
-        wantsLayer = true
-        layer?.cornerRadius = Tokens.Layout.Radius.control
-        layer?.cornerCurve = .continuous
-        stampLayerColors()
 
         well.wantsLayer = true
         well.layer?.cornerRadius = Tokens.Layout.Radius.control
@@ -102,7 +99,7 @@ final class ThankYouCardView: NSView, FoldFollowing {
         let center = NotificationCenter.default
         center.addObserver(self, selector: #selector(restampColors),
                            name: Tokens.accentStyleDidChangeNotification, object: nil)
-        // Registered directly: `redrawOnAccessibilityDisplayChange()` is internal to AudioutSharedUI.
+        // The ground restamps itself; the rings need their own re-render.
         NSWorkspace.shared.notificationCenter.addObserver(
             self, selector: #selector(restampColors),
             name: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification, object: nil)
@@ -119,25 +116,6 @@ final class ThankYouCardView: NSView, FoldFollowing {
     @objc private func closeTapped() { onClose?() }
 
     // MARK: Colour
-
-    override var wantsUpdateLayer: Bool { true }
-
-    override func updateLayer() {
-        super.updateLayer()
-        stampLayerColors()
-    }
-
-    /// Resolved under the view's own appearance, the banner's idiom, with the
-    /// banner's 1 pt Increase Contrast edge in the card's own tint.
-    func stampLayerColors(
-        increaseContrast: Bool = NSWorkspace.shared.accessibilityDisplayShouldIncreaseContrast
-    ) {
-        effectiveAppearance.performAsCurrentDrawingAppearance {
-            layer?.backgroundColor = Tokens.Color.gold.withAlphaComponent(0.12).cgColor
-            layer?.borderColor = Tokens.Color.gold.cgColor
-        }
-        layer?.borderWidth = increaseContrast ? 1 : 0
-    }
 
     @objc private func restampColors() {
         needsDisplay = true
@@ -227,8 +205,4 @@ final class ThankYouCardView: NSView, FoldFollowing {
     var test_headlineText: String { headlineLabel.stringValue }
     var test_bodyText: String { bodyLabel.stringValue }
     var test_closeButton: NSButton { closeButton }
-    var test_backgroundColor: NSColor? {
-        guard let cgColor = layer?.backgroundColor else { return nil }
-        return NSColor(cgColor: cgColor)
-    }
 }

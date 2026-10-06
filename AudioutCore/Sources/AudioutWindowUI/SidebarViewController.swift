@@ -1283,7 +1283,7 @@ final class IconLabelCellView: NSTableCellView {
         stack.translatesAutoresizingMaskIntoConstraints = false
         stack.orientation = .vertical
         stack.alignment = .leading
-        stack.spacing = 2
+        stack.spacing = Tokens.Layout.titleSubtitleSpacing
         return stack
     }()
 
@@ -1337,9 +1337,7 @@ final class SidebarHeaderCellView: NSTableCellView {
         label.translatesAutoresizingMaskIntoConstraints = false
         label.textColor = Tokens.Color.labelCool
         label.lineBreakMode = .byTruncatingTail
-        // VoiceOver's heading rotor stops here; the raw value is
-        // `kAXHeadingRole`, as the Mixer's headers set it.
-        label.setAccessibilityRole(NSAccessibility.Role(rawValue: "AXHeading"))
+        label.setAccessibilityHeading()
         label.redrawOnAccessibilityDisplayChange()
         return label
     }()
@@ -1441,7 +1439,7 @@ class SidebarRowView: NSTableRowView {
 /// with `label` at `darkLiftAlpha`, because dark `raised` is darker than the
 /// sidebar's own ground and read as sunk. Drawn (not a layer colour) so the
 /// `Tokens` fills re-resolve live per appearance flip and Increase Contrast
-/// on every paint, same rule as `HairlineView`.
+/// on every paint, same rule as `RuleView`.
 ///
 /// **Never two shapes: the plate and the selection take turns.** Selected, the
 /// row draws nothing and the source list's own pill stands alone; unselected,

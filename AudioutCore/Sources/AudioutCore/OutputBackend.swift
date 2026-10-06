@@ -536,6 +536,13 @@ public protocol MeteringControlling: AnyObject {
     /// leave it `false` again — a closed popover has nobody to render a meter for,
     /// so there's no reason to keep spending a per-buffer RMS pass on it.
     func setMeteringActive(_ active: Bool)
+
+    /// Keep per-device `.level` flowing while the popover is closed, for a host
+    /// that only needs to know whether sound is coming out (the app's Touch Bar
+    /// play/pause glyph). Unlike ``setMeteringActive(_:)`` it starts no
+    /// metering-only per-app tap: those exist only for the popover's app rows.
+    /// Independent of the popover gate; levels flow while either is on.
+    func setDeviceLevelsWanted(_ wanted: Bool)
 }
 
 /// The optional per-app routing capability (T6/T7). A backend that can stream a

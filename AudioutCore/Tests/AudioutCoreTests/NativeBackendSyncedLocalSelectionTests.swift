@@ -140,13 +140,15 @@ import CoreAudio
                              // The burst tests below shrink this; every other test keeps the
                              // production value. The production default itself is pinned in
                              // `NativeBackendTests`, not here.
-                             syncedLocalSettleWindow: TimeInterval = 0.5)
+                             syncedLocalSettleWindow: TimeInterval = 0.5,
+                             delayClock: @escaping NativeBackend.DelayClock = NativeBackend.dispatchDelayClock)
         -> (NativeBackend, SpySyncedLocalSink, LockedBool) {
         let backend = NativeBackend(
             engineControl: NoOpEngine(),
             discoverySource: NoOpDiscovery(),
             systemVolume: NoOpSystemVolume(),
             syncedLocalSettleWindow: syncedLocalSettleWindow,
+            delayClock: delayClock,
             aggregateControl: NoOpAggregateControl(),
             currentDefaultOutputUID: {
                 weOwnVolume ? AggregateOutputDevice.productUID : "BuiltInSpeakerDevice"
@@ -185,6 +187,14 @@ import CoreAudio
         init(_ v: Bool) { value = v }
         func get() -> Bool { lock.withLock { value } }
         func set(_ v: Bool) { lock.withLock { value = v } }
+    }
+
+    /// The manual clock performs jobs on the caller's thread, and the settle body
+    /// must run on `stateQueue`, so each job hops to the queue the backend named.
+    fileprivate func queueHopping(_ manual: ManualDelayClock) -> NativeBackend.DelayClock {
+        { delaySeconds, queue, work in
+            manual.clock(delaySeconds, queue, DispatchWorkItem { queue.async(execute: work) })
+        }
     }
 
     private func waitFor(timeout: TimeInterval? = nil,
@@ -368,7 +378,9 @@ import CoreAudio
     /// scheduling jitter on a loaded machine; a split burst produced a FALSE
     /// failure.
     @Test func rapidToggleBurstProducesAtMostOneTransition() {
-        let (backend, sink, macSelected) = makeBackend(macSelectedByDefault: false, syncedLocalSettleWindow: 0.15)
+        let clock = ManualDelayClock()
+        let (backend, sink, macSelected) = makeBackend(macSelectedByDefault: false, syncedLocalSettleWindow: 0.15,
+                                                       delayClock: queueHopping(clock))
         defer { backend.stop() }
 
         macSelected.set(true);  backend.setOutputSet(["airplay-1"])
@@ -377,9 +389,10 @@ import CoreAudio
         macSelected.set(false); backend.setOutputSet(["airplay-1"])
         macSelected.set(true);  backend.setOutputSet(["airplay-1"])   // net: ON
 
+        clock.advance(by: 0.15)
         waitFor { !sink.calls.isEmpty }
-        // Give a wrongly-uncoalesced extra transition time to show up.
-        SuiteWait.settle(0.3)
+        // Nothing else is armed, so no wrongly-uncoalesced extra transition can come.
+        #expect(clock.pendingCount == 0)
 
         #expect(sink.calls == ["start", "startObserving"],
                 "a rapid 5-decision burst must settle into exactly ONE transition (the trailing decision), never one per click")
@@ -392,11 +405,14 @@ import CoreAudio
     /// headroom as the case above: the four flips must land in ONE window or the
     /// "net" in "net no-op" is lost.
     @Test func netNoOpBurstDoesNothing() {
-        let (backend, sink, macSelected) = makeBackend(macSelectedByDefault: true, syncedLocalSettleWindow: 0.15)
+        let clock = ManualDelayClock()
+        let (backend, sink, macSelected) = makeBackend(macSelectedByDefault: true, syncedLocalSettleWindow: 0.15,
+                                                       delayClock: queueHopping(clock))
         defer { backend.stop() }
 
         // Settle into ON first (applied == true), same as every other test here.
         backend.setOutputSet(["airplay-1"])
+        clock.advance(by: 0.15)
         waitFor { !sink.calls.isEmpty }
         #expect(sink.calls == ["start", "startObserving"])
 
@@ -406,7 +422,9 @@ import CoreAudio
         macSelected.set(false); backend.setOutputSet(["airplay-1"])
         macSelected.set(true);  backend.setOutputSet(["airplay-1"])   // net: back to ON (already applied)
 
-        SuiteWait.settle(0.3)   // let the settle window elapse
+        clock.advance(by: 0.15)   // the settle window elapses
+        // The fire ran on `stateQueue` and bailed on desired == applied.
+        waitFor { !backend.test_hasPendingSyncedLocalSettle }
         #expect(sink.calls == ["start", "startObserving"],
                 "a burst that lands back on the already-applied state must call NOTHING further: no stop, no re-start")
     }
@@ -423,7 +441,9 @@ import CoreAudio
     /// has its own `desired != applied` bail, and `stop()` resets both flags in the
     /// same synchronous block, so even a stale settle would no-op by itself.
     @Test func stopCancelsPendingSettle() {
-        let (backend, sink, macSelected) = makeBackend(macSelectedByDefault: false, syncedLocalSettleWindow: 1.0)
+        let clock = ManualDelayClock()
+        let (backend, sink, macSelected) = makeBackend(macSelectedByDefault: false, syncedLocalSettleWindow: 1.0,
+                                                       delayClock: queueHopping(clock))
 
         macSelected.set(true)
         backend.setOutputSet(["airplay-1"])   // schedules a settle 1 s out
@@ -440,7 +460,7 @@ import CoreAudio
                 "stop() must clear the pending settle promptly, not leave it armed until its own natural deadline")
 
         // Wait well past the settle window the pending item was armed for.
-        SuiteWait.settle(1.5)
+        clock.advance(by: 1.5)
         #expect(sink.calls.isEmpty,
                 "stop() must cancel the pending settle: nothing may fire against a torn-down backend")
     }

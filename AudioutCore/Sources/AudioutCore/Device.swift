@@ -331,3 +331,15 @@ extension Int {
     /// briefly compute >100 before clamping — SPEC.md §9).
     var clampedToVolume: Int { Swift.min(100, Swift.max(0, self)) }
 }
+
+extension Sequence where Element == Device {
+    /// Whether any device has been told to play and has not yet confirmed that
+    /// sound is coming out: its `connectionState` is `.connecting`. A Cast
+    /// receiver sits there from the load until it reports PLAYING, often for
+    /// seconds. Keys on the state alone, not `isSelected`: a Cast or Bluetooth
+    /// device never has `isSelected` set (see `NativeBackend.isMeterable`), and
+    /// the backend writes `.connecting` only for a device something wants playing.
+    public var hasDeviceStillConnecting: Bool {
+        contains { $0.connectionState == .connecting }
+    }
+}

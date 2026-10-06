@@ -4,10 +4,10 @@ import AppKit
 import AudioutSharedUI
 
 /// The Settings screen's source list: one non-selectable "Settings" header row
-/// over one leaf row per section. Deliberately the Groups sidebar's own
-/// arrangement — `SurfaceLayout.sidebarWidth` wide, `.sourceList` style,
-/// `.medium` rows, the same icon/label cell geometry — so the two arrangement
-/// screens read as one surface rather than two different sidebars.
+/// over one leaf row per section. Deliberately the Speakers sidebar's own
+/// arrangement — `SurfaceLayout.sidebarWidth` wide, `.sourceList` style, its
+/// two-line `IconLabelCellView` — so each section row carries a readout of
+/// what is set in it under its name.
 ///
 /// What the Groups sidebar has and this deliberately does NOT: an add bar,
 /// a context menu, double-click, Cmd-N, multi-selection, an active marker.
@@ -22,6 +22,9 @@ final class SettingsSidebarViewController: NSViewController {
         /// `nil` for the header row — that is what makes it a group item.
         let sectionIndex: Int?
         var children: [Node] = []
+        /// What is set in the section, one or two lines under its name.
+        var readoutLines: [String] = []
+        var glyphTint: NSColor = Tokens.Color.labelCool
 
         init(title: String, symbolName: String, sectionIndex: Int?) {
             self.title = title
@@ -112,6 +115,58 @@ final class SettingsSidebarViewController: NSViewController {
             outlineView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
         }
     }
+
+    /// Show `lines` under section `index`'s name and tint its glyph. A change
+    /// in line count re-measures the row at once, with no animation.
+    func setReadout(_ lines: [String], glyphTint: NSColor, at index: Int) {
+        loadViewIfNeeded()
+        guard root.children.indices.contains(index) else { return }
+        let node = root.children[index]
+        let countChanged = node.readoutLines.count != lines.count
+        node.readoutLines = lines
+        node.glyphTint = glyphTint
+        outlineView.reloadItem(node)
+        guard countChanged else { return }
+        let row = outlineView.row(forItem: node)
+        guard row >= 0 else { return }
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0
+            outlineView.noteHeightOfRows(withIndexesChanged: IndexSet(integer: row))
+        }
+    }
+
+    /// What VoiceOver says for a section row: the name, then each readout
+    /// line, with the readout's own separators spoken as pauses.
+    private static func spokenLabel(title: String, lines: [String]) -> String {
+        title + lines.map { ", " + $0.replacingOccurrences(of: " · ", with: ", ") }.joined()
+    }
+
+    // MARK: Test-support hooks
+
+    func test_readoutLines(at index: Int) -> [String] {
+        root.children.indices.contains(index) ? root.children[index].readoutLines : []
+    }
+
+    /// The glyph's resting tint, read from a cell built through the delegate.
+    func test_glyphTint(at index: Int) -> NSColor {
+        test_cell(at: index)?.imageView?.contentTintColor ?? .clear
+    }
+
+    func test_rowHeight(at index: Int) -> CGFloat {
+        loadViewIfNeeded()
+        guard root.children.indices.contains(index) else { return 0 }
+        return outlineView(outlineView, heightOfRowByItem: root.children[index])
+    }
+
+    func test_spokenLabel(at index: Int) -> String? {
+        test_cell(at: index)?.nameLabel.accessibilityLabel()
+    }
+
+    private func test_cell(at index: Int) -> IconLabelCellView? {
+        loadViewIfNeeded()
+        guard root.children.indices.contains(index) else { return nil }
+        return outlineView(outlineView, viewFor: nil, item: root.children[index]) as? IconLabelCellView
+    }
 }
 
 // MARK: - NSOutlineViewDataSource
@@ -148,7 +203,29 @@ extension SettingsSidebarViewController: NSOutlineViewDelegate {
     func outlineView(_ outlineView: NSOutlineView, viewFor tableColumn: NSTableColumn?, item: Any) -> NSView? {
         guard let node = item as? Node else { return nil }
         guard node.sectionIndex != nil else { return makeHeaderCell(node.title) }
-        return makeIconLabelCell(symbol: node.symbolName, text: node.title)
+        return makeSectionCell(node)
+    }
+
+    /// Header rows keep the outline's height; a section row is 40 pt, or 54 pt
+    /// with a second readout line.
+    func outlineView(_ outlineView: NSOutlineView, heightOfRowByItem item: Any) -> CGFloat {
+        guard let node = item as? Node, node.sectionIndex != nil else { return outlineView.rowHeight }
+        return node.readoutLines.count > 1 ? 54 : 40
+    }
+
+    /// Section rows ride a `SidebarRowView`, which re-inks the cell when the
+    /// row's selection or emphasis changes, as the Speakers sidebar does.
+    func outlineView(_ outlineView: NSOutlineView, rowViewForItem item: Any) -> NSTableRowView? {
+        guard let node = item as? Node, node.sectionIndex != nil else { return nil }
+        let id = NSUserInterfaceItemIdentifier("sectionRow")
+        if let reused = outlineView.makeView(withIdentifier: id, owner: self) as? SidebarRowView { return reused }
+        let row = SidebarRowView()
+        row.identifier = id
+        return row
+    }
+
+    func outlineView(_ outlineView: NSOutlineView, didAdd rowView: NSTableRowView, forRow row: Int) {
+        (rowView as? SidebarRowView)?.reink()
     }
 
     func outlineViewSelectionDidChange(_ notification: Notification) {
@@ -176,7 +253,7 @@ extension SettingsSidebarViewController: NSOutlineViewDelegate {
         let textField = NSTextField(labelWithString: "")
         textField.translatesAutoresizingMaskIntoConstraints = false
         textField.font = Tokens.Font.captionEmphasized
-        textField.textColor = Tokens.Color.label2
+        textField.textColor = Tokens.Color.labelCool
         textField.lineBreakMode = .byTruncatingTail
         cell.addSubview(textField)
         cell.textField = textField
@@ -189,47 +266,23 @@ extension SettingsSidebarViewController: NSOutlineViewDelegate {
         return cell
     }
 
-    private func makeIconLabelCell(symbol: String, text: String) -> NSTableCellView {
+    private func makeSectionCell(_ node: Node) -> IconLabelCellView {
         let id = NSUserInterfaceItemIdentifier("section")
-        let cell = outlineView.makeView(withIdentifier: id, owner: self) as? NSTableCellView
-            ?? Self.newIconLabelCell(identifier: id)
-        // Flat monochrome glyphs, as in the Groups sidebar: some SF Symbols
-        // default to a lighter hierarchical tone that reads as a highlight.
-        let image = NSImage(systemSymbolName: symbol, accessibilityDescription: text)
-        image?.isTemplate = true
-        cell.imageView?.image = image
-        cell.imageView?.contentTintColor = Tokens.Color.label
-        cell.textField?.stringValue = text
-        cell.textField?.textColor = Tokens.Color.label
-        return cell
-    }
-
-    private static func newIconLabelCell(identifier: NSUserInterfaceItemIdentifier) -> NSTableCellView {
-        let cell = NSTableCellView()
-        cell.identifier = identifier
-
-        let imageView = NSImageView()
-        imageView.translatesAutoresizingMaskIntoConstraints = false
-        cell.addSubview(imageView)
-        cell.imageView = imageView
-
-        let textField = NSTextField(labelWithString: "")
-        textField.translatesAutoresizingMaskIntoConstraints = false
-        textField.lineBreakMode = .byTruncatingTail
-        cell.addSubview(textField)
-        cell.textField = textField
-
-        NSLayoutConstraint.activate([
-            imageView.leadingAnchor.constraint(equalTo: cell.leadingAnchor),
-            imageView.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
-            imageView.widthAnchor.constraint(equalToConstant: SurfaceLayout.sidebarIconSize),
-            imageView.heightAnchor.constraint(equalToConstant: SurfaceLayout.sidebarIconSize),
-
-            textField.leadingAnchor.constraint(equalTo: imageView.trailingAnchor,
-                                               constant: SurfaceLayout.sidebarIconToLabelGap),
-            textField.trailingAnchor.constraint(lessThanOrEqualTo: cell.trailingAnchor),
-            textField.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
-        ])
+        let cell = outlineView.makeView(withIdentifier: id, owner: self) as? IconLabelCellView
+            ?? IconLabelCellView.make(identifier: id, isSpeakerRow: true)
+        cell.imageView?.image = DeviceIcon.image(node.symbolName)
+        cell.nameLabel.stringValue = node.title
+        cell.nameLabel.setAccessibilityLabel(Self.spokenLabel(title: node.title, lines: node.readoutLines))
+        let readout = node.readoutLines.joined(separator: "\n")
+        cell.statusLabel.maximumNumberOfLines = 2
+        cell.statusLabel.usesSingleLineMode = false
+        cell.statusLabel.stringValue = readout
+        cell.statusLabel.toolTip = readout.isEmpty ? nil : readout
+        cell.statusLabel.isHidden = readout.isEmpty
+        cell.setRestingInks(name: Tokens.Color.label, icon: node.glyphTint)
+        // A cell with no row yet rests.
+        let row = cell.superview as? NSTableRowView
+        cell.applySelectionInks(selected: row?.isSelected == true, emphasized: row?.isEmphasized == true)
         return cell
     }
 }

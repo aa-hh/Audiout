@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 import AppKit
-import AudioutSharedUI
 
 /// The approved custom-drawn element of the Groups window (`../../AGENTS.md`):
 /// a large glyph with a single, always-present edit affordance, SHARED by the
@@ -58,12 +57,12 @@ import AudioutSharedUI
 /// All fills/strokes resolve inside `draw(_:)` so every token
 /// re-resolves live per appearance + Increase Contrast, never a frozen
 /// `.cgColor` (the `WarmCanvasView` pattern).
-final class DeviceIconWellView: NSView {
+public final class DeviceIconWellView: NSView {
 
     /// Square side length: every window page opens with a 48 pt icon well.
     /// One constant so the speaker page's, the Main Audio page's and the
     /// scene editor's headers can never drift apart.
-    static let size: CGFloat = 48
+    public static let size: CGFloat = 48
 
     /// Corner radius of the raised-well rounded rect (and of the focus ring /
     /// hover wash that trace the same shape) — the control radius.
@@ -89,12 +88,12 @@ final class DeviceIconWellView: NSView {
     private static let badgeRestAlpha = PopoverColumnGrid.editAffordanceRestAlpha
     private static let badgeHoverAlpha = PopoverColumnGrid.editAffordanceHoverAlpha
 
-    let iconImageView = NSImageView()
+    public let iconImageView = NSImageView()
     private let badgeView = NSView()
     private let badgePencilImageView = NSImageView()
 
     /// Fired on a real click (mouse-down) anywhere in the well.
-    var onClick: (() -> Void)?
+    public var onClick: (() -> Void)?
 
     /// False turns the well into a pure picture: the corner pencil badge is
     /// hidden and every interaction path (hover, click, Tab focus, Space/
@@ -102,7 +101,7 @@ final class DeviceIconWellView: NSView {
     /// glyph nobody chooses — the Main Audio page's whole-mix icon. Matches the
     /// module's edit-affordance vocabulary (`AGENTS.md`: bordered + pencil =
     /// editable, bare = read-only): with no badge there is no promise to break.
-    var isEditable: Bool = true {
+    public var isEditable: Bool = true {
         didSet {
             guard isEditable != oldValue else { return }
             badgeView.isHidden = !isEditable
@@ -115,7 +114,7 @@ final class DeviceIconWellView: NSView {
     /// of the resting hairline. Pure model-state input (the host sets it from
     /// `GroupController.activeGroupID`), never audio-driven, matching the
     /// §3.3 "state, not signal" discipline. Drawing-only.
-    var isActiveGroup: Bool = false {
+    public var isActiveGroup: Bool = false {
         didSet {
             guard isActiveGroup != oldValue else { return }
             iconImageView.contentTintColor = isActiveGroup ? Tokens.Color.label
@@ -136,7 +135,7 @@ final class DeviceIconWellView: NSView {
     /// the spine and the ring it lands on are always the same colour, and the
     /// active/idle distinction the §5.3 gold ring carries is preserved rather
     /// than flattened into "always gold". Drawing-only.
-    var isRailOrigin: Bool = false {
+    public var isRailOrigin: Bool = false {
         didSet { if isRailOrigin != oldValue { needsDisplay = true } }
     }
 
@@ -146,7 +145,7 @@ final class DeviceIconWellView: NSView {
 
     private var trackingArea: NSTrackingArea?
 
-    init() {
+    public init() {
         super.init(frame: .zero)
 
         iconImageView.translatesAutoresizingMaskIntoConstraints = false
@@ -232,7 +231,7 @@ final class DeviceIconWellView: NSView {
     /// alone can't tell "correct already" from "never re-stamped, but
     /// happened to start correct," so the appearance-change/Increase-Contrast
     /// tests assert this instead.
-    private(set) var test_restampCount = 0
+    public private(set) var test_restampCount = 0
 
     @objc private func accessibilityDisplayOptionsDidChange() {
         restampBadgeLayerColors()
@@ -251,7 +250,7 @@ final class DeviceIconWellView: NSView {
     /// (`WarmCanvasView`'s pattern). Static drawing: Reduce Motion /
     /// Transparency need no special casing here (nothing animates, nothing
     /// is translucent over foreign content).
-    override func draw(_ dirtyRect: NSRect) {
+    public override func draw(_ dirtyRect: NSRect) {
         // A rail origin wears the ring at its full width even when idle — the
         // spine has to land on something, and a 1pt hairline reads as an edge
         // the rail stops AT rather than one it plugs INTO.
@@ -290,7 +289,7 @@ final class DeviceIconWellView: NSView {
         path.stroke()
     }
 
-    override func viewDidChangeEffectiveAppearance() {
+    public override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
         needsDisplay = true
         restampBadgeLayerColors()
@@ -298,7 +297,7 @@ final class DeviceIconWellView: NSView {
 
     // MARK: Hover tracking
 
-    override func updateTrackingAreas() {
+    public override func updateTrackingAreas() {
         super.updateTrackingAreas()
         if let trackingArea { removeTrackingArea(trackingArea) }
         let area = NSTrackingArea(
@@ -309,17 +308,17 @@ final class DeviceIconWellView: NSView {
         trackingArea = area
     }
 
-    override func mouseEntered(with event: NSEvent) {
+    public override func mouseEntered(with event: NSEvent) {
         guard isEditable else { return }
         setOverlayVisible(true)
     }
 
-    override func mouseExited(with event: NSEvent) {
+    public override func mouseExited(with event: NSEvent) {
         guard isEditable else { return }
         setOverlayVisible(false)
     }
 
-    override func mouseDown(with event: NSEvent) {
+    public override func mouseDown(with event: NSEvent) {
         guard isEditable else { return }
         // A real click also claims first responder, exactly like a genuine
         // `NSButton` would — otherwise a mouse click leaves whatever was
@@ -335,15 +334,15 @@ final class DeviceIconWellView: NSView {
     // so none of the following is inherited for free — each override mirrors
     // exactly what `NSButton` would already give it.
 
-    override var acceptsFirstResponder: Bool { isEditable }
+    public override var acceptsFirstResponder: Bool { isEditable }
 
-    override func becomeFirstResponder() -> Bool {
+    public override func becomeFirstResponder() -> Bool {
         let became = super.becomeFirstResponder()
         if became { setOverlayVisible(true) }
         return became
     }
 
-    override func resignFirstResponder() -> Bool {
+    public override func resignFirstResponder() -> Bool {
         let resigned = super.resignFirstResponder()
         if resigned { setOverlayVisible(false) }
         return resigned
@@ -355,7 +354,7 @@ final class DeviceIconWellView: NSView {
     /// AppKit resolves to key-view-loop traversal before `keyDown` even sees
     /// it, but falling through keeps this view from becoming an unintended
     /// sink for keys it has no opinion on).
-    override func keyDown(with event: NSEvent) {
+    public override func keyDown(with event: NSEvent) {
         guard isEditable else {
             super.keyDown(with: event)
             return
@@ -371,7 +370,7 @@ final class DeviceIconWellView: NSView {
     /// The VoiceOver / Full Keyboard Access "press" entry point — fired
     /// instead of a real click when the user activates this element via
     /// assistive technology rather than a pointer.
-    override func accessibilityPerformPress() -> Bool {
+    public override func accessibilityPerformPress() -> Bool {
         guard isEditable else { return false }
         onClick?()
         return true
@@ -382,13 +381,13 @@ final class DeviceIconWellView: NSView {
     /// same automatic ring an `NSButton` gets, computed manually here since a
     /// plain `NSView` has no default focus-ring mask. Traces the same rounded
     /// rect the warm well paints so the ring hugs the visible control.
-    override func drawFocusRingMask() {
+    public override func drawFocusRingMask() {
         NSBezierPath(roundedRect: bounds,
                      xRadius: Self.wellCornerRadius,
                      yRadius: Self.wellCornerRadius).fill()
     }
 
-    override var focusRingMaskBounds: NSRect { bounds }
+    public override var focusRingMaskBounds: NSRect { bounds }
 
     /// Step the badge between its rest and hover alpha. Respects Reduce Motion
     /// (`../AGENTS.md`'s system-settings rule): an instant change with Reduce
@@ -397,7 +396,7 @@ final class DeviceIconWellView: NSView {
     /// snapshot hook. (Name kept as `setOverlayVisible` for the existing
     /// test/snapshot call sites; there is no longer a full-coverage overlay —
     /// only the badge.)
-    func setOverlayVisible(_ visible: Bool) {
+    public func setOverlayVisible(_ visible: Bool) {
         // Neutral hover/focus wash on the well itself (§4.8) — an instant
         // repaint (no animation), so Reduce Motion needs no branch for it.
         if isHighlighted != visible {
@@ -420,18 +419,18 @@ final class DeviceIconWellView: NSView {
     /// The corner badge's current alpha — asserts the hover-OR-focus step-up
     /// (`setOverlayVisible(_:)`), including the keyboard-focus case a headless
     /// run can't observe visually.
-    var test_badgeAlpha: CGFloat { badgeView.alphaValue }
+    public var test_badgeAlpha: CGFloat { badgeView.alphaValue }
 
     /// The badge layer's currently-stamped fill/border, read back as
     /// `NSColor` — asserts `restampBadgeLayerColors()` actually wrote
     /// `Tokens.Color.iconWellBadge`/`.iconWellBadgeBorder` into the layer,
     /// and that an appearance/Increase-Contrast change re-stamps them rather
     /// than leaving the layer frozen at its init-time value.
-    var test_badgeFillColor: NSColor? {
+    public var test_badgeFillColor: NSColor? {
         guard let cgColor = badgeView.layer?.backgroundColor else { return nil }
         return NSColor(cgColor: cgColor)
     }
-    var test_badgeBorderColor: NSColor? {
+    public var test_badgeBorderColor: NSColor? {
         guard let cgColor = badgeView.layer?.borderColor else { return nil }
         return NSColor(cgColor: cgColor)
     }
@@ -441,14 +440,14 @@ final class DeviceIconWellView: NSView {
     /// real notification path, the same way `HaloRingView`'s tests drive it
     /// (`test_reduceMotionOverride`'s doc comment), rather than calling the
     /// private re-stamp method directly.
-    func test_postAccessibilityDisplayOptionsChanged() {
+    public func test_postAccessibilityDisplayOptionsChanged() {
         NSWorkspace.shared.notificationCenter.post(
             name: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification, object: nil)
     }
 
     /// Whether the well is currently drawing the active-group gold ring
     /// (Warm Signal §5.3) instead of the resting hairline edge.
-    var test_isDrawingActiveRing: Bool { isActiveGroup }
+    public var test_isDrawingActiveRing: Bool { isActiveGroup }
 
     /// Simulate a real Space/Return key press on this view via the actual
     /// `keyDown(with:)` override (not a direct `onClick?()` call) — proves
@@ -456,7 +455,7 @@ final class DeviceIconWellView: NSView {
     /// Mirrors the "no synthesized clicks in headless runs" house rule
     /// (`../AGENTS.md`) for the keyboard path: no real window is needed since
     /// `keyDown(with:)` never touches `window`.
-    func test_pressKey(_ characters: String) {
+    public func test_pressKey(_ characters: String) {
         keyDown(with: Self.keyEvent(charactersIgnoringModifiers: characters))
     }
 

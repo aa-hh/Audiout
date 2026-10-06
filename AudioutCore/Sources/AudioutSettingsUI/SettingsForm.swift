@@ -67,16 +67,6 @@ enum SettingsForm {
         return field
     }
 
-    /// A **section header** (roadmap 050 visual pass): semibold caption in the
-    /// secondary color, so headers carry real weight separation from body-font
-    /// row titles. One helper so every pane's headers match.
-    static func sectionHeader(_ string: String) -> NSTextField {
-        let field = label(string)
-        field.font = Tokens.Font.captionEmphasized
-        field.textColor = Tokens.Color.label2
-        return field
-    }
-
     /// A **value readout** (`35%`, `0 ms` — roadmap 050 visual pass): monospaced
     /// digits on the panel's `well` fill, so live numbers read as instrument and
     /// rhyme with the Mixer. Fixed `width` so the row never shifts as the digit
@@ -208,12 +198,45 @@ enum SettingsForm {
         }
         return container
     }
+
+    /// A Settings page: `content` stacked with no spacing on the page's
+    /// rail-free lane, so a pane's header, cards and notes line up with the
+    /// Speakers page's. Callers set each gap with `setCustomSpacing(_:after:)`
+    /// on the stack (the container's only subview).
+    static func pageView(content: [NSView]) -> NSView {
+        let stack = NSStackView(views: content)
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 0
+        stack.translatesAutoresizingMaskIntoConstraints = false
+
+        let container = NSView()
+        container.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(stack)
+
+        // `.defaultHigh` for the reason `paneView` gives.
+        let widthConstraint = container.widthAnchor.constraint(equalToConstant: contentWidth)
+        widthConstraint.priority = .defaultHigh
+
+        NSLayoutConstraint.activate([
+            widthConstraint,
+            stack.leadingAnchor.constraint(equalTo: container.leadingAnchor,
+                                           constant: GroupsPaneLayout.railFreeContentLeadingInset),
+            stack.trailingAnchor.constraint(equalTo: container.trailingAnchor,
+                                            constant: -GroupsPaneLayout.contentTrailingInset),
+            stack.topAnchor.constraint(equalTo: container.topAnchor),
+            stack.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -22),
+        ])
+        for child in content {
+            child.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+        }
+        return container
+    }
 }
 
 /// The value-readout backing: the panel's inset `well` fill in a rounded rect,
 /// drawn in `draw(_:)` (not a stamped layer color), so it needs both repaint
-/// triggers to track the current appearance — same reasoning as
-/// `BorderedListView`: `viewDidChangeEffectiveAppearance` for light/dark, and
+/// triggers to track the current appearance: `viewDidChangeEffectiveAppearance` for light/dark, and
 /// `redrawOnAccessibilityDisplayChange` for Increase Contrast, which fires no
 /// appearance change of its own (`AccessibilityDisplayRedraw.swift`).
 private final class ReadoutWellView: NSView {

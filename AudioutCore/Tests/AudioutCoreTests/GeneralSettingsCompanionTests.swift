@@ -7,10 +7,11 @@ import AppKit
 @testable import AudioutSettingsUI
 @testable import AudioutSharedUI
 
-/// FIX-C: the Settings › General "Allow control from iPhone" switch must
-/// never misrepresent whether the companion LAN server is actually running.
+/// FIX-C: the Settings › Audiout Remote "Allow control from iPhone" switch
+/// must never misrepresent whether the companion LAN server is actually
+/// running.
 ///
-/// Before this fix, `GeneralSettingsViewController` rendered and wrote
+/// Before this fix, the pane (then part of General) rendered and wrote
 /// `AppSettings.allowRemoteControl` directly — the RAW persisted bool — while
 /// `AppDelegate` started/stopped the server from
 /// `AppSettings.resolvedAllowRemoteControl`, which lets `AUDIOUT_COMPANION`
@@ -23,13 +24,6 @@ import AppKit
 @MainActor
 @Suite struct GeneralSettingsCompanionTests {
 
-    /// A `LoginItemManaging` fake — never touches real `SMAppService`;
-    /// irrelevant to these tests beyond satisfying the initializer.
-    private final class FakeLoginItem: LoginItemManaging {
-        var isEnabled: Bool = false
-        func setEnabled(_ newValue: Bool) throws { isEnabled = newValue }
-    }
-
     private func makeSettings() -> AppSettings {
         let suite = "AudioutTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
@@ -37,9 +31,8 @@ import AppKit
         return AppSettings(defaults: defaults)
     }
 
-    private func makePane(settings: AppSettings, environment: [String: String]) -> GeneralSettingsViewController {
-        GeneralSettingsViewController(loginItem: FakeLoginItem(), settings: settings, environment: environment,
-                                      remoteAppIsOffered: true)
+    private func makePane(settings: AppSettings, environment: [String: String]) -> RemoteSettingsViewController {
+        RemoteSettingsViewController(settings: settings, environment: environment, remoteAppIsOffered: true)
     }
 
     // MARK: No override present — unchanged behavior
@@ -136,6 +129,35 @@ import AppKit
         #expect(!settings.allowRemoteControl)
         #expect(!callbackFired)
     }
+
+    /// Red if the Audiout Remote row's readout stops following the switch or
+    /// stops counting only the iPhones that were allowed.
+    @Test func readoutFollowsTheSwitchAndTheAllowedPhones() throws {
+        let settings = makeSettings()
+        settings.allowRemoteControl = false
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("AudioutTests-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let approvals = CompanionApprovalController(store: CompanionApprovalStore(directory: dir))
+        let pane = RemoteSettingsViewController(settings: settings, environment: [:],
+                                                remoteAppIsOffered: true, approvals: approvals)
+        let root = SettingsRootViewController(sections: [
+            .init(title: "Audiout Remote", symbolName: "iphone", viewController: pane),
+        ])
+        #expect(root.test_readoutLines(at: 0) == ["Off"])
+
+        pane.test_toggleAllowRemoteControl(true)
+        #expect(root.test_readoutLines(at: 0) == ["On · no iPhones yet"])
+
+        approvals.presentPrompt = { _, _, respond in respond(false) }
+        approvals.handleRequest(clientID: "7C1D93F0-1111-4A2A-B3C4-D5E6F7A8B9C0", clientName: "Guest's iPhone") { _ in }
+        #expect(root.test_readoutLines(at: 0) == ["On · no iPhones allowed"])
+
+        approvals.presentPrompt = { _, _, respond in respond(true) }
+        approvals.handleRequest(clientID: "2B5E5A2B-58D8-4979-9F41-92E668FD9C0A", clientName: "Owner's iPhone") { _ in }
+        approvals.handleRequest(clientID: "0A1B2C3D-4E5F-4A6B-8C7D-9E0F1A2B3C4D", clientName: "Kid's iPhone") { _ in }
+        #expect(root.test_readoutLines(at: 0) == ["On · 2 iPhones allowed"])
+    }
 }
 
 /// T24: the "Remembered iPhones" list under the remote-control switch —
@@ -144,11 +166,6 @@ import AppKit
 /// (or no phones remembered) means no visible section at all.
 @MainActor
 @Suite final class GeneralSettingsRememberedPhonesTests: IsolatedSuite {
-
-    private final class FakeLoginItem: LoginItemManaging {
-        var isEnabled: Bool = false
-        func setEnabled(_ newValue: Bool) throws { isEnabled = newValue }
-    }
 
     private static let ownerID = "2B5E5A2B-58D8-4979-9F41-92E668FD9C0A"
     private static let guestID = "7C1D93F0-1111-4A2A-B3C4-D5E6F7A8B9C0"
@@ -159,11 +176,10 @@ import AppKit
         return CompanionApprovalController(store: store)
     }
 
-    private func makePane(approvals: CompanionApprovalController?) -> GeneralSettingsViewController {
-        GeneralSettingsViewController(loginItem: FakeLoginItem(),
-                                      settings: AppSettings(defaults: isolatedDefaults),
-                                      environment: [:], remoteAppIsOffered: true,
-                                      approvals: approvals)
+    private func makePane(approvals: CompanionApprovalController?) -> RemoteSettingsViewController {
+        RemoteSettingsViewController(settings: AppSettings(defaults: isolatedDefaults),
+                                     environment: [:], remoteAppIsOffered: true,
+                                     approvals: approvals)
     }
 
     private func record(_ id: String, name: String, decision: CompanionApproval.Decision) -> CompanionApproval {
@@ -182,7 +198,7 @@ import AppKit
         #expect(pane.test_phoneRowCount == 2)
         #expect(pane.test_rememberedPhones.map(\.name) == ["Owner's iPhone", "Guest's iPhone"])
         #expect(pane.test_rememberedPhones.map(\.decision) == ["Allowed", "Denied"])
-        #expect(pane.test_phoneRowDecisionTextColor(at: 1) == Tokens.Color.label2,
+        #expect(pane.test_phoneRowDecisionTextColor(at: 1) == Tokens.Color.labelCool,
                 "a recorded \"Denied\" is a fact about a past decision, not a failure — it never takes the red")
     }
 
@@ -218,22 +234,20 @@ import AppKit
     // MARK: The invitation to Audiout Remote
 
     /// Defect this names: a release built before Audiout Remote is approved
-    /// still shows the Allow switch, the QR invitation and the phone list —
-    /// three offers to pair with an app nobody can download.
-    @Test func aBuildWithoutTheCompanionMountsNoCompanionRows() throws {
+    /// still offers the Audiout Remote section — the Allow switch, the QR
+    /// invitation and the phone list, three offers to pair with an app nobody
+    /// can download. The app builds the section only while `isOffered`.
+    @Test func aBuildWithoutTheCompanionOffersNoRemoteSection() throws {
         let settings = AppSettings(defaults: isolatedDefaults)
         settings.allowRemoteControl = true
-        let pane = GeneralSettingsViewController(loginItem: FakeLoginItem(),
-                                                 settings: settings, environment: [:],
+        let pane = RemoteSettingsViewController(settings: settings, environment: [:],
                                                  remoteAppIsOffered: false,
                                                  approvals: try makeController(records: [
                                                     record(Self.ownerID, name: "Owner's iPhone",
                                                            decision: .approved),
                                                  ]))
-        #expect(!pane.test_allowRemoteControlRowIsMounted)
+        #expect(!pane.isOffered)
         #expect(!pane.test_remoteInviteRowIsMounted)
-        #expect(!pane.test_phoneListIsVisible,
-                "a remembered phone does not bring the list back in a build with no companion")
         #expect(!pane.test_allowRemoteControlIsOn,
                 "the effective state is off, whatever the persisted setting says")
     }
@@ -243,8 +257,7 @@ import AppKit
     @Test func theInvitationIsMountedOnlyWhileTheSwitchIsOn() throws {
         let settings = AppSettings(defaults: isolatedDefaults)
         settings.allowRemoteControl = true
-        let pane = GeneralSettingsViewController(loginItem: FakeLoginItem(),
-                                                 settings: settings, environment: [:], remoteAppIsOffered: true,
+        let pane = RemoteSettingsViewController(settings: settings, environment: [:], remoteAppIsOffered: true,
                                                  approvals: try makeController(records: []))
         #expect(pane.test_remoteInviteRowIsMounted)
 
@@ -262,8 +275,7 @@ import AppKit
         settings.allowRemoteControl = true
         let controller = try makeController(records: [])
         controller.presentPrompt = { _, _, respond in respond(true) }
-        let pane = GeneralSettingsViewController(loginItem: FakeLoginItem(),
-                                                 settings: settings, environment: [:], remoteAppIsOffered: true,
+        let pane = RemoteSettingsViewController(settings: settings, environment: [:], remoteAppIsOffered: true,
                                                  approvals: controller)
         #expect(pane.test_remoteInviteQRIsVisible)
 
@@ -280,8 +292,7 @@ import AppKit
         var opened: [URL] = []
         let settings = AppSettings(defaults: isolatedDefaults)
         settings.allowRemoteControl = true
-        let pane = GeneralSettingsViewController(loginItem: FakeLoginItem(),
-                                                 settings: settings, environment: [:], remoteAppIsOffered: true,
+        let pane = RemoteSettingsViewController(settings: settings, environment: [:], remoteAppIsOffered: true,
                                                  openURL: { opened.append($0) },
                                                  approvals: try makeController(records: []))
         #expect(pane.test_remoteInviteButtonTitle == "Open audiout.app/remote")

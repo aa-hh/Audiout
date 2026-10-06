@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 import AppKit
-import AudioutSharedUI
 
 /// One row of the outlined list the speaker page and the Speakers page share:
 /// an optional leading glyph, a title with an optional caption under it, and
@@ -10,31 +9,32 @@ import AudioutSharedUI
 /// whose inset hairlines start at ``leadingInset`` so they line up with the
 /// row's content. The insets are the page's own rail-free lane, so list text
 /// lines up with the headings above the list.
-final class ListRowView: NSView {
+public final class ListRowView: NSView {
 
-    static let leadingInset: CGFloat = GroupsPaneLayout.railFreeContentLeadingInset
-    static let trailingInset: CGFloat = GroupsPaneLayout.contentTrailingInset
+    public static let leadingInset: CGFloat = GroupsPaneLayout.railFreeContentLeadingInset
+    public static let trailingInset: CGFloat = GroupsPaneLayout.contentTrailingInset
     static let verticalPadding: CGFloat = 9
     static let minimumHeight: CGFloat = 44
     private static let glyphSide: CGFloat = 16
     private static let glyphToTextGap: CGFloat = 10
     private static let textToAccessoryGap: CGFloat = 10
 
-    let titleLabel = NSTextField(labelWithString: "")
+    public let titleLabel = NSTextField(labelWithString: "")
     let captionLabel = NSTextField(wrappingLabelWithString: "")
     private let textStack = NSStackView()
-    private(set) var accessory: NSView?
+    public private(set) var accessory: NSView?
+    private let captionSpansRow: Bool
 
     /// A row that sits inside a button passes every click to it, so the whole
     /// row is one target; its labels then leave the speaking to the button.
-    var isClickThrough = false {
+    public var isClickThrough = false {
         didSet {
             titleLabel.setAccessibilityElement(!isClickThrough)
             captionLabel.setAccessibilityElement(!isClickThrough)
         }
     }
 
-    var caption: String? {
+    public var caption: String? {
         get { captionLabel.isHidden ? nil : captionLabel.stringValue }
         set {
             captionLabel.stringValue = newValue ?? ""
@@ -43,7 +43,7 @@ final class ListRowView: NSView {
     }
 
     /// A decorative 16 pt template glyph for the leading slot.
-    static func glyph(_ symbolName: String, tint: NSColor = Tokens.Color.label2) -> NSImageView {
+    public static func glyph(_ symbolName: String, tint: NSColor = Tokens.Color.label2) -> NSImageView {
         let view = NSImageView()
         view.image = DeviceIcon.image(symbolName)
         view.contentTintColor = tint
@@ -52,7 +52,12 @@ final class ListRowView: NSView {
         return view
     }
 
-    init(glyph: NSView? = nil, title: String, caption: String? = nil, accessory: NSView? = nil) {
+    /// `captionSpansRow` keeps the title and accessory on one line and runs
+    /// the caption the full lane width beneath them, for a row whose
+    /// accessory is too wide to leave the caption a readable column.
+    public init(glyph: NSView? = nil, title: String, caption: String? = nil, accessory: NSView? = nil,
+                captionSpansRow: Bool = false) {
+        self.captionSpansRow = captionSpansRow
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false
 
@@ -74,16 +79,37 @@ final class ListRowView: NSView {
         textStack.spacing = Tokens.Layout.titleSubtitleSpacing
         textStack.translatesAutoresizingMaskIntoConstraints = false
         textStack.addArrangedSubview(titleLabel)
-        textStack.addArrangedSubview(captionLabel)
+        if !captionSpansRow { textStack.addArrangedSubview(captionLabel) }
         textStack.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         addSubview(textStack)
 
-        var constraints = [
-            heightAnchor.constraint(greaterThanOrEqualToConstant: Self.minimumHeight),
-            textStack.centerYAnchor.constraint(equalTo: centerYAnchor),
-            textStack.topAnchor.constraint(greaterThanOrEqualTo: topAnchor, constant: Self.verticalPadding),
-            textStack.bottomAnchor.constraint(lessThanOrEqualTo: bottomAnchor, constant: -Self.verticalPadding),
-        ]
+        var constraints: [NSLayoutConstraint]
+        if captionSpansRow {
+            // The title line and the caption under it are centred as one block.
+            captionLabel.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(captionLabel)
+            let block = NSLayoutGuide()
+            addLayoutGuide(block)
+            constraints = [
+                heightAnchor.constraint(greaterThanOrEqualToConstant: Self.minimumHeight),
+                block.topAnchor.constraint(equalTo: textStack.topAnchor),
+                block.bottomAnchor.constraint(equalTo: captionLabel.bottomAnchor),
+                block.centerYAnchor.constraint(equalTo: centerYAnchor),
+                textStack.topAnchor.constraint(greaterThanOrEqualTo: topAnchor, constant: Self.verticalPadding),
+                captionLabel.topAnchor.constraint(equalTo: textStack.bottomAnchor,
+                                                  constant: Tokens.Layout.titleSubtitleSpacing),
+                captionLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.leadingInset),
+                captionLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Self.trailingInset),
+                captionLabel.bottomAnchor.constraint(lessThanOrEqualTo: bottomAnchor, constant: -Self.verticalPadding),
+            ]
+        } else {
+            constraints = [
+                heightAnchor.constraint(greaterThanOrEqualToConstant: Self.minimumHeight),
+                textStack.centerYAnchor.constraint(equalTo: centerYAnchor),
+                textStack.topAnchor.constraint(greaterThanOrEqualTo: topAnchor, constant: Self.verticalPadding),
+                textStack.bottomAnchor.constraint(lessThanOrEqualTo: bottomAnchor, constant: -Self.verticalPadding),
+            ]
+        }
 
         if let glyph {
             glyph.translatesAutoresizingMaskIntoConstraints = false
@@ -107,7 +133,9 @@ final class ListRowView: NSView {
             addSubview(accessory)
             constraints += [
                 accessory.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Self.trailingInset),
-                accessory.centerYAnchor.constraint(equalTo: centerYAnchor),
+                captionSpansRow
+                    ? accessory.centerYAnchor.constraint(equalTo: titleLabel.centerYAnchor)
+                    : accessory.centerYAnchor.constraint(equalTo: centerYAnchor),
                 accessory.topAnchor.constraint(greaterThanOrEqualTo: topAnchor, constant: Self.verticalPadding),
                 accessory.bottomAnchor.constraint(lessThanOrEqualTo: bottomAnchor, constant: -Self.verticalPadding),
                 textStack.trailingAnchor.constraint(lessThanOrEqualTo: accessory.leadingAnchor,
@@ -135,14 +163,14 @@ final class ListRowView: NSView {
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-    override func hitTest(_ point: NSPoint) -> NSView? {
+    public override func hitTest(_ point: NSPoint) -> NSView? {
         isClickThrough ? nil : super.hitTest(point)
     }
 
-    override func layout() {
+    public override func layout() {
         super.layout()
         // A wrapping caption needs a width to compute its height against.
-        let width = textStack.frame.width
+        let width = captionSpansRow ? captionLabel.frame.width : textStack.frame.width
         if width > 0, captionLabel.preferredMaxLayoutWidth != width {
             captionLabel.preferredMaxLayoutWidth = width
         }

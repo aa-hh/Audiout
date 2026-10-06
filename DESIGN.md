@@ -630,8 +630,33 @@ trailing edge, matching the iPhone file's own row-as-fader grammar in AppKit
 terms.
 
 **Settings** is a sidebar-plus-pane split (`SettingsRootViewController`),
-never tabs — a new section becomes another sidebar row. It is its own
-window-hosted surface, not a sheet.
+never tabs; a new section becomes another sidebar row. It is its own
+window-hosted surface, not a sheet. The sidebar is the Speakers sidebar's
+two-line row (`IconLabelCellView` on a `SidebarRowView`) under a "Settings"
+header in `labelCool`: 40pt with one readout line, 54pt with two, the 22pt
+glyph at the cell's leading edge and the readout in `caption`/`labelCool` 2pt
+under the name. Each readout follows one rule: something the user must act on,
+else what changes what they hear or who can control the Mac, else the
+section's headline setting. VoiceOver hears the row as "name, readout", each
+" · " spoken as a comma ("License, Trial, 9 days left"). Each pane opens with
+`PageHeaderView` carrying a bare 30pt glyph in the 48pt slot, no well; its
+content sits on the 14pt lane in `ListRowView` rows over `GroupedSectionView`
+`.card` boxes at the `row` radius, and the License pane is one `.well` at the
+same radius holding the status sentence and its buttons. Buy Audiout is a
+`ProminentButton` and shows in the trial and unregistered states (and for a
+key the server refused); Enter license… and Change… stay stock. The sidebar
+glyph and the License header glyph take `ring` in the states marked below and
+`labelCool` otherwise.
+
+| Section | Readout | Glyph |
+|---|---|---|
+| General | "Needs Login Items approval" | `ring` |
+| | "Opens at login", "Doesn't open at login" | `labelCool` |
+| Audiout Remote (companion builds only) | "Off", "On · no iPhones yet", "On · no iPhones allowed", "On · 1 iPhone allowed", "On · N iPhones allowed" | `labelCool` |
+| Appearance | "{theme} · {accent}", e.g. "Match system · Full gold" | `labelCool` |
+| Audio | "No apps stay on this Mac", "1 app stays on this Mac", "N apps stay on this Mac"; second line "Buffer N ms" while the buffer is not 1000 ms | `labelCool` |
+| License (builds with a licence server only) | "Trial · N days left", "Registered", "Key saved, not verified" | `labelCool` |
+| | "Unregistered", "Trial ended", "Key refunded", "Payment reversed", "Key revoked", "Key not recognized", "Not an Audiout key"; second line "One speaker at a time" while the install is limited and no trial runs | `ring` |
 
 The Scenes and Speakers content (`MixerWindowController`) has two roots. The
 Scenes root is a card-grid scene overview and a configuration-only scene
@@ -745,10 +770,10 @@ every item of the surface header strip), and `EQGainFillCell: NSSliderCell`
 tick). Each folder's own
 `AGENTS.md` names its own local exception rather than one file listing them
 all — `AudioutSharedUI/AGENTS.md` names `ControlPanelBackingView`,
+`GroupedSectionView` and `DeviceIconWellView`,
 `AudioutPopoverUI/AGENTS.md` names the seat cell,
 `AudioutOnboardingUI/AGENTS.md` names `DemoPaneView`, and
-`AudioutWindowUI/AGENTS.md` names `GroupedSectionView`'s `.well`,
-`DeviceIconWellView`, the icon picker's cells and `EqualizerMarkView`. Anything not
+`AudioutWindowUI/AGENTS.md` names the icon picker's cells and `EqualizerMarkView`. Anything not
 on one of these lists draws with stock AppKit chrome; a new custom-drawn
 piece gets named in its owning folder's `AGENTS.md`, not invented silently.
 
@@ -1216,7 +1241,7 @@ scene from them. ⌘N reaches it. It opens the scene sheet and never activates
 anything.
 
 Every window page opens with one header, `PageHeaderView`
-(`AudioutWindowUI`): the 48 pt icon well, the name in `heading`, and an
+(`AudioutSharedUI`): the 48 pt icon well, the name in `heading`, and an
 optional caption line in `labelCool`, the name and caption sitting as one
 block centred on the well, `titleSubtitleSpacing` (2 pt) apart. On the Overview, a speaker's page and
 Main Audio the well starts on the page's rail-free 14 pt inset, level with
@@ -1260,7 +1285,7 @@ status and nothing about visibility; scene cards count unavailable members
 alongside the existing Playing and Feeding labels.
 
 ### List Row (window pages)
-`ListRowView` (`AudioutWindowUI`) is one row of the outlined list on the
+`ListRowView` (`AudioutSharedUI`) is one row of the outlined list on the
 Overview and a speaker's page:
 
 - an optional 16 pt leading glyph (`ListRowView.glyph`, default `label2`),
@@ -1273,13 +1298,17 @@ Overview and a speaker's page:
 - 9 pt top and bottom padding, a 44 pt minimum height, and the page's
   rail-free 14 pt lane on both sides.
 
+A row built with `captionSpansRow` keeps its title and accessory on one line
+and runs the caption the full lane width beneath them (the Audio pane's
+connect-volume row).
+
 `isClickThrough` puts the whole row inside a borderless button, so the row is
 one target and the button does the speaking. Rows stack on a
 `GroupedSectionView` `.card` whose dividers start at
 `ListRowView.leadingInset`.
 
 ### Grouped Section (window pages)
-`GroupedSectionView` (`AudioutWindowUI`) is the box under a window page's
+`GroupedSectionView` (`AudioutSharedUI`) is the box under a window page's
 rows, drawn in `draw(_:)` and never hit-tested. A box is earned by holding a
 different instrument, never by length.
 
@@ -1297,7 +1326,7 @@ than two rows draws none. Onboarding's permission card
 `hairline` border, 10 pt radius.
 
 ### Icon Well, Icon Picker and Equalizer Heading Icon (window pages)
-Three custom-drawn pieces, named in `AudioutWindowUI/AGENTS.md`.
+Three custom-drawn pieces: the icon well is named in `AudioutSharedUI/AGENTS.md`, the icon picker's cells and `EqualizerMarkView` in `AudioutWindowUI/AGENTS.md`.
 
 - **`DeviceIconWellView`**, the 48 pt well that opens every page header: a
   `control`-radius square filled `raised` with a 1 pt `containerEdge` edge,

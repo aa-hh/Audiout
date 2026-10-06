@@ -16,7 +16,7 @@ Configuration-only Speakers and Scenes content: no window, no backend.
 - Never let the sidebar collapse; nothing can restore it.
 - Panes fit the shared surface geometry; never widen the shell.
 - Gold means live audio; magenta, group identity; green, a reachable speaker. Stock sidebar chrome remains native.
-- Custom-drawn: `GroupedSectionView` (`.well` recesses both Equalizers; in light a `.card` outlines nothing), `DeviceIconWellView`, `IconPickerViewController` cells, `EqualizerMarkView`.
+- Custom-drawn: `IconPickerViewController` cells, `EqualizerMarkView`.
 - Report persistence failures in plain words; never swallow them.
 - Preserve keyboard focus seeding in visible hosts; headless absence is not dead code.
 - Never regenerate the unreproducible macOS 27 device-detail goldens.
@@ -28,13 +28,11 @@ Configuration-only Speakers and Scenes content: no window, no backend.
 - `MixerWindowController` → Scenes and Speakers navigation.
 - `ContentPaneHostViewController` → Swapped content and footer.
 - `SpeakersPageViewController` → Overview; shimmer: AppKit has none.
-- `ListRowView` → Outlined-list row.
 - `GroupsOverviewViewController` → Saved-scene cards.
 - `SidebarViewController` → Speaker list.
 - `GroupEditorViewController` → Scene editor.
 - `GroupCreationSheetController` → Scene creation.
 - `DeviceDetailViewController` → Speaker page.
 - `MainOutDetailViewController` → Main Audio configuration.
-- `PageHeaderView` → Every page's icon, name, caption.
 - `FlippedView` → Top-down page document.
 - `EqualizerMarkView` → Equalizer heading icon.

@@ -72,9 +72,8 @@ public struct WakeAudioRestoreModel {
 /// (persisted via `ExcludedAppsController`); the app layer enforces the
 /// precedence (pruning any route for a newly-excluded app) via ``onChange``.
 ///
-/// The list is a bordered column of `icon · name · remove` rows plus an "Add
-/// application…" row that doubles as the empty state — the same idiom as the
-/// popover's Applications card. Add offers running apps, plus "Choose from
+/// The list is a card of `icon · name · remove` rows plus an "Add app…" row
+/// that doubles as the empty state. Add offers running apps, plus "Choose from
 /// Finder…" so a not-currently-running app (e.g. a comms app) can be
 /// pre-excluded.
 ///
@@ -89,7 +88,7 @@ public struct WakeAudioRestoreModel {
 /// value reconnects active speakers. When `AIRPLAY_START_BUFFER_MS` overrode
 /// the setting at launch the control renders disabled with a note instead.
 @MainActor
-public final class AudioSettingsViewController: NSViewController {
+public final class AudioSettingsViewController: NSViewController, SettingsReadoutProviding {
 
     private let excluded: ExcludedAppsController
     private let runningAppsProvider: () -> [AppPickerItem]
@@ -104,20 +103,20 @@ public final class AudioSettingsViewController: NSViewController {
     /// Injectable so tests use a throwaway `UserDefaults` suite, never `.standard`.
     private let settings: AppSettings
 
-    // Connect-volume state.
+    // Connect-volume state. Each row's caption is its live hint.
     private let connectVolumeSlider = NSSlider()
     private let connectVolumeValueLabel = NSTextField(labelWithString: "")
-    private let connectVolumeHint = SettingsForm.hintLabel()
+    private var connectVolumeRow: ListRowView?
 
     // Wake-restore state (nil/untouched when `wakeRestore` is nil).
     private let wakeRestorePopup = NSPopUpButton()
-    private let wakeRestoreHint = SettingsForm.hintLabel()
+    private var wakeRestoreRow: ListRowView?
 
     // Bluetooth keep-alive state (roadmap 085 ticket 04). Persist-only, the
     // connect-volume pattern: the backend re-reads `AppSettings` on every
     // Bluetooth enable, so there is nothing to push to a running session.
     private let btKeepAlivePopup = NSPopUpButton()
-    private let btKeepAliveHint = SettingsForm.hintLabel()
+    private var btKeepAliveRow: ListRowView?
 
     /// Fired after the denylist changes so the app can enforce precedence (prune
     /// routes) and refresh the popover.
@@ -129,21 +128,20 @@ public final class AudioSettingsViewController: NSViewController {
     /// single-assignment idiom as ``onChange``.
     public var onSettingChanged: (() -> Void)?
 
-    private let listStack = NSStackView()
-    private let listContainer = BorderedListView()
+    var onReadoutChanged: (() -> Void)?
+
+    private var appsCard: (container: NSView, box: GroupedSectionView, stack: NSStackView)?
 
     // Advanced › Audio buffer state (all nil/untouched when `latency` is nil).
     private let bufferPopup = NSPopUpButton()
-    private let bufferHint = SettingsForm.hintLabel()
+    private var bufferRow: ListRowView?
     // Advanced is a disclosure, collapsed by default (roadmap 050): the buffer
     // is an expert control and doesn't deserve a standing row.
     private let advancedDisclosure = NSButton()
     private let advancedContent = NSStackView()
-    // 4pt inside the clip + the column's own 8pt spacing = the standard 12pt
-    // section gap when expanded; collapsed, only the stack's 8pt remains above
-    // the pane's bottom padding.
-    private lazy var advancedClip = FoldingClipView(content: advancedContent, topInset: 4)
-    // The pane's column stack, kept because `republishFittedHeight()` measures
+    // The page's 8 pt spacing after the header is the gap above the card.
+    private lazy var advancedClip = FoldingClipView(content: advancedContent)
+    // The page's column stack, kept because `republishFittedHeight()` measures
     // IT rather than the root (see that method's trap note).
     private weak var columnStack: NSStackView?
     // Apply-in-progress feedback for the buffer popup (V1: applies immediately,
@@ -153,8 +151,6 @@ public final class AudioSettingsViewController: NSViewController {
     private var appliedMs = 0
     private var isApplying = false
     private var statusResetWorkItem: DispatchWorkItem?
-
-    private static let rowHeight: CGFloat = 34
 
     public init(excluded: ExcludedAppsController,
                 runningAppsProvider: @escaping () -> [AppPickerItem] = RunningApps.regularRunningApps,
@@ -166,87 +162,65 @@ public final class AudioSettingsViewController: NSViewController {
         self.settings = settings
         self.latency = latency
         self.wakeRestore = wakeRestore
+        // The readout reads the applied buffer before the view ever loads.
+        self.appliedMs = latency?.initialMs ?? 0
         super.init(nibName: nil, bundle: nil)
         title = "Audio"
     }
 
     public required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
+    // MARK: Readout
+
+    var readoutLines: [String] {
+        let count = excluded.excludedApps.count
+        let apps: String
+        switch count {
+        case 0: apps = "No apps stay on this Mac"
+        case 1: apps = "1 app stays on this Mac"
+        default: apps = "\(count) apps stay on this Mac"
+        }
+        guard let latency else { return [apps] }
+        let ms = latency.envOverrideMs ?? appliedMs
+        return ms == 1000 ? [apps] : [apps, "Buffer \(ms) ms"]
+    }
+
+    var readoutGlyphTint: NSColor { Tokens.Color.labelCool }
+
+    // MARK: Layout
+
     public override func loadView() {
-        // Section-header voice (roadmap 050): real weight separation from
-        // body-font row titles, shared with every other header in the panes.
-        let heading = SettingsForm.sectionHeader("Apps that stay on this Mac")
-
-        // `hintLabel`, not a hand-rolled `label` + wrap properties: it also
-        // resolves `preferredMaxLayoutWidth`, without which this sentence's
-        // unwrapped width drags the whole pane (and the live window) wider
-        // than the fixed content column — see hintLabel's doc comment.
-        let subtitle = SettingsForm.hintLabel(
+        let (header, _) = SettingsPane.makeHeader(symbolName: "speaker.wave.2", title: "Audio")
+        let appsTitle = SettingsPane.makeSectionTitle("Apps that stay on this Mac")
+        let appsNote = SettingsPane.makeNote(
             "Audio from these apps always plays on your Mac, never sent to speakers.")
+        let apps = SettingsPane.makeCard(rows: [])
+        appsCard = apps
 
-        listStack.orientation = .vertical
-        listStack.alignment = .leading
-        listStack.spacing = 0
-        listStack.translatesAutoresizingMaskIntoConstraints = false
+        var settingRows: [NSView] = [makeConnectVolumeRow()]
+        if let wakeRestoreRow = makeWakeRestoreRow() { settingRows.append(wakeRestoreRow) }
+        settingRows.append(makeBTKeepAliveRow())
+        let settingsCard = SettingsPane.makeCard(rows: settingRows)
 
-        listContainer.translatesAutoresizingMaskIntoConstraints = false
-        listContainer.addSubview(listStack)
-        NSLayoutConstraint.activate([
-            listStack.leadingAnchor.constraint(equalTo: listContainer.leadingAnchor),
-            listStack.trailingAnchor.constraint(equalTo: listContainer.trailingAnchor),
-            listStack.topAnchor.constraint(equalTo: listContainer.topAnchor, constant: 4),
-            listStack.bottomAnchor.constraint(equalTo: listContainer.bottomAnchor, constant: -4),
-        ])
-
-        let column = NSStackView(views: [heading, subtitle, listContainer])
-        column.orientation = .vertical
-        column.alignment = .leading
-        column.spacing = 8
-        column.translatesAutoresizingMaskIntoConstraints = false
-        columnStack = column
-
-        for sectionView in makeConnectVolumeSectionViews() {
-            column.addArrangedSubview(sectionView)
-            sectionView.widthAnchor.constraint(equalTo: column.widthAnchor).isActive = true
-        }
-
-        if wakeRestore != nil {
-            for sectionView in makeWakeRestoreSectionViews() {
-                column.addArrangedSubview(sectionView)
-                sectionView.widthAnchor.constraint(equalTo: column.widthAnchor).isActive = true
-            }
-        }
-
-        for sectionView in makeBTKeepAliveSectionViews() {
-            column.addArrangedSubview(sectionView)
-            sectionView.widthAnchor.constraint(equalTo: column.widthAnchor).isActive = true
-        }
-
+        var content: [NSView] = [header, appsTitle, appsNote, apps.container, settingsCard.container]
+        var advancedHeader: NSView?
         if latency != nil {
-            for sectionView in makeAdvancedSectionViews() {
-                column.addArrangedSubview(sectionView)
-                sectionView.widthAnchor.constraint(equalTo: column.widthAnchor).isActive = true
-            }
+            let header = makeAdvancedHeader()
+            advancedHeader = header
+            content += [header, advancedClip]
         }
 
-        let container = NSView()
-        container.translatesAutoresizingMaskIntoConstraints = false
-        container.addSubview(column)
-        // `.defaultHigh`, same reason as `SettingsForm.paneView(rows:width:)`:
-        // the pane host's edge pins own the real width once mounted, and a 1pt
-        // split divider must be able to shave this without a conflict.
-        let widthConstraint = container.widthAnchor.constraint(equalToConstant: SettingsForm.contentWidth)
-        widthConstraint.priority = .defaultHigh
-        NSLayoutConstraint.activate([
-            widthConstraint,
-            column.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: SettingsForm.horizontalPadding),
-            column.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -SettingsForm.horizontalPadding),
-            column.topAnchor.constraint(equalTo: container.topAnchor, constant: SettingsForm.verticalPadding),
-            column.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -SettingsForm.verticalPadding),
-            subtitle.widthAnchor.constraint(equalTo: column.widthAnchor),
-            listContainer.widthAnchor.constraint(equalTo: column.widthAnchor),
-        ])
-        view = container
+        let page = SettingsForm.pageView(content: content)
+        let column = page.subviews.first as? NSStackView
+        column?.setCustomSpacing(3, after: appsTitle)
+        column?.setCustomSpacing(9, after: appsNote)
+        column?.setCustomSpacing(16, after: apps.container)
+        if let advancedHeader {
+            column?.setCustomSpacing(16, after: settingsCard.container)
+            column?.setCustomSpacing(8, after: advancedHeader)
+        }
+        columnStack = column
+        view = page
         rebuildList()
     }
 
@@ -257,20 +231,14 @@ public final class AudioSettingsViewController: NSViewController {
         "\(msFormatter.string(from: NSNumber(value: percent)) ?? String(percent))%"
     }
 
-    /// The connect-volume sub-section: hairline + heading + a slider row. Mounts
-    /// unconditionally (a universal preference; only the native backend acts on it,
-    /// which is the shipping backend). The slider is bounded to
+    /// The connect-volume row: title and slider on one line, the live hint
+    /// the full lane width beneath. Mounts unconditionally (a universal
+    /// preference; only the native backend acts on it, which is the shipping
+    /// backend). The slider is bounded to
     /// ``AppSettings/minConnectVolume``…``AppSettings/maxConnectVolume`` so the UI
     /// itself can never select 0/silent. Persists on change — no CTA, since it only
     /// affects the NEXT speaker connect, never a live session.
-    private func makeConnectVolumeSectionViews() -> [NSView] {
-        var views: [NSView] = []
-
-        let hairline = NSBox()
-        hairline.boxType = .separator
-        hairline.translatesAutoresizingMaskIntoConstraints = false
-        views.append(hairline)
-
+    private func makeConnectVolumeRow() -> ListRowView {
         connectVolumeSlider.translatesAutoresizingMaskIntoConstraints = false
         connectVolumeSlider.minValue = Double(AppSettings.minConnectVolume)
         connectVolumeSlider.maxValue = Double(AppSettings.maxConnectVolume)
@@ -282,8 +250,7 @@ public final class AudioSettingsViewController: NSViewController {
         connectVolumeSlider.widthAnchor.constraint(equalToConstant: 160).isActive = true
 
         // Monospaced digits on the panel's well (roadmap 050) — the readout as
-        // instrument. One shared width with the sync-offset readout below so
-        // both sliders land on the same column.
+        // instrument.
         let connectVolumeWell = SettingsForm.readoutWell(connectVolumeValueLabel, width: 56)
         connectVolumeValueLabel.stringValue = Self.percentLabel(settings.connectVolume)
 
@@ -293,16 +260,13 @@ public final class AudioSettingsViewController: NSViewController {
         control.spacing = 8
         control.translatesAutoresizingMaskIntoConstraints = false
 
-        views.append(SettingsForm.row(
-            title: "Volume when connecting a speaker",
-            control: control))
-
         // Live hint (spec §5.2): re-written on every drag, so the consequence
-        // of the chosen level is always spelled out — replaces the old static
-        // subtitle.
-        connectVolumeHint.stringValue = Self.connectVolumeHintLine(settings.connectVolume)
-        views.append(connectVolumeHint)
-        return views
+        // of the chosen level is always spelled out.
+        let row = ListRowView(title: "Volume when connecting a speaker",
+                              caption: Self.connectVolumeHintLine(settings.connectVolume),
+                              accessory: control, captionSpansRow: true)
+        connectVolumeRow = row
+        return row
     }
 
     /// The connect-volume live hint: value + consequence, the
@@ -333,6 +297,7 @@ public final class AudioSettingsViewController: NSViewController {
     /// to it while the user is dragging would fight the drag — and nobody can
     /// be dragging a control on a screen that is only now appearing.
     public func reloadFromSettings() {
+        defer { onReadoutChanged?() }
         // Nothing to reconcile before the controls exist — and the load path
         // reads `settings` itself, so an unloaded pane comes up current. This
         // must NOT force the view: building a whole pane to answer a reconcile
@@ -342,13 +307,13 @@ public final class AudioSettingsViewController: NSViewController {
         let percent = settings.connectVolume
         connectVolumeSlider.integerValue = percent
         connectVolumeValueLabel.stringValue = Self.percentLabel(percent)
-        connectVolumeHint.stringValue = Self.connectVolumeHintLine(percent)
+        connectVolumeRow?.caption = Self.connectVolumeHintLine(percent)
 
         let keepAliveMinutes = settings.btKeepAliveMinutes
         if let index = AppSettings.btKeepAliveMinuteOptions.firstIndex(of: keepAliveMinutes) {
             btKeepAlivePopup.selectItem(at: index)
         }
-        btKeepAliveHint.stringValue = Self.btKeepAliveHintLine(keepAliveMinutes)
+        btKeepAliveRow?.caption = Self.btKeepAliveHintLine(keepAliveMinutes)
 
         // The buffer popup is disabled outright under an env override, and
         // then its one item is that override — nothing to reconcile.
@@ -358,13 +323,13 @@ public final class AudioSettingsViewController: NSViewController {
         if let index = latency.optionsMs.firstIndex(of: ms) {
             bufferPopup.selectItem(at: index)
         }
-        bufferHint.stringValue = Self.bufferHintLine(ms)
+        bufferRow?.caption = Self.bufferHintLine(ms)
     }
 
     @objc private func connectVolumeChanged() {
         let percent = connectVolumeSlider.integerValue
         connectVolumeValueLabel.stringValue = Self.percentLabel(percent)
-        connectVolumeHint.stringValue = Self.connectVolumeHintLine(percent)
+        connectVolumeRow?.caption = Self.connectVolumeHintLine(percent)
         settings.connectVolume = percent
         onSettingChanged?()
     }
@@ -381,18 +346,11 @@ public final class AudioSettingsViewController: NSViewController {
         }
     }
 
-    /// The wake-restore sub-section: hairline + heading + the popup row. Applies
-    /// immediately on change (persist + push to backend) — no CTA, since un-gating
-    /// the Mac's own output on a future wake has no live-session cost now.
-    private func makeWakeRestoreSectionViews() -> [NSView] {
-        guard let wakeRestore else { return [] }
-        var views: [NSView] = []
-
-        let hairline = NSBox()
-        hairline.boxType = .separator
-        hairline.translatesAutoresizingMaskIntoConstraints = false
-        views.append(hairline)
-
+    /// The wake-restore row, its caption the live hint. Applies immediately
+    /// on change (persist + push to backend) — no CTA, since un-gating the
+    /// Mac's own output on a future wake has no live-session cost now.
+    private func makeWakeRestoreRow() -> ListRowView? {
+        guard let wakeRestore else { return nil }
         wakeRestorePopup.translatesAutoresizingMaskIntoConstraints = false
         for minutes in wakeRestore.minuteOptions {
             wakeRestorePopup.addItem(withTitle: Self.wakeMinutesLabel(minutes))
@@ -404,14 +362,11 @@ public final class AudioSettingsViewController: NSViewController {
         wakeRestorePopup.action = #selector(wakeRestoreChanged)
         wakeRestorePopup.setAccessibilityLabel("Restore Mac audio if speakers don't reconnect")
 
-        views.append(SettingsForm.row(
-            title: "Restore Mac audio if speakers don't reconnect",
-            control: wakeRestorePopup))
-
-        // Live hint (spec §5.2) — re-written on every popup change.
-        wakeRestoreHint.stringValue = Self.wakeRestoreHintLine(wakeRestore.initialMinutes)
-        views.append(wakeRestoreHint)
-        return views
+        let row = ListRowView(title: "Restore Mac audio if speakers don't reconnect",
+                              caption: Self.wakeRestoreHintLine(wakeRestore.initialMinutes),
+                              accessory: wakeRestorePopup)
+        wakeRestoreRow = row
+        return row
     }
 
     /// The wake-restore live hint: what the chosen delay actually does after a
@@ -429,22 +384,15 @@ public final class AudioSettingsViewController: NSViewController {
         let index = wakeRestorePopup.indexOfSelectedItem
         guard wakeRestore.minuteOptions.indices.contains(index) else { return }
         let minutes = wakeRestore.minuteOptions[index]
-        wakeRestoreHint.stringValue = Self.wakeRestoreHintLine(minutes)
+        wakeRestoreRow?.caption = Self.wakeRestoreHintLine(minutes)
         wakeRestore.apply(minutes)
     }
 
     // MARK: Bluetooth keep-alive (roadmap 085 ticket 04)
 
-    /// The Bluetooth keep-alive sub-section: hairline + popup row + live hint.
+    /// The Bluetooth keep-alive row, its caption the live hint.
     /// Persist-only — the value lands on the next Bluetooth enable.
-    private func makeBTKeepAliveSectionViews() -> [NSView] {
-        var views: [NSView] = []
-
-        let hairline = NSBox()
-        hairline.boxType = .separator
-        hairline.translatesAutoresizingMaskIntoConstraints = false
-        views.append(hairline)
-
+    private func makeBTKeepAliveRow() -> ListRowView {
         btKeepAlivePopup.translatesAutoresizingMaskIntoConstraints = false
         for minutes in AppSettings.btKeepAliveMinuteOptions {
             btKeepAlivePopup.addItem(withTitle: Self.wakeMinutesLabel(minutes))
@@ -456,13 +404,11 @@ public final class AudioSettingsViewController: NSViewController {
         btKeepAlivePopup.action = #selector(btKeepAliveChanged)
         btKeepAlivePopup.setAccessibilityLabel("Keep Bluetooth speakers streaming during pauses")
 
-        views.append(SettingsForm.row(
-            title: "Keep Bluetooth speakers streaming during pauses",
-            control: btKeepAlivePopup))
-
-        btKeepAliveHint.stringValue = Self.btKeepAliveHintLine(settings.btKeepAliveMinutes)
-        views.append(btKeepAliveHint)
-        return views
+        let row = ListRowView(title: "Keep Bluetooth speakers streaming during pauses",
+                              caption: Self.btKeepAliveHintLine(settings.btKeepAliveMinutes),
+                              accessory: btKeepAlivePopup)
+        btKeepAliveRow = row
+        return row
     }
 
     private static func btKeepAliveHintLine(_ minutes: Int) -> String {
@@ -479,7 +425,7 @@ public final class AudioSettingsViewController: NSViewController {
         guard AppSettings.btKeepAliveMinuteOptions.indices.contains(index) else { return }
         let minutes = AppSettings.btKeepAliveMinuteOptions[index]
         settings.btKeepAliveMinutes = minutes
-        btKeepAliveHint.stringValue = Self.btKeepAliveHintLine(minutes)
+        btKeepAliveRow?.caption = Self.btKeepAliveHintLine(minutes)
     }
 
     // MARK: Advanced › Audio buffer (PLAN-LATENCY-SETTING.md)
@@ -496,18 +442,11 @@ public final class AudioSettingsViewController: NSViewController {
         "\(msFormatter.string(from: NSNumber(value: ms)) ?? String(ms)) ms"
     }
 
-    /// The Advanced sub-section: hairline + a **disclosure header** (collapsed
-    /// by default, roadmap 050) whose content stack holds the Audio buffer row
-    /// (+ env-override note, or the apply-feedback row).
-    /// Expanding/collapsing republishes `preferredContentSize`, which reaches
-    /// the host via the same KVO path `rebuildList()` uses — no second path.
-    private func makeAdvancedSectionViews() -> [NSView] {
-        guard latency != nil else { return [] }
-
-        let hairline = NSBox()
-        hairline.boxType = .separator
-        hairline.translatesAutoresizingMaskIntoConstraints = false
-
+    /// The Advanced **disclosure header** (collapsed by default, roadmap 050);
+    /// its fold holds a card with the Audio buffer row and, under it, the
+    /// env-override note or the apply-feedback row. Builds the fold's content
+    /// as a side effect.
+    private func makeAdvancedHeader() -> NSView {
         advancedDisclosure.translatesAutoresizingMaskIntoConstraints = false
         advancedDisclosure.setButtonType(.pushOnPushOff)
         advancedDisclosure.bezelStyle = .disclosure
@@ -542,16 +481,15 @@ public final class AudioSettingsViewController: NSViewController {
 
         advancedContent.orientation = .vertical
         advancedContent.alignment = .leading
-        advancedContent.spacing = 12
+        advancedContent.spacing = 0
         advancedContent.translatesAutoresizingMaskIntoConstraints = false
-        for contentView in makeAdvancedContentViews() {
-            advancedContent.addArrangedSubview(contentView)
-            contentView.widthAnchor.constraint(equalTo: advancedContent.widthAnchor).isActive = true
-        }
+        let card = SettingsPane.makeCard(rows: makeAdvancedContentViews())
+        advancedContent.addArrangedSubview(card.container)
+        card.container.widthAnchor.constraint(equalTo: advancedContent.widthAnchor).isActive = true
 
         // Collapsed by default: `FoldingClipView` explains why a clip, not
         // `isHidden`, folds a stack child.
-        return [hairline, header, advancedClip]
+        return header
     }
 
     /// Clicking the word "Advanced" mirrors the triangle exactly: flip the
@@ -625,17 +563,16 @@ public final class AudioSettingsViewController: NSViewController {
         }
         bufferPopup.setAccessibilityLabel("Audio buffer")
 
-        views.append(SettingsForm.row(
-            title: "Audio buffer",
-            control: bufferPopup))
-
         // Live hint (spec §5.2 — the "`Buffer: 120 ms — safe for Wi-Fi
-        // speakers`" pattern itself): re-written on every popup change,
-        // states the currently-applied value's consequence AND that changing
-        // it reconnects active speakers (V1: the popup applies immediately,
-        // there's no CTA to carry that warning instead).
-        bufferHint.stringValue = Self.bufferHintLine(latency.envOverrideMs ?? latency.initialMs)
-        views.append(bufferHint)
+        // speakers`" pattern itself) as the row's caption: re-written on every
+        // popup change, states the currently-applied value's consequence AND
+        // that changing it reconnects active speakers (V1: the popup applies
+        // immediately, there's no CTA to carry that warning instead).
+        let row = ListRowView(title: "Audio buffer",
+                              caption: Self.bufferHintLine(latency.envOverrideMs ?? latency.initialMs),
+                              accessory: bufferPopup)
+        bufferRow = row
+        views.append(row)
 
         if let envMs = latency.envOverrideMs {
             let note = SettingsForm.label(
@@ -650,8 +587,8 @@ public final class AudioSettingsViewController: NSViewController {
             // `preferredMaxLayoutWidth` fix — see hintLabel's doc comment for
             // why an unset one drags the whole pane wider than the fixed
             // content column.
-            note.preferredMaxLayoutWidth = SettingsForm.contentWidth - 40
-            views.append(note)
+            note.preferredMaxLayoutWidth = SettingsPane.cardLaneWidth
+            views.append(SettingsPane.makeLaneRow(note))
             return views
         }
 
@@ -679,7 +616,7 @@ public final class AudioSettingsViewController: NSViewController {
             applyStatusLabel.leadingAnchor.constraint(equalTo: applySpinner.trailingAnchor, constant: 6),
             applyStatusLabel.centerYAnchor.constraint(equalTo: statusRow.centerYAnchor),
         ])
-        views.append(statusRow)
+        views.append(SettingsPane.makeLaneRow(statusRow))
 
         return views
     }
@@ -713,7 +650,7 @@ public final class AudioSettingsViewController: NSViewController {
         let index = bufferPopup.indexOfSelectedItem
         guard latency.optionsMs.indices.contains(index) else { return nil }
         let ms = latency.optionsMs[index]
-        bufferHint.stringValue = Self.bufferHintLine(ms)
+        bufferRow?.caption = Self.bufferHintLine(ms)
         clearTransientStatus()
         return ms == appliedMs ? nil : ms
     }
@@ -736,6 +673,7 @@ public final class AudioSettingsViewController: NSViewController {
 
         appliedMs = target
         onSettingChanged?()
+        onReadoutChanged?()
         isApplying = false
         bufferPopup.isEnabled = true
         applySpinner.stopAnimation(nil)
@@ -775,8 +713,9 @@ public final class AudioSettingsViewController: NSViewController {
     /// document the Settings pane host wraps it in, and the extra rows become
     /// scrollable content rather than a taller window.
     private func rebuildList() {
-        for row in listStack.arrangedSubviews {
-            listStack.removeArrangedSubview(row)
+        guard let card = appsCard else { return }
+        for row in card.stack.arrangedSubviews {
+            card.stack.removeArrangedSubview(row)
             row.removeFromSuperview()
         }
         // ONE snapshot for the whole rebuild: `runningAppsProvider()`
@@ -785,30 +724,25 @@ public final class AudioSettingsViewController: NSViewController {
         let running = Dictionary(runningAppsProvider().map { ($0.bundleID, $0) },
                                  uniquingKeysWith: { first, _ in first })
         for app in excluded.excludedApps {
-            listStack.addArrangedSubview(makeExcludedRow(app, running: running))
+            card.stack.addArrangedSubview(makeExcludedRow(app, running: running))
         }
-        listStack.addArrangedSubview(makeAddRow())
-        for row in listStack.arrangedSubviews {
-            row.widthAnchor.constraint(equalTo: listStack.widthAnchor).isActive = true
+        card.stack.addArrangedSubview(makeAddRow())
+        for row in card.stack.arrangedSubviews {
+            row.widthAnchor.constraint(equalTo: card.stack.widthAnchor).isActive = true
         }
+        card.box.rows = card.stack.arrangedSubviews.filter { !$0.isHidden }
 
         republishFittedHeight()
+        onReadoutChanged?()
     }
 
     private func makeExcludedRow(_ app: ExcludedApp, running: [String: AppPickerItem]) -> NSView {
-        let row = NSView()
-        row.translatesAutoresizingMaskIntoConstraints = false
-
         let iconView = NSImageView()
-        iconView.translatesAutoresizingMaskIntoConstraints = false
         iconView.imageScaling = .scaleProportionallyDown
         iconView.image = icon(for: app.bundleID, running: running)
-
-        let nameLabel = SettingsForm.label(app.displayName)
-        nameLabel.lineBreakMode = .byTruncatingTail
+        iconView.setAccessibilityElement(false)
 
         let remove = NSButton()
-        remove.translatesAutoresizingMaskIntoConstraints = false
         remove.isBordered = false
         remove.setButtonType(.momentaryChange)
         remove.imagePosition = .imageOnly
@@ -821,49 +755,31 @@ public final class AudioSettingsViewController: NSViewController {
         remove.identifier = NSUserInterfaceItemIdentifier(app.bundleID)
         remove.setAccessibilityLabel("Remove \(app.displayName)")
 
-        row.addSubview(iconView)
-        row.addSubview(nameLabel)
-        row.addSubview(remove)
-        NSLayoutConstraint.activate([
-            row.heightAnchor.constraint(equalToConstant: Self.rowHeight),
-            iconView.leadingAnchor.constraint(equalTo: row.leadingAnchor, constant: 10),
-            iconView.centerYAnchor.constraint(equalTo: row.centerYAnchor),
-            iconView.widthAnchor.constraint(equalToConstant: 18),
-            iconView.heightAnchor.constraint(equalToConstant: 18),
-            nameLabel.leadingAnchor.constraint(equalTo: iconView.trailingAnchor, constant: 8),
-            nameLabel.centerYAnchor.constraint(equalTo: row.centerYAnchor),
-            nameLabel.trailingAnchor.constraint(lessThanOrEqualTo: remove.leadingAnchor, constant: -8),
-            remove.trailingAnchor.constraint(equalTo: row.trailingAnchor, constant: -10),
-            remove.centerYAnchor.constraint(equalTo: row.centerYAnchor),
-        ])
-        return row
+        return ListRowView(glyph: iconView, title: app.displayName, accessory: remove)
     }
 
+    /// "Add app…": the whole row is one borderless button, so a click
+    /// anywhere on it opens the picker.
     private func makeAddRow() -> NSView {
-        let row = NSView()
-        row.translatesAutoresizingMaskIntoConstraints = false
-
         let button = NSButton()
         button.translatesAutoresizingMaskIntoConstraints = false
         button.isBordered = false
         button.setButtonType(.momentaryChange)
-        button.imagePosition = .imageLeading
-        let config = NSImage.SymbolConfiguration(pointSize: 12, weight: .regular)
-        button.image = NSImage(systemSymbolName: "plus.circle", accessibilityDescription: nil)?
-            .withSymbolConfiguration(config)
-        button.title = "Add app…"
-        button.contentTintColor = Tokens.Color.label2
+        button.title = ""
         button.target = self
         button.action = #selector(addTapped(_:))
         button.setAccessibilityLabel("Add excluded app")
 
-        row.addSubview(button)
+        let row = ListRowView(glyph: ListRowView.glyph("plus.circle"), title: "Add app…")
+        row.isClickThrough = true
+        button.addSubview(row)
         NSLayoutConstraint.activate([
-            row.heightAnchor.constraint(equalToConstant: Self.rowHeight),
-            button.leadingAnchor.constraint(equalTo: row.leadingAnchor, constant: 10),
-            button.centerYAnchor.constraint(equalTo: row.centerYAnchor),
+            row.topAnchor.constraint(equalTo: button.topAnchor),
+            row.leadingAnchor.constraint(equalTo: button.leadingAnchor),
+            row.trailingAnchor.constraint(equalTo: button.trailingAnchor),
+            row.bottomAnchor.constraint(equalTo: button.bottomAnchor),
         ])
-        return row
+        return button
     }
 
     /// Resolve an excluded app's icon: the running app's icon if it's running,
@@ -1002,7 +918,7 @@ public final class AudioSettingsViewController: NSViewController {
     /// The connect-volume live hint line (W1, spec §5.2).
     public var test_connectVolumeHint: String {
         _ = view
-        return connectVolumeHint.stringValue
+        return connectVolumeRow?.caption ?? ""
     }
 
     // MARK: Test-support hooks (Wake restore — B6b)
@@ -1036,7 +952,7 @@ public final class AudioSettingsViewController: NSViewController {
     /// The wake-restore live hint line (W1, spec §5.2).
     public var test_wakeRestoreHint: String {
         _ = view
-        return wakeRestoreHint.stringValue
+        return wakeRestoreRow?.caption ?? ""
     }
 
     // MARK: Test-support hooks (Advanced › Audio buffer)
@@ -1068,7 +984,7 @@ public final class AudioSettingsViewController: NSViewController {
     /// The audio-buffer live hint line (W1, spec §5.2).
     public var test_bufferHint: String {
         _ = view
-        return bufferHint.stringValue
+        return bufferRow?.caption ?? ""
     }
 
     /// The option the popup is currently showing — what a reader would see,
@@ -1116,34 +1032,4 @@ extension AudioSettingsViewController: FoldFollowing {
     /// height, frame by frame — the surface applies it instantly during a
     /// fold (`AppSurfaceController`, `FoldAnimator.shared.isFolding`).
     public func foldAnimatorDidTick() { republishFittedHeight() }
-}
-
-/// A rounded hairline border around the excluded-apps list. Drawn in
-/// `draw(_:)` (not a stamped layer color), so it needs both repaint triggers
-/// to track the current appearance: `viewDidChangeEffectiveAppearance` for
-/// light/dark and the app's theme override, and
-/// `redrawOnAccessibilityDisplayChange` for Increase Contrast, which fires no
-/// appearance change of its own (`AccessibilityDisplayRedraw.swift`).
-final class BorderedListView: NSView {
-
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
-        redrawOnAccessibilityDisplayChange()
-    }
-
-    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-
-    override func draw(_ dirtyRect: NSRect) {
-        super.draw(dirtyRect)
-        let rect = bounds.insetBy(dx: 0.5, dy: 0.5)
-        let path = NSBezierPath(roundedRect: rect, xRadius: 6, yRadius: 6)
-        Tokens.Color.separator.setStroke()
-        path.lineWidth = 1
-        path.stroke()
-    }
-
-    override func viewDidChangeEffectiveAppearance() {
-        super.viewDidChangeEffectiveAppearance()
-        needsDisplay = true
-    }
 }

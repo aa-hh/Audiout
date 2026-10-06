@@ -68,6 +68,11 @@ public final class MockBackend: OutputBackend, @unchecked Sendable {
     private let simulatesDropouts: Bool
     private let outputObserver: DefaultOutputObserver?
     private let connectScripts: [String: ConnectScript]
+    /// Schedules every delayed step (staggered discovery, scripted connects,
+    /// the dropout recovery). Only the tests pass anything but
+    /// `NativeBackend.dispatchDelayClock`, so the offline app keeps its real
+    /// wall-clock timing.
+    private let delayClock: NativeBackend.DelayClock
 
     /// The ids `setOutputSet` currently expects to be routed to — i.e. what
     /// the caller last asked for, independent of whether a scripted device
@@ -133,7 +138,7 @@ public final class MockBackend: OutputBackend, @unchecked Sendable {
     ///     path does NOT use this — `NativeBackend` owns `SystemOutputVolume`,
     ///     which covers the same default-device tracking plus volume/mute. This
     ///     observer serves the mock only.
-    public init(
+    public convenience init(
         fleet: [Device] = .demoFleet,
         staggerDiscovery: Bool = true,
         emitsLevels: Bool = true,
@@ -141,6 +146,23 @@ public final class MockBackend: OutputBackend, @unchecked Sendable {
         connectScripts: [String: ConnectScript] = [:],
         outputObserver: DefaultOutputObserver? = nil
     ) {
+        self.init(
+            fleet: fleet, staggerDiscovery: staggerDiscovery, emitsLevels: emitsLevels,
+            simulatesDropouts: simulatesDropouts, connectScripts: connectScripts,
+            outputObserver: outputObserver, delayClock: NativeBackend.dispatchDelayClock)
+    }
+
+    /// The same backend with its delayed steps run by `delayClock` (tests only).
+    init(
+        fleet: [Device],
+        staggerDiscovery: Bool,
+        emitsLevels: Bool,
+        simulatesDropouts: Bool,
+        connectScripts: [String: ConnectScript],
+        outputObserver: DefaultOutputObserver?,
+        delayClock: @escaping NativeBackend.DelayClock
+    ) {
+        self.delayClock = delayClock
         self.fleet = fleet
         self.staggerDiscovery = staggerDiscovery
         self.emitsLevels = emitsLevels
@@ -179,11 +201,11 @@ public final class MockBackend: OutputBackend, @unchecked Sendable {
             for (index, device) in self.fleet.enumerated() {
                 if self.staggerDiscovery {
                     let delay = 0.2 + Double(index) * 0.35
-                    self.queue.asyncAfter(deadline: .now() + delay) {
+                    self.delayClock(delay, self.queue, DispatchWorkItem {
                         guard self.started, self.live[device.id] == nil else { return }
                         self.live[device.id] = device
                         self.emit(.deviceAdded(device))
-                    }
+                    })
                 } else {
                     guard self.live[device.id] == nil else { continue }
                     self.live[device.id] = device
@@ -442,10 +464,10 @@ public final class MockBackend: OutputBackend, @unchecked Sendable {
     /// so a superseded attempt (re-enable, or a subsequent step in the same
     /// attempt) can't clobber newer state.
     private func scheduleAfter(_ delay: TimeInterval, id: String, generation: UInt64, _ work: @escaping () -> Void) {
-        queue.asyncAfter(deadline: .now() + delay) { [weak self] in
+        delayClock(delay, queue, DispatchWorkItem { [weak self] in
             guard let self, self.generations[id] == generation else { return }
             work()
-        }
+        })
     }
 
     private func completeConnect(_ id: String, generation: UInt64) {
@@ -571,12 +593,12 @@ public final class MockBackend: OutputBackend, @unchecked Sendable {
         emit(.deviceUpdated(device))
 
         let id = device.id
-        queue.asyncAfter(deadline: .now() + 6) {
+        delayClock(6, queue, DispatchWorkItem {
             guard var back = self.live[id] else { return }
             back.isAvailable = true
             self.live[id] = back
             self.emit(.deviceUpdated(back))
-        }
+        })
     }
 }
 

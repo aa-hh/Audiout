@@ -10,7 +10,13 @@ import AppKit
 ///
 /// The view spans slider + readout; its leading edge IS the slider's. Rows
 /// pin its trailing edge ``PopoverColumnGrid/readoutTrailing`` in from their
-/// own, which lands the slider on ``PopoverColumnGrid/sliderTrailing``.
+/// own, which lands the trough on ``PopoverColumnGrid/sliderTrailing``.
+///
+/// With a nonzero ``haloRoom`` (the speaker rows, whose Cast volume can be
+/// pending) the slider's frame is 24 pt tall and ``haloRoom`` wider at each
+/// end than its trough, so the pending glow's 3 pt halo is never cut off. The
+/// trough and readout land where they would at zero; the view's leading edge
+/// sits ``haloRoom`` before the trough, which the host's neighbours give back.
 ///
 /// The slider's behaviour stays stock (tracking, keyboard, scroll-wheel,
 /// VoiceOver); hosts label it through ``slider``.
@@ -20,6 +26,8 @@ public final class RowVolumeFader: NSView {
     /// The Warm fader skin installed on ``slider``.
     public let faderCell = WarmFaderCell()
     public let readoutLabel = NSTextField(labelWithString: "")
+    /// Clear space between the slider's frame and each end of its trough.
+    public let haloRoom: CGFloat
 
     /// Called with the new level on every slider change, drag included.
     public var onChange: ((Int) -> Void)?
@@ -29,6 +37,9 @@ public final class RowVolumeFader: NSView {
     /// the pointer.
     private var isDragging = false
     private var dragEndMonitor: Any?
+    /// Whether the `%` readout breathes with the thumb: pending AND the
+    /// readout would otherwise read `goldText` (the engaged state).
+    private var readoutBreathes = false
 
     /// The level shown. Setting it is a MODEL push: ignored during a mouse
     /// drag (the readout already follows the drag from the slider's own value).
@@ -62,7 +73,17 @@ public final class RowVolumeFader: NSView {
             faderCell.isPendingApply = newValue
             // Invalidate explicitly rather than trust the cell's controlView.
             slider.needsDisplay = true
+            updateReadoutInk()
         }
+    }
+
+    /// Drop a pending hold at once, with no arrival, for a surface that is
+    /// hiding: the glow and its timer stop and the readout takes back its
+    /// resting ink.
+    public func cancelPendingHold() {
+        readoutBreathes = false
+        faderCell.cancelPendingHold()
+        updateReadoutInk()
     }
 
     /// Whether the slider accepts input. Main Audio keeps it on while muted.
@@ -71,7 +92,8 @@ public final class RowVolumeFader: NSView {
         set { slider.isEnabled = newValue; updateReadoutInk() }
     }
 
-    public init() {
+    public init(haloRoom: CGFloat = 0) {
+        self.haloRoom = haloRoom
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false
 
@@ -79,6 +101,8 @@ public final class RowVolumeFader: NSView {
         // Install the drawing-only cell BEFORE the value/target setup: a cell
         // swap resets cell-held state.
         slider.cell = faderCell
+        faderCell.haloRoom = haloRoom
+        faderCell.onPulse = { [weak self] strength in self?.updatePendingReadoutInk(strength) }
         slider.minValue = 0
         slider.maxValue = 100
         slider.isContinuous = true   // fire throughout the drag
@@ -95,14 +119,21 @@ public final class RowVolumeFader: NSView {
         addSubview(readoutLabel)
         let hug = heightAnchor.constraint(equalToConstant: 0)
         hug.priority = .defaultLow
+        if haloRoom > 0 {
+            // Stock height is 16 pt, which clipped the 17 pt thumb by half a
+            // point; 24 pt holds thumb plus ring, centred, so the track stays put.
+            slider.heightAnchor.constraint(equalToConstant: 24).isActive = true
+        }
         NSLayoutConstraint.activate([
             slider.leadingAnchor.constraint(equalTo: leadingAnchor),
-            slider.widthAnchor.constraint(equalToConstant: PopoverColumnGrid.sliderWidth),
+            slider.widthAnchor.constraint(
+                equalToConstant: PopoverColumnGrid.sliderWidth + 2 * haloRoom),
             slider.centerYAnchor.constraint(equalTo: centerYAnchor),
             slider.topAnchor.constraint(greaterThanOrEqualTo: topAnchor),
             slider.bottomAnchor.constraint(lessThanOrEqualTo: bottomAnchor),
             readoutLabel.leadingAnchor.constraint(
-                equalTo: slider.trailingAnchor, constant: PopoverColumnGrid.sliderToReadout),
+                equalTo: slider.trailingAnchor,
+                constant: PopoverColumnGrid.sliderToReadout - haloRoom),
             readoutLabel.widthAnchor.constraint(equalToConstant: PopoverColumnGrid.readoutWidth),
             readoutLabel.trailingAnchor.constraint(equalTo: trailingAnchor),
             readoutLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
@@ -116,6 +147,7 @@ public final class RowVolumeFader: NSView {
 
     /// Three readout inks: `labelCool2` when the row can't be adjusted,
     /// `goldText` while sounding, `emberText` for a stored-but-idle level.
+    /// A pending `goldText` readout breathes instead.
     private func updateReadoutInk() {
         if !slider.isEnabled || faderCell.isMutedControl {
             readoutLabel.textColor = Tokens.Color.labelCool2
@@ -124,6 +156,23 @@ public final class RowVolumeFader: NSView {
         } else {
             readoutLabel.textColor = Tokens.Color.emberText
         }
+        readoutBreathes = faderCell.isPendingApply && slider.isEnabled
+            && !faderCell.isMutedControl && faderCell.isRouteArmed
+        updatePendingReadoutInk(faderCell.pulseStrength)
+    }
+
+    /// The readout's breath while a Cast volume is pending: dim to live ink
+    /// in step with the thumb, held dim under Reduce Motion. Outside the
+    /// hold it leaves the resting ink alone.
+    private func updatePendingReadoutInk(_ strength: CGFloat?) {
+        guard readoutBreathes else { return }
+        readoutLabel.textColor = PendingPulse.ink(
+            strength: faderCell.reduceMotion ? nil : strength, in: effectiveAppearance)
+    }
+
+    public override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        updatePendingReadoutInk(faderCell.pulseStrength)
     }
 
     @objc private func sliderChanged(_ sender: NSSlider) {

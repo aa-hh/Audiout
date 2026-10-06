@@ -354,7 +354,7 @@ public final class DeviceRowView: NSView {
     var energizePending = false
     /// The volume slider and its `%` readout. Its gold fill takes the same
     /// §3.3 route-armed predicate the corner dot renders.
-    let fader = RowVolumeFader()
+    let fader = RowVolumeFader(haloRoom: DeviceRowView.faderHaloRoom)
     let muteButton = NSButton()
     /// The Equalizer door, leading of mute on every row with an equalizer.
     /// Mounted only when ``supportsEqualizer``; the layout reserves its slot on
@@ -1069,6 +1069,20 @@ public final class DeviceRowView: NSView {
         updateMuteTint()
     }
 
+    /// Drop a pending Cast volume hold at once, with no arrival, for a
+    /// surface that is hiding: the fader stops glowing and its timer stops,
+    /// and the readout takes back its resting ink.
+    public func cancelPendingHold() {
+        volumePendingApply = false
+        fader.cancelPendingHold()
+        configureAccessibility()
+    }
+
+    /// Room for the pending glow's outermost halo ring between the slider's
+    /// frame and its trough, at each end. The neighbours' constants give it
+    /// back, so the trough, mute glyph and readout land where they would at 0.
+    private static let faderHaloRoom: CGFloat = 3
+
     /// Alpha applied to `enableCheckbox` when `apply(selectionDimmed:)` is true
     /// (A1) — a visual de-emphasis, not a disablement (the checkbox stays
     /// `isEnabled` and interactive at this alpha).
@@ -1732,7 +1746,8 @@ public final class DeviceRowView: NSView {
         NSLayoutConstraint.activate([
             unavailableStatusLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
             unavailableStatusLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -PopoverColumnGrid.trailingControlTrailing),
-            unavailableStatusLabel.leadingAnchor.constraint(greaterThanOrEqualTo: fader.leadingAnchor),
+            unavailableStatusLabel.leadingAnchor.constraint(greaterThanOrEqualTo: fader.leadingAnchor,
+                                                            constant: Self.faderHaloRoom),
         ])
         addSubview(muteButton)
         if supportsEqualizer { addSubview(eqButton) }
@@ -1796,7 +1811,8 @@ public final class DeviceRowView: NSView {
             muteButton.centerYAnchor.constraint(equalTo: centerYAnchor),
             muteButton.widthAnchor.constraint(equalToConstant: PopoverColumnGrid.muteWidth),
             muteButton.trailingAnchor.constraint(
-                equalTo: fader.leadingAnchor, constant: -PopoverColumnGrid.muteToSlider),
+                equalTo: fader.leadingAnchor,
+                constant: -(PopoverColumnGrid.muteToSlider - Self.faderHaloRoom)),
 
             // Slider + `%` readout; the slider lands on `sliderTrailing`.
             fader.centerYAnchor.constraint(equalTo: centerYAnchor),

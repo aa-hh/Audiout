@@ -748,9 +748,13 @@ public enum Tokens {
 
         /// The gold bloom/halo hue — the rail bead, the ring's arrival pulse
         /// and the header-dot bloom: transient strokes and fills, never a
-        /// shadow (the armed dot carries no halo). CONTRAST RATIONALE: NO floor
+        /// shadow (the armed dot carries no halo). In light it is also the
+        /// pending Cast glow's light (``pendingGlow`` reuses these hexes).
+        /// CONTRAST RATIONALE: NO floor
         /// (transient/halo only — it never carries meaning alone; the ≥3:1
-        /// `gold` disc under it does). Measured for the record: dark `#FFD97A`
+        /// `gold` disc under it does, and on a pending Cast hold the thumb
+        /// body's tint, the breathing number and the "applying" accessibility
+        /// text carry the meaning while the halo is the accent). Measured for the record: dark `#FFD97A`
         /// = 13.22:1 vs `panel`; light `#E8B84B` = 1.77:1 vs the flat ground
         /// (a soft paper halo — acceptable because floor-exempt). House rule 3
         /// still requires IC variants: both reuse the base hexes (a halo needs
@@ -780,6 +784,56 @@ public enum Tokens {
                                              light: 0xE8B84B, lightHighContrast: 0xE8B84B),
                           subtle: WarmVariants(dark: 0xEBCE88, darkHighContrast: 0xFFE39E,
                                                light: 0xD1BC8A, lightHighContrast: 0xC2AB74))
+        }
+
+        /// The light of the pending Cast glows: the fader thumb's halo and
+        /// body tint (`WarmFaderCell`) and the sync drawer's value-field halo
+        /// (`BTSyncDrawerView`), while a Cast volume or offset waits out the
+        /// stream lag (owner's pick, 2026-10-06). Dark is white blended
+        /// halfway toward ``glow`` per column; light is ``glow``'s own hexes,
+        /// because white vanishes on the near-white ground.
+        ///
+        /// CONTRAST RATIONALE: NO floor, like ``glow`` (a halo and a tint,
+        /// never the only carrier: the breathing number and the "applying"
+        /// accessibility text say the same thing). Measured for the record:
+        /// FULL dark `#FFECBD` = 15.38:1 vs `panel` / 13.50:1 vs `raised`;
+        /// light `#E8B84B` = 1.77:1 vs the flat ground / 1.53:1 vs `well`.
+        /// SUBTLE dark `#F5E7C4` = 14.63:1 / 12.84:1, dark Increase Contrast
+        /// `#FFF1CF` (from Subtle IC `glow` `#FFE39E`); light `#D1BC8A` =
+        /// 1.79:1 / 1.55:1, light IC `#C2AB74`. Full IC variants reuse the
+        /// base hexes, as ``glow``'s do.
+        public static var pendingGlow: NSColor {
+            accentDynamic(name: "pendingGlow",
+                          full: WarmVariants(dark: 0xFFECBD, darkHighContrast: 0xFFECBD,
+                                             light: 0xE8B84B, lightHighContrast: 0xE8B84B),
+                          subtle: WarmVariants(dark: 0xF5E7C4, darkHighContrast: 0xFFF1CF,
+                                               light: 0xD1BC8A, lightHighContrast: 0xC2AB74))
+        }
+
+        /// The dim end of the pending Cast number's breath: the row's `%`
+        /// readout and the sync drawer's digits swing between this and
+        /// ``goldText`` while a Cast change is not yet audible. Dark is
+        /// ``emberText``'s hexes. Light cannot use ``emberText``: it has
+        /// ``goldText``'s luminance, so a breath between them would not show.
+        /// Full light is `#64480C`, the dim end the ink exploration mocked and
+        /// the owner approved (2026-10-06), which is also Full light-IC
+        /// ``goldText``. The other light variants are ``goldText`` blended
+        /// 40 % toward ``inkOnFill``'s dark ink `#171104` in their column.
+        ///
+        /// CONTRAST RATIONALE (measured; floor 4.5:1, it is text). FULL: dark
+        /// `#A98341` = 5.66:1 vs `canvas` / 5.14:1 vs `panel` / 4.51:1 vs
+        /// `raised` / 5.83:1 vs `well` (IC `#C4AA7C` 7.05:1 on `raised`);
+        /// light `#64480C` = 8.14:1 vs the flat ground / 7.05:1 vs `well`, so
+        /// the light breath runs 8.14 to 5.66:1 on the ground; light IC
+        /// `#453209` = 11.75:1 / 10.18:1. SUBTLE: dark `#95886B` = 4.51:1 on
+        /// `raised` (IC `#B6AC98` 7.01:1); light `#524527` = 8.99:1 / 7.79:1
+        /// (IC `#3E341D` 11.75:1 / 10.18:1).
+        public static var pendingInkDim: NSColor {
+            accentDynamic(name: "pendingInkDim",
+                          full: WarmVariants(dark: 0xA98341, darkHighContrast: 0xC4AA7C,
+                                             light: 0x64480C, lightHighContrast: 0x453209),
+                          subtle: WarmVariants(dark: 0x95886B, darkHighContrast: 0xB6AC98,
+                                               light: 0x524527, lightHighContrast: 0x3E341D))
         }
 
         /// The ink a BRIGHT-gold or bright-instrument fill carries — the

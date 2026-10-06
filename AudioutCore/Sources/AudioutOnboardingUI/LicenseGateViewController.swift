@@ -697,6 +697,9 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
         registerTapped()
     }
 
+    /// True while a Register check is waiting on the licence server.
+    public var isChecking: Bool { !registerButton.isEnabled }
+
     // MARK: Test-support hooks
 
     /// Replace the field's text, as typing would.

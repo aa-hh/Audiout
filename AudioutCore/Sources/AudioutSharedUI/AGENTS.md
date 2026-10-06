@@ -17,10 +17,10 @@ Shared AppKit rows and window chrome. Hosts own models, routing and persistence;
 - Test hooks use the real action path.
 - Reusable views treat `NSApp` as optional.
 - Permission prompts suspend transient dismissal across pin changes; restore manners before raising windows.
-- Respect accessibility-display changes. Warm ink means `isRouteArmed`, never a row wash; instruments stay flat.
+- Respect accessibility-display changes. Warm ink means `isRouteArmed`, never a row wash; instruments stay flat; pending Cast glows.
 - Muted ink belongs only to an engaged mute.
 - `Tokens.Color.shadow` draws flat clipped bands, never an `NSShadow`.
-- The invitation QR stays black on white for cameras.
+- The invitation QR stays black-on-white for cameras.
 - "Removed, Undo" and "Play here" offers are host state; rows draw, never decide.
 - Earlier decisions and traps: [AGENTS-HISTORY.md](AGENTS-HISTORY.md).
 
@@ -29,7 +29,7 @@ Shared AppKit rows and window chrome. Hosts own models, routing and persistence;
 - `DeviceRowView` → Shared speaker row.
 - `PopoverColumnGrid` → Row columns.
 - `BusRailOverlayView` → Playback rail.
-- `ControlPanelBackingView` → Custom-drawn bubble and beak; stock panels lack arrows.
+- `ControlPanelBackingView` → Bubble and beak; stock panels lack arrows.
 - `ProminentButton` → Gold call-to-action.
 - `RemoteInviteView` → Companion invitation.
 - `RowVolumeFader` → Row volume slider.

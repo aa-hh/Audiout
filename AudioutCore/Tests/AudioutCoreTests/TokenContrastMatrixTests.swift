@@ -203,6 +203,8 @@ extension SerializedSharedState {
                          groundsFor: sameGrounds(textGrounds)),
             ContrastEntry(name: "emberText", token: Tokens.Color.emberText, floor: 4.5,
                          groundsFor: sameGrounds(textGrounds)),
+            ContrastEntry(name: "pendingInkDim", token: Tokens.Color.pendingInkDim, floor: 4.5,
+                         groundsFor: sameGrounds(textGrounds)),
             // The ink of every gold-filled call to action — the prominent button
             // and the alignment wizard's primary plates, both of which pin gold
             // and this ink to their DARK values in both appearances. Nothing

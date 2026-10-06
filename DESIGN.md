@@ -575,7 +575,10 @@ own header records that its Font aliases mirror shipped call sites as of the
 audit pass that created them, not a claim every size in the five UI packages
 is on-scale. Two sizes sit off the scale by design and are documented at
 their declaration: `syncReadout` (12pt monospaced semibold, the BT sync
-drawer's editable value) and `plateTitle` (15pt semibold, the wizard's two
+drawer's editable value; while a Cast offset edit or reset waits out the
+stream lag its digits breathe `pendingInkDim` to `goldText`, a `pendingGlow`
+halo 2.5pt around the field breathes with the fader thumb's curve, and the
+field's label adds "applying") and `plateTitle` (15pt semibold, the wizard's two
 hero answer plates). `detail` and `keycap` are names for intent only: they
 equal `caption` and `captionEmphasized`.
 
@@ -874,7 +877,8 @@ The name, in `menuItem`, takes the system label color while sounding and
 route-armed, `emberText` while idle-but-adjustable, and drops to
 `labelCool2` when the slider is disabled or the row is in the muted-
 unconnected treatment (see Row Fader). Warm ink means `isRouteArmed`; cool
-means silent. Instruments are flat — no `CALayer` blooms.
+means silent. Instruments are flat — no `CALayer` blooms. The one exception
+is the pending Cast hold (see Row Fader).
 
 An unavailable retained row keeps its name, glyph and connection node. A
 caption in the trailing control area gives its status while live controls
@@ -947,11 +951,32 @@ The slider wears `WarmFaderCell`, a drawing-only skin over stock
 | Idle | `rim` fill |
 | Can't be adjusted (connecting, unavailable, failed; `isMutedControl`) | idle look at 0.4 alpha (`faderDisabledAlpha`), still enabled |
 | Disabled | idle look at 0.4 alpha |
-| Volume still landing on a Cast speaker (`isPendingApply`) | dashed gold, 6 pt dashes, 4 pt gaps |
+| Volume still landing on a Cast speaker (`isPendingApply`) | route-armed fill; the thumb glows (below) |
 
 The trough is 5 pt of `well` with a `rim` edge and a 1 pt top shade
 (`shadow` at `insetShadeAlpha`); the thumb is a 10 × 17 pt capsule, a `raised` body read
 by its `rim` edge, that stops flush with the track's ends.
+
+`WarmFaderCell` also draws the pending Cast hold, the owner's pick on
+2026-10-06 after three animated explorations. While a Cast volume or mute
+change waits out the measured stream lag, the thumb lights from inside: three
+flat halo rings 1, 2 and 3pt out (alphas 0.34 / 0.16 / 0.07 dark, 0.50 /
+0.26 / 0.11 light) and a body blended toward the light by 0.85 (dark) or 0.42
+(light), all in `Tokens.Color.pendingGlow`: white halfway to `glow` in dark
+(`#FFECBD`), `glow` itself in light, where white vanishes on the near-white
+ground. The strength follows `PendingPulse`: a 160 ms ramp, then a 1.4 s
+breath from 0.35 to 1 in 0.4 s and back in 1.0 s. When the hold ends the
+light rises to 1 in 100 ms and goes out over 450 ms. Reduce Motion holds 0.7
+and goes out with no fade. The fill under it stays the solid gold gradient.
+While it runs, an armed readout breathes in step with the thumb from
+`pendingInkDim` (dark `emberText`'s `#A98341`; light `#64480C`, 8.14:1 on the
+light ground) to `goldText`, holds the dim end under Reduce Motion, and
+VoiceOver hears "applying volume". To fit the outer ring, `DeviceRowView`
+builds its `RowVolumeFader` with `haloRoom` 3: the slider frame is 24pt tall
+and `sliderWidth + 6` wide, the cell leaves 3pt empty at each end, and the
+readout's gap and the row's mute glyph give the 3pt back, so the trough sits
+exactly where the 16pt × `sliderWidth` frame put it. Main Audio and the app
+rows never go pending and keep `haloRoom` 0.
 
 `LevelMeterView` is the meter under a row's name: a 74 × 3 pt bar (6 pt on
 Main Audio) whose fill uncovers an `ember` → `gold` ramp fixed to the track.

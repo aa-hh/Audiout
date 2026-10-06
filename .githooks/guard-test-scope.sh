@@ -7,7 +7,8 @@
 # full suite runs on GitHub for every pull request and in the merge queue.
 #
 # Prints ONE line on stdout:
-#   FULL      — run the whole suite
+#   FULL      — run the whole suite (only when AUDIOUT_FULL_SUITE=1)
+#   BUILD     — no staged file maps to a test: compile only
 #   <regex>   — pass to the runner as `--filter <regex>`
 #
 # pre-commit calls it with no arguments, so it reads the staged index. Runnable
@@ -27,14 +28,12 @@
 #      targets includes AudioutCore itself: 172 of the 209 test files import
 #      it, so the selection would be close to the full suite anyway.
 #
-# It fails CLOSED — anything it cannot map prints FULL:
-#   - a staged source file that neither rule above maps to any test file,
-#     including every file in AudioutCore (rule 2 skipped, see above) and in
-#     AudioutApp or any other executable target (no test imports those)
-#   - any deletion or rename (a deleted file has no suites of its own, and
-#     removing one breaks callers that live elsewhere)
-#   - AUDIOUT_FULL_SUITE=1, the switch agents already use for a deliberate full
-#     run, so no second variable is needed
+# A file neither rule maps adds nothing; if no staged file maps at all the
+# commit only compiles (BUILD). Decision: the owner, 2026-10-06. Forcing the
+# full suite for every unmapped file meant most AudioutCore commits (rule 2 is
+# skipped there, see above) paid the full run, which the pull request's `tests`
+# check already does. A deleted or renamed file maps by its old name like any
+# other. AUDIOUT_FULL_SUITE=1 still forces the full run.
 
 root=${GUARD_SCOPE_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null)}
 
@@ -51,7 +50,7 @@ else
         'AudioutCore/Sources/' 'AudioutCore/Tests/' 2>/dev/null | grep '\.swift$')
 fi
 
-if [ "${AUDIOUT_FULL_SUITE:-0}" = "1" ] || [ -n "$deleted" ]; then
+if [ "${AUDIOUT_FULL_SUITE:-0}" = "1" ]; then
     echo FULL
     exit 0
 fi
@@ -132,7 +131,7 @@ suites=""
 old_ifs=$IFS
 IFS='
 '
-for f in $changed; do
+for f in $changed $deleted; do
     base=${f##*/}
     base=${base%.swift}
     case "$base" in
@@ -143,16 +142,13 @@ for f in $changed; do
                     matches=$(tests_by_target "$f")
                 fi ;;
     esac
-    if [ -z "$matches" ]; then
-        IFS=$old_ifs
-        echo FULL
-        exit 0
-    fi
     for t in $matches; do
         case "$t" in
             /*) path=$t ;;
             *)  path="$root/$t" ;;
         esac
+        # A deleted test file has no suites left to run.
+        [ -f "$path" ] || continue
         # A name picked up from a comment or a heredoc inside a test file only
         # ever ADDS an alternative that matches nothing, so this scan can be
         # loose without opening a hole.
@@ -169,7 +165,7 @@ IFS=$old_ifs
 
 regex=$(printf '%s\n' "$suites" | grep -v '^[[:space:]]*$' | sort -u | paste -sd '|' -)
 if [ -z "$regex" ]; then
-    echo FULL
+    echo BUILD
     exit 0
 fi
 echo "$regex"

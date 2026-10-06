@@ -380,8 +380,7 @@ extension NativeBackend {
         // Scheduled ON `stateQueue`, so a newer toggle's cancel (above) before this
         // fires simply drops it — no double-firing, no stale work after a newer
         // decision landed.
-        self.stateQueue.asyncAfter(
-            deadline: .now() + self.syncedLocalSettleWindow, execute: work)
+        self.delayClock(self.syncedLocalSettleWindow, self.stateQueue, work)
     }
 
     /// T1/T2: the quiet window elapsed — run AT MOST one real transition for the
@@ -409,9 +408,8 @@ extension NativeBackend {
         // Record the real transition and count how many landed inside the rolling
         // horizon. Monotonic clock, so a wall-clock jump can neither fabricate nor
         // hide churn.
-        let now = DispatchTime.now().uptimeNanoseconds
-        let horizonNanos = UInt64(self.syncedLocalTransitionHorizon * 1_000_000_000)
-        self.syncedLocalTransitionTimes.removeAll { now &- $0 > horizonNanos }
+        let now = self.uptimeClock()
+        self.syncedLocalTransitionTimes.removeAll { now - $0 > self.syncedLocalTransitionHorizon }
         self.syncedLocalTransitionTimes.append(now)
         let recentTransitions = self.syncedLocalTransitionTimes.count
 
@@ -613,7 +611,7 @@ extension NativeBackend {
         let claimed = perApp ? btPerAppClaimedUIDs.contains(id) : expectedSelected.contains(id)
         guard claimed, known[id]?.isBluetooth == true else { return }
         setConnectionState(.connecting, for: id)
-        btConnectingDeadlines[id] = Date().addingTimeInterval(btRenderStartTimeout)
+        btConnectingDeadlines[id] = uptimeClock() + btRenderStartTimeout
         scheduleBTRenderPollLocked()
     }
 
@@ -623,7 +621,7 @@ extension NativeBackend {
         guard btRenderPollWork == nil, !btConnectingDeadlines.isEmpty else { return }
         let work = DispatchWorkItem { [weak self] in self?.pollBTRenderStart() }
         btRenderPollWork = work
-        stateQueue.asyncAfter(deadline: .now() + Self.btRenderPollInterval, execute: work)
+        delayClock(Self.btRenderPollInterval, stateQueue, work)
     }
 
     /// Read the rendering set off `captureControlQueue` (which owns `btSink`)
@@ -656,7 +654,7 @@ extension NativeBackend {
     private func applyBTRenderStart(
         _ rendering: Set<String>, anchored: Set<String>?
     ) {   // on stateQueue
-        let now = Date()
+        let now = uptimeClock()
         for (id, deadline) in btConnectingDeadlines {
             guard expectedSelected.contains(id) || btPerAppClaimedUIDs.contains(id) else {
                 btConnectingDeadlines[id] = nil
@@ -721,20 +719,21 @@ extension NativeBackend {
             self.btEnumerator?.refresh()
             self.stateQueue.async { [weak self] in
                 guard let self else { return }
-                let now = Date()
-                let diedRecently = self.btSinkDeathAt[uid].map { now.timeIntervalSince($0) < 10 } ?? false
+                let now = self.uptimeClock()
+                let diedRecently = self.btSinkDeathAt[uid].map { now - $0 < 10 } ?? false
                 if resolves && !diedRecently {
                     self.btSinkDeathAt[uid] = now
                     self.reapplyBTSinkLocked()
                     return
                 }
                 self.markBTDeviceLostLocked(uid)
-                self.stateQueue.asyncAfter(deadline: .now() + self.btSinkDeathRecoverySeconds) { [weak self] in
+                let work = DispatchWorkItem { [weak self] in
                     self?.captureControlQueue.async { [weak self] in
                         self?.btEnumerator?.stop()
                         self?.btEnumerator?.start()
                     }
                 }
+                self.delayClock(self.btSinkDeathRecoverySeconds, self.stateQueue, work)
                 self.reconcileSilenceWatchdog()
                 self.reapplyBTSinkLocked()
             }
@@ -1953,7 +1952,7 @@ extension NativeBackend: BTOutputControlling {
                 onReleased()
                 return
             }
-            let now = Date()
+            let now = self.uptimeClock()
             let claimed = self.btTrimLock.withLock { () -> (UUID?, String?) in
                 if var current = self.companionAudition {
                     guard current.targetID == targetID, current.referenceID == referenceID else {
@@ -1987,8 +1986,8 @@ extension NativeBackend: BTOutputControlling {
                 self.companionProgramSuppressed = true
                 var lifecycle = CompanionAuditionLifecycle(
                     id: run.id, targetID: targetID, referenceID: referenceID,
-                    preparationDeadline: now.addingTimeInterval(self.companionAuditionPreparationSeconds),
-                    leaseDeadline: now.addingTimeInterval(self.companionAuditionLeaseSeconds),
+                    preparationDeadline: now + self.companionAuditionPreparationSeconds,
+                    leaseDeadline: now + self.companionAuditionLeaseSeconds,
                     startCompletions: [completion])
                 lifecycle.releaseCallbacks = [onReleased]
                 self.companionAudition = lifecycle
@@ -2163,7 +2162,7 @@ extension NativeBackend: BTOutputControlling {
         guard let current = btTrimLock.withLock({ companionAudition }),
               current.id == id, current.phase == .preparing else { return }
         // The live-pair read waits on `stateQueue`; no lock is held across it.
-        guard Date() < current.preparationDeadline,
+        guard uptimeClock() < current.preparationDeadline,
               companionAuditionPairIsLive(targetID: current.targetID,
                                           referenceID: current.referenceID) else {
             failCompanionAuditionPreparation(id: id,
@@ -2180,7 +2179,7 @@ extension NativeBackend: BTOutputControlling {
             guard var audition = companionAudition, audition.id == id,
                   audition.phase == .preparing, audition.preparationFailure == nil,
                   audition.preparationPending.isEmpty else { return .gone }
-            guard Date() < audition.preparationDeadline else { return .expired }
+            guard uptimeClock() < audition.preparationDeadline else { return .expired }
             audition.phase = .active
             let callbacks = audition.startCompletions
             audition.startCompletions = []
@@ -2201,7 +2200,7 @@ extension NativeBackend: BTOutputControlling {
     }
 
     private func monitorCompanionAuditionPair(id: UUID) {
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+        let work = DispatchWorkItem { [weak self] in
             guard let self, let audition = self.btTrimLock.withLock({ self.companionAudition }),
                   audition.id == id, audition.phase == .active else { return }
             if !self.companionAuditionPairIsLive(targetID: audition.targetID,
@@ -2212,6 +2211,7 @@ extension NativeBackend: BTOutputControlling {
                 self.monitorCompanionAuditionPair(id: id)
             }
         }
+        delayClock(0.25, .main, work)
     }
 
     public func endCompanionAlignmentAudition(
@@ -2224,7 +2224,7 @@ extension NativeBackend: BTOutputControlling {
                 guard audition.targetID == targetID else {
                     return (nil, "A different speaker click session is running.")
                 }
-                if let deadline = audition.cleanupDeadline, Date() >= deadline {
+                if let deadline = audition.cleanupDeadline, self.uptimeClock() >= deadline {
                     return (nil, "Restoring the speaker levels took too long. Try again shortly.")
                 }
                 audition.stopCompletions.append(completion)
@@ -2246,7 +2246,7 @@ extension NativeBackend: BTOutputControlling {
                   !audition.cleanupStarted else { return nil }
             audition.cleanupStarted = true
             audition.phase = .cleaning
-            audition.cleanupDeadline = Date().addingTimeInterval(companionAuditionStopSeconds)
+            audition.cleanupDeadline = uptimeClock() + companionAuditionStopSeconds
             let callbacks = audition.startCompletions
             audition.startCompletions = []
             companionAudition = audition

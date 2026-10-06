@@ -427,7 +427,7 @@ extension DeviceRowView {
     /// can't drift from the pixels. Must track `test_routeArmed` whenever the
     /// slider is enabled (one armed truth, two instruments).
     public var test_isFaderEngaged: Bool { fader.faderCell.test_isEngagedFill }
-    public var test_isFaderPending: Bool { fader.faderCell.test_isPendingFill }
+    public var test_isFaderPending: Bool { fader.faderCell.test_isPendingGlow }
 
     /// Whether the slider is wearing the Warm fader skin (the drawing-only
     /// `WarmFaderCell` swap) — structural assertion that the skin is installed.

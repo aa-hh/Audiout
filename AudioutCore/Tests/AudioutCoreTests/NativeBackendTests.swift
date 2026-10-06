@@ -130,6 +130,9 @@ private final class SpyEngine: EngineControlling, @unchecked Sendable {
     /// any single device — must stay 1 with per-device serialization.
     private var inFlightByID: [UInt64: Int] = [:]
     private(set) var maxConcurrentPerDevice = 0
+    /// Adds or removes for `id` still running, so a test can wait for a
+    /// scripted failure to have actually thrown.
+    func opsInFlight(for id: OutputID) -> Int { lock.withLock { inFlightByID[id.rawValue] ?? 0 } }
 
     private var continuation: AsyncStream<(OutputID, OutputState)>.Continuation?
     private var remoteContinuation: AsyncStream<RemoteEvent>.Continuation?
@@ -690,7 +693,8 @@ private func makeBackend(
     /// production defaults are pinned by tests that construct the backend directly.
     syncedLocalSettleWindow: TimeInterval = 0.5,
     syncedLocalTransitionHorizon: TimeInterval = 2.0,
-    delayClock: @escaping NativeBackend.DelayClock = NativeBackend.dispatchDelayClock
+    delayClock: @escaping NativeBackend.DelayClock = NativeBackend.dispatchDelayClock,
+    uptimeClock: @escaping NativeBackend.UptimeClock = NativeBackend.dispatchUptimeClock
 ) -> (NativeBackend, SpyEngine, FakeDiscovery) {
     let engine = SpyEngine()
     let discovery = FakeDiscovery()
@@ -707,6 +711,7 @@ private func makeBackend(
         captureRetryDelay: captureRetryDelay,
         captureRetryMaxBackoff: captureRetryMaxBackoff,
         delayClock: delayClock,
+        uptimeClock: uptimeClock,
         // 0 = the old synchronous `.takingOver` emit. The suite's scripted
         // activators resolve instantly, so the production debounce (which
         // exists to SUPPRESS the strip on fast resolutions) would hide the
@@ -1455,18 +1460,35 @@ func subscribeLevels(_ backend: NativeBackend) -> (LevelSink, Task<Void, Never>)
 /// backed-off retry or a deadline waits in `pending` until `fireAll()`, so a
 /// slow machine can no longer fire one between two of the test's own steps.
 /// Shared with the BT-alignment suite, whose audition deadlines run on it too.
+/// It also keeps a manual "now" (`uptime`) that only `advance(by:)` moves, firing
+/// each job whose delay that move covers.
 final class ManualDelayClock: @unchecked Sendable {
     private let lock = NSLock()
-    private var jobs: [DispatchWorkItem] = []
+    private var now: TimeInterval = 0
+    private var jobs: [(due: TimeInterval, work: DispatchWorkItem)] = []
     var clock: NativeBackend.DelayClock {
-        { [self] _, _, work in lock.withLock { jobs.append(work) } }
+        { [self] delaySeconds, _, work in lock.withLock { jobs.append((now + delaySeconds, work)) } }
+    }
+    var uptime: NativeBackend.UptimeClock {
+        { [self] in lock.withLock { now } }
     }
     /// Jobs scheduled and not yet fired or cancelled.
-    var pendingCount: Int { lock.withLock { jobs.filter { !$0.isCancelled }.count } }
+    var pendingCount: Int { lock.withLock { jobs.filter { !$0.work.isCancelled }.count } }
     /// Run every job scheduled so far, on the caller's thread, as if its delay
     /// had passed. A cancelled job is skipped, as `asyncAfter` would skip it.
     func fireAll() {
-        let due = lock.withLock { () -> [DispatchWorkItem] in defer { jobs = [] }; return jobs }
+        let due = lock.withLock { () -> [DispatchWorkItem] in defer { jobs = [] }; return jobs.map(\.work) }
+        for work in due where !work.isCancelled { work.perform() }
+    }
+    /// Move "now" forward, then run, on the caller's thread in scheduling order,
+    /// every job now due. A cancelled job is skipped.
+    func advance(by seconds: TimeInterval) {
+        let due = lock.withLock { () -> [DispatchWorkItem] in
+            now += seconds
+            let ready = jobs.filter { $0.due <= now }.map(\.work)
+            jobs.removeAll { $0.due <= now }
+            return ready
+        }
         for work in due where !work.isCancelled { work.perform() }
     }
 }
@@ -1548,11 +1570,13 @@ private final class LockedBool: @unchecked Sendable {
 private func makeSyncedLocalBackend(
     macSelectedByDefault: Bool,
     syncedLocalSettleWindow: TimeInterval = 0.5,
-    syncedLocalTransitionHorizon: TimeInterval = 2.0
+    syncedLocalTransitionHorizon: TimeInterval = 2.0,
+    uptimeClock: @escaping NativeBackend.UptimeClock = NativeBackend.dispatchUptimeClock
 ) -> (NativeBackend, SpyEngine, FakeDiscovery, FakeCapture, SpySyncedLocalSink, LockedBool) {
     let (backend, engine, discovery) = makeBackend(
         syncedLocalSettleWindow: syncedLocalSettleWindow,
-        syncedLocalTransitionHorizon: syncedLocalTransitionHorizon)
+        syncedLocalTransitionHorizon: syncedLocalTransitionHorizon,
+        uptimeClock: uptimeClock)
     let capture = FakeCapture()
     backend.captureCoordinator = capture
     let sink = SpySyncedLocalSink()
@@ -3891,7 +3915,14 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         }
         let binds = { engine.streamAddCalls.filter { $0.0 == device.outputID }.count }
         let isAvailable = { backend.devices.first { $0.id == device.id }?.isAvailable }
-        let unbound = { backend.stateQueue.sync { backend.streamBindings[device.id] == nil } }
+        // The binding drops as soon as the pushed failure is applied, while the
+        // scripted add is still in flight; waiting on the binding alone let the
+        // test retype and retry inside one poll gap of `onMirroredAddFailure`,
+        // which then never saw the failure and held the add for 120 s.
+        let unbound = {
+            engine.opsInFlight(for: device.outputID) == 0
+                && backend.stateQueue.sync { backend.streamBindings[device.id] == nil }
+        }
 
         backend.updateAppRoutes([route("com.foo", name: "Foo", toDevice: device.id)])
         await pollUntil { binds() == 1 }
@@ -5230,6 +5261,66 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         backend.stop()
         await pollUntil { !capture.meteringActive }
         #expect(!(capture.meteringActive), "stop() must leave metering inactive")
+    }
+
+    /// The Touch Bar pulses its play button for `slowOutputDelayMs` after a
+    /// start or stop. Turns red if a room with nothing slow reports a delay (the
+    /// button would pulse on every play with plain AirPlay), or if a slow
+    /// output's raised room delay stops being reported (no pulse for Cast).
+    @Test func slowOutputDelayOnlyWhenAnOutputRaisesTheRoomDelay() async {
+        let (backend, _, _) = makeBackend()
+        let read = { await withCheckedContinuation { c in backend.slowOutputDelayMs { c.resume(returning: $0) } } }
+        #expect(await read() == nil)
+        backend.stateQueue.sync { backend.btRoomTermMs = 5500 }
+        #expect(await read() == 5500)
+    }
+
+    /// The Touch Bar's play/pause glyph reads `.level`, and the popover gate
+    /// keeps `.level` off whenever the popover is closed, which is nearly always
+    /// while someone uses the Touch Bar. `setDeviceLevelsWanted(true)` must keep
+    /// the per-device level flowing with the popover closed, and must NOT start
+    /// a metering-only per-app tap, which only the popover's app rows need.
+    /// Turns red if a closed popover again silences `.level` for the Touch Bar
+    /// (the glyph sticks on play while music plays), or if the Touch Bar's
+    /// request starts per-app metering taps for the whole session.
+    @Test func deviceLevelsFlowWithPopoverClosedWhenWanted() async {
+        let registry = TapRegistry()
+        let metering = registeringPerAppCapture(muteBehavior: .unmuted, bundleIDs: ["com.plain"], into: registry)
+        let (backend, engine, discovery) = makeBackend(injectedMeteringCapture: metering)
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:56", name: "Touch Bar Glyph")
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+        backend.setOutputSet([device.id])
+        await pollUntil { backend.devices.first { $0.id == device.id }?.isSelected == true }
+        backend.updateAppRoutes([AppRoute(bundleID: "com.plain", displayName: "Plain")])
+
+        let (levels, task) = subscribeLevels(backend); defer { task.cancel() }
+        try? await Task.sleep(nanoseconds: 20_000_000)
+
+        (backend as MeteringControlling).setDeviceLevelsWanted(true)
+        // Keep delivering, as the real tap does: `noteSystemRMS` drops a sample
+        // that meets the drain holding its lock.
+        await pollUntil {
+            capture.fireLevelIfActive(0.4)
+            return (levels.lastDeviceLevel(device.id) ?? 0) > 0
+        }
+        #expect(abs((levels.lastDeviceLevel(device.id) ?? 0) - 0.4) <= 0.001,
+                "with the popover closed, the Touch Bar's request must keep .level flowing")
+        try? await Task.sleep(nanoseconds: 50_000_000)   // a wrongly started tap would land by now
+        if case .idle = metering.state(for: "com.plain") {} else {
+            Issue.record("the Touch Bar's request must not start a metering-only per-app tap")
+        }
+
+        // Withdrawing it with the popover still closed switches the RMS work off.
+        (backend as MeteringControlling).setDeviceLevelsWanted(false)
+        await pollUntil { !capture.meteringActive }
+        #expect(!capture.meteringActive, "levels must stop once nobody wants them")
     }
 
     /// D3: a burst of rapid capture-buffer RMS callbacks (far above the ~25 Hz
@@ -8762,7 +8853,14 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         }
         let binds = { engine.streamAddCalls.filter { $0.0 == device.outputID }.count }
         let isAvailable = { backend.devices.first { $0.id == device.id }?.isAvailable }
-        let unbound = { backend.stateQueue.sync { backend.streamBindings[device.id] == nil } }
+        // The binding drops as soon as the pushed failure is applied, while the
+        // scripted add is still in flight; waiting on the binding alone let the
+        // test retype and retry inside one poll gap of `onMirroredAddFailure`,
+        // which then never saw the failure and held the add for 120 s.
+        let unbound = {
+            engine.opsInFlight(for: device.outputID) == 0
+                && backend.stateQueue.sync { backend.streamBindings[device.id] == nil }
+        }
 
         backend.updateAppRoutes([route("com.foo", name: "Foo", toDevice: device.id)])
         await pollUntil { binds() == 1 }
@@ -9494,7 +9592,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
     /// window but faster than deliberate use. Every click lands in its own window,
     /// so the coalesce counter reads exactly 1 every time and a `coalesced >= 2`
     /// guard alone is unreachable. Two Mac toggles about 330 ms apart against a
-    /// 0.05 s window: neither coalesces, both land inside the production 2 s
+    /// 0.05 s window: neither coalesces, both land inside the
     /// horizon, so the SECOND real transition must arm exactly one re-sync.
     ///
     /// The window here is deliberately SHORTER than the 0.15 s floor the burst
@@ -9503,11 +9601,14 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
     /// the jitter-safe choice. Merging these two clicks would need a 280 ms
     /// `stateQueue` stall, and a merge is the only way this test can go wrong
     /// (2 flips coalesced = net no-op = no transition at all).
-    @Test(.enabled(if: ProcessInfo.processInfo.environment["CI"] == nil, "Quarantined on GitHub runners 2026-10-06: the 330 ms second click lands outside the 2 s horizon when the 3-core runner stalls, so no reset arms and the poll waits its full 120 s (run 37459907744 on PR #291); passes locally in 0.6 s. Issue #258.")) func slowCadenceToggleStormArmsExactlyOneReset() async {
-        // The horizon stays at the helper's production-matching default (2 s): the
-        // point of the case is that clicks 330 ms apart are inside the REAL horizon.
-        let (backend, engine, discovery, _, sink, macSelected) =
-            makeSyncedLocalBackend(macSelectedByDefault: false, syncedLocalSettleWindow: 0.05)
+    @Test func slowCadenceToggleStormArmsExactlyOneReset() async {
+        // The two transitions are stamped from the test's own clock, so a stalled
+        // runner can no longer widen the gap between them past the horizon (run
+        // 37459907744 put more than 2 s of wall time there). The 2 s value has its
+        // own test, `syncedLocalTransitionHorizonProductionDefaultIsUnchanged`.
+        let clock = ManualDelayClock()
+        let (backend, engine, discovery, _, sink, macSelected) = makeSyncedLocalBackend(
+            macSelectedByDefault: false, syncedLocalSettleWindow: 0.05, uptimeClock: clock.uptime) // real-time-ok: the settle window is still a real stateQueue timer, not on delayClock, and the test clock already spaces the clicks, so only 50 ms of real time has to pass between them
         defer { backend.stop() }
 
         let device = ap2Device(id: "AA:BB:CC:DD:EE:94", name: "Slow Cadence Speaker")
@@ -9522,7 +9623,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
 
         // About 330 ms later: outside the 0.05 s window, so this gets its OWN
         // settle with coalesced == 1, the exact cadence that used to disarm the fix.
-        try? await Task.sleep(nanoseconds: 330_000_000)
+        clock.advance(by: 0.33)
         macSelected.set(false); backend.setOutputSet([device.id])
 
         await pollUntil { engine.flushedIDs.filter { $0 == device.outputID }.count >= 1 }
@@ -12620,7 +12721,14 @@ extension SerializedSharedState {
         }
         let binds = { engine.streamAddCalls.filter { $0.0 == device.outputID }.count }
         let isAvailable = { backend.devices.first { $0.id == device.id }?.isAvailable }
-        let unbound = { backend.stateQueue.sync { backend.streamBindings[device.id] == nil } }
+        // The binding drops as soon as the pushed failure is applied, while the
+        // scripted add is still in flight; waiting on the binding alone let the
+        // test retype and retry inside one poll gap of `onMirroredAddFailure`,
+        // which then never saw the failure and held the add for 120 s.
+        let unbound = {
+            engine.opsInFlight(for: device.outputID) == 0
+                && backend.stateQueue.sync { backend.streamBindings[device.id] == nil }
+        }
 
         backend.updateAppRoutes([route("com.foo", name: "Foo", toDevice: device.id)])
         await pollUntil { binds() == 1 }
@@ -12642,6 +12750,8 @@ extension SerializedSharedState {
         await pollUntil { failureCause() == .unknown }
         #expect(failureCause() == .unknown)
         #expect(binds() == 2)
+        // The telemetry sink is delivered on its own queue, so wait for the line.
+        await pollUntil { !telemetryLines(box, evt: "airplay:connect_failed", device: device.id).isEmpty }
         #expect(!telemetryLines(box, evt: "airplay:connect_failed", device: device.id).isEmpty)
     }
 

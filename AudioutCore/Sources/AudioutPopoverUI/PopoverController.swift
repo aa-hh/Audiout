@@ -683,12 +683,17 @@ public final class PopoverController: NSObject {
     var switchOfferDeviceID: String?
     private var switchOfferTimer: Timer?
 
-    /// Cast fixed-volume (feed-gain) receivers whose fader is currently
-    /// holding the pending "not yet gold" tone, keyed by device id — HOST
-    /// state, mirroring the removal-undo idiom above. Each id's own timer
-    /// self-expires it after the measured stream lag.
-    var castVolumePendingIDs: Set<String> = []
-    var castVolumePendingTimers: [String: Timer] = [:]
+    /// What a Cast receiver is still holding as not yet audible: a volume or
+    /// mute gesture (fader thumb glow) or a sync-offset edit (drawer value
+    /// field glow). Both reach the speaker through its feed, so both land
+    /// after the same measured stream lag.
+    enum CastPendingHold: String { case volume, trim }
+
+    /// Cast receivers currently holding a pending glow, per hold, keyed by
+    /// device id — HOST state, mirroring the removal-undo idiom above. Each
+    /// id's own timer self-expires it after the measured stream lag.
+    var castPendingIDs: [CastPendingHold: Set<String>] = [:]
+    var castPendingTimers: [CastPendingHold: [String: Timer]] = [:]
 
     /// The Applications card's `AppRowView`s, keyed by bundle id (stable identity —
     /// `AppRoute.bundleID`). Populated by `rebuild()` in `appRoutes` order (T-8,
@@ -2774,11 +2779,11 @@ public final class PopoverController: NSObject {
         switchOfferDeviceID = nil
     }
 
-    /// Raise (or re-arm) the Cast feed-gain pending fill on `id`'s fader after
-    /// a volume/mute gesture, for the measured stream lag. A continuous drag
-    /// re-arms the timer on every tick, so `refreshDeviceRows()` only runs on
-    /// the id's FIRST insertion, not every re-arm.
-    private func raiseCastVolumePending(for id: String) {
+    /// Raise (or re-arm) a Cast pending glow on `id` after a gesture, for the
+    /// measured stream lag. A continuous drag or held stepper re-arms the
+    /// timer on every tick, so the repaint only runs on the id's FIRST
+    /// insertion, not every re-arm.
+    func raiseCastPending(_ hold: CastPendingHold, for id: String) {
         guard let device = devicesByID[id], device.isCast,
               let lag = device.castVolumeLagSeconds,
               device.connectionState == .connected else {
@@ -2786,30 +2791,45 @@ public final class PopoverController: NSObject {
             if let d = devicesByID[id], d.isCast {
                 Telemetry.log(.cast, "cast_pending_refused", [
                     "device": id,
+                    "hold": hold.rawValue,
                     "lag": d.castVolumeLagSeconds.map(String.init) ?? "nil",
                     "state": String(describing: d.connectionState),
                 ])
             }
             return
         }
-        Telemetry.log(.cast, "cast_pending_raised", ["device": id, "lag": String(lag)])
-        castVolumePendingTimers[id]?.invalidate()
-        castVolumePendingTimers[id] = Timer.scheduledTimer(withTimeInterval: TimeInterval(max(1, lag)),
-                                                            repeats: false) { [weak self] _ in
-            self?.expireCastVolumePending(for: id)
+        Telemetry.log(.cast, "cast_pending_raised",
+                      ["device": id, "hold": hold.rawValue, "lag": String(lag)])
+        castPendingTimers[hold, default: [:]][id]?.invalidate()
+        castPendingTimers[hold, default: [:]][id] = Timer.scheduledTimer(
+            withTimeInterval: TimeInterval(max(1, lag)), repeats: false) { [weak self] _ in
+            self?.expireCastPending(hold, for: id)
         }
-        if castVolumePendingIDs.insert(id).inserted {
-            refreshDeviceRows()
+        if castPendingIDs[hold, default: []].insert(id).inserted {
+            repaintCastPending(hold, for: id)
         }
     }
 
-    /// The timer's end of the pending fill: drop it, then repaint so the
-    /// fader returns to gold.
-    func expireCastVolumePending(for id: String) {
-        castVolumePendingIDs.remove(id)
-        castVolumePendingTimers[id]?.invalidate()
-        castVolumePendingTimers[id] = nil
-        refreshDeviceRows()
+    /// The timer's end of a pending glow: drop it, then repaint so the
+    /// control settles.
+    func expireCastPending(_ hold: CastPendingHold, for id: String) {
+        castPendingIDs[hold]?.remove(id)
+        castPendingTimers[hold]?[id]?.invalidate()
+        castPendingTimers[hold]?[id] = nil
+        repaintCastPending(hold, for: id)
+    }
+
+    /// The volume glow lives on the row's fader; the trim glow lives in the
+    /// sync drawer, which `refreshDeviceRows()` never reaches.
+    private func repaintCastPending(_ hold: CastPendingHold, for id: String) {
+        switch hold {
+        case .volume:
+            refreshDeviceRows()
+        case .trim:
+            if mountedSyncDrawerID == id, let device = devicesByID[id] {
+                pushSyncDrawerState(device)
+            }
+        }
     }
 
     /// Live Reduce Motion value, overridable for headless determinism.
@@ -3213,7 +3233,7 @@ public final class PopoverController: NSObject {
                   switchOfferOffered: switchOfferDeviceID == device.id && !selected,
                   // A stale id (device no longer Cast/lagged) renders nothing;
                   // its own timer self-expires it — no pruning machinery needed.
-                  volumePendingApply: castVolumePendingIDs.contains(device.id)
+                  volumePendingApply: castPendingIDs[.volume]?.contains(device.id) == true
                       && device.castVolumeLagSeconds != nil
                       && device.connectionState == .connected,
                   isEQShaped: deviceEQIsShaped?(device.id) ?? false,
@@ -3639,7 +3659,7 @@ extension PopoverController: DeviceRowView.Delegate {
         noteSliderGesture()
         groupController?.setMemberVolume(volume, for: id)
         refreshMainOutRow()
-        raiseCastVolumePending(for: id)
+        raiseCastPending(.volume, for: id)
     }
 
     public func deviceRow(_ row: DeviceRowView, didToggleMute muted: Bool, for id: String) {
@@ -3649,7 +3669,7 @@ extension PopoverController: DeviceRowView.Delegate {
         // refresh those glyphs live.
         refreshDeviceRows()
         refreshMainOutRow()
-        raiseCastVolumePending(for: id)
+        raiseCastPending(.volume, for: id)
     }
 
     public func deviceRow(_ row: DeviceRowView, didToggleEnabled on: Bool, for id: String) {

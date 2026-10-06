@@ -132,6 +132,10 @@ public final class BTSyncDrawerView: NSView {
     private let minusButton = StepperButton()
     private let plusButton = StepperButton()
     private let valueField = NSTextField()
+    /// Glow behind the value field while a Cast offset waits out the stream
+    /// lag. The bottom-most subview, so it shows only as a ring past the
+    /// field's opaque bezel and never sits over a button's click area.
+    private let pendingGlowView = NSView()
 
     private lazy var valueFieldEditor = SyncValueFieldEditor(field: valueField, initialValue: 0)
 
@@ -161,6 +165,8 @@ public final class BTSyncDrawerView: NSView {
     /// line from the source until the host clears it, which the host does when
     /// the drawer closes.
     private var movedSinceLastTimeMs: Double?
+    /// Whether the host is holding this device's offset as not yet audible.
+    private var pendingApply = false
     /// The band's leading anchor, swapped when "Align again…" is hidden: the
     /// metronome takes its place rather than leaving a 110 pt hole.
     private var alignLeadingToAlignAgain: NSLayoutConstraint?
@@ -209,6 +215,7 @@ public final class BTSyncDrawerView: NSView {
             addSubview(subview)
         }
         installConstraints()
+        installPendingGlow()
 
         valueFieldEditor.delegate = self
         // Reads `usableRangeMs` LIVE on every call (closes over `self`, not a
@@ -511,6 +518,97 @@ public final class BTSyncDrawerView: NSView {
     }
 
 
+    // MARK: Pending glow
+
+    private func installPendingGlow() {
+        pendingGlowView.translatesAutoresizingMaskIntoConstraints = false
+        pendingGlowView.wantsLayer = true
+        pendingGlowView.layer?.cornerRadius = Self.pendingGlowCornerRadius
+        pendingGlowView.isHidden = true
+        addSubview(pendingGlowView, positioned: .below, relativeTo: nil)
+        let outset = Self.pendingGlowOutset
+        NSLayoutConstraint.activate([
+            pendingGlowView.leadingAnchor.constraint(equalTo: valueField.leadingAnchor, constant: -outset),
+            pendingGlowView.trailingAnchor.constraint(equalTo: valueField.trailingAnchor, constant: outset),
+            pendingGlowView.topAnchor.constraint(equalTo: valueField.topAnchor, constant: -outset),
+            pendingGlowView.bottomAnchor.constraint(equalTo: valueField.bottomAnchor, constant: outset),
+        ])
+    }
+
+    /// Text colour has no layer key path, so one timer drives both the halo
+    /// and the digits from `PendingPulse`, the curve the fader thumb reads.
+    private var pulse = PendingPulse()
+    private var pulseTimer: Timer?
+
+    deinit { pulseTimer?.invalidate() }
+
+    private func setPendingApply(_ pending: Bool) {
+        guard pending != pendingApply else { return }
+        pendingApply = pending
+        let now = CACurrentMediaTime()
+        if pending {
+            pulse.begin(at: now)
+        } else {
+            pulse.finish(at: now, reduceMotion: reduceMotion)
+        }
+        renderPendingGlow()
+    }
+
+    /// Paint the halo and digits at the current strength, and keep the
+    /// timer running only while there is motion to show.
+    private func renderPendingGlow() {
+        let strength = pulse.value(at: CACurrentMediaTime(), reduceMotion: reduceMotion)
+        pendingGlowView.isHidden = strength == nil
+        if let strength {
+            pendingGlowView.layer?.backgroundColor = PendingPulse.light(in: effectiveAppearance)
+                .withAlphaComponent(Self.pendingGlowAlpha * strength).cgColor
+        }
+        valueField.textColor = pendingApply
+            ? PendingPulse.ink(strength: reduceMotion ? nil : strength, in: effectiveAppearance)
+            : Tokens.Color.label
+        let needsFrames = pulse.isArriving || (pendingApply && !reduceMotion)
+        if !needsFrames {
+            pulseTimer?.invalidate()
+            pulseTimer = nil
+        } else if pulseTimer == nil {
+            let timer = Timer(timeInterval: PendingPulse.frameInterval, repeats: true) { [weak self] _ in
+                self?.renderPendingGlow()
+            }
+            timer.tolerance = 0.01
+            RunLoop.main.add(timer, forMode: .common)
+            pulseTimer = timer
+        }
+    }
+
+    public override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        renderPendingGlow()
+    }
+
+    /// The drawer hears a hold's end only through `configure`, which stops
+    /// once it is unmounted. Leaving a window mid-hold would keep the timer
+    /// running on a detached view and play the arrival on the next device's
+    /// field, so unmounting drops the hold at once, with no arrival.
+    public override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        guard window == nil, pendingApply || pulse.isArriving else { return }
+        pendingApply = false
+        pulse = PendingPulse()
+        renderPendingGlow()
+        refreshDisplay()
+    }
+
+    private var reduceMotion: Bool {
+        test_reduceMotionOverride ?? NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+    }
+
+    /// The halo's alpha at full strength, its reach past the field, and its
+    /// corners. The stock bezel exposes no border colour, so the field's own
+    /// edge does not light.
+    private static let pendingGlowAlpha: CGFloat = 0.40
+    private static let pendingGlowOutset: CGFloat = 2.5
+    private static let pendingGlowCornerRadius: CGFloat = 3
+
     // MARK: Public API (T7)
 
     /// Push a fresh model snapshot. Guards the value field's DISPLAYED text
@@ -522,7 +620,8 @@ public final class BTSyncDrawerView: NSView {
                           usableRangeMs: ClosedRange<Double>, alignTickActive: Bool,
                           canReset: Bool = false, canAlignAgain: Bool = false,
                           offsetSource: BTOffsetSource? = nil,
-                          movedSinceLastTimeMs: Double? = nil) {
+                          movedSinceLastTimeMs: Double? = nil,
+                          pendingApply: Bool = false) {
         self.deviceName = deviceName
         self.trimMs = trimMs
         self.isSet = isSet
@@ -531,6 +630,7 @@ public final class BTSyncDrawerView: NSView {
         self.canAlignAgain = canAlignAgain
         self.offsetSource = offsetSource
         self.movedSinceLastTimeMs = movedSinceLastTimeMs
+        setPendingApply(pendingApply)
         alignButton.state = alignTickActive ? .on : .off
         alignButton.contentTintColor = alignTickActive
             ? Tokens.Color.engagedChrome : Tokens.Color.label2
@@ -708,7 +808,9 @@ public final class BTSyncDrawerView: NSView {
         // from jumping) and a real element when it is not.
         captionLabel.setAccessibilityElement(!captionText.isEmpty)
         spokenValue = isSet ? BTSyncTrim.spokenOffset(trimMs) : "Not set"
-        valueField.setAccessibilityLabel("Sync offset for \(deviceName)")
+        valueField.setAccessibilityLabel(pendingApply
+            ? "Sync offset for \(deviceName), applying"
+            : "Sync offset for \(deviceName)")
         valueField.setAccessibilityValue(spokenValue)
         valueField.toolTip = "\(deviceName): \(isSet ? BTSyncTrim.spokenOffset(trimMs) : "not tuned yet"). Type an exact value in whole milliseconds."
     }
@@ -744,6 +846,11 @@ public final class BTSyncDrawerView: NSView {
     // reads it via `?`, never force-unwrapped.)
 
     public var test_shiftModifierOverride: Bool?
+
+    /// Stands in for the system Reduce Motion setting.
+    public var test_reduceMotionOverride: Bool?
+    public var test_isPendingGlowShown: Bool { !pendingGlowView.isHidden }
+    public var test_isPulseTimerRunning: Bool { pulseTimer != nil }
 
     private var shiftIsHeld: Bool {
         test_shiftModifierOverride ?? (NSApp?.currentEvent?.modifierFlags.contains(.shift) ?? false)

@@ -67,6 +67,7 @@ public final class CompanionCoordinator {
     private let appRouting: AppRoutingController
     private let settings: AppSettings
     private let excludedBundleIDs: () -> Set<String>
+    private let speakerLibrary: SpeakerLibraryController
 
     /// One name for both the Bonjour advertisement (`start(name:)`) and
     /// `Snapshot.serverName` — the server's `welcome` reads the latter, so the
@@ -94,6 +95,7 @@ public final class CompanionCoordinator {
                 appRouting: AppRoutingController,
                 settings: AppSettings,
                 excludedBundleIDs: @escaping () -> Set<String>,
+                speakerLibrary: SpeakerLibraryController,
                 serverName: String,
                 server: CompanionServer = CompanionServer(),
                 // Optional rather than defaulted: a default argument is evaluated
@@ -105,6 +107,7 @@ public final class CompanionCoordinator {
         self.appRouting = appRouting
         self.settings = settings
         self.excludedBundleIDs = excludedBundleIDs
+        self.speakerLibrary = speakerLibrary
         self.serverName = serverName
         self.server = server
         self.approvals = approvals ?? CompanionApprovalController()
@@ -139,6 +142,10 @@ public final class CompanionCoordinator {
     private var localFallbackActive = false
     private var takeoverStatus: TakeoverStatus?
     private var systemDefaultIsAirPlayActive = false
+    /// The other two inputs of the Mac's note slot (`.captureFailed` /
+    /// `.routingBlockedNeedsDefault`), cached the same way.
+    private var captureFailureMessage: String?
+    private var routingBlocked = false
 
     /// Last-known display name per `Device.id`, accumulated from
     /// `deviceAdded`/`deviceUpdated` and NEVER pruned on `deviceRemoved`
@@ -225,7 +232,8 @@ public final class CompanionCoordinator {
                 // `onSettingChanged` fires after `await latency.apply`.
                 await self.scheduleBroadcast()
             },
-            alignmentActions: makeAlignmentActions())
+            alignmentActions: makeAlignmentActions(),
+            speakerLibrary: speakerLibrary)
 
         // A reconnect (or an alignment landing) changes what the phone's
         // speaker row says, and nothing else broadcasts for it — the timing
@@ -483,6 +491,14 @@ public final class CompanionCoordinator {
         takeoverStatus = status
     }
 
+    public func noteCaptureFailure(_ message: String?) {
+        captureFailureMessage = message
+    }
+
+    public func noteRoutingBlocked(_ active: Bool) {
+        routingBlocked = active
+    }
+
     /// An app launched or quit: the cached running-app list is stale.
     public func invalidateRunningAppsCache() {
         runningAppsCache = nil
@@ -540,7 +556,13 @@ public final class CompanionCoordinator {
             // alignment at all, which the phone reads as "not reported".
             alignmentFor: { [weak self] device in
                 (self?.backend as? BTOutputControlling)?.btAlignmentReport(forDevice: device.id)
-            })
+            },
+            speakerRecord: { [speakerLibrary] in speakerLibrary.record(for: $0.id) },
+            missingSpeakers: speakerLibrary.records
+                .filter { !$0.isLocalDevice && $0.liveDevice == nil }
+                .map { ($0.id, $0.displayName, $0.kind?.rawValue) },
+            note: Self.noteSlot(captureFailure: captureFailureMessage, routingBlocked: routingBlocked,
+                                takeover: takeoverStatus, doublePath: systemDefaultIsAirPlayActive))
         server.broadcast(snapshot)
     }
 
@@ -578,7 +600,7 @@ public final class CompanionCoordinator {
     /// `PopoverController.takeoverStatusText(for:)` is internal to
     /// `AudioutPopoverUI`; keep the two in sync (follow-up: make that helper
     /// public and delete this copy).
-    private nonisolated static func takeoverText(_ status: TakeoverStatus) -> String {
+    nonisolated static func takeoverText(_ status: TakeoverStatus) -> String {
         switch status {
         case .needsApproval:
             return "Speaker Sync needs permission to run. Open Login Items to approve it."
@@ -589,6 +611,35 @@ public final class CompanionCoordinator {
         case .timedOut:
             return "Another app is using AirPlay's timing right now, so this connection couldn't complete. Try again in a moment."
         }
+    }
+
+    /// The wire copy for the routing-blocked note — the popover's
+    /// `PopoverController.routingBlockedNeedsDefaultText`. Duplicated because
+    /// that copy is internal to `AudioutPopoverUI`; keep the two in sync.
+    nonisolated static var routingBlockedText: String {
+        "\(AggregateOutputDevice.productName) isn't your Mac's output device. Audio won't play until you switch back."
+    }
+
+    /// The wire copy for the double-path note — the popover's
+    /// `PopoverController.systemAirPlayNoteText`. Duplicated because that copy
+    /// is internal to `AudioutPopoverUI`; keep the two in sync.
+    nonisolated static let doublePathText =
+        "Your Mac's system output is also set to AirPlay. Audio may play twice. Switch it back to avoid an echo."
+
+    /// The one Mac-wide note the popover would show, in its precedence order
+    /// (`PopoverController.resolvedSystemAirPlayNote`): capture failed, then
+    /// routing blocked, then a takeover status, then the double path. Licence
+    /// and trial notes never reach the phone.
+    nonisolated static func noteSlot(captureFailure: String?, routingBlocked: Bool,
+                                     takeover: TakeoverStatus?,
+                                     doublePath: Bool) -> (text: String, severity: String)? {
+        if let captureFailure { return (captureFailure, "warning") }
+        if routingBlocked { return (routingBlockedText, "warning") }
+        if let takeover {
+            return (takeoverText(takeover), takeover == .timedOut ? "warning" : "info")
+        }
+        if doublePath { return (doublePathText, "info") }
+        return nil
     }
 
     // MARK: Speaker clicks (the audition)

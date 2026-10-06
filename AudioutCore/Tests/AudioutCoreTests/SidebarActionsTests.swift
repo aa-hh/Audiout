@@ -144,8 +144,8 @@ import AppKit
     // Turns red when the method drifts off AppKit's `outlineView(_:shouldShowOutlineCellForItem:)` selector, so AppKit never asks and every header gets the default Show/Hide, or when a header other than the hidden group answers true.
     @Test func onlyTheHiddenGroupHeaderShowsTheFoldControl() throws {
         let (sidebar, _) = makeFleetSidebar()
-        let outlineView = try #require(sidebar.view.subviews.lazy
-            .compactMap { ($0 as? NSScrollView)?.documentView as? NSOutlineView }.first)
+        let scrollView = sidebar.view.subviews.first { $0 is NSScrollView } as? NSScrollView
+        let outlineView = try #require(scrollView?.documentView as? NSOutlineView)
         let delegate = try #require(outlineView.delegate)
         let answers: [String: Bool?] = Dictionary(uniqueKeysWithValues:
             (0..<outlineView.numberOfChildren(ofItem: nil)).compactMap { index -> (String, Bool?)? in

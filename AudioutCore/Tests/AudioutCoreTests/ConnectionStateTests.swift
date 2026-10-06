@@ -54,8 +54,8 @@ import Testing
                 "The speaker refused the connection. Another device may hold an exclusive session. Stop playback from other apps or restart the speaker, then try again."
             ),
             .authRequired: (
-                "Password required",
-                "This speaker needs its AirPlay password. Enter it to connect."
+                "Password didn't work",
+                "The speaker didn't accept that password. Enter it again to connect."
             ),
             .codeRequired: (
                 "Code required",

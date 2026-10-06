@@ -784,7 +784,95 @@ import AudioutProtocol
             $0.connectionState = .failed(ConnectionFailure(cause: .authRequired))
         }
         #expect(sheet.test_resultText == "That password didn't work. Check it and try again.")
+        #expect(popover.test_diagnosisPanel(for: "office") == nil)
         #expect(sheet.test_connectButton.isEnabled)
+        #expect(popover.test_passwordSheet() != nil)
+    }
+
+    // Dropping the `passwordSheetDeviceID` check around the panel open on the `.failed` edge in `handleConnectionTransitions` turns it red.
+    @Test func passwordSheetHoldsTheDiagnosisPanelUntilCancel() async throws {
+        let (popover, backend, sheet) = try await popoverWithPasswordSheet()
+        pushOffice(popover, backend) {
+            $0.airPlayAccess = .password
+            $0.connectionState = .failed(ConnectionFailure(cause: .authRequired))
+        }
+        #expect(popover.test_diagnosisPanel(for: "office") == nil)
+
+        sheet.test_tapCancel()
+        #expect(popover.test_passwordSheet() == nil)
+        #expect(popover.test_diagnosisPanel(for: "office") != nil)
+    }
+
+    // Turns red if the row stops offering its "Enter Password…" link for `.awaitingPassword` or if `deviceRowDidRequestPasswordEntry` stops opening the sheet.
+    @Test func passwordWaitDrawsTheRowAsConnectingWithItsEnterPasswordLink() async throws {
+        let (popover, backend, sheet) = try await popoverWithPasswordSheet()
+        sheet.test_tapCancel()
+        pushOffice(popover, backend) {
+            $0.airPlayAccess = .password
+            $0.connectionState = .awaitingPassword
+        }
+        let row = try #require(popover.test_deviceRow(for: "office"))
+        #expect(row.test_statusKind == .connecting)
+        #expect(row.test_ringForm == .connecting)
+        #expect(row.test_enterPasswordOffered)
+        #expect(popover.test_diagnosisPanel(for: "office") == nil)
+        #expect(popover.test_passwordSheet() == nil)
+
+        row.test_clickEnterPassword()
+        let reopened = try #require(popover.test_passwordSheet())
+
+        reopened.test_tapCancel()
+        pushOffice(popover, backend) {
+            $0.airPlayAccess = .password
+            $0.connectionState = .failed(ConnectionFailure(cause: .authRequired))
+        }
+        #expect(popover.test_diagnosisPanel(for: "office") != nil)
+        let refusedRow = try #require(popover.test_deviceRow(for: "office"))
+        #expect(!refusedRow.test_enterPasswordOffered)
+    }
+
+    // Dropping the password-wait branch from the row's name click turns it red, and so does putting that branch back on the checkbox action.
+    @Test func clickingTheNameOfAWaitingRowOpensTheSheetAndTheCheckboxRemovesIt() async throws {
+        let (popover, controller, backend) = try await makePopover()
+        pushOffice(popover, backend) {
+            $0.airPlayAccess = .password
+            $0.connectionState = .connecting
+        }
+        let joinRow = try #require(popover.test_deviceRow(for: "office"))
+        popover.deviceRow(joinRow, didToggleEnabled: true, for: "office")
+        try #require(popover.test_passwordSheet()).test_tapCancel()
+        pushOffice(popover, backend) {
+            $0.airPlayAccess = .password
+            $0.connectionState = .awaitingPassword
+        }
+        let row = try #require(popover.test_deviceRow(for: "office"))
+
+        row.test_clickName()
+        #expect(popover.test_passwordSheet() != nil)
+        #expect(controller.isSpeakerSelected("office"))
+
+        try #require(popover.test_passwordSheet()).test_tapCancel()
+        row.test_fireCheckboxAction(settingStateTo: false)
+        #expect(popover.test_passwordSheet() == nil)
+        #expect(!controller.isSpeakerSelected("office"))
+    }
+
+    /// Turns red if entering a password for a speaker only an app route
+    /// targets pulls it into Selected Devices.
+    @Test func passwordSheetForAnUnselectedSpeakerNeverSelectsIt() async throws {
+        let appRouting = tempAppRoutingController()
+        seedRoute(appRouting, bundleID: "com.example.music", displayName: "Music",
+                  destination: .device(id: "office"))
+        let (popover, controller, backend) = try await makePopover(appRouting: appRouting)
+        pushOffice(popover, backend) {
+            $0.airPlayAccess = .password
+            $0.connectionState = .failed(ConnectionFailure(cause: .authRequired))
+        }
+        try #require(popover.test_diagnosisPanel(for: "office")).test_tapRetry()
+        let sheet = try #require(popover.test_passwordSheet())
+        sheet.test_setPasswordText("secret")
+        sheet.test_tapConnect()
+        #expect(!controller.isSpeakerSelected("office"))
         #expect(popover.test_passwordSheet() != nil)
     }
 

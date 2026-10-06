@@ -548,7 +548,7 @@ public final class CompanionCommandDispatcher {
         switch device.connectionState {
         case .connected, .reconnecting:
             return nil
-        case .off, .connecting, .failed:
+        case .off, .connecting, .awaitingPassword, .failed:
             return .refused("\(device.name) isn't connected yet, so it can't take volume changes.")
         }
     }

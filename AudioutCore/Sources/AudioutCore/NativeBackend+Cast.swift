@@ -84,6 +84,7 @@ extension NativeBackend {
         case .connecting: return "connecting"
         case .connected: return "connected"
         case .reconnecting: return "reconnecting"
+        case .awaitingPassword: return "awaitingPassword"
         case .failed(let failure): return "failed(\(failure.cause))"
         }
     }

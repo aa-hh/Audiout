@@ -750,6 +750,7 @@ public final class DeviceDetailViewController: NSViewController {
         case .connected:     return "Connected"
         case .connecting:    return "Connecting…"
         case .reconnecting:  return "Reconnecting…"
+        case .awaitingPassword: return "Waiting for password"
         case .failed:        return "Couldn't connect"
         case .off:           return device.isAvailable ? "Ready" : "Not on Wi-Fi"
         }

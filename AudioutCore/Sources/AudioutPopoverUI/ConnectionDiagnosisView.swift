@@ -136,7 +136,8 @@ public final class ConnectionDiagnosisView: NSView {
 
         configureSmallButton(retryButton, title: "Try again", action: #selector(retryClicked(_:)))
         configureSmallButton(copyDetailsButton, title: "Copy details", action: #selector(copyDetailsClicked(_:)))
-        // "Try again" is the default action (P1-6): Return fires it without a
+        // The default button ("Try again", or "Enter Password…" for a password
+        // demand) is the default action (P1-6): Return fires it without a
         // click, the stock `.rounded` bezel renders the default treatment on
         // its own.
         retryButton.keyEquivalent = "\r"

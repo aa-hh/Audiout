@@ -205,6 +205,15 @@ import AudioutCore
                 "the failed ring speaks 'couldn't connect'")
     }
 
+    // Reverting `.awaitingPassword` in `HaloRingView.form` or in `accessibilityStateSuffix` turns it red.
+    @Test func awaitingPasswordShowsTheConnectingRingAndSpeaksWaitingForPassword() {
+        let row = DeviceRowView(device: makeDevice(connectionState: .awaitingPassword))
+        row.apply(makeDevice(connectionState: .awaitingPassword), selected: true)
+        #expect(row.test_statusKind == .connecting)
+        #expect(row.test_ringForm == .connecting)
+        #expect(row.test_accessibilityLabel?.hasSuffix(", waiting for password") == true)
+    }
+
     @Test func accessibilityLabelOmitsClauseWhenOff() {
         let row = DeviceRowView(device: makeDevice(connectionState: .off))
         row.apply(makeDevice(connectionState: .off), selected: false)

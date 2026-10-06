@@ -278,6 +278,20 @@ import Testing
         #expect(!controller.selectedDeviceIDs.contains("office"), "membership is never invented")
     }
 
+    /// Turns red if `submitAirPlayPassword` falls back to `retryConnection`'s
+    /// select for a speaker in neither the selected set nor the active group (a
+    /// per-app-only speaker joins the whole-system mix, and a refused select
+    /// leaves the sheet on Connecting).
+    @Test func submitAirPlayPasswordForAnUnselectedSpeakerRetriesWithoutSelectingIt() async throws {
+        let (controller, backend) = try await makeRecordingController()
+        #expect(!controller.selectedDeviceIDs.contains("office"))
+        backend.reset()
+
+        controller.submitAirPlayPassword("secret", for: "office", source: "mac")
+        #expect(backend.callOrder == ["retry"])
+        #expect(!controller.selectedDeviceIDs.contains("office"))
+    }
+
     /// R12 adversarial-review fixup — `retryConnection(for:)` must decide its
     /// re-kick path off which routing is ACTUALLY active (`mainOut`), not off
     /// whichever membership set happens to contain `id` first.

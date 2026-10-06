@@ -593,12 +593,20 @@ public final class GroupController {
         return setDeviceSelected(id, true)
     }
 
-    /// Store the AirPlay password the user typed for `id`, then retry it
-    /// through `retryConnection(for:)` once the backend has written it, on the
-    /// main thread. `source` is `"mac"` or `"phone"`, for analytics only.
+    /// Store the AirPlay password the user typed for `id`, then retry it once
+    /// the backend has written it, on the main thread. A selected or
+    /// active-group speaker retries through `retryConnection(for:)`; any other
+    /// speaker goes through `requestReconnect(for:)`, because membership stays
+    /// the checkbox's job and the backend re-binds a per-app-only speaker
+    /// itself. `source` is `"mac"` or `"phone"`, for analytics only.
     public func submitAirPlayPassword(_ password: String, for id: String, source: String) {
         backend.submitAirPlayPassword(password, for: id, source: source) { [weak self] in
-            self?.retryConnection(for: id)
+            guard let self else { return }
+            if self.isMainOutMember(id) || self.selectedDeviceIDs.contains(id) {
+                self.retryConnection(for: id)
+            } else {
+                self.requestReconnect(for: id)
+            }
         }
     }
 

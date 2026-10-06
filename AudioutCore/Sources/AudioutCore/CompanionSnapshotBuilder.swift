@@ -285,6 +285,8 @@ public enum CompanionSnapshotBuilder {
 
     /// `credentialKind` is `"password"` in every state while a password
     /// speaker has none on file, so the phone can offer to enter one.
+    /// A password wait is `"awaitingPassword"` with no failure fields: it is
+    /// not a failure; a refused password is `"failed"` with its cause.
     private static func connectionInfo(_ device: Device) -> DeviceState.ConnectionInfo {
         let credentialKind: String? =
             device.airPlayAccess == .password && !device.hasStoredPassword ? "password" : nil
@@ -298,6 +300,8 @@ public enum CompanionSnapshotBuilder {
             return DeviceState.ConnectionInfo(state: "connected", credentialKind: credentialKind, access: access)
         case .reconnecting:
             return DeviceState.ConnectionInfo(state: "reconnecting", credentialKind: credentialKind, access: access)
+        case .awaitingPassword:
+            return DeviceState.ConnectionInfo(state: "awaitingPassword", credentialKind: credentialKind, access: access)
         case .failed(let failure):
             return DeviceState.ConnectionInfo(
                 state: "failed",

@@ -64,9 +64,10 @@ private final class SpyEngine: EngineControlling, @unchecked Sendable {
     /// Ids that should THROW on `addOutput` (best-effort partial-failure test).
     var addFailures: Set<UInt64> = []
     /// The error `addFailures` throws — defaults to the generic session
-    /// failure; the auth-mapping test sets `.passwordRequired` to prove the
-    /// connect path surfaces `.authRequired` instead of flattening to
-    /// `.unknown`.
+    /// failure; the password tests set `.passwordRequired` to prove the
+    /// connect path parks the speaker in `.awaitingPassword` when no password
+    /// was fed and surfaces `.authRequired` when one was, instead of
+    /// flattening to `.unknown`.
     var addFailureError: AirPlayEngineError = .sessionFailed
     /// When set, an `addFailures` add also reports its failure on the state
     /// stream, as the real engine does (shims/outputs.c fires the completion
@@ -649,7 +650,7 @@ private func ap1Device(id: String = "AA:BB:CC:DD:EE:99", name: String = "Old Exp
                        access: AirPlayAccess = .open) -> DiscoveredDevice {
     let txt = ["deviceid": id, "model": "AirPort4,107"]
     let (parsedID, outputID) = NativeDiscovery.parseDeviceID(txt)!
-    let desc = DeviceDescriptor(name: name, address: "192.168.1.20", family: .ipv4, port: 5000, txtRecord: txt)
+    let desc = DeviceDescriptor(name: name, address: "192.168.1.20", family: .ipv4, port: 5000, kind: .raop, txtRecord: txt)
     return DiscoveredDevice(id: parsedID, descriptor: desc, outputID: outputID, isAirPlay2Supported: false,
                             access: access)
 }
@@ -3112,11 +3113,11 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
                       "the auto-recovery reconnect must still push a level to the engine (the seed fires) — the preserved 75, not skipped")
     }
 
-    /// An engine `.passwordRequired` on the STATE STREAM surfaces as
-    /// `.authRequired`, never flattened to `.unknown` (live 2026-08-06: an
-    /// auth-blocked Mac receiver — act=2 "Current User" access control — was
-    /// debugged blind because the panel said "failed for an unknown reason"
-    /// while the engine knew it wanted a password).
+    /// An engine `.passwordRequired` on the STATE STREAM with no password fed
+    /// surfaces as `.awaitingPassword`, never flattened to `.failed(.unknown)`
+    /// (live 2026-08-06: an auth-blocked Mac receiver — act=2 "Current User"
+    /// access control — was debugged blind because the panel said "failed for
+    /// an unknown reason" while the engine knew it wanted a password).
     @Test func passwordRequiredOnStateStreamSurfacesAuthRequiredCause() async {
         let (backend, engine, discovery) = makeBackend()
         backend.start(); defer { backend.stop() }
@@ -3131,24 +3132,14 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         await pollUntil { backend.devices.first { $0.id == device.id }?.isSelected == true }
 
         engine.pushState(device.outputID, .passwordRequired)
-        await pollUntil {
-            if case .failed(let f)? = backend.devices.first(where: { $0.id == device.id })?.connectionState {
-                return f.cause == .authRequired
-            }
-            return false
-        }
-        guard case .failed(let failure)? =
-                backend.devices.first(where: { $0.id == device.id })?.connectionState else {
-            Issue.record("device did not enter .failed")
-            return
-        }
-        #expect(failure.cause == .authRequired,
-                "a password rejection carries its known cause, not .unknown")
+        await pollUntil { self.connectionState(backend, device.id) == .awaitingPassword }
+        #expect(connectionState(backend, device.id) == .awaitingPassword,
+                "a password demand with no password fed waits for one, not .failed(.unknown)")
     }
 
     /// The same mapping on the CONNECT path: an `addOutput` that throws the
-    /// engine's `.passwordRequired` parks the device with `.authRequired` —
-    /// `convergeDevice`'s catch mirrors `applyEngineState`'s arm.
+    /// engine's `.passwordRequired` with no password fed parks the device in
+    /// `.awaitingPassword` — `convergeDevice`'s catch mirrors `applyEngineState`'s arm.
     @Test func passwordRequiredAddThrowSurfacesAuthRequiredCause() async {
         let (backend, engine, discovery) = makeBackend()
         let device = ap2Device()
@@ -3163,19 +3154,9 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         } after: { discovery.fire(.appeared(device)) }
 
         backend.setOutputSet([device.id])
-        await pollUntil {
-            if case .failed(let f)? = backend.devices.first(where: { $0.id == device.id })?.connectionState {
-                return f.cause == .authRequired
-            }
-            return false
-        }
-        guard case .failed(let failure)? =
-                backend.devices.first(where: { $0.id == device.id })?.connectionState else {
-            Issue.record("device did not enter .failed")
-            return
-        }
-        #expect(failure.cause == .authRequired,
-                "the add-throw catch maps the engine's passwordRequired, not .unknown")
+        await pollUntil { self.connectionState(backend, device.id) == .awaitingPassword }
+        #expect(connectionState(backend, device.id) == .awaitingPassword,
+                "the add-throw catch maps the engine's passwordRequired, not .failed(.unknown)")
     }
 
     // MARK: AirPlay passwords
@@ -3207,7 +3188,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         } after: { discovery.fire(.appeared(device)) }
 
         backend.setOutputSet([device.id])
-        await pollUntil { self.failureCause(backend, device.id) == .authRequired }
+        await pollUntil { self.connectionState(backend, device.id) == .awaitingPassword }
 
         engine.addFailures = []
         await submitAndWait(backend, "secret", for: device.id)
@@ -3242,7 +3223,8 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
     }
 
     /// Mapping a password speaker's unexplained connect failure to `.unknown`
-    /// (AirPlay 2 reports a refused password as a plain failure) turns it red.
+    /// (AirPlay 2 reports a refused password as a plain failure), so it reads
+    /// `.failed` instead of `.awaitingPassword`, turns it red.
     @Test func passwordSpeakerConnectFailureReadsAsAuthRequired() async {
         let (backend, engine, discovery) = makeBackend()
         let device = ap2Device(access: .password)
@@ -3255,8 +3237,11 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         } after: { discovery.fire(.appeared(device)) }
 
         backend.setOutputSet([device.id])
-        await pollUntil { self.failureCause(backend, device.id) != nil }
-        #expect(failureCause(backend, device.id) == .authRequired)
+        await pollUntil {
+            self.failureCause(backend, device.id) != nil
+                || self.connectionState(backend, device.id) == .awaitingPassword
+        }
+        #expect(connectionState(backend, device.id) == .awaitingPassword)
     }
 
     /// Mapping a password demand from an on-screen-code receiver to
@@ -3277,6 +3262,25 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         #expect(failureCause(backend, device.id) == .codeRequired)
     }
 
+    /// Mapping a password demand from a Home-only receiver (a Mac in Current
+    /// User AirPlay mode) to `.authRequired`, offering a password sheet no
+    /// password satisfies, turns it red.
+    @Test func passwordRequiredOnHomeOnlySpeakerReadsAsHomeMembersOnly() async {
+        let (backend, engine, discovery) = makeBackend()
+        let device = ap2Device(access: .homeMembersOnly)
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+
+        backend.setOutputSet([device.id])
+        await pollUntil { backend.devices.first { $0.id == device.id }?.isSelected == true }
+        engine.pushState(device.outputID, .passwordRequired)
+        await pollUntil { self.failureCause(backend, device.id) != nil }
+        #expect(failureCause(backend, device.id) == .homeMembersOnly)
+    }
+
     /// Deleting the stored password on a plain `sessionFailed` (a guessed
     /// refusal, which a Wi-Fi blip also produces) turns it red.
     @Test func sessionFailedOnPasswordSpeakerKeepsTheStoredPassword() async {
@@ -3292,6 +3296,25 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         backend.setOutputSet([device.id])
         await pollUntil { self.failureCause(backend, device.id) != nil }
         #expect(failureCause(backend, device.id) == .authRequired)
+        #expect(backend.devices.first { $0.id == device.id }?.hasStoredPassword == true)
+        #expect(store.password(for: device.id) == "right")
+    }
+
+    /// Reading a `.raop` password speaker's plain `sessionFailed` as `.authRequired` (the AirPlay 2 guess; the RAOP sender reports a bad password itself) turns it red.
+    @Test func sessionFailedOnAirPlay1PasswordSpeakerReadsAsUnknownAndKeepsThePassword() async {
+        let store = InMemoryAirPlayPasswordStore()
+        let device = ap1Device(access: .password)
+        store.setPassword("right", for: device.id)
+        let (backend, engine, discovery) = makeBackend(passwordStore: store)
+        defer { backend.stop() }
+        engine.addFailures = [device.outputID.rawValue]
+        engine.addFailureError = .sessionFailed
+        await startAndDiscover(backend, engine, discovery, device)
+
+        backend.setOutputSet([device.id])
+        await pollUntil { self.failureCause(backend, device.id) != nil }
+        #expect(failureCause(backend, device.id) == .unknown)
+        #expect(engine.fedDescriptorList.last?.password == "right")
         #expect(backend.devices.first { $0.id == device.id }?.hasStoredPassword == true)
         #expect(store.password(for: device.id) == "right")
     }
@@ -3364,10 +3387,10 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         #expect(engine.fedDescriptorList.last?.password == "secret")
 
         backend.retryOutput(device.id)
-        await pollUntil { adds() == 3 && self.failureCause(backend, device.id) != nil }
+        await pollUntil { adds() == 3 && self.connectionState(backend, device.id) == .awaitingPassword }
         #expect(adds() == 3)
         #expect(engine.fedDescriptorList.last?.password == nil)
-        #expect(failureCause(backend, device.id) == .authRequired)
+        #expect(connectionState(backend, device.id) == .awaitingPassword)
     }
 
     /// Setting the typed-password mark after the store write (so a
@@ -3441,6 +3464,37 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         #expect(store.password(for: device.id) == nil)
         writeGate.signal()
         await pollUntil { store.password(for: device.id) == "secret" }
+    }
+
+    /// Dispatching the Keychain writes on a concurrent queue (the second submit's write landing while the first is still held) turns it red.
+    @Test func twoSubmitsStoreTheLastSubmittedPassword() async {
+        let store = ScriptedPasswordStore()
+        let writeGate = DispatchSemaphore(value: 0)
+        let entered = DispatchSemaphore(value: 0)
+        let sawFirstWrite = OnceFlag()
+        store.onWillSet = {
+            guard !sawFirstWrite.testAndSet() else { return }
+            entered.signal()
+            writeGate.wait()
+        }
+        let (backend, engine, discovery) = makeBackend(passwordStore: store)
+        defer { backend.stop() }
+        let device = ap2Device(access: .password)
+        await startAndDiscover(backend, engine, discovery, device)
+        let firstDone = DispatchSemaphore(value: 0)
+        let secondDone = DispatchSemaphore(value: 0)
+
+        backend.submitAirPlayPassword("first", for: device.id, source: "mac") { firstDone.signal() }
+        backend.submitAirPlayPassword("second", for: device.id, source: "phone") { secondDone.signal() }
+        await pollUntil { entered.wait(timeout: .now()) == .success }
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        writeGate.signal()
+        writeGate.signal()
+        await pollUntil { firstDone.wait(timeout: .now()) == .success }
+        await pollUntil { secondDone.wait(timeout: .now()) == .success }
+
+        #expect(store.password(for: device.id) == "second")
+        #expect(backend.devices.first { $0.id == device.id }?.hasStoredPassword == true)
     }
 
     /// Building a discovery re-feed's password from the store alone (dropping
@@ -3694,7 +3748,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         await startAndDiscover(backend, engine, discovery, device)
 
         backend.setOutputSet([device.id])
-        await pollUntil { self.failureCause(backend, device.id) == .authRequired }
+        await pollUntil { self.connectionState(backend, device.id) == .awaitingPassword }
         #expect(backend.devices.first { $0.id == device.id }?.isAvailable == true)
 
         await submitAndWait(backend, "wrong", for: device.id)
@@ -3703,6 +3757,119 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         #expect(engine.fedDescriptorList.last?.password == "wrong")
         #expect(backend.devices.first { $0.id == device.id }?.isAvailable == false)
         #expect(failureCause(backend, device.id) == .authRequired)
+    }
+
+    /// Writing `.failed` instead of `.awaitingPassword` in the converge catch
+    /// (the wait times out), or counting a password-waiting speaker in
+    /// `reconcileSilenceWatchdog`'s `desiredNonLocal` (the countdown stays armed
+    /// after the wait begins), turns it red.
+    @Test func passwordDemandWithNoPasswordFedReadsAsAwaitingPassword() async {
+        let scheduler = ManualWatchdogScheduler()
+        let (backend, engine, discovery) = makeBackend(watchdogScheduler: scheduler)
+        defer { backend.stop() }
+        let device = ap2Device(access: .password)
+        engine.addFailures = [device.outputID.rawValue]
+        engine.addFailureError = .passwordRequired
+        await startAndDiscover(backend, engine, discovery, device)
+
+        backend.setOutputSet([device.id])
+        await pollUntil { self.connectionState(backend, device.id) == .awaitingPassword }
+        #expect(backend.devices.first { $0.id == device.id }?.isAvailable == true)
+        #expect(!scheduler.hasPending)
+    }
+
+    /// Dropping the `.failed(.authRequired)` case from `reconcileSilenceWatchdog`'s
+    /// `desiredNonLocal` exclusion turns it red: the countdown the retry's
+    /// `.connecting` armed stays armed after the refusal.
+    @Test func refusedPasswordArmsNoSilenceCountdown() async {
+        let scheduler = ManualWatchdogScheduler()
+        let (backend, engine, discovery) = makeBackend(watchdogScheduler: scheduler)
+        defer { backend.stop() }
+        let device = ap2Device(access: .password)
+        engine.addFailures = [device.outputID.rawValue]
+        engine.addFailureError = .passwordRequired
+        await startAndDiscover(backend, engine, discovery, device)
+
+        backend.setOutputSet([device.id])
+        await pollUntil { self.connectionState(backend, device.id) == .awaitingPassword }
+        await submitAndWait(backend, "wrong", for: device.id)
+        backend.retryOutput(device.id)
+        await pollUntil { self.failureCause(backend, device.id) == .authRequired }
+        #expect(!scheduler.hasPending)
+    }
+
+    /// Clearing the fallback when the password exclusion empties the selection
+    /// turns it red.
+    @Test func fallbackThatAlreadyFiredStaysOnWhenTheSpeakerThenRefusesItsPassword() async {
+        let scheduler = ManualWatchdogScheduler()
+        let store = InMemoryAirPlayPasswordStore()
+        let device = ap2Device(access: .password)
+        store.setPassword("secret", for: device.id)
+        let (backend, engine, discovery) = makeBackend(passwordStore: store, watchdogScheduler: scheduler)
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        defer { backend.stop() }
+        await connectAP2(backend, engine, discovery, device)
+        await pollUntil { self.connectionState(backend, device.id) == .connected }
+
+        engine.pushState(device.outputID, .failed)
+        await pollUntil { scheduler.hasPending }
+        scheduler.fireAll()
+        await pollUntil { backend.test_silenceFallbackActive && !capture.isCapturing }
+
+        engine.addFailures = [device.outputID.rawValue]
+        engine.addFailureError = .passwordRequired
+        backend.retryOutput(device.id)
+        await pollUntil { self.failureCause(backend, device.id) == .authRequired }
+        #expect(engine.fedDescriptorList.last?.password == "secret")
+        #expect(backend.test_silenceFallbackActive)
+        #expect(!capture.isCapturing)
+        #expect(!scheduler.hasPending)
+    }
+
+    /// Dropping the `lastDescriptors` gate from `retryOutput`'s per-app password
+    /// arm turns it red: the retype makes the offline speaker available and
+    /// replays the route into a bind that cannot succeed.
+    @Test func perAppOnlyPasswordSpeakerThatWentOfflineBeforeARetypeStaysUnavailable() async {
+        let perApp = workingPerAppCapture(bundleIDs: ["com.foo"])
+        let (backend, engine, discovery) = makeBackend(injectedPerAppCapture: perApp)
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:C9", name: "Locked Speaker", access: .password)
+        await startAndDiscover(backend, engine, discovery, device)
+        engine.addFailures = [device.outputID.rawValue]
+        engine.addFailureError = .passwordRequired
+        engine.onMirroredAddFailure = { _ in
+            await pollUntil {
+                self.connectionState(backend, device.id) == .awaitingPassword
+                    || self.failureCause(backend, device.id) == .authRequired
+            }
+        }
+        let binds = { engine.streamAddCalls.filter { $0.0 == device.outputID }.count }
+        let isAvailable = { backend.devices.first { $0.id == device.id }?.isAvailable }
+        let unbound = { backend.stateQueue.sync { backend.streamBindings[device.id] == nil } }
+
+        backend.updateAppRoutes([route("com.foo", name: "Foo", toDevice: device.id)])
+        await pollUntil { binds() == 1 }
+        await pollUntil { perApp.state(for: "com.foo") == .idle && unbound() }
+
+        await submitAndWait(backend, "wrong", for: device.id)
+        backend.retryOutput(device.id)
+        await pollUntil { binds() == 2 }
+        await pollUntil { isAvailable() == false && unbound() }
+        #expect(failureCause(backend, device.id) == .authRequired)
+
+        discovery.fire(.updated(DiscoveredDevice(
+            id: device.id, descriptor: device.descriptor, outputID: device.outputID,
+            isAirPlay2Supported: true, isAvailable: false, access: .password)))
+        await pollUntil { backend.stateQueue.sync { backend.lastDescriptors[device.id] == nil } }
+
+        engine.addFailures = []
+        await submitAndWait(backend, "right", for: device.id)
+        backend.retryOutput(device.id)
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        #expect(isAvailable() == false)
+        #expect(binds() == 2)
+        #expect(connectionState(backend, device.id) != .connecting)
     }
 
     /// A MUTED AirPlay-1 receiver that drops and reconnects must come back TRULY
@@ -8455,7 +8622,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         #expect(failure.cause == .unknown)
     }
 
-    /// Turns red if `isRouteTargetReachableLocked` stops reading a speaker that waits for a password as unreachable (the app stays out of the system mix, bound to a refused session), or if `droppedByOwnFailureLocked` stops keeping that `.failed` through the unbind (the `.off` re-arms the route and it binds again).
+    /// Turns red if `isRouteTargetReachableLocked` stops reading a speaker that waits for a password as unreachable (the app stays out of the system mix, bound to a refused session), or if `droppedByOwnFailureLocked` stops keeping that `.awaitingPassword` through the unbind (the `.off` re-arms the route and it binds again).
     @Test func perAppRouteToAPasswordSpeakerAwaitingAPasswordRejoinsTheSystemMix() async {
         let perApp = workingPerAppCapture(bundleIDs: ["com.foo"])
         let (backend, engine, discovery) = makeBackend(injectedPerAppCapture: perApp)
@@ -8465,7 +8632,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         engine.addFailures = [device.outputID.rawValue]
         engine.addFailureError = .passwordRequired
         engine.onMirroredAddFailure = { _ in
-            await pollUntil { self.failureCause(backend, device.id) == .authRequired }
+            await pollUntil { self.connectionState(backend, device.id) == .awaitingPassword }
         }
         let binds = { engine.streamAddCalls.filter { $0.0 == device.outputID }.count }
 
@@ -8481,7 +8648,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
                 "its per-app tap stops, so the app rejoins the whole-system mix while the speaker waits for a password")
         #expect(backend.devices.first { $0.id == device.id }?.isAvailable == true,
                 "the row stays available so it offers Enter password")
-        #expect(failureCause(backend, device.id) == .authRequired,
+        #expect(connectionState(backend, device.id) == .awaitingPassword,
                 "the unbind keeps the password demand instead of writing .off")
         #expect(binds() == 1, "no second bind into the same refusal")
 
@@ -8492,6 +8659,119 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         #expect(binds() == 2, "the .connected edge re-binds the route")
         #expect(perApp.state(for: "com.foo") != .idle,
                 "the replayed route restarts the app's own tap")
+    }
+
+    /// Turns red if `retryOutput` ignores a per-app-only speaker waiting for a
+    /// password (the typed password never reaches the engine and the sheet
+    /// stays on Connecting), feeds it after the bind instead of before, or adds
+    /// the speaker to the whole-system set.
+    @Test func perAppOnlyPasswordSpeakerRebindsAfterItsPasswordIsSubmitted() async {
+        let perApp = workingPerAppCapture(bundleIDs: ["com.foo"])
+        let (backend, engine, discovery) = makeBackend(injectedPerAppCapture: perApp)
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:C9", name: "Locked Speaker", access: .password)
+        await startAndDiscover(backend, engine, discovery, device)
+        engine.addFailures = [device.outputID.rawValue]
+        engine.addFailureError = .passwordRequired
+        engine.onMirroredAddFailure = { _ in
+            await pollUntil { self.connectionState(backend, device.id) == .awaitingPassword }
+        }
+        let binds = { engine.streamAddCalls.filter { $0.0 == device.outputID }.count }
+
+        backend.updateAppRoutes([route("com.foo", name: "Foo", toDevice: device.id)])
+        await pollUntil { binds() == 1 }
+        await pollUntil {
+            perApp.state(for: "com.foo") == .idle
+                && backend.stateQueue.sync { backend.streamBindings[device.id] == nil }
+        }
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        #expect(binds() == 1, "no second bind into the same refusal")
+
+        engine.addFailures = []
+        await submitAndWait(backend, "secret", for: device.id)
+        backend.retryOutput(device.id)
+        await pollUntil { binds() == 2 }
+        #expect(engine.fedDescriptorList.last?.password == "secret")
+        await pollUntil { self.connectionState(backend, device.id) == .connected }
+        #expect(backend.devices.first { $0.id == device.id }?.isSelected == false)
+        #expect(backend.stateQueue.sync { !backend.expectedSelected.contains(device.id) })
+    }
+
+    /// Turns red if `retryOutput`'s per-app password arm stops restoring
+    /// `isAvailable` with its `.connecting` write: a refused typed password
+    /// leaves the row unavailable, eligibility never flips, and the retyped
+    /// password is never bound.
+    @Test func perAppOnlyPasswordSpeakerRebindsAfterARefusedPasswordIsRetyped() async {
+        let perApp = workingPerAppCapture(bundleIDs: ["com.foo"])
+        let (backend, engine, discovery) = makeBackend(injectedPerAppCapture: perApp)
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:C9", name: "Locked Speaker", access: .password)
+        await startAndDiscover(backend, engine, discovery, device)
+        engine.addFailures = [device.outputID.rawValue]
+        engine.addFailureError = .passwordRequired
+        engine.onMirroredAddFailure = { _ in
+            await pollUntil {
+                self.connectionState(backend, device.id) == .awaitingPassword
+                    || self.failureCause(backend, device.id) == .authRequired
+            }
+        }
+        let binds = { engine.streamAddCalls.filter { $0.0 == device.outputID }.count }
+        let isAvailable = { backend.devices.first { $0.id == device.id }?.isAvailable }
+        let unbound = { backend.stateQueue.sync { backend.streamBindings[device.id] == nil } }
+
+        backend.updateAppRoutes([route("com.foo", name: "Foo", toDevice: device.id)])
+        await pollUntil { binds() == 1 }
+        await pollUntil { perApp.state(for: "com.foo") == .idle && unbound() }
+
+        await submitAndWait(backend, "wrong", for: device.id)
+        backend.retryOutput(device.id)
+        await pollUntil { binds() == 2 }
+        await pollUntil { isAvailable() == false && unbound() }
+        #expect(failureCause(backend, device.id) == .authRequired)
+        #expect(isAvailable() == false, "a refused typed password leaves the row unavailable")
+
+        engine.addFailures = []
+        await submitAndWait(backend, "right", for: device.id)
+        backend.retryOutput(device.id)
+        await pollUntil { binds() == 3 }
+        #expect(binds() == 3, "the retyped password binds the route again")
+        #expect(engine.fedDescriptorList.last?.password == "right")
+        await pollUntil { self.connectionState(backend, device.id) == .connected }
+        #expect(connectionState(backend, device.id) == .connected)
+    }
+
+    /// Turns red if `updateAppRoutes` stops writing `.off` for a password-waiting speaker the user's route table no longer names (the row keeps showing Enter password with nothing routed to it).
+    @Test func removingTheRouteToAPasswordWaitingSpeakerTurnsItsRowOff() async {
+        let perApp = workingPerAppCapture(bundleIDs: ["com.foo"])
+        let (backend, engine, discovery) = makeBackend(injectedPerAppCapture: perApp)
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:C9", name: "Locked Speaker", access: .password)
+        await startAndDiscover(backend, engine, discovery, device)
+        engine.addFailures = [device.outputID.rawValue]
+        engine.addFailureError = .passwordRequired
+        engine.onMirroredAddFailure = { _ in
+            await pollUntil { self.connectionState(backend, device.id) == .awaitingPassword }
+        }
+        let binds = { engine.streamAddCalls.filter { $0.0 == device.outputID }.count }
+
+        backend.updateAppRoutes([route("com.foo", name: "Foo", toDevice: device.id)])
+        await pollUntil { binds() == 1 }
+        await pollUntil {
+            perApp.state(for: "com.foo") == .idle
+                && backend.stateQueue.sync { backend.streamBindings[device.id] == nil }
+        }
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        #expect(binds() == 1)
+        #expect(connectionState(backend, device.id) == .awaitingPassword)
+        #expect(backend.devices.first { $0.id == device.id }?.isAvailable == true)
+
+        backend.updateAppRoutes([])
+        await pollUntil { self.connectionState(backend, device.id) == .off }
+        try? await Task.sleep(nanoseconds: 300_000_000)
+
+        #expect(connectionState(backend, device.id) == .off)
+        #expect(binds() == 1, "removing the route binds nothing")
+        #expect(perApp.state(for: "com.foo") == .idle)
     }
 
     /// Turns red if a per-app bind refused for want of a clock stops reporting `.failed(.timingUnavailable)`, or if removing that route leaves the row `.failed` instead of `.off`.

@@ -177,12 +177,14 @@ import AudioutProtocol
         #expect(!ctx.groupController.isSpeakerSelected("office"))
     }
 
-    /// Not retrying the speaker after storing the password turns it red.
+    /// Turns red if a password submitted from the phone selects a speaker the
+    /// user never joined; the phone's submit must match the Mac sheet's, which
+    /// retries without inventing membership.
     @Test func submitSpeakerPasswordRetriesTheSpeaker() async throws {
         let ctx = try await makeContext()
         let result = ctx.dispatcher.execute(.submitSpeakerPassword(id: "office", password: "secret"))
         #expect(result.applied)
-        #expect(ctx.groupController.isSpeakerSelected("office"), "the retry falls back to setDeviceSelected(_, true)")
+        #expect(!ctx.groupController.isSpeakerSelected("office"), "the retry never selects; membership stays the checkbox's job")
     }
 
     // MARK: setMainOut — selected / group / refusals

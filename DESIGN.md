@@ -627,7 +627,13 @@ password speaker with nothing saved, or the diagnosis panel's
 (`SpeakerPasswordSheetViewController`): a bold one-line heading, a stock secure
 field, then Cancel and a gold `ProminentButton` Connect, right-aligned. A
 caption-size result line appears only once Connect is pressed: "Connecting…",
-then the reason if the attempt fails. A connect dismisses the sheet.
+then the reason if the attempt fails. A connect dismisses the sheet. The
+row shows no diagnosis panel while its sheet is up; Cancel with the speaker
+still failed opens the panel. A speaker waiting for its first password draws
+the connecting ring and an underlined caption-size "Enter Password…" link in
+the trailing slot (the same slot as the Undo and Play here offers), which,
+like a click on the selected row, raises the sheet; red is reserved for a
+refused password.
 
 ### Equalizer Door (Mixer, Mac-only)
 The Mixer carries an equalizer DOOR only — the row button beside mute, and
@@ -742,7 +748,10 @@ Main Audio's ring, and the rail's node circles. Weight never carries state;
 colour and dash do on the glyph ring, fill and the line gap on the rail node.
 `HaloRingView` draws one form per connection state: no
 ring while off; dashed `rim` while connecting or reconnecting; solid `rim`
-while connected; solid `failure` when failed. The rail node for a connecting
+while connected; solid `failure` when failed. A speaker waiting for its first
+password draws the connecting form, with an underlined caption-size
+"Enter Password…" link in the row's trailing slot (the same slot as the Undo
+and Play here offers); red is reserved for a refused password. The rail node for a connecting
 speaker (`MembershipBusView`'s `.connecting`) is a plain hollow `gold` circle
 at `ringStrokeWidth`, and the line stops `busConnectingNodeRailGap` (9 pt)
 short of it above and below, against `busNodeRailGap` (3 pt) for a member:

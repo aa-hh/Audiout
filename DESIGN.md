@@ -740,8 +740,8 @@ unconnected treatment (`DeviceRowView.swift`). Warm ink means
 `isRouteArmed`; cool means silent. Instruments are flat — no `CALayer`
 blooms. The one exception is the pending Cast hold above: while it runs, an
 armed readout breathes in step with the thumb from `pendingInkDim` (dark
-`emberText`'s `#A98341`; light `#573F0B`, `goldText` 40 % toward
-`inkOnFill`) to `goldText`, holds the dim end under Reduce Motion, and
+`emberText`'s `#A98341`; light `#64480C`, 8.14:1 on the light ground) to
+`goldText`, holds the dim end under Reduce Motion, and
 VoiceOver hears "applying volume".
 
 An unavailable retained row keeps its name, glyph and connection node. A

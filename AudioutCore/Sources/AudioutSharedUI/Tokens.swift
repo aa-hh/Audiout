@@ -838,21 +838,23 @@ public enum Tokens {
         /// ``goldText`` while a Cast change is not yet audible. Dark is
         /// ``emberText``'s hexes. Light cannot use ``emberText``: it has
         /// ``goldText``'s luminance, so a breath between them would not show.
-        /// Light is ``goldText`` blended 40 % toward ``inkOnFill``'s dark ink
-        /// `#171104` per column instead.
+        /// Full light is `#64480C`, the dim end the ink exploration mocked and
+        /// the owner approved (2026-10-06), which is also Full light-IC
+        /// ``goldText``. The other light variants are ``goldText`` blended
+        /// 40 % toward ``inkOnFill``'s dark ink `#171104` in their column.
         ///
         /// CONTRAST RATIONALE (measured; floor 4.5:1, it is text). FULL: dark
         /// `#A98341` = 5.66:1 vs `canvas` / 5.14:1 vs `panel` / 4.51:1 vs
         /// `raised` / 5.83:1 vs `well` (IC `#C4AA7C` 7.05:1 on `raised`);
-        /// light `#573F0B` = 9.49:1 vs the flat ground / 8.22:1 vs `well`, so
-        /// the light breath runs 9.49 to 5.66:1 on the ground; light IC
+        /// light `#64480C` = 8.14:1 vs the flat ground / 7.05:1 vs `well`, so
+        /// the light breath runs 8.14 to 5.66:1 on the ground; light IC
         /// `#453209` = 11.75:1 / 10.18:1. SUBTLE: dark `#95886B` = 4.51:1 on
         /// `raised` (IC `#B6AC98` 7.01:1); light `#524527` = 8.99:1 / 7.79:1
         /// (IC `#3E341D` 11.75:1 / 10.18:1).
         public static var pendingInkDim: NSColor {
             accentDynamic(name: "pendingInkDim",
                           full: WarmVariants(dark: 0xA98341, darkHighContrast: 0xC4AA7C,
-                                             light: 0x573F0B, lightHighContrast: 0x453209),
+                                             light: 0x64480C, lightHighContrast: 0x453209),
                           subtle: WarmVariants(dark: 0x95886B, darkHighContrast: 0xB6AC98,
                                                light: 0x524527, lightHighContrast: 0x3E341D))
         }

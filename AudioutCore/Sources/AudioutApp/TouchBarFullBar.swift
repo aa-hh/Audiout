@@ -57,10 +57,10 @@ final class TouchBarFullBar: NSObject, NSTouchBarDelegate {
     /// keeps the backend's levels flowing for exactly that span, because
     /// ``noteAudioLevel(_:)`` is the play/pause glyph's only input.
     var onPresentedChange: ((Bool) -> Void)?
-    /// Seconds a slow output (a Cast receiver) takes to start sounding after
-    /// the Mac starts playing, or `nil` when nothing is slow. Read each time
-    /// the glyph flips to pause, to pulse for that long.
-    var slowOutputDelay: (() -> TimeInterval?)?
+    /// Seconds a slow output (a Cast receiver) takes to catch up with the
+    /// Mac, or `nil` when nothing is slow, handed to the closure on the main
+    /// thread. Asked each time the glyph flips, to pulse for that long.
+    var slowOutputDelay: ((@escaping (TimeInterval?) -> Void) -> Void)?
 
     private var presented = false
 
@@ -211,15 +211,23 @@ final class TouchBarFullBar: NSObject, NSTouchBarDelegate {
     private func notePlaybackStarted(_ playing: Bool) {
         startWaitTimer?.invalidate()
         startWaitTimer = nil
-        if let slow = slowOutputDelay?(), case let delay = playing ? slow : slow - Self.silenceHold, delay > 0 {
-            startWaitTimer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
+        reconcileAwaitingPlayback()
+        flipCount += 1
+        let flip = flipCount
+        let asked = CACurrentMediaTime()
+        slowOutputDelay? { [weak self] slow in
+            // A later flip owns the pulse; this answer is stale.
+            guard let self, flip == self.flipCount, let slow else { return }
+            let delay = (playing ? slow : slow - Self.silenceHold) - (CACurrentMediaTime() - asked)
+            guard delay > 0 else { return }
+            self.startWaitTimer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
                 MainActor.assumeIsolated {
                     self?.startWaitTimer = nil
                     self?.reconcileAwaitingPlayback()
                 }
             }
+            self.reconcileAwaitingPlayback()
         }
-        reconcileAwaitingPlayback()
     }
 
     private func reconcileAwaitingPlayback() {
@@ -233,6 +241,7 @@ final class TouchBarFullBar: NSObject, NSTouchBarDelegate {
     private static let silenceHold: TimeInterval = 2.0
     private var speakerStillConnecting = false
     private var startWaitTimer: Timer?
+    private var flipCount = 0
     private var awaitingPlayback = false
     private var pulseTimer: Timer?
 

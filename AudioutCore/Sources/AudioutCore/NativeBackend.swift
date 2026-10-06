@@ -4018,6 +4018,19 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         stateQueue.sync { _startBufferMs }
     }
 
+    /// How long, in milliseconds, sound takes to reach the room when a slow
+    /// output (a Cast receiver, a high-latency Bluetooth speaker) has pushed the
+    /// room delay past the normal start buffer; `nil` when nothing is slow.
+    /// The Touch Bar pulses its play button for this long after a start or stop.
+    /// Answers on `stateQueue`, never blocking the caller: a main-thread
+    /// `stateQueue.sync` freezes the app while coreaudiod is slow.
+    public func slowOutputDelayMs(_ reply: @escaping @Sendable (Int?) -> Void) {
+        stateQueue.async {
+            let room = self.roomDelayLocked()
+            reply(room > self._startBufferMs ? room : nil)
+        }
+    }
+
     /// `R` — the room delay (ms): the longest intrinsic delay any active
     /// output has, which every other output then delays itself to (sync
     /// architecture brief §3). One number for the whole room, so the outputs
@@ -4035,17 +4048,6 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// Bluetooth term (`btRoomTermMs`) raises it the same way the Cast term
     /// does, when the slowest selected Bluetooth speaker's latency plus
     /// headroom exceeds the start buffer.
-    /// How long, in milliseconds, sound takes to reach the room when a slow
-    /// output (a Cast receiver, a high-latency Bluetooth speaker) has pushed the
-    /// room delay past the normal start buffer; `nil` when nothing is slow.
-    /// The Touch Bar pulses its play button for this long after playback starts.
-    public var slowOutputDelayMs: Int? {
-        stateQueue.sync {
-            let room = roomDelayLocked()
-            return room > _startBufferMs ? room : nil
-        }
-    }
-
     func roomDelayLocked() -> Int {   // on stateQueue
         let today = (btSinkEnabled && !btComposition.usesPresentationReference)
             ? btReferenceBufferMs : _startBufferMs

@@ -5236,11 +5236,12 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
     /// start or stop. Turns red if a room with nothing slow reports a delay (the
     /// button would pulse on every play with plain AirPlay), or if a slow
     /// output's raised room delay stops being reported (no pulse for Cast).
-    @Test func slowOutputDelayOnlyWhenAnOutputRaisesTheRoomDelay() {
+    @Test func slowOutputDelayOnlyWhenAnOutputRaisesTheRoomDelay() async {
         let (backend, _, _) = makeBackend()
-        #expect(backend.slowOutputDelayMs == nil)
+        let read = { await withCheckedContinuation { c in backend.slowOutputDelayMs { c.resume(returning: $0) } } }
+        #expect(await read() == nil)
         backend.stateQueue.sync { backend.btRoomTermMs = 5500 }
-        #expect(backend.slowOutputDelayMs == 5500)
+        #expect(await read() == 5500)
     }
 
     /// The Touch Bar's play/pause glyph reads `.level`, and the popover gate

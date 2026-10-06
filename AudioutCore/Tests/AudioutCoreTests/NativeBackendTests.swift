@@ -3537,6 +3537,27 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         #expect(store.pairingKey(for: device.id) == "KEY1")
     }
 
+    /// Leaving the fed pairing key in place when a per-app bind fails in `handleBindFailure` turns it red.
+    @Test func aTimedOutPerAppBindRefeedsTheStoredPairingOnTheNextDiscoveryUpdate() async {
+        let store = InMemoryAirPlayPasswordStore()
+        let perApp = workingPerAppCapture(bundleIDs: ["com.foo"])
+        let device = ap2Device(access: .onScreenCode)
+        store.setPairingKey("KEY1", for: device.id)
+        let (backend, engine, discovery) = makeBackend(passwordStore: store, injectedPerAppCapture: perApp)
+        defer { backend.stop() }
+        await startAndDiscover(backend, engine, discovery, device)
+        engine.addFailures = [device.outputID.rawValue]
+        engine.addFailureError = .sessionFailed
+
+        backend.updateAppRoutes([route("com.foo", name: "Foo", toDevice: device.id)])
+        await pollUntil { self.failureCause(backend, device.id) != nil }
+        let fedBefore = engine.fedDescriptorList.count
+        discovery.fire(.updated(device))
+        await pollUntil { engine.fedDescriptorList.count > fedBefore }
+        #expect(engine.fedDescriptorList.dropFirst(fedBefore).first?.authKey == "KEY1")
+        #expect(store.pairingKey(for: device.id) == "KEY1")
+    }
+
     /// Feeding the stored pairing key again after the receiver refused it, when
     /// the Keychain delete left it in place (no `rejectedPairingKeyIDs` skip),
     /// turns it red: the join refeeds the stale key and loops.

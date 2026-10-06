@@ -1567,9 +1567,9 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
 
     /// Show (or, with `nil`, clear) a full-width warning banner PINNED above every
     /// card — used by the generalized silence watchdog to say "Speakers unreachable
-    /// — playing on this Mac. Will resume automatically." A stock system-orange
-    /// rounded inset card with a warning glyph and a wrapping label; system colors
-    /// only, no custom drawing. `clearRows()` drops it along with the cards, so the
+    /// — playing on this Mac. Will resume automatically." The `.warning` note
+    /// banner: `Tokens.Color.failure` on the shared tinted inset ground, a warning
+    /// glyph and a wrapping label. `clearRows()` drops it along with the cards, so the
     /// host re-applies it at the tail of every `rebuild()`.
     ///
     /// `action`, when non-nil, renders a trailing call-to-action button — the

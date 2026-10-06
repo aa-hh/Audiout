@@ -540,6 +540,9 @@ public enum PopoverColumnGrid {
     /// `AppRowView`'s routed ∧ running) — the iPhone's 12 % (`gold.opacity(0.12)`);
     /// measured 1.256:1 on dark `panel`, 1.140:1 on the light ground.
     public static let rowLiveWashAlpha: CGFloat = 0.12
+    /// Alpha of the tint filling an inset notice card (`TintedNoteBackgroundView`):
+    /// the note banner, the thank-you card and the connection diagnosis card.
+    public static let insetCardTintAlpha: CGFloat = 0.12
 
     // MARK: The engaged fill behind a row accessory (Warm Signal v3 §3.4/§3.5, S3)
     //

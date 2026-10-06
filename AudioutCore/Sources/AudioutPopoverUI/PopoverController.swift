@@ -33,13 +33,8 @@ public struct RunningAppInfo: Equatable {
 /// actions route back through `onAdd`/`onRemove` closures so
 /// `PopoverController` stays the only thing that talks to the controllers.
 ///
-/// Two users, ONE construction so the popover has a single "add a thing to
-/// this list" affordance: Applications ("+" opens the running-app picker, "−"
-/// removes the selected row) and Output Devices ("+" fronts the add MENU, "−"
-/// fronts the hide menu — 2026-09-15, replacing the add-only strip: a device
-/// still leaves the LIST by going away; "−" only hides it from display).
-/// Segment metrics are identical either way, so the two "+" glyphs sit on the
-/// same left edge at the same size.
+/// One user, the Applications card: "+" opens the running-app picker, "−"
+/// removes the selected row.
 final class CardFooterView: NSView {
 
     enum Segment: Int { case add = 0, remove = 1 }
@@ -1987,7 +1982,7 @@ public final class PopoverController: NSObject {
         // show a single non-interactive placeholder BEFORE the ± footer.
         applicationsPlaceholderShown = false
         if renderedRoutes.isEmpty {
-            panel.addRow(makePlaceholderRow(text: Self.applicationsEmptyPlaceholderText))
+            panel.addRow(CardMessageRow(message: Self.applicationsEmptyPlaceholderText))
             applicationsPlaceholderShown = true
         }
         applicationsFooter.isRemoveEnabled = selectedAppBundleID != nil
@@ -2160,11 +2155,8 @@ public final class PopoverController: NSObject {
     static let speakerPermissionDeniedHintText =
         "Allow Local Network for Audiout in System Settings \u{203A} Privacy & Security."
 
-    /// The AirPlay subsection's empty body, built the same way the Bluetooth
-    /// Connect row is: a wrapper on the name column whose CONTENT is the empty
-    /// state. Secondary, never tertiary — this is live state text explaining why
-    /// the list is empty, and dimming the explanation of the dimming reads as
-    /// broken (folder rule).
+    /// The AirPlay subsection's empty body: a `CardMessageRow`, with a spinner
+    /// while the search runs.
     private func makeSpeakerSearchStateRow(_ state: SpeakerSearchState) -> NSView {
         let message: String
         let hint: String?
@@ -2180,68 +2172,7 @@ public final class PopoverController: NSObject {
             hint = Self.speakerPermissionDeniedHintText
         }
         renderedSpeakerSearchText = message
-
-        let label = NSTextField(labelWithString: message)
-        label.translatesAutoresizingMaskIntoConstraints = false
-        label.font = Tokens.Font.menuItem
-        label.textColor = Tokens.Color.secondaryLabel
-        label.lineBreakMode = .byTruncatingTail
-        label.maximumNumberOfLines = 1
-
-        let wrapper = NSView()
-        wrapper.translatesAutoresizingMaskIntoConstraints = false
-        wrapper.addSubview(label)
-        let nameColumnLeading = PopoverColumnGrid.nameColumnLeading
-        let trailingInset = -PopoverColumnGrid.leadingInset
-        var constraints: [NSLayoutConstraint] = [
-            label.leadingAnchor.constraint(equalTo: wrapper.leadingAnchor, constant: nameColumnLeading),
-            label.trailingAnchor.constraint(lessThanOrEqualTo: wrapper.trailingAnchor,
-                                            constant: trailingInset),
-        ]
-
-        if let hint {
-            // Two stacked labels: the wrapper GROWS to fit rather than being
-            // pinned to `rowHeight`, or the hint would be clipped out of a row
-            // sized for one line.
-            let hintLabel = NSTextField(wrappingLabelWithString: hint)
-            hintLabel.translatesAutoresizingMaskIntoConstraints = false
-            hintLabel.font = Tokens.Font.captionMedium
-            hintLabel.textColor = Tokens.Color.secondaryLabel
-            hintLabel.isSelectable = false
-            hintLabel.preferredMaxLayoutWidth =
-                SurfaceLayout.width - nameColumnLeading - PopoverColumnGrid.leadingInset
-            wrapper.addSubview(hintLabel)
-            constraints += [
-                label.topAnchor.constraint(equalTo: wrapper.topAnchor, constant: 8),
-                hintLabel.topAnchor.constraint(equalTo: label.bottomAnchor, constant: 2),
-                hintLabel.leadingAnchor.constraint(equalTo: label.leadingAnchor),
-                hintLabel.trailingAnchor.constraint(lessThanOrEqualTo: wrapper.trailingAnchor,
-                                                    constant: trailingInset),
-                hintLabel.bottomAnchor.constraint(equalTo: wrapper.bottomAnchor, constant: -8),
-            ]
-        } else {
-            // One line: a spinner beside it, so "looking" is visibly a process
-            // and not a stuck string. Reduce Motion gets the words alone.
-            constraints += [
-                wrapper.heightAnchor.constraint(equalToConstant: DeviceRowView.rowHeight),
-                label.centerYAnchor.constraint(equalTo: wrapper.centerYAnchor),
-            ]
-            if !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
-                let spinner = NSProgressIndicator()
-                spinner.translatesAutoresizingMaskIntoConstraints = false
-                spinner.style = .spinning
-                spinner.controlSize = .small
-                spinner.isIndeterminate = true
-                wrapper.addSubview(spinner)
-                spinner.startAnimation(nil)
-                constraints += [
-                    spinner.leadingAnchor.constraint(equalTo: label.trailingAnchor, constant: 8),
-                    spinner.centerYAnchor.constraint(equalTo: wrapper.centerYAnchor),
-                ]
-            }
-        }
-        NSLayoutConstraint.activate(constraints)
-        return wrapper
+        return CardMessageRow(message: message, hint: hint, showsSpinner: state == .searching)
     }
 
     private var currentSpeakerUse: SpeakerCurrentUse {
@@ -3394,30 +3325,6 @@ public final class PopoverController: NSObject {
         onOpenSpeakerSettings?(id)
     }
 
-    /// A non-interactive placeholder body row (V2 Devices empty state / V11
-    /// Applications empty state; copy carried by both to the §5.9 spec text
-    /// under V9): `text` in a tertiary-label, row-height view whose label
-    /// leading edge aligns with the name column (past the icon).
-    private func makePlaceholderRow(text: String) -> NSView {
-        let label = NSTextField(labelWithString: text)
-        label.translatesAutoresizingMaskIntoConstraints = false
-        label.font = Tokens.Font.menuItem
-        label.textColor = Tokens.Color.inkTertiary
-        label.lineBreakMode = .byTruncatingTail
-        label.maximumNumberOfLines = 1
-        let wrapper = NSView()
-        wrapper.translatesAutoresizingMaskIntoConstraints = false
-        wrapper.addSubview(label)
-        let nameColumnLeading = PopoverColumnGrid.nameColumnLeading
-        NSLayoutConstraint.activate([
-            wrapper.heightAnchor.constraint(equalToConstant: DeviceRowView.rowHeight),
-            label.leadingAnchor.constraint(equalTo: wrapper.leadingAnchor, constant: nameColumnLeading),
-            label.trailingAnchor.constraint(lessThanOrEqualTo: wrapper.trailingAnchor,
-                                            constant: -PopoverColumnGrid.leadingInset),
-            label.centerYAnchor.constraint(equalTo: wrapper.centerYAnchor),
-        ])
-        return wrapper
-    }
 
     private func makePairBluetoothRow() -> NSView {
         let button = PointingHandButton(title: "Pair Bluetooth speaker…",
@@ -3455,32 +3362,10 @@ public final class PopoverController: NSObject {
     }
 
     private func makeBluetoothAccessRow(_ explanation: String) -> NSView {
-        let label = NSTextField(labelWithString: explanation)
-        label.translatesAutoresizingMaskIntoConstraints = false
-        label.font = Tokens.Font.menuItem
-        label.textColor = Tokens.Color.label2
-        let button = NSButton(title: bluetoothPermissionProvider?() == .denied
-                              ? "Open Bluetooth privacy…" : "Allow Bluetooth access…",
-                              target: self, action: #selector(bluetoothAccessClicked(_:)))
-        button.translatesAutoresizingMaskIntoConstraints = false
-        button.bezelStyle = .accessoryBar
-        button.controlSize = .small
-        button.setAccessibilityLabel(button.title)
-        let row = NSView()
-        row.translatesAutoresizingMaskIntoConstraints = false
-        row.addSubview(label)
-        row.addSubview(button)
-        NSLayoutConstraint.activate([
-            row.heightAnchor.constraint(equalToConstant: DeviceRowView.rowHeight),
-            label.leadingAnchor.constraint(equalTo: row.leadingAnchor,
-                                           constant: PopoverColumnGrid.firstElementLeading(indented: false)),
-            label.centerYAnchor.constraint(equalTo: row.centerYAnchor),
-            button.leadingAnchor.constraint(equalTo: label.trailingAnchor, constant: 8),
-            button.centerYAnchor.constraint(equalTo: row.centerYAnchor),
-            button.trailingAnchor.constraint(lessThanOrEqualTo: row.trailingAnchor,
-                                              constant: -PopoverColumnGrid.trailingInset),
-        ])
-        return row
+        CardMessageRow(message: explanation, action: .init(
+            title: bluetoothPermissionProvider?() == .denied
+                ? "Open Bluetooth privacy…" : "Allow Bluetooth access…",
+            target: self, selector: #selector(bluetoothAccessClicked(_:))))
     }
 
     @objc private func bluetoothAccessClicked(_ sender: Any?) { onBluetoothAccess?() }

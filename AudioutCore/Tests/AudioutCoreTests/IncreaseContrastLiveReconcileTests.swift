@@ -8,6 +8,7 @@ import ObjectiveC.runtime
 @testable import AudioutSharedUI
 @testable import AudioutSettingsUI
 @testable import AudioutWindowUI
+@testable import AudioutPopoverUI
 
 /// Increase Contrast has to reach the Groups window and Settings while the app
 /// is running.
@@ -225,6 +226,20 @@ import ObjectiveC.runtime
         _ = pane.view
         let views = customDrawingViews(in: pane.view)
         #expect(!views.isEmpty, "expected the excluded-apps list border")
+        #expect(viewsThatIgnoredTheFlip(views).isEmpty)
+    }
+
+    // MARK: Mixer notices
+
+    /// Turns red if the sync drawer, the alignment note or the tinted notice
+    /// ground (banner, thank-you card, diagnosis card) stops subscribing to the
+    /// toggle, which leaves its edge colours at the old contrast.
+    @Test func theMixerNoticesRedraw() {
+        let views: [(String, NSView)] = [
+            ("BTSyncDrawerView", BTSyncDrawerView()),
+            ("BTAlignmentNoteView", BTAlignmentNoteView(deviceName: "Move")),
+            ("TintedNoteBackgroundView", TintedNoteBackgroundView(tint: Tokens.Color.failure)),
+        ]
         #expect(viewsThatIgnoredTheFlip(views).isEmpty)
     }
 

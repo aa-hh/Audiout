@@ -7,14 +7,18 @@
 # RunLoop.run(until:), .wait(timeout:)); those hold a cooperative thread and
 # starve Swift concurrency process-wide (see SuiteWait.swift and 8a1016d9), so
 # they get a process of their own. Shard 2 is the alphabetical first half of
-# every other suite file, and may be rebalanced when the last shard outgrows
-# it. The last shard has no list: it is every suite not in the earlier lists
-# (`--skip`), so a new suite file always runs without an edit here.
+# the rest plus three main-actor suites moved in to balance it. Shard 3 is the
+# serialized chains. The last shard (4) has no list: it is every suite not in
+# the earlier lists (`--skip`), so a new suite file always runs without an edit
+# here. A local full run on the mule still fans out to at most three processes
+# (the run-tests.sh default), in which case the last process's `--skip` of
+# lists 1 and 2 also carries list 3's suites, so coverage holds for any
+# process count up to suite_shards_max.
 #
 # Each regex names whole suite types after `.` (top level) or `/` (nested,
 # e.g. under SerializedSharedState).
 
-suite_shards_max=3
+suite_shards_max=4
 
 suite_shard_1="AggregateOutputDeviceIdentityTests AggregateOutputDeviceTests \
 AggregateOutputDeviceWiringTests AppRouteMixerTests \
@@ -66,14 +70,20 @@ EqualizerEngagedMarkTests ExcludedAppsTests FeedColumnTests \
 FoldAnimatorTests GeneralSettingsCompanionTests \
 GeneralSettingsRememberedPhonesTests GroupControllerSyncedLocalFlipTests \
 GroupControllerTests GroupEditorClickTargetTests GroupIconPersistenceTests \
-GroupIdentityGlowViewTests GroupMasterVolumePersistenceTests"
+GroupIdentityGlowViewTests GroupMasterVolumePersistenceTests \
+MixerWindowControllerTests OnboardingUITests SettingsRootViewControllerTests"
+
+# These .serialized chains set shard 3's end time, so they get a process where
+# nothing crowds the main thread.
+suite_shard_3="PopoverControllerTests PopoverBTAlignmentUITests PopoverDeviceVisibilityTests NativeBackendBTAlignmentInterceptTests LicenseGateTrialAnalyticsTests"
 
 # suite_shards_names <i>
-# Print list i. Only lists 1 and 2 exist; anything else prints nothing.
+# Print list i. Only lists 1 to 3 exist; anything else prints nothing.
 suite_shards_names() {
     case $1 in
         1) printf '%s\n' "$suite_shard_1" ;;
         2) printf '%s\n' "$suite_shard_2" ;;
+        3) printf '%s\n' "$suite_shard_3" ;;
     esac
 }
 

@@ -42,14 +42,6 @@ extension SerializedSharedState {
 
 @Suite final class TokenContrastMatrixTests: IsolatedSuite {
 
-    deinit {
-        // Both are process-global test seams; restore them unconditionally so
-        // no other test in the process inherits a dialed accent or a forced
-        // Increase-Contrast reading.
-        Tokens.accentStyle = .fullGold
-        Tokens.test_increaseContrastOverride = nil
-    }
-
     // MARK: - Ported helpers (see `OnboardingPermissionColorTests` for provenance)
 
     private func resolved(_ color: NSColor, appearanceName: NSAppearance.Name) -> NSColor {

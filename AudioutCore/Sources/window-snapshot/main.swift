@@ -518,11 +518,19 @@ func loadSpeakerSnapshotSymbols() -> Bool {
     return true
 }
 
+/// Land the screen swap `surface.select` just started. The swap dissolves the
+/// mounted content in on `FoldAnimator`'s display-link clock, and that clock
+/// stalls in this process (no window of ours is on screen), so the content
+/// view stayed at the opacity 0 the swap set and every `mixer-*` frame
+/// rendered as bare chassis (2026-10-06). Run the fold to its end state the
+/// way the headless tests do, then refuse the capture if the content still is
+/// not opaque: a blank golden must fail the run, not land in `dev/notes/`.
 @MainActor
-func settleSpeakerSnapshot(_ interval: TimeInterval) {
-    let deadline = Date().addingTimeInterval(interval)
-    while Date() < deadline {
-        RunLoop.current.run(mode: .default, before: min(deadline, Date().addingTimeInterval(0.02)))
+func settleScreenSwap(_ surface: AppSurfaceController, label: String) {
+    FoldAnimator.shared.test_settleNow()
+    if (surface.shell.window?.contentView?.layer?.opacity ?? 0) < 0.999 {
+        print("  FAIL  \(label) screen swap did not settle")
+        renderFailed = true
     }
 }
 
@@ -629,11 +637,7 @@ func snapshotSpeakerManagement(appearanceName: NSAppearance.Name, outDir: URL) {
         let presenting: (SurfaceScreen) -> (NSRect?) -> Void = { screen in { anchor in
             surface.show(anchorRect: anchor)
             surface.select(screen)
-            settleSpeakerSnapshot(1.0)
-            if (surface.shell.window?.contentView?.layer?.opacity ?? 0) < 0.999 {
-                print("  FAIL  speaker screen fade did not settle")
-                renderFailed = true
-            }
+            settleScreenSwap(surface, label: "speaker")
         } }
         let present = presenting(.speakers)
         let presentScenes = presenting(.groups)
@@ -641,11 +645,7 @@ func snapshotSpeakerManagement(appearanceName: NSAppearance.Name, outDir: URL) {
             let presentMixer: (NSRect?) -> Void = { anchor in
                 surface.show(anchorRect: anchor)
                 surface.select(.mixer)
-                settleSpeakerSnapshot(1.0)
-                if (surface.shell.window?.contentView?.layer?.opacity ?? 0) < 0.999 {
-                    print("  FAIL  Mixer screen fade did not settle")
-                    renderFailed = true
-                }
+                settleScreenSwap(surface, label: "Mixer")
             }
             snapshotControlPanel(surface.shell, label: "mixer", appearanceName: appearanceName,
                                  outDir: outDir, present: presentMixer)
@@ -762,14 +762,17 @@ func run() -> Int32 {
         // `select` is a no-op once that screen is already selected —
         // so calling one of these before every capture just guarantees the
         // surface is showing Scenes (or Speakers, for a speaker page), without
-        // re-running the mount/resize dance.
+        // re-running the mount/resize dance. `settleScreenSwap` then lands the
+        // dissolve `select` starts (see it for why the clock never does).
         let presentGroups: (NSRect?) -> Void = { anchor in
             surface.show(anchorRect: anchor)
             surface.select(.groups)
+            settleScreenSwap(surface, label: "Groups")
         }
         let presentSpeakers: (NSRect?) -> Void = { anchor in
             surface.show(anchorRect: anchor)
             surface.select(.speakers)
+            settleScreenSwap(surface, label: "Speakers")
         }
 
         // 1. Default state: no groups — the card overview's own zero-groups

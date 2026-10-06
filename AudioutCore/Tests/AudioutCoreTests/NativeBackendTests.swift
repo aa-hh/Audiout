@@ -8558,6 +8558,8 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         await startAndDiscover(backend, engine, discovery, systemDevice)
         backend.setOutputSet([systemDevice.id])
         await pollUntil { systemTap.createCount >= 1 }
+        // The whole-system add runs on its own task and must land before the local route, so the last assertion can only turn red when the local route tears it down.
+        await pollUntil { engine.addedIDs.contains(systemDevice.outputID) }
         #expect(systemTap.excludedProcessObjectIDs == [], "nothing local yet -> the system mix must include every app")
 
         // Route an app to .currentDevice (deliberately "play here, on the Mac").
@@ -8583,7 +8585,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         #expect(localPlayback.didStart,
                       "the local playback engine must be started for the first .currentDevice app")
         // The whole-system stream keeps streaming to its own device throughout.
-        #expect(engine.addedIDs.contains(systemDevice.outputID),
+        #expect(netAdded(engine, systemDevice.outputID),
                       "the whole-system stream must be unaffected by the local route")
     }
 

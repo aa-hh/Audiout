@@ -37,7 +37,7 @@ final class PageHeaderView: NSView {
         textStack.translatesAutoresizingMaskIntoConstraints = false
         textStack.orientation = .vertical
         textStack.alignment = .leading
-        textStack.spacing = 2
+        textStack.spacing = Tokens.Layout.titleSubtitleSpacing
         textStack.setViews([title] + (caption.map { [$0] } ?? []), in: .leading)
         textStack.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         addSubview(iconWell)

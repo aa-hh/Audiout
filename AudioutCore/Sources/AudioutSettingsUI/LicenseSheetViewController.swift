@@ -106,7 +106,7 @@ public final class LicenseSheetViewController: NSViewController {
         removeButton.title = "Remove license…"
         removeButton.isBordered = false
         removeButton.controlSize = .small
-        removeButton.font = .systemFont(ofSize: NSFont.systemFontSize(for: .small))
+        removeButton.font = Tokens.Font.caption
         removeButton.contentTintColor = .linkColor
         removeButton.target = self
         removeButton.action = #selector(removeTapped)

@@ -40,7 +40,7 @@ final class ThankYouCardView: TintedNoteBackgroundView, FoldFollowing {
     init(width: CGFloat) {
         headlineLabel = NSTextField(labelWithString: Self.headline)
         headlineLabel.font = Tokens.Font.heading
-        headlineLabel.textColor = .labelColor
+        headlineLabel.textColor = Tokens.Color.label
         bodyLabel = NSTextField(wrappingLabelWithString: Self.body)
         bodyLabel.font = Tokens.Font.body
         bodyLabel.textColor = Tokens.Color.label2

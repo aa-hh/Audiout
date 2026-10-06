@@ -31,7 +31,7 @@ import AppKit
 ///    against EACH OTHER) — `MembershipWellContrastTests`' job; this file
 ///    only uses those tokens as fixed GROUNDS for a foreground instrument.
 ///  - The floor-exempt backdrops `canvas`, `panel`, `raised`, `well`,
-///    `liveRow`, `liveRaised`, `glow`, `socket` and `meter` — each documented
+///    `glow`, `socket` and `meter` — each documented
 ///    as a quiet surface in its own Tokens.swift rationale. `socket` is exempt
 ///    from a GROUND floor only: it is always ringed, and Test D below pins it
 ///    against the ring. `panel` is likewise exempt as a ground, but Test A

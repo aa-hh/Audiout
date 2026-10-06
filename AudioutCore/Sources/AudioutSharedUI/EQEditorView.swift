@@ -36,7 +36,7 @@ public protocol EQEditorViewDelegate: AnyObject {
 ///
 /// **The Advanced row is a section row, not a bare disclosure.** A 1 pt
 /// hairline sits above it; the word "Advanced" is clickable exactly like the
-/// triangle; a `tertiaryLabel` hint names the band count ("10 bands"); and a
+/// triangle; a `label3` hint names the band count ("10 bands"); and a
 /// trailing readout counts the shaped bands ("N set", blank when flat). Every
 /// channel is composed into one spoken label. The expanded/collapsed state is
 /// one global switch — ``AppSettings/eqAdvancedExpanded`` — read at init and
@@ -189,7 +189,6 @@ public final class EQEditorView: NSView {
             contentStack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -vInset),
         ])
 
-        configureNotes()
         configureSimpleTier()
         configureAdvancedTier()
 
@@ -208,21 +207,6 @@ public final class EQEditorView: NSView {
     private func addFullWidthRow(_ view: NSView) {
         contentStack.addArrangedSubview(view)
         view.widthAnchor.constraint(equalTo: contentStack.widthAnchor).isActive = true
-    }
-
-    private func configureNotes() {
-        bypassLabel.font = Tokens.Font.caption
-        // `secondaryLabel`, never `tertiaryLabel`: the line is live state text
-        // explaining the controls beneath it, and the module rule is that a
-        // dimmed label must be dimmed BY something.
-        bypassLabel.textColor = Tokens.Color.label2
-        // Wraps to two lines: the speaker page's unavailable sentence is
-        // longer than one line at pane width.
-        bypassLabel.usesSingleLineMode = false
-        bypassLabel.maximumNumberOfLines = 2
-        bypassLabel.lineBreakMode = .byWordWrapping
-        bypassLabel.cell?.wraps = true
-        bypassLabel.cell?.truncatesLastVisibleLine = true
     }
 
     override public func layout() {

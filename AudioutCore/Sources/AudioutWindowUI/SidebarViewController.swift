@@ -1283,7 +1283,7 @@ final class IconLabelCellView: NSTableCellView {
         stack.translatesAutoresizingMaskIntoConstraints = false
         stack.orientation = .vertical
         stack.alignment = .leading
-        stack.spacing = 2
+        stack.spacing = Tokens.Layout.titleSubtitleSpacing
         return stack
     }()
 

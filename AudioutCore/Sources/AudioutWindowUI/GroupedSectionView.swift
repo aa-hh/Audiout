@@ -19,9 +19,10 @@ import AudioutSharedUI
 ///   raised: `Tokens.Color.well` fill (DESIGN.md "Elevation & Depth" — the
 ///   one neutral that stays visibly sunk even where `raised` flattens to the
 ///   paper ground in light), the same `containerEdge` edge and default panel
-///   radius as `.card`, plus a 1 pt `Tokens.Color.shadow` @ 0.18 band along the
-///   visual top edge — the flat, clipped inset-shade recipe `WarmFaderCell`'s
-///   trough (`WarmFaderCell.swift:87-95`) already draws, no blur, no
+///   radius as `.card`, plus a 1 pt `Tokens.Color.shadow` @
+///   `Tokens.Color.insetShadeAlpha` band along the visual top edge — the
+///   flat, clipped inset-shade recipe `WarmFaderCell`'s trough
+///   (`WarmFaderCell.swift:87-95`) already draws, no blur, no
 ///   `NSShadow`. Both Equalizer pages wear it —
 ///   the device detail page and Main Audio: in light, `raised` measures
 ///   identical to the `canvas`/`panel` ground they sit on, so a card there is
@@ -100,9 +101,6 @@ final class GroupedSectionView: NSView {
     static let verticalPadding: CGFloat = 6
     private static let hairlineThickness: CGFloat = 1
     private static let borderWidth: CGFloat = 1
-    /// Alpha of `.well`'s top-edge inset shade (`Tokens.Color.shadow` over
-    /// the well fill) — same alpha `WarmFaderCell`'s trough shade uses.
-    private static let wellTopShadeAlpha: CGFloat = 0.18
 
     /// Where the row's ICON starts, measured from this view's own leading edge
     /// — the inset dividers align to it. Set by the controller so it stays
@@ -142,7 +140,7 @@ final class GroupedSectionView: NSView {
                 // shaded lip on top of the edge stroke below.
                 NSGraphicsContext.current?.saveGraphicsState()
                 shape.addClip()
-                Tokens.Color.shadow.withAlphaComponent(Self.wellTopShadeAlpha).setFill()
+                Tokens.Color.shadow.withAlphaComponent(Tokens.Color.insetShadeAlpha).setFill()
                 let topEdgeY = isFlipped ? borderRect.minY : borderRect.maxY - Self.hairlineThickness
                 NSRect(x: borderRect.minX, y: topEdgeY,
                       width: borderRect.width, height: Self.hairlineThickness).fill()

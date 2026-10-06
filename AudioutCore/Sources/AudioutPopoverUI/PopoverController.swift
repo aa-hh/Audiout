@@ -3337,7 +3337,7 @@ public final class PopoverController: NSObject {
         button.image = NSImage(systemSymbolName: "plus", accessibilityDescription: nil)
         button.image?.isTemplate = true
         button.imagePosition = .imageLeading
-        button.contentTintColor = Tokens.Color.secondaryLabel
+        button.contentTintColor = Tokens.Color.label2
         button.attributedTitle = NSAttributedString(string: button.title,
             attributes: [.font: Tokens.Font.menuItem, .foregroundColor: Tokens.Color.label2])
         pairBluetoothButton = button

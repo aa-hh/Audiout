@@ -302,7 +302,7 @@ import AppKit
         #expect(row.test_syncChipFill != Tokens.Color.gold, "…and never the gold accent")
         #expect(row.test_syncChipTitleColor == Tokens.Color.engagedChrome)
         #expect(row.test_syncChipBorderColor == Tokens.Color.engagedChrome)
-        #expect(row.test_syncChipBorderColor != Tokens.Color.accent,
+        #expect(row.test_syncChipBorderColor != NSColor.controlAccentColor,
                 "…nor the user's system accent")
 
         let collapsed = makeRow(btDevice(), delegate: SpyDelegate(), syncTrimMs: 24,

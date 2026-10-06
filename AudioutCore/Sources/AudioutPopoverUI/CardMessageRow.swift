@@ -75,7 +75,8 @@ final class CardMessageRow: NSView {
             addSubview(hintLabel)
             constraints += [
                 firstLine.topAnchor.constraint(equalTo: topAnchor, constant: 8),
-                hintLabel.topAnchor.constraint(equalTo: firstLine.bottomAnchor, constant: 2),
+                hintLabel.topAnchor.constraint(equalTo: firstLine.bottomAnchor,
+                                               constant: Tokens.Layout.titleSubtitleSpacing),
                 hintLabel.leadingAnchor.constraint(equalTo: firstLine.leadingAnchor),
                 hintLabel.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: trailing),
                 hintLabel.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -8),

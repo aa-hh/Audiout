@@ -1642,7 +1642,7 @@ public final class DeviceRowView: NSView {
             button.translatesAutoresizingMaskIntoConstraints = false
             button.bezelStyle = .rounded
             button.controlSize = .small
-            button.font = .systemFont(ofSize: NSFont.systemFontSize(for: .small))
+            button.font = Tokens.Font.caption
             button.title = title
             button.target = self
             button.action = action
@@ -1699,7 +1699,7 @@ public final class DeviceRowView: NSView {
         identityStack.translatesAutoresizingMaskIntoConstraints = false
         identityStack.orientation = .vertical
         identityStack.alignment = .leading
-        identityStack.spacing = 2
+        identityStack.spacing = Tokens.Layout.titleSubtitleSpacing
         identityStack.distribution = .fill
         // The lock rides after the name; the name keeps its low priorities, so
         // it truncates first and the lock is never squeezed out.
@@ -2007,8 +2007,7 @@ public final class DeviceRowView: NSView {
     /// The chip's tabular-figures label font: monospaced DIGITS so a stepper
     /// change can't make the chip's number jitter in width under the fixed
     /// `syncChipWidth` column — the same answer the drawer's value field uses.
-    private static let syncChipFont =
-        NSFont.monospacedDigitSystemFont(ofSize: NSFont.smallSystemFontSize, weight: .regular)
+    private static let syncChipFont = Tokens.Font.captionDigits
 
     /// Relocated from the deleted Settings › Audio › Advanced sync-offset row.
     /// Its "takes effect next time" sentence is gone on purpose: the row applies

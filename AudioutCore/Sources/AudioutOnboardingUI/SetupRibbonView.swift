@@ -176,10 +176,10 @@ final class SetupPreviewFrameView: NSView {
     }
     /// A 1 pt shade lip inside the top edge — the recess recipe
     /// `GroupedSectionView`'s `.well` style draws (DESIGN.md), at the same
-    /// 0.18 alpha, composited here because this view is layer-backed rather
+    /// `Tokens.Color.insetShadeAlpha`, composited here because this view is layer-backed rather
     /// than hand-drawn.
     private static var topLipFill: NSColor {
-        dynamicBlend(Self.wellFill, fraction: 0.18, of: Tokens.Color.shadow)
+        dynamicBlend(Self.wellFill, fraction: Tokens.Color.insetShadeAlpha, of: Tokens.Color.shadow)
     }
 
     /// Where the caller installs whatever plays in here (the demo pane). Its

@@ -253,7 +253,7 @@ public final class DeviceDetailViewController: NSViewController {
         listStack.spacing = 0
         forgetPasswordButton.bezelStyle = .rounded
         forgetPasswordButton.controlSize = .small
-        forgetPasswordButton.font = .systemFont(ofSize: NSFont.systemFontSize(for: .small))
+        forgetPasswordButton.font = Tokens.Font.caption
         forgetPasswordButton.target = self
         forgetPasswordButton.action = #selector(forgetPasswordTapped)
         for row in [btVolumeRow, showInMixerRow, scenesRow, passwordRow] {

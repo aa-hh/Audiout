@@ -747,7 +747,7 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
             chevron.isBordered = false
             chevron.imagePosition = .imageOnly
             chevron.setContentHuggingPriority(.required, for: .horizontal)
-            chevron.contentTintColor = Tokens.Color.secondaryLabel
+            chevron.contentTintColor = Tokens.Color.label2
             chevron.setAccessibilityLabel(collapsed ? "Expand \(header)" : "Collapse \(header)")
             let toggle = onToggle
             let onChevron = ClosureActionTarget { toggle?() }
@@ -853,7 +853,7 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
             button.showsBorderOnlyWhileMouseInside = true
             button.imagePosition = .imageOnly
             button.imageScaling = .scaleProportionallyDown
-            button.contentTintColor = Tokens.Color.secondaryLabel
+            button.contentTintColor = Tokens.Color.label2
             button.isEnabled = accessory.isEnabled
             // System-rendered template SF Symbol (task D — `plus`), verified
             // non-nil with a graceful fallback.
@@ -1382,7 +1382,7 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
     /// its column in the combined header row built by `beginCard`. Volume is
     /// deliberately NOT among them — see `PopoverController.rebuild()`.
     private static func makeColumnHeaderLabel(_ text: String) -> NSTextField {
-        let label = makeLegendLabel(text, weight: .medium, color: Tokens.Color.secondaryLabel)
+        let label = makeLegendLabel(text, weight: .medium, color: Tokens.Color.label2)
         label.alignment = .center
         return label
     }
@@ -1415,7 +1415,7 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
         let label = NSTextField(labelWithString: title)
         label.translatesAutoresizingMaskIntoConstraints = false
         label.font = Tokens.Font.captionMedium
-        label.textColor = Tokens.Color.inkTertiary
+        label.textColor = Tokens.Color.label3
         // Subsection titles are headings too — one rank below the card title,
         // same VoiceOver section-jumping (VO-⌘-H).
         Self.markAsAccessibilityHeading(label)
@@ -1438,7 +1438,7 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
             chevron.isBordered = false
             chevron.imagePosition = .imageOnly
             chevron.setContentHuggingPriority(.required, for: .horizontal)
-            chevron.contentTintColor = Tokens.Color.inkTertiary
+            chevron.contentTintColor = Tokens.Color.label3
             chevron.setAccessibilityLabel(collapsed ? "Expand \(title)" : "Collapse \(title)")
             let onChevron = ClosureActionTarget { onToggle?() }
             chevron.target = onChevron
@@ -1530,7 +1530,7 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
         // it the FAINTEST text there, under the 4.5:1 floor in light. The dimmed
         // `%` readouts sit at tertiary legitimately (they label DISABLED
         // sliders); a note about live routing does not.
-        label.textColor = Tokens.Color.secondaryLabel
+        label.textColor = Tokens.Color.label2
         label.lineBreakMode = .byTruncatingTail
         label.maximumNumberOfLines = 1
         let wrapper = NSView()

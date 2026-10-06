@@ -585,7 +585,7 @@ public final class AppRowView: NSView {
         identityStack.translatesAutoresizingMaskIntoConstraints = false
         identityStack.orientation = .vertical
         identityStack.alignment = .leading
-        identityStack.spacing = 2
+        identityStack.spacing = Tokens.Layout.titleSubtitleSpacing
         identityStack.distribution = .fill
         identityStack.addArrangedSubview(nameLabel)
         if showsMeter { identityStack.addArrangedSubview(meterView) }

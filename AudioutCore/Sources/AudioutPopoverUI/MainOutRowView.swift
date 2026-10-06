@@ -312,7 +312,7 @@ public final class MainOutRowView: NSView {
             item.representedObject = option.target
             if option.isDimmed {
                 item.attributedTitle = NSAttributedString(string: option.title, attributes: [
-                    .font: menu.font ?? NSFont.menuFont(ofSize: 0),
+                    .font: menu.font ?? Tokens.Font.menuItem,
                     .foregroundColor: Tokens.Color.label2,
                 ])
             }
@@ -407,7 +407,7 @@ public final class MainOutRowView: NSView {
         // Match device row icon styling (2026-07-17): neutral gray, not accent.
         // Consistency across System and Devices sections — all icons are identity
         // only, connection status lives on the icon as a corner badge.
-        iconView.contentTintColor = Tokens.Color.secondaryLabel
+        iconView.contentTintColor = Tokens.Color.label2
         iconView.setContentHuggingPriority(.required, for: .horizontal)
 
         // Connection halo ring around the Main Out icon (spec §3.2 Main Out note).
@@ -472,7 +472,7 @@ public final class MainOutRowView: NSView {
         identityStack.translatesAutoresizingMaskIntoConstraints = false
         identityStack.orientation = .vertical
         identityStack.alignment = .leading
-        identityStack.spacing = 2
+        identityStack.spacing = Tokens.Layout.titleSubtitleSpacing
         identityStack.distribution = .fill
         identityStack.addArrangedSubview(nameLabel)
         identityStack.addArrangedSubview(meterView)

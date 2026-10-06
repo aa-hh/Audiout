@@ -111,7 +111,7 @@ final class SystemAirPlayNoteBannerView: TintedNoteBackgroundView {
 
         let text = NSTextField(wrappingLabelWithString: text)
         text.font = labelFont
-        text.textColor = .labelColor
+        text.textColor = Tokens.Color.label
         text.isSelectable = false
         text.translatesAutoresizingMaskIntoConstraints = false
         text.preferredMaxLayoutWidth = max(100, maxTextWidth - buttonReserve)

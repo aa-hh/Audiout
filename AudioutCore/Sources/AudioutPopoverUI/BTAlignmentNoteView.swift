@@ -149,8 +149,7 @@ final class BTAlignmentNoteView: NSView {
                          .paragraphStyle: paragraph])
         text.append(NSAttributedString(
             string: noteAlignCall,
-            attributes: [.font: NSFont.systemFont(ofSize: Tokens.Font.detail.pointSize,
-                                                  weight: .semibold),
+            attributes: [.font: Tokens.Font.captionEmphasized,
                          .foregroundColor: Tokens.Color.goldText,
                          .paragraphStyle: paragraph]))
         return text

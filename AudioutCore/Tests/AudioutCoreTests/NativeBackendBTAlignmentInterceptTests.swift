@@ -351,7 +351,8 @@ extension SerializedSharedState {
         engine: RecordingEngine? = nil,
         discovery: FakeDiscovery? = nil,
         perAppCapture: PerAppCaptureCoordinator? = nil,
-        delayClock: @escaping NativeBackend.DelayClock = NativeBackend.dispatchDelayClock
+        delayClock: @escaping NativeBackend.DelayClock = NativeBackend.dispatchDelayClock,
+        uptimeClock: @escaping NativeBackend.UptimeClock = NativeBackend.dispatchUptimeClock
     ) -> (NativeBackend, FakeBTEnumerator, SpyBTSink, EventCollector) {
         let bt = FakeBTEnumerator()
         let backend = NativeBackend(
@@ -364,6 +365,7 @@ extension SerializedSharedState {
             ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
             injectedPerAppCapture: perAppCapture,
             delayClock: delayClock,
+            uptimeClock: uptimeClock,
             systemDefaultOutputIsAirPlayClass: { false },
             aggregateControl: NoOpAggregateControl(),
             handoffWatcherFactory: { onBlockedAttempt in
@@ -1078,10 +1080,11 @@ extension SerializedSharedState {
     @Test @MainActor func theLifetimeCallbackFiresOnceAfterTheRealDrainNotTheTimeout() async {
         let engine = RecordingEngine()
         let discovery = FakeDiscovery()
-        let (backend, bt, _, _) = makeBackend(engine: engine, discovery: discovery)
+        let clock = ManualDelayClock()
+        let (backend, bt, _, _) = makeBackend(engine: engine, discovery: discovery,
+                                              delayClock: clock.clock, uptimeClock: clock.uptime)
         defer { engine.releaseWrites(); backend.stop() }
         backend.captureCoordinator = ProbeStagingCapture()
-        backend.companionAuditionStopSeconds = 0.1
         backend.start()
         let ap1 = airPlay1()
         discovery.fire(.appeared(ap1))
@@ -1114,6 +1117,10 @@ extension SerializedSharedState {
         engine.blockWrites = true
         let stop = LockedBox<String??>(nil)
         backend.endCompanionAlignmentAudition(targetID: btMove.id) { stop.value = .some($0) }
+        // The stop refuses on its timeout because the test moved the clock past
+        // it, not because real time elapsed.
+        await SuiteWait.until { engine.heldCount > 0 }
+        clock.advance(by: backend.companionAuditionStopSeconds)
         await SuiteWait.until { stop.value != nil }
         #expect(stop.value.flatMap { $0 }?.contains("took too long") == true)
         #expect(released.value == 0, "a refused stop does not consume the lifetime signal")

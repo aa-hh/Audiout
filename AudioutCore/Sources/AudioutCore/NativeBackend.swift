@@ -270,12 +270,12 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// 330 ms apart), so every click used to land in its own window.
     let syncedLocalSettleWindow: TimeInterval
 
-    /// Monotonic `DispatchTime.now().uptimeNanoseconds` stamps of the synced-local
+    /// Monotonic `uptimeClock` seconds stamps of the synced-local
     /// transitions this backend really applied: appended only past
     /// `fireSyncedLocalSettle`'s desired-versus-applied guard, never per toggle
     /// decision, pruned to `syncedLocalTransitionHorizon` on each append, cleared
     /// by `stop()`. On `stateQueue`.
-    var syncedLocalTransitionTimes: [UInt64] = []
+    var syncedLocalTransitionTimes: [TimeInterval] = []
 
     /// Rolling horizon over which two or more real applied transitions count as
     /// churn, arming the one-shot re-sync no matter how the clicks were spaced.
@@ -508,12 +508,13 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// whether that write succeeded. A push answered `false` because a newer
     /// write superseded it never lands here: it is not this value completing.
     struct CompanionRestoreCompletion { let value: Double; let ok: Bool }
+    /// Every deadline here is in `uptimeClock` seconds.
     struct CompanionAuditionLifecycle {
         let id: UUID
         let targetID: String
         let referenceID: String
-        let preparationDeadline: Date
-        let leaseDeadline: Date
+        let preparationDeadline: TimeInterval
+        let leaseDeadline: TimeInterval
         var phase: CompanionAuditionPhase = .preparing
         var startCompletions: [@Sendable (String?) -> Void]
         var stopCompletions: [@Sendable (String?) -> Void] = []
@@ -542,7 +543,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         /// actually gone. Independent of the one-shot start/stop replies: a
         /// stop that refuses on its four-second timeout does not consume it.
         var releaseCallbacks: [@Sendable () -> Void] = []
-        var cleanupDeadline: Date?
+        var cleanupDeadline: TimeInterval?
     }
     /// The .tick run remains reserved during preparation and restoration.
     var companionAudition: CompanionAuditionLifecycle?
@@ -1591,6 +1592,18 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// expire mid-restoration.
     let delayClock: DelayClock
 
+    /// Monotonic seconds since boot.
+    typealias UptimeClock = @Sendable () -> TimeInterval
+
+    /// The shipping time source: `DispatchTime.now().uptimeNanoseconds` in seconds.
+    static let dispatchUptimeClock: UptimeClock = {
+        Double(DispatchTime.now().uptimeNanoseconds) / 1_000_000_000
+    }
+
+    /// The backend's one reading of "now" for the synced-local churn horizon and
+    /// the companion audition deadlines. Tests pass a manual one.
+    let uptimeClock: UptimeClock
+
     // MARK: Metering (T3 — three real level sources through the event channel)
     //
     // Replaces the old single whole-system RMS fanned identically to every device.
@@ -1740,6 +1753,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         captureRetryDelay: TimeInterval = 2.0,
         captureRetryMaxBackoff: TimeInterval = 10.0,
         delayClock: @escaping DelayClock = NativeBackend.dispatchDelayClock,
+        uptimeClock: @escaping UptimeClock = NativeBackend.dispatchUptimeClock,
         takeoverStripDelay: TimeInterval = 3.0,
         watchdogScheduler: SilenceWatchdogScheduling? = nil,
         silenceFallbackDelay: TimeInterval = NativeBackend.defaultSilenceFallbackDelay,
@@ -1840,6 +1854,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         self.captureRetryDelay = captureRetryDelay
         self.captureRetryMaxBackoff = captureRetryMaxBackoff
         self.delayClock = delayClock
+        self.uptimeClock = uptimeClock
         self.takeoverStripDelay = takeoverStripDelay
 
         // Wire the per-app routing callback graph (T6/T8). All four are set once

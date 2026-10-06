@@ -157,6 +157,8 @@ repo. `AudioutCore` pins it by version.
      just wrote. One review found six in a single day's work; they read as
      coverage and cover nothing. If the intent is real, rewrite it to read the
      DRAWN or observed result.
+  5. A test that waits for time drives the backend's `uptimeClock`/`delayClock`
+     through `ManualDelayClock.advance(by:)`, never the wall clock.
 - **Flag finished worktrees `.prunable`; never hand-delete them.** Fifteen
   worktrees' SwiftPM caches once filled the disk to zero bytes free mid-build.
   `scripts/housekeeping.sh` (invoked automatically by `scripts/run-tests.sh`
@@ -336,7 +338,9 @@ warn-only 3/5) are documented in the hook file itself:
   [docs/REVIEW-RUBRIC.md](docs/REVIEW-RUBRIC.md)).
 - **Guard 11 blocks** a commit whose new `@Test` has no comment sentence naming
   the code change that turns it red, a `print(` in a test (`print-ok` exempts),
-  or a new test file holding one test (`new-suite-ok` exempts);
+  a new test file holding one test (`new-suite-ok` exempts), or a real-time
+  wait in a test (`Task.sleep`, `Thread.sleep`, `usleep`, `sleep(`,
+  `asyncAfter`; `real-time-ok: <reason>` exempts a line);
   `bash scripts/test-guard-test-discipline.sh` self-tests it.
 - **Guard 12 blocks** a folder AGENTS.md that gains ruling phrasing or grows
   while over its 300-word budget, and any removed line in an AGENTS-HISTORY.md;

@@ -1732,14 +1732,6 @@ extension GroupEditorViewController: RailHookProviding {
 /// membership well (T5) on every layout pass so both track the current row
 /// frames with no cached geometry. Both
 /// draw from settled frames, so `cacheDisplay` snapshots stay deterministic.
-/// A flipped document view so the editor scrolls from the TOP rather than
-/// bottom-gravitating with dead space above the header. File-scoped on purpose
-/// (`DeviceDetailViewController` and `GroupCreationSheetController` each keep
-/// their own for the same reason).
-private final class FlippedView: NSView {
-    override var isFlipped: Bool { true }
-}
-
 private final class RailRepaintingView: NSView {
     weak var railOverlay: BusRailOverlayView?
     weak var membershipWell: GroupedSectionView?

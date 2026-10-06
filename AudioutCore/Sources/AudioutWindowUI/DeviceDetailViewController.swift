@@ -1614,10 +1614,3 @@ final class EqualizerMarkView: NSView {
         CATransaction.commit()
     }
 }
-
-/// A flipped document view so the form scrolls from the TOP rather than
-/// bottom-gravitating with dead space above the header. File-scoped on purpose
-/// (`GroupCreationSheetController` keeps its own for the same reason).
-private final class FlippedView: NSView {
-    override var isFlipped: Bool { true }
-}

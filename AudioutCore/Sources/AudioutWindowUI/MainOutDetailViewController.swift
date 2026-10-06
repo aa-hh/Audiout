@@ -429,9 +429,3 @@ extension MainOutDetailViewController: EQEditorViewDelegate {
         Analytics.capture("eq:reset", ["target": "main_out"])
     }
 }
-
-/// A flipped document view so the page scrolls from the TOP rather than
-/// bottom-gravitating with dead space above the header. File-scoped on purpose.
-private final class FlippedView: NSView {
-    override var isFlipped: Bool { true }
-}

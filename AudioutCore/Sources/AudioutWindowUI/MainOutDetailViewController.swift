@@ -331,7 +331,9 @@ public final class MainOutDetailViewController: NSViewController {
     public var test_iconWellIsEditable: Bool { iconWell.isEditable }
 
     /// HEADER PARITY hooks — identical bodies to the device pane's, so
-    /// `GroupsHeaderParityTests` can compare the two panes' real frames.
+    /// `GroupsHeaderParityTests` can compare the panes' real frames: the same
+    /// header band height and vertical centring as the scene editor, with the
+    /// icon's x differing from the editor's by design on this page.
 
     public var test_headerIconFrame: NSRect {
         view.layoutSubtreeIfNeeded()

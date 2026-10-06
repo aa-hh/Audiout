@@ -937,9 +937,7 @@ public final class DeviceDetailViewController: NSViewController {
         let symbol = DeviceIcon.resolve(group.iconSymbolName, default: Group.defaultIconSymbolName)
         button.image = DeviceIcon.image(symbol)
         button.setAccessibilityLabel(group.name)
-        // A long group name truncates; it never widens the pane. Earlier links
-        // hold their width first, so which one truncates is never a toss-up.
-        button.setContentCompressionResistancePriority(.defaultLow - Float(min(tag, 100)), for: .horizontal)
+        button.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         // Rides ON the button — the WHOLE link is the target, so the glyph must
         // never swallow a click meant for it.
@@ -1138,9 +1136,10 @@ public final class DeviceDetailViewController: NSViewController {
         return deviceIconController?.symbolName(for: device) ?? device.symbolName
     }
 
-    /// HEADER PARITY hooks — the three numbers that must match
-    /// `GroupEditorViewController`'s identically-named hooks, so switching
-    /// sidebar selection never shifts the header (`GroupsHeaderParityTests`).
+    /// HEADER PARITY hooks — compared with `GroupEditorViewController`'s
+    /// identically-named hooks by `GroupsHeaderParityTests`, which require the
+    /// same header band height and the same vertical centring; the icon's x
+    /// differs from the editor's by design on this page.
 
     /// The icon well's laid-out frame in the pane's own coordinates.
     public var test_headerIconFrame: NSRect {
@@ -1452,9 +1451,9 @@ final class EqualizerMarkView: NSView {
     var test_reduceMotionOverride: Bool?
     private(set) var test_lastFlipEffect: FlipEffect = .none
     private(set) var test_lastAnnouncement: String?
-    var test_shapedSymbolName: String {
-        isShaped ? RowAccessorySymbol.equalizerEngaged : RowAccessorySymbol.equalizerRest
-    }
+    /// The symbol name `refresh()` last drew.
+    private(set) var drawnSymbolName = RowAccessorySymbol.equalizerRest
+    var test_shapedSymbolName: String { drawnSymbolName }
 
     private var reduceMotion: Bool {
         test_reduceMotionOverride ?? NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
@@ -1559,11 +1558,16 @@ final class EqualizerMarkView: NSView {
     /// layer never picks up an implicit animation.
     private func refresh() {
         let scale = window?.backingScaleFactor ?? 2
-        let image = isShaped
-            ? DeviceRowView.equalizerShapedHeadingMarkImage(
+        let image: NSImage?
+        if isShaped {
+            image = DeviceRowView.equalizerShapedHeadingMarkImage(
                 in: effectiveAppearance, pointSize: RowAccessorySymbol.headingPointSize)
-            : DeviceRowView.equalizerRestMarkImage(
+            drawnSymbolName = RowAccessorySymbol.equalizerEngaged
+        } else {
+            image = DeviceRowView.equalizerRestMarkImage(
                 in: effectiveAppearance, pointSize: RowAccessorySymbol.headingPointSize)
+            drawnSymbolName = RowAccessorySymbol.equalizerRest
+        }
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         markLayer.contentsScale = scale

@@ -53,9 +53,11 @@ public enum RowAccessorySymbol {
     public static let muteRest = "custom.speaker.square"
     /// Mute engaged — the same outline square with the slash added.
     public static let muteEngaged = "custom.speaker.slash.square"
-    /// The Equalizer door on a flat curve — the outline square.
+    /// The outline square — the Equalizer door in both states (rest ink flat,
+    /// green shaped) and the heading icon on a flat curve.
     public static let equalizerRest = "custom.slider.horizontal.2.square"
-    /// The Equalizer door on a shaped curve — the filled square.
+    /// The filled square — the Equalizer heading icon's shaped state only,
+    /// never drawn on the door.
     public static let equalizerEngaged = "custom.slider.horizontal.2.square.fill"
 
     /// Every name above, for the load test that guards the catalogue.

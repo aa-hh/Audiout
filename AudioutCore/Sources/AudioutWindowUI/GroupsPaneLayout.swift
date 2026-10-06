@@ -9,12 +9,16 @@ import AudioutSharedUI
 ///
 /// **HEADER PARITY IS GEOMETRIC, NOT DECORATIVE.** Switching the sidebar
 /// selection between a group and a device swaps the whole content pane; if the
-/// icon well or the title lands on a different x, or the header band is a
-/// different height, the swap reads as the window twitching. The two panes used
-/// to carry hand-copied literals and drifted ~22.5 pt apart (design review
+/// header band is a different height, or the name block sits off the icon's
+/// centre line, the swap reads as the window twitching. The two panes used to
+/// carry hand-copied literals and drifted ~22.5 pt apart (design review
 /// 2026-07-25). Every shared number now lives HERE, once, and
-/// `GroupsHeaderParityTests` asserts the two panes' real laid-out frames still
-/// match.
+/// `GroupsHeaderParityTests` asserts the panes' real laid-out frames still
+/// share the band height and the vertical centring. The icon's x is NOT
+/// shared: the speaker and Main Audio pages start it at
+/// `railFreeContentLeadingInset`, lined up with their Equalizer heading, while
+/// the scene editor keeps `contentLeadingInset` for its rail, so the icon
+/// moves sideways on a switch between a scene and a speaker by design.
 ///
 /// What is deliberately NOT shared: the SKIN. A group's title is an editable
 /// field (filled, bordered, pencil); a device's is a bare label. That

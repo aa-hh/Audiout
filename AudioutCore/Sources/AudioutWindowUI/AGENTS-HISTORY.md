@@ -294,3 +294,5 @@ backend.
 - `DeviceDetailViewController` → device pane: identity, Equalizer, Groups, About.
 - `MainOutDetailViewController` → Main Audio page, non-editable icon well.
 - 2026-10-04: The Speakers overview table (`SpeakersOverviewViewController`) was retired: the sidebar is the only speaker list, and the Speakers plate opens `SpeakersPageViewController`. The Forget confirm refuses, rather than deleting the scene, when forgetting would leave a scene with no speaker, because deleting a scene can move audio.
+- 2026-10-04 (owner's call, Alec): The speaker page and the Main Audio page start their header icon at `GroupsPaneLayout.railFreeContentLeadingInset` (14 pt), lined up with the Equalizer heading, so the icon's x no longer matches the scene editor's, which keeps `contentLeadingInset` for its membership rail. Header parity across panes is now the shared band height and vertical centring only; switching between a scene and a speaker moves the icon sideways by design.
+- 2026-10-04 (owner's call, Alec): The scene editor's name and "Playing" badge sit in one block centred on the header icon, so the name moves up when a scene starts playing, by design.

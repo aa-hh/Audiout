@@ -174,7 +174,8 @@ import ObjectiveC.runtime
         let views: [(String, NSView)] = [
             ("GroupedSectionView", GroupedSectionView()),
             ("PlateRowView", PlateRowView()),
-            ("HairlineView", HairlineView()),
+            ("RuleView hairline", RuleView(tone: .hairline)),
+            ("RuleView containerEdge", RuleView(tone: .containerEdge)),
         ]
         #expect(viewsThatIgnoredTheFlip(views).isEmpty)
     }

@@ -1441,7 +1441,7 @@ class SidebarRowView: NSTableRowView {
 /// with `label` at `darkLiftAlpha`, because dark `raised` is darker than the
 /// sidebar's own ground and read as sunk. Drawn (not a layer colour) so the
 /// `Tokens` fills re-resolve live per appearance flip and Increase Contrast
-/// on every paint, same rule as `HairlineView`.
+/// on every paint, same rule as `RuleView`.
 ///
 /// **Never two shapes: the plate and the selection take turns.** Selected, the
 /// row draws nothing and the source list's own pill stands alone; unselected,

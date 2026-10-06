@@ -575,16 +575,7 @@ public final class SpeakersPageViewController: NSViewController {
     private static let unavailableMinWidth: CGFloat = 77.4
 
     /// A 1 pt `containerEdge` rule; `hairline` is too faint on `raised`.
-    private func makeRule() -> NSBox {
-        let rule = NSBox()
-        rule.boxType = .custom
-        rule.titlePosition = .noTitle
-        rule.borderWidth = 0
-        rule.fillColor = Tokens.Color.containerEdge
-        rule.redrawOnAccessibilityDisplayChange()
-        rule.setAccessibilityElement(false)
-        return rule
-    }
+    private func makeRule() -> RuleView { RuleView(tone: .containerEdge) }
 
     /// Each tile's count, or nil while its kind is still being looked for.
     private func reloadTiles(_ counts: SpeakerOverviewCounts, reduceMotion: Bool, animate: Bool) {

@@ -117,7 +117,8 @@ public final class EQEditorView: NSView {
     private let trebleCaption = NSTextField(labelWithString: "Treble")
     private let balanceCaption = NSTextField(labelWithString: "Balance")
 
-    private let advancedDivider = ContainerEdgeView()
+    /// `containerEdge`, not `hairline`: the editor sits in a `raised` card.
+    private let advancedDivider = RuleView(tone: .containerEdge)
     private let advancedHeader = NSStackView()
     private let advancedDisclosure = NSButton()
     private let advancedTitle = NSButton()
@@ -940,27 +941,6 @@ public final class EQEditorView: NSView {
         slider.doubleValue = value
         guard let action = slider.action, let target = slider.target as? NSObject else { return }
         _ = target.perform(action, with: slider)
-    }
-}
-
-/// A one-token divider above the Advanced row. The editor sits in a `raised`
-/// card (`GroupedSectionView`), and `hairline` is never drawn on `raised`
-/// (1.154:1 dark) — `containerEdge` measures 1.55:1 dark / 2.02:1 light there.
-/// `draw(_:)`-based rather than a frozen layer color so the token re-resolves
-/// per appearance and Increase Contrast on every paint.
-/// Non-interactive — pure chrome, never an `NSBox` (`test_hasBoxDivider`).
-private final class ContainerEdgeView: NSView {
-
-    override func hitTest(_ point: NSPoint) -> NSView? { nil }
-
-    override func draw(_ dirtyRect: NSRect) {
-        Tokens.Color.containerEdge.setFill()
-        bounds.fill()
-    }
-
-    override func viewDidChangeEffectiveAppearance() {
-        super.viewDidChangeEffectiveAppearance()
-        needsDisplay = true
     }
 }
 

@@ -1585,10 +1585,10 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         queue.asyncAfter(deadline: .now() + delaySeconds, execute: work)
     }
 
-    /// The backend's own one-shot delays go through this clock, except the ones
-    /// that are real audio timing (the probe pipeline tail, the companion demo
-    /// legs) and the wizard arm gate, which stay on dispatch timers. Only the
-    /// tests pass anything but ``dispatchDelayClock``:
+    /// Runs the backed-off retries, the companion audition's deadlines and
+    /// liveness poll, and the Bluetooth hold, sink-recovery and synced-local
+    /// settle timers, among others. Only the tests pass anything but
+    /// ``dispatchDelayClock``:
     /// on the wall clock, a loaded test run let a 0.05 s backoff burn every
     /// rebind attempt before the test's next step, and a 4 s stop deadline
     /// expire mid-restoration.
@@ -1602,8 +1602,9 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         Double(DispatchTime.now().uptimeNanoseconds) / 1_000_000_000
     }
 
-    /// The backend's one reading of "now" for every deadline it stores. Tests
-    /// pass a manual one.
+    /// The backend's reading of "now" for the Bluetooth hold and sink-death
+    /// deadlines, the synced-local churn horizon and the companion audition
+    /// deadlines. Tests pass a manual one.
     let uptimeClock: UptimeClock
 
     // MARK: Metering (T3 — three real level sources through the event channel)

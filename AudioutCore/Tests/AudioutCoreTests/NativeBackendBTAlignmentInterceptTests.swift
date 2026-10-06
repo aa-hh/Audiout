@@ -1081,8 +1081,12 @@ extension SerializedSharedState {
         let engine = RecordingEngine()
         let discovery = FakeDiscovery()
         let clock = ManualDelayClock()
-        let (backend, bt, _, _) = makeBackend(engine: engine, discovery: discovery,
-                                              delayClock: clock.clock, uptimeClock: clock.uptime)
+        // Each fired job hops to the queue the backend named: the Bluetooth
+        // render poll also runs on this clock and must run on `stateQueue`.
+        let (backend, bt, _, _) = makeBackend(
+            engine: engine, discovery: discovery,
+            delayClock: { d, q, w in clock.clock(d, q, DispatchWorkItem { q.async(execute: w) }) },
+            uptimeClock: clock.uptime)
         defer { engine.releaseWrites(); backend.stop() }
         backend.captureCoordinator = ProbeStagingCapture()
         backend.start()

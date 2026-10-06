@@ -309,6 +309,7 @@ public final class MicProbeSession {
     private let recorder: MicProbeRecording
     private let timeout: TimeInterval
     private let pipelineTail: TimeInterval
+    private let now: () -> Int64
     private let queue = DispatchQueue(label: "mic-probe-session")
     private var sampleRate: Double = 0
     /// Monotonic nanoseconds, the clock `firstSampleHostNanos` is on.
@@ -317,12 +318,15 @@ public final class MicProbeSession {
     private var finished = false
     private var completion: ((Result?) -> Void)?
 
+    /// `now` is the monotonic clock `startedAt` and `recordingBegan` are stamped from; tests pin it.
     public init(recorder: MicProbeRecording = BuiltInMicRecorder(),
                 timeout: TimeInterval = 20,
-                pipelineTail: TimeInterval = MicProbeSession.pipelineTailSeconds) {
+                pipelineTail: TimeInterval = MicProbeSession.pipelineTailSeconds,
+                now: (() -> Int64)? = nil) {
         self.recorder = recorder
         self.timeout = timeout
         self.pipelineTail = pipelineTail
+        self.now = now ?? Self.nowNanos
     }
 
     /// Kick the measurement off. `completion` is called exactly once, on the
@@ -339,9 +343,9 @@ public final class MicProbeSession {
                 finish(analyze: false)
                 return
             }
-            recordingBegan = Self.nowNanos()
+            recordingBegan = now()
             stage({ [weak self] in
-                self?.queue.async { self?.startedAt = Self.nowNanos() }
+                self?.queue.async { self?.startedAt = self?.now() }
             }, { [weak self] in
                 guard let self else { return }
                 self.queue.asyncAfter(deadline: .now() + self.pipelineTail) {

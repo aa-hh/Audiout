@@ -132,9 +132,9 @@ public final class BTSyncDrawerView: NSView {
     private let minusButton = StepperButton()
     private let plusButton = StepperButton()
     private let valueField = NSTextField()
-    /// White glow behind the value field while a Cast offset waits out the
-    /// stream lag. The bottom-most subview, so it shows only as a ring past
-    /// the field's opaque bezel and never sits over a button's click area.
+    /// Glow behind the value field while a Cast offset waits out the stream
+    /// lag. The bottom-most subview, so it shows only as a ring past the
+    /// field's opaque bezel and never sits over a button's click area.
     private let pendingGlowView = NSView()
 
     private lazy var valueFieldEditor = SyncValueFieldEditor(field: valueField, initialValue: 0)
@@ -520,8 +520,6 @@ public final class BTSyncDrawerView: NSView {
     private func installPendingGlow() {
         pendingGlowView.translatesAutoresizingMaskIntoConstraints = false
         pendingGlowView.wantsLayer = true
-        pendingGlowView.layer?.backgroundColor =
-            NSColor.white.withAlphaComponent(Self.pendingGlowAlpha).cgColor
         pendingGlowView.layer?.cornerRadius = Self.pendingGlowCornerRadius
         pendingGlowView.isHidden = true
         addSubview(pendingGlowView, positioned: .below, relativeTo: nil)
@@ -534,46 +532,66 @@ public final class BTSyncDrawerView: NSView {
         ])
     }
 
-    /// Show or hide the glow and its breath. The layer's model opacity stays
-    /// 1, the settled full glow, so Reduce Motion and a frame caught between
-    /// breaths both show it whole. Core Animation drops the breath when the
-    /// layer leaves the window; `viewDidMoveToWindow` puts it back.
-    private func reconcilePendingGlow() {
-        pendingGlowView.isHidden = !pendingApply
-        guard let layer = pendingGlowView.layer else { return }
-        guard pendingApply, !reduceMotion, window != nil else {
-            layer.removeAnimation(forKey: Self.pendingBreathKey)
-            return
+    /// Text colour has no layer key path, so one timer drives both the halo
+    /// and the digits from `PendingPulse`, the curve the fader thumb reads.
+    private var pulse = PendingPulse()
+    private var pulseTimer: Timer?
+
+    deinit { pulseTimer?.invalidate() }
+
+    private func setPendingApply(_ pending: Bool) {
+        guard pending != pendingApply else { return }
+        pendingApply = pending
+        let now = CACurrentMediaTime()
+        if pending {
+            pulse.begin(at: now)
+        } else {
+            pulse.finish(at: now, reduceMotion: reduceMotion)
         }
-        guard layer.animation(forKey: Self.pendingBreathKey) == nil else { return }
-        let breath = CABasicAnimation(keyPath: "opacity")
-        breath.fromValue = Self.pendingBreathMinOpacity
-        breath.toValue = 1.0
-        breath.duration = Self.pendingBreathHalfPeriod
-        breath.autoreverses = true
-        breath.repeatCount = .infinity
-        breath.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-        breath.isRemovedOnCompletion = false
-        layer.add(breath, forKey: Self.pendingBreathKey)
+        renderPendingGlow()
     }
 
-    public override func viewDidMoveToWindow() {
-        super.viewDidMoveToWindow()
-        reconcilePendingGlow()
+    /// Paint the halo and digits at the current strength, and keep the
+    /// timer running only while there is motion to show.
+    private func renderPendingGlow() {
+        let strength = pulse.value(at: CACurrentMediaTime(), reduceMotion: reduceMotion)
+        pendingGlowView.isHidden = strength == nil
+        if let strength {
+            pendingGlowView.layer?.backgroundColor = PendingPulse.light(in: effectiveAppearance)
+                .withAlphaComponent(Self.pendingGlowAlpha * strength).cgColor
+        }
+        valueField.textColor = pendingApply
+            ? PendingPulse.ink(strength: reduceMotion ? nil : strength, in: effectiveAppearance)
+            : Tokens.Color.label
+        let needsFrames = pulse.isArriving || (pendingApply && !reduceMotion)
+        if !needsFrames {
+            pulseTimer?.invalidate()
+            pulseTimer = nil
+        } else if pulseTimer == nil {
+            let timer = Timer(timeInterval: PendingPulse.frameInterval, repeats: true) { [weak self] _ in
+                self?.renderPendingGlow()
+            }
+            timer.tolerance = 0.01
+            RunLoop.main.add(timer, forMode: .common)
+            pulseTimer = timer
+        }
+    }
+
+    public override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        renderPendingGlow()
     }
 
     private var reduceMotion: Bool {
         test_reduceMotionOverride ?? NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
     }
 
-    /// Same white, strength and 1.2 s breath as the fader thumb's pending
-    /// glow in `WarmFaderCell`, so the two Cast holds read as one signal.
+    /// The halo's alpha at full strength, its reach past the field, and its
+    /// corners. The stock bezel exposes no border colour, so the field's own
+    /// edge does not light.
     private static let pendingGlowAlpha: CGFloat = 0.40
     private static let pendingGlowOutset: CGFloat = 2.5
     private static let pendingGlowCornerRadius: CGFloat = 3
-    private static let pendingBreathMinOpacity: Float = 0.45
-    private static let pendingBreathHalfPeriod: CFTimeInterval = 0.6
-    private static let pendingBreathKey = "pendingBreath"
 
     // MARK: Public API (T7)
 
@@ -596,8 +614,7 @@ public final class BTSyncDrawerView: NSView {
         self.canAlignAgain = canAlignAgain
         self.offsetSource = offsetSource
         self.movedSinceLastTimeMs = movedSinceLastTimeMs
-        self.pendingApply = pendingApply
-        reconcilePendingGlow()
+        setPendingApply(pendingApply)
         alignButton.state = alignTickActive ? .on : .off
         alignButton.contentTintColor = alignTickActive
             ? Tokens.Color.engagedChrome : Tokens.Color.label2

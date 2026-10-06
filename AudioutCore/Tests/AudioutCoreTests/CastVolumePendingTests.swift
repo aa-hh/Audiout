@@ -126,10 +126,10 @@ import Testing
         #expect(fillChanged == 0, "\(fillChanged) fill pixels changed: the fill must stay solid gold while pending")
     }
 
-    /// The glow is white, the colour the owner asked for, and it is absent
-    /// from the settled thumb. Turns red if the glow is drawn in a token tint
-    /// or at a strength that never reaches near-white on the dark thumb.
-    @Test func pendingGlowPutsWhiteOnTheThumb() throws {
+    /// The thumb lights from inside and its 3 pt outer ring fits inside the
+    /// slider. Turns red if the body stops blending toward the light, or if
+    /// `DeviceRowView` drops the slider's 24 pt height so the ring clips.
+    @Test func pendingGlowLightsTheThumbAndItsOuterRingIsNotClipped() throws {
         let device = makeCastDevice()
         let row = makeBusRow(device)
         row.appearance = NSAppearance(named: .darkAqua)
@@ -141,16 +141,57 @@ import Testing
                   volumePendingApply: true)
         let pending = try #require(sliderRep(row))
 
-        let knob = knobRect(row)
         let bounds = row.test_slider.bounds
-        func whitePixels(_ rep: NSBitmapImageRep) -> Int {
-            columns(rep, from: knob.minX, to: knob.maxX, in: bounds).filter {
-                guard let c = rep.colorAt(x: $0.0, y: $0.1) else { return false }
-                return min(c.redComponent, c.greenComponent, c.blueComponent) > 0.9
-            }.count
+        let knob = knobRect(row)
+        let thumbTop = (knob.midY - PopoverColumnGrid.faderThumbHeight / 2).rounded()
+        let scale = CGFloat(settled.pixelsWide) / bounds.width
+        func pixel(_ rep: NSBitmapImageRep, y: CGFloat) -> NSColor? {
+            rep.colorAt(x: Int(knob.midX * scale), y: Int(y * scale))
         }
-        #expect(whitePixels(settled) == 0, "a settled dark thumb carries no white")
-        #expect(whitePixels(pending) > 20, "the pending thumb must glow white")
+
+        let settledBody = try #require(pixel(settled, y: knob.midY - 4))
+        let pendingBody = try #require(pixel(pending, y: knob.midY - 4))
+        #expect(pendingBody.redComponent > settledBody.redComponent + 0.3,
+                "the pending thumb body must light toward the warm white")
+
+        let ringY = thumbTop - 2.5
+        #expect(ringY >= 0, "the slider is too short: the outer ring starts above its top edge")
+        let settledRing = try #require(pixel(settled, y: ringY))
+        let pendingRing = try #require(pixel(pending, y: ringY))
+        #expect(settledRing.alphaComponent == 0, "nothing is drawn 2.5 pt above a settled thumb")
+        #expect(pendingRing.alphaComponent > 0, "the outer ring was clipped or never drawn")
+    }
+
+    /// Under Reduce Motion a pending armed row's `%` readout holds the dim
+    /// ink, and once the hold ends it is the ordinary armed `goldText`.
+    /// Turns red if the row stops tinting the readout from the cell's pulse,
+    /// or if the tint outlives the hold.
+    @Test func pendingReadoutHoldsTheDimInkAndReturnsToGold() throws {
+        let device = makeCastDevice()
+        let row = makeBusRow(device)
+        let dark = try #require(NSAppearance(named: .darkAqua))
+        row.appearance = dark
+        (row.test_slider.cell as? WarmFaderCell)?.test_reduceMotionOverride = true
+        func srgb(_ color: NSColor?) -> NSColor? {
+            var out: NSColor?
+            dark.performAsCurrentDrawingAppearance { out = color?.usingColorSpace(.sRGB) }
+            return out
+        }
+        func same(_ a: NSColor?, _ b: NSColor?) -> Bool {
+            guard let a = srgb(a), let b = srgb(b) else { return false }
+            return abs(a.redComponent - b.redComponent) < 0.01
+                && abs(a.greenComponent - b.greenComponent) < 0.01
+                && abs(a.blueComponent - b.blueComponent) < 0.01
+        }
+
+        row.apply(device, selected: true, controllable: true, inActiveTarget: true,
+                  volumePendingApply: true)
+        #expect(same(row.test_readoutColor, Tokens.Color.emberText),
+                "a pending readout under Reduce Motion holds the dim ink")
+
+        row.apply(device, selected: true, controllable: true, inActiveTarget: true)
+        #expect(same(row.test_readoutColor, Tokens.Color.goldText),
+                "the ordinary armed readout returns once the hold ends")
     }
 
     // MARK: Controller level

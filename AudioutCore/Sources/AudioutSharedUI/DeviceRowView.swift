@@ -231,6 +231,9 @@ public final class DeviceRowView: NSView {
     /// `configureAccessibility()` (called outside `apply`'s own scope) can
     /// speak its equivalent.
     private var volumePendingApply = false
+    /// Whether the `%` readout breathes with the thumb: pending AND the
+    /// readout would otherwise read `goldText` (the engaged state).
+    private var readoutBreathes = false
     private var liveVolumeAvailable = true
     let nameLabel = DeviceNameLabel(labelWithString: "")
     /// Stock `lock.fill` after the name, shown for any speaker that asks for a
@@ -810,6 +813,8 @@ public final class DeviceRowView: NSView {
         } else {
             readoutLabel.textColor = Tokens.Color.emberText
         }
+        readoutBreathes = volumePendingApply && slider.isEnabled && !controlsMuted && isRouteArmed
+        updatePendingReadoutInk(faderCell.pulseStrength)
 
         // Under-name meter visibility (v4 §Call-1): the meter is shown ONLY on
         // armed + unmuted + connected rows (the §3.3 armed predicate captures
@@ -1155,6 +1160,16 @@ public final class DeviceRowView: NSView {
         super.viewDidChangeEffectiveAppearance()
         updateEQButton()
         updateMuteTint()
+        updatePendingReadoutInk(faderCell.pulseStrength)
+    }
+
+    /// The readout's breath while a Cast volume is pending: dim to live ink
+    /// in step with the thumb, held dim under Reduce Motion. Outside the
+    /// hold it leaves the colour `apply` chose alone.
+    private func updatePendingReadoutInk(_ strength: CGFloat?) {
+        guard readoutBreathes else { return }
+        readoutLabel.textColor = PendingPulse.ink(
+            strength: faderCell.reduceMotion ? nil : strength, in: effectiveAppearance)
     }
 
     /// Alpha applied to `enableCheckbox` when `apply(selectionDimmed:)` is true
@@ -1769,6 +1784,7 @@ public final class DeviceRowView: NSView {
         // everything after re-lands on the new cell). Tracking, keyboard,
         // scroll-wheel, `isContinuous`, and VoiceOver stay stock NSSlider.
         slider.cell = faderCell
+        faderCell.onPulse = { [weak self] strength in self?.updatePendingReadoutInk(strength) }
         slider.minValue = 0
         slider.maxValue = 100
         slider.isContinuous = true            // fire throughout the drag (brief §2)
@@ -1914,6 +1930,10 @@ public final class DeviceRowView: NSView {
                 equalTo: slider.leadingAnchor, constant: -PopoverColumnGrid.muteToSlider),
 
             slider.centerYAnchor.constraint(equalTo: centerYAnchor),
+            // Stock height is 16 pt, which clipped the 17 pt thumb by half a
+            // point and would clip the pending glow's 3 pt outer ring; 24 pt
+            // holds thumb plus ring. Centred as before, so the track stays put.
+            slider.heightAnchor.constraint(equalToConstant: 24),
             slider.widthAnchor.constraint(equalToConstant: PopoverColumnGrid.sliderWidth),
             slider.trailingAnchor.constraint(equalTo: trailingAnchor,
                                              constant: -PopoverColumnGrid.sliderTrailing),

@@ -33,9 +33,11 @@ import AppKit
 ///   slides inside the stock knob rect rather than centring on it, so at the
 ///   maximum its trailing edge lands on the track's end and at the minimum its
 ///   leading edge lands on the start — no strip of trough past the handle.
-/// - **Pending glow** (Cast volume not yet audible, `isPendingApply`): a white
-///   halo around the thumb and a white-blended body, breathing on a timer the
-///   cell owns; under Reduce Motion it holds still at full strength.
+/// - **Pending glow** (Cast volume not yet audible, `isPendingApply`): the
+///   thumb lights from inside, with three flat halo rings (1/2/3 pt) and a
+///   body blended toward the light: warm white in dark, `glow` in light. It
+///   breathes on `PendingPulse`'s curve from a timer the cell owns, rises
+///   and goes out when the hold ends, and holds at 0.7 under Reduce Motion.
 ///
 /// Every color goes through `Tokens`, resolved at DRAW time under the
 /// control's effective appearance (AppKit sets the drawing appearance before
@@ -72,49 +74,62 @@ public final class WarmFaderCell: NSSliderCell {
     /// Whether the owning row's volume/mute gesture is still pending its
     /// feed-gain apply moment (Cast fixed-volume receivers only — the row
     /// re-stamps this on every `apply`). While true, an armed thumb glows
-    /// white and breathes: the "not yet landed" signal.
+    /// and breathes: the "not yet landed" signal.
     public var isPendingApply: Bool = false {
         didSet {
             guard isPendingApply != oldValue else { return }
+            let now = CACurrentMediaTime()
+            if isPendingApply {
+                pulse.begin(at: now)
+            } else {
+                pulse.finish(at: now, reduceMotion: reduceMotion)
+            }
             reconcilePulseTimer()
+            onPulse?(pulseStrength)
             controlView?.needsDisplay = true
         }
     }
 
-    /// Repaints the breathing glow. Runs only while pending and motion is
-    /// allowed; `CACurrentMediaTime()` sets the phase, so a late tick never
-    /// drifts the pulse.
+    /// Called with the glow's strength on every pulse tick and on each
+    /// pending edge (`nil` once the light is out), so the row's readout
+    /// breathes in step with the thumb.
+    public var onPulse: ((CGFloat?) -> Void)?
+
+    private var pulse = PendingPulse()
+
+    /// Repaints the glow. Runs while the hold breathes and through its
+    /// arrival; Reduce Motion's static glow needs no frames.
     private var pulseTimer: Timer?
 
     deinit { pulseTimer?.invalidate() }
 
     private func reconcilePulseTimer() {
-        guard isPendingApply, !reduceMotion else {
+        let needsFrames = pulse.isArriving || (isPendingApply && !reduceMotion)
+        guard needsFrames else {
             pulseTimer?.invalidate()
             pulseTimer = nil
             return
         }
         guard pulseTimer == nil else { return }
-        let timer = Timer(timeInterval: Self.pulseFrameInterval, repeats: true) { [weak self] _ in
-            self?.controlView?.needsDisplay = true
+        let timer = Timer(timeInterval: PendingPulse.frameInterval, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            let strength = self.pulseStrength
+            self.onPulse?(strength)
+            self.controlView?.needsDisplay = true
+            if strength == nil { self.reconcilePulseTimer() }
         }
         timer.tolerance = 0.01
         RunLoop.main.add(timer, forMode: .common)
         pulseTimer = timer
     }
 
-    private var reduceMotion: Bool {
+    var reduceMotion: Bool {
         test_reduceMotionOverride ?? NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
     }
 
-    /// The glow's strength right now, 0.45…1.0 over a 1.2 s breath; a
-    /// constant 1.0 under Reduce Motion.
-    private var pulseAlpha: CGFloat {
-        guard !reduceMotion else { return 1.0 }
-        let phase = CACurrentMediaTime()
-            .truncatingRemainder(dividingBy: Self.pulsePeriod) / Self.pulsePeriod
-        let wave = CGFloat(0.5 - 0.5 * cos(2 * .pi * phase))
-        return Self.pulseMinAlpha + (1 - Self.pulseMinAlpha) * wave
+    /// The glow's strength right now, or nil when it is out.
+    var pulseStrength: CGFloat? {
+        pulse.value(at: CACurrentMediaTime(), reduceMotion: reduceMotion)
     }
 
     // MARK: Drawing
@@ -227,16 +242,24 @@ public final class WarmFaderCell: NSSliderCell {
         let radius = PopoverColumnGrid.faderThumbCornerRadius
         let path = NSBezierPath(roundedRect: thumb, xRadius: radius, yRadius: radius)
 
-        // The raised cap body, white-blended under a white halo while a Cast
-        // apply is pending. Flat fills, never an `NSShadow` (folder rule).
+        // The raised cap body, lit from inside while a Cast apply is pending
+        // and through its arrival. Flat fills, never an `NSShadow` (folder
+        // rule). The 3 pt outer ring needs a 23 pt slider; `DeviceRowView`
+        // gives its slider 24.
         var body = Tokens.Color.raised
-        if test_isPendingGlow {
-            let glow = pulseAlpha
-            let haloRect = thumb.insetBy(dx: -Self.pendingHaloOutset, dy: -Self.pendingHaloOutset)
-            let haloRadius = radius + Self.pendingHaloOutset
-            NSColor.white.withAlphaComponent(glow * Self.pendingHaloAlpha).setFill()
-            NSBezierPath(roundedRect: haloRect, xRadius: haloRadius, yRadius: haloRadius).fill()
-            body = body.blended(withFraction: glow, of: .white) ?? body
+        if isRouteArmed && isEnabled, let g = pulseStrength {
+            let appearance = NSAppearance.currentDrawing()
+            let dark = PendingPulse.isDark(appearance)
+            let light = PendingPulse.light(in: appearance)
+            let rings = dark ? Self.pendingHaloAlphasDark : Self.pendingHaloAlphasLight
+            for (index, alpha) in rings.enumerated().reversed() {
+                let outset = CGFloat(index + 1)
+                light.withAlphaComponent(alpha * g).setFill()
+                NSBezierPath(roundedRect: thumb.insetBy(dx: -outset, dy: -outset),
+                             xRadius: radius + outset, yRadius: radius + outset).fill()
+            }
+            let toward = (dark ? Self.pendingBodyBlendDark : Self.pendingBodyBlendLight) * g
+            body = body.blended(withFraction: toward, of: light) ?? body
         }
         body.withAlphaComponent(interiorAlpha).setFill()
         path.fill()
@@ -306,14 +329,14 @@ public final class WarmFaderCell: NSSliderCell {
     /// (light) vs `well` — raw ember measured 3.86:1 / 1.98:1, muddy at the
     /// track's low-value end in light.
     private static let armedDimEndGoldBlend: CGFloat = 0.5
-    /// The pending glow: halo reach past the thumb edge, the halo's white
-    /// alpha at full breath, and the breath itself (same 0.45 floor and
-    /// 1.2 s period as the drawer's value-field glow).
-    private static let pendingHaloOutset: CGFloat = 2.5
-    private static let pendingHaloAlpha: CGFloat = 0.40
-    private static let pulseMinAlpha: CGFloat = 0.45
-    private static let pulsePeriod: CFTimeInterval = 1.2
-    private static let pulseFrameInterval: TimeInterval = 1.0 / 30
+    /// The pending glow's halo alphas at full strength for the rings 1, 2
+    /// and 3 pt out, and how far the body blends toward the light. Light
+    /// mode runs stronger because `glow` on the near-white ground is the
+    /// faintest pairing.
+    private static let pendingHaloAlphasDark: [CGFloat] = [0.34, 0.16, 0.07]
+    private static let pendingHaloAlphasLight: [CGFloat] = [0.50, 0.26, 0.11]
+    private static let pendingBodyBlendDark: CGFloat = 0.85
+    private static let pendingBodyBlendLight: CGFloat = 0.42
 
     // MARK: Test-support hooks
 
@@ -322,8 +345,8 @@ public final class WarmFaderCell: NSSliderCell {
     /// from the pixels.
     public var test_isEngagedFill: Bool { isRouteArmed && isEnabled }
     public var test_isPendingGlow: Bool { isPendingApply && isRouteArmed && isEnabled }
-    /// Stands in for the system Reduce Motion setting; `true` stops the
-    /// breath so a pending render is deterministic.
+    /// Stands in for the system Reduce Motion setting; `true` holds the
+    /// glow at 0.7 so a pending render is deterministic.
     public var test_reduceMotionOverride: Bool? {
         didSet { reconcilePulseTimer() }
     }

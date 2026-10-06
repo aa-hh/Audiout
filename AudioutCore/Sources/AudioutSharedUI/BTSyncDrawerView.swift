@@ -582,6 +582,19 @@ public final class BTSyncDrawerView: NSView {
         renderPendingGlow()
     }
 
+    /// The drawer hears a hold's end only through `configure`, which stops
+    /// once it is unmounted. Leaving a window mid-hold would keep the timer
+    /// running on a detached view and play the arrival on the next device's
+    /// field, so unmounting drops the hold at once, with no arrival.
+    public override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        guard window == nil, pendingApply || pulse.isArriving else { return }
+        pendingApply = false
+        pulse = PendingPulse()
+        renderPendingGlow()
+        refreshDisplay()
+    }
+
     private var reduceMotion: Bool {
         test_reduceMotionOverride ?? NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
     }
@@ -834,6 +847,7 @@ public final class BTSyncDrawerView: NSView {
     /// Stands in for the system Reduce Motion setting.
     public var test_reduceMotionOverride: Bool?
     public var test_isPendingGlowShown: Bool { !pendingGlowView.isHidden }
+    public var test_isPulseTimerRunning: Bool { pulseTimer != nil }
 
     private var shiftIsHeld: Bool {
         test_shiftModifierOverride ?? (NSApp?.currentEvent?.modifierFlags.contains(.shift) ?? false)

@@ -802,17 +802,7 @@ public final class DeviceRowView: NSView {
         updateEQButton()
         muteButton.state = device.isMuted ? .on : .off
         updateMuteTint()
-        // The `%` readout has three states (D6): sounding here reads `goldText`,
-        // a stored-but-idle level reads `emberText`, and a row that is not
-        // adjustable — slider disabled, or the muted-unconnected treatment —
-        // drops to the cool dim `labelCool2`.
-        if !slider.isEnabled || controlsMuted {
-            readoutLabel.textColor = Tokens.Color.labelCool2
-        } else if isRouteArmed {
-            readoutLabel.textColor = Tokens.Color.goldText
-        } else {
-            readoutLabel.textColor = Tokens.Color.emberText
-        }
+        readoutLabel.textColor = restingReadoutInk
         readoutBreathes = volumePendingApply && slider.isEnabled && !controlsMuted && isRouteArmed
         updatePendingReadoutInk(faderCell.pulseStrength)
 
@@ -1163,6 +1153,26 @@ public final class DeviceRowView: NSView {
         updatePendingReadoutInk(faderCell.pulseStrength)
     }
 
+    /// The `%` readout has three states (D6): sounding here reads `goldText`,
+    /// a stored-but-idle level reads `emberText`, and a row that is not
+    /// adjustable — slider disabled, or the muted-unconnected treatment —
+    /// drops to the cool dim `labelCool2`.
+    private var restingReadoutInk: NSColor {
+        if !slider.isEnabled || controlsMuted { return Tokens.Color.labelCool2 }
+        return isRouteArmed ? Tokens.Color.goldText : Tokens.Color.emberText
+    }
+
+    /// Drop a pending Cast volume hold at once, with no arrival, for a
+    /// surface that is hiding: the fader stops glowing and its timer stops,
+    /// and the readout takes back the ink `apply` chose for it.
+    public func cancelPendingHold() {
+        volumePendingApply = false
+        readoutBreathes = false
+        faderCell.cancelPendingHold()
+        readoutLabel.textColor = restingReadoutInk
+        configureAccessibility()
+    }
+
     /// The readout's breath while a Cast volume is pending: dim to live ink
     /// in step with the thumb, held dim under Reduce Motion. Outside the
     /// hold it leaves the colour `apply` chose alone.
@@ -1171,6 +1181,10 @@ public final class DeviceRowView: NSView {
         readoutLabel.textColor = PendingPulse.ink(
             strength: faderCell.reduceMotion ? nil : strength, in: effectiveAppearance)
     }
+
+    /// Room for the pending glow's outermost halo ring between the slider's
+    /// frame and its trough, at each end.
+    private static let faderHaloRoom: CGFloat = 3
 
     /// Alpha applied to `enableCheckbox` when `apply(selectionDimmed:)` is true
     /// (A1) — a visual de-emphasis, not a disablement (the checkbox stays
@@ -1784,6 +1798,7 @@ public final class DeviceRowView: NSView {
         // everything after re-lands on the new cell). Tracking, keyboard,
         // scroll-wheel, `isContinuous`, and VoiceOver stay stock NSSlider.
         slider.cell = faderCell
+        faderCell.haloRoom = Self.faderHaloRoom
         faderCell.onPulse = { [weak self] strength in self?.updatePendingReadoutInk(strength) }
         slider.minValue = 0
         slider.maxValue = 100
@@ -1862,7 +1877,8 @@ public final class DeviceRowView: NSView {
         NSLayoutConstraint.activate([
             unavailableStatusLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
             unavailableStatusLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -PopoverColumnGrid.trailingControlTrailing),
-            unavailableStatusLabel.leadingAnchor.constraint(greaterThanOrEqualTo: slider.leadingAnchor),
+            unavailableStatusLabel.leadingAnchor.constraint(greaterThanOrEqualTo: slider.leadingAnchor,
+                                                            constant: Self.faderHaloRoom),
         ])
         addSubview(readoutLabel)
         addSubview(muteButton)
@@ -1927,22 +1943,30 @@ public final class DeviceRowView: NSView {
             muteButton.centerYAnchor.constraint(equalTo: centerYAnchor),
             muteButton.widthAnchor.constraint(equalToConstant: PopoverColumnGrid.muteWidth),
             muteButton.trailingAnchor.constraint(
-                equalTo: slider.leadingAnchor, constant: -PopoverColumnGrid.muteToSlider),
+                equalTo: slider.leadingAnchor,
+                constant: -(PopoverColumnGrid.muteToSlider - Self.faderHaloRoom)),
 
             slider.centerYAnchor.constraint(equalTo: centerYAnchor),
-            // Stock height is 16 pt, which clipped the 17 pt thumb by half a
-            // point and would clip the pending glow's 3 pt outer ring; 24 pt
-            // holds thumb plus ring. Centred as before, so the track stays put.
+            // The slider's frame is bigger than its trough so the pending
+            // glow's 3 pt halo is never cut off. Stock height is 16 pt, which
+            // clipped the 17 pt thumb by half a point; 24 pt holds thumb plus
+            // ring, centred, so the track stays put. Width gains
+            // `faderHaloRoom` at each end, which the cell leaves empty, and
+            // every neighbour's constant gives it back: the trough, the mute
+            // glyph and the readout land where they did at `sliderWidth`.
             slider.heightAnchor.constraint(equalToConstant: 24),
-            slider.widthAnchor.constraint(equalToConstant: PopoverColumnGrid.sliderWidth),
-            slider.trailingAnchor.constraint(equalTo: trailingAnchor,
-                                             constant: -PopoverColumnGrid.sliderTrailing),
+            slider.widthAnchor.constraint(
+                equalToConstant: PopoverColumnGrid.sliderWidth + 2 * Self.faderHaloRoom),
+            slider.trailingAnchor.constraint(
+                equalTo: trailingAnchor,
+                constant: -(PopoverColumnGrid.sliderTrailing - Self.faderHaloRoom)),
 
             // `%` readout: tight to the right of the slider, fixed-width column.
             readoutLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
             readoutLabel.widthAnchor.constraint(equalToConstant: PopoverColumnGrid.readoutWidth),
             readoutLabel.leadingAnchor.constraint(
-                equalTo: slider.trailingAnchor, constant: PopoverColumnGrid.sliderToReadout),
+                equalTo: slider.trailingAnchor,
+                constant: PopoverColumnGrid.sliderToReadout - Self.faderHaloRoom),
         ]
 
         // The under-name meter's fixed size (v4 §Call-1), when it's in the stack.

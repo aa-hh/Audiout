@@ -733,7 +733,12 @@ extension PopoverController: AppRowView.Delegate {
         for timer in castPendingTimers.values.flatMap(\.values) { timer.invalidate() }
         castPendingTimers.removeAll()
         castPendingIDs.removeAll()
-        for row in deviceRowsByID.values { row.resetLevel() }
+        for row in deviceRowsByID.values {
+            row.resetLevel()
+            // The ids are cleared above, but the rows only learn it on the
+            // next `apply`; until then a fader would keep glowing unseen.
+            row.cancelPendingHold()
+        }
         mainOutRow.resetLevel()
         for row in appRowsByBundleID.values { row.resetLevel() }
         onMeteringActiveChange?(false)

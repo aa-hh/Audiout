@@ -194,6 +194,67 @@ import Testing
                 "the ordinary armed readout returns once the hold ends")
     }
 
+    /// The slider's frame grew by 3 pt at each end for the halo, but the
+    /// trough the user sees did not move, and at 0 % and 100 % the outer halo
+    /// ring past the thumb's outer edge is painted, not cut off. Turns red if
+    /// `haloRoom` and the row's widened frame stop cancelling out, or if the
+    /// thumb goes back to sitting flush with the slider's own edge.
+    @Test func haloRoomKeepsTheTroughInPlaceAndTheEndRingsPainted() throws {
+        let device = makeCastDevice()
+        let row = makeBusRow(device)
+        row.appearance = NSAppearance(named: .darkAqua)
+        row.frame = NSRect(x: 0, y: 0, width: 640, height: 64)
+        row.apply(device, selected: true, controllable: true, inActiveTarget: true)
+        row.layoutSubtreeIfNeeded()
+        let slider = row.test_slider
+        let cell = try #require(slider.cell as? WarmFaderCell)
+
+        let track = slider.convert(cell.test_trackRect, to: row)
+        let oldEnd = row.bounds.width - PopoverColumnGrid.sliderTrailing
+        #expect(abs(track.maxX - oldEnd) < 0.01, "the trough's end moved")
+        #expect(abs(track.minX - (oldEnd - PopoverColumnGrid.sliderWidth)) < 0.01,
+                "the trough's start moved")
+
+        for value in [0.0, 100.0] {
+            row.apply(device, selected: true, controllable: true, inActiveTarget: true)
+            slider.doubleValue = value
+            let settled = try #require(sliderRep(row))
+            row.apply(device, selected: true, controllable: true, inActiveTarget: true,
+                      volumePendingApply: true)
+            slider.doubleValue = value
+            let pending = try #require(sliderRep(row))
+
+            let local = cell.test_trackRect
+            let x = value == 0 ? local.minX - 2.5 : local.maxX + 2.5
+            let scale = CGFloat(pending.pixelsWide) / slider.bounds.width
+            let y = Int(knobRect(row).midY * scale)
+            let before = try #require(settled.colorAt(x: Int(x * scale), y: y))
+            let after = try #require(pending.colorAt(x: Int(x * scale), y: y))
+            #expect(before.alphaComponent == 0, "nothing sits past the trough at \(value) %")
+            #expect(after.alphaComponent > 0, "the halo was cut off at \(value) %")
+        }
+    }
+
+    /// Hiding the surface mid-hold drops the fader's hold at once: no glow
+    /// and no timer while nobody can see it. Turns red if `surfaceDidHide`
+    /// stops calling `cancelPendingHold()` on its rows.
+    @Test func hidingTheSurfaceStopsAPendingFader() throws {
+        let (popover, fleet) = makeLaggedCastPopover()
+        let id = fleet[0].id
+        let row = try #require(popover.test_deviceRow(for: id))
+        let cell = try #require(row.test_slider.cell as? WarmFaderCell)
+        cell.test_reduceMotionOverride = false
+
+        row.test_fireSliderAction(settingValueTo: 30)
+        #expect(cell.isPendingApply)
+        #expect(cell.test_isPulseTimerRunning)
+
+        popover.surfaceDidHide()
+
+        #expect(!cell.isPendingApply)
+        #expect(!cell.test_isPulseTimerRunning, "the arrival must not play on a hidden surface")
+    }
+
     // MARK: Controller level
 
     private func waitFleet(_ backend: MockBackend, count: Int,

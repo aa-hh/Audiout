@@ -96,28 +96,18 @@ public struct PendingPulse {
         appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
     }
 
-    /// The glow's light: white halfway to `glow` in dark (about #FFECBD),
-    /// `glow` itself in light, where white vanishes on the near-white ground.
+    /// The glow's light, resolved for `appearance`.
     static func light(in appearance: NSAppearance) -> NSColor {
-        resolved(in: appearance) {
-            isDark(appearance)
-                ? NSColor.white.blended(withFraction: 0.5, of: Tokens.Color.glow) ?? .white
-                : Tokens.Color.glow
-        }
+        resolved(in: appearance) { Tokens.Color.pendingGlow }
     }
 
-    /// The number's ink at strength `g`: dim to live (`goldText`). Dark's dim
-    /// end is `emberText`; light's `emberText` has `goldText`'s luminance, so
-    /// light dims `goldText` 40 % toward `inkOnFill` instead. `nil` (Reduce
-    /// Motion) holds the dim end.
+    /// The number's ink at strength `g`, from ``Tokens/Color/pendingInkDim``
+    /// to ``Tokens/Color/goldText``. `nil` (Reduce Motion) holds the dim end.
     static func ink(strength g: CGFloat?, in appearance: NSAppearance) -> NSColor {
         resolved(in: appearance) {
-            let live = Tokens.Color.goldText
-            let dim = isDark(appearance)
-                ? Tokens.Color.emberText
-                : live.blended(withFraction: 0.4, of: Tokens.Color.inkOnFill) ?? live
+            let dim = Tokens.Color.pendingInkDim
             guard let g else { return dim }
-            return dim.blended(withFraction: g, of: live) ?? live
+            return dim.blended(withFraction: g, of: Tokens.Color.goldText) ?? Tokens.Color.goldText
         }
     }
 

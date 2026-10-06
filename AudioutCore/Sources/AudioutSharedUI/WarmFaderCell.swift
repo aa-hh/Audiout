@@ -30,9 +30,12 @@ import AppKit
 ///   ≈ 10×17 pt) replacing the stock white circle — a `raised` body (1.29:1
 ///   on the dark trough; the flat ground itself in light) read entirely by
 ///   its `rim` edge (3.39:1 on the dark body, 4.78:1 on the light ground). It
-///   slides inside the stock knob rect rather than centring on it, so at the
-///   maximum its trailing edge lands on the track's end and at the minimum its
-///   leading edge lands on the start — no strip of trough past the handle.
+///   is placed along the track, not the stock knob rect, so at the maximum its
+///   trailing edge lands on the track's end and at the minimum its leading
+///   edge lands on the start — no strip of trough past the handle.
+/// - **Halo room** (`haloRoom`): the trough can stop short of the slider's
+///   frame at both ends, so a host that widens its slider by the same amount
+///   keeps the trough in place and gains room for the pending glow's halo.
 /// - **Pending glow** (Cast volume not yet audible, `isPendingApply`): the
 ///   thumb lights from inside, with three flat halo rings (1/2/3 pt) and a
 ///   body blended toward the light: warm white in dark, `glow` in light. It
@@ -88,6 +91,28 @@ public final class WarmFaderCell: NSSliderCell {
             onPulse?(pulseStrength)
             controlView?.needsDisplay = true
         }
+    }
+
+    /// Clear space left between the slider's frame and each end of the
+    /// trough, so the pending glow's 3 pt halo is not cut off when the thumb
+    /// sits at 0 % or 100 %. A host that sets it widens its slider by twice
+    /// this, keeping the trough where it was. `DeviceRowView` sets 3; the
+    /// other faders never glow and leave it 0.
+    public var haloRoom: CGFloat = 0 {
+        didSet {
+            if haloRoom != oldValue { controlView?.needsDisplay = true }
+        }
+    }
+
+    /// Drop a pending hold at once, with no arrival: for a surface that is
+    /// going away, where a rise-and-fade nobody sees would only keep the
+    /// timer running.
+    public func cancelPendingHold() {
+        isPendingApply = false
+        pulse = PendingPulse()
+        reconcilePulseTimer()
+        onPulse?(nil)
+        controlView?.needsDisplay = true
     }
 
     /// Called with the glow's strength on every pulse tick and on each
@@ -223,20 +248,17 @@ public final class WarmFaderCell: NSSliderCell {
     public override func drawKnob(_ knobRect: NSRect) {
         let size = NSSize(width: PopoverColumnGrid.faderThumbWidth,
                           height: PopoverColumnGrid.faderThumbHeight)
-        // The thumb slides INSIDE `knobRect` rather than centring on it. Stock
-        // `knobRect` is `knobThickness` wide (20 pt on a 150 pt regular slider)
-        // and its EDGES already sit flush with the track at both extremes —
-        // 0…20 at the minimum, 130…150 at the maximum. Centring our narrower
-        // 10 pt thumb on that rect leaves 5 pt of trough showing past the
-        // handle at each end; offsetting it by the value's fraction of the
-        // slack lands the thumb's trailing edge on the track's end at the
-        // maximum and its leading edge on the start at the minimum. `knobRect`
-        // itself — the rect `NSSliderCell` maps mouse tracking against — is
-        // untouched, so this moves paint only.
-        let slack = max(0, knobRect.width - size.width)
+        // The thumb is placed on the TRACK, not on `knobRect`: its leading
+        // edge lands on the track's start at the minimum and its trailing
+        // edge on the track's end at the maximum, so no trough shows past the
+        // handle. Stock `knobRect` (20 pt on a 150 pt slider, 0…20 at the
+        // minimum, 130…150 at the maximum) is the rect `NSSliderCell` maps
+        // mouse tracking against and stays untouched; with `haloRoom` the
+        // two differ by that many points at the extremes, in paint only.
+        let track = trackRect(inside: barRect(flipped: controlView?.isFlipped ?? false))
         let offset = (controlView?.userInterfaceLayoutDirection == .rightToLeft)
             ? 1 - valueFraction : valueFraction
-        let thumb = NSRect(x: (knobRect.minX + slack * offset).rounded(),
+        let thumb = NSRect(x: (track.minX + (track.width - size.width) * offset).rounded(),
                            y: (knobRect.midY - size.height / 2).rounded(),
                            width: size.width, height: size.height)
         let radius = PopoverColumnGrid.faderThumbCornerRadius
@@ -305,11 +327,11 @@ public final class WarmFaderCell: NSSliderCell {
     }
 
     /// The recessed trough: `faderTrackHeight` tall, vertically centered in
-    /// the cell's bar rect, full width.
+    /// the cell's bar rect, full width less `haloRoom` at each end.
     private func trackRect(inside rect: NSRect) -> NSRect {
-        NSRect(x: rect.minX,
+        NSRect(x: rect.minX + haloRoom,
                y: rect.midY - PopoverColumnGrid.faderTrackHeight / 2,
-               width: rect.width,
+               width: max(0, rect.width - 2 * haloRoom),
                height: PopoverColumnGrid.faderTrackHeight)
     }
 
@@ -356,4 +378,10 @@ public final class WarmFaderCell: NSSliderCell {
     /// assert the fill reaches the track's real ends without going through
     /// the drawing chain.
     public func test_fillRect(track: NSRect) -> NSRect { fillRect(track: track) }
+
+    /// The trough rect `drawBar` paints, in the slider's coordinates.
+    public var test_trackRect: NSRect {
+        trackRect(inside: barRect(flipped: controlView?.isFlipped ?? false))
+    }
+    public var test_isPulseTimerRunning: Bool { pulseTimer != nil }
 }

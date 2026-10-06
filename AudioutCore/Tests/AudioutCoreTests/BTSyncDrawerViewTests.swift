@@ -148,6 +148,29 @@ import AppKit
         #expect(drawer.test_valueField.accessibilityLabel() == "Sync offset for Living Room TV")
     }
 
+    /// Unmounting mid-hold drops the hold with no arrival, so nothing runs
+    /// on the detached drawer and the next device's field never flashes.
+    /// Turns red if `viewDidMoveToWindow` stops resetting the hold.
+    @Test func unmountingMidHoldLeavesNoTimerAndNoArrival() {
+        let (drawer, _) = makeDrawer()
+        drawer.test_reduceMotionOverride = false
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 620, height: 200),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentView?.addSubview(drawer)
+        drawer.configure(deviceName: "Living Room TV", trimMs: 24, isSet: true,
+                         usableRangeMs: -500...500, alignTickActive: false, pendingApply: true)
+        #expect(drawer.test_isPulseTimerRunning)
+
+        drawer.removeFromSuperview()
+        #expect(!drawer.test_isPulseTimerRunning)
+        #expect(!drawer.test_isPendingGlowShown)
+
+        drawer.configure(deviceName: "Kitchen", trimMs: 0, isSet: true,
+                         usableRangeMs: -500...500, alignTickActive: false)
+        #expect(!drawer.test_isPendingGlowShown, "a later device's field must not play an arrival")
+        #expect(!drawer.test_isPulseTimerRunning)
+    }
+
     // MARK: One stepper pair — 1 ms a click, 10 while ⇧ is held
 
     @Test func minusStepsByOne() {

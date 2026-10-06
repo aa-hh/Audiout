@@ -314,6 +314,10 @@ extension PopoverController: BTSyncDrawerViewDelegate {
         btTrimsByID.removeValue(forKey: id)
         btLatenciesByID.removeValue(forKey: id)
         btTunedDeviceIDs.remove(id)
+        // A Cast reset moves the same receiver delay line, heard after the
+        // same lag. Raised after the caches clear: its first drawer push
+        // reads them.
+        if devicesByID[id]?.isCast == true { raiseCastPending(.trim, for: id) }
         // A cleared BLUETOOTH row's chip becomes the wizard's door, so it can
         // no longer close the drawer it opened — leaving one open with no way
         // to dismiss it. Collapse it here instead.

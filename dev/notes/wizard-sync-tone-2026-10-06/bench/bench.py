@@ -14,6 +14,12 @@ Run:  .venv/bin/python bench.py            (all candidates, 20 seeds)
                           unchanged from the calibrated flat pink noise)
       --trims=file.json   {"id": [ref_dB, tgt_dB]} level trims after RMS matching
       --seeds=N  --codecs=aac,sbc  --tag=name   (fewer seeds / codecs; CSV name suffix)
+      --staggered  round-2 dark candidates played in turn, each lane searched in its own
+                   window, plus today's probe as it ships (writes to ../shaped/dark/)
+      --noise-shape=rumble6  flat pink with +6 dB below 300 Hz
+      --round3  round-3 candidates (with --staggered; writes to ../shaped/round3/)
+      --gain-db=X  raise both lanes by X dB (round 3 only)   --bed-free-ambient  room-only ambient slice
+      --smooth-hz=100  noise-weighting smoothing over a fixed 100 Hz instead of +/-64 bins
 """
 import json
 import os, sys, subprocess, tempfile, csv
@@ -33,12 +39,18 @@ TAG = next((a.split("=")[1] for a in sys.argv if a.startswith("--tag=")), "")
 # --noise-boost=N: N dB more room noise than the calibrated level
 BOOST_DB = next((float(a.split("=")[1]) for a in sys.argv if a.startswith("--noise-boost=")), 0.0)
 ONLY = next((a.split("=", 1)[1].split(",") for a in sys.argv if a.startswith("--only=")), None)
+# --smooth-hz=W: noise-weighting smoothing over a fixed W Hz (+/- W/2) instead of +/-64 FFT bins
+SMOOTH_HZ = next((float(a.split("=")[1]) for a in sys.argv if a.startswith("--smooth-hz=")), 0.0)
+STAGGERED = "--staggered" in sys.argv
+ROUND3 = "--round3" in sys.argv
+# --bed-free-ambient: weight by a room-only ambient slice (as if the bed started after the app's ambient slice ended)
+BED_FREE_AMBIENT = "--bed-free-ambient" in sys.argv
 SHAPE = next((a.split("=", 1)[1] for a in sys.argv if a.startswith("--noise-shape=")), "flat")
 TRIMS = next((json.load(open(a.split("=", 1)[1])) for a in sys.argv if a.startswith("--trims=")), {})
 OFFSETS_MS = [-40.0, -7.0, 3.3, 120.0]
 TARGET_GAIN_DB = -23.0
 LEAD = 0.5          # probe-free lead-in used as the ambient slice
-D1 = 0.6            # reference arrival time in the recording
+D1 = next((float(a.split("=")[1]) for a in sys.argv if a.startswith("--d1=")), 0.6)  # first arrival in the recording
 TAIL = 0.4
 FADE = 0.08
 SWEEP_AMP = 0.175   # AlignmentTickInjector.probeAmplitude
@@ -95,14 +107,14 @@ def stepped_sweep(f0, f1, dur, degrees, fin=FADE, fout=None):
     return fades(np.sin(2 * np.pi * np.cumsum(f) / FS), fin, fout)
 
 
-def band_noise(lo, hi, dur, seed, pink=True, skirt=0.1):
+def band_noise(lo, hi, dur, seed, pink=True, skirt=0.1, power=0.5):
     n = int(round(dur * FS))
     rng = np.random.default_rng(seed)
     X = np.fft.rfft(rng.standard_normal(n))
     f = np.fft.rfftfreq(n, 1 / FS)
     mag = np.zeros_like(f)
     inb = (f >= lo) & (f <= hi)
-    mag[inb] = 1 / np.sqrt(f[inb]) if pink else 1
+    mag[inb] = f[inb] ** -power if pink else 1   # power 0.5 pink, 1.0 brown
     # cosine skirts inside the band edges so the noise has no brick-wall ring
     w_lo, w_hi = lo * (1 + skirt), hi * (1 - skirt)
     a = (f >= lo) & (f < w_lo)
@@ -287,6 +299,186 @@ def candidates():
     return C
 
 
+# ---- round 2: dark candidates, played in turn (research/shaped/dark/DARK-OPTIONS.md)
+# Real levels: Bluetooth lane peak -15 dBFS, Mac lane peak -27 dBFS (today: 0.175 / 0.0875).
+WIN = 3.5          # each speaker's window, s
+GAP = 1.0          # silence between the windows, s
+BT_PEAK = 10 ** (-15 / 20)
+MAC_PEAK = 10 ** (-27 / 20)
+
+
+def swell(n, rise, fall):
+    """Raised-cosine rise over `rise` s, flat, raised-cosine fall over `fall` s."""
+    e = np.ones(n)
+    a, b = int(rise * FS), int(fall * FS)
+    e[:a] = 0.5 - 0.5 * np.cos(np.pi * np.arange(a) / a)
+    e[n - b:] = 0.5 + 0.5 * np.cos(np.pi * np.arange(b) / b)
+    return e
+
+
+def gliding_lowpass(x, f_start, f_end, order=4, frame=4096, hop=1024):
+    """Low-pass whose cutoff glides exponentially f_start -> f_end over the
+    signal (Butterworth magnitude of `order`), applied frame by frame with a
+    sqrt-Hann analysis/synthesis window at 75 % overlap."""
+    n = len(x)
+    w = np.sqrt(np.hanning(frame + 1)[:frame])
+    xp = np.concatenate([np.zeros(frame), x, np.zeros(frame)])
+    y = np.zeros_like(xp)
+    norm_ = np.zeros_like(xp)
+    f = np.fft.rfftfreq(frame, 1 / FS)
+    for s in range(0, len(xp) - frame, hop):
+        t = np.clip((s + frame / 2 - frame) / n, 0, 1)
+        fc = f_start * (f_end / f_start) ** t
+        H = 1 / np.sqrt(1 + (f / fc) ** (2 * order))
+        y[s:s + frame] += w * np.fft.irfft(np.fft.rfft(xp[s:s + frame] * w) * H, frame)
+        norm_[s:s + frame] += w ** 2
+    return (y / np.maximum(norm_, 1e-9))[frame:frame + n]
+
+
+def at_peak(x, peak):
+    return x * peak / np.max(np.abs(x))
+
+
+def dark_lanes():
+    """{id: (name, lane at unit peak)}; the same sound plays on both speakers."""
+    n = int(WIN * FS)
+    L = {}
+    L["D1"] = ("D1 dark whoosh: brown noise 150-1500 Hz, one swell (1.2 s in, 1.7 s out)",
+               band_noise(150, 1500, WIN, 41, power=1.0) * swell(n, 1.2, 1.7))
+    sw = np.zeros(n)
+    for k in range(3):                       # 1.3 s sweeps every 1.1 s: 0.2 s crossfades
+        s0 = int(k * 1.1 * FS)
+        x = exp_sweep(1200, 150, 1.3, 0.3, 0.5)
+        sw[s0:s0 + len(x)] += x
+    bed = band_noise(60, 250, WIN, 42, power=1.0)
+    bed *= np.sqrt(np.mean(sw ** 2)) / np.sqrt(np.mean(bed ** 2)) * 10 ** (-10 / 20)
+    L["D2s"] = ("D2s check: D2 matched against its sweeps only (the bed is not in the template)", sw)
+    L["D2"] = ("D2 Sonos-like: 3 falling sweeps 1200>150 Hz (1.3 s, every 1.1 s) over brown bed 60-250 Hz at -10 dB",
+               sw + fades(bed, 0.3, 0.5))
+    ex = gliding_lowpass(band_noise(150, 1500, WIN, 43), 1500, 200)
+    L["D3"] = ("D3 exhale: pink noise 150-1500 Hz, low-pass gliding 1500>200 Hz, swell 0.8 s in, 2.7 s out",
+               ex * swell(n, 0.8, 2.7))
+    L["D4"] = ("D4 low harmonic glide: sweep 600>150 Hz, partials 2 and 3 at -12/-18 dB, fades 300/600",
+               exp_sweep(600, 150, WIN, 0.3, 0.6, (1.0, 10 ** (-12 / 20), 10 ** (-18 / 20))))
+    return {k: (nm, x / np.max(np.abs(x))) for k, (nm, x) in L.items()}
+
+
+def today_real():
+    """Today's probe as it ships: simultaneous, Mac 0.0875 peak, Bluetooth 0.175 peak."""
+    return dict(name="T0 today as shipped: 2000>500 at 0.0875 / 3200>10000 at 0.175, simultaneous",
+                ref=0.0875 * exp_sweep(2000, 500), tgt=0.175 * exp_sweep(3200, 10000))
+
+
+def dark_candidates(mac_peak=MAC_PEAK):
+    C = []
+    t = today_real()
+    C.append(dict(t, tref=t["ref"], ttgt=t["tgt"]))
+    lanes = dark_lanes()
+    for k, (nm, x) in lanes.items():
+        if k == "D2s":
+            continue
+        C.append(dict(name=nm, ref=x * mac_peak, tgt=x * BT_PEAK, tref=x * mac_peak, ttgt=x * BT_PEAK,
+                      staggered=True))
+        if k == "D2":   # same sound as D2; template = the sweeps at the level they sit at inside D2
+            sw = lanes["D2s"][1] * (lanes["D2"][1] @ lanes["D2s"][1]) / (lanes["D2s"][1] @ lanes["D2s"][1])
+            C.append(dict(name=lanes["D2s"][0], ref=x * mac_peak, tgt=x * BT_PEAK,
+                          tref=sw * mac_peak, ttgt=sw * BT_PEAK, staggered=True))
+    if ONLY:
+        C = [c for c in C if c["name"].split(" ")[0] in ONLY]
+    return C
+
+
+# ---- round 3 (research/shaped/round3/ROUND3-OPTIONS.md)
+PRE = 0.5          # the bed starts this long before the glide
+
+
+def tilted_sweep(f0, f1, dur, db_per_oct, fin=0.3, fout=0.6, ref=150.0):
+    """Exponential sweep whose amplitude follows db_per_oct of its instantaneous
+    frequency (0 dB at `ref` Hz), on top of the sweep's own pink spectrum."""
+    t = t_axis(dur)
+    lnr = np.log(f1 / f0)
+    f = f0 * np.exp(t / dur * lnr)
+    ph = 2 * np.pi * f0 * dur / lnr * (np.exp(t / dur * lnr) - 1)
+    return fades(10 ** (db_per_oct * np.log2(f / ref) / 20) * np.sin(ph), fin, fout)
+
+
+def rms(x):
+    return np.sqrt(np.mean(x ** 2))
+
+
+def drone(freqs, dur):
+    t = t_axis(dur)
+    return fades(sum(np.sin(2 * np.pi * f * t) for f in freqs), 0.3, 0.6)
+
+
+def with_bed(glide, bed, rel_db=-6.0, pre=PRE):
+    """Lane = bed from 0 s, glide from `pre` s; bed RMS rel_db under the glide's.
+    Returns (lane, template), both divided by the lane's peak."""
+    n = int(pre * FS) + len(glide)
+    bed = bed[:n] * rms(glide) / rms(bed[:n]) * 10 ** (rel_db / 20)
+    lane = bed.copy()
+    lane[int(pre * FS):] += glide
+    k = np.max(np.abs(lane))
+    return lane / k, glide / k
+
+
+GLIDE_PARTIALS = (1.0, 10 ** (-12 / 20), 10 ** (-18 / 20))
+
+
+def round3_lanes():
+    """{id: (name, lane, template, pre seconds)}, lane and template at unit lane peak."""
+    g = exp_sweep(600, 150, WIN, 0.3, 0.6, GLIDE_PARTIALS)       # D4's glide
+    nb = WIN + PRE
+    beds = {"c": ("fifth chord 110 + 165 Hz", drone((110, 165), nb)),
+            "t": ("tritone 110 + 155.6 Hz", drone((110, 155.56), nb)),
+            "n": ("brown noise 60-250 Hz", fades(band_noise(60, 250, nb, 52, power=1.0), 0.3, 0.6))}
+    L = {}
+    for k, (nm, b) in beds.items():
+        L["E1" + k] = (f"E1{k} D4 glide + {nm} bed at -6 dB, bed from 0.5 s before", *with_bed(g, b), PRE)
+    deco = exp_sweep(400, 150 * 2 / 3, WIN, 0.3, 0.6, GLIDE_PARTIALS)   # parallel glide a fifth below
+    lane = g + deco * rms(g) / rms(deco) * 10 ** (-6 / 20)
+    k = np.max(np.abs(lane))
+    lane0 = g + deco * rms(g) / rms(deco)
+    L["E1x0"] = ("E1x0 BROKEN CONTROL at equal level: D4 glide + parallel glide a fifth below, 0 dB",
+                 lane0 / np.max(np.abs(lane0)), g / np.max(np.abs(lane0)), 0.0)
+    L["E1x"] = ("E1x BROKEN CONTROL: D4 glide + parallel glide a fifth below (400>100 Hz) at -6 dB", lane / k, g / k, 0.0)
+    n = int(WIN * FS)
+    gD2, dD2 = np.zeros(n), np.zeros(n)
+    for k3 in range(3):                     # D2's three glides, each with a parallel copy a fifth below
+        s0 = int(k3 * 1.1 * FS)
+        x, y = exp_sweep(1200, 150, 1.3, 0.3, 0.5), exp_sweep(800, 100, 1.3, 0.3, 0.5)
+        gD2[s0:s0 + len(x)] += x; dD2[s0:s0 + len(y)] += y
+    for rel, tag in ((0, "E1y0"), (-6, "E1y")):
+        lane = gD2 + dD2 * rms(gD2) / rms(dD2) * 10 ** (rel / 20)
+        k = np.max(np.abs(lane))
+        L[tag] = (f"{tag} BROKEN CONTROL 2: D2's glides + parallel glides a fifth below at {rel} dB", lane / k, gD2 / k, 0.0)
+    for s in (-4, -6, -9):
+        sw = tilted_sweep(4500, 150, WIN, s)
+        L[f"E2{-s}"] = (f"E2{-s} sweep 4500>150 Hz tilted {s} dB/oct", sw / np.max(np.abs(sw)), sw / np.max(np.abs(sw)), 0.0)
+        if s in (-6, -9):
+            L[f"E2{-s}c"] = (f"E2{-s}c E2{-s} + fifth chord bed at -6 dB", *with_bed(sw, beds["c"][1]), PRE)
+    return L
+
+
+GAIN_DB = next((float(a.split("=")[1]) for a in sys.argv if a.startswith("--gain-db=")), 0.0)
+
+
+def round3_candidates():
+    gk = 10 ** (GAIN_DB / 20)
+    C = []
+    dl = dark_lanes()
+    for k in ("D2", "D4"):
+        nm, x = dl[k]
+        C.append(dict(name=nm, ref=x * MAC_PEAK * gk, tgt=x * BT_PEAK * gk, tref=x * MAC_PEAK * gk,
+                      ttgt=x * BT_PEAK * gk, staggered=True, pre=0.0))
+    for k, (nm, lane, tmpl, pre) in round3_lanes().items():
+        C.append(dict(name=nm, ref=lane * MAC_PEAK * gk, tgt=lane * BT_PEAK * gk, tref=tmpl * MAC_PEAK * gk,
+                      ttgt=tmpl * BT_PEAK * gk, staggered=True, pre=pre))
+    if ONLY:
+        C = [c for c in C if c["name"].split(" ")[0] in ONLY]
+    return C
+
+
 # ---------------------------------------------------------------- codecs
 def run(cmd):
     subprocess.run(cmd, shell=True, check=True, capture_output=True)
@@ -335,7 +527,7 @@ def next_pow2(n):
 
 def noise_weights(ambient, n):
     P = np.abs(np.fft.fft(ambient, n)) ** 2
-    r = min(64, n // 2)
+    r = min(int(round(SMOOTH_HZ / 2 / (FS / n))) if SMOOTH_HZ else 64, n // 2)
     pre = np.concatenate([[0.0], np.cumsum(P)])
     k = np.arange(n)
     lo, hi = np.maximum(0, k - r), np.minimum(n - 1, k + r)
@@ -443,6 +635,11 @@ def pink(n, rng, shape="flat"):
     X[0] = 0
     y = np.fft.irfft(X, n)
     k = 1 / np.sqrt(np.mean(y ** 2))
+    if shape == "rumble6":   # +6 dB below 300 Hz, half-octave transition centred on 300 Hz
+        lo, hi = 300 / 2 ** 0.25, 300 * 2 ** 0.25
+        u = np.clip(np.log2(np.maximum(f, 1) / lo) / np.log2(hi / lo), 0, 1)
+        g = 2.0 - 1.0 * (0.5 - 0.5 * np.cos(np.pi * u))
+        y = np.fft.irfft(X * g, n)
     if shape == "step12":
         lo, hi = 3000 / 2 ** 0.25, 3000 * 2 ** 0.25
         u = np.clip(np.log2(np.maximum(f, 1) / lo) / np.log2(hi / lo), 0, 1)
@@ -509,6 +706,129 @@ def distort(x, h2_db=-30.0, h3_db=-40.0):
     a2 = 2 * 10 ** (h2_db / 20) / A
     a3 = 4 * 10 ** (h3_db / 20) / A ** 2
     return x + a2 * x ** 2 - a3 * x ** 3
+
+
+# ---------------------------------------------------------------- staggered (round 2)
+# Bluetooth lane first at D1 (+ the offset), the Mac lane WIN + GAP later. MicProbeSession today
+# searches both templates over one region (searchFrom to the end); with the SAME sound on both
+# speakers each lane must instead be searched only inside its own window, as here.
+SLACK_BEFORE = next((float(a.split("=")[1]) for a in sys.argv if a.startswith("--slack-before=")), 0.3)
+SLACK_AFTER = 0.6
+
+
+def scene_stag(mac, bt_coded, offset_ms, noise_rms, seed, echoes=True, pre=0.0):
+    rng = np.random.default_rng(seed)
+    t_mac = D1 + WIN + GAP
+    total = int((t_mac - pre + len(mac) / FS + SLACK_AFTER + TAIL) * FS)
+    rv = reverb if echoes else (lambda x, _: x)
+    b = rv(frac_shift(bt_coded * 10 ** (TARGET_GAIN_DB / 20), D1 - pre + offset_ms / 1000, total), rng)
+    m = rv(frac_shift(mac, t_mac - pre, total), rng)
+    return b + m + noise_rms * pink(total, rng, SHAPE)
+
+
+def lane_windows(n_lane):
+    t_mac = D1 + WIN + GAP
+    return {"bt": (D1, int((D1 - SLACK_BEFORE) * FS), int((D1 + n_lane / FS + SLACK_AFTER) * FS)),
+            "mac": (t_mac, int((t_mac - SLACK_BEFORE) * FS), int((t_mac + n_lane / FS + SLACK_AFTER) * FS))}
+
+
+def lane_corr(sl, tmpl, W_amb):
+    n = next_pow2(len(sl) + len(tmpl))
+    W = noise_weights(W_amb, n) if W_amb is not None else None
+    return correlate(np.fft.rfft(sl, n), tmpl, n, len(sl), W), correlate(np.fft.rfft(sl, n), tmpl, n, len(sl), None)
+
+
+def far_rival_db(corr):
+    """Tallest correlation value more than 50 ms from the true peak anywhere in the window, dB."""
+    i = int(np.argmax(corr)); idx = np.arange(len(corr))
+    v = corr[np.abs(idx - i) > int(0.05 * FS)]
+    return 20 * np.log10(v.max() / corr[i]), (int(np.argmax(np.where(np.abs(idx - i) > int(0.05 * FS), corr, -np.inf))) - i) / FS * 1000
+
+
+def measure_stag(rec, c, ambient):
+    """Per lane: weighted correlation in its own window, plain matched filter if that is refused
+    (below 5). Returns (offset in samples or None, conf mac, conf bt)."""
+    out = {}
+    for lane, tmpl in (("bt", c["ttgt"]), ("mac", c["tref"])):
+        t0, s0, s1 = lane_windows(len(tmpl))[lane]
+        cw, cp = lane_corr(rec[s0:s1], tmpl, ambient)
+        a = arrival(cw)
+        if a[0] is None or a[1] < 5:
+            a = arrival(cp)
+        out[lane] = (None if a[0] is None else s0 + a[0] - t0 * FS, a[1])
+    ok = out["bt"][0] is not None and out["mac"][0] is not None
+    return (out["bt"][0] - out["mac"][0]) if ok else None, out["mac"][1], out["bt"][1]
+
+
+def evaluate_stag(c, codec, noise_rms, tmp, delays):
+    tgt_play = through(c["tgt"], codec, tmp, delays)
+    errs, pr, pt, refused = [], [], [], 0
+    for o in OFFSETS_MS:
+        for s in range(SEEDS):
+            rec = scene_stag(c["ref"], tgt_play, o, noise_rms, 1000 + s, pre=c.get("pre", 0.0))
+            amb = rec[: int(LEAD * FS)] if not BED_FREE_AMBIENT else noise_rms * pink(int(LEAD * FS), np.random.default_rng(7000 + s), SHAPE)
+            d, pa, pb = measure_stag(rec, c, amb)
+            pr.append(pa); pt.append(pb)
+            if d is None or pa < 5 or pb < 5:
+                refused += 1
+                continue
+            errs.append(d / FS * 1000 - o)
+    errs = np.abs(np.array(errs)) if errs else np.array([np.nan])
+    clean = scene_stag(c["ref"], tgt_play, 3.3, 0.0, 0, echoes=False, pre=c.get("pre", 0.0))
+    _, cr, ct = measure_stag(clean, c, None)
+    fp, far = {}, {}
+    for lane, tmpl in (("bt", c["ttgt"]), ("mac", c["tref"])):
+        _, s0, s1 = lane_windows(len(tmpl))[lane]
+        _, cp = lane_corr(clean[s0:s1], tmpl, None)
+        fp[lane] = near_false_peaks(cp)
+        far[lane] = far_rival_db(cp)
+    n = len(OFFSETS_MS) * SEEDS
+    return dict(candidate=c["name"], codec=codec,
+                med_err_ms=float(np.median(errs)), worst_err_ms=float(np.max(errs)),
+                wrong_gt2ms=int(np.sum(errs > 2)), refused=refused, trials=n,
+                med_conf_ref=float(np.median(pr)), med_conf_tgt=float(np.median(pt)),
+                min_conf_ref=float(np.min(pr)), min_conf_tgt=float(np.min(pt)),
+                ceil_ref=float(cr), ceil_tgt=float(ct),
+                fp_ref_in3ms_db=fp["mac"][0], fp_ref_3to50ms_db=fp["mac"][2], fp_ref_3to50ms_lag_ms=fp["mac"][3],
+                fp_tgt_in3ms_db=fp["bt"][0], fp_tgt_3to50ms_db=fp["bt"][2], fp_tgt_3to50ms_lag_ms=fp["bt"][3],
+                far_ref_db=far["mac"][0], far_ref_lag_ms=far["mac"][1],
+                far_tgt_db=far["bt"][0], far_tgt_lag_ms=far["bt"][1])
+
+
+def main_staggered():
+    C = round3_candidates() if ROUND3 else dark_candidates()
+    with tempfile.TemporaryDirectory() as tmp:
+        delays = {k: codec_delay(k, tmp) for k in ("aac", "sbc")}
+        base = dict(ref=norm(exp_sweep(2000, 500)), tgt=norm(exp_sweep(3200, 10000)))
+        base.update(tref=base["ref"], ttgt=base["tgt"])
+        global SMOOTH_HZ
+        keep, SMOOTH_HZ = SMOOTH_HZ, 0.0      # calibrate exactly as round 1 did, so bench units match
+        noise = calibrate_noise(base, tmp, delays) * 10 ** (BOOST_DB / 20)
+        SMOOTH_HZ = keep
+        print("noise rms %.3g (%.1f dBFS), shape %s, smoothing %s" % (
+            noise, 20 * np.log10(noise), SHAPE, f"{SMOOTH_HZ:g} Hz" if SMOOTH_HZ else "64 bins"), flush=True)
+        rows = []
+        for c in C:
+            for codec in CODECS:
+                if c.get("staggered"):
+                    r = evaluate_stag(c, codec, noise, tmp, delays)
+                else:
+                    r = evaluate(c, codec, noise, tmp, delays)
+                rows.append(r)
+                print("%-40s %-4s err med %.3f worst %.3f wrong %d refused %d/%d conf mac/bt %.1f/%.1f (min %.1f/%.1f) ceil %.0f/%.0f fp3-50 %.1f/%.1f far %s/%s"
+                      % (r["candidate"][:40], codec, r["med_err_ms"], r["worst_err_ms"], r["wrong_gt2ms"], r["refused"],
+                         r["trials"], r["med_conf_ref"], r["med_conf_tgt"], r.get("min_conf_ref", np.nan), r["min_conf_tgt"],
+                         r["ceil_ref"], r["ceil_tgt"], r["fp_ref_3to50ms_db"], r["fp_tgt_3to50ms_db"],
+                         "%.1f@%.0f" % (r["far_ref_db"], r["far_ref_lag_ms"]) if "far_ref_db" in r else "-",
+                         "%.1f@%.0f" % (r["far_tgt_db"], r["far_tgt_lag_ms"]) if "far_tgt_db" in r else "-"), flush=True)
+    where = os.path.join(HERE, "..", "shaped", "round3" if ROUND3 else "dark")
+    name = "bench_%s%s%s%s.csv" % (SHAPE, "" if BOOST_DB == 0 else "_noise+%g" % BOOST_DB,
+                                   "" if GAIN_DB == 0 else "_probe+%gdB" % GAIN_DB, f"_{TAG}" if TAG else "")
+    keys = sorted({k for r in rows for k in r}, key=lambda k: (k != "candidate", k != "codec", k))
+    with open(os.path.join(where, name), "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=keys)
+        w.writeheader()
+        w.writerows(rows)
 
 
 # ---------------------------------------------------------------- main
@@ -629,4 +949,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    main_staggered() if STAGGERED else main()

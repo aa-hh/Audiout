@@ -109,3 +109,35 @@ Rendered exactly as `renderTick` in `AlignmentTickInjector.swift`: 0.7 sin(f1) +
 8. AAC at 128 kbps barely touches any of them. Only today's tick moved, by 0.17 ms. SBC was not tested here.
 9. T1 and T2 move the Mac-side pitch to 440 Hz, an octave and a bit below today's 900 Hz. T3 stays in today's register.
 10. At equal loudness, every candidate peaks lower than today: T1 by 1.7 dB, T3 by 2.7 dB, T2 by 5.9 dB. That leaves more headroom before the mix clips.
+
+## Short decays (T1 Mallet, 440 / 660 Hz)
+
+T1 re-rendered with shorter fundamental decays, so the strike ends sooner and two strikes a few ms apart are less likely to blur into one. The partials are the same as T1 (4 × at −6 dB, 10 × at −24 dB), and their decay constants keep T1's 30 : 8 : 3 ratio, so the high partials still die first. Attack: 1 ms raised-cosine ramp on both sides.
+
+Files in `short/`:
+
+- `t1_tau{6,10,15}ms_bt_{00,06,10,20,40}ms_late.wav`: 6 beats at 20 BPM with the Bluetooth side late by that many ms.
+- `audition_tau{6,10,15}ms.wav`: the five offsets in the order 0, 6, 10, 20, 40 ms, 1.5 s apart, with no announcements.
+
+Levels are realistic, with no file normalisation. Each Mac side is loudness-matched to today's Mac tick (amplitude 0.35), and the Bluetooth side is panned right and 6 dB quieter, as in the earlier files. Shorter sounds need a higher peak to be equally loud, so the peaks land at −6.9 to −9.2 dBFS. Script: `short/render_short.py`; numbers: `short/metrics.json`.
+
+| Fundamental decay | Partial decays (4 × / 10 ×) | Audible length, ms (Mac / Bluetooth) | 10–90 % rise, ms (Mac / Bluetooth) | Loudness trim, Bluetooth side | Sharpness, acum (Mac / Bluetooth) | Mac peak | Estimated fusion window |
+|---|---|---|---|---|---|---|---|
+| 6 ms | 1.6 / 0.6 ms | 29 / 29 | 0.69 / 0.79 | −0.97 dB | 0.89 / 1.12 | −6.9 dBFS | about 5–10 ms |
+| 10 ms | 2.7 / 1.0 ms | 47 / 47 | 0.75 / 0.77 | −0.85 dB | 0.93 / 1.17 | −8.1 dBFS | about 7–12 ms |
+| 15 ms | 4.0 / 1.5 ms | 68 / 70 | 1.35 / 0.77 | −1.03 dB | 0.96 / 1.21 | −9.2 dBFS | about 10–15 ms |
+| 30 ms (T1 as first rendered) | 8 / 3 ms | 134 / 139 | 1.71 / 1.27 | −0.77 dB | 0.96 / 1.24 | −11.7 dBFS | about 15–25 ms |
+
+- **6 ms:** as short as today's tick (29 ms audible), so its timing precision should be about today's. The cost is that a 440 Hz note lasting 29 ms gives little sense of pitch and will sound like a dull knock more than a mallet note.
+- **10 ms:** a xylophone-like strike with clear pitch, a little under 50 ms long. It gives up a few ms of precision against the 6 ms version.
+- **15 ms:** still clearly a pitched mallet. Of the three short versions it is the most likely to blur two strikes 10 ms apart into one.
+
+The fusion-window column is an estimate, not a measurement. It is the offset below which the two strikes are likely to be heard as one event, interpolated from three findings in `research/02-psychoacoustics.md`:
+
+- about 5–10 ms for clicks, rising to as much as 50 ms for long musical sounds;
+- Danielsen et al. 2019: perceived onset 3.9 ms after physical onset for fast, short sounds against 9.1 ms for fast, long ones, with a wider spread for longer sounds;
+- the order-judgement threshold grows with stimulus duration (Fostick et al. 2019).
+
+No study measures fusion for these exact sounds. Playing the `audition_tau*.wav` files is the check: the 6 and 10 ms offsets should sound like one strike or a double strike.
+
+The measured rise differs between sides for the 15 ms version (1.35 against 0.77 ms) for the same reason as before: the partials interfere differently in the first millisecond. The attack ramp is identical on both sides.

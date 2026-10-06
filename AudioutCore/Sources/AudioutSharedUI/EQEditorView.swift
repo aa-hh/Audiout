@@ -44,7 +44,9 @@ public protocol EQEditorViewDelegate: AnyObject {
 /// toggle, so every host's editor remembers the same state across launches.
 ///
 /// **Stock AppKit only, and almost no surface of its own.** Every control here
-/// is an un-subclassed `NSSlider`, `NSButton` or `NSTextField`, and every
+/// is a stock `NSSlider`, `NSButton` or `NSTextField`, the sliders wearing a
+/// drawing-only cell (``EQGainFillCell``) that adds the green stretch between
+/// 0 dB and the knob and changes nothing else, and every
 /// colour is a semantic ``Tokens`` value. The editor draws nothing except that
 /// one hairline: the host's `GroupedSectionView` is the well it sits in, and
 /// the other custom-drawn element is the ``EQResponseCurveView`` scope, which
@@ -139,7 +141,7 @@ public final class EQEditorView: NSView {
     // MARK: State — pushed by `apply`, never read from a model
 
     private var eq: DeviceEQ = .flat
-    private var bypassReason: Device.EQBypassReason?
+    private var bypassNote: String?
     private var advancedExpanded = false
 
     /// The slider currently mid-pointer-drag, if any. `refreshDisplay` must
@@ -214,7 +216,22 @@ public final class EQEditorView: NSView {
         // explaining the controls beneath it, and the module rule is that a
         // dimmed label must be dimmed BY something.
         bypassLabel.textColor = Tokens.Color.label2
-        bypassLabel.lineBreakMode = .byTruncatingTail
+        // Wraps to two lines: the speaker page's unavailable sentence is
+        // longer than one line at pane width.
+        bypassLabel.usesSingleLineMode = false
+        bypassLabel.maximumNumberOfLines = 2
+        bypassLabel.lineBreakMode = .byWordWrapping
+        bypassLabel.cell?.wraps = true
+        bypassLabel.cell?.truncatesLastVisibleLine = true
+    }
+
+    override public func layout() {
+        super.layout()
+        // A wrapping label needs a width to compute its height against.
+        let width = contentStack.frame.width
+        if width > 0, bypassLabel.preferredMaxLayoutWidth != width {
+            bypassLabel.preferredMaxLayoutWidth = width
+        }
     }
 
     private func configureSimpleTier() {
@@ -230,6 +247,8 @@ public final class EQEditorView: NSView {
         // AppKit shape for a rest-at-centre control (docs/SPEC.md, "Balance").
         // `allowsTickMarkValuesOnly` stays OFF — the tick marks where centre
         // IS, it does not quantise the control to it.
+        balanceSlider.cell = EQGainFillCell()
+        balanceSlider.redrawOnAccessibilityDisplayChange()
         balanceSlider.translatesAutoresizingMaskIntoConstraints = false
         balanceSlider.minValue = DeviceEQ.balanceRange.lowerBound
         balanceSlider.maxValue = DeviceEQ.balanceRange.upperBound
@@ -255,7 +274,7 @@ public final class EQEditorView: NSView {
         loudnessCheckbox.action = #selector(loudnessToggled(_:))
         loudnessCheckbox.setAccessibilityLabel("Loudness")
 
-        contentStack.addArrangedSubview(bypassLabel)
+        addFullWidthRow(bypassLabel)
         addFullWidthRow(sliderRow(caption: bassCaption, middle: bassSlider, readout: bassReadout))
         addFullWidthRow(sliderRow(caption: trebleCaption, middle: trebleSlider, readout: trebleReadout))
         addFullWidthRow(sliderRow(caption: balanceCaption, middle: balanceMiddleView(), readout: balanceReadout))
@@ -263,6 +282,8 @@ public final class EQEditorView: NSView {
     }
 
     private func configureGainSlider(_ slider: NSSlider, action: Selector, label: String) {
+        slider.cell = EQGainFillCell()
+        slider.redrawOnAccessibilityDisplayChange()
         slider.translatesAutoresizingMaskIntoConstraints = false
         slider.minValue = DeviceEQ.gainRangeDB.lowerBound
         slider.maxValue = DeviceEQ.gainRangeDB.upperBound
@@ -468,6 +489,8 @@ public final class EQEditorView: NSView {
 
     private func bandColumn(index: Int, title: String) -> NSView {
         let slider = NSSlider()
+        slider.cell = EQGainFillCell()
+        slider.redrawOnAccessibilityDisplayChange()
         slider.translatesAutoresizingMaskIntoConstraints = false
         slider.isVertical = true
         slider.minValue = DeviceEQ.gainRangeDB.lowerBound
@@ -508,14 +531,19 @@ public final class EQEditorView: NSView {
 
     // MARK: Public API
 
-    /// Push a fresh snapshot. A non-`nil` `bypassReason` mounts that reason's
-    /// "not applied" sentence and hollows the curve (the stored values stay
+    /// Push a fresh snapshot. A non-`nil` `bypassNote` mounts that "not
+    /// applied" sentence and hollows the curve (the stored values stay
     /// editable — the host is saying they are inaudible right now, not that
     /// they are gone).
-    public func apply(eq: DeviceEQ, bypassReason: Device.EQBypassReason?) {
+    public func apply(eq: DeviceEQ, bypassNote: String?) {
         self.eq = eq
-        self.bypassReason = bypassReason
+        self.bypassNote = bypassNote
         refreshDisplay()
+    }
+
+    /// The backend's bypass reason, mounted as its shipped sentence.
+    public func apply(eq: DeviceEQ, bypassReason: Device.EQBypassReason?) {
+        apply(eq: eq, bypassNote: bypassReason.map(Self.bypassNoteText))
     }
 
     /// The tone the drawer is currently rendering — the model every spoken
@@ -668,11 +696,11 @@ public final class EQEditorView: NSView {
     }
 
     private func refreshDisplay() {
-        if let bypassReason { bypassLabel.stringValue = Self.bypassNoteText(bypassReason) }
-        bypassLabel.isHidden = bypassReason == nil
+        if let bypassNote { bypassLabel.stringValue = bypassNote }
+        bypassLabel.isHidden = bypassNote == nil
         // The scope reads the SAME model every slider below it renders, so the
         // picture and the controls can never disagree.
-        curve.apply(eq: eq, bypassed: bypassReason != nil)
+        curve.apply(eq: eq, bypassed: bypassNote != nil)
 
         writeSliderIfNeeded(bassSlider, value: eq.bassDB)
         writeSliderIfNeeded(trebleSlider, value: eq.trebleDB)
@@ -719,7 +747,7 @@ public final class EQEditorView: NSView {
     /// Rounds to one decimal and prints exactly that: a whole value prints
     /// "3 dB", a half prints "3.5 dB" — every stored gain is a half-dB step,
     /// so nothing here needs more precision than that.
-    static func gainText(_ db: Double) -> String {
+    public static func gainText(_ db: Double) -> String {
         let tenths = (db * 10).rounded()
         let magnitude = abs(Int(tenths))
         let whole = magnitude / 10
@@ -730,7 +758,7 @@ public final class EQEditorView: NSView {
 
     /// The Balance readout: "Center" at rest, otherwise "L 30%" / "R 20%" —
     /// printed alongside the slider in the same readout column Bass/Treble use.
-    static func balanceReadoutText(_ balance: Double) -> String {
+    public static func balanceReadoutText(_ balance: Double) -> String {
         let percent = Int((abs(balance) * 100).rounded())
         if percent == 0 { return "Center" }
         return balance < 0 ? "L \(percent)%" : "R \(percent)%"
@@ -808,6 +836,14 @@ public final class EQEditorView: NSView {
 
     public var test_bypassNoteShown: Bool { !bypassLabel.isHidden }
     public var test_bypassNoteText: String { bypassLabel.stringValue }
+    /// How many lines the bypass note draws at the editor's laid-out width.
+    /// Two passes: the first sets the wrap width, the second measures by it.
+    public var test_bypassNoteLineCount: Int {
+        layoutSubtreeIfNeeded()
+        layoutSubtreeIfNeeded()
+        let lineHeight = NSLayoutManager().defaultLineHeight(for: bypassLabel.font ?? Tokens.Font.caption)
+        return Int((bypassLabel.frame.height / lineHeight).rounded())
+    }
     public var test_curve: EQResponseCurveView { curve }
     public var test_bassReadout: String { bassReadout.stringValue }
     public var test_trebleReadout: String { trebleReadout.stringValue }
@@ -885,6 +921,17 @@ public final class EQEditorView: NSView {
         fire(bandSliders[index], value: db)
     }
 
+    /// The 13 sliders: bass, treble, balance, then the ten bands.
+    var test_sliders: [NSSlider] { [bassSlider, trebleSlider, balanceSlider] + bandSliders }
+
+    /// The green stretch `slider` would paint, nil when its cell is not an
+    /// ``EQGainFillCell``.
+    func test_fillRect(of slider: NSSlider) -> NSRect? {
+        guard let cell = slider.cell as? EQGainFillCell else { return nil }
+        return cell.test_fillRect(inBar: cell.barRect(flipped: slider.isFlipped),
+                                  flipped: slider.isFlipped)
+    }
+
     public func test_fireLoudnessClick() { loudnessCheckbox.performClick(nil) }
     public func test_fireAdvancedClick() { advancedDisclosure.performClick(nil) }
     public func test_fireAdvancedTitleClick() { advancedTitle.performClick(nil) }
@@ -914,5 +961,53 @@ private final class ContainerEdgeView: NSView {
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
         needsDisplay = true
+    }
+}
+
+/// Drawing-only skin for the EQ sliders: the stock bar and knob, plus a green
+/// stretch from where the knob sits at 0 dB to the knob so a moved control
+/// reads without reading the number. Overrides only `drawBar(inside:flipped:)`; tracking,
+/// knob and tick stay stock.
+final class EQGainFillCell: NSSliderCell {
+
+    // razor: the neutral point is where the stock knob's centre sits at
+    // value 0, from the stock mapping measured on macOS 27 at 1x and 2x:
+    // knob origin = bar start + fraction × (bar length − knob length),
+    // rounded to whole points, a flipped vertical bar counting from its
+    // bottom. The bar's midpoint is not it: an odd travel puts the knob
+    // 0.5 pt off. An AppKit that maps differently turns
+    // `knobCentreAtZeroMeetsTheFillEdge` red; the upgrade is reading
+    // `knobRect` at 0 from a scratch copy of the cell.
+    private func fillRect(inBar rect: NSRect, flipped: Bool) -> NSRect {
+        let knob = knobRect(flipped: flipped)
+        let fraction = CGFloat((0 - minValue) / (maxValue - minValue))
+        if isVertical {
+            let along = flipped ? 1 - fraction : fraction
+            let neutral = (rect.minY + along * (rect.height - knob.height)).rounded()
+                + knob.height / 2
+            let low = min(neutral, knob.midY)
+            return NSRect(x: rect.minX, y: low, width: rect.width,
+                          height: max(neutral, knob.midY) - low)
+        }
+        let neutral = (rect.minX + fraction * (rect.width - knob.width)).rounded() + knob.width / 2
+        let low = min(neutral, knob.midX)
+        return NSRect(x: low, y: rect.minY, width: max(neutral, knob.midX) - low,
+                      height: rect.height)
+    }
+
+    override func drawBar(inside rect: NSRect, flipped: Bool) {
+        super.drawBar(inside: rect, flipped: flipped)
+        let fill = fillRect(inBar: rect, flipped: flipped)
+        guard (isVertical ? fill.height : fill.width) > 0 else { return }
+        NSGraphicsContext.current?.saveGraphicsState()
+        let radius = min(rect.width, rect.height) / 2
+        NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius).addClip()
+        Tokens.Color.equalizer.setFill()
+        fill.fill()
+        NSGraphicsContext.current?.restoreGraphicsState()
+    }
+
+    func test_fillRect(inBar rect: NSRect, flipped: Bool) -> NSRect {
+        fillRect(inBar: rect, flipped: flipped)
     }
 }

@@ -1,0 +1,330 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sidebar groups, J</title>
+<style>
+:root{
+  --canvas:#FAFAFB; --panel:#FAFAFB; --raised:#FAFAFB; --well:#E9EAEC;
+  --label:#1D1D1F; --label2:#6B5F4E; --label3:#6B6459; --labelCool:#4E5A63; --labelCool2:#5F6A73;
+  --hairline:#CBCED4; --containerEdge:#AEB3BB; --rim:#66717A;
+  --gold:#E8B84B; --goldText:#825E0F; --inkOnFill:#171104; --failure:#B03327; --bt:#0082FC;
+  --sidebar:#EEEEEF; --toolbar:#F4F4F5; --sideSel:#DCDCDE;
+  --popFill:#FFFFFF; --popEdge:rgba(0,0,0,.16); --popShadow:0 .5px 1px rgba(0,0,0,.12);
+  --track:rgba(0,0,0,.14); --knob:#FFFFFF; --knobEdge:rgba(0,0,0,.22);
+  --page:#E4E5E8; --frame:rgba(0,0,0,.18); --note:#5F6A73;
+  color-scheme:light;
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    --canvas:#0A0A0C; --panel:#15171A; --raised:#1F232A; --well:#050507;
+    --label:#F2F2F3; --label2:#B7AC95; --label3:#9E947F; --labelCool:#A9B3BB; --labelCool2:#818C94;
+    --hairline:#2A2E33; --containerEdge:#3D4247; --rim:#6B767D;
+    --goldText:#E8B84B; --failure:#D9564A;
+    --sidebar:#1B1C1F; --toolbar:#18191C; --sideSel:#3A3B3F;
+    --popFill:rgba(255,255,255,.12); --popEdge:rgba(255,255,255,.10); --popShadow:none;
+    --track:rgba(255,255,255,.16); --knob:#C9CBCF; --knobEdge:rgba(0,0,0,.4);
+    --page:#050507; --frame:rgba(255,255,255,.16); --note:#818C94;
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --canvas:#0A0A0C; --panel:#15171A; --raised:#1F232A; --well:#050507;
+  --label:#F2F2F3; --label2:#B7AC95; --label3:#9E947F; --labelCool:#A9B3BB; --labelCool2:#818C94;
+  --hairline:#2A2E33; --containerEdge:#3D4247; --rim:#6B767D;
+  --goldText:#E8B84B; --failure:#D9564A;
+  --sidebar:#1B1C1F; --toolbar:#18191C; --sideSel:#3A3B3F;
+  --popFill:rgba(255,255,255,.12); --popEdge:rgba(255,255,255,.10); --popShadow:none;
+  --track:rgba(255,255,255,.16); --knob:#C9CBCF; --knobEdge:rgba(0,0,0,.4);
+  --page:#050507; --frame:rgba(255,255,255,.16); --note:#818C94;
+  color-scheme:dark;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{background:var(--page)}
+body{font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","Helvetica Neue",sans-serif;font-size:13px;color:var(--label);-webkit-font-smoothing:antialiased;padding:16px}
+::selection{background:rgba(232,184,75,.35)}
+.stage{zoom:2;width:max-content;margin:0 auto}
+svg.i{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.4;stroke-linecap:round;stroke-linejoin:round;flex:none}
+#toggle{position:fixed;top:12px;right:12px;z-index:9;font:600 12px -apple-system,sans-serif;padding:6px 12px;border-radius:8px;border:1px solid var(--containerEdge);background:var(--popFill);color:var(--label);cursor:pointer}
+#toggle:focus-visible{outline:2px solid var(--gold);outline-offset:2px}
+
+/* window */
+.win{width:653px;height:669px;margin:0 auto;border-radius:12px;overflow:hidden;background:var(--canvas);box-shadow:0 0 0 .5px var(--frame),0 18px 40px rgba(0,0,0,.18);display:grid;grid-template-rows:62px 1fr}
+.tb{background:var(--toolbar);border-bottom:1px solid var(--hairline);display:flex;align-items:center;padding:0 14px;position:relative}
+.seg{display:flex;align-items:center;gap:2px;padding:3px;border-radius:999px;border:1px solid var(--containerEdge)}
+.seg span{display:flex;align-items:center;gap:6px;height:26px;padding:0 9px;border-radius:999px;color:var(--label2);font-size:12px}
+.seg span.on{background:var(--sideSel);color:var(--label)}
+.tb .title{position:absolute;left:0;right:0;text-align:center;font-weight:700;font-size:17px;color:var(--label2);pointer-events:none}
+.tb .pin{margin-left:auto;color:var(--label2)}
+.body{display:grid;grid-template-columns:210px 443px;min-height:0}
+
+/* sidebar */
+.sb{background:var(--sidebar);border-right:1px solid var(--hairline);display:flex;flex-direction:column;min-height:0}
+.sbList{flex:1;padding:10px 10px 0;overflow:hidden}
+.plate{display:flex;align-items:center;gap:9px;height:36px;padding:0 10px 0 12px;border-radius:10px;border:1px solid var(--containerEdge);background:var(--raised);font-weight:600;font-size:13.5px;margin-bottom:10px}
+.plate.sel{background:var(--sideSel);border-color:transparent}
+.plate .chev{margin-left:auto;color:var(--label2)}
+.plate .chev svg{width:12px;height:12px}
+.hdr{display:flex;align-items:center;font-size:11px;font-weight:600;color:var(--label3);padding:6px 4px 4px 4px}
+.hdr .fold{margin-left:auto;font-weight:500;color:var(--label3);opacity:.85}
+.row{display:flex;align-items:center;gap:9px;height:36px;padding:0 8px;border-radius:6px;color:var(--label)}
+.row.one{height:30px}
+.row .t{display:flex;flex-direction:column;min-width:0;line-height:1.2}
+.row .n{font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.row .s{font-size:11px;color:var(--label2)}
+.row.sel{background:var(--sideSel)}
+.row.away{color:var(--labelCool2)}
+.row.away .n{color:var(--labelCool)}
+.row.away .s{color:var(--labelCool2)}
+.row .s.play{color:var(--goldText);font-weight:600}
+.row .s.fail{display:flex;align-items:center;gap:3px}
+.row .s.fail svg{width:10px;height:10px;stroke:var(--failure);stroke-width:1.8}
+.addbar{height:36px;border-top:1px solid var(--hairline);display:flex;align-items:center;gap:6px;padding:0 14px;color:var(--label);font-size:13px}
+.addbar svg{width:13px;height:13px}
+
+/* content */
+.ct{display:flex;flex-direction:column;min-height:0;background:var(--panel)}
+.pane{flex:1;padding:18px 22px 0;overflow:hidden}
+.foot{height:36px;display:flex;align-items:center;justify-content:center;font-size:11.5px;color:var(--label2)}
+.id{display:flex;align-items:center;gap:12px;margin-bottom:18px}
+.idw{width:44px;height:44px;border-radius:10px;border:1px solid var(--containerEdge);display:grid;place-items:center;color:var(--label2);position:relative}
+.idw svg{width:24px;height:24px}
+.idw .pen{position:absolute;right:-4px;bottom:-4px;width:16px;height:16px;border-radius:50%;background:var(--rim);display:grid;place-items:center}
+.idw .pen svg{width:9px;height:9px;stroke:#fff;stroke-width:1.8}
+.id h1{font-size:16px;font-weight:600;line-height:1.2}
+.id .sub{font-size:11px;color:var(--label2);margin-top:2px}
+.id.away h1{color:var(--labelCool)}
+.id.away .sub{color:var(--labelCool2)}
+.ttl{display:flex;align-items:center;justify-content:space-between;margin:0 2px 6px}
+.ttl b{font-size:13px;font-weight:600;color:var(--label2)}
+.btn{font-size:12px;height:22px;padding:0 10px;border-radius:6px;background:var(--popFill);border:.5px solid var(--popEdge);box-shadow:var(--popShadow);display:inline-flex;align-items:center;color:var(--label);white-space:nowrap}
+.btn.pro{background:var(--gold);color:var(--inkOnFill);border-color:transparent}
+.well{background:var(--well);border:1px solid var(--containerEdge);border-radius:26px;padding:12px 20px 4px;box-shadow:inset 0 1px 0 rgba(0,0,0,.18)}
+.eqr{display:grid;grid-template-columns:60px 1fr 52px;align-items:center;height:28px}
+.eqr .c{color:var(--label2);font-size:12px}
+.eqr .r{font-size:11px;font-weight:600;color:var(--label2);text-align:right;font-variant-numeric:tabular-nums}
+.sl{position:relative;height:20px}
+.sl::before{content:"";position:absolute;left:0;right:0;top:8px;height:4px;border-radius:2px;background:var(--track)}
+.sl i{position:absolute;top:1px;width:18px;height:18px;margin-left:-9px;border-radius:50%;background:var(--knob);box-shadow:0 0 0 .5px var(--knobEdge),0 1px 2px rgba(0,0,0,.2)}
+.sl.mid::after{content:"";position:absolute;left:50%;top:4px;width:1px;height:12px;background:var(--rim);opacity:.6}
+.bal{display:flex;align-items:center;gap:6px}
+.bal small{font-size:11px;color:var(--label3)}
+.bal .sl{flex:1}
+.chk{display:flex;align-items:center;gap:7px;height:28px;font-size:13px}
+.chk em{width:14px;height:14px;border-radius:4px;border:.5px solid var(--popEdge);background:var(--popFill);box-shadow:var(--popShadow)}
+.adv{display:flex;align-items:center;gap:7px;height:32px;border-top:1px solid var(--hairline);margin-top:4px;font-size:13px;color:var(--label2)}
+.adv svg{width:10px;height:10px;stroke-width:2}
+.adv small{font-size:11px;color:var(--label3)}
+.note{font-size:11px;color:var(--label2);padding:2px 0 6px;line-height:1.35}
+.facts{margin-top:16px}
+.fr{display:flex;align-items:center;justify-content:space-between;min-height:32px;border-bottom:1px solid var(--hairline);padding:0 2px}
+.fr:last-child{border-bottom:0}
+.fr .k{color:var(--label2)}
+.fr .v{color:var(--label);display:flex;align-items:center;gap:6px}
+.fr .v.link{color:var(--label)}
+.fr .v.link svg{width:11px;height:11px;color:var(--label2)}
+.cap{font-size:11px;color:var(--label2);padding:0 2px 8px;margin-top:-2px;line-height:1.35}
+.pop{display:inline-flex;align-items:center;gap:8px;height:22px;padding:0 4px 0 9px;border-radius:6px;background:var(--popFill);border:.5px solid var(--popEdge);box-shadow:var(--popShadow);font-size:12.5px;color:var(--label)}
+.pop svg{width:11px;height:11px;stroke-width:1.8}
+
+/* lower panels */
+.panels{display:flex;gap:16px;margin-top:22px;justify-content:center}
+.pnl{width:300px}
+.pnl figcaption{font-size:11px;font-weight:600;color:var(--label2);margin:0 0 6px 2px}
+.pnl figcaption span{font-weight:400;color:var(--note)}
+.mini{width:443px;height:470px;zoom:.677;border-radius:12px;overflow:hidden;background:var(--panel);box-shadow:0 0 0 .5px var(--frame),0 10px 24px rgba(0,0,0,.14);display:flex;flex-direction:column}
+.mini .pane{padding-top:20px}
+.h2{font-size:16px;font-weight:600;margin-bottom:4px}
+.lede{color:var(--label2);font-size:12.5px;margin-bottom:18px}
+.act{display:grid;grid-template-columns:22px 1fr;gap:4px 10px;padding:12px 2px;border-top:1px solid var(--hairline)}
+.act:last-child{border-bottom:1px solid var(--hairline)}
+.act svg{margin-top:1px}
+.act b{font-weight:600;font-size:13px}
+.act p{grid-column:2;font-size:11.5px;color:var(--label2);line-height:1.35}
+.act .b{grid-column:2;margin-top:6px}
+.ruling{display:inline-block;margin-left:6px;font-size:10px;font-weight:600;color:var(--failure);border:1px dashed var(--failure);border-radius:4px;padding:0 4px;vertical-align:1px}
+.stack{display:flex;margin-bottom:6px}
+.stack .idw{width:36px;height:36px;margin-right:-8px;background:var(--panel)}
+.stack .idw svg{width:20px;height:20px}
+
+/* ---- J-sidebar additions ---- */
+.row .s.dim{color:var(--labelCool2)}
+.row.away svg.i{color:var(--labelCool2)}
+.hdr .chv{margin-left:auto;color:var(--label3);display:flex}
+.hdr .chv svg{width:10px;height:10px;stroke-width:2}
+.row.ctx{box-shadow:inset 0 0 0 2px var(--ctxRing)}
+:root{--ctxRing:#3B82F6;--menuBg:rgba(246,246,247,.97);--menuEdge:rgba(0,0,0,.14);--menuSep:rgba(0,0,0,.10);--menuHi:#3B82F6}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--ctxRing:#4C8DF6;--menuBg:rgba(40,41,45,.97);--menuEdge:rgba(255,255,255,.14);--menuSep:rgba(255,255,255,.12)}}
+:root[data-theme="dark"]{--ctxRing:#4C8DF6;--menuBg:rgba(40,41,45,.97);--menuEdge:rgba(255,255,255,.14);--menuSep:rgba(255,255,255,.12)}
+.panels2{display:flex;gap:16px;margin-top:22px;justify-content:center;align-items:flex-start}
+.pnl2 figcaption{font-size:11px;font-weight:600;color:var(--label2);margin:0 0 6px 2px;max-width:100%}
+.pnl2 figcaption span{font-weight:400;color:var(--note)}
+.frag{position:relative;border-radius:10px;overflow:visible;box-shadow:0 0 0 .5px var(--frame),0 10px 24px rgba(0,0,0,.14)}
+.frag .sb{border-radius:10px;border-right:0;overflow:hidden}
+.menu{position:absolute;min-width:236px;padding:5px;border-radius:9px;background:var(--menuBg);box-shadow:0 0 0 .5px var(--menuEdge),0 10px 28px rgba(0,0,0,.24);font-size:13px;z-index:3}
+.menu div{height:22px;display:flex;align-items:center;padding:0 10px 0 22px;border-radius:5px;color:var(--label);white-space:nowrap;position:relative}
+.menu div.hi{background:var(--menuHi);color:#fff}
+.menu div.off{color:var(--labelCool2)}
+.menu div .ck{position:absolute;left:7px;font-size:11px}
+.menu hr{border:0;height:1px;background:var(--menuSep);margin:5px 10px}
+.scroller{position:absolute;right:3px;top:368px;width:6px;height:160px;border-radius:3px;background:var(--rim);opacity:.55}
+.legend{font-size:10.5px;color:var(--note);line-height:1.4;margin-top:8px;max-width:100%}
+.legend b{color:var(--label2);font-weight:600}
+</style>
+</head>
+<body>
+<script>(function(){var r=document.documentElement;if(!r.hasAttribute("data-theme")){try{var t=localStorage.getItem("jsb-theme");if(t)r.setAttribute("data-theme",t);}catch(e){}}})();</script>
+<button id="toggle" type="button" aria-label="Switch light or dark appearance">Light / Dark</button>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+ <defs>
+  <symbol id="laptop" viewBox="0 0 24 24"><rect x="4.5" y="6" width="15" height="10" rx="1.2"/><path d="M2.5 18.5h19"/></symbol>
+  <symbol id="spk" viewBox="0 0 24 24"><rect x="7" y="3" width="10" height="18" rx="2"/><circle cx="12" cy="14.5" r="3"/><circle cx="12" cy="7.2" r="1.2"/></symbol>
+  <symbol id="radio" viewBox="0 0 24 24"><rect x="3.5" y="8" width="17" height="11.5" rx="2"/><path d="M7 8 16 4"/><circle cx="9" cy="13.8" r="2.6"/><path d="M15 12h3M15 15.5h3"/></symbol>
+  <symbol id="tv" viewBox="0 0 24 24"><rect x="2.5" y="5" width="14" height="10" rx="1.2"/><path d="M6 18h7"/><rect x="15.5" y="10" width="6" height="9.5" rx="1.2"/><circle cx="18.5" cy="16.5" r="1.4"/></symbol>
+  <symbol id="pod" viewBox="0 0 24 24"><path d="M6.5 6.5c0-1.4 2.5-2.5 5.5-2.5s5.5 1.1 5.5 2.5v11c0 1.4-2.5 2.5-5.5 2.5s-5.5-1.1-5.5-2.5z"/><path d="M6.5 6.5c0 1.4 2.5 2.5 5.5 2.5s5.5-1.1 5.5-2.5"/></symbol>
+  <symbol id="spkOut" viewBox="0 0 24 24"><path d="M5 9.5h3l5-4v13l-5-4H5z"/></symbol>
+  <symbol id="scenes" viewBox="0 0 24 24"><rect x="3" y="5" width="8" height="6" rx="1.4"/><rect x="3" y="13" width="8" height="6" rx="1.4"/><rect x="13" y="5" width="8" height="14" rx="1.4"/></symbol>
+  <symbol id="main" viewBox="0 0 24 24"><rect x="9" y="3.5" width="9" height="17" rx="1.6"/><path d="M3 12h9M9.5 9l3 3-3 3"/></symbol>
+  <symbol id="speakers" viewBox="0 0 24 24"><rect x="4" y="4" width="8" height="16" rx="1.6"/><circle cx="8" cy="14" r="2.2"/><rect x="14" y="7" width="6" height="13" rx="1.4"/><circle cx="17" cy="15.5" r="1.4"/></symbol>
+  <symbol id="chev" viewBox="0 0 24 24"><path d="m9 5 7 7-7 7"/></symbol>
+  <symbol id="chevD" viewBox="0 0 24 24"><path d="m5 9 7 7 7-7"/></symbol>
+  <symbol id="disc" viewBox="0 0 24 24"><path d="m8 5 8 7-8 7z" fill="currentColor"/></symbol>
+  <symbol id="updown" viewBox="0 0 24 24"><path d="m7 9 5-5 5 5M7 15l5 5 5-5"/></symbol>
+  <symbol id="tri" viewBox="0 0 24 24"><path d="M12 3.5 22 20H2z"/><path d="M12 10v4.5M12 17.2v.3"/></symbol>
+  <symbol id="bt" viewBox="0 0 24 24"><path d="m7 7 10 10-5 4.5V2.5L17 7 7 17"/></symbol>
+  <symbol id="eye" viewBox="0 0 24 24"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="3"/><path d="M4 20 20 4"/></symbol>
+  <symbol id="plus" viewBox="0 0 24 24"><path d="M12 4v16M4 12h16"/></symbol>
+  <symbol id="pen" viewBox="0 0 24 24"><path d="M5 19 18 6"/></symbol>
+  <symbol id="pinS" viewBox="0 0 24 24"><path d="M8 3h8M9 3v6l-3 4h12l-3-4V3M12 13v8"/></symbol>
+  <symbol id="bars" viewBox="0 0 24 24"><path d="M4 9v6M8 6v12M12 4v16M16 7v10M20 10v4"/></symbol>
+  <symbol id="gear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 3.5l1.6 2.3 2.7-.8.6 2.8 2.7.9-.8 2.7 2.3 1.6-2.3 1.6.8 2.7-2.7.9-.6 2.8-2.7-.8L12 20.5l-1.6-2.3-2.7.8-.6-2.8-2.7-.9.8-2.7L2.9 12l2.3-1.6-.8-2.7 2.7-.9.6-2.8 2.7.8z"/></symbol>
+ </defs>
+</svg>
+
+<div class="stage">
+
+<!-- ============ MAIN WINDOW: Move 2 selected ============ -->
+<div class="win" role="img" aria-label="Scenes window, Move 2 selected. Sidebar groups: In the Mixer, Hidden unless playing">
+ <div class="tb">
+  <div class="seg">
+   <span><svg class="i"><use href="#bars"/></svg></span>
+   <span class="on"><svg class="i"><use href="#speakers"/></svg>Scenes</span>
+   <span><svg class="i"><use href="#gear"/></svg></span>
+  </div>
+  <div class="title">Audiout</div>
+  <div class="pin"><svg class="i"><use href="#pinS"/></svg></div>
+ </div>
+ <div class="body">
+  <aside class="sb">
+   <div class="sbList">
+    <div class="plate"><svg class="i"><use href="#scenes"/></svg>Scenes<span class="chev"><svg class="i"><use href="#chev"/></svg></span></div>
+    <div class="hdr">System Audio</div>
+    <div class="row one"><svg class="i"><use href="#main"/></svg><div class="t"><span class="n">Main Audio</span></div></div>
+    <div class="plate" style="margin-top:10px"><svg class="i"><use href="#speakers"/></svg>Speakers<span class="chev"><svg class="i"><use href="#chev"/></svg></span></div>
+    <div class="hdr">In the Mixer</div>
+    <div class="row"><svg class="i"><use href="#laptop"/></svg><div class="t"><span class="n">MacBook Pro Speakers</span><span class="s">This Mac</span></div></div>
+    <div class="row away"><svg class="i"><use href="#pod"/></svg><div class="t"><span class="n">Bedroom</span><span class="s">Unavailable</span></div></div>
+    <div class="row sel"><svg class="i"><use href="#spk"/></svg><div class="t"><span class="n">Move 2</span><span class="s">Ready</span></div></div>
+    <div class="row away"><svg class="i"><use href="#radio"/></svg><div class="t"><span class="n">Sonos Move</span><span class="s">Unavailable</span></div></div>
+    <div class="row away"><svg class="i"><use href="#spkOut"/></svg><div class="t"><span class="n">Study</span><span class="s fail"><svg class="i"><use href="#tri"/></svg>Can't be found</span></div></div>
+    <div class="row"><svg class="i"><use href="#tv"/></svg><div class="t"><span class="n">TV</span><span class="s play">Playing</span></div></div>
+    <div class="hdr">Hidden unless playing</div>
+    <div class="row"><svg class="i"><use href="#radio"/></svg><div class="t"><span class="n">Garage</span><span class="s play">Playing</span></div></div>
+    <div class="row"><svg class="i"><use href="#radio"/></svg><div class="t"><span class="n">Onkyo TX-8220</span><span class="s">Ready</span></div></div>
+   </div>
+   <div class="addbar"><svg class="i"><use href="#plus"/></svg>Add scene</div>
+  </aside>
+
+  <section class="ct">
+   <div class="pane">
+    <div class="id">
+     <div class="idw"><svg class="i"><use href="#spk"/></svg><span class="pen"><svg class="i"><use href="#pen"/></svg></span></div>
+     <div><h1>Move 2</h1><div class="sub">AirPlay · Available</div></div>
+    </div>
+
+    <div class="ttl"><b>Equalizer</b><span class="btn">Reset</span></div>
+    <div class="well">
+     <div class="eqr"><span class="c">Bass</span><div class="sl mid"><i style="left:62%"></i></div><span class="r">+3 dB</span></div>
+     <div class="eqr"><span class="c">Treble</span><div class="sl mid"><i style="left:46%"></i></div><span class="r">−1 dB</span></div>
+     <div class="eqr"><span class="c">Balance</span><div class="bal"><small>L</small><div class="sl mid"><i style="left:50%"></i></div><small>R</small></div><span class="r">Centre</span></div>
+     <div class="chk"><em></em>Loudness</div>
+     <div class="adv"><svg class="i"><use href="#disc"/></svg>Advanced <small>10 bands</small></div>
+    </div>
+
+    <div class="facts">
+     <div class="fr"><span class="k">Show in Mixer</span><span class="pop">When available<svg class="i"><use href="#updown"/></svg></span></div>
+     <div class="fr"><span class="k">Scenes</span><span class="v link">Kitchen<svg class="i"><use href="#chev"/></svg>&nbsp;Downstairs<svg class="i"><use href="#chev"/></svg></span></div>
+     <div class="fr"><span class="k">Status</span><span class="v">Available</span></div>
+     <div class="fr"><span class="k">AirPlay 2</span><span class="v">Yes</span></div>
+    </div>
+   </div>
+   <div class="foot">Set up scenes here, then switch to the Mixer to play</div>
+  </section>
+ </div>
+</div>
+
+<!-- ============ LOWER PANELS ============ -->
+<div class="panels2">
+
+ <figure class="pnl2" style="width:380px">
+  <figcaption>Right-click on Onkyo TX-8220 <span>· a speaker in the second group</span></figcaption>
+  <div class="frag" style="width:210px;height:254px">
+   <aside class="sb" style="height:254px">
+    <div class="sbList">
+     <div class="row away"><svg class="i"><use href="#spkOut"/></svg><div class="t"><span class="n">Study</span><span class="s fail"><svg class="i"><use href="#tri"/></svg>Can't be found</span></div></div>
+     <div class="row"><svg class="i"><use href="#tv"/></svg><div class="t"><span class="n">TV</span><span class="s play">Playing</span></div></div>
+     <div class="hdr">Hidden unless playing</div>
+     <div class="row"><svg class="i"><use href="#radio"/></svg><div class="t"><span class="n">Garage</span><span class="s play">Playing</span></div></div>
+     <div class="row ctx"><svg class="i"><use href="#radio"/></svg><div class="t"><span class="n">Onkyo TX-8220</span><span class="s">Ready</span></div></div>
+    </div>
+   </aside>
+   <div class="menu" style="left:132px;top:188px" role="menu" aria-label="Context menu for Onkyo TX-8220">
+    <div class="hi" role="menuitem">Show in Mixer</div>
+    <hr>
+    <div role="menuitem">Add scene from “Onkyo TX-8220”…</div>
+   </div>
+  </div>
+  <p class="legend" style="margin-top:62px"><b>Same row in the first group:</b> Hide from Mixer · ✓ Keep in Mixer when unavailable · Add scene from “Name”… · Forget “Name”… (only when it can't be found).<br><b>Several selected:</b> Hide 3 speakers from Mixer · Show 3 speakers in Mixer (both when the selection spans the groups) · Keep in Mixer when unavailable (dash when mixed) · Add scene from 3 speakers… · Forget 2 speakers… (only when none can be found).<br><b>Drag</b> a row onto the other group's header to move it.</p>
+ </figure>
+
+ <figure class="pnl2" style="width:257px">
+  <figcaption>15 speakers <span>· scrolled to the second group, pointer over its header</span></figcaption>
+  <div class="frag" style="width:210px;height:571px;margin:0 auto">
+   <aside class="sb" style="height:571px">
+    <div class="sbList" style="padding-top:0;margin-top:-20px">
+    <div class="row"><svg class="i"><use href="#pod"/></svg><div class="t"><span class="n">Bathroom</span><span class="s">Ready</span></div></div>
+    <div class="row away"><svg class="i"><use href="#pod"/></svg><div class="t"><span class="n">Bedroom</span><span class="s">Unavailable</span></div></div>
+    <div class="row"><svg class="i"><use href="#spk"/></svg><div class="t"><span class="n">Den</span><span class="s">Ready</span></div></div>
+    <div class="row"><svg class="i"><use href="#pod"/></svg><div class="t"><span class="n">Dining Room</span><span class="s">Ready</span></div></div>
+    <div class="row away"><svg class="i"><use href="#pod"/></svg><div class="t"><span class="n">Hallway</span><span class="s">Unavailable</span></div></div>
+    <div class="row"><svg class="i"><use href="#pod"/></svg><div class="t"><span class="n">Kitchen</span><span class="s play">Playing</span></div></div>
+    <div class="row"><svg class="i"><use href="#tv"/></svg><div class="t"><span class="n">Living Room Sonos Arc Ultra</span><span class="s play">Playing</span></div></div>
+    <div class="row"><svg class="i"><use href="#spk"/></svg><div class="t"><span class="n">Move 2</span><span class="s">Ready</span></div></div>
+    <div class="row"><svg class="i"><use href="#pod"/></svg><div class="t"><span class="n">Office</span><span class="s">Ready</span></div></div>
+    <div class="row away"><svg class="i"><use href="#radio"/></svg><div class="t"><span class="n">Sonos Move</span><span class="s">Unavailable</span></div></div>
+    <div class="row away"><svg class="i"><use href="#spkOut"/></svg><div class="t"><span class="n">Study</span><span class="s fail"><svg class="i"><use href="#tri"/></svg>Can't be found</span></div></div>
+    <div class="hdr">Hidden unless playing<span class="chv" title="Fold, shown on hover"><svg class="i"><use href="#chevD"/></svg></span></div>
+    <div class="row"><svg class="i"><use href="#radio"/></svg><div class="t"><span class="n">Garage</span><span class="s play">Playing</span></div></div>
+    <div class="row"><svg class="i"><use href="#radio"/></svg><div class="t"><span class="n">Onkyo TX-8220</span><span class="s">Ready</span></div></div>
+    <div class="row"><svg class="i"><use href="#tv"/></svg><div class="t"><span class="n">Samsung 7 Series (55)</span><span class="s">Ready</span></div></div>
+    </div>
+    <div class="addbar"><svg class="i"><use href="#plus"/></svg>Add scene</div>
+   </aside>
+   <span class="scroller" aria-hidden="true"></span>
+  </div>
+ </figure>
+
+</div>
+</div>
+
+<script>
+document.getElementById('toggle').addEventListener('click',function(){
+  var r=document.documentElement;
+  var cur=r.getAttribute('data-theme')||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');
+  var n=cur==='dark'?'light':'dark';r.setAttribute('data-theme',n);try{localStorage.setItem('jsb-theme',n);}catch(e){}
+});
+</script>
+<script>document.documentElement.setAttribute("data-theme","dark");</script></body>
+</html>

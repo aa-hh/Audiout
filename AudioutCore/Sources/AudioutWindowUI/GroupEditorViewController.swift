@@ -16,9 +16,10 @@ import AudioutSharedUI
 /// already-persisted group.
 ///
 /// Layout, top to bottom (HEADER PARITY with `DeviceDetailViewController` —
-/// design feedback 2026-07-18: groups and devices share the identical
-/// large-icon header, the only difference being that a group's TITLE is
-/// editable and a device's is not; every shared number lives in
+/// design feedback 2026-07-18: groups and devices share the large-icon
+/// header's band height and vertical centring; a group's TITLE is editable
+/// and a device's is not, and the device page starts its icon at a smaller
+/// inset than this pane's by design; every shared number lives in
 /// ``GroupsPaneLayout``):
 /// - a HEADER SECTION holding the large (``DeviceIconWellView/size``pt) group
 ///   icon and the group's name SIDE BY SIDE (design review 2026-07-25 — they
@@ -83,12 +84,6 @@ public final class GroupEditorViewController: NSViewController {
     /// "‹ Groups" band, Escape, or ⌘[. The host owns the pane swap; this pane
     /// only reports the request (direction C's in-pane push).
     public var onBack: (() -> Void)?
-    /// Called when Escape abandoned a rename, so the host can put keyboard
-    /// focus somewhere real (the sidebar's outline view) instead of leaving
-    /// the window as its own first responder — see ``cancelRename()``. Escape
-    /// while renaming stops HERE (the field editor consumes it); only an
-    /// Escape outside a rename reaches the container and fires `onBack`.
-    public var onDidCancelRename: (() -> Void)?
 
     /// The group currently being edited, nil before `show`.
     public private(set) var editingGroupID: String?
@@ -120,6 +115,10 @@ public final class GroupEditorViewController: NSViewController {
     /// The group's identity light, mounted behind the well.
     private let iconGlow = GroupIdentityGlowView()
     private let nameField = NSTextField(string: "")
+    /// The rename field over the "Playing" marker, as one block centred on
+    /// the icon well. A hidden marker drops out of the stack, so the name
+    /// alone is centred while nothing plays.
+    private let headerTextStack = NSStackView()
     private let membershipStack = RailRepaintingStackView()
     /// THIS PAGE'S ONE INSTRUMENT, so it is the one `.card` here — a `raised`
     /// fill with a `containerEdge` edge behind the Speakers checklist, plus
@@ -171,9 +170,10 @@ public final class GroupEditorViewController: NSViewController {
     }()
 
     /// The line that says edits are saved as they are made — nothing on this
-    /// pane waits for a button. Every group's editor shows it; an ACTIVE
-    /// group's, where "Playing" is on screen while membership is being
-    /// edited, adds that nothing playing changes (``show(groupID:devices:)``).
+    /// pane waits for a button — and points to Speakers for Mixer visibility.
+    /// An ACTIVE group's, where "Playing" is on screen while membership is
+    /// being edited, also says that edits do not touch what is playing
+    /// (``show(groupID:devices:)``).
     ///
     /// HEIGHT BUDGET: it sits BESIDE "Delete scene…", centred on it, with no
     /// bottom pin, so it rides inside the button's existing bottom margin and
@@ -203,9 +203,9 @@ public final class GroupEditorViewController: NSViewController {
     /// invisible once already (snapshot-caught 2026-07-18). REQUIRED priority,
     /// deliberately: the field may overflow its section by a hair on a
     /// pathologically narrow pane rather than vanish.
-    /// The identity glow's mounted side. A 60 pt glow would sit wholly under
-    /// the 64 pt opaque well and never be seen, so it is the well plus 16: 40
-    /// pt of radius, 8 pt of magenta leaking past the well's edge.
+    /// The identity glow's mounted side: the 48 pt opaque well plus 16, so 8
+    /// pt of magenta leaks past the well's edge all round. A glow no wider
+    /// than the well would sit wholly under it and never be seen.
     static let iconGlowSide: CGFloat = DeviceIconWellView.size + 16
 
     private static let titleFieldMinWidth: CGFloat = 140
@@ -234,8 +234,9 @@ public final class GroupEditorViewController: NSViewController {
     /// by the same amount, whenever the band's margin changes — that keeps the
     /// 8 pt of clearance below the band constant while giving the band more
     /// air above it. HEADER PARITY IS GEOMETRIC (`GroupsHeaderParityTests`
-    /// asserts the two panes' real laid-out title frames), so the column must
-    /// not move relative to the device detail pane's — moving both constants
+    /// asserts the panes share the header band height and the vertical
+    /// centring of the text block), so the column must not move vertically
+    /// relative to the device detail pane's — moving both constants
     /// together keeps the column pinned to the shared `columnTopInset`, it
     /// just shifts that shared value too.
     private static let topBandTopInset: CGFloat = 12
@@ -266,13 +267,15 @@ public final class GroupEditorViewController: NSViewController {
     private var iconWellSymbolName: String?
 
     /// Membership rows keyed by device id, so a test can read/drive them.
+    public var speakerLibrary: SpeakerLibraryController?
+    private var presentationByID: [String: SpeakerPresentationRecord] = [:]
     private var rowsByID: [String: MembershipRowView] = [:]
-    /// The devices currently offered as membership candidates, in order
-    /// (available devices, plus unavailable devices only while they remain
-    /// members of this group — see ``rebuildCandidates(devices:)``).
+    /// The devices currently offered as membership candidates, in order:
+    /// every device, unavailable ones included (see
+    /// ``rebuildCandidates(memberSet:)``).
     private var candidateDevices: [Device] = []
     /// The full device set last passed to `show`, so membership toggles can
-    /// rebuild the candidate list (an unchecked unavailable device drops out).
+    /// rebuild the candidate list.
     private var allDevices: [Device] = []
 
     public init(groupController: GroupController) {
@@ -437,7 +440,14 @@ public final class GroupEditorViewController: NSViewController {
         }
         // Identity is bare; the checklist is the page's one card.
         headerWell.style = .bare
-        for v in [iconGlow, iconWell, nameField, playingBadge, speakersLabel, membershipStack] {
+        headerTextStack.orientation = .vertical
+        headerTextStack.alignment = .leading
+        headerTextStack.spacing = 2
+        headerTextStack.setViews([nameField, playingBadge], in: .leading)
+        // Below the rename field's 240 width preference, so the shown badge
+        // never pulls the field towards its own width.
+        headerTextStack.setHuggingPriority(NSLayoutConstraint.Priority(230), for: .horizontal)
+        for v in [iconGlow, iconWell, headerTextStack, speakersLabel, membershipStack] {
             v.translatesAutoresizingMaskIntoConstraints = false
             column.addSubview(v)
         }
@@ -566,9 +576,10 @@ public final class GroupEditorViewController: NSViewController {
             // HEADER, SIDE BY SIDE (design review 2026-07-25): icon BESIDE the
             // name, not above it — 30 pt of reclaimed height on a pane that was
             // overflowing its own window. Header parity with
-            // `DeviceDetailViewController` is geometric: both panes read the
-            // same `GroupsPaneLayout` numbers, so switching sidebar selection
-            // never shifts the header (it used to jump ~22.5 pt sideways).
+            // `DeviceDetailViewController` is the shared band height and
+            // vertical centring, both read from `GroupsPaneLayout`. The icon's
+            // x differs by design: this pane keeps `contentLeadingInset` for
+            // its rail, while the device page starts its icon further left.
             iconWell.topAnchor.constraint(equalTo: column.topAnchor,
                                           constant: GroupsPaneLayout.headerPadding),
             iconWell.leadingAnchor.constraint(equalTo: column.leadingAnchor,
@@ -579,9 +590,9 @@ public final class GroupEditorViewController: NSViewController {
             iconGlow.widthAnchor.constraint(equalToConstant: Self.iconGlowSide),
             iconGlow.heightAnchor.constraint(equalToConstant: Self.iconGlowSide),
 
-            nameField.leadingAnchor.constraint(equalTo: iconWell.trailingAnchor,
-                                               constant: GroupsPaneLayout.iconToTitleGap),
-            nameField.centerYAnchor.constraint(equalTo: iconWell.centerYAnchor),
+            headerTextStack.leadingAnchor.constraint(equalTo: iconWell.trailingAnchor,
+                                                     constant: GroupsPaneLayout.iconToTitleGap),
+            headerTextStack.centerYAnchor.constraint(equalTo: iconWell.centerYAnchor),
             nameField.heightAnchor.constraint(equalToConstant: PopoverColumnGrid.titleFieldHeight),
             // REQUIRED floor: an editable text field has no intrinsic width, so
             // without this auto layout is free to collapse it to zero (it
@@ -589,12 +600,6 @@ public final class GroupEditorViewController: NSViewController {
             nameField.widthAnchor.constraint(greaterThanOrEqualToConstant: Self.titleFieldMinWidth),
             titleWidth,
             titleCap,
-
-            // The "Playing" marker tucks UNDER the name, inside the header
-            // band's own padding — it hangs off the field, never off the
-            // section's bottom, so the band's pinned height can't follow it.
-            playingBadge.leadingAnchor.constraint(equalTo: nameField.leadingAnchor),
-            playingBadge.topAnchor.constraint(equalTo: nameField.bottomAnchor, constant: 4),
 
             // Sits BETWEEN the two sections, on bare pane — the gap below the
             // header section's bottom border, above the list section's top.
@@ -724,9 +729,9 @@ public final class GroupEditorViewController: NSViewController {
     // MARK: Model
 
     /// Show the editor for `groupID`, building the membership row list from
-    /// `devices` (every known device is a candidate for an available row; an
-    /// unavailable device is offered only while it remains a member — see
-    /// ``rebuildCandidates(devices:)``). No-op if the group no longer exists.
+    /// the speaker library's records: every speaker it keeps, unavailable and
+    /// remembered ones included. `devices` stands in only when no library is
+    /// injected. No-op if the group no longer exists.
     ///
     /// GATED on what the pane actually draws. The host calls this on EVERY
     /// backend event while the screen is visible, and a re-render tears down
@@ -734,6 +739,15 @@ public final class GroupEditorViewController: NSViewController {
     /// keyboard focus several times a second during discovery. An unchanged
     /// ``EditorProjection`` means there is nothing to repaint.
     public func show(groupID: String, devices: [Device]) {
+        let records: [SpeakerPresentationRecord]
+        if let speakerLibrary { records = speakerLibrary.records }
+        else {
+            let library = SpeakerLibraryController(loadPersisted: false)
+            library.update(liveDevices: devices, groups: groupController.groups)
+            records = library.records
+        }
+        presentationByID = Dictionary(uniqueKeysWithValues: records.map { ($0.id, $0) })
+        let devices = records.map(\.renderingDevice)
         guard let group = groupController.groups.first(where: { $0.id == groupID }) else { return }
         guard editorProjection(for: group, devices: devices) != lastRenderedProjection else {
             // Nothing to repaint, but a later membership toggle
@@ -782,10 +796,10 @@ public final class GroupEditorViewController: NSViewController {
         isActiveGroup = isActive
         iconWell.isActiveGroup = isActive
         iconWell.setAccessibilityValue(isActive ? "Playing" : "")
-        // The ring is colour alone; these two say it in words — the marker
-        // states that this group IS playing, and the line answers the question
-        // that raises while its membership is being edited. An inactive group
-        // moves nothing either way, so its line only says edits are saved.
+        // The ring is colour alone; these two say it in words — the badge
+        // states that this group IS playing; the line says edits save as made
+        // and, for the active group, that they do not touch what is playing.
+        // Both states point to Speakers for Mixer visibility.
         playingBadge.isHidden = !isActive
         reassuranceLabel.stringValue = isActive ? Self.savedAsYouGoActive : Self.savedAsYouGo
         // The origin hook's tone follows the same active-group truth the well's
@@ -810,6 +824,7 @@ public final class GroupEditorViewController: NSViewController {
             let symbolName: String
             let isMember: Bool
             let railArmed: Bool
+            let status: SpeakerPresentationStatus?
         }
         let groupID: String
         let groupName: String
@@ -843,7 +858,8 @@ public final class GroupEditorViewController: NSViewController {
                         ?? device.kind.symbolName,
                     isMember: memberSet.contains(device.id),
                     railArmed: railArmed(for: device, memberSet: memberSet,
-                                         isActiveGroup: isActive))
+                                         isActiveGroup: isActive),
+                    status: presentationByID[device.id]?.status)
             })
     }
 
@@ -875,10 +891,10 @@ public final class GroupEditorViewController: NSViewController {
         iconWell.iconImageView.image = image
     }
 
-    /// Recompute `candidateDevices` from `allDevices` — available devices,
-    /// plus any unavailable device still in `memberSet` — and rebuild the
-    /// membership rows from that list. Called on `show` and after every
-    /// membership toggle, so an unchecked unavailable member disappears.
+    /// Recompute `candidateDevices` from `allDevices` — every device, an
+    /// unavailable one offered whether or not it is a member — and rebuild
+    /// the membership rows from that list. Called on `show` and after every
+    /// membership toggle.
     ///
     /// REUSES the existing rows whenever the candidate ID SEQUENCE is
     /// unchanged — only the list's membership/labels moved, so refreshing each
@@ -899,6 +915,7 @@ public final class GroupEditorViewController: NSViewController {
             row.apply(device: device,
                       checked: memberSet.contains(device.id),
                       iconSymbolName: deviceIconController?.symbolName(for: device))
+            row.applyPresentation(presentationByID[device.id])
             row.railArmed = railArmed(for: device, memberSet: memberSet,
                                       isActiveGroup: isActiveGroup)
             // `apply` re-enables the checkbox but doesn't know about the sole-
@@ -935,6 +952,7 @@ public final class GroupEditorViewController: NSViewController {
                 checked: memberSet.contains(device.id),
                 iconSymbolName: deviceIconController?.symbolName(for: device),
                 surface: .warmPane)
+            row.applyPresentation(presentationByID[device.id])
             row.railArmed = railArmed(for: device, memberSet: memberSet,
                                       isActiveGroup: isActiveGroup)
             row.onToggle = { [weak self] deviceID, isChecked in
@@ -1062,7 +1080,7 @@ public final class GroupEditorViewController: NSViewController {
             // a failed save) and skip the repaint that puts the controls back
             // to the truth.
             if let group = editingGroup { render(group: group, devices: allDevices) }
-            presentPersistFailureAlert(message: "Couldn\u{2019}t save the change.")
+            Self.presentPersistFailureAlert(message: "Couldn\u{2019}t save the change.", over: view.window)
             return false
         }
     }
@@ -1077,7 +1095,7 @@ public final class GroupEditorViewController: NSViewController {
     }
 
     /// The refusal for a name another group already has — same window-guarded
-    /// shape as ``presentPersistFailureAlert(message:)``.
+    /// shape as ``presentPersistFailureAlert(message:over:)``.
     private func presentDuplicateNameAlert(name: String) {
         guard let window = view.window, !HeadlessRuntime.isActive else { return }
         let alert = NSAlert()
@@ -1088,13 +1106,13 @@ public final class GroupEditorViewController: NSViewController {
         alert.beginSheetModal(for: window)
     }
 
-    /// The failure alert both `saveOrReport` and the delete path present — a
-    /// sheet when a window hosts the pane, skipped headless (the `test_*`
+    /// The failure alert `saveOrReport`, the delete path and the host's
+    /// Forget present — a sheet over `window`, skipped headless (the `test_*`
     /// seams observe the failure instead).
-    private func presentPersistFailureAlert(message: String) {
-        // `view.window != nil` is NOT a headless proxy — suites host this pane
-        // in a real (ordered-out) window, so the gate has to be explicit.
-        guard let window = view.window, !HeadlessRuntime.isActive else { return }
+    static func presentPersistFailureAlert(message: String, over window: NSWindow?) {
+        // A window is NOT a headless proxy — suites host these panes in a
+        // real (ordered-out) window, so the gate has to be explicit.
+        guard let window, !HeadlessRuntime.isActive else { return }
         let alert = NSAlert()
         alert.messageText = message
         alert.informativeText = "The scene\u{2019}s saved settings couldn\u{2019}t be updated. Try again."
@@ -1118,13 +1136,13 @@ public final class GroupEditorViewController: NSViewController {
     ///
     /// Focus goes SOMEWHERE REAL. It used to go to `makeFirstResponder(nil)`,
     /// which is the exact dead-Tab state A11Y-GROUPS fixed: the window becomes
-    /// its own first responder and Tab has nothing to advance from. The host
-    /// wires ``onDidCancelRename`` to the sidebar's outline view, the one
-    /// control present whatever pane is showing.
+    /// its own first responder and Tab has nothing to advance from. It lands
+    /// on the Back control, the way out of this editor; the sidebar it used to
+    /// land on lives on the Speakers screen, not beside the editor.
     private func cancelRename() {
         nameField.abortEditing()
         restoreNameField()
-        onDidCancelRename?()
+        view.window?.makeFirstResponder(backButton)
     }
 
     /// Re-measure the rename field around its current text. An editable
@@ -1171,7 +1189,7 @@ public final class GroupEditorViewController: NSViewController {
             if !group.memberIDs.contains(deviceID) {
                 group.memberIDs.append(deviceID)
                 // Remember the device's current volume for this membership.
-                if let device = candidateDevices.first(where: { $0.id == deviceID }) {
+                if let device = groupController.devices.first(where: { $0.id == deviceID }) {
                     group.memberVolumes[deviceID] = device.volume
                 }
             }
@@ -1391,6 +1409,8 @@ public final class GroupEditorViewController: NSViewController {
     /// The rename field itself, so a test can drive real AppKit editing (a
     /// window + `makeFirstResponder`) instead of a stand-in.
     public var test_titleField: NSTextField { nameField }
+    /// The Back control (the band's "‹ Scenes" button, wired to `onBack`).
+    public var test_backButton: NSButton { backButton }
 
     /// Simulate ticking/unticking a membership row for a device.
     public func test_setMembership(_ member: Bool, for deviceID: String) {
@@ -1457,6 +1477,7 @@ public final class GroupEditorViewController: NSViewController {
 
     /// True when "Delete scene…" is currently visible (always true — the
     /// editor is edit-only).
+    public func test_presentationText(for id: String) -> String? { rowsByID[id]?.test_presentationText }
     public var test_deleteButtonVisible: Bool { !deleteButton.isHidden }
 
     /// The primary button's title — "Done" at rest, "Save" while the name
@@ -1513,7 +1534,7 @@ public final class GroupEditorViewController: NSViewController {
             try groupController.deleteGroup(id: id)
         } catch {
             test_saveFailureReported = true
-            presentPersistFailureAlert(message: "Couldn\u{2019}t delete the scene.")
+            Self.presentPersistFailureAlert(message: "Couldn\u{2019}t delete the scene.", over: view.window)
             return
         }
         Analytics.capture("scene:deleted")
@@ -1592,9 +1613,10 @@ public final class GroupEditorViewController: NSViewController {
         return nameField.bounds.width
     }
 
-    /// HEADER PARITY hooks — the three numbers that must match
-    /// `DeviceDetailViewController`'s identically-named hooks, so switching
-    /// sidebar selection never shifts the header (`GroupsHeaderParityTests`).
+    /// HEADER PARITY hooks — compared with `DeviceDetailViewController`'s
+    /// identically-named hooks by `GroupsHeaderParityTests`, which require the
+    /// same header band height and the same vertical centring; the icon's x
+    /// differs from the device page's by design.
 
     /// The icon well's laid-out frame in the pane's own coordinates.
     public var test_headerIconFrame: NSRect {
@@ -1614,6 +1636,13 @@ public final class GroupEditorViewController: NSViewController {
     public var test_headerSectionFrame: NSRect {
         view.layoutSubtreeIfNeeded()
         return headerWell.convert(headerWell.bounds, to: view)
+    }
+
+    /// The name-and-marker block's laid-out frame in the pane's own
+    /// coordinates.
+    public var test_headerTextBlockFrame: NSRect {
+        view.layoutSubtreeIfNeeded()
+        return headerTextStack.convert(headerTextStack.bounds, to: view)
     }
 
     /// T5: the number of rows currently fed to the checklist's recessed
@@ -1673,7 +1702,7 @@ extension GroupEditorViewController: RailHookProviding {
     /// icon sat ABOVE the name and the climb from the list past the whole
     /// header read badly). The header is now SIDE BY SIDE: icon and name share
     /// one horizontal band, so hooking the icon hooks the name's line too, and
-    /// the hook goes back to the well — a fixed 64 pt tile whose leading edge
+    /// the hook goes back to the well — a fixed 48 pt tile whose leading edge
     /// sits on the content inset, rather than a field whose width changes with
     /// the name it holds.
     ///

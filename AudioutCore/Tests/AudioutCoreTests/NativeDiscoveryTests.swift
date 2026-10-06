@@ -52,9 +52,10 @@ import AirPlayEngine
         model: String = "S13",
         features: String? = nil,
         address: String = "192.168.1.10",
-        port: Int = 7000
+        port: Int = 7000,
+        extraTXT: [String: String] = [:]
     ) -> ResolvedService {
-        var txt = ["deviceid": id, "model": model]
+        var txt = ["deviceid": id, "model": model].merging(extraTXT) { $1 }
         if let features { txt["features"] = features }
         return ResolvedService(
             serviceType: .airplay,
@@ -72,7 +73,8 @@ import AirPlayEngine
         name: String = "Old Express",
         model: String = "AirPort4,107",
         address: String = "192.168.1.20",
-        port: Int = 5000
+        port: Int = 5000,
+        extraTXT: [String: String] = [:]
     ) -> ResolvedService {
         ResolvedService(
             serviceType: .raop,
@@ -81,7 +83,7 @@ import AirPlayEngine
             address: address,
             family: .ipv4,
             port: port,
-            txtRecord: ["deviceid": id, "model": model]
+            txtRecord: ["deviceid": id, "model": model].merging(extraTXT) { $1 }
         )
     }
 
@@ -320,6 +322,22 @@ import AirPlayEngine
         #expect(!device.isAirPlay2Supported)
 
         discovery.stop()
+    }
+
+    /// Reading the wrong TXT key, dropping the `pw=false` check, or reordering
+    /// the precedence (Home-only over code over password) turns it red.
+    @Test func accessReadsPasswordCodeAndHomeOnlyFromTXT() {
+        func access(airplay: [String: String]? = nil, raop: [String: String]? = nil) -> AirPlayAccess {
+            NativeDiscovery.access(airplay: airplay.map { airplayService(features: ap2Features, extraTXT: $0) },
+                                   raop: raop.map { raopService(extraTXT: $0) })
+        }
+        #expect(access(raop: ["pw": "true"]) == .password)
+        #expect(access(airplay: ["flags": "0x80"]) == .password)
+        #expect(access(airplay: ["flags": "0x8"]) == .onScreenCode)
+        #expect(access(airplay: ["flags": "0x200"]) == .onScreenCode)
+        #expect(access(airplay: ["act": "2"]) == .homeMembersOnly)
+        #expect(access(raop: ["pw": "false"]) == .open)
+        #expect(access(airplay: ["act": "2", "flags": "0x80"]) == .homeMembersOnly)
     }
 
     /// Direct unit coverage of the classifier (pure/static): a nil airplay
@@ -736,6 +754,38 @@ import AirPlayEngine
         }
         #expect(back.isAvailable, "the airplay resolve brings the row back")
         #expect(back.isAirPlay2Supported, "still sticky-AP2")
+
+        discovery.stop()
+    }
+
+    /// Recomputing `access` from the lingering `_raop._tcp` record when a sticky-AP2
+    /// device loses its `_airplay._tcp` advert (flipping the lock glyph and
+    /// `credentialKind` while only availability changed) turns it red.
+    @Test func losingTheAirplayLegKeepsTheAdvertisedAccess() {
+        let browser = FakeBrowser()
+        let discovery = makeDiscovery(browser: browser)
+        let events = EventCollector()
+        discovery.onEvent = { events.append($0) }
+        discovery.start()
+
+        let id = "AA:BB:CC:DD:EE:51"
+        browser.resolve(airplayService(id: id, name: "Sonos", features: ap2Features,
+                                       extraTXT: ["act": "2"]))
+        browser.resolve(raopService(id: id, name: "Sonos"))
+        guard case .appeared(let first)? = events.wait(count: 1).first else {
+            Issue.record("expected .appeared")
+            return
+        }
+        #expect(first.access == .homeMembersOnly)
+
+        browser.remove(RemovedService(serviceType: .airplay, deviceID: id, name: "Sonos"))
+        guard case .updated(let offline)? = events.wait(count: 2).last else {
+            Issue.record("expected the offline .updated once the grace elapses")
+            return
+        }
+        #expect(!offline.isAvailable)
+        #expect(offline.access == .homeMembersOnly,
+                "the raop record carries no act key, so only availability changed")
 
         discovery.stop()
     }

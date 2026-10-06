@@ -67,6 +67,9 @@ public struct DeviceDescriptor: Sendable {
     /// `keyval` so the vendored `features_parse`/`device_id_colon_parse` run.
     public var txtRecord: [String: String]
 
+    /// Served to the vendored sender as its per-device config password; nil = none.
+    public var password: String?
+
     public init(
         name: String,
         hostname: String = "",
@@ -74,7 +77,8 @@ public struct DeviceDescriptor: Sendable {
         family: AddressFamily,
         port: Int,
         kind: ServiceKind = .airplay,
-        txtRecord: [String: String]
+        txtRecord: [String: String],
+        password: String? = nil
     ) {
         self.name = name
         self.hostname = hostname
@@ -83,6 +87,7 @@ public struct DeviceDescriptor: Sendable {
         self.port = port
         self.kind = kind
         self.txtRecord = txtRecord
+        self.password = password
     }
 
     /// The device id parsed from the `deviceid` TXT key, if present/valid.

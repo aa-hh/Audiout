@@ -197,6 +197,8 @@ public final class ControlPanelWindowController: NSWindowController {
             defer: false
         )
         panel.becomesKeyOnlyIfNeeded = false // ACTIVATING: takes key on open
+        // A code-built window defaults this to false, and Tab then has no loop to follow.
+        panel.autorecalculatesKeyViewLoop = true
         panel.isReleasedWhenClosed = false   // reused across opens (one panel, swapped content)
         panel.isRestorable = false           // decided policy (P3/W7): menu-bar app, no window restoration
         panel.animationBehavior = .utilityWindow

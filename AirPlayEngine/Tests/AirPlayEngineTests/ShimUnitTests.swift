@@ -178,7 +178,8 @@ extension SerializedEngineState {
     // (conffile_unknown_key_assert) to disable ONLY the abort while still
     // counting + logging + returning the safe default. This test flips it off,
     // confirms an unknown lookup bumps the counter and returns the default, and
-    // confirms a KNOWN key does NOT trip the counter.
+    // confirms a KNOWN key does NOT trip the counter. Turns red if `cfg_getbool`
+    // answers a per-device bool key silently for the root or sentinel section.
     @Test func conffileUnknownKeyIsLoudAndCounted() {
         let savedAssert = conffile_unknown_key_assert
         conffile_unknown_key_assert = false
@@ -206,6 +207,55 @@ extension SerializedEngineState {
         // ipv6 is served -> no additional miss.
         _ = cfg_getbool(general, "ipv6")
         #expect(conffile_unknown_key_count == before + 3, "ipv6 is a served bool key")
+
+        // A per-device bool key asked of a global section is a miss: only a
+        // table section from cfg_gettsec may answer it silently.
+        #expect(cfg_getbool(general, "exclude") == 0)
+        #expect(conffile_unknown_key_count == before + 4,
+                "a per-device bool key on a global section must register one miss")
+    }
+
+    // MARK: - per-device password table
+
+    // Turns red if cfg_gettsec stops returning a section for a device with a
+    // password, or if that section's per-device keys fall through to the
+    // unknown-key path instead of their defaults.
+    @Test func devicePasswordServesASectionUntilCleared() {
+        let savedAssert = conffile_unknown_key_assert
+        conffile_unknown_key_assert = false
+        defer {
+            conffile_set_device_password("Kitchen", nil)
+            conffile_unknown_key_assert = savedAssert
+        }
+
+        conffile_set_device_password("Kitchen", "secret")
+        let before = conffile_unknown_key_count
+        let sec = cfg_gettsec(cfg, "airplay", "Kitchen")
+        #expect(sec != nil)
+        #expect(cfg_getstr(sec, "password").map { String(cString: $0) } == "secret")
+        #expect(cfg_getstr(sec, "nickname") == nil)
+        #expect(cfg_getbool(sec, "exclude") == 0)
+        #expect(cfg_getbool(sec, "raop_disable") == 0)
+        #expect(conffile_unknown_key_count == before)
+        #expect(cfg_getint(sec, "max_volume") == 11)
+        #expect(cfg_getopt(sec, "reconnect") == nil)
+        #expect(cfg_gettsec(cfg, "airplay", "Other") == nil)
+
+        conffile_set_device_password("Kitchen", nil)
+        #expect(cfg_gettsec(cfg, "airplay", "Kitchen") == nil)
+    }
+
+    // Turns red if conffile_set_device_password frees the string it replaces,
+    // which the C device and session still point at.
+    @Test func replacedDevicePasswordStaysReadable() {
+        defer { conffile_set_device_password("Kitchen", nil) }
+
+        conffile_set_device_password("Kitchen", "first")
+        let old = cfg_getstr(cfg_gettsec(cfg, "airplay", "Kitchen"), "password")
+        conffile_set_device_password("Kitchen", "second")
+
+        #expect(old.map { String(cString: $0) } == "first")
+        #expect(cfg_getstr(cfg_gettsec(cfg, "airplay", "Kitchen"), "password").map { String(cString: $0) } == "second")
     }
 
     // MARK: - gcry_check_version min-version floor (first-light hardening #5d)

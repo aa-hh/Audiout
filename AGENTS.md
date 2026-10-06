@@ -157,6 +157,11 @@ repo. `AudioutCore` pins it by version.
      just wrote. One review found six in a single day's work; they read as
      coverage and cover nothing. If the intent is real, rewrite it to read the
      DRAWN or observed result.
+  5. A test that waits for time drives the backend's `uptimeClock`/`delayClock`
+     through `ManualDelayClock.advance(by:)`, never the wall clock. Guard 11
+     refuses sleeps, `asyncAfter`, `SuiteWait.settle(`, every `.wait(timeout:`
+     and fractional-second Timeout/Delay/Deadline/Interval/Grace/Window/Seconds
+     values; a hang ceiling is a valid `real-time-ok:` reason.
 - **Flag finished worktrees `.prunable`; never hand-delete them.** Fifteen
   worktrees' SwiftPM caches once filled the disk to zero bytes free mid-build.
   `scripts/housekeeping.sh` (invoked automatically by `scripts/run-tests.sh`
@@ -186,10 +191,11 @@ repo. `AudioutCore` pins it by version.
   worktree is refused with the reason printed.
 - **Every compile and test takes one capacity permit from a machine-wide pool.**
   Local pool (this machine): `git config audiout.localSlots` (set to 2).
-  Mule pool (remote M3 Air): `git config audiout.remoteSlots` (set to 3).
+  Mule pool (remote M3 Air): `git config audiout.remoteSlots` (set to 2).
   Entry points: `scripts/run-tests.sh`, `scripts/build.sh`, `scripts/make-app.sh`,
   `scripts/ios.sh`, `scripts/run-app.sh`, and pre-commit Guard 6 all acquire a
-  permit before work starts. Mule-full falls back to local at once (no wait).
+  permit before work starts. A full suite run on the mule takes one permit per
+  shard (up to three). Mule-full falls back to local at once (no wait).
   Local-full waits up to 600s, printing progress; ceiling reached → proceeds
   uncapped with a loud warning (never refuses). Sweep on acquire reclaims stale
   permits (dead holder, unrecognised job, or held >45 min). `bash scripts/capacity.sh status`
@@ -237,9 +243,10 @@ repo. `AudioutCore` pins it by version.
   leaves permanent residue that trashing the `.app` does not remove: a
   preferences domain, TCC grants (a dead row in System Settings › Privacy &
   Security forever), a PUBLIC aggregate audio device that keeps appearing in
-  Sound settings, and a root PTP-helper daemon. This script finds every
-  non-shipping `com.audiout.*` identity across all four surfaces, unions
-  them, and removes the lot — plus the preference domains leaked by the test
+  Sound settings, a root PTP-helper daemon, and a stored AirPlay speaker
+  password in the login keychain. This script finds every non-shipping
+  `com.audiout.*` identity across all five surfaces, unions them, and removes
+  the lot — plus the preference domains leaked by the test
   suites (`swift test` creates a per-test `UserDefaults` suite and never
   removes it; this had reached **48,769 plists**, 98% of everything in
   `~/Library/Preferences`). Dry-run by default; `--apply` to act. The shipping
@@ -280,8 +287,10 @@ any commit on `main`; GitHub's ruleset refuses a push. End every task with:
 git push -u origin HEAD
 gh pr create --fill
 bash scripts/review-branch.sh   # run the passes it prints as subagents, then: bash scripts/review-branch.sh --continue
-gh pr merge --merge --auto
 ```
+
+Then **stop and ask the owner before merging.** Only after a clear yes, run
+`gh pr merge --merge --auto`.
 
 Local `main` is a fast-forward mirror of `origin/main`, kept by
 `scripts/sync-main.sh` on a 2-minute launchd timer; never commit on it (Guard 1
@@ -289,7 +298,8 @@ still refuses), and cut worktrees from `origin/main` after `git fetch`.
 
 `tests` (the full suite, on GitHub) and `review` (the status
 `review-branch.sh --continue` posts) are the two required checks; `--auto`
-queues the PR once both are green, and the session does not wait for it.
+queues the PR to land on its own once both are green, which is why it waits for
+the owner's yes. The merge-approval hook asks on `gh pr merge` either way.
 
 **Do not work in the `main` checkout at all.** Merely *editing* it starts the
 accident, even if you never commit.
@@ -331,7 +341,12 @@ warn-only 3/5) are documented in the hook file itself:
   [docs/REVIEW-RUBRIC.md](docs/REVIEW-RUBRIC.md)).
 - **Guard 11 blocks** a commit whose new `@Test` has no comment sentence naming
   the code change that turns it red, a `print(` in a test (`print-ok` exempts),
-  or a new test file holding one test (`new-suite-ok` exempts);
+  a new test file holding one test (`new-suite-ok` exempts), or a real-time
+  wait in a test (`Task.sleep`, `Thread.sleep`, `usleep`, `sleep(`,
+  `asyncAfter`, `SuiteWait.settle(`, any `.wait(timeout:`, or a
+  Timeout/Delay/Deadline/Interval/Grace/Window/Seconds value set to a fraction
+  of a second; `real-time-ok: <reason>` exempts a line, and a hang ceiling is a
+  reason);
   `bash scripts/test-guard-test-discipline.sh` self-tests it.
 - **Guard 12 blocks** a folder AGENTS.md that gains ruling phrasing or grows
   while over its 300-word budget, and any removed line in an AGENTS-HISTORY.md;

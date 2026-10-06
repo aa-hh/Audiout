@@ -162,19 +162,24 @@ extension SerializedSharedState {
         let textGrounds: [(String, NSColor)] = [("canvas", canvas), ("panel", panel),
                                                 ("raised", raised), ("well", well)]
 
-        // The two WASHED grounds a device row's mute pill also sits on, built
-        // the way `DeviceRowView.draw(_:)` builds them: the row's `panel`
-        // ground under the gold live wash, or under the neutral hover wash.
-        // Neither is a token, so neither can be named as one — they are
-        // composited per appearance and handed in as opaque grounds.
+        // The one WASHED ground a device row's mute pill also sits on, built
+        // the way `DeviceRowView.draw(_:)` builds it: the row's `panel`
+        // ground under the neutral hover wash. It is not a token, so it
+        // cannot be named as one — it is composited per appearance and
+        // handed in as an opaque ground.
         func rowWashGrounds(_ appearanceName: NSAppearance.Name) -> [(String, NSColor)] {
             let ground = resolved(panel, appearanceName: appearanceName)
             func wash(_ token: NSColor, _ alpha: CGFloat) -> NSColor {
                 composited(resolved(token, appearanceName: appearanceName)
                             .withAlphaComponent(alpha), over: ground)
             }
-            return [("live wash", wash(Tokens.Color.gold, PopoverColumnGrid.rowLiveWashAlpha)),
-                    ("hover wash", wash(Tokens.Color.engagedChrome, PopoverColumnGrid.rowHoverWashAlpha))]
+            return [("hover wash", wash(Tokens.Color.engagedChrome, PopoverColumnGrid.rowHoverWashAlpha))]
+        }
+
+        func sidebarGrounds(_ appearanceName: NSAppearance.Name) -> [(String, NSColor)] {
+            let hex: (r: CGFloat, g: CGFloat, b: CGFloat) = appearanceName == .darkAqua
+                ? (0x2C, 0x2C, 0x2E) : (0xE8, 0xE8, 0xEA)
+            return [("sidebar", NSColor(srgbRed: hex.r / 255, green: hex.g / 255, blue: hex.b / 255, alpha: 1))]
         }
 
         let entries: [ContrastEntry] = [
@@ -187,9 +192,18 @@ extension SerializedSharedState {
                          groundsFor: sameGrounds(textGrounds)),
             ContrastEntry(name: "labelCool2", token: Tokens.Color.labelCool2, floor: 4.5,
                          groundsFor: sameGrounds(textGrounds)),
+            // The sidebar's resting grounds. These two are the assumed darkest light and
+            // lightest dark sidebar grounds for macOS 14.4-26, which are unmeasured;
+            // macOS 27 measured #F0F0F0 / #282828.
+            ContrastEntry(name: "labelCool on sidebar", token: Tokens.Color.labelCool, floor: 4.5,
+                         groundsFor: sidebarGrounds),
+            ContrastEntry(name: "labelCool2 on sidebar", token: Tokens.Color.labelCool2, floor: 3.0,
+                         groundsFor: sidebarGrounds),
             ContrastEntry(name: "goldText", token: Tokens.Color.goldText, floor: 4.5,
                          groundsFor: sameGrounds(textGrounds)),
             ContrastEntry(name: "emberText", token: Tokens.Color.emberText, floor: 4.5,
+                         groundsFor: sameGrounds(textGrounds)),
+            ContrastEntry(name: "pendingInkDim", token: Tokens.Color.pendingInkDim, floor: 4.5,
                          groundsFor: sameGrounds(textGrounds)),
             // The ink of every gold-filled call to action — the prominent button
             // and the alignment wizard's primary plates, both of which pin gold
@@ -222,11 +236,18 @@ extension SerializedSharedState {
             // had NO entry here until 2026-09-14, which is why `#227950` could
             // ship at 2.66:1 on the live wash — the same omission this file
             // already records against `gold`, repeated one token later.
+            // Measured on the row grounds for the door and on `well` for the
+            // EQ sliders' green fills.
             ContrastEntry(name: "equalizer", token: Tokens.Color.equalizer, floor: 3.0,
                          groundsFor: { appearanceName in
-                             [("canvas", canvas), ("panel", panel), ("raised", raised)]
+                             [("canvas", canvas), ("panel", panel), ("raised", raised),
+                              ("well", well)]
                                  + rowWashGrounds(appearanceName)
                          }),
+            // The Speakers tab's green is TEXT (the Available label, the counts, the
+            // Ready/Connected word) and a glyph, so it carries the body floor.
+            ContrastEntry(name: "speakersAccent", token: Tokens.Color.speakersAccent, floor: 4.5,
+                         groundsFor: sameGrounds([("panel", panel), ("raised", raised), ("well", well)])),
             // `panel` is a BACKDROP everywhere else; on the mute pill it is the
             // ink the slashed glyph is knocked out in, so it carries a glyph
             // floor there and nowhere else.
@@ -264,6 +285,19 @@ extension SerializedSharedState {
                     }
                 }
             }
+        }
+    }
+
+    // Turns red if either dark equalizer hex falls under 3:1 on scopeGround, the ground the scope's shaped trace draws on in both appearances.
+    @Test func equalizerTraceClearsTheFloorOnTheScopeGround() {
+        defer { Tokens.test_increaseContrastOverride = nil }
+        for icOn in [false, true] {
+            Tokens.test_increaseContrastOverride = icOn
+            let ratio = measuredRatio(Tokens.Color.equalizer, over: Tokens.Color.scopeGround,
+                                      appearanceName: .darkAqua)
+            let ratioString = String(format: "%.2f", ratio)
+            let message = "equalizer vs scopeGround darkAqua ic=\(icOn): \(ratioString):1 under 3.0:1"
+            #expect(ratio >= 3.0, Comment(rawValue: message))
         }
     }
 

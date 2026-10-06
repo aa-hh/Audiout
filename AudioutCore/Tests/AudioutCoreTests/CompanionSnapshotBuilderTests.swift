@@ -179,6 +179,29 @@ import AudioutProtocol
         #expect(after.devices.first { $0.id == "speaker-b" }?.isMuted == true)
     }
 
+    // Turns red if `GroupController.setMuted` stops forwarding the Mac to `backend.setMuted`, or the phone snapshot stops reporting the Mac's mute.
+    @Test func macRowIsMutedFollowsTheHardwareMute() async throws {
+        let backend = try await makeBackend()
+        let controller = makeGroupController(backend: backend)
+        let appRouting = makeAppRouting()
+
+        controller.setMuted(true, for: "local")
+        await SuiteWait.until("local to read muted on the backend") {
+            backend.devices.first { $0.id == "local" }?.isMuted == true
+        }
+        let snapshot = CompanionSnapshotBuilder.build(
+            devices: backend.devices, groupController: controller, appRouting: appRouting,
+            excludedBundleIDs: noExcludedBundleIDs, iconFor: iconFor, addableApps: noAddableApps,
+            runningRouted: noRunningRouted, liveRoutedAppNames: noLiveRoutedAppNames,
+            localFallbackActive: false, takeoverStatus: nil, serverName: defaultServerName,
+            connectVolume: defaultConnectVolume, connectVolumeMin: defaultConnectVolumeMin,
+            connectVolumeMax: defaultConnectVolumeMax, startBufferMs: defaultStartBufferMs,
+            startBufferOptionsMs: defaultStartBufferOptionsMs
+        )
+        let mac = try #require(snapshot.devices.first { $0.id == "local" })
+        #expect(mac.isMuted == true)
+    }
+
     // MARK: Trap 3 — isMainOutMember
 
     @Test func deviceIsMainOutMemberComesFromGroupControllerIsMainOutMemberNotSelectedDevices() async throws {
@@ -352,13 +375,78 @@ import AudioutProtocol
 
     // MARK: Connection fields (D9 full parity)
 
+    /// Dropping `failureCause`, or sending `credentialKind` for a speaker that
+    /// already has a stored password (or never sending it), turns it red;
+    /// so does sending a password wait as `"failed"` or with a cause.
     @Test func connectionCarriesFailureHeadlineAndSuggestion() async throws {
         let backend = try await makeBackend()
         let controller = makeGroupController(backend: backend)
         let appRouting = makeAppRouting()
 
+        func build(storedPassword: Bool, awaitingPassword: Bool = false) -> Snapshot {
+            CompanionSnapshotBuilder.build(
+                devices: backend.devices.map { device in
+                    var device = device
+                    if device.id == "speaker-b" {
+                        device.airPlayAccess = .password
+                        device.hasStoredPassword = storedPassword
+                        if awaitingPassword { device.connectionState = .awaitingPassword }
+                    }
+                    return device
+                },
+                groupController: controller, appRouting: appRouting,
+                excludedBundleIDs: noExcludedBundleIDs, iconFor: iconFor, addableApps: noAddableApps,
+                runningRouted: noRunningRouted, liveRoutedAppNames: noLiveRoutedAppNames,
+                localFallbackActive: false, takeoverStatus: nil, serverName: defaultServerName,
+                connectVolume: defaultConnectVolume, connectVolumeMin: defaultConnectVolumeMin,
+                connectVolumeMax: defaultConnectVolumeMax, startBufferMs: defaultStartBufferMs,
+                startBufferOptionsMs: defaultStartBufferOptionsMs
+            )
+        }
+        let snapshot = build(storedPassword: false)
+        let speakerB = try #require(snapshot.devices.first { $0.id == "speaker-b" })
+        let failure = ConnectionFailure(cause: .refusedOrBusy)
+        #expect(speakerB.connection.state == "failed")
+        #expect(speakerB.connection.failureHeadline == failure.headline)
+        #expect(speakerB.connection.failureSuggestion == failure.suggestion)
+        #expect(speakerB.connection.failureCause == "refusedOrBusy")
+        #expect(speakerB.connection.credentialKind == "password")
+
+        // A device with no failure carries no headline/suggestion/cause.
+        let local = try #require(snapshot.devices.first { $0.id == "local" })
+        #expect(local.connection.state == "off")
+        #expect(local.connection.failureHeadline == nil)
+        #expect(local.connection.failureSuggestion == nil)
+        #expect(local.connection.failureCause == nil)
+        #expect(local.connection.credentialKind == nil)
+
+        let stored = try #require(build(storedPassword: true).devices.first { $0.id == "speaker-b" })
+        #expect(stored.connection.credentialKind == nil)
+
+        let waiting = try #require(
+            build(storedPassword: false, awaitingPassword: true).devices.first { $0.id == "speaker-b" })
+        #expect(waiting.connection.state == "awaitingPassword")
+        #expect(waiting.connection.credentialKind == "password")
+        #expect(waiting.connection.access == "password")
+        #expect(waiting.connection.failureHeadline == nil)
+        #expect(waiting.connection.failureSuggestion == nil)
+        #expect(waiting.connection.failureCause == nil)
+    }
+
+    /// Dropping `access` from the `off` or `failed` state in
+    /// `CompanionSnapshotBuilder.connectionInfo` turns it red.
+    @Test func connectionCarriesTheSpeakersAccessKind() async throws {
+        let backend = try await makeBackend()
+        let controller = makeGroupController(backend: backend)
+        let appRouting = makeAppRouting()
+
         let snapshot = CompanionSnapshotBuilder.build(
-            devices: backend.devices, groupController: controller, appRouting: appRouting,
+            devices: backend.devices.map { device in
+                var device = device
+                device.airPlayAccess = device.id == "speaker-b" ? .password : .open
+                return device
+            },
+            groupController: controller, appRouting: appRouting,
             excludedBundleIDs: noExcludedBundleIDs, iconFor: iconFor, addableApps: noAddableApps,
             runningRouted: noRunningRouted, liveRoutedAppNames: noLiveRoutedAppNames,
             localFallbackActive: false, takeoverStatus: nil, serverName: defaultServerName,
@@ -366,17 +454,12 @@ import AudioutProtocol
             connectVolumeMax: defaultConnectVolumeMax, startBufferMs: defaultStartBufferMs,
             startBufferOptionsMs: defaultStartBufferOptionsMs
         )
-        let speakerB = try #require(snapshot.devices.first { $0.id == "speaker-b" })
-        let failure = ConnectionFailure(cause: .refusedOrBusy)
-        #expect(speakerB.connection.state == "failed")
-        #expect(speakerB.connection.failureHeadline == failure.headline)
-        #expect(speakerB.connection.failureSuggestion == failure.suggestion)
-
-        // A device with no failure carries no headline/suggestion.
-        let local = try #require(snapshot.devices.first { $0.id == "local" })
-        #expect(local.connection.state == "off")
-        #expect(local.connection.failureHeadline == nil)
-        #expect(local.connection.failureSuggestion == nil)
+        let protected = try #require(snapshot.devices.first { $0.id == "speaker-b" })
+        #expect(protected.connection.state == "failed")
+        #expect(protected.connection.access == "password")
+        let openSpeaker = try #require(snapshot.devices.first { $0.id == "local" })
+        #expect(openSpeaker.connection.state == "off")
+        #expect(openSpeaker.connection.access == "open")
     }
 
     // MARK: Passthrough fields

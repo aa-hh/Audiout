@@ -248,3 +248,53 @@ All group logic goes through the shared
 | `GroupsPaneLayout` | The panes' shared grid constants — the single parity source. |
 | `GroupedSectionView` | The one container: `.card` (raised + hairline edge) or `.bare` (inset dividers only). |
 | `SidebarSelection` | Enum: `.mainOut`, `.groupsOverview`, `.group(id:)` or `.device(id:)`. `.group` has no row of its own — the cards set it, and the sidebar highlights the Groups row for it. |
+
+
+## Archived folder rules
+
+# AudioutWindowUI
+
+## Purpose
+
+The Groups screen's content: a configuration-only tree for viewing and editing
+saved groups and for tuning speakers. It owns no window and talks to no
+backend.
+
+## Rules
+
+- Configuration-only: selection is not activation, and nothing here calls `activateGroup`.
+- Every way out of the editor lands in `MixerWindowController.dismissEditor()`: “‹ Groups”, ⌘[, the primary button, the Groups plate re-click, and the surface's Escape (which closes the window only when there is no editor to pop).
+- Hosts drive visibility through `setHostVisible(_:)`; a hidden host still stores snapshots.
+- The sidebar split must never collapse: nothing in the UI brings it back.
+- The `mixer-4-device-detail` goldens are unreproducible on macOS 27; never regenerate them.
+- Every fitting width derives from `SurfaceLayout`; raising one widens a window that must not.
+- Header parity is geometric, in `GroupsPaneLayout`; half-point misses are the run's rounding grid.
+- The rail overlay and the delete button anchor to the column, not the container.
+- `viewDidAppear` Tab seeding never runs headless; do not delete it as dead code.
+- Gold means LIVE, per row; it is never decoration here.
+- Magenta is identity, never state: `GroupIdentityGlowView` sits behind every group seat, active or not.
+- Persistence failures go through `saveOrReport(_:)`, reported in plain words, never swallowed.
+- An unavailable speaker may join a group; `orderedDevices()` is the one ordering rule (2026-08-28).
+- Ink carries temperature (C5, 2026-09-03): `labelCool` on idle names and glyphs, `label` on the live one; chrome and the sidebar stay stock. `GroupsInkTemperatureTests` pins it.
+- `GroupedSectionView`'s `.well` style is this folder's custom-drawn piece: the `Tokens.Color.shadow` inset-shade band, flat and clipped at 0.18, along the box's top edge. Both Equalizer pages wear it — `DeviceDetailViewController` and `MainOutDetailViewController` — because `raised` resolves to the pane's own ground in light, so a `.card` there is an outline around nothing (2026-09-04).
+- `DeviceIcon` is the single resolution point for a device or group symbol.
+- The three swapped panes are built and laid out in `MixerWindowController.init`, not on the
+  first swap that shows one: this controller is itself built off the click path, so its panes
+  ride along and the Equalizer door stops paying for a view tree inside the click.
+- Long-form traps, dated decisions and the changelog: [AGENTS-HISTORY.md](AGENTS-HISTORY.md). Grep it before debugging anything here.
+
+## Map
+
+- `MixerWindowController` → screen-content controller: split view, sheets, auto-select rule.
+- `ContentPaneHostViewController` → swapped overview, editor and detail pane, plus footer.
+- `GroupsOverviewViewController` → the group list: card grid with seats, absorbed empty state.
+- `SidebarViewController` → source list: Groups plate, System Audio, Speakers. A click on the already-selected Groups plate re-reports `.groupsOverview` (the click action, not the selection delegate).
+- `GroupEditorViewController` → edit-only pane: a top band carrying “‹ Groups” and the primary, then rename, membership, delete. Edits autosave, so the primary reads “Done”; it reads “Save” only while the name field holds text that has not been committed, and pressing it then commits before leaving.
+- `GroupCreationSheetController` → standard sheet for new groups; never activates.
+- `DeviceDetailViewController` → device pane: identity, Equalizer, Groups, About.
+- `MainOutDetailViewController` → Main Audio page, non-editable icon well.
+- 2026-10-04: The Speakers overview table (`SpeakersOverviewViewController`) was retired: the sidebar is the only speaker list, and the Speakers plate opens `SpeakersPageViewController`. The Forget confirm refuses, rather than deleting the scene, when forgetting would leave a scene with no speaker, because deleting a scene can move audio.
+- 2026-10-04 (owner's call, Alec): The speaker page and the Main Audio page start their header icon at `GroupsPaneLayout.railFreeContentLeadingInset` (14 pt), lined up with the Equalizer heading, so the icon's x no longer matches the scene editor's, which keeps `contentLeadingInset` for its membership rail. Header parity across panes is now the shared band height and vertical centring only; switching between a scene and a speaker moves the icon sideways by design.
+- 2026-10-04 (owner's call, Alec): The scene editor's name and "Playing" badge sit in one block centred on the header icon, so the name moves up when a scene starts playing, by design.
+- 2026-10-05: The sidebar's presence dot gave way to order: in each group the speakers the Mac can reach come first, then an "N unavailable" divider row and the rest in cool greys, and an update moves, inserts and removes rows instead of reloading the list, so rows keep their identity and a selection survives.
+- 2026-10-05: Green (`Tokens.Color.speakersAccent`) became the Speakers tab's colour for a reachable speaker and the tab's one add action, and the Speakers tab's secondary inks moved from the warm `label2`/`label3` to the cool `labelCool`/`labelCool2`, the equalizer's inks excepted.

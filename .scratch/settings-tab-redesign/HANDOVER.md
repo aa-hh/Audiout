@@ -5,9 +5,9 @@ Written 2026-10-07 for an agent taking this over cold. Everything below is check
 ## Where things stand
 
 - **Worktree:** `/Users/alechenderson/Projects/AirPlay Controller/.claude/worktrees/settings-tab-redesign-0dd6a3`
-- **Branch:** `claude/settings-tab-redesign-0dd6a3`, based on `ccd0ed98` (origin/main at the time). **Nothing is committed and the branch is not on origin yet.**
+- **Branch:** `claude/settings-tab-redesign-0dd6a3`, based on `ccd0ed98` (origin/main at the time). Committed locally as `056c23ba` (the code), `872108df` (these design files) and `9cc49f6a` (roadmap 050 bookkeeping). **The branch is not pushed to origin yet.** The code commit passed Guard 4's scoped suites (1831 tests in 98 suites).
 - **Code:** built in two tracks from `work-order.md` (this folder). Both tracks passed their build and their test filter. A review then found four problems (below). Those are the next job.
-- **Diff:** 27 tracked files changed (+1057 / −1734), five files moved with `git mv`, four new untracked source files:
+- **Diff** (`git show --stat 056c23ba`): 31 files, five files moved from `AudioutWindowUI` to `AudioutSharedUI`, four new source files:
   - `AudioutCore/Sources/AudioutSettingsUI/SettingsPane.swift`
   - `AudioutCore/Sources/AudioutSettingsUI/RemoteSettingsViewController.swift`
   - `AudioutCore/Sources/AudioutSettingsUI/LicenseSettingsViewController.swift`
@@ -56,7 +56,7 @@ bash scripts/run-tests.sh --filter 'DeviceIconWellViewTests|GroupsHeaderParityTe
    APP_NAME="Audiout Dev" BUNDLE_ID="com.audiout.Audiout.dev" bash scripts/make-app.sh
    ```
    If the slot is busy, report who holds it and use a fresh id instead. Release the slot (`bash scripts/livetest.sh done`) the moment Alec gives a verdict. Things to look at: every pane in light and dark; the selected row's inks after toggling Launch at login (finding 1); a trial build's License pane; Increase Contrast on; VoiceOver on a sidebar row (should read "License, Trial, 9 days left").
-2. **Commit** only when Alec says so. The pre-commit guards run the scoped suites. Guard 11 checks every new test for its "Red if…" sentence and bans real-time waits.
+2. **Commit** the fixes on this branch (never on `main`). The pre-commit guards run the scoped suites. Guard 11 checks every new test for its "Red if…" sentence and bans real-time waits.
 3. **Land it** through the PR flow in root `CLAUDE.md` ("Critical workflow rules"): push, `gh pr create --fill`, `bash scripts/review-branch.sh` (run the printed passes as subagents, then `--continue`). **Do not merge** without Alec's explicit yes.
 
 ## Open items Alec has not ruled on
@@ -81,7 +81,7 @@ Read in this order. Stop when you have what you need for the job in hand.
    - `inputs.md`: the content inventory and hard constraints every direction was held to.
 6. **The work order:** `work-order.md`. The Verified facts section maps every file and line the change touched; the Steps section is what was built; Out of scope lists what must not change.
 7. **The review:** `review.md`.
-8. **The code:** `git diff HEAD` plus the four untracked files above. Start with `SettingsRootViewController.swift` and `SettingsSidebarViewController.swift`, then the five pane controllers, then `AppDelegate.makeSettingsRoot()`.
+8. **The code:** `git show 056c23ba`. Start with `SettingsRootViewController.swift` and `SettingsSidebarViewController.swift`, then the five pane controllers, then `AppDelegate.makeSettingsRoot()`.
 9. **Background only, if you want the why:** `compare.html` (the four directions and the pick), `direction-a` to `direction-d` (rejected directions with their briefs).
 
 All paths without a leading folder are in `.scratch/settings-tab-redesign/` in the worktree.

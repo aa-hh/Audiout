@@ -6031,8 +6031,13 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     private var passwordResubmitted: [String: String] = [:]
 
     /// Runs `submitAirPlayPassword`'s Keychain writes (passwords and pairing
-    /// keys) and Forget's read and deletes one at a time, in the order enqueued.
+    /// keys) one at a time, in the order enqueued.
     private let passwordWriteQueue = DispatchQueue(label: "NativeBackend.passwordWrites")
+
+    /// Forgets per id. A queued submit write whose captured count no longer
+    /// matches skips the store, so it cannot undo a Forget that ran after the
+    /// submit. On `stateQueue`.
+    private var forgetGeneration: [String: Int] = [:]
 
     /// The typed password the converge catch spent its mark on, for exactly
     /// the extra attempt it grants; `descriptorToFeed` consumes it.
@@ -6107,9 +6112,9 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         // retry) runs on main after it, so the retry reads the new password.
         // Writes are enqueued on one serial queue from `stateQueue`, so two
         // submits land in submit order; deletes are synchronous on `stateQueue`
-        // at the refusal sites, and Forget's run on the same write queue, and
-        // a delete that runs after the mark is skipped only while a whole-system
-        // connect holds the slot.
+        // at the refusal sites and on the caller's thread in Forget, and a write
+        // queued before a Forget skips the store. A delete that runs after the
+        // mark is skipped only while a whole-system connect holds the slot.
         stateQueue.async {
             switch self.known[id]?.airPlayAccess {
             case .onScreenCode?:
@@ -6126,8 +6131,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             self.pendingPasswordOutcome[id] = source
             self.applyLocal(id) { $0.hasStoredPassword = true }
             let store = self.passwordStore
-            self.passwordWriteQueue.async {
-                store.setPassword(password, for: id)
+            let generation = self.forgetGeneration[id]
+            self.passwordWriteQueue.async { [weak self] in
+                if self?.stateQueue.sync(execute: { self?.forgetGeneration[id] }) == generation {
+                    store.setPassword(password, for: id)
+                }
                 DispatchQueue.main.async(execute: completion)
             }
         }
@@ -6149,6 +6157,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         let engine = self.engine
         let store = self.passwordStore
         let writes = self.passwordWriteQueue
+        let generation = forgetGeneration[id]
         // The dispatcher echoes the authorize op's terminal on the state stream
         // after its completion (`.passwordRequired` for a refused code, `.stopped`
         // for an accepted one); drop it as the converge catch drops its own, or
@@ -6158,11 +6167,12 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         Task { [weak self] in
             do {
                 let key = try await engine.authorize(outputID, pin: code)
-                // The password submits' write queue, so this write and a
-                // Forget's deletes land in the order they were enqueued.
-                // razor: a Forget while authorize is pending enqueues first, so this write still lands after it; a per-id Forget generation checked here would close it.
+                // The password submits' write queue, so this write lands after
+                // theirs. A Forget since the submit skips it.
+                // razor: a Forget between the check and the write still loses; holding both under one lock would close it.
                 writes.async {
-                    if storesKey {
+                    let forgotten = self?.stateQueue.sync { self?.forgetGeneration[id] } != generation
+                    if storesKey, !forgotten {
                         store.setPairingKey(key, for: id)
                         self?.stateQueue.sync {
                             self?.rejectedPairingKeyIDs.remove(id)
@@ -6216,26 +6226,21 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     }
 
     public func forgetAirPlayPassword(for id: String) {
-        // The Keychain read and deletes run on the submits' write queue: off the
-        // main thread and `stateQueue`, and in order with any pending submit write.
-        passwordWriteQueue.async {
-            // Read before the deletes: the event's kind falls back to it when the
-            // speaker has left `known`.
-            let hadPairingKey = self.passwordStore.pairingKey(for: id) != nil
-            self.passwordStore.removePassword(for: id)
-            self.passwordStore.removePairingKey(for: id)
-            self.stateQueue.async {
-                self.passwordResubmitted[id] = nil
-                self.passwordForNextFeed[id] = nil
-                self.expectStaleFailure.remove(id)
-                self.failureEchoSeen.remove(id)
-                self.rejectedPairingKeyIDs.remove(id)
-                self.applyLocal(id) { $0.hasStoredPassword = false }
-                let kind = self.known[id] != nil
-                    ? self.credentialKindLocked(id)
-                    : (hadPairingKey ? "onScreenCode" : "password")
-                Analytics.capture("airplay:code_forgotten", ["kind": kind])
-            }
+        // The deletes run on the caller's thread before returning, so the next
+        // `descriptorToFeed` cannot read what was forgotten. Deletes are exempt
+        // from the off-main Keychain rule: they never raise an access prompt.
+        stateQueue.async { self.forgetGeneration[id, default: 0] += 1 }
+        passwordStore.removePassword(for: id)
+        passwordStore.removePairingKey(for: id)
+        stateQueue.async {
+            self.passwordResubmitted[id] = nil
+            self.passwordForNextFeed[id] = nil
+            self.expectStaleFailure.remove(id)
+            self.failureEchoSeen.remove(id)
+            self.rejectedPairingKeyIDs.remove(id)
+            self.applyLocal(id) { $0.hasStoredPassword = false }
+            // An id that has left `known` reports "password".
+            Analytics.capture("airplay:code_forgotten", ["kind": self.credentialKindLocked(id)])
         }
     }
 

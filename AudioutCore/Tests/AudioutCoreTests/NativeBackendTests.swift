@@ -352,11 +352,14 @@ private final class SpyEngine: EngineControlling, @unchecked Sendable {
     var authorizeResults: [UInt64: Result<String, AirPlayEngineError>] = [:]
     /// Every `authorize` call, in order: the output and the code typed.
     private(set) var authorizeCalls: [(OutputID, String)] = []
+    /// When set, `authorize` waits here before answering.
+    var authorizeGate: HoldPoint?
     func authorize(_ id: OutputID, pin: String) async throws -> String {
-        let result = lock.withLock { () -> Result<String, AirPlayEngineError> in
+        let (result, gate) = lock.withLock { () -> (Result<String, AirPlayEngineError>, HoldPoint?) in
             authorizeCalls.append((id, pin))
-            return authorizeResults[id.rawValue] ?? .failure(.sessionFailed)
+            return (authorizeResults[id.rawValue] ?? .failure(.sessionFailed), authorizeGate)
         }
+        if let gate { await gate.hold() }
         return try result.get()
     }
     func setVolume(_ id: OutputID, _ volume: Double) async throws {
@@ -3325,6 +3328,42 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         #expect(engine.authorizeCalls.count == 1)
         #expect(engine.authorizeCalls.first?.0 == device.outputID)
         #expect(engine.authorizeCalls.first?.1 == "1234")
+    }
+
+    /// Forget queueing its Keychain deletes instead of running them before it
+    /// returns turns it red: the next connect's feed reads the forgotten password.
+    @Test func forgetDeletesBeforeTheNextFeedCanReadTheStore() async {
+        let store = InMemoryAirPlayPasswordStore()
+        let device = ap2Device(access: .password)
+        store.setPassword("right", for: device.id)
+        let (backend, engine, discovery) = makeBackend(passwordStore: store)
+        defer { backend.stop() }
+        await connectAP2(backend, engine, discovery, device)
+        await pollUntil { self.connectionState(backend, device.id) == .connected }
+        #expect(engine.fedDescriptorList.last?.password == "right")
+
+        backend.forgetAirPlayPassword(for: device.id)
+        let descriptor = backend.descriptorToFeed(id: device.id)
+        #expect(descriptor != nil, "the feed still matched the engine's descriptor, so it read the forgotten password")
+        #expect(descriptor?.password == nil)
+    }
+
+    /// The queued pairing-key write in `submitCodeLocked` ignoring a Forget
+    /// tapped while `engine.authorize` was pending turns it red: the key comes back.
+    @Test func aForgetDuringAnInFlightCodeCheckWinsOverTheLateKeyWrite() async {
+        let store = InMemoryAirPlayPasswordStore()
+        let (backend, engine, device) = await joinCodeSpeaker(.onScreenCode, store: store)
+        defer { backend.stop() }
+        engine.authorizeResults[device.outputID.rawValue] = .success("KEY1")
+        let gate = HoldPoint()
+        engine.authorizeGate = gate
+        // Ends only once the completion runs, which it must even when the write is skipped.
+        let submitted = Task { await self.submitAndWait(backend, "1234", for: device.id) }
+        await pollUntil { gate.entered }
+        backend.forgetAirPlayPassword(for: device.id)
+        gate.open()
+        await submitted.value
+        #expect(store.pairingKey(for: device.id) == nil)
     }
 
     /// Retrying after a refused code, or reading the refusal as anything but `.codeRequired`, turns it red.

@@ -2359,7 +2359,7 @@ public final class DeviceRowView: NSView {
         enterPasswordOffered = device.connectionState == .awaitingPassword
             && !removalUndoOffered && !switchOfferOffered
         enterPasswordButton.isHidden = !enterPasswordOffered
-        let asksForCode = device.airPlayAccess == .onScreenCode || device.airPlayAccess == .onScreenCodeEveryTime
+        let asksForCode = device.airPlayAccess == .onScreenCode
         enterPasswordButton.attributedTitle = NSAttributedString(
             string: asksForCode ? "Enter Code…" : "Enter Password…",
             attributes: [

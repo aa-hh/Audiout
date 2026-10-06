@@ -14,6 +14,25 @@ import Testing
 
     private static let server = URL(string: "https://license.example.com")!
     private static let key = "AUDT-AAAAA-BBBBB-CCCCC-DDDDD"
+    private static let newKey = "AUDT-BBBBB-BBBBB-BBBBB-BBBBB"
+
+    /// A Mac holding an active key and its companion token, as a verified
+    /// purchase leaves it.
+    private func settingsHoldingActiveKey() -> AppSettings {
+        let settings = AppSettings(defaults: defaults, licenseServerURL: Self.server)
+        settings.licenseKey = Self.key
+        settings.licenseStatus = .active
+        settings.companionToken = "tok-a"
+        settings.licenseMaxMajor = 1
+        return settings
+    }
+
+    private func expectActiveKeyKept(_ settings: AppSettings) {
+        #expect(settings.licenseKey == Self.key)
+        #expect(settings.licenseStatus == .active)
+        #expect(settings.companionToken == "tok-a")
+        #expect(settings.licenseMaxMajor == 1)
+    }
 
     /// Collects what the validator asked for and answers with a canned reply.
     /// A class because the transport closure escapes into the validator.
@@ -99,5 +118,60 @@ import Testing
             applied: false, refusalReason: "Your Mac didn’t recognise this licence. Tap Restore purchase."))
         #expect(settings.licenseKey == nil)
         #expect(transport.requests.isEmpty)
+    }
+
+    /// Red if a rejected phone key overwrote the active key and cleared its token.
+    @Test func aRevokedPhoneKeyLeavesTheActiveKeyAndItsTokenInPlace() async {
+        let settings = settingsHoldingActiveKey()
+        let transport = Transport()
+        transport.stub(status: 200, json: #"{"status":"revoked","reason":"refund"}"#)
+
+        let result = await activate(settings, Self.newKey, transport)
+
+        #expect(result == CompanionServer.CommandResult(
+            applied: false, refusalReason: LicenseCopy.statusLine(for: .revoked, reason: "refund")))
+        expectActiveKeyKept(settings)
+    }
+
+    /// Red if an unanswerable phone key displaced a verified key.
+    @Test func anUnansweredPhoneKeyLeavesTheActiveKeyAndItsTokenInPlace() async {
+        let settings = settingsHoldingActiveKey()
+        let transport = Transport()
+
+        let result = await activate(settings, Self.newKey, transport)
+
+        #expect(result == CompanionServer.CommandResult(applied: true))
+        expectActiveKeyKept(settings)
+    }
+
+    /// Red if the restore overwrote a key stored during the check.
+    @Test func aKeyStoredDuringThePhoneCheckIsNotOverwrittenByTheRestore() async {
+        let settings = settingsHoldingActiveKey()
+        let transport = Transport()
+        transport.stub(status: 200, json: #"{"status":"revoked","reason":"refund"}"#)
+        let typedKey = "AUDT-CCCCC-CCCCC-CCCCC-CCCCC"
+
+        // The validator's answer lands one main-queue turn after `activate`
+        // returns, so the write below happens while the check is in flight.
+        _ = await withCheckedContinuation { continuation in
+            CompanionLicenseActivation(settings: settings, transport: transport.closure)
+                .activate(key: Self.newKey) { continuation.resume(returning: $0) }
+            settings.licenseKey = typedKey
+        }
+
+        #expect(settings.licenseKey == typedKey)
+    }
+
+    /// Red if the restore of the previous key ran after an active verdict too.
+    @Test func anActivePhoneKeyReplacesTheActiveKeyAndTakesItsToken() async {
+        let settings = settingsHoldingActiveKey()
+        let transport = Transport()
+        transport.stub(status: 200, json: #"{"status":"active","key":"\#(Self.newKey)","companion_token":"tok-b"}"#)
+
+        let result = await activate(settings, Self.newKey, transport)
+
+        #expect(result == CompanionServer.CommandResult(applied: true))
+        #expect(settings.licenseKey == Self.newKey)
+        #expect(settings.companionToken == "tok-b")
     }
 }

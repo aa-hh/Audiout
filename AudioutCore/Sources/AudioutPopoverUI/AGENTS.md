@@ -18,7 +18,6 @@ Menu-bar Mixer and shared surface host; Core owns routing.
 - Permission answers restore window manners; abandoned alignment runs never reopen the surface.
 - The tab capsule (`SurfaceToolbarTabCapsule`) and Pin are custom-drawn: AppKit's toolbar hover and selection are two unsettable shapes. No cue sits behind `#available`.
 - Group-route membership stays live; exclusivity never hides saved-group choices.
-- Equalizer buttons open editors; the Mixer edits no tone.
 - The alignment note may carry one underlined text action left of its button, both centred.
 - Under the limit the note is session state (`limitNoteRaised`) a wizard door shows, not the wizard; the thank-you card is marked shown on Close or hide, not raise.
 - Earlier decisions and traps: [AGENTS-HISTORY.md](AGENTS-HISTORY.md).
@@ -29,3 +28,4 @@ Menu-bar Mixer and shared surface host; Core owns routing.
 - `PopoverPanelViewController` → The Mixer panel.
 - `AppSurfaceController` → Shared shell and four screens.
 - `SurfaceToolbarController` → Header strip: screen tabs and Pin.
+- `CardMessageRow` → A card's empty or permission row.

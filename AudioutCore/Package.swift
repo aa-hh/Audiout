@@ -183,9 +183,11 @@ let package = Package(
         // cause and `credentialKind` on `ConnectionInfo`; 0.19.0 adds the
         // speaker's `access` kind to `ConnectionInfo`, which
         // `CompanionSnapshotBuilder` fills so the phone draws the same lock the
-        // Mac does.
+        // Mac does; 0.20.0 adds per-speaker Mixer visibility, missing speakers,
+        // the note slot, and the `setSpeakerVisibility`/`forgetSpeakers`
+        // commands.
         .package(url: "https://github.com/aa-hh/audiout-shared.git",
-                 from: "0.19.0"),
+                 from: "0.20.0"),
         // Sparkle 2 (MIT) — in-app updates for the paid, notarised build only.
         // Scoped to the `AudioutApp` executable target so no library, test or
         // harness target ever links it.

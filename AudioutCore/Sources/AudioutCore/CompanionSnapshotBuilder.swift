@@ -96,6 +96,14 @@ public enum CompanionSnapshotBuilder {
     ///     ``alignmentReferenceID(forTarget:among:isAudible:)`` computes it
     ///     here and the phone's CTA and the Mac's staging can never disagree
     ///     about which speaker a run would measure against.
+    ///   - speakerRecord: the speaker library's record for a device
+    ///     (`SpeakerLibraryController.record(for:)` on the caller's side),
+    ///     backing each `DeviceState.mixerVisibility` and `isVisibleInMixer`.
+    ///     `nil` leaves both unset, which the phone reads as an older Mac.
+    ///   - missingSpeakers: the speakers the Mac remembers but cannot find
+    ///     right now, backing `Snapshot.missingSpeakers`; sorted by id here.
+    ///   - note: the Mac's note slot, backing `Snapshot.note`; `severity` is
+    ///     `"info"` or `"warning"`.
     public static func build(
         devices: [Device],
         groupController: GroupController,
@@ -115,13 +123,20 @@ public enum CompanionSnapshotBuilder {
         connectVolumeMax: Int,
         startBufferMs: Int,
         startBufferOptionsMs: [Int],
-        alignmentFor: (Device) -> BTSpeakerTimingReport? = { _ in nil }
+        alignmentFor: (Device) -> BTSpeakerTimingReport? = { _ in nil },
+        speakerRecord: (Device) -> SpeakerPresentationRecord? = { _ in nil },
+        missingSpeakers: [(id: String, name: String, kind: String?)] = [],
+        note: (text: String, severity: String)? = nil
     ) -> Snapshot {
         let deviceStates = devices.map { device in
             deviceState(for: device, groupController: groupController, iconFor: iconFor,
                         alignment: alignmentState(for: device, among: devices,
                                                   groupController: groupController,
-                                                  alignmentFor: alignmentFor))
+                                                  alignmentFor: alignmentFor),
+                        record: speakerRecord(device),
+                        hasLiveApps: !(device.isLocalDevice
+                            ? appRouting.routedAppNames(for: device.id, isLocalDevice: true)
+                            : liveRoutedAppNames[device.id] ?? []).isEmpty)
         }
 
         // Live names win over the caller's last-known map — a rename arriving
@@ -190,6 +205,12 @@ public enum CompanionSnapshotBuilder {
             localFallbackActive: localFallbackActive,
             takeoverStatus: takeoverStatus,
             systemDefaultIsAirPlayActive: systemDefaultIsAirPlayActive,
+            // Sorted by id for the same Equatable-stability reason as
+            // `addableApps` above.
+            missingSpeakers: missingSpeakers
+                .sorted { $0.id < $1.id }
+                .map { MissingSpeakerState(id: $0.id, name: $0.name, kind: $0.kind) },
+            note: note.map { NoteState(text: $0.text, severity: $0.severity) },
             settings: SettingsState(
                 connectVolume: connectVolume,
                 connectVolumeMin: connectVolumeMin,
@@ -255,9 +276,20 @@ public enum CompanionSnapshotBuilder {
         for device: Device,
         groupController: GroupController,
         iconFor: (Device) -> String,
-        alignment: DeviceState.AlignmentState?
+        alignment: DeviceState.AlignmentState?,
+        record: SpeakerPresentationRecord?,
+        hasLiveApps: Bool
     ) -> DeviceState {
-        DeviceState(
+        let isMember = groupController.isMainOutMember(device.id)
+        // The popover's sounding-row rule (`PopoverController.refreshCardHeaderLiveness`
+        // with `drawsConnected`) is the reference, and a change there must change this too.
+        let connectedForPlayback = device.connectionState == .connected
+            || (device.isLocalDevice && device.isAvailable && device.connectionState == .off
+                && (isMember || hasLiveApps))
+        let isPlaying = (isMember || hasLiveApps) && connectedForPlayback
+            && !groupController.isMuted(device.id)
+            && (isMember ? !groupController.isMainOutMuted : true)
+        return DeviceState(
             id: device.id,
             name: device.name,
             kind: device.kind.rawValue,
@@ -279,7 +311,10 @@ public enum CompanionSnapshotBuilder {
             isSelected: groupController.isSpeakerSelected(device.id),
             isMainOutMember: groupController.isMainOutMember(device.id),
             connection: connectionInfo(device),
-            alignment: alignment
+            alignment: alignment,
+            mixerVisibility: record?.visibility.rawValue,
+            isVisibleInMixer: record?.isVisibleInMixer,
+            isPlaying: isPlaying
         )
     }
 

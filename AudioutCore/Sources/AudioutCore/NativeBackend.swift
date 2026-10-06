@@ -270,12 +270,12 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// 330 ms apart), so every click used to land in its own window.
     let syncedLocalSettleWindow: TimeInterval
 
-    /// Monotonic `DispatchTime.now().uptimeNanoseconds` stamps of the synced-local
+    /// Monotonic `uptimeClock` seconds stamps of the synced-local
     /// transitions this backend really applied: appended only past
     /// `fireSyncedLocalSettle`'s desired-versus-applied guard, never per toggle
     /// decision, pruned to `syncedLocalTransitionHorizon` on each append, cleared
     /// by `stop()`. On `stateQueue`.
-    var syncedLocalTransitionTimes: [UInt64] = []
+    var syncedLocalTransitionTimes: [TimeInterval] = []
 
     /// Rolling horizon over which two or more real applied transitions count as
     /// churn, arming the one-shot re-sync no matter how the clicks were spaced.
@@ -354,15 +354,16 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
 
     // MARK: Bluetooth connect lifecycle (BT-LIFECYCLE)
 
-    /// Every BT id currently held at `.connecting`, with the instant its hold
-    /// expires. An entry exists ONLY while the row is breathing; the promotion
-    /// to `.connected` (or the degrade to `.failed`) removes it. On `stateQueue`.
-    var btConnectingDeadlines: [String: Date] = [:]
+    /// Every BT id currently held at `.connecting`, with the `uptimeClock`
+    /// seconds at which its hold expires. An entry exists ONLY while the row is
+    /// breathing; the promotion to `.connected` (or the degrade to `.failed`)
+    /// removes it. On `stateQueue`.
+    var btConnectingDeadlines: [String: TimeInterval] = [:]
 
-    /// When each Bluetooth UID's sink last died and was rebuilt, so a second
-    /// death inside 10 s marks the speaker gone instead of looping on a
-    /// zombie object id. On `stateQueue`.
-    var btSinkDeathAt: [String: Date] = [:]
+    /// When each Bluetooth UID's sink last died and was rebuilt, in
+    /// `uptimeClock` seconds, so a second death inside 10 s marks the speaker
+    /// gone instead of looping on a zombie object id. On `stateQueue`.
+    var btSinkDeathAt: [String: TimeInterval] = [:]
 
     /// How long after a sink death marks a speaker gone the enumerator is
     /// restarted, which re-emits the full list: it otherwise emits only on a
@@ -508,12 +509,13 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// whether that write succeeded. A push answered `false` because a newer
     /// write superseded it never lands here: it is not this value completing.
     struct CompanionRestoreCompletion { let value: Double; let ok: Bool }
+    /// Every deadline here is in `uptimeClock` seconds.
     struct CompanionAuditionLifecycle {
         let id: UUID
         let targetID: String
         let referenceID: String
-        let preparationDeadline: Date
-        let leaseDeadline: Date
+        let preparationDeadline: TimeInterval
+        let leaseDeadline: TimeInterval
         var phase: CompanionAuditionPhase = .preparing
         var startCompletions: [@Sendable (String?) -> Void]
         var stopCompletions: [@Sendable (String?) -> Void] = []
@@ -542,7 +544,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         /// actually gone. Independent of the one-shot start/stop replies: a
         /// stop that refuses on its four-second timeout does not consume it.
         var releaseCallbacks: [@Sendable () -> Void] = []
-        var cleanupDeadline: Date?
+        var cleanupDeadline: TimeInterval?
     }
     /// The .tick run remains reserved during preparation and restoration.
     var companionAudition: CompanionAuditionLifecycle?
@@ -1583,20 +1585,34 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         queue.asyncAfter(deadline: .now() + delaySeconds, execute: work)
     }
 
-    /// Runs the backed-off retries (`.processNotYetAudible`, rebind recovery,
-    /// whole-system capture) and the companion audition's preparation, lease and
-    /// stop deadlines. Only the tests pass anything but ``dispatchDelayClock``:
+    /// Runs the backed-off retries, the companion audition's deadlines and
+    /// liveness poll, and the Bluetooth hold, sink-recovery and synced-local
+    /// settle timers, among others. Only the tests pass anything but
+    /// ``dispatchDelayClock``:
     /// on the wall clock, a loaded test run let a 0.05 s backoff burn every
     /// rebind attempt before the test's next step, and a 4 s stop deadline
     /// expire mid-restoration.
     let delayClock: DelayClock
 
+    /// Monotonic seconds since boot.
+    typealias UptimeClock = @Sendable () -> TimeInterval
+
+    /// The shipping time source: `DispatchTime.now().uptimeNanoseconds` in seconds.
+    static let dispatchUptimeClock: UptimeClock = {
+        Double(DispatchTime.now().uptimeNanoseconds) / 1_000_000_000
+    }
+
+    /// The backend's reading of "now" for the Bluetooth hold and sink-death
+    /// deadlines, the synced-local churn horizon and the companion audition
+    /// deadlines. Tests pass a manual one.
+    let uptimeClock: UptimeClock
+
     // MARK: Metering (T3 — three real level sources through the event channel)
     //
     // Replaces the old single whole-system RMS fanned identically to every device.
     // Three real sources now feed the meters, all through the same `BackendEvent`
-    // channel, all popover-scoped (gated on `meteringActive`, flipped by
-    // `setMeteringActive`):
+    // channel, all gated on `levelsFlowing` (the popover's `setMeteringActive`
+    // or the Touch Bar's `setDeviceLevelsWanted`):
     //   - Per-device `.level` = MAX(the whole-system-tap RMS iff the device is a
     //     Selected Device + unmuted, the loudest PRE-volume SOURCE level among the
     //     apps `.device`-routed to it). A device fed by both shows the larger
@@ -1608,11 +1624,19 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     //       `.currentDevice` -> `localPlaybackEngine.onAppLevel` (pre-volume, raw)
     //       `.noRedirect`    -> `meteringCapture` (a dedicated `.unmuted` tap)
 
-    /// Whether a meter is currently being shown (popover open). Gates every
-    /// `.level`/`.appLevel` emission and the metering-only tap lifecycle;
-    /// forwarded to `captureCoordinator`/`routeMixer`/`localPlaybackEngine` (each
-    /// gates its own RMS pass on it). Confined to `stateQueue`.
+    /// Whether a meter is currently being shown (popover open). Gates the
+    /// metering-only tap lifecycle, and with ``deviceLevelsWanted`` every
+    /// `.level`/`.appLevel` emission (see ``levelsFlowing``). Confined to `stateQueue`.
     var meteringActive = false
+
+    /// `setDeviceLevelsWanted`: the app's Touch Bar wants `.level` while the
+    /// popover is closed. Starts no metering-only tap. Confined to `stateQueue`.
+    var deviceLevelsWanted = false
+
+    /// Either reason to compute RMS and emit levels; forwarded to
+    /// `captureCoordinator`/`routeMixer`/`leveledInjector`/`localPlaybackEngine`
+    /// (each gates its own RMS pass on it). On `stateQueue`.
+    var levelsFlowing: Bool { meteringActive || deviceLevelsWanted }
 
     /// The most recent whole-system-tap RMS (stream_id 0) — a device's system
     /// contribution when it is a Selected Device (unmuted). On `stateQueue`.
@@ -1740,6 +1764,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         captureRetryDelay: TimeInterval = 2.0,
         captureRetryMaxBackoff: TimeInterval = 10.0,
         delayClock: @escaping DelayClock = NativeBackend.dispatchDelayClock,
+        uptimeClock: @escaping UptimeClock = NativeBackend.dispatchUptimeClock,
         takeoverStripDelay: TimeInterval = 3.0,
         watchdogScheduler: SilenceWatchdogScheduling? = nil,
         silenceFallbackDelay: TimeInterval = NativeBackend.defaultSilenceFallbackDelay,
@@ -1840,6 +1865,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         self.captureRetryDelay = captureRetryDelay
         self.captureRetryMaxBackoff = captureRetryMaxBackoff
         self.delayClock = delayClock
+        self.uptimeClock = uptimeClock
         self.takeoverStripDelay = takeoverStripDelay
 
         // Wire the per-app routing callback graph (T6/T8). All four are set once
@@ -2792,6 +2818,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // Metering (T3): a later start() re-decides from a clean slate — no
             // stale system/stream RMS, metering off, no metering-only targets.
             self.meteringActive = false
+            self.deviceLevelsWanted = false
             self.latestSystemRMS = 0
             self.latestAppLevel.removeAll()
             self.lastExcludedBundleIDs.removeAll()
@@ -4025,6 +4052,19 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
 
     public var startBufferMs: Int {
         stateQueue.sync { _startBufferMs }
+    }
+
+    /// How long, in milliseconds, sound takes to reach the room when a slow
+    /// output (a Cast receiver, a high-latency Bluetooth speaker) has pushed the
+    /// room delay past the normal start buffer; `nil` when nothing is slow.
+    /// The Touch Bar pulses its play button for this long after a start or stop.
+    /// Answers on `stateQueue`, never blocking the caller: a main-thread
+    /// `stateQueue.sync` freezes the app while coreaudiod is slow.
+    public func slowOutputDelayMs(_ reply: @escaping @Sendable (Int?) -> Void) {
+        stateQueue.async {
+            let room = self.roomDelayLocked()
+            reply(room > self._startBufferMs ? room : nil)
+        }
     }
 
     /// `R` — the room delay (ms): the longest intrinsic delay any active

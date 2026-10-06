@@ -96,10 +96,8 @@ final class SetupHeroHeadView: NSView {
         headlineLabel.font = Tokens.Font.display
         headlineLabel.textColor = Tokens.Color.label
         headlineLabel.maximumNumberOfLines = 2
-        // The hero's heading, findable in VoiceOver's rotor. The raw AX string,
-        // not `NSAccessibilityHeadingRole`: that constant is macOS 26+ and this
-        // app installs on 14.2.
-        headlineLabel.setAccessibilityRole(NSAccessibility.Role(rawValue: "AXHeading"))
+        // The hero's heading, findable in VoiceOver's rotor.
+        headlineLabel.setAccessibilityHeading()
 
         // Primary ink, not secondary: this is the sentence the whole step rests
         // on, and it is the only body copy a first ask has.
@@ -178,10 +176,10 @@ final class SetupPreviewFrameView: NSView {
     }
     /// A 1 pt shade lip inside the top edge — the recess recipe
     /// `GroupedSectionView`'s `.well` style draws (DESIGN.md), at the same
-    /// 0.18 alpha, composited here because this view is layer-backed rather
+    /// `Tokens.Color.insetShadeAlpha`, composited here because this view is layer-backed rather
     /// than hand-drawn.
     private static var topLipFill: NSColor {
-        dynamicBlend(Self.wellFill, fraction: 0.18, of: Tokens.Color.shadow)
+        dynamicBlend(Self.wellFill, fraction: Tokens.Color.insetShadeAlpha, of: Tokens.Color.shadow)
     }
 
     /// Where the caller installs whatever plays in here (the demo pane). Its

@@ -106,9 +106,9 @@ public enum Tokens {
         ///
         /// CONTRAST RATIONALE (WCAG relative luminance, measured; floor 4.5:1
         /// on `canvas`/`panel`/`raised`/`well` in both appearances): dark
-        /// `#B7AC95` = 8.81 canvas / 7.99 panel / 7.02 raised / 9.07 well, and
-        /// 6.71 on `liveRow`; dark Increase Contrast `#C9C1AF` = 8.81 on
-        /// raised. Light `#6B5F4E` = 5.97 on the flat ground / 5.17 on well;
+        /// `#B7AC95` = 8.81 canvas / 7.99 panel / 7.02 raised / 9.07 well;
+        /// dark Increase Contrast `#C9C1AF` = 8.81 on raised. Light `#6B5F4E` =
+        /// 5.97 on the flat ground / 5.17 on well;
         /// light Increase Contrast `#554C3E` = 8.09 / 7.01.
         public static let label2: NSColor = warmDynamic(
             name: "label2", dark: 0xB7AC95, darkHighContrast: 0xC9C1AF,
@@ -132,11 +132,11 @@ public enum Tokens {
 
         /// **Engaged-control chrome**: the one tone every "this control is
         /// engaged / this row is picked out" surface on the mixer draws in — the
-        /// mute pill and its glyph, the SYNC chip's engaged fill and border, and
-        /// the row hover and selection washes. Strength, not hue, separates
-        /// them: each site applies its own alpha
-        /// (`PopoverColumnGrid.rowHoverWashAlpha` < `rowSelectionWashAlpha` <
-        /// `mutePillFillAlpha` < full for a glyph or border).
+        /// open SYNC chip's fill and border, a pressed toolbar seat, and the row
+        /// hover and selection washes. Strength, not hue, separates them: each
+        /// site applies its own alpha (`PopoverColumnGrid.rowHoverWashAlpha` <
+        /// `rowSelectionWashAlpha` < `engagedFillAlpha` < full for a glyph or
+        /// border).
         ///
         /// Deliberately NEUTRAL, and deliberately not the gold family. Gold
         /// means signal — in the mix, carrying audio — so painting MUTE gold
@@ -164,6 +164,12 @@ public enum Tokens {
         /// trough, the Equalizer `.well`, a plate's lip) and for darkening
         /// blends; never an `NSShadow` drop shadow. Alias of `NSColor.black`.
         public static var shadow: NSColor { .black }
+        /// Alpha of ``shadow`` for the 1 pt inset shade along a recess's top
+        /// edge: a fader's trough (`WarmFaderCell`), the Groups `.well`
+        /// (`GroupedSectionView`) and the Setup window's demo frame
+        /// (`SetupPreviewFrameView`). One value so the three recesses read
+        /// alike.
+        public static let insetShadeAlpha: CGFloat = 0.18
         /// Fully transparent fill, used to make a layer's background see
         /// through to a view behind it (`ControlPanelWindowController`). Alias
         /// of `NSColor.clear`.
@@ -229,29 +235,6 @@ public enum Tokens {
         public static var well: NSColor {
             warmDynamic(name: "well", dark: 0x050507, light: 0xE9EAEC)
         }
-        /// The ground a row carrying audio sits on — the one warm surface in
-        /// the ladder, so "this is live" is legible before any instrument is
-        /// read. Light has no separate live ground: it stays the flat
-        /// `#FAFAFB` and liveness is carried by the row's instruments alone.
-        /// No contrast floor (a background); the IC parameters carry the base
-        /// hex, the same precedent `canvas`/`panel`/`raised`/`well` set.
-        /// Measured separation: dark 1.313:1 on `canvas`, 1.192:1 on `panel`,
-        /// 1.352:1 on `well`. BARS `labelCool2` (4.38:1) and `emberText`
-        /// (4.31:1), both under the body floor; `labelCool` is barred by
-        /// temperature rather than measurement.
-        public static var liveRow: NSColor {
-            warmDynamic(name: "liveRow", dark: 0x2E2518, darkHighContrast: 0x2E2518,
-                        light: 0xFAFAFB, lightHighContrast: 0xFAFAFB)
-        }
-        /// ``liveRow``'s raised companion — a live row's lifted interior.
-        /// Same background rules and the same ink bars. Measured separation:
-        /// dark 1.292:1 on `canvas` and only 1.016:1 on `liveRow` itself; the
-        /// `well` ring that divides the two carries 1.330:1, which is what
-        /// makes the pair readable.
-        public static var liveRaised: NSColor {
-            warmDynamic(name: "liveRaised", dark: 0x2B241C, darkHighContrast: 0x2B241C,
-                        light: 0xFAFAFB, lightHighContrast: 0xFAFAFB)
-        }
         /// The 1px divider BETWEEN rows inside a container — the lighter of
         /// the two edge weights (``containerEdge`` is the container's own
         /// outer stroke, one rank up).
@@ -286,9 +269,9 @@ public enum Tokens {
         ///
         /// CONTRAST RATIONALE (measured, WCAG relative luminance; each ratio is
         /// against the surface that edge actually borders): dark `#3D4247` =
-        /// 1.95:1 vs `canvas`, 1.77:1 vs `panel`, 1.55:1 vs `raised`, 1.48:1 vs
-        /// `liveRow`; dark Increase Contrast `#6A6E72` = 3.49:1 vs `panel`,
-        /// 3.07:1 vs `raised`, and 1.159× the `hairline` IC ratio. Light
+        /// 1.95:1 vs `canvas`, 1.77:1 vs `panel`, 1.55:1 vs `raised`; dark
+        /// Increase Contrast `#6A6E72` = 3.49:1 vs `panel`, 3.07:1 vs `raised`,
+        /// and 1.159× the `hairline` IC ratio. Light
         /// `#AEB3BB` = 2.02:1 vs the flat ground, 1.75:1 vs `well`; light
         /// Increase Contrast `#67696E` = 5.27:1 / 4.56:1, and 1.160× the
         /// `hairline` IC ratio — so the container-vs-divider rank survives the
@@ -393,7 +376,7 @@ public enum Tokens {
         ///
         /// WHY A NEW HUE RATHER THAN ONE ALREADY HERE. `gold`/`ember` mean the
         /// row is carrying audio, so mute can never borrow them; `failure` red
-        /// means something went wrong and a mute is deliberate; `party`/
+        /// means something went wrong and a mute is deliberate;
         /// `partyRampDeep` is the alignment wizard's group identity, `ring` its
         /// reference light, the five `permission*` hues are fenced to
         /// onboarding, and `bluetoothBrand` is a vendor mark. Cool is the
@@ -542,10 +525,7 @@ public enum Tokens {
         }
 
         /// The COOL body ink — the same second-rung job as ``label2`` on a
-        /// surface that carries no warmth of its own. Barred from `liveRow`
-        /// and `liveRaised`: it measures 7.07:1 there and would pass, but a
-        /// cool ink on the live row's warm ground is a temperature clash, not
-        /// a contrast one.
+        /// surface that carries no warmth of its own.
         ///
         /// `static let` for the same instance-identity reason as ``label2``.
         ///
@@ -559,9 +539,7 @@ public enum Tokens {
             name: "labelCool", dark: 0xA9B3BB, darkHighContrast: 0xC0C8CD,
             light: 0x4E5A63, lightHighContrast: 0x414B53)
 
-        /// ``labelCool``'s quieter companion — the cool third rung. BARRED
-        /// from `liveRow`/`liveRaised` by measurement as well as by
-        /// temperature: 4.38:1 on `liveRow`, under the body floor.
+        /// ``labelCool``'s quieter companion — the cool third rung.
         ///
         /// `static let` for the same instance-identity reason as ``label2``.
         ///
@@ -730,8 +708,7 @@ public enum Tokens {
         }
 
         /// ``ember`` as an INK — the dim accent voice held to the 4.5:1 body
-        /// floor. BARRED from `liveRow`/`liveRaised`: 4.31:1 on `liveRow`,
-        /// under the floor.
+        /// floor.
         ///
         /// CONTRAST RATIONALE (measured; floor 4.5:1). FULL: dark `#A98341` =
         /// 5.66:1 vs `canvas` / 5.14:1 vs `panel` / 4.51:1 vs `raised` /
@@ -771,9 +748,13 @@ public enum Tokens {
 
         /// The gold bloom/halo hue — the rail bead, the ring's arrival pulse
         /// and the header-dot bloom: transient strokes and fills, never a
-        /// shadow (the armed dot carries no halo). CONTRAST RATIONALE: NO floor
+        /// shadow (the armed dot carries no halo). In light it is also the
+        /// pending Cast glow's light (``pendingGlow`` reuses these hexes).
+        /// CONTRAST RATIONALE: NO floor
         /// (transient/halo only — it never carries meaning alone; the ≥3:1
-        /// `gold` disc under it does). Measured for the record: dark `#FFD97A`
+        /// `gold` disc under it does, and on a pending Cast hold the thumb
+        /// body's tint, the breathing number and the "applying" accessibility
+        /// text carry the meaning while the halo is the accent). Measured for the record: dark `#FFD97A`
         /// = 13.22:1 vs `panel`; light `#E8B84B` = 1.77:1 vs the flat ground
         /// (a soft paper halo — acceptable because floor-exempt). House rule 3
         /// still requires IC variants: both reuse the base hexes (a halo needs
@@ -803,6 +784,56 @@ public enum Tokens {
                                              light: 0xE8B84B, lightHighContrast: 0xE8B84B),
                           subtle: WarmVariants(dark: 0xEBCE88, darkHighContrast: 0xFFE39E,
                                                light: 0xD1BC8A, lightHighContrast: 0xC2AB74))
+        }
+
+        /// The light of the pending Cast glows: the fader thumb's halo and
+        /// body tint (`WarmFaderCell`) and the sync drawer's value-field halo
+        /// (`BTSyncDrawerView`), while a Cast volume or offset waits out the
+        /// stream lag (owner's pick, 2026-10-06). Dark is white blended
+        /// halfway toward ``glow`` per column; light is ``glow``'s own hexes,
+        /// because white vanishes on the near-white ground.
+        ///
+        /// CONTRAST RATIONALE: NO floor, like ``glow`` (a halo and a tint,
+        /// never the only carrier: the breathing number and the "applying"
+        /// accessibility text say the same thing). Measured for the record:
+        /// FULL dark `#FFECBD` = 15.38:1 vs `panel` / 13.50:1 vs `raised`;
+        /// light `#E8B84B` = 1.77:1 vs the flat ground / 1.53:1 vs `well`.
+        /// SUBTLE dark `#F5E7C4` = 14.63:1 / 12.84:1, dark Increase Contrast
+        /// `#FFF1CF` (from Subtle IC `glow` `#FFE39E`); light `#D1BC8A` =
+        /// 1.79:1 / 1.55:1, light IC `#C2AB74`. Full IC variants reuse the
+        /// base hexes, as ``glow``'s do.
+        public static var pendingGlow: NSColor {
+            accentDynamic(name: "pendingGlow",
+                          full: WarmVariants(dark: 0xFFECBD, darkHighContrast: 0xFFECBD,
+                                             light: 0xE8B84B, lightHighContrast: 0xE8B84B),
+                          subtle: WarmVariants(dark: 0xF5E7C4, darkHighContrast: 0xFFF1CF,
+                                               light: 0xD1BC8A, lightHighContrast: 0xC2AB74))
+        }
+
+        /// The dim end of the pending Cast number's breath: the row's `%`
+        /// readout and the sync drawer's digits swing between this and
+        /// ``goldText`` while a Cast change is not yet audible. Dark is
+        /// ``emberText``'s hexes. Light cannot use ``emberText``: it has
+        /// ``goldText``'s luminance, so a breath between them would not show.
+        /// Full light is `#64480C`, the dim end the ink exploration mocked and
+        /// the owner approved (2026-10-06), which is also Full light-IC
+        /// ``goldText``. The other light variants are ``goldText`` blended
+        /// 40 % toward ``inkOnFill``'s dark ink `#171104` in their column.
+        ///
+        /// CONTRAST RATIONALE (measured; floor 4.5:1, it is text). FULL: dark
+        /// `#A98341` = 5.66:1 vs `canvas` / 5.14:1 vs `panel` / 4.51:1 vs
+        /// `raised` / 5.83:1 vs `well` (IC `#C4AA7C` 7.05:1 on `raised`);
+        /// light `#64480C` = 8.14:1 vs the flat ground / 7.05:1 vs `well`, so
+        /// the light breath runs 8.14 to 5.66:1 on the ground; light IC
+        /// `#453209` = 11.75:1 / 10.18:1. SUBTLE: dark `#95886B` = 4.51:1 on
+        /// `raised` (IC `#B6AC98` 7.01:1); light `#524527` = 8.99:1 / 7.79:1
+        /// (IC `#3E341D` 11.75:1 / 10.18:1).
+        public static var pendingInkDim: NSColor {
+            accentDynamic(name: "pendingInkDim",
+                          full: WarmVariants(dark: 0xA98341, darkHighContrast: 0xC4AA7C,
+                                             light: 0x64480C, lightHighContrast: 0x453209),
+                          subtle: WarmVariants(dark: 0x95886B, darkHighContrast: 0xB6AC98,
+                                               light: 0x524527, lightHighContrast: 0x3E341D))
         }
 
         /// The ink a BRIGHT-gold or bright-instrument fill carries — the
@@ -1175,7 +1206,7 @@ public enum Tokens {
         // rather than the fixed plate itself. The wizard's REFERENCE light
         // and rim are `ring` — pinned to its dark hex on the stage, themed on
         // the plates — so `ring` needs no Deep companion of its own.
-        // `party`/`partyRampDeep` are group identity (C1) and are not drawn
+        // `partyRampDeep` is group identity (C1) and is not drawn
         // on this sheet. None of these are accent-dial remapped (spec §2.2):
         // the stage no longer borrows `gold`/`glow`, so the dial's remap
         // cannot collide with "which speaker" identity.
@@ -1233,15 +1264,7 @@ public enum Tokens {
                        light: 0x0B7A45, lightHighContrast: 0x086237)
         }
 
-        /// The website's Party Magenta — group identity, consumed by the
-        /// popover and Groups. Fixed in both appearances. CONTRAST
-        /// RATIONALE: measured 9.71:1 vs `stagePlate`.
-        public static var party: NSColor {
-            warmDynamic(name: "party", dark: 0xFF90E9, darkHighContrast: 0xFF90E9,
-                       light: 0xFF90E9, lightHighContrast: 0xFF90E9)
-        }
-
-        /// `party`'s themed chrome companion — "the magenta ramp's own
+        /// The group-identity magenta — "the magenta ramp's own
         /// dark end" (spec §2.1), for the popover/Groups grounds that theme.
         /// Dark keeps the electric value at FULL strength (owner ruling
         /// 2026-08-23), the same way `syncSignalDeep` does.
@@ -1260,30 +1283,6 @@ public enum Tokens {
             warmDynamic(name: "fuseWhite", dark: 0xFFF4E2, darkHighContrast: 0xFFF4E2,
                        light: 0xFFF4E2, lightHighContrast: 0xFFF4E2)
         }
-
-        // MARK: Deprecated aliases (removed by the surface PRs)
-        //
-        // Every retired or renamed token forwards here so no surface changed
-        // in the commit that re-valued the palette. Each surface PR deletes
-        // the aliases it is the last consumer of — grep `Tokens.Color.<old>`
-        // across Sources AND Tests before removing one. An enum cannot alias a
-        // case, but `Tokens.Color` has no cases (its members are static
-        // properties), so a forwarding static property is the alias; because
-        // `label2`/`label3` are `static let`, identity comparisons still hold
-        // through them.
-
-        @available(*, deprecated, renamed: "label2")
-        public static var secondaryLabel: NSColor { label2 }
-        @available(*, deprecated, renamed: "label2")
-        public static var inkSecondary: NSColor { label2 }
-        @available(*, deprecated, renamed: "label3")
-        public static var tertiaryLabel: NSColor { label3 }
-        @available(*, deprecated, renamed: "label3")
-        public static var inkTertiary: NSColor { label3 }
-        @available(*, deprecated, renamed: "gold")
-        public static var accent: NSColor { gold }
-        @available(*, deprecated, renamed: "partyRampDeep")
-        public static var partySignalDeep: NSColor { partyRampDeep }
     }
 
     // MARK: - Type
@@ -1297,7 +1296,7 @@ public enum Tokens {
     /// alone are ledgered in their owning folders' `AGENTS.md` rather than
     /// tokenised without a type-scale decision. Two spec-named custom
     /// exceptions: ``microLabel`` (the Warm Signal §2 micro-label voice) and
-    /// ``detail``/``display`` (P1-4's two newly-promoted sizes).
+    /// ``display`` (P1-4's newly-promoted size).
     public enum Font {
         /// Standard body text at the system's default control size — the most
         /// common label font in the app (row names, headings, form labels).
@@ -1308,9 +1307,6 @@ public enum Tokens {
         public static var bodyEmphasized: NSFont {
             .systemFont(ofSize: NSFont.systemFontSize, weight: .semibold)
         }
-        /// Bold body text, currently without a consumer. Alias of
-        /// `NSFont.boldSystemFont(ofSize:)`.
-        public static var bodyBold: NSFont { .boldSystemFont(ofSize: NSFont.systemFontSize) }
         /// A heading one step up from body (e.g. device-detail/group-editor
         /// name fields, +3pt semibold). Alias of
         /// `NSFont.systemFont(ofSize: NSFont.systemFontSize + 3, weight: .semibold)`.
@@ -1392,19 +1388,18 @@ public enum Tokens {
         /// chips on `AlignmentPlateButton`): the plain system face at the
         /// micro-label weight. Not monospaced — the chip draws the WORD
         /// "SPACE" and iOS's One Case rule has no monospaced design; measured
-        /// 36.58 pt in the 44 pt wide chip.
-        public static var keycap: NSFont {
-            .systemFont(ofSize: 11, weight: .semibold)
-        }
+        /// 36.58 pt in the 44 pt wide chip. The same font as
+        /// ``captionEmphasized``; the name keeps the job searchable.
+        public static var keycap: NSFont { captionEmphasized }
         /// The wizard's two ANSWER plates' title (owner ruling 2026-08-23:
         /// 236×88 hero plates with a 15 pt semibold title). Neither
         /// ``bodyEmphasized`` (13) nor ``heading`` (16) is that size; only
         /// `BTAlignmentWizardView` consumes it.
         public static var plateTitle: NSFont { .systemFont(ofSize: 15, weight: .semibold) }
-        /// The compact explanatory voice (design-token audit P1-4): the
-        /// alignment prompt copy and the card note line — an 11 pt regular size
-        /// two call sites already used independently.
-        public static var detail: NSFont { .systemFont(ofSize: 11) }
+        /// The compact explanatory voice: the alignment note and prompt copy and
+        /// the card note line. The same font as ``caption``; the name keeps the
+        /// job searchable.
+        public static var detail: NSFont { caption }
         /// The Setup window's display headline voice (design-token audit
         /// P1-4): a 20 pt bold size two exact-duplicate call sites already
         /// used independently.
@@ -1485,16 +1480,22 @@ public enum Tokens {
         public static let panelCornerRadius: CGFloat = 12
         /// The System Settings "grouped inset-list" card corner radius —
         /// onboarding's `RoundedContainerView` (the permission card) rounds
-        /// at it. The Groups window rounds on the ``Radius`` ladder below.
-        public static let groupedSectionCornerRadius: CGFloat = 10
+        /// at it. The window pages round on the ``Radius`` ladder below.
+        public static let permissionCardCornerRadius: CGFloat = 10
+
+        /// The vertical gap between a title line and the subtitle or caption
+        /// line under it: row names over their sublabel, a page header's name
+        /// over its caption, a list row's title over its caption.
+        public static let titleSubtitleSpacing: CGFloat = 2
 
         /// The iPhone companion's three corner radii (`WarmSignal.Radius` in
         /// `audiout-remote`), carried across so the two apps round the same
         /// shapes by the same amounts. The rows PR and the Groups PR adopted
         /// them (D6 of PR 5: card/tile = row, seats/chips/plate/picker =
-        /// control, the Equalizer and checklist card = panel). Distinct from
-        /// ``panelCornerRadius`` above, which is the control-panel shell's
-        /// bubble and stays 12.
+        /// control, a `GroupedSectionView` card or well = panel; the Equalizer
+        /// wells on the speaker page and Main Audio override to row).
+        /// Distinct from ``panelCornerRadius`` above, which is the
+        /// control-panel shell's bubble and stays 12.
         public enum Radius {
             /// A control's own corner — buttons, chips, fields.
             public static let control: CGFloat = 10
@@ -1513,8 +1514,9 @@ public enum Tokens {
     /// used.
     public enum Motion {
         /// How long ANY collapsible element in the app takes to unfold into —
-        /// or fold out of — its host, on one curve (`.easeInEaseOut`): the
-        /// popover's inserted rows, device-type subsections and card bodies
+        /// or fold out of — its host, on one curve (the quadratic ease-in-out
+        /// `FoldAnimator` computes per tick): the popover's inserted rows,
+        /// device-type subsections and card bodies
         /// (`CardView.setBodyCollapsed`). The Setup window's permission cards
         /// were replaced by the non-collapsing spine (Direction 04), so it is no
         /// longer one of them. ONE value, so an expand is the exact

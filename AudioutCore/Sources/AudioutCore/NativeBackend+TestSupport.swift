@@ -85,6 +85,14 @@ extension NativeBackend {
     /// failed reconnect legitimately deselects the model row.
     var test_expectedSelected: Set<String> { stateQueue.sync { expectedSelected } }
 
+    /// Test-only (`@testable`): the whole-system Cast selection, which a
+    /// receiver fed only by per-app routes must never enter.
+    var test_castSelectedIDs: [String] { stateQueue.sync { castSelectedIDs } }
+
+    /// Test-only (`@testable`): the Cast sessions and producers last handed to
+    /// the manager.
+    var test_castLastApplied: [String: CastFeedSource] { stateQueue.sync { castLastApplied } }
+
     /// Test-only (`@testable`): the settle window this instance was built with,
     /// so a test can pin the production default rather than trust it.
     var test_syncedLocalSettleWindow: TimeInterval { syncedLocalSettleWindow }

@@ -311,6 +311,18 @@ repo-wide and are detailed in [../AGENTS.md](../AGENTS.md): subclass
 dirs directly, and use `Telemetry._installTestSink(_:)` to assert a
 subsystem's own emissions rather than adding ad hoc logging hooks.
 
+**Per-app Cast routes (2026-10-04):** a Cast receiver can be one app's
+`.device` destination (never a saved group's member). `CastFeedSource` names
+the one producer each Cast session takes: `.wholeSystem` (the capture fan-out)
+or `.perApp` (the mixer, through `CastOutputManager.writePerApp` by device id).
+Which receivers hold a session, and which producer feeds each, is decided in
+one place, `reconcileCastSessionsLocked`: the whole-system selection plus every
+reachable Cast receiver a per-app route targets. A per-app-only receiver never
+enters `castSelectedIDs`, so it holds no room delay and never moves the AirPlay
+pre-delay. Whole-system still wins a contested receiver: claiming it flips the
+same session to `.wholeSystem` and demotes the app's route, and releasing it
+flips it back with no relaunch.
+
 2026-10-04, AirPlay passwords: a stored password the receiver refuses is deleted at the failure site (the connect catch and both state-stream failure arms in `NativeBackend`) and never retried, so a wrong password costs one attempt, not one per reconnect. On AirPlay 2 a refused password and a network failure during connect both arrive as a plain failure, so a speaker that advertises a password reads any connect failure as a bad password until the engine can say more. `notePasswordOutcome`, reading `pendingPasswordOutcome`, is the one place `airplay:code_submitted` fires, for submissions from the Mac and the phone alike.
 
 2026-10-04, AirPlay passwords, review round 1 (supersedes the deletion rule above): a stored password is deleted only when the engine reports `.passwordRequired`, at the connect catch or a state-stream failure arm. A plain `sessionFailed` on a `.password` or `.homeMembersOnly` speaker is still read as that demand, so the user gets the prompt or the Home-app instruction, but the password is kept, because a Wi-Fi blip looks the same; every other connect error is `.unknown`. A password or code demand with no password fed leaves the speaker available, so it keeps offering "Enter password"; only a refused password makes it unavailable (owner's ruling). A password submitted while a connect is still failing buys one more attempt (`passwordResubmitted`) instead of parking, so the typed password reaches the receiver. Keychain reads happen on the caller's thread before `stateQueue`, because a read can wait on an access prompt.

@@ -146,7 +146,10 @@ extension NativeBackend {
     /// device's delay gate has opened (`BTDeviceSink.hasStartedRendering`) and is the
     /// same state that arms its dot — NOT `btSelectedUIDs`, which is intent and would
     /// light the bar on a selected-but-silent speaker; and `castPlaying` for a
-    /// receiver that has reported PLAYING. Both sinks are handed the identical
+    /// whole-system-selected receiver that has reported PLAYING. A per-app-only
+    /// Cast receiver is fed by the mixer, not this RMS, so it is never meterable
+    /// here: its bar is its routed app's source level through
+    /// `emitCombinedLevel`. Both sinks are handed the identical
     /// captured PCM this RMS was measured from (BT-FANOUT / CAST-FANOUT in
     /// `NativeCaptureCoordinator.deliver`), so reusing it is exact for them too.
     /// TRAP: the bar therefore shows the UNDELAYED source. A BT sync trim moves that
@@ -156,7 +159,7 @@ extension NativeBackend {
     /// Must run on `stateQueue`, like every caller.
     func isMeterable(_ device: Device) -> Bool {
         if device.isBluetooth { return device.connectionState == .connected }
-        if device.isCast { return castPlaying.contains(device.id) }
+        if device.isCast { return castPlaying.contains(device.id) && castSelectedIDs.contains(device.id) }
         return device.isLocalDevice ? syncedLocalSinkApplied : device.isSelected
     }
 

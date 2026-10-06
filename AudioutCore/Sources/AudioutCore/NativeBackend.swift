@@ -307,10 +307,9 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// sink is internally synchronized).
     let btSinkRefLock = NSLock()
 
-    /// One per-app mixed stream's Bluetooth delivery: the speakers it feeds, the
-    /// S16LE→Float bridge's resampler (streaming filter state, hence one per
-    /// stream and never shared), and whether that same stream still has an
-    /// engine-bound device, i.e. whether the AirPlay write stays.
+    /// One per-app mixed stream's Bluetooth delivery: the speakers it feeds and
+    /// the S16LE→Float bridge's resampler (streaming filter state, hence one per
+    /// stream and never shared).
     ///
     /// The manager is resolved per buffer rather than captured: the map is built
     /// on `stateQueue`, and the manager may not exist until the transition that
@@ -320,15 +319,13 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// takes Float frames; it goes away if ``BTSyncedSink`` ever accepts S16LE.
     final class BTPerAppStreamFeed: SyncedLocalPCMSink, @unchecked Sendable {
         let uids: [String]
-        let feedsEngine: Bool
         let renderSampleRate: Double
         let resampler: SyncedLocalBaseResampler
         let manager: @Sendable () -> BTSyncedSinkControlling?
 
-        init(uids: [String], feedsEngine: Bool, renderSampleRate: Double,
+        init(uids: [String], renderSampleRate: Double,
              manager: @escaping @Sendable () -> BTSyncedSinkControlling?) {
             self.uids = uids
-            self.feedsEngine = feedsEngine
             self.renderSampleRate = renderSampleRate
             self.resampler = SyncedLocalBaseResampler(
                 inputRate: Double(PCMFormat.airplay.sampleRate),
@@ -343,14 +340,22 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         }
     }
 
+    /// One per-app mixed stream's three additive transports: whether an
+    /// engine-bound device keeps the AirPlay write, the Bluetooth feed when the
+    /// stream has Bluetooth members, and the Cast receivers fed by device id.
+    struct PerAppStreamDelivery {
+        let engine: Bool
+        let bt: BTPerAppStreamFeed?
+        let castIDs: [String]
+    }
+
     /// Where each per-app mixed stream is delivered, keyed by `streamID`.
-    /// Rebuilt whole by ``rebuildBTPerAppFeedsLocked(_:)`` and read on the
+    /// Rebuilt whole by ``rebuildPerAppDeliveriesLocked(_:)`` and read on the
     /// mixer's delivery thread, so it takes its own leaf lock rather than
     /// `stateQueue` (the same posture as ``btSinkRefLock`` above). A stream with
-    /// no Bluetooth destination has NO entry, which is what leaves the
-    /// AirPlay-only path exactly as it was.
-    var btPerAppFeeds: [Int: BTPerAppStreamFeed] = [:]
-    let btPerAppFeedsLock = NSLock()
+    /// no entry writes to the engine only, as it always has.
+    var perAppDeliveries: [Int: PerAppStreamDelivery] = [:]
+    let perAppDeliveriesLock = NSLock()
 
     // MARK: Bluetooth connect lifecycle (BT-LIFECYCLE)
 
@@ -718,6 +723,10 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// The Cast ids `setOutputSet` last committed (`stateQueue`), sorted, so a
     /// routing call that changes none of them re-applies nothing.
     var castSelectedIDs: [String] = []
+    /// The Cast ids last handed to the manager and the producer each one takes
+    /// (`stateQueue`): the whole-system selection plus every reachable receiver
+    /// a per-app route targets. Written only by `reconcileCastSessionsLocked`.
+    var castLastApplied: [String: CastFeedSource] = [:]
     /// Cast ids whose receiver has reported PLAYING (`stateQueue`) — the audible
     /// fact `desiredDeviceAudibleLocked` reads.
     var castPlaying: Set<String> = []
@@ -1905,18 +1914,23 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 AudioDiag.tick("engineWrite:stream\(mixed.streamID)",
                                detail: "s16peak=\(Self.diagS16Peak(mixed.pcm)) frames=\(mixed.frameCount)")
             }
-            // R-partition, per-app half: a stream can span an AirPlay receiver
-            // and a Bluetooth speaker, so the two deliveries are ADDITIVE. No
-            // entry at all means no Bluetooth on this stream — the engine write
-            // then stands alone, as it always has.
-            let feed = self.btPerAppFeedsLock.withLock { self.btPerAppFeeds[mixed.streamID] }
-            if feed?.feedsEngine ?? true {
+            // R-partition, per-app half: a stream can span an AirPlay receiver,
+            // a Bluetooth speaker and a Cast receiver, so the three deliveries
+            // are ADDITIVE. A Cast-only stream touches neither the engine nor
+            // Bluetooth; no entry at all means the engine write stands alone.
+            let delivery = self.perAppDeliveriesLock.withLock {
+                self.perAppDeliveries[mixed.streamID]
+            }
+            if delivery?.engine ?? true {
                 self.engine.write(
                     pcm: pcm, streamId: UInt32(mixed.streamID), pts: mixed.pts)
             }
-            if let feed {
+            if let feed = delivery?.bt {
                 NativeCaptureCoordinator.fanOutToSyncedLocal(
                     pcm, pts: mixed.pts, into: feed, resampler: feed.resampler)
+            }
+            for id in delivery?.castIDs ?? [] {
+                self.castOutputManager?.writePerApp(pcm: pcm, toDevice: id)
             }
             // BACKPRESSURE VISIBILITY (diagnostic): the engine's write guard can
             // silently DROP audio once a stream's un-drained backlog hits its cap
@@ -2653,6 +2667,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // CAST-OUT: same shape — reset the decisions here, enqueue the
             // teardown below so the FIFO's last Cast op is the disable.
             self.castSelectedIDs = []
+            self.castLastApplied = [:]
             self.castPlaying = []
             // CAST-SYNC: the room delay goes with them. Publishing the AirPlay
             // line away is enqueued below with the rest of the Cast teardown,
@@ -2702,7 +2717,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                     composition: BTGroupComposition(airPlayPresent: false, macLocalPresent: false))
             }
             self.captureControlQueue.async { [weak self] in
-                self?.applyCastTransition(enable: false, records: [], levels: [:])
+                self?.applyCastTransition(records: [], sources: [:], levels: [:])
                 if hadCastTerm || hadBTTerm { self?.captureCoordinator?.setAirPlayPreDelay(ms: 0) }
             }
             let ids = self.order
@@ -3047,9 +3062,10 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // gain. `pushBTSinkGainLocked` folds mute/hold in as 0, so this
             // can't unmute or blow through a first-mix hold.
             for uid in self.btSelectedUIDs { self.pushBTSinkGainLocked(uid) }
-            // Same for every selected Cast id — `castLevel(forID:)` folds mute
-            // in as 0, so this can't unmute a receiver either.
-            for id in self.castSelectedIDs { self.pushCastLevelLocked(id) }
+            // Same for every Cast id holding a session, selected or fed by a
+            // per-app route — `castLevel(forID:)` folds mute in as 0, so this
+            // can't unmute a receiver either.
+            for id in self.castLastApplied.keys.sorted() { self.pushCastLevelLocked(id) }
             // The Mac's own path carries `group × device`, and Main too whenever we
             // own the volume — there it is the ONLY thing applying Main to the Mac,
             // so a Main-only move has to re-push as well. When macOS owns the

@@ -243,13 +243,14 @@ extension PopoverController {
     }
 
     /// The members of `group` that could carry this app's own stream right now:
-    /// discovered, reachable, and eligible per
-    /// `Device.canBePerAppRouteTarget()` (`available` is already
-    /// filtered to that), and not already claimed by the main output (one role
+    /// discovered, reachable (`available` is already filtered to the device
+    /// rule, `Device.canBePerAppRouteTarget()`), eligible as a group member per
+    /// `Device.canBePerAppGroupMember()` (the device rule minus Cast, applied
+    /// here), and not already claimed by the main output (one role
     /// per speaker — the main mix is the senior claim, and the app plays on
     /// whatever is left).
     private func usableGroupMemberIDs(_ group: Group, available: [Device]) -> [String] {
-        let availableIDs = Set(available.map(\.id))
+        let availableIDs = Set(available.filter { $0.canBePerAppGroupMember() }.map(\.id))
         return group.memberIDs.filter {
             availableIDs.contains($0) && groupController?.isMainOutMember($0) != true
         }
@@ -323,9 +324,10 @@ extension PopoverController {
     ///
     /// Readers: `appDestinations(devices:keeping:bundleID:)`,
     /// `usableGroupMemberIDs(_:available:)`, `appRow(_:didSelectDestination:for:)`'s
-    /// group-analytics count, and `update(devices:)`'s R5 tracking. Widening the
-    /// shared predicate therefore also widens which group members an app can
-    /// play on, via `usableGroupMemberIDs`.
+    /// group-analytics count, and `update(devices:)`'s R5 tracking. The group
+    /// member rule, `Device.canBePerAppGroupMember()`, is applied inside
+    /// `usableGroupMemberIDs`, so a Cast receiver is listed here as a device
+    /// but never counts as a usable group member.
     func availableAirPlayDestinations(devices: [Device]) -> [Device] {
         devices.filter { $0.isAvailable && $0.canBePerAppRouteTarget() }
     }

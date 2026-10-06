@@ -51,6 +51,14 @@ import Testing
         var all: [Int?] { lock.withLock { values } }
     }
 
+    /// How many times a feed writer has fired.
+    private final class TickCount: @unchecked Sendable {
+        private let lock = NSLock()
+        private var count = 0
+        func bump() { lock.withLock { count += 1 } }
+        var value: Int { lock.withLock { count } }
+    }
+
     private func waitUntil(
         timeout: TimeInterval,
         sourceLocation: SourceLocation = #_sourceLocation,
@@ -147,7 +155,7 @@ import Testing
         let manager = makeManager()
         defer { manager.stopAll() }
         let log = watch(manager, deviceID: "dev1")
-        manager.setDevices([record(endpoint)])
+        manager.setDevices([record(endpoint)], sources: [:])
 
         #expect(waitUntil(timeout: 10) { log.contains(.playing) },
                 Comment(rawValue: "never reached PLAYING, saw \(log.all)"))
@@ -182,7 +190,7 @@ import Testing
         writer.resume()
         defer { writer.cancel() }
 
-        manager.setDevices([record(endpoint)])
+        manager.setDevices([record(endpoint)], sources: [:])
         #expect(waitUntil(timeout: 10) { log.contains(.playing) },
                 Comment(rawValue: "never reached PLAYING, saw \(log.all)"))
         // PLAYING lands as soon as PLAY is answered; the 300 000th byte only
@@ -216,7 +224,7 @@ import Testing
         let manager = makeManager()
         defer { manager.stopAll() }
         let log = watch(manager, deviceID: "dev1")
-        manager.setDevices([record(endpoint)])
+        manager.setDevices([record(endpoint)], sources: [:])
         try #require(waitUntil(timeout: 10) { log.contains(.playing) }, "never reached PLAYING")
 
         manager.setLevel(0.4, forDevice: "dev1")
@@ -246,10 +254,10 @@ import Testing
         defer { fake.stop() }
         let manager = makeManager()
         let log = watch(manager, deviceID: "dev1")
-        manager.setDevices([record(endpoint)])
+        manager.setDevices([record(endpoint)], sources: [:])
         try #require(waitUntil(timeout: 10) { log.contains(.playing) }, "never reached PLAYING")
 
-        manager.setDevices([])
+        manager.setDevices([], sources: [:])
         #expect(waitUntil(timeout: 5) { log.last == .idle },
                 Comment(rawValue: "the removed device never went idle, saw \(log.all)"))
 
@@ -265,7 +273,7 @@ import Testing
         defer { manager.stopAll() }
         let log = watch(manager, deviceID: "dev1")
         // Port 1 on loopback: nothing listens, so the refusal is immediate.
-        manager.setDevices([record(.hostPort(host: "127.0.0.1", port: 1))])
+        manager.setDevices([record(.hostPort(host: "127.0.0.1", port: 1))], sources: [:])
 
         #expect(waitUntil(timeout: 5) {
             switch log.last {
@@ -282,14 +290,14 @@ import Testing
         let manager = makeManager()
         defer { manager.stopAll() }
         let log = watch(manager, deviceID: "dev1")
-        manager.setDevices([record(endpoint)])
+        manager.setDevices([record(endpoint)], sources: [:])
         try #require(waitUntil(timeout: 10) { log.contains(.playing) },
                      Comment(rawValue: "never reached PLAYING, saw \(log.all)"))
 
         // Deselect and re-select in the same breath: the first session's STOP
         // is still in flight when the second one is asked for.
-        manager.setDevices([])
-        manager.setDevices([record(endpoint)])
+        manager.setDevices([], sources: [:])
+        manager.setDevices([record(endpoint)], sources: [:])
 
         #expect(waitUntil(timeout: 20) { log.all.filter { $0 == .playing }.count >= 2 },
                 Comment(rawValue: "the re-selected session never reached PLAYING, saw \(log.all)"))
@@ -314,7 +322,7 @@ import Testing
         let manager = makeManager()
         defer { manager.stopAll() }
         let log = watch(manager, deviceID: "dev1")
-        manager.setDevices([record(endpoint)])
+        manager.setDevices([record(endpoint)], sources: [:])
         try #require(waitUntil(timeout: 10) { log.contains(.playing) },
                      Comment(rawValue: "never reached PLAYING, saw \(log.all)"))
 
@@ -343,7 +351,7 @@ import Testing
         let manager = makeManager()
         defer { manager.stopAll() }
         let log = watch(manager, deviceID: "dev1")
-        manager.setDevices([record(endpoint)])
+        manager.setDevices([record(endpoint)], sources: [:])
         try #require(waitUntil(timeout: 10) { log.contains(.playing) },
                      Comment(rawValue: "never reached PLAYING, saw \(log.all)"))
 
@@ -362,7 +370,7 @@ import Testing
         let manager = makeManager(playDeadline: 1)
         defer { manager.stopAll() }
         let log = watch(manager, deviceID: "dev1")
-        manager.setDevices([record(endpoint)])
+        manager.setDevices([record(endpoint)], sources: [:])
 
         #expect(waitUntil(timeout: 10) { log.last == .failed(.timedOut) },
                 Comment(rawValue: "expected a play-deadline timeout, saw \(log.all)"))
@@ -381,7 +389,7 @@ import Testing
         let manager = makeManager(playDeadline: 5)
         defer { manager.stopAll() }
         let log = watch(manager, deviceID: "dev1")
-        manager.setDevices([record(endpoint)])
+        manager.setDevices([record(endpoint)], sources: [:])
 
         #expect(waitUntil(timeout: 20) { log.contains(.playing) },
                 Comment(rawValue: "the slow fetch never reached PLAYING, saw \(log.all)"))
@@ -406,7 +414,7 @@ import Testing
             lagLog.append(lag)
         }
 
-        manager.setDevices([record(endpoint)])
+        manager.setDevices([record(endpoint)], sources: [:])
         try #require(waitUntil(timeout: 10) { log.contains(.playing) },
                      Comment(rawValue: "never reached PLAYING, saw \(log.all)"))
 
@@ -415,7 +423,7 @@ import Testing
         try #require(waitUntil(timeout: 15) { lagLog.all.last == .some(2) },
                      Comment(rawValue: "the reported lag never settled at the receiver's 2 s buffer, saw \(lagLog.all)"))
 
-        manager.setDevices([])
+        manager.setDevices([], sources: [:])
         #expect(waitUntil(timeout: 5) { lagLog.all.last == .some(nil) },
                 Comment(rawValue: "never reported nil on deselect, saw \(lagLog.all)"))
     }
@@ -441,7 +449,7 @@ import Testing
         writer.resume()
         defer { writer.cancel() }
 
-        manager.setDevices([record(endpoint)])
+        manager.setDevices([record(endpoint)], sources: [:])
         try #require(waitUntil(timeout: 10) { log.contains(.playing) },
                      Comment(rawValue: "never reached PLAYING, saw \(log.all)"))
 
@@ -450,6 +458,120 @@ import Testing
         Thread.sleep(forTimeInterval: 2.5)
         #expect(lagLog.all.isEmpty,
                 Comment(rawValue: "an attenuation receiver reported a volume lag: \(lagLog.all)"))
+    }
+
+    /// Turns red if `CastOutputManager.setDevices(_:sources:)` hands a `.perApp`
+    /// ring to the whole-system fan-out, or `writePerApp(pcm:toDevice:)` stops
+    /// addressing one ring by id, because a receiver an app owns would then
+    /// play the whole system's audio or a neighbour's.
+    @Test func aReceiverOwnedByAnAppTakesOnlyItsOwnBlocks() throws {
+        guard #available(macOS 15, *) else { return }
+        let (fake, endpoint) = try startFake()
+        defer { fake.stop() }
+        let manager = makeManager()
+        defer { manager.stopAll() }
+        let log = watch(manager, deviceID: "dev1")
+
+        let feed = manager.feed
+        let ticks = TickCount()
+        let writer = DispatchSource.makeTimerSource(queue: DispatchQueue(label: "CastOutputManagerTests.perAppFeed"))
+        writer.schedule(deadline: .now(), repeating: 0.020)
+        let block = tone(frames: 882)
+        writer.setEventHandler {
+            feed.write(pcm: block, pts: timespec(tv_sec: 0, tv_nsec: 0))
+            ticks.bump()
+        }
+        writer.resume()
+        defer { writer.cancel() }
+
+        // The second app-owned receiver listens nowhere: its ring belongs to
+        // the session, connected or not.
+        manager.setDevices(
+            [record(endpoint), record(.hostPort(host: "127.0.0.1", port: 1), id: "dev2")],
+            sources: ["dev1": .perApp, "dev2": .perApp])
+        try #require(waitUntil(timeout: 10) { log.contains(.playing) },
+                     Comment(rawValue: "never reached PLAYING, saw \(log.all)"))
+        let seen = ticks.value
+        try #require(waitUntil(timeout: 5) { ticks.value >= seen + 5 }, "the whole-system writer stopped firing")
+
+        let ring = try #require(manager.test_ring(forDevice: "dev1"))
+        let neighbour = try #require(manager.test_ring(forDevice: "dev2"))
+        #expect(ring.stats.writes == 0, "the whole-system fan-out wrote into an app's receiver")
+
+        for _ in 0..<5 { manager.writePerApp(pcm: block, toDevice: "dev1") }
+        #expect(ring.stats.writes > 0, "the app's blocks never reached its receiver")
+        #expect(neighbour.stats.writes == 0, "one app's blocks reached another app's receiver")
+    }
+
+    /// Turns red if a change of source in `setDevices(_:sources:)` restarts the
+    /// session, resets the ring, or leaves a room delay on an app-owned
+    /// receiver, because handing a receiver between the whole system and one
+    /// app would then relaunch it or hold the app's audio back by the room.
+    /// Also red if `setCastRoomDelayMs` stops storing a value pushed while
+    /// app-owned, or the hand-back to the whole system stops applying it.
+    /// Red too if `setDevices(_:sources:)` stops zeroing the stored room delay
+    /// when a receiver goes app-owned, so a later hand-back with no push re-applies it.
+    @Test func handingAReceiverBetweenProducersKeepsTheSessionAndDropsTheRoomDelay() throws {
+        guard #available(macOS 15, *) else { return }
+        let (fake, endpoint) = try startFake()
+        defer { fake.stop() }
+        let manager = makeManager()
+        defer { manager.stopAll() }
+        let log = watch(manager, deviceID: "dev1")
+        let block = tone(frames: 882)
+        let pts = timespec(tv_sec: 0, tv_nsec: 0)
+
+        manager.setDevices([record(endpoint)], sources: ["dev1": .perApp])
+        try #require(waitUntil(timeout: 10) { log.contains(.playing) },
+                     Comment(rawValue: "never reached PLAYING, saw \(log.all)"))
+        try #require(waitUntil(timeout: 5) { manager.castFeedStats(forDevice: "dev1")?.feedResets == 1 },
+                     "the receiver never fetched")
+        let ring = try #require(manager.test_ring(forDevice: "dev1"))
+
+        // Owned by an app: the room's delay is dropped, so no line is built.
+        manager.setCastRoomDelayMs(3000, forDeviceID: "dev1")
+        _ = manager.castFeedStats(forDevice: "dev1")          // flushes the queue
+        #expect(ring.test_hasDelayLine == false, "an app-owned receiver took the room's delay")
+        manager.setCastUserOffsetMs(-500, forDeviceID: "dev1")
+        _ = manager.castFeedStats(forDevice: "dev1")
+        #expect(ring.test_hasDelayLine == false, "an app-owned receiver took a negative user offset")
+        manager.setCastUserOffsetMs(500, forDeviceID: "dev1")
+        _ = manager.castFeedStats(forDevice: "dev1")
+        #expect(ring.test_hasDelayLine == false, "an app-owned receiver took a positive user offset")
+        manager.setCastUserOffsetMs(0, forDeviceID: "dev1")
+
+        // Claimed by the whole system: the delay pushed while app-owned lands
+        // with no second push, and the next block adopts it.
+        manager.setDevices([record(endpoint)], sources: ["dev1": .wholeSystem])
+        _ = manager.castFeedStats(forDevice: "dev1")
+        #expect(ring.test_hasDelayLine)
+        manager.feed.write(pcm: block, pts: pts)
+        let held = manager.castFeedStats(forDevice: "dev1")?.achievedDelayMs ?? 0
+        #expect(held >= 3000, Comment(rawValue: "the room delay never reached the feed (held \(held) ms)"))
+
+        // Back to the app: the line shrinks to nothing on the app's next block,
+        // so all that is left is the ring's own backlog, at most its 2 s.
+        manager.setDevices([record(endpoint)], sources: ["dev1": .perApp])
+        _ = manager.castFeedStats(forDevice: "dev1")
+        manager.writePerApp(pcm: block, toDevice: "dev1")
+        let released = manager.castFeedStats(forDevice: "dev1")?.achievedDelayMs ?? .max
+        #expect(released <= 2000, Comment(rawValue: "the room delay outlived the hand-back (held \(released) ms)"))
+
+        // Claimed by the whole system again, with no push in between: the
+        // 3000 ms from the earlier whole-system stretch must not come back.
+        manager.setDevices([record(endpoint)], sources: ["dev1": .wholeSystem])
+        _ = manager.castFeedStats(forDevice: "dev1")
+        manager.feed.write(pcm: block, pts: pts)
+        let reclaimed = manager.castFeedStats(forDevice: "dev1")?.achievedDelayMs ?? .max
+        #expect(reclaimed <= 2000, Comment(rawValue: "a stale room delay came back on hand-back (held \(reclaimed) ms)"))
+
+        // One session through all four hand-overs.
+        let events = fake.events
+        #expect(events.filter { $0 == "LAUNCH" }.count == 1, Comment(rawValue: "relaunched: \(events)"))
+        #expect(!events.contains("STOP"), Comment(rawValue: "stopped: \(events)"))
+        #expect(manager.test_ring(forDevice: "dev1") === ring, "the session's ring was replaced")
+        #expect(manager.castFeedStats(forDevice: "dev1")?.feedResets == 1, "the ring was reset")
+        #expect(log.all == [.connecting, .playing], Comment(rawValue: "the row moved: \(log.all)"))
     }
 
     @Test func fixedReceiverGainRampsWithoutZipper() {

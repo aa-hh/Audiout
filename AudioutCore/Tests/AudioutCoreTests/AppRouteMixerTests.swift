@@ -326,6 +326,59 @@ import Testing
                        "two mixed apps must emit exactly one real-time's worth of frames, not more")
     }
 
+    /// Turns red if the multi-contributor emission leaves `timelineLock` before
+    /// `onMixedBuffer` runs, because a second tap could then deliver the next
+    /// range of a shared stream ahead of the first and its one consumer would
+    /// see the pts run backwards.
+    @Test func aSharedStreamReachesItsHandlerInTimelineOrderAcrossTwoTaps() {
+        let m = mixer()
+        let sink = Sink()
+        let entered = DispatchSemaphore(value: 0)
+        let go = DispatchSemaphore(value: 0)
+        let calls = Counter()
+        m.onMixedBuffer = { buffer in
+            calls.bump()
+            if calls.value == 1 {
+                entered.signal()
+                go.wait()
+            }
+            sink.append(buffer)
+        }
+        m.updateRoutes([route("a", to: "dev1"), route("b", to: "dev1")])
+        m.handleStateChange(bundleID: "a", state: capturing())
+        m.handleStateChange(bundleID: "b", state: capturing())
+
+        // "a" fills 44 100..<44 600 and drains its first 59 frames; "b" then
+        // continues the timeline from 44 600 while "a" is still in the handler.
+        let bufferA = s16BufferAtFrame(value: 100, count: 500, atFrame: 44_100)
+        let bufferB = s16BufferAtFrame(value: 10, count: 500, atFrame: 44_600)
+        let doneA = DispatchSemaphore(value: 0)
+        let doneB = DispatchSemaphore(value: 0)
+        // Own threads, not the shared dispatch pool: in a parallel run the
+        // pool can stay starved for longer than the 10 s waits below.
+        Thread {
+            m.handleBuffer(bundleID: "a", buffer: bufferA)
+            doneA.signal()
+        }.start()
+        #expect(entered.wait(timeout: .now() + 10) == .success, "the first emission never reached the handler")
+        Thread {
+            m.handleBuffer(bundleID: "b", buffer: bufferB)
+            doneB.signal()
+        }.start()
+        // 200 ms is a hang-stop, not a speed claim: it gives "b" the time to
+        // overtake "a" if the lock lets it.
+        Thread.sleep(forTimeInterval: 0.2)
+        go.signal()
+        #expect(doneA.wait(timeout: .now() + 10) == .success)
+        #expect(doneB.wait(timeout: .now() + 10) == .success)
+
+        let starts = sink.all.map { AppRouteMixer.frameIndex(of: $0.pts) }
+        #expect(zip(starts, starts.dropFirst()).allSatisfy { $0 < $1 },
+                Comment(rawValue: "emissions out of timeline order: \(starts)"))
+        let left = pairs(sink.combined).map(\.0)
+        #expect(left == Array(repeating: 100, count: 500) + Array(repeating: 10, count: 59))
+    }
+
     @Test func clippingEngagesAtBoundaryWithoutWrapping() {
         let m = mixer()
         let sink = Sink()

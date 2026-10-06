@@ -4,6 +4,16 @@ import AppKit
 import AudioutCore
 import AudioutSharedUI
 
+/// A pane whose sidebar row shows what is set in it. The pane reads its
+/// readout from its own source and fires `onReadoutChanged` whenever that
+/// source changes; the root pushes the new lines to the sidebar.
+@MainActor
+protocol SettingsReadoutProviding: AnyObject {
+    var readoutLines: [String] { get }
+    var readoutGlyphTint: NSColor { get }
+    var onReadoutChanged: (() -> Void)? { get set }
+}
+
 /// The Settings screen: a source-list sidebar of sections on the left, one
 /// pane on the right — the Groups screen's own arrangement, so the app has
 /// exactly ONE tab level (the surface's screen switcher) instead of a second
@@ -78,6 +88,11 @@ public final class SettingsRootViewController: NSSplitViewController {
         loadViewIfNeeded()
 
         sidebar.onSelect = { [weak self] index in self?.showSection(at: index) }
+        for (index, section) in sections.enumerated() {
+            guard let provider = section.viewController as? SettingsReadoutProviding else { continue }
+            provider.onReadoutChanged = { [weak self] in self?.pushReadout(at: index) }
+            pushReadout(at: index)
+        }
         // Settings always opens on General; no persisted section.
         if !sections.isEmpty { selectSection(at: 0) }
     }
@@ -93,6 +108,23 @@ public final class SettingsRootViewController: NSSplitViewController {
         for case let audio as AudioSettingsViewController in sections.map(\.viewController) {
             audio.reloadFromSettings()
         }
+        refreshReadouts()
+    }
+
+    /// Trial days count down while the app runs, so every show re-reads them.
+    public override func viewWillAppear() {
+        super.viewWillAppear()
+        refreshReadouts()
+    }
+
+    /// Re-push every section's readout to the sidebar.
+    func refreshReadouts() {
+        for index in sections.indices { pushReadout(at: index) }
+    }
+
+    private func pushReadout(at index: Int) {
+        guard let provider = sections[index].viewController as? SettingsReadoutProviding else { return }
+        sidebar.setReadout(provider.readoutLines, glyphTint: provider.readoutGlyphTint, at: index)
     }
 
     /// Select a section through the sidebar's REAL outline selection, exactly
@@ -133,6 +165,18 @@ public final class SettingsRootViewController: NSSplitViewController {
 
     /// The sidebar's split item, for the pinned-thickness/no-collapse guard.
     public var test_sidebarSplitItem: NSSplitViewItem { splitViewItems[0] }
+
+    /// Section `index`'s readout lines, as the sidebar holds them.
+    public func test_readoutLines(at index: Int) -> [String] { sidebar.test_readoutLines(at: index) }
+
+    /// Section `index`'s sidebar glyph tint.
+    public func test_glyphTint(at index: Int) -> NSColor { sidebar.test_glyphTint(at: index) }
+
+    /// Section `index`'s sidebar row height.
+    public func test_rowHeight(at index: Int) -> CGFloat { sidebar.test_rowHeight(at: index) }
+
+    /// What VoiceOver says for section `index`'s sidebar row.
+    public func test_spokenLabel(at index: Int) -> String? { sidebar.test_spokenLabel(at: index) }
 }
 
 /// A document view whose origin is at its TOP, so a pane shorter than the

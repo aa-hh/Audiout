@@ -119,7 +119,7 @@ public final class GroupEditorViewController: NSViewController {
     /// "Playing" marker as one block centred on the well. A hidden marker
     /// drops out of the stack, so the name alone is centred while nothing
     /// plays. The rail climbs out of the list and lands on the well.
-    private lazy var header = PageHeaderView(iconWell: iconWell, title: nameField,
+    private lazy var header = PageHeaderView(icon: iconWell, title: nameField,
                                              caption: playingBadge, leadingInset: .rail)
     private let membershipStack = RailRepaintingStackView()
     /// THIS PAGE'S ONE INSTRUMENT, so it is the one `.card` here — a `raised`

@@ -4,7 +4,7 @@ import Testing
 import Foundation
 import AppKit
 @testable import AudioutCore
-import AudioutSharedUI
+@testable import AudioutSharedUI
 @testable import AudioutWindowUI
 
 /// The speaker sidebar: its two groups (the Mixer visibility setting), the

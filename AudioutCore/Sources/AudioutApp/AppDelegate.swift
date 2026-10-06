@@ -214,12 +214,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// `GroupController` as the Mixer, so the two screens stay in lockstep.
     private var mixerWindowController: MixerWindowController?
 
-    /// The Settings screen and its General pane, once built (`makeSettingsRoot`
-    /// runs on the first visit). Weak — the surface owns them; these exist only
-    /// so `audiout://register` can reach the license sheet without the user
-    /// navigating there first.
+    /// The Settings screen and its General and License panes, once built
+    /// (`makeSettingsRoot` runs on the first visit). Weak — the surface owns
+    /// them; these exist only so `audiout://register` can reach the license
+    /// sheet without the user navigating there first.
     private weak var settingsRootController: SettingsRootViewController?
     private weak var generalSettingsController: GeneralSettingsViewController?
+    private weak var licenseSettingsController: LicenseSettingsViewController?
 
     /// The one surface (U4): a single window hosting the Mixer, Groups and
     /// Settings screens behind the header's tab switcher. Owns the menu-bar
@@ -668,11 +669,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // all — and a REJECTED key would then leave the sheet held but
         // invisible, wedging "Enter License…" for the rest of the session.
         surface.whenRevealed { [weak self] in
-            // General is the first section (`makeSettingsRoot`), and it has to
-            // be the MOUNTED one: an unmounted pane has no window to host a
-            // sheet.
-            self?.settingsRootController?.selectSection(at: 0)
-            self?.generalSettingsController?.presentLicenseSheet(registering: key)
+            // The License section has to be the MOUNTED one: an unmounted
+            // pane has no window to host a sheet. A build with no license
+            // server has no License section, and nothing to register against.
+            guard let root = self?.settingsRootController,
+                  let index = root.sectionTitles.firstIndex(of: "License") else { return }
+            root.selectSection(at: index)
+            self?.licenseSettingsController?.presentLicenseSheet(registering: key)
         }
     }
 
@@ -1192,13 +1195,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         // "I have a key" on the one-speaker note, the trial pill and the
         // trial nudges: the Enter License sheet on
-        // General, once the surface is really on screen to host it.
+        // License, once the surface is really on screen to host it.
         popoverController.onEnterLicenseKey = { [weak self] in
             guard let self else { return }
             showSurface(.settings)
             surface.whenRevealed { [weak self] in
-                self?.settingsRootController?.selectSection(at: 0)
-                self?.generalSettingsController?.presentLicenseSheetFromNote()
+                guard let root = self?.settingsRootController,
+                      let index = root.sectionTitles.firstIndex(of: "License") else { return }
+                root.selectSection(at: index)
+                self?.licenseSettingsController?.presentLicenseSheetFromNote()
             }
         }
         // The one-time thank-you card, owed to a trial that converted to a
@@ -2500,22 +2505,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func makeSettingsRoot() -> SettingsRootViewController {
         let general = GeneralSettingsViewController(loginItem: SMAppServiceLoginItem(),
                                                     settings: settings,
-                                                    approvals: companionCoordinator.approvals,
                                                     saveDiagnostics: { [weak self] in self?.saveDiagnostics() })
-        // The way back in for `audiout://register` — weak because the surface
-        // owns both for as long as the Settings screen exists.
+        // Weak because the surface owns the panes for as long as the
+        // Settings screen exists.
         generalSettingsController = general
-        // "Open Setup…" (General pane) re-opens the first-run priming window;
-        // the backend is already running, so its onFinished is a guarded no-op.
+        // "Run setup again…" (General pane) re-opens the first-run priming
+        // window; the backend is already running, so its onFinished is a
+        // guarded no-op.
         general.onRunSetupAgain = { [weak self] in self?.presentSetup() }
-        // Companion (T7): the General pane's "Allow control from iPhone"
-        // checkbox has already persisted the setting; this starts/stops the
-        // server to match.
-        general.onAllowRemoteControlChanged = { [weak self] in
+        // Left nil in a build with no updater, which hides the button.
+        if let updaterController {
+            general.onCheckForUpdates = { updaterController.checkForUpdates(nil) }
+        }
+
+        let remote = RemoteSettingsViewController(settings: settings,
+                                                  approvals: companionCoordinator.approvals)
+        // Companion (T7): the "Allow control from iPhone" switch has already
+        // persisted the setting; this starts/stops the server to match.
+        remote.onAllowRemoteControlChanged = { [weak self] in
             self?.companionCoordinator.updateServerState()
         }
+
+        let license = LicenseSettingsViewController(settings: settings)
+        // The way back in for `audiout://register`.
+        licenseSettingsController = license
         // A committed key changes both the note and the update feed's header.
-        general.onLicenseChanged = { [weak self, settings] in
+        license.onLicenseChanged = { [weak self, settings] in
             self?.applyLicenseState()
             // A key entered mid-session registers the device now rather than at
             // the next launch. This closure fires a few times around one
@@ -2523,10 +2538,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // fire-and-forget, /v1/checkin always 204s, and the device-spread
             // metric counts distinct install ids.
             LicenseCheckIn(settings: settings).checkInIfNeeded()
-        }
-        // Left nil in a build with no updater, which hides the button.
-        if let updaterController {
-            general.onCheckForUpdates = { updaterController.checkForUpdates(nil) }
         }
 
         let appearance = AppearanceSettingsViewController(settings: settings)
@@ -2547,11 +2558,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // slice of the snapshot, so re-broadcast it.
         audio.onSettingChanged = { [weak self] in self?.companionCoordinator.scheduleBroadcast() }
 
-        let root = SettingsRootViewController(sections: [
+        var sections: [SettingsRootViewController.Section] = [
             .init(title: "General", symbolName: "gearshape", viewController: general),
+        ]
+        // A build with no companion shows no Audiout Remote section at all.
+        if remote.isOffered {
+            sections.append(.init(title: "Audiout Remote", symbolName: "iphone", viewController: remote))
+        }
+        sections += [
             .init(title: "Appearance", symbolName: "paintpalette", viewController: appearance),
             .init(title: "Audio", symbolName: "speaker.wave.2", viewController: audio),
-        ])
+        ]
+        // A build with no license server has nothing to verify and nothing to sell.
+        if license.isAvailable {
+            sections.append(.init(title: "License", symbolName: "key", viewController: license))
+        }
+        let root = SettingsRootViewController(sections: sections)
         settingsRootController = root
         return root
     }

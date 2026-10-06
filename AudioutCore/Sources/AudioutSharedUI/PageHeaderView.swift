@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 import AppKit
-import AudioutSharedUI
 
 /// The band every Speakers and Scenes page opens with: the icon well, then
 /// the page's title over an optional caption, as one block centred on the
@@ -12,10 +11,10 @@ import AudioutSharedUI
 /// The title slot takes any view: a plain label on the speaker, Main Audio
 /// and Overview pages, the editable rename field on the scene editor. That
 /// difference in skin is the message — see `GroupsPaneLayout`.
-final class PageHeaderView: NSView {
+public final class PageHeaderView: NSView {
 
     /// Where the icon well starts inside the column.
-    enum LeadingInset {
+    public enum LeadingInset {
         /// A page with no rail: the well lines up with the page's headings
         /// and list text.
         case railFree
@@ -24,23 +23,23 @@ final class PageHeaderView: NSView {
         case rail
     }
 
-    let iconWell: DeviceIconWellView
+    let icon: NSView
     /// The title over the caption.
-    let textStack = NSStackView()
+    public let textStack = NSStackView()
 
-    init(iconWell: DeviceIconWellView, title: NSView, caption: NSView? = nil,
+    public init(icon: NSView, title: NSView, caption: NSView? = nil,
          leadingInset: LeadingInset) {
-        self.iconWell = iconWell
+        self.icon = icon
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false
-        iconWell.translatesAutoresizingMaskIntoConstraints = false
+        icon.translatesAutoresizingMaskIntoConstraints = false
         textStack.translatesAutoresizingMaskIntoConstraints = false
         textStack.orientation = .vertical
         textStack.alignment = .leading
         textStack.spacing = Tokens.Layout.titleSubtitleSpacing
         textStack.setViews([title] + (caption.map { [$0] } ?? []), in: .leading)
         textStack.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        addSubview(iconWell)
+        addSubview(icon)
         addSubview(textStack)
 
         let inset = leadingInset == .rail
@@ -54,15 +53,15 @@ final class PageHeaderView: NSView {
             lessThanOrEqualTo: trailingAnchor, constant: -GroupsPaneLayout.contentTrailingInset)
         textCap.priority = NSLayoutConstraint.Priority(999)
         NSLayoutConstraint.activate([
-            iconWell.widthAnchor.constraint(equalToConstant: DeviceIconWellView.size),
-            iconWell.heightAnchor.constraint(equalToConstant: DeviceIconWellView.size),
-            iconWell.topAnchor.constraint(equalTo: topAnchor, constant: GroupsPaneLayout.headerPadding),
-            iconWell.leadingAnchor.constraint(equalTo: leadingAnchor, constant: inset),
-            bottomAnchor.constraint(equalTo: iconWell.bottomAnchor, constant: GroupsPaneLayout.headerPadding),
+            icon.widthAnchor.constraint(equalToConstant: DeviceIconWellView.size),
+            icon.heightAnchor.constraint(equalToConstant: DeviceIconWellView.size),
+            icon.topAnchor.constraint(equalTo: topAnchor, constant: GroupsPaneLayout.headerPadding),
+            icon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: inset),
+            bottomAnchor.constraint(equalTo: icon.bottomAnchor, constant: GroupsPaneLayout.headerPadding),
 
-            textStack.leadingAnchor.constraint(equalTo: iconWell.trailingAnchor,
+            textStack.leadingAnchor.constraint(equalTo: icon.trailingAnchor,
                                                constant: GroupsPaneLayout.iconToTitleGap),
-            textStack.centerYAnchor.constraint(equalTo: iconWell.centerYAnchor),
+            textStack.centerYAnchor.constraint(equalTo: icon.centerYAnchor),
             textCap,
         ])
     }
@@ -71,9 +70,9 @@ final class PageHeaderView: NSView {
 
     /// The well, the band and the text block, in `view`'s coordinates —
     /// what each page's header-parity test hooks report.
-    func frames(in view: NSView) -> (icon: NSRect, band: NSRect, textBlock: NSRect) {
+    public func frames(in view: NSView) -> (icon: NSRect, band: NSRect, textBlock: NSRect) {
         view.layoutSubtreeIfNeeded()
-        return (iconWell.convert(iconWell.bounds, to: view),
+        return (icon.convert(icon.bounds, to: view),
                 convert(bounds, to: view),
                 textStack.convert(textStack.bounds, to: view))
     }

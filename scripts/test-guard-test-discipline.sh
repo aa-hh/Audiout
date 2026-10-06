@@ -168,6 +168,17 @@ reset; write "$NEW" 'import Testing
 }'
 run_guard; expect "sentence on the test inside a suite" 0
 
+# (p) real-time waits
+append() { reset; printf '\n%s\n' "$1" >> "$CLONE/$EXISTING"; git -C "$CLONE" add -- "$EXISTING"; run_guard; }
+append 'try? await Task.sleep(nanoseconds: 1)'; expect "Task.sleep blocked" 1 "real-time wait"
+append 'Thread.sleep(forTimeInterval: 1)'; expect "Thread.sleep blocked" 1 "real-time wait"
+append 'usleep(1)'; expect "usleep blocked" 1 "real-time wait"
+append 'q.asyncAfter(deadline: .now() + 1) {}'; expect "asyncAfter blocked" 1 "real-time wait"
+append 'try? await Task.sleep(nanoseconds: 1) // real-time-ok: production timer under test'
+expect "real-time-ok with a reason exempts" 0
+append 'try? await Task.sleep(nanoseconds: 1) // real-time-ok:'; expect "bare real-time-ok still blocks" 1 "real-time wait"
+append '// a comment naming Task.sleep'; expect "comment line naming Task.sleep passes" 0
+
 if [ "$FAILURES" -gt 0 ]; then
   echo "$FAILURES guard-test-discipline test(s) FAILED" >&2
   exit 1

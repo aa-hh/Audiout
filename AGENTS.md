@@ -158,7 +158,10 @@ repo. `AudioutCore` pins it by version.
      coverage and cover nothing. If the intent is real, rewrite it to read the
      DRAWN or observed result.
   5. A test that waits for time drives the backend's `uptimeClock`/`delayClock`
-     through `ManualDelayClock.advance(by:)`, never the wall clock.
+     through `ManualDelayClock.advance(by:)`, never the wall clock. Guard 11
+     refuses sleeps, `asyncAfter`, `SuiteWait.settle(`, every `.wait(timeout:`
+     and fractional-second Timeout/Delay/Deadline/Interval/Grace/Window/Seconds
+     values; a hang ceiling is a valid `real-time-ok:` reason.
 - **Flag finished worktrees `.prunable`; never hand-delete them.** Fifteen
   worktrees' SwiftPM caches once filled the disk to zero bytes free mid-build.
   `scripts/housekeeping.sh` (invoked automatically by `scripts/run-tests.sh`
@@ -340,7 +343,10 @@ warn-only 3/5) are documented in the hook file itself:
   the code change that turns it red, a `print(` in a test (`print-ok` exempts),
   a new test file holding one test (`new-suite-ok` exempts), or a real-time
   wait in a test (`Task.sleep`, `Thread.sleep`, `usleep`, `sleep(`,
-  `asyncAfter`; `real-time-ok: <reason>` exempts a line);
+  `asyncAfter`, `SuiteWait.settle(`, any `.wait(timeout:`, or a
+  Timeout/Delay/Deadline/Interval/Grace/Window/Seconds value set to a fraction
+  of a second; `real-time-ok: <reason>` exempts a line, and a hang ceiling is a
+  reason);
   `bash scripts/test-guard-test-discipline.sh` self-tests it.
 - **Guard 12 blocks** a folder AGENTS.md that gains ruling phrasing or grows
   while over its 300-word budget, and any removed line in an AGENTS-HISTORY.md;

@@ -382,10 +382,9 @@ response curve (its 2 pt shaped trace and the 13 % fill under it,
 `EQResponseCurveView`). A flat curve shows the door's rest ink and an empty
 slider track instead. The one exception: the scope's 0.14-alpha band
 gridlines are reference marks drawn in this green in every state, as the gold
-ones were. `DeviceRowView` draws the
-door and heading images through its mark helpers
-`equalizerShapedHeadingMarkImage(in:pointSize:)` and
-`equalizerRestMarkImage(in:pointSize:)`. On `scopeGround` only the dark hexes
+ones were. `RowAccessorySymbol` draws the
+door and heading images through `equalizerDoor(shaped:in:)` and
+`equalizerHeading(shaped:in:pointSize:)`. On `scopeGround` only the dark hexes
 draw, 6.92:1 (Increase Contrast 10.65:1). It is not a general "on"
 green, not a success tone, and not available to a second control that happens
 to be engaged; `DeviceRowMutedStateTests` names the files allowed to draw
@@ -640,9 +639,12 @@ host their pages in `ContentPaneHostViewController`, on `WarmPanelView`, with
 a 1 pt `hairline` rule under the title bar at the safe-area top (the content
 pane only; the sidebar runs the full height). The Scenes host adds a footer:
 one centred caption line in `label2`, 6 pt below the page and 8 pt above the
-window's bottom edge. Every window page is a top-anchored scrolling column
-capped at `GroupsPaneLayout.contentMaxWidth`, its document view a
-`FlippedView` (`AudioutWindowUI`) so content starts at the top.
+window's bottom edge. The speaker page, Main Audio, the scene editor and the
+scene creation sheet are top-anchored scrolling columns capped at
+`GroupsPaneLayout.contentMaxWidth`, each with a `FlippedView`
+(`AudioutWindowUI`) as document view so content starts at the top. The
+Scenes overview scrolls a collection view; the Speakers overview does not
+scroll.
 
 The **Speakers page** (`SpeakersPageViewController`), behind the sidebar's
 Overview plate, lists no speakers. It opens with the shared page header (see

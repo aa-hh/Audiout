@@ -240,7 +240,10 @@ if [ -n "$staged_swift" ] && command -v swift >/dev/null 2>&1; then
         run_suite=""
     fi
     echo "" >&2
-    if [ "$scope" = "FULL" ]; then
+    if [ "$scope" = "BUILD" ]; then
+        echo "  Guard 4: only executable targets changed — no test can reach them," >&2
+        echo "  so compiling instead (scripts/build.sh). --no-verify to skip." >&2
+    elif [ "$scope" = "FULL" ]; then
         echo "  Guard 4: AudioutCore Swift changed — running full suite" >&2
         echo "  (scripts/run-tests.sh) before commit. ~70s warm; --no-verify to skip." >&2
     else
@@ -270,6 +273,8 @@ if [ -n "$staged_swift" ] && command -v swift >/dev/null 2>&1; then
         if [ -z "$run_suite" ]; then
             ( cd "$repo_root/AudioutCore" \
                 && $nogit swift test --parallel >&2 )
+        elif [ "$scope" = "BUILD" ]; then
+            $nogit "$(dirname "$run_suite")/build.sh" >&2
         elif [ "$scope" = "FULL" ]; then
             $nogit "$run_suite"
         else
@@ -283,7 +288,9 @@ if [ -n "$staged_swift" ] && command -v swift >/dev/null 2>&1; then
         echo "" >&2
         exit 1
     fi
-    if [ "$scope" = "FULL" ]; then
+    if [ "$scope" = "BUILD" ]; then
+        echo "  Guard 4: build passed." >&2
+    elif [ "$scope" = "FULL" ]; then
         echo "  Guard 4: full suite passed." >&2
     else
         echo "  Guard 4: the suites covering this change passed." >&2

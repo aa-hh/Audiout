@@ -174,8 +174,7 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
                           range: NSRange(location: 0, length: line.length))
         headlineLabel.attributedStringValue = line
         headlineLabel.alignment = .center
-        headlineLabel.setAccessibilityRole(.staticText)
-        headlineLabel.setAccessibilitySubrole(NSAccessibility.Subrole(rawValue: "AXHeading"))
+        headlineLabel.setAccessibilityHeading()
 
         whyLabel.stringValue =
             "It takes one key to open. Yours is in your receipt email, starting with AUDT."

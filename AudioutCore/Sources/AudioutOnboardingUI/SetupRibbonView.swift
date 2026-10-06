@@ -96,10 +96,8 @@ final class SetupHeroHeadView: NSView {
         headlineLabel.font = Tokens.Font.display
         headlineLabel.textColor = Tokens.Color.label
         headlineLabel.maximumNumberOfLines = 2
-        // The hero's heading, findable in VoiceOver's rotor. The raw AX string,
-        // not `NSAccessibilityHeadingRole`: that constant is macOS 26+ and this
-        // app installs on 14.2.
-        headlineLabel.setAccessibilityRole(NSAccessibility.Role(rawValue: "AXHeading"))
+        // The hero's heading, findable in VoiceOver's rotor.
+        headlineLabel.setAccessibilityHeading()
 
         // Primary ink, not secondary: this is the sentence the whole step rests
         // on, and it is the only body copy a first ask has.

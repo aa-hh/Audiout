@@ -351,7 +351,8 @@ extension SerializedSharedState {
         engine: RecordingEngine? = nil,
         discovery: FakeDiscovery? = nil,
         perAppCapture: PerAppCaptureCoordinator? = nil,
-        delayClock: @escaping NativeBackend.DelayClock = NativeBackend.dispatchDelayClock
+        delayClock: @escaping NativeBackend.DelayClock = NativeBackend.dispatchDelayClock,
+        uptimeClock: @escaping NativeBackend.UptimeClock = NativeBackend.dispatchUptimeClock
     ) -> (NativeBackend, FakeBTEnumerator, SpyBTSink, EventCollector) {
         let bt = FakeBTEnumerator()
         let backend = NativeBackend(
@@ -364,11 +365,17 @@ extension SerializedSharedState {
             ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
             injectedPerAppCapture: perAppCapture,
             delayClock: delayClock,
+            uptimeClock: uptimeClock,
             systemDefaultOutputIsAirPlayClass: { false },
             aggregateControl: NoOpAggregateControl(),
             handoffWatcherFactory: { onBlockedAttempt in
                 AirPlayHandoffWatcher(spawn: NoOpLogStream(), onBlockedAttempt: onBlockedAttempt)
             })
+        // The 4 s production start deadline is wall time, and a stalled GitHub
+        // runner has taken longer than that to answer the holds, so every start
+        // was refused as "The speaker pair changed". A test about the deadline
+        // itself sets a short one.
+        backend.companionAuditionPreparationSeconds = 60
         let sink = SpyBTSink()
         backend.btSyncedSinkFactory = { sink }
         backend.btDeviceIDForUID = { uid in AudioObjectID(1000 + UInt32(abs(uid.hashValue % 1000))) }
@@ -1037,7 +1044,7 @@ extension SerializedSharedState {
         // run let the 4 s stop deadline expire while the restoration was held.
         let deadlines = ManualDelayClock()
         let (backend, bt, _, _) = makeBackend(engine: engine, discovery: discovery,
-                                              delayClock: deadlines.clock)
+                                              delayClock: deadlines.clock, uptimeClock: deadlines.uptime)
         defer { engine.releaseWrites(); backend.stop() }
         backend.captureCoordinator = ProbeStagingCapture()
         backend.start()
@@ -1077,10 +1084,15 @@ extension SerializedSharedState {
     @Test @MainActor func theLifetimeCallbackFiresOnceAfterTheRealDrainNotTheTimeout() async {
         let engine = RecordingEngine()
         let discovery = FakeDiscovery()
-        let (backend, bt, _, _) = makeBackend(engine: engine, discovery: discovery)
+        let clock = ManualDelayClock()
+        // Each fired job hops to the queue the backend named: the Bluetooth
+        // render poll also runs on this clock and must run on `stateQueue`.
+        let (backend, bt, _, _) = makeBackend(
+            engine: engine, discovery: discovery,
+            delayClock: { d, q, w in clock.clock(d, q, DispatchWorkItem { q.async(execute: w) }) },
+            uptimeClock: clock.uptime)
         defer { engine.releaseWrites(); backend.stop() }
         backend.captureCoordinator = ProbeStagingCapture()
-        backend.companionAuditionStopSeconds = 0.1
         backend.start()
         let ap1 = airPlay1()
         discovery.fire(.appeared(ap1))
@@ -1113,6 +1125,10 @@ extension SerializedSharedState {
         engine.blockWrites = true
         let stop = LockedBox<String??>(nil)
         backend.endCompanionAlignmentAudition(targetID: btMove.id) { stop.value = .some($0) }
+        // The stop refuses on its timeout because the test moved the clock past
+        // it, not because real time elapsed.
+        await SuiteWait.until { engine.heldCount > 0 }
+        clock.advance(by: backend.companionAuditionStopSeconds)
         await SuiteWait.until { stop.value != nil }
         #expect(stop.value.flatMap { $0 }?.contains("took too long") == true)
         #expect(released.value == 0, "a refused stop does not consume the lifetime signal")

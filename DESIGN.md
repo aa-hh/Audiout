@@ -477,7 +477,10 @@ own header records that its Font aliases mirror shipped call sites as of the
 audit pass that created them, not a claim every size in the five UI packages
 is on-scale. A handful of narrow, single-consumer sizes exist by design and
 are documented at their declaration rather than promoted into the shared
-scale: `syncReadout` (12pt monospaced, the BT sync drawer's editable value),
+scale: `syncReadout` (12pt monospaced, the BT sync drawer's editable value;
+while a Cast offset edit or reset waits out the stream lag its digits breathe
+`pendingInkDim` to `goldText` and a `pendingGlow` halo 2.5pt around the field
+breathes with the fader thumb's curve, and the field's label adds "applying"),
 `keycap` (11pt, the wizard's key-chip glyphs), `plateTitle` (15pt, the
 wizard's two hero answer plates), `detail` (11pt, compact explanatory copy).
 Do not read these as a second type scale — each is pinned to the one row or
@@ -618,6 +621,22 @@ all — `AudioutSharedUI/AGENTS.md` names `ControlPanelBackingView`,
 on one of these lists draws with stock AppKit chrome; a new custom-drawn
 piece gets named in its owning folder's `AGENTS.md`, not invented silently.
 
+`WarmFaderCell` also draws the pending Cast hold, the owner's pick on
+2026-10-06 after three animated explorations. While a Cast volume or mute
+change waits out the measured stream lag, the thumb lights from inside: three
+flat halo rings 1, 2 and 3pt out (alphas 0.34 / 0.16 / 0.07 dark, 0.50 /
+0.26 / 0.11 light) and a body blended toward the light by 0.85 (dark) or 0.42
+(light), all in `Tokens.Color.pendingGlow`: white halfway to `glow` in dark
+(`#FFECBD`), `glow` itself in light, where white vanishes on the near-white
+ground. The strength follows `PendingPulse`: a 160 ms ramp, then a 1.4 s
+breath from 0.35 to 1 in 0.4 s and back in 1.0 s. When the hold ends the
+light rises to 1 in 100 ms and goes out over 450 ms. Reduce Motion holds 0.7
+and goes out with no fade. The fill under it stays the solid gold gradient.
+To fit the outer ring, `DeviceRowView`'s slider frame is 24pt tall and
+`sliderWidth + 6` wide; the cell leaves 3pt empty at each end
+(`haloRoom`), so the trough sits exactly where the 16pt × `sliderWidth`
+frame put it.
+
 ## Shapes
 
 Three radii shared with iOS: **control** (10pt), **row** (16pt), **panel**
@@ -719,7 +738,11 @@ route-armed, `emberText` while idle-but-adjustable, and drops to
 `labelCool2` when the slider is disabled or the row is in the muted-
 unconnected treatment (`DeviceRowView.swift`). Warm ink means
 `isRouteArmed`; cool means silent. Instruments are flat — no `CALayer`
-blooms.
+blooms. The one exception is the pending Cast hold above: while it runs, an
+armed readout breathes in step with the thumb from `pendingInkDim` (dark
+`emberText`'s `#A98341`; light `#64480C`, 8.14:1 on the light ground) to
+`goldText`, holds the dim end under Reduce Motion, and
+VoiceOver hears "applying volume".
 
 An unavailable retained row keeps its name, glyph and connection node. A
 caption in the trailing control area gives its status while live controls
@@ -740,7 +763,13 @@ password speaker with nothing saved, or the diagnosis panel's
 (`SpeakerPasswordSheetViewController`): a bold one-line heading, a stock secure
 field, then Cancel and a gold `ProminentButton` Connect, right-aligned. A
 caption-size result line appears only once Connect is pressed: "Connecting…",
-then the reason if the attempt fails. A connect dismisses the sheet.
+then the reason if the attempt fails. A connect dismisses the sheet. The
+row shows no diagnosis panel while its sheet is up; Cancel with the speaker
+still failed opens the panel. A speaker waiting for its first password draws
+the connecting ring and an underlined caption-size "Enter Password…" link in
+the trailing slot (the same slot as the Undo and Play here offers), which,
+like a click on the selected row, raises the sheet; red is reserved for a
+refused password.
 
 ### Speakers Sidebar and Pages
 The sidebar is the only speaker list. Two section titles in
@@ -891,7 +920,10 @@ Main Audio's ring, and the rail's node circles. Weight never carries state;
 colour and dash do on the glyph ring, fill and the line gap on the rail node.
 `HaloRingView` draws one form per connection state: no
 ring while off; dashed `rim` while connecting or reconnecting; solid `rim`
-while connected; solid `failure` when failed. The rail node for a connecting
+while connected; solid `failure` when failed. A speaker waiting for its first
+password draws the connecting form, with an underlined caption-size
+"Enter Password…" link in the row's trailing slot (the same slot as the Undo
+and Play here offers); red is reserved for a refused password. The rail node for a connecting
 speaker (`MembershipBusView`'s `.connecting`) is a plain hollow `gold` circle
 at `ringStrokeWidth`, and the line stops `busConnectingNodeRailGap` (9 pt)
 short of it above and below, against `busNodeRailGap` (3 pt) for a member:

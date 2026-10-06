@@ -27,7 +27,7 @@ extension DeviceRowView {
     public var test_statusKind: StatusKind {
         switch device.connectionState {
         case .off:                        return .none
-        case .connecting, .reconnecting:  return .connecting
+        case .connecting, .reconnecting, .awaitingPassword: return .connecting
         case .connected:                  return .connected
         case .failed:                     return .failed
         }
@@ -435,7 +435,7 @@ extension DeviceRowView {
     /// can't drift from the pixels. Must track `test_routeArmed` whenever the
     /// slider is enabled (one armed truth, two instruments).
     public var test_isFaderEngaged: Bool { faderCell.test_isEngagedFill }
-    public var test_isFaderPending: Bool { faderCell.test_isPendingFill }
+    public var test_isFaderPending: Bool { faderCell.test_isPendingGlow }
 
     /// Whether the slider is wearing the Warm fader skin (the drawing-only
     /// `WarmFaderCell` swap) — structural assertion that the skin is installed.
@@ -575,6 +575,9 @@ extension DeviceRowView {
     public var test_removalUndoOffered: Bool { removalUndoOffered && !removalUndoStack.isHidden }
     public var test_removalUndoAXLabel: String? { removalUndoButton.accessibilityLabel() }
     public var test_switchOfferOffered: Bool { switchOfferOffered && !switchOfferButton.isHidden }
+    public var test_enterPasswordOffered: Bool { enterPasswordOffered && !enterPasswordButton.isHidden }
+    /// Drive "Enter Password…" through real AppKit action dispatch.
+    public func test_clickEnterPassword() { enterPasswordButton.performClick(nil) }
 
     /// The membership checkbox's HIT rect in this row's coordinates (the
     /// expanded gutter target), after layout — asserts the click target really

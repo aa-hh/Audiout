@@ -382,6 +382,30 @@ import Testing
         #expect(settings.licenseKey == Self.key)
     }
 
+    /// Red if the phone-verified pass stopped opening the gate exactly once.
+    @MainActor
+    @Test func aPhoneVerifiedKeyOpensTheGateExactlyOnce() async {
+        var passed = 0
+        var aborted = 0
+        let gate = makeGate(settings(), Transport(),
+                            onPassed: { passed += 1 }, onAbort: { aborted += 1 })
+        gate.passWithStoredKey()
+        gate.passWithStoredKey()
+        #expect(passed == 1)
+        #expect(aborted == 0)
+    }
+
+    /// Red if `isChecking` stopped reporting a Register check in flight, which
+    /// let the phone's key race the gate's own check on the stored key.
+    @MainActor
+    @Test func isCheckingCoversOnlyARegisterInFlight() async {
+        let gate = makeGate(settings(), Transport())
+        #expect(!gate.isChecking)
+        gate.submit(key: Self.key)
+        #expect(gate.isChecking, "the validator has not answered until the next main-queue turn")
+        await drainMain()
+    }
+
     // MARK: The one surface's states
 
     /// A key on the clipboard is OFFERED, never spent: filled in and named, so

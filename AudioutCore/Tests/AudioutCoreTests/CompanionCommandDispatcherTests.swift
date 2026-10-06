@@ -73,6 +73,7 @@ import AudioutProtocol
         let settings: AppSettings
         let backend: MockBackend
         let spy: Spy
+        let speakerLibrary: SpeakerLibraryController
     }
 
     private func makeContext(fleet: [Device] = .demoFleet,
@@ -87,6 +88,9 @@ import AudioutProtocol
         let appRouting = AppRoutingController(store: AppRouteStore(directory: scratchDir), loadPersisted: false)
         let settings = AppSettings(defaults: isolatedDefaults)
         let spy = Spy()
+        let speakerLibrary = SpeakerLibraryController(store: SpeakerLibraryStore(directory: scratchDir),
+                                                      loadPersisted: false)
+        speakerLibrary.update(liveDevices: backend.devices, groups: [])
 
         let dispatcher = CompanionCommandDispatcher(
             groupController: groupController,
@@ -102,10 +106,11 @@ import AudioutProtocol
                     try? await Task.sleep(nanoseconds: 5_000_000)
                 }
             },
-            alignmentActions: alignmentActions
+            alignmentActions: alignmentActions,
+            speakerLibrary: speakerLibrary
         )
         return Context(dispatcher: dispatcher, groupController: groupController, appRouting: appRouting,
-                       settings: settings, backend: backend, spy: spy)
+                       settings: settings, backend: backend, spy: spy, speakerLibrary: speakerLibrary)
     }
 
     private func waitForFleet(_ backend: MockBackend, count: Int) async throws {
@@ -177,12 +182,49 @@ import AudioutProtocol
         #expect(!ctx.groupController.isSpeakerSelected("office"))
     }
 
-    /// Not retrying the speaker after storing the password turns it red.
+    /// Turns red if a password submitted from the phone selects a speaker the
+    /// user never joined; the phone's submit must match the Mac sheet's, which
+    /// retries without inventing membership.
     @Test func submitSpeakerPasswordRetriesTheSpeaker() async throws {
         let ctx = try await makeContext()
         let result = ctx.dispatcher.execute(.submitSpeakerPassword(id: "office", password: "secret"))
         #expect(result.applied)
-        #expect(ctx.groupController.isSpeakerSelected("office"), "the retry falls back to setDeviceSelected(_, true)")
+        #expect(!ctx.groupController.isSpeakerSelected("office"), "the retry never selects; membership stays the checkbox's job")
+    }
+
+    // MARK: setSpeakerVisibility / forgetSpeakers
+
+    /// Turns red if `setSpeakerVisibility` stops writing the speaker library,
+    /// or lets the phone change This Mac's Show in Mixer choice.
+    @Test func setSpeakerVisibilityWritesTheLibraryAndRefusesThisMac() async throws {
+        let ctx = try await makeContext()
+        let result = ctx.dispatcher.execute(.setSpeakerVisibility(id: "office", visibility: "hideWhenNotInUse"))
+        #expect(result.applied)
+        #expect(ctx.speakerLibrary.visibility(for: "office") == .hideWhenNotInUse)
+
+        let mac = ctx.dispatcher.execute(.setSpeakerVisibility(id: "local-mac", visibility: "hideWhenNotInUse"))
+        #expect(!mac.applied)
+        #expect(mac.refusalReason == "This Mac is always shown in the Mixer.")
+    }
+
+    /// Turns red if `forgetSpeakers` stops reaching the speaker library, or a
+    /// speaker Main Audio names gets forgotten along with the missing one.
+    @Test func forgetSpeakersForgetsARememberedSpeakerAndSkipsARoutedOne() async throws {
+        let ctx = try await makeContext()
+        try ctx.groupController.saveGroup(Group(id: "g1", name: "Pair", memberIDs: ["office", "garage"],
+                                                memberVolumes: [:]))
+        try ctx.groupController.saveGroup(Group(id: "g2", name: "Upstairs", memberIDs: ["office", "attic"],
+                                                memberVolumes: [:]))
+        ctx.speakerLibrary.update(liveDevices: ctx.backend.devices, groups: ctx.groupController.groups,
+                                  mainOut: .group(id: "g2"), selectedDeviceIDs: [], appRouteDestinations: [],
+                                  routedAppNamesByDeviceID: [:], recoveryIDs: [])
+
+        let result = ctx.dispatcher.execute(.forgetSpeakers(ids: ["garage", "attic"]))
+        #expect(result.applied)
+        #expect(ctx.speakerLibrary.record(for: "garage") == nil)
+        #expect(ctx.groupController.groups.first { $0.id == "g1" }?.memberIDs == ["office"])
+        #expect(ctx.speakerLibrary.record(for: "attic") != nil, "Main Audio names it, so Forget skips it")
+        #expect(ctx.groupController.groups.first { $0.id == "g2" }?.memberIDs == ["office", "attic"])
     }
 
     // MARK: setMainOut — selected / group / refusals

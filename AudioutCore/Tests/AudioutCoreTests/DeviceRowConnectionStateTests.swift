@@ -211,6 +211,15 @@ private final class UnconstrainedDeviceRowWindow: NSWindow {
                 "the failed ring speaks 'couldn't connect'")
     }
 
+    // Reverting `.awaitingPassword` in `HaloRingView.form` or in `accessibilityStateSuffix` turns it red.
+    @Test func awaitingPasswordShowsTheConnectingRingAndSpeaksWaitingForPassword() {
+        let row = DeviceRowView(device: makeDevice(connectionState: .awaitingPassword))
+        row.apply(makeDevice(connectionState: .awaitingPassword), selected: true)
+        #expect(row.test_statusKind == .connecting)
+        #expect(row.test_ringForm == .connecting)
+        #expect(row.test_accessibilityLabel?.hasSuffix(", waiting for password") == true)
+    }
+
     // Announcing a placeholder volume or retaining its omission after reapply would break this label.
     @Test func accessibilityLabelOmitsConnectionClauseWhenOffAndVolumeWhenUnknown() {
         let row = DeviceRowView(device: makeDevice(connectionState: .off))

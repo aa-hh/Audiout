@@ -178,7 +178,8 @@ extension SerializedEngineState {
     // (conffile_unknown_key_assert) to disable ONLY the abort while still
     // counting + logging + returning the safe default. This test flips it off,
     // confirms an unknown lookup bumps the counter and returns the default, and
-    // confirms a KNOWN key does NOT trip the counter.
+    // confirms a KNOWN key does NOT trip the counter. Turns red if `cfg_getbool`
+    // answers a per-device bool key silently for the root or sentinel section.
     @Test func conffileUnknownKeyIsLoudAndCounted() {
         let savedAssert = conffile_unknown_key_assert
         conffile_unknown_key_assert = false
@@ -206,6 +207,12 @@ extension SerializedEngineState {
         // ipv6 is served -> no additional miss.
         _ = cfg_getbool(general, "ipv6")
         #expect(conffile_unknown_key_count == before + 3, "ipv6 is a served bool key")
+
+        // A per-device bool key asked of a global section is a miss: only a
+        // table section from cfg_gettsec may answer it silently.
+        #expect(cfg_getbool(general, "exclude") == 0)
+        #expect(conffile_unknown_key_count == before + 4,
+                "a per-device bool key on a global section must register one miss")
     }
 
     // MARK: - per-device password table

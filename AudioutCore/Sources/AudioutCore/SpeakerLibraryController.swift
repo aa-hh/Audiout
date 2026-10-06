@@ -10,6 +10,7 @@ public enum SpeakerPresentationStatus: Equatable, Sendable {
     case missing
     case connecting
     case reconnecting
+    case awaitingPassword
     case failed(ConnectionFailure)
 
     public var text: String {
@@ -21,6 +22,7 @@ public enum SpeakerPresentationStatus: Equatable, Sendable {
         case .missing: return "Missing speaker"
         case .connecting: return "Connecting…"
         case .reconnecting: return "Reconnecting…"
+        case .awaitingPassword: return "Waiting for password"
         case .failed(let failure): return failure.headline
         }
     }
@@ -120,6 +122,7 @@ public struct SpeakerPresentationRecord: Identifiable, Equatable, Sendable {
             case .connected: return .connected
             case .connecting: return .connecting
             case .reconnecting: return .reconnecting
+            case .awaitingPassword: return .awaitingPassword
             case .failed(let failure): return .failed(failure)
             case .off: break
             }
@@ -304,7 +307,7 @@ public final class SpeakerLibraryController {
         let routed = currentUse.routedDeviceIDs(groups: groups)
         for device in liveDevices {
             switch device.connectionState {
-            case .connected, .connecting, .reconnecting: inUse.insert(device.id)
+            case .connected, .connecting, .reconnecting, .awaitingPassword: inUse.insert(device.id)
             case .off, .failed: break
             }
         }

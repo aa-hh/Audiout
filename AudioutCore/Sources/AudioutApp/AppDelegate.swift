@@ -383,7 +383,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// The app's device model, kept as a pure function of backend events. Keyed
     /// by `Device.id`. T-U2 reads this to build rows; for now it just backs the
     /// placeholder master-volume value the status symbol tracks.
-    private var devicesByID: [String: Device] = [:]
+    private var devicesByID: [String: Device] = [:] {
+        // The Touch Bar play button pulses while any speaker is still starting
+        // (a Cast receiver loading). The bar drops repeats of the same value.
+        didSet {
+            if hasTouchBar {
+                touchBarFullBar.setAwaitingPlayback(devicesByID.values.hasDeviceStillConnecting)
+            }
+        }
+    }
 
     /// The live per-device CONFIRMED per-app streaming map (`BackendEvent
     /// .routedApps`), mirroring `PopoverController`'s own `liveRoutedAppNames`
@@ -406,6 +414,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         appRouting: appRouting,
         settings: settings,
         excludedBundleIDs: { [excludedApps] in excludedApps.excludedBundleIDs },
+        speakerLibrary: speakerLibrary,
         serverName: Host.current().localizedName ?? "Mac",
         host: self)
 
@@ -487,6 +496,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// whole bar means every control on it is one we drive.
     private lazy var touchBarFullBar: TouchBarFullBar = {
         let bar = TouchBarFullBar()
+        bar.slowOutputDelay = { [weak self] reply in
+            guard let native = self?.backend as? NativeBackend else { return reply(nil) }
+            native.slowOutputDelayMs { ms in
+                DispatchQueue.main.async { reply(ms.map { TimeInterval($0) / 1000 }) }
+            }
+        }
+        bar.onPresentedChange = { [weak self] presented in
+            (self?.backend as? MeteringControlling)?.setDeviceLevelsWanted(presented)
+        }
         bar.onVolumeStep = { [weak self] up in
             guard let self else { return }
             // Same step feel as the volume keys — one shared definition, so the
@@ -960,7 +978,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // a direct call beside it posts the same registration a second time.
         // The case the monitor cannot see — a trial started at the gate while
         // the app is already running, which follows no path change — belongs to
-        // the gate's own pass handler.
+        // the gate's own pass handler. The monitor also re-asks about a stored
+        // key the server never answered about, and pushes the resulting token
+        // to connected phones through `applyLicenseState`.
         //
         // The check-in and validate calls below run on the state as it stands
         // now: nothing waits on an answer here, so a key that arrives later is
@@ -968,6 +988,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         trialReachability = TrialReachability(settings: settings,
                                               onRegistered: { [weak self] in
             self?.useNewTrialKey()
+        }, onValidated: { [weak self] in
+            self?.applyLicenseState()
         })
         trialReachability?.start()
 
@@ -1099,6 +1121,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self, !self.updatingSpeakerSnapshot else { return }
             self.popoverController.refreshSpeakerPresentation()
             self.mixerWindowController?.refreshSpeakerPresentation()
+            self.companionCoordinator.scheduleBroadcast()
         }
         speakerSearch.onChange = { [weak self] in self?.mixerWindowController?.refreshSpeakerPresentation() }
         speakerSearch.isBluetoothAccessGranted = { [weak self] in
@@ -3015,6 +3038,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // while its row still reads "Connected". Show or clear the popover's
             // note; no device model changed — handle it and return.
             popoverController.setCaptureFailureMessage(message)
+            companionCoordinator.noteCaptureFailure(message)
+            companionCoordinator.scheduleBroadcast()
             log("event: \(describe(event))")
             return
         case .routingBlockedNeedsDefault(let active):
@@ -3023,6 +3048,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // back. Show or clear the popover's routing-blocked warning; a whole-app
             // condition with no home on a `Device` — handle it and return.
             popoverController.setRoutingBlockedNeedsDefault(active)
+            companionCoordinator.noteRoutingBlocked(active)
+            companionCoordinator.scheduleBroadcast()
             logEvent(event)
             return
         case .systemVolumeOwnershipChanged(let weOwnIt):
@@ -3369,25 +3396,32 @@ extension AppDelegate: CompanionCoordinatorHost {
 
     /// A licence key bought on the phone. Kept in this target
     /// because it needs `LicenseValidator`, the gate window and
-    /// `applyLicenseState`, none of which an AppKit-free type owns.
+    /// `applyLicenseState`, none of which an AppKit-free type owns. The phone
+    /// is answered only after the licence server's verdict; with the gate up,
+    /// an accepted key then opens it, and the gate's own pass runs
+    /// `applyLicenseState` and the check-in.
     @MainActor
     func activateLicenseKey(_ key: String,
                             reply: @escaping (CompanionServer.CommandResult) -> Void) {
-        if let gate = licenseGateWindowController {
-            // The gate is still up: its own field already runs the
-            // validate/store/pass sequence, so hand the key to it rather than
-            // racing it with a second validator.
-            gate.submit(key: key)
-            reply(CompanionServer.CommandResult(applied: true))
+        // The gate's check and the phone's must not race on the same stored
+        // key, so the phone is told to retry rather than silently dropped or
+        // falsely accepted.
+        if licenseGateWindowController?.isChecking == true {
+            reply(CompanionServer.CommandResult(applied: false, refusalReason: "Your Mac is checking another licence key. Try again in a moment."))
             return
         }
         CompanionLicenseActivation(settings: settings).activate(key: key) { [weak self] result in
             reply(result)
+            guard let self, !self.isTerminating else { return }
+            if result.applied, let gate = self.licenseGateWindowController {
+                gate.passWithStoredKey()
+                return
+            }
             // `applyLicenseState` is what pushes the companion token that
-            // unlocks the phone.
-            guard result.applied, let self, !self.isTerminating else { return }
+            // unlocks the phone. A refusal re-reads state too, because the
+            // activation may have restored the previous key.
             self.applyLicenseState()
-            LicenseCheckIn(settings: self.settings).checkInIfNeeded()
+            if result.applied { LicenseCheckIn(settings: self.settings).checkInIfNeeded() }
         }
     }
 

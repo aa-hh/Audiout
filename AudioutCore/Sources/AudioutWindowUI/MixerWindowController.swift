@@ -85,13 +85,13 @@ public final class MixerWindowController {
     /// `onSetDeviceEQ` carries (eq, device id, committed); `onSetMainOutEQ`
     /// carries (eq, committed) — no id, it is the whole mix.
     public var onSetDeviceEQ: ((DeviceEQ, String, Bool) -> Void)?
-    /// The device page's "Forget" on its Password row, with the device id.
-    public var onForgetAirPlayPassword: ((String) -> Void)?
     public var onSetMainOutEQ: ((DeviceEQ, Bool) -> Void)?
     /// Reads the whole mix's current tone when the Main Audio page opens.
     /// Pulled rather than pushed: the value lives on the backend, and this
     /// screen has no event to receive it on.
     public var mainOutEQProvider: (() -> DeviceEQ)?
+    /// The device page's "Forget" on its Password row, with the device id.
+    public var onForgetAirPlayPassword: ((String) -> Void)?
     /// Asks the host to bring the Scenes screen forward: a scene created from
     /// the Speakers sidebar opens its editor there.
     public var onRequestScenesTab: (() -> Void)?

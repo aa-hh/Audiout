@@ -157,6 +157,11 @@ repo. `AudioutCore` pins it by version.
      just wrote. One review found six in a single day's work; they read as
      coverage and cover nothing. If the intent is real, rewrite it to read the
      DRAWN or observed result.
+  5. A test that waits for time drives the backend's `uptimeClock`/`delayClock`
+     through `ManualDelayClock.advance(by:)`, never the wall clock. Guard 11
+     refuses sleeps, `asyncAfter`, `SuiteWait.settle(`, every `.wait(timeout:`
+     and fractional-second Timeout/Delay/Deadline/Interval/Grace/Window/Seconds
+     values; a hang ceiling is a valid `real-time-ok:` reason.
 - **Flag finished worktrees `.prunable`; never hand-delete them.** Fifteen
   worktrees' SwiftPM caches once filled the disk to zero bytes free mid-build.
   `scripts/housekeeping.sh` (invoked automatically by `scripts/run-tests.sh`
@@ -191,8 +196,10 @@ repo. `AudioutCore` pins it by version.
   `scripts/ios.sh`, `scripts/run-app.sh`, and pre-commit Guard 6 all acquire a
   permit before work starts. A full suite run on the mule takes one permit per
   shard (up to three). Mule-full falls back to local at once (no wait).
-  Local-full waits up to 600s, printing progress; ceiling reached → proceeds
-  uncapped with a loud warning (never refuses). Sweep on acquire reclaims stale
+  Local-full waits up to 1800s, printing progress; ceiling reached → proceeds
+  uncapped with a loud warning (never refuses). While it waits, a build or test
+  run checks the mule once a minute and moves there if a mule permit frees
+  first (build.sh and run-tests.sh only). Sweep on acquire reclaims stale
   permits (dead holder, unrecognised job, or held >45 min). `bash scripts/capacity.sh status`
   shows local and mule permits; `bash scripts/test-capacity.sh` self-tests the pool.
 - **A green run is reused, not repeated.** `run-tests.sh` stamps each pass by
@@ -238,9 +245,10 @@ repo. `AudioutCore` pins it by version.
   leaves permanent residue that trashing the `.app` does not remove: a
   preferences domain, TCC grants (a dead row in System Settings › Privacy &
   Security forever), a PUBLIC aggregate audio device that keeps appearing in
-  Sound settings, and a root PTP-helper daemon. This script finds every
-  non-shipping `com.audiout.*` identity across all four surfaces, unions
-  them, and removes the lot — plus the preference domains leaked by the test
+  Sound settings, a root PTP-helper daemon, and a stored AirPlay speaker
+  password in the login keychain. This script finds every non-shipping
+  `com.audiout.*` identity across all five surfaces, unions them, and removes
+  the lot — plus the preference domains leaked by the test
   suites (`swift test` creates a per-test `UserDefaults` suite and never
   removes it; this had reached **48,769 plists**, 98% of everything in
   `~/Library/Preferences`). Dry-run by default; `--apply` to act. The shipping
@@ -335,7 +343,12 @@ warn-only 3/5) are documented in the hook file itself:
   [docs/REVIEW-RUBRIC.md](docs/REVIEW-RUBRIC.md)).
 - **Guard 11 blocks** a commit whose new `@Test` has no comment sentence naming
   the code change that turns it red, a `print(` in a test (`print-ok` exempts),
-  or a new test file holding one test (`new-suite-ok` exempts);
+  a new test file holding one test (`new-suite-ok` exempts), or a real-time
+  wait in a test (`Task.sleep`, `Thread.sleep`, `usleep`, `sleep(`,
+  `asyncAfter`, `SuiteWait.settle(`, any `.wait(timeout:`, or a
+  Timeout/Delay/Deadline/Interval/Grace/Window/Seconds value set to a fraction
+  of a second; `real-time-ok: <reason>` exempts a line, and a hang ceiling is a
+  reason);
   `bash scripts/test-guard-test-discipline.sh` self-tests it.
 - **Guard 12 blocks** a folder AGENTS.md that gains ruling phrasing or grows
   while over its 300-word budget, and any removed line in an AGENTS-HISTORY.md;

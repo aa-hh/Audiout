@@ -5,9 +5,11 @@ name: Tests
 # the PR stuck at "expected". Free on this public repo, same as the licence
 # gate's macOS job.
 #
-# Caches: a cache saved by a pull_request run is visible only to that PR's
-# merge ref, and a merge_group run can only read caches saved on main. So
-# only push-to-main and workflow_dispatch save; PR and queue runs restore.
+# Caches: PR and push runs save; a PR's saved cache is visible to that PR's
+# later pushes and is searched before main's, so a second push rebuilds only
+# its own diff. A merge-queue run can read only main's caches so it does not
+# save; the 10 GB repo limit evicts by last access, and main's cache is
+# re-saved on every merge.
 
 on:
   pull_request:
@@ -37,6 +39,9 @@ env:
   AUDIOUT_BUILD_LOCAL: "1"
   AUDIOUT_TEST_PREFER: local
   AUDIOUT_TEST_NO_CACHE: "1"
+  # Best effort: the toolchain's test helper may lack the entitlement the
+  # backtracer needs. The crash-report upload below is the reliable record.
+  SWIFT_BACKTRACE: enable=yes
 
 jobs:
   suite:
@@ -51,10 +56,11 @@ jobs:
         # still hold blocking waits (Thread.sleep, RunLoop.run(until:),
         # .wait(timeout:)); those hold a cooperative thread and starve Swift
         # concurrency process-wide (see SuiteWait.swift and 8a1016d9), so
-        # they get a process of their own. Shard 2 is half of every other
-        # suite file, split alphabetically by file. Shard 3 is everything
-        # else, via `--skip`, so a new suite file needs no edit here.
-        shard: [1, 2, 3]
+        # they get a process of their own. Shard 2 is the alphabetical first
+        # half of the rest plus three main-actor suites moved in to balance
+        # it. Shard 3 is the serialized chains. Shard 4 is everything else,
+        # via `--skip`, so a new suite file needs no edit here.
+        shard: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@v4
 
@@ -87,11 +93,19 @@ jobs:
       - name: AudioutCore suite
         run: bash scripts/run-tests.sh --shard ${{ matrix.shard }} --disable-index-store -Xswiftc -enable-incremental-file-hashing -Xswiftc -driver-show-incremental
 
-      # One saver, so three shards do not race on one key.
+      - name: Upload crash reports
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: crash-reports-shard-${{ matrix.shard }}
+          path: /Users/runner/Library/Logs/DiagnosticReports/*.ips
+          if-no-files-found: ignore
+
+      # One saver, so four shards do not race on one key.
       - name: Save SwiftPM build caches
         # !cancelled(): the build products are valid whether or not a test
         # failed, and a cache that saves only on green never warms up.
-        if: ${{ !cancelled() && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && strategy.job-index == 0 }}
+        if: ${{ !cancelled() && github.event_name != 'merge_group' && strategy.job-index == 0 }}
         uses: actions/cache/save@v4
         with:
           path: AudioutCore/.build
@@ -125,6 +139,14 @@ jobs:
       # Guard 6's suite, through the same runner (it takes the package name).
       - name: AirPlayEngine suite
         run: AUDIOUT_TEST_PACKAGE=AirPlayEngine bash scripts/run-tests.sh --disable-index-store -Xswiftc -enable-incremental-file-hashing -Xswiftc -driver-show-incremental
+
+      - name: Upload crash reports
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: crash-reports-airplayengine
+          path: /Users/runner/Library/Logs/DiagnosticReports/*.ips
+          if-no-files-found: ignore
 
       - name: Save AirPlayEngine build cache
         if: ${{ !cancelled() && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') }}

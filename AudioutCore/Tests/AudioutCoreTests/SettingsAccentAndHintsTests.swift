@@ -14,7 +14,10 @@ import Testing
 /// real window.
 ///
 /// Nested into `SerializedSharedState`: `Tokens.accentStyle` is process-global
-/// (see the `deinit` below), and `OnboardingPermissionColorTests` mutates the
+/// (each test that moves the dial restores it with `defer` on the main actor,
+/// since a `deinit` runs on the test runner's thread and the setter's
+/// notification would repaint AppKit views there), and
+/// `OnboardingPermissionColorTests` mutates the
 /// same global — under swift-testing's in-process concurrency the two suites
 /// running at once produced real, reproducible failures (color comparisons
 /// racing a concurrent accent-style write), invisible under XCTest's
@@ -25,13 +28,6 @@ extension SerializedSharedState {
 @Suite final class SettingsAccentAndHintsTests: IsolatedSuite {
 
     private var settings: AppSettings { AppSettings(defaults: isolatedDefaults) }
-
-    deinit {
-        // `Tokens.accentStyle` is process-global on purpose (the live remap
-        // seam); restore the flagship default so no other test in this suite —
-        // or a later golden render in this process — inherits a dialed accent.
-        Tokens.accentStyle = .fullGold
-    }
 
     // MARK: AppSettings scalar (UserDefaults idiom)
 
@@ -75,6 +71,7 @@ extension SerializedSharedState {
     }
 
     @Test func selectingAccentPersistsRemapsAndNotifies() {
+        defer { Tokens.accentStyle = .fullGold }
         let pane = makeAppearancePane()
         var notified: [AccentStyle] = []
         pane.onAccentChanged = { notified.append($0) }
@@ -88,6 +85,7 @@ extension SerializedSharedState {
     }
 
     @Test func accentHintTracksSelection() {
+        defer { Tokens.accentStyle = .fullGold }
         let pane = makeAppearancePane()
         let fullGoldHint = pane.test_accentHint
         #expect(!fullGoldHint.isEmpty)
@@ -111,6 +109,7 @@ extension SerializedSharedState {
     }
 
     @Test func subtleRemapsGoldAndKeepsAQuieterGlow() {
+        defer { Tokens.accentStyle = .fullGold }
         let fullGold = resolved(Tokens.Color.gold, appearanceName: .darkAqua)
         let fullGlow = resolved(Tokens.Color.glow, appearanceName: .darkAqua)
 
@@ -130,6 +129,7 @@ extension SerializedSharedState {
     }
 
     @Test func accentDialNeverRemapsFailureRimOrRing() {
+        defer { Tokens.accentStyle = .fullGold }
         let failure = resolved(Tokens.Color.failure, appearanceName: .darkAqua)
         let rim = resolved(Tokens.Color.rim, appearanceName: .darkAqua)
         let ring = resolved(Tokens.Color.ring, appearanceName: .darkAqua)

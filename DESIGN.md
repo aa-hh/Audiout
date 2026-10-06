@@ -912,9 +912,13 @@ connecting ring and a caption-size `TextLinkButton` reading
 "Enter Password…" or "Enter Code…" in the trailing slot (the same slot as the Undo and Play
 here offers), which, like a click on the selected row, raises the sheet; red is
 reserved for a refused password or code. A code receiver gets the sheet's code
-variant: the heading "Enter the code shown on “<name>”", then four stock
+variant: the heading "Enter the code shown on “<name>”", then four
 one-digit boxes (52×48 pt, 8 pt apart, the row centred in the 320 pt sheet,
-24 pt medium monospaced digits, no placeholder; 12 pt from the heading, 8 pt
+24 pt medium monospaced digits, no placeholder; each box is `CodeBoxCell`: a
+`well` fill inside a 1 pt `rim` edge on the 10 pt control radius, so the
+boundary holds 3:1 on any sheet background, with the digit, caret and field
+editor centred vertically and the stock focus ring following the rounded
+shape; 12 pt from the heading, 8 pt
 above the result line, 20 pt between it and the buttons) that take digits only. Focus moves on as each digit
 lands, Delete on an empty box steps back to the one before, a pasted string
 spreads across the boxes, and the fourth digit connects by itself. Connect

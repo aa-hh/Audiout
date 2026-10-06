@@ -161,4 +161,16 @@ import AudioutSharedUI
             ((sub as? NSTextField).map { [$0] } ?? []) + textFields(in: sub)
         }
     }
+
+    // A box keeping AppKit's top-aligned text rect or its stock borderless field turns it red.
+    @Test func codeBoxesCentreTheirDigitAndDrawAnEdge() throws {
+        let sheet = SpeakerPasswordSheetViewController(deviceName: "Kitchen", kind: .onScreenCode)
+        let bounds = NSRect(x: 0, y: 0, width: 52, height: 48)
+        for box in sheet.test_codeBoxes {
+            let cell = try #require(box.cell as? CodeBoxCell)
+            #expect(abs(cell.titleRect(forBounds: bounds).midY - bounds.midY) <= 0.5)
+            #expect(abs(cell.drawingRect(forBounds: bounds).midY - bounds.midY) <= 0.5)
+            #expect(cell.drawsEdge)
+        }
+    }
 }

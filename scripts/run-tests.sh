@@ -585,6 +585,22 @@ fi
 # group below, and letting capacity_acquire install its own trap here would
 # get silently clobbered by that later one — install ours instead, right away,
 # so an interrupt during the cold-checkout/reap steps below still releases.
+# While it waits for a local permit, capacity_acquire hands the run to the mule
+# if a mule permit frees first. Same verdict handling as the overflow above.
+suite_args=$(remote_quote_args "$@")
+suite_on_mule() {
+    rrc=0
+    eval "run_remote$suite_args" || rrc=$?
+    if [ "$rrc" -eq 0 ]; then
+        eval "suite_cache_record \"\$key\"$suite_args"
+        exit 0
+    fi
+    if [ "$rrc" -eq 3 ]; then
+        echo "  suite: FAILED on remote $remote_host — not re-run here." >&2
+        exit "${remote_status:-1}"
+    fi
+}
+[ -n "$remote_host" ] && capacity_mule_retry=suite_on_mule
 AUDIOUT_CAPACITY_NO_TRAP=1 capacity_acquire suite
 acquired=0
 [ -n "$capacity_slot_file" ] && acquired=1

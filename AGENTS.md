@@ -197,7 +197,9 @@ repo. `AudioutCore` pins it by version.
   permit before work starts. A full suite run on the mule takes one permit per
   shard (up to three). Mule-full falls back to local at once (no wait).
   Local-full waits up to 1800s, printing progress; ceiling reached → proceeds
-  uncapped with a loud warning (never refuses). Sweep on acquire reclaims stale
+  uncapped with a loud warning (never refuses). While it waits, a build or test
+  run checks the mule once a minute and moves there if a mule permit frees
+  first (build.sh and run-tests.sh only). Sweep on acquire reclaims stale
   permits (dead holder, unrecognised job, or held >45 min). `bash scripts/capacity.sh status`
   shows local and mule permits; `bash scripts/test-capacity.sh` self-tests the pool.
 - **A green run is reused, not repeated.** `run-tests.sh` stamps each pass by

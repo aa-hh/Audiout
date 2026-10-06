@@ -176,6 +176,12 @@ extension SerializedSharedState {
             return [("hover wash", wash(Tokens.Color.engagedChrome, PopoverColumnGrid.rowHoverWashAlpha))]
         }
 
+        func sidebarGrounds(_ appearanceName: NSAppearance.Name) -> [(String, NSColor)] {
+            let hex: (r: CGFloat, g: CGFloat, b: CGFloat) = appearanceName == .darkAqua
+                ? (0x2C, 0x2C, 0x2E) : (0xE8, 0xE8, 0xEA)
+            return [("sidebar", NSColor(srgbRed: hex.r / 255, green: hex.g / 255, blue: hex.b / 255, alpha: 1))]
+        }
+
         let entries: [ContrastEntry] = [
             // TEXT, floor 4.5:1
             ContrastEntry(name: "label2", token: Tokens.Color.label2, floor: 4.5,
@@ -186,6 +192,13 @@ extension SerializedSharedState {
                          groundsFor: sameGrounds(textGrounds)),
             ContrastEntry(name: "labelCool2", token: Tokens.Color.labelCool2, floor: 4.5,
                          groundsFor: sameGrounds(textGrounds)),
+            // The sidebar's resting grounds. These two are the assumed darkest light and
+            // lightest dark sidebar grounds for macOS 14.4-26, which are unmeasured;
+            // macOS 27 measured #F0F0F0 / #282828.
+            ContrastEntry(name: "labelCool on sidebar", token: Tokens.Color.labelCool, floor: 4.5,
+                         groundsFor: sidebarGrounds),
+            ContrastEntry(name: "labelCool2 on sidebar", token: Tokens.Color.labelCool2, floor: 3.0,
+                         groundsFor: sidebarGrounds),
             ContrastEntry(name: "goldText", token: Tokens.Color.goldText, floor: 4.5,
                          groundsFor: sameGrounds(textGrounds)),
             ContrastEntry(name: "emberText", token: Tokens.Color.emberText, floor: 4.5,
@@ -226,6 +239,10 @@ extension SerializedSharedState {
                              [("canvas", canvas), ("panel", panel), ("raised", raised)]
                                  + rowWashGrounds(appearanceName)
                          }),
+            // The Speakers tab's green is TEXT (the Available label, the counts, the
+            // Ready/Connected word) and a glyph, so it carries the body floor.
+            ContrastEntry(name: "speakersAccent", token: Tokens.Color.speakersAccent, floor: 4.5,
+                         groundsFor: sameGrounds([("panel", panel), ("raised", raised), ("well", well)])),
             // `panel` is a BACKDROP everywhere else; on the mute pill it is the
             // ink the slashed glyph is knocked out in, so it carries a glyph
             // floor there and nowhere else.

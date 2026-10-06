@@ -62,7 +62,7 @@ final class ListRowView: NSView {
         titleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         captionLabel.font = Tokens.Font.caption
-        captionLabel.textColor = Tokens.Color.label2
+        captionLabel.textColor = Tokens.Color.labelCool
         captionLabel.maximumNumberOfLines = 2
         captionLabel.cell?.truncatesLastVisibleLine = true
         captionLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
@@ -123,6 +123,12 @@ final class ListRowView: NSView {
             constant: accessory == nil ? -Self.trailingInset : -Self.textToAccessoryGap)
         fill.priority = .defaultHigh - 1
         constraints.append(fill)
+        // The height above is only a minimum, so a row in a card taller than
+        // its rows took the spare height. This pulls it to the least its
+        // content allows.
+        let shortest = heightAnchor.constraint(equalToConstant: 0)
+        shortest.priority = .defaultLow
+        constraints.append(shortest)
         NSLayoutConstraint.activate(constraints)
     }
 

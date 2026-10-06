@@ -25,6 +25,7 @@ colors:
   failure: "#D9564A"
   muted: "#8E93F0"
   equalizer: "#41B07A"
+  speakersAccent: "#41B07A"
   partyRampDeep: "#FF90E9"
   meter: "#464C55"
   socket: "#2A2E33"
@@ -344,6 +345,19 @@ replaced (`#227950` / `#1C6543`, 2026-09-05) were measured on `panel` alone:
 the dark half sat at 2.66:1 on the gold wash rows painted behind a sounding speaker at the time, and the light half, at chroma 0.091, read as
 near-black rather than as green.
 
+**The Speakers tab's green.** `Tokens.Color.speakersAccent` (`#41B07A` dark /
+`#007835` light, Increase Contrast `#63D199` / `#03642B`) means the Mac can
+reach a speaker, and it also marks the tab's one add action. It has four
+placements, all on the Speakers tab: the Overview's "Available" label, each
+count tile's number above 0, the `plus.circle` glyph on "Pair Bluetooth
+speaker…", and the "Ready" or "Connected" word in a speaker page's caption. It
+is never selection, never a fill behind text in dark (white on the dark value
+measures 2.72:1), and never the Mixer or the sidebar. Its base values are
+`equalizer`'s, so the app has one green; the Increase Contrast pair is its own,
+and it is not on the accent dial. Against a 4.5:1 floor it measures, light,
+5.39 on `panel` and `raised` and 4.67 on `well` (7.04 / 6.10 with Increase
+Contrast) and, dark, 6.60 / 5.79 / 7.48 (9.50 / 8.34 / 10.77).
+
 **The Instrument Ground Rule (Mac-only).** The alignment wizard's stage
 (`stagePlate`, `stageRule`, `stageInk`, `wireCore`, `fuseWhite`) authors the
 same hex for dark and light — a fixed dark instrument face set into a
@@ -404,12 +418,15 @@ relative to a text style.
 - **Display** (700, 20pt; `displayLarge` 700/24pt for the licence gate's
   welcome headline): a window's own headline, where the headline is the
   reason the window opened.
-- **Heading** (600, 16pt): device-detail and group-editor name fields, form
+- **Heading** (600, 16pt; `headingDigits` 600/16pt with tabular digits for
+  the Overview's counts): device-detail and group-editor name fields, form
   section titles — one step above body.
 - **Body** (400, 13pt; `bodyEmphasized` 600/13pt): the most common label
   font — row names, headings, form labels.
 - **Caption** (400, 11pt; `captionMedium` 500/11pt; `captionEmphasized`
-  600/11pt): secondary/detail text — sublabels, readouts, hints, footers.
+  600/11pt; `captionDigits` 400/11pt with tabular digits for the sidebar's
+  "N unavailable" divider and the Overview's total): secondary/detail text —
+  sublabels, readouts, hints, footers.
 - **Micro Label** (600, 10pt, sentence case): the state vocabulary ("Muted")
   and inline tags ("AP1") — the Mac's version of the iOS Micro Label voice,
   one point smaller because it rides the sublabel line and must not change
@@ -495,25 +512,38 @@ editor, with no sidebar. The Speakers root is a sidebar split that must never
 collapse: the sidebar is the only speaker list, beside the Speakers page, a
 speaker's page or Main Audio. Selection on either is never activation.
 
-The **Speakers page** (`SpeakersPageViewController`) lists no speakers. Its
-column sits at the top of the pane on `GroupsPaneLayout` insets: the 48 pt
-icon well, the title, and one caption line in `Tokens.Font.caption` /
-`Tokens.Color.label2` that reports the search for speakers. While looking it
-reads a small spinner, "Looking for speakers on your network…" and "· N found
-so far". Once `SpeakerSearch` decides the search is done (the list of speakers
-the Mac can see has not changed for 0.5 s, the popover's first-open quiet
-window, or a 10 s ceiling ran out; once per launch) it shows an
-`NSColor.systemGreen` check and either "All N speakers found" or "Done
-looking · ● F found · ○ A away", the dots drawn by the sidebar's own
-`SidebarPresenceDotView` at 7 pt. Below it, one `GroupedSectionView` card
-ends at its last row. Its first row counts every kept speaker by kind
-(AirPlay, Bluetooth, Cast, This Mac, Unknown; a kind with none is left out):
-a 16 pt glyph, the count in `Tokens.Font.heading`, the label in caption ink.
-Then one-line `ListRowView` rows, each only when true: "Bluetooth access is
-off" with its action button, "N speakers can't be found" with "Forget N
-speakers…" (only after the search is done), and "Pair Bluetooth speaker…"
-with a chevron, always last. Each row's longer sentence is its tooltip and
-VoiceOver hint.
+The **Speakers page** (`SpeakersPageViewController`), behind the sidebar's
+Overview plate, lists no speakers. Its column sits at the top of the pane on
+`GroupsPaneLayout` insets: the 48 pt icon well, the title "Overview", and one
+caption in `Tokens.Font.captionDigits` / `Tokens.Color.labelCool` holding the
+total ("No speakers", "1 speaker", "N speakers"). Below it, one
+`GroupedSectionView` card ends at its last row. Its first row is the counts
+strip: "Available" in `captionEmphasized` / `speakersAccent` over four kind
+tiles (AirPlay, Bluetooth, Cast, This Mac), then Unavailable behind a 1 pt
+`containerEdge` rule. A tile is a 16 pt `labelCool2` glyph, its number in
+`Tokens.Font.headingDigits` and its label in `caption` / `labelCool`; a kind's
+number is `speakersAccent` above 0, Unavailable's is `label`, and both are
+`labelCool2` at 0. This Mac counts as This Mac; any other speaker counts under
+its kind only while the Mac can reach it and as Unavailable otherwise, so
+Unavailable equals the rows under the sidebar's dividers. After the strip come
+one-line `ListRowView` rows, built once and only shown while true: "N speakers
+can't be found" with "Forget N speakers…", "Local Network access is off" with
+"Open Privacy Settings…", "Bluetooth access is off" with its action button, and
+"Pair Bluetooth speaker…" with a `speakersAccent` `plus.circle` and a
+`labelCool2` chevron, always last. Each row's longer sentence is its tooltip
+and VoiceOver hint. Nothing on the tab uses `systemGreen`.
+
+`SpeakerSearch` decides when each number is known: This Mac once it is
+listed, Bluetooth after 0.5 s with no change, AirPlay and Cast after 2 s, and
+every kind 10 s after the search starts (the first speaker listed or the
+page's first appearance, whichever is first). Until then a 20×12 `meter`
+placeholder stands in for the number, and a 14×8 one for the total, with one
+highlight crossing every placeholder on a shared 1.6 s cycle; a number fades
+in over 0.18 s when it arrives. Under Reduce Motion there are no placeholders:
+the tiles show "–" and the caption "Looking for speakers…". The can't-be-found
+list stays empty until that 10 s mark, and never holds a Bluetooth speaker
+without Bluetooth access, or a network speaker while Local Network is denied
+or before any network speaker has answered.
 
 **Onboarding** is a floating first-run window: a spine of status rows beside
 one hero panel, gating Done until every check passes.
@@ -639,7 +669,7 @@ the record. Converting only the tabs failed live review on 2026-08-30 — three
 bare glyphs beside two bordered circles, two styles in one header — so the
 strip is converted whole or not at all. And nothing in the seat is behind
 `#available`: the version this replaces put every cue inside
-`if #available(macOS 26.0, *)` while the package deploys to 14.2, so macOS
+`if #available(macOS 26.0, *)` while the package deploys to 14.4, so macOS
 14–25 showed three identical circles and no current screen at all.
 
 Only the current tab shows its name, to the right of its glyph, at
@@ -688,45 +718,52 @@ caption-size result line appears only once Connect is pressed: "Connecting…",
 then the reason if the attempt fails. A connect dismisses the sheet.
 
 ### Speakers Sidebar and Pages
-The sidebar is the only speaker list. Under the System Audio row and the
-Speakers plate it holds two groups that are the Mixer visibility setting:
-**In the Mixer**, with This Mac first and the rest alphabetical, and, only
-when it has rows, **Hidden unless playing**, which folds through the stock
-hover Show/Hide control. Rows are one line. A 9 pt dot before the icon shows
-presence, never routing: a filled `ember` disc for a speaker on the network, a
-1.5 pt `ember` ring for one that is away, and the `failure`
-`exclamationmark.triangle` at 11 pt for one the Mac can't find. The one
-caption is **In the Mixer while it plays**, on a 40 pt row, for a hidden
-speaker in use. The right-click menu
-offers **Hide from Mixer** or **Show in Mixer**, **Keep in Mixer when
-unavailable** (checked for Always), **Speaker settings…**, and **Forget…** for
-speakers the Mac can't find; dragging rows onto the other group's header moves
-them between groups. Forget asks first in a warning sheet whose Return key is
-Cancel. It refuses when a scene would be left with no speaker, naming the
-scene to delete first, and when Main Audio or an app is still set to play on
-the speaker. A failed Forget shows the scene editor's "couldn't be updated"
-alert.
+The sidebar is the only speaker list. Two section titles in
+`Tokens.Font.captionEmphasized`, **System Audio** over the Main Audio plate
+and **Speakers** over the Overview plate, then two groups that are the Mixer
+visibility setting, titled in `captionMedium`: **Shown in Mixer**, with This
+Mac first, and, only when it has rows, **Hidden unless in use**, which folds
+through the stock hover Show/Hide control. Every title is `labelCool` and
+spoken as a heading. The plates are 8 pt taller than a speaker row, filled
+`raised` in light and `label` at 5% in dark. Within each group the speakers
+the Mac can reach come first, by name; then a divider row (a slashed-antenna
+glyph, "N unavailable" in `captionDigits` / `labelCool` and a separator rule,
+spoken "N unavailable speakers"); then the speakers it can't reach, by name,
+the name in `labelCool` and the icon in `labelCool2`, each with a tooltip
+saying Unavailable, Not connected or Can't be found. The split waits until the
+search knows every kind, so a cold launch never shows every speaker as
+unavailable. Rows keep their identity: an update moves, fades in and fades out
+rows inside one outline update (with no animation under Reduce Motion or off
+screen), a selection moves with its rows, and nothing moves while the pointer
+is over the sidebar, its menu is open or a drag is running. Rows are one line,
+except a hidden speaker in use, which carries **Shown while in use** on a row
+12 pt taller. A selected row's inks take the selection pill's text colour.
+The right-click menu offers **Hide from Mixer** or **Show in Mixer**, **Show
+even when unavailable** (checked for Always), **Speaker settings…**, and
+**Forget…** only for speakers on the search's can't-be-found list;
+Command-Delete forgets the selected ones on that list. Dragging rows onto the
+other group's header moves them between groups. Forget asks first in a
+warning sheet whose Return key is Cancel. It names up to two speakers and
+counts the rest, and says that a speaker which turns up again comes back to
+the speaker list but not to its scenes. It refuses when a scene would be left
+with no speaker, naming the scene to delete first, and when Main Audio or an
+app is still set to play on the speaker. A failed Forget shows the scene
+editor's "couldn't be updated" alert.
 
 Every window page opens with a 48 pt icon well, a 16 pt semibold name and one
-caption line. A speaker's caption is its kind and status ("Sonos · Ready"),
-"This Mac", or the failure glyph and "Can't be found". The Equalizer sits open
-below: its title row carries the green engaged mark, a one-line summary
-("Bass 3 dB, Loudness on", or "Flat") and a Reset button hidden while the
-curve is flat. A speaker the Mac can't find shows no editor, only a note that
-its curve is kept when it is shaped, and a Forget button. Then an outlined
-list: **Show in Mixer**, whose caption explains the current choice beside its
-pop-up (absent for This Mac), **Scenes**, linking each scene the speaker
-belongs to, and, only while a password is saved for the speaker, **Password**,
-captioned "Saved", with a small stock Forget button.
-
-The Speakers plate's page lists no speakers. Its caption line is the search
-result: a small spinner and the count found so far while looking, then a
-`systemGreen` `checkmark.circle.fill` with "All N speakers found", or "Done
-looking" with the found and away counts. One outlined card follows. Its first
-row counts every kept speaker by kind; after it come only the rows that are
-true: Bluetooth access while it is off, the speakers that can't be found with
-a Forget button once the search is done, and **Pair Bluetooth speaker…** last. The found mark is stock
-`systemGreen` because the equalizer green is fenced.
+caption line in `labelCool`. A speaker's caption is its kind and status
+("Sonos · Ready") with "Ready" or "Connected" in `speakersAccent`, "This Mac",
+or a `labelCool2` `questionmark.circle` and "Can't be found" once the search
+lists the speaker; before that a remembered speaker reads as unavailable. The
+Equalizer sits open below: its title row carries the green engaged mark, a
+one-line summary ("Bass 3 dB, Loudness on", or "Flat") and a Reset button
+hidden while the curve is flat. A speaker the Mac can't find shows no editor,
+only a note that its curve is kept when it is shaped. A Forget button appears
+only for a speaker on the can't-be-found list. Then an outlined
+list with `labelCool` captions: **Show in Mixer**, whose caption explains the
+current choice beside its pop-up (absent for This Mac), **Scenes**, linking
+each scene the speaker belongs to, and, only while a password is saved for the
+speaker, **Password**, captioned "Saved", with a small stock Forget button.
 
 Scene checkboxes change membership. Their rows give an unavailable member's
 status and nothing about visibility; scene cards count unavailable members
@@ -779,7 +816,7 @@ foreground rather than a ground, and `TokenContrastMatrixTests` holds it to the
 
 The slash retires the older "the icon never changes on toggle" decision.
 `.fill` rather than plain `speaker.slash` so it keeps the weight of the at-rest
-glyph it replaces; it landed in macOS 10.15, well under the package's 14.2
+glyph it replaces; it landed in macOS 10.15, well under the package's 14.4
 floor. It collides with nothing — `Device.Kind.symbolName` already avoids the
 `speaker.*` family for the Bluetooth row icon for this reason.
 

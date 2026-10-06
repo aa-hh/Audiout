@@ -294,3 +294,5 @@ backend.
 - `DeviceDetailViewController` → device pane: identity, Equalizer, Groups, About.
 - `MainOutDetailViewController` → Main Audio page, non-editable icon well.
 - 2026-10-04: The Speakers overview table (`SpeakersOverviewViewController`) was retired: the sidebar is the only speaker list, and the Speakers plate opens `SpeakersPageViewController`. The Forget confirm refuses, rather than deleting the scene, when forgetting would leave a scene with no speaker, because deleting a scene can move audio.
+- 2026-10-05: The sidebar's presence dot gave way to order: in each group the speakers the Mac can reach come first, then an "N unavailable" divider row and the rest in cool greys, and an update moves, inserts and removes rows instead of reloading the list, so rows keep their identity and a selection survives.
+- 2026-10-05: Green (`Tokens.Color.speakersAccent`) became the Speakers tab's colour for a reachable speaker and the tab's one add action, and the Speakers tab's secondary inks moved from the warm `label2`/`label3` to the cool `labelCool`/`labelCool2`, the equalizer's inks excepted.

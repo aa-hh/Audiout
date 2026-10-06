@@ -114,7 +114,7 @@ public enum Tokens {
             name: "label2", dark: 0xB7AC95, darkHighContrast: 0xC9C1AF,
             light: 0x6B5F4E, lightHighContrast: 0x554C3E)
         /// The THIRD ink rung — de-emphasized state-bearing text ("Unavailable",
-        /// "Not set", subsection headers, empty-state placeholders). Held to the
+        /// "Not set", empty-state placeholders). Held to the
         /// same body floor as ``label2``, one step quieter; hierarchy between
         /// the two is carried by size and weight as much as by ink.
         ///
@@ -493,6 +493,23 @@ public enum Tokens {
         /// read as a colour on paper.
         public static var equalizer: NSColor {
             warmDynamic(name: "equalizer", dark: 0x41B07A, light: 0x007835)
+        }
+
+        /// The Speakers tab's colour. It means the Mac can reach a speaker, and it
+        /// also marks the tab's one add action. Never selection, never a fill
+        /// behind text in dark, never the Mixer or the sidebar. Base values match
+        /// ``equalizer`` so the app has one green; the Increase Contrast pair is
+        /// this token's own.
+        ///
+        /// CONTRAST RATIONALE (measured; floor 4.5:1 on `panel`/`raised`/`well`,
+        /// both appearances, Increase Contrast on and off): light `#007835` =
+        /// 5.39 panel/raised / 4.67 well, light Increase Contrast `#03642B` =
+        /// 7.04 / 6.10. Dark `#41B07A` = 6.60 panel / 5.79 raised / 7.48 well,
+        /// dark Increase Contrast `#63D199` = 9.50 / 8.34 / 10.77. White text on
+        /// the dark value measures 2.72:1, so it is never a fill.
+        public static var speakersAccent: NSColor {
+            warmDynamic(name: "speakersAccent", dark: 0x41B07A, darkHighContrast: 0x63D199,
+                        light: 0x007835, lightHighContrast: 0x03642B)
         }
 
         /// The COOL body ink — the same second-rung job as ``label2`` on a
@@ -1270,6 +1287,11 @@ public enum Tokens {
         public static var heading: NSFont {
             .systemFont(ofSize: NSFont.systemFontSize + 3, weight: .semibold)
         }
+        /// ``heading`` with tabular digits, so the Overview's counts hold their
+        /// width as they change.
+        public static var headingDigits: NSFont {
+            .monospacedDigitSystemFont(ofSize: NSFont.systemFontSize + 3, weight: .semibold)
+        }
         /// A large message title (mixer-window empty state, +2pt regular).
         /// Alias of `NSFont.systemFont(ofSize: NSFont.systemFontSize + 2)`.
         public static var titleLarge: NSFont {
@@ -1285,6 +1307,11 @@ public enum Tokens {
         /// (sublabels, readouts, hints, footers). Alias of
         /// `NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)`.
         public static var caption: NSFont { .systemFont(ofSize: NSFont.smallSystemFontSize) }
+        /// ``caption`` with tabular digits, for the sidebar's "N unavailable"
+        /// divider and the Overview's total.
+        public static var captionDigits: NSFont {
+            .monospacedDigitSystemFont(ofSize: NSFont.smallSystemFontSize, weight: .regular)
+        }
         /// The row `%` readout (iOS Readout: bold, tabular digits) at the
         /// caption size so it keeps fitting the 40 pt readout column; semibold
         /// is the system face's cut nearest iOS's 700. `goldText` while
@@ -1293,7 +1320,8 @@ public enum Tokens {
             .monospacedDigitSystemFont(ofSize: NSFont.smallSystemFontSize, weight: .semibold)
         }
         /// Caption text, medium weight (appearance-tile labels, section
-        /// sub-headers in the popover header row).
+        /// sub-headers in the popover header row, and the Speakers sidebar's
+        /// subsection headers).
         public static var captionMedium: NSFont {
             .systemFont(ofSize: NSFont.smallSystemFontSize, weight: .medium)
         }

@@ -473,10 +473,11 @@ public final class PopoverController: NSObject {
     /// The wizard's stimulus tempo (BPM), driven by the estimator's stage.
     /// Wired to `setBTWizardTickTempo`.
     public var onBTWizardTempo: ((_ bpm: Double) -> Void)?
-    /// Stage the mic-probe calibration sweeps on the live wizard feed
+    /// Stage the mic-probe calibration lanes on the live wizard feed
     /// (roadmap 064). Wired to `stageBTMicProbe`; nil (mock/dev backends)
     /// means no probe and the run stays purely by-ear.
-    public var onStageBTMicProbe: ((_ onStarted: @escaping () -> Void,
+    public var onStageBTMicProbe: ((_ levelStepDB: @escaping () -> Int,
+                                    _ onStarted: @escaping (_ pipelineDelaySeconds: TimeInterval) -> Void,
                                     _ onFinished: @escaping () -> Void) -> Void)?
     /// The mic permission answer, asked from the wizard's Start (the system
     /// prompt when it is still undecided). Overridden in tests so no suite
@@ -540,8 +541,8 @@ public final class PopoverController: NSObject {
     var btWizardMicProbe: MicProbeSession?
     /// Bumped on every live preview push. The probe result is only trusted if
     /// the preview it was measured under is STILL the one applied — an answer
-    /// (or a reference swap) mid-probe moves the sink under the sweep, and a
-    /// measurement across that splice would be about two different timelines.
+    /// mid-probe moves the sink under the sweep, and a measurement across that
+    /// splice would be about two different timelines.
     var btWizardPreviewGeneration = 0
     /// The preview value in force when the probe's sweeps started — the
     /// measured Δ corrects THIS value into the proposal.

@@ -30,14 +30,17 @@ import Testing
         let scene: [Float]
         let failsToStart: Bool
         let firstSampleHostNanos: Int64?
+        let roomSlices: [Double]
         private(set) var stopped = false
-        init(rate: Double = 24_000, scene: [Float] = [], failsToStart: Bool = false,
-             firstSampleHostNanos: Int64? = nil) {
+        init(rate: Double = 8_000, scene: [Float] = [], failsToStart: Bool = false,
+             firstSampleHostNanos: Int64? = nil, roomSlices: [Double] = []) {
             self.rate = rate
             self.scene = scene
             self.failsToStart = failsToStart
             self.firstSampleHostNanos = firstSampleHostNanos
+            self.roomSlices = roomSlices
         }
+        func recentRMSdBFS(seconds: Double, slices: Int) -> [Double] { Array(roomSlices.prefix(slices)) }
         struct StartFailure: Error {}
         func start() throws -> Double {
             if failsToStart { throw StartFailure() }
@@ -46,62 +49,83 @@ import Testing
         func stop() -> [Float] { stopped = true; return scene }
     }
 
-    /// A mic capture holding both sweeps: DOWN (the reference lane) at
-    /// `downDelay` samples, UP (the Bluetooth lane) at `upDelay`.
-    ///
-    /// Every scene here runs at 24 kHz rather than some cheaper rate: the
-    /// Bluetooth lane sweeps to 10 kHz, and a rate that cannot represent that
-    /// band would leave these scenes correlating one aliasing artefact against
-    /// another — passing while proving nothing.
-    private func scene(rate: Double, downDelay: Int, upDelay: Int) -> [Float] {
-        let down = SyncProbe.SweepDesign.downSweep(sampleRate: rate,
-                                                   duration: MicProbeSession.sweepSeconds)
-        let up = SyncProbe.SweepDesign.upSweep(sampleRate: rate,
-                                               duration: MicProbeSession.sweepSeconds)
-        let length = max(downDelay, upDelay) + Int(rate * 1.5)
+    /// A mic capture holding both probe lanes (`SyncProbe.lane`, drone and
+    /// glide): the reference lane at `referenceDelay` samples, the Bluetooth
+    /// lane at `targetDelay` — one lane spacing earlier, plus the skew under
+    /// test. 8 kHz is enough: the glide's top partial is 1 800 Hz.
+    private func scene(rate: Double, targetDelay: Int, referenceDelay: Int) -> [Float] {
+        let lane = SyncProbe.lane(sampleRate: rate)
+        let length = max(targetDelay, referenceDelay) + lane.count + Int(rate * 0.5)
         var out = [Float](repeating: 0, count: length)
-        for i in 0..<length {
-            let sample = 0.5 * SyncProbe.value(down, at: Double(i - downDelay) / rate)
-                + 0.4 * SyncProbe.value(up, at: Double(i - upDelay) / rate)
-            out[i] = Float(sample)
+        for (i, v) in lane.enumerated() {
+            out[referenceDelay + i] += 0.5 * v
+            out[targetDelay + i] += 0.4 * v
         }
         return out
     }
 
+    /// Where the target lane sits for a given skew, in samples.
+    private func targetDelay(referenceDelay: Int, rate: Double, skewSamples: Int) -> Int {
+        referenceDelay - Int(SyncProbe.Layout.laneSpacingSeconds * rate) + skewSamples
+    }
+
     @Test func aCleanSceneReducesToTheSignedDelta() async {
-        // UP (Bluetooth) 180 samples after DOWN (reference) at 24 kHz: +7.5 ms.
-        let recorder = FakeRecorder(rate: 24_000,
-                                    scene: scene(rate: 24_000, downDelay: 16_800,
-                                                 upDelay: 16_980))
+        // Bluetooth lane 60 samples late against its slot at 8 kHz: +7.5 ms.
+        let recorder = FakeRecorder(
+            rate: 8_000,
+            scene: scene(rate: 8_000,
+                         targetDelay: targetDelay(referenceDelay: 41_600, rate: 8_000, skewSamples: 60),
+                         referenceDelay: 41_600))
         let session = MicProbeSession(recorder: recorder, timeout: 5, pipelineTail: 0.05)
         let result: MicProbeSession.Result? = await withCheckedContinuation { cont in
-            session.start(stage: { onStarted, onFinished in
-                onStarted()
+            session.start(stage: { _, onStarted, onFinished in
+                onStarted(0)
                 DispatchQueue.global().asyncAfter(deadline: .now() + 0.02, execute: onFinished)
             }, completion: { cont.resume(returning: $0) })
         }
         guard let result else {
-            Issue.record("a clean two-sweep scene must measure")
+            Issue.record("a clean two-lane scene must measure")
             return
         }
         #expect(abs(result.deltaMs - 7.5) < 0.2,
-                "Bluetooth late by 180 samples reads +7.5 ms: got \(result.deltaMs)")
+                "Bluetooth late by 60 samples reads +7.5 ms: got \(result.deltaMs)")
         #expect(result.confidence > 5, "a clean scene is confident")
         #expect(recorder.stopped, "the mic is released")
     }
 
     @Test func aBluetoothSideArrivingEarlyReadsNegative() async {
-        let recorder = FakeRecorder(rate: 24_000,
-                                    scene: scene(rate: 24_000, downDelay: 16_980,
-                                                 upDelay: 16_680))
+        let recorder = FakeRecorder(
+            rate: 8_000,
+            scene: scene(rate: 8_000,
+                         targetDelay: targetDelay(referenceDelay: 41_600, rate: 8_000, skewSamples: -100),
+                         referenceDelay: 41_600))
         let session = MicProbeSession(recorder: recorder, timeout: 5, pipelineTail: 0.05)
         let result: MicProbeSession.Result? = await withCheckedContinuation { cont in
-            session.start(stage: { onStarted, onFinished in
-                onStarted(); onFinished()
+            session.start(stage: { _, onStarted, onFinished in
+                onStarted(0); onFinished()
             }, completion: { cont.resume(returning: $0) })
         }
         #expect(result.map { abs($0.deltaMs - (-12.5)) < 0.2 } == true,
-                "Bluetooth early by 300 samples reads −12.5 ms: got \(String(describing: result))")
+                "Bluetooth early by 100 samples reads −12.5 ms: got \(String(describing: result))")
+    }
+
+    /// Turns red if the session stops a fixed margin after the feed end
+    /// instead of waiting the reported pipeline delay.
+    @Test func theRecordingWaitsTheReportedPipelineDelay() async {
+        let recorder = FakeRecorder(rate: 24_000,
+                                    scene: [Float](repeating: 0.01, count: 48_000))
+        let session = MicProbeSession(recorder: recorder, timeout: 5, pipelineTail: 0.05)
+        final class Box: @unchecked Sendable { var at: Date? }
+        let finishedAt = Box()
+        let _: MicProbeSession.Result? = await withCheckedContinuation { cont in
+            session.start(stage: { _, onStarted, onFinished in
+                onStarted(0.2) // real-time-ok: the session's tail wait is a real queue timer with no clock seam; 0.2 s against the 0.05 s margin is the least that still shows the reported delay was waited
+                finishedAt.at = Date()
+                onFinished()
+            }, completion: { cont.resume(returning: $0) })
+        }
+        let waited = finishedAt.at.map { Date().timeIntervalSince($0) } ?? 0
+        #expect(waited >= 0.2, "the capture waits the reported 0.2 s: waited \(waited)")
     }
 
     @Test func aRunWhoseProbeNeverPlaysTimesOutToNil() async {
@@ -111,7 +135,7 @@ import Testing
                                     scene: [Float](repeating: 0.01, count: 48_000))
         let session = MicProbeSession(recorder: recorder, timeout: 0.2, pipelineTail: 0.05)
         let result: MicProbeSession.Result? = await withCheckedContinuation { cont in
-            session.start(stage: { _, _ in }, completion: { cont.resume(returning: $0) })
+            session.start(stage: { _, _, _ in }, completion: { cont.resume(returning: $0) })
         }
         #expect(result == nil, "no probe in the air can never yield a number")
         #expect(recorder.stopped, "the mic is released even on the timeout path")
@@ -121,7 +145,7 @@ import Testing
         let recorder = FakeRecorder(failsToStart: true)
         let session = MicProbeSession(recorder: recorder, timeout: 1, pipelineTail: 0.05)
         let result: MicProbeSession.Result? = await withCheckedContinuation { cont in
-            session.start(stage: { _, _ in
+            session.start(stage: { _, _, _ in
                 Issue.record("no recorder means nothing to stage a probe for")
             }, completion: { cont.resume(returning: $0) })
         }
@@ -130,35 +154,83 @@ import Testing
     }
 
     @Test func cancelCompletesNilWithoutAnalysis() async {
-        let recorder = FakeRecorder(rate: 24_000,
-                                    scene: scene(rate: 24_000, downDelay: 16_800,
-                                                 upDelay: 16_980))
+        let recorder = FakeRecorder(
+            rate: 8_000,
+            scene: scene(rate: 8_000,
+                         targetDelay: targetDelay(referenceDelay: 41_600, rate: 8_000, skewSamples: 60),
+                         referenceDelay: 41_600))
         let session = MicProbeSession(recorder: recorder, timeout: 5, pipelineTail: 5)
         let result: MicProbeSession.Result? = await withCheckedContinuation { cont in
-            session.start(stage: { onStarted, _ in onStarted() },
+            session.start(stage: { _, onStarted, _ in onStarted(0) },
                           completion: { cont.resume(returning: $0) })
             session.cancel()
         }
         #expect(result == nil, "a cancelled run reports nothing, even over a scene that would measure")
     }
 
-    /// The session's sweep length must stay in lock-step with the injector's —
-    /// they render the same probes from two files.
-    @Test func sessionAndInjectorAgreeOnTheSweepLength() {
-        #expect(MicProbeSession.sweepSeconds == AlignmentTickInjector.probeSweepSeconds)
+    /// The level step follows the room the lead-in heard: quiet rooms play at
+    /// the staged level, louder ones 6 or 12 dB up. Turns red if
+    /// `MicProbeSession.levelStepDB(ambientRMSdBFS:)` moves a threshold or
+    /// stops treating an unreadable room as quiet.
+    @Test func theLevelStepFollowsTheRoom() {
+        let step = MicProbeSession.levelStepDB
+        #expect(step(nil) == 0)
+        #expect(step(-75) == 0)
+        #expect(step(-68) == 0)
+        #expect(step(-67.9) == 6)
+        #expect(step(-62) == 6)
+        #expect(step(-61.9) == 12)
+        #expect(step(-50) == 12)
+    }
+
+    /// The stage closure's level question is answered from the recorder's own
+    /// reading of the room. Turns red if `MicProbeSession.start` stops passing
+    /// `recentRMSdBFS(seconds:slices:)` through `levelStepDB(ambientRMSdBFS:)`.
+    @Test func theStageClosureAsksTheRecorderForTheRoom() async {
+        let recorder = FakeRecorder(rate: 8_000, scene: [], roomSlices: [-55])
+        let session = MicProbeSession(recorder: recorder, timeout: 1, pipelineTail: 0.05)
+        final class Box: @unchecked Sendable { var step: Int? }
+        let box = Box()
+        _ = await withCheckedContinuation { (cont: CheckedContinuation<MicProbeSession.Result?, Never>) in
+            session.start(stage: { levelStepDB, onStarted, onFinished in
+                box.step = levelStepDB()
+                onStarted(0); onFinished()
+            }, completion: { cont.resume(returning: $0) })
+        }
+        #expect(box.step == 12, "a −55 dBFS room asks for the +12 dB step")
+    }
+
+    /// Music the wizard just silenced is still loud in the newest half second
+    /// while an older slice already hears the quiet room. Turns red if
+    /// `MicProbeSession.start` reads the room from the newest slice alone (or
+    /// any slice but the quietest) instead of the minimum of the last three.
+    @Test func aLoudNewestSliceOverAQuietRoomKeepsTheStagedLevel() async {
+        let recorder = FakeRecorder(rate: 8_000, scene: [], roomSlices: [-50, -75, -55])
+        let session = MicProbeSession(recorder: recorder, timeout: 1, pipelineTail: 0.05)
+        final class Box: @unchecked Sendable { var step: Int? }
+        let box = Box()
+        _ = await withCheckedContinuation { (cont: CheckedContinuation<MicProbeSession.Result?, Never>) in
+            session.start(stage: { levelStepDB, onStarted, onFinished in
+                box.step = levelStepDB()
+                onStarted(0); onFinished()
+            }, completion: { cont.resume(returning: $0) })
+        }
+        #expect(box.step == 0, "the quietest slice, −75 dBFS, is the room: no level step")
     }
 
     /// The live 2026-08-28 refusal: the ambient slice carries the tail of the
-    /// user's music (loud, broadband, gone by sweep time), the SNR weighting
-    /// crushes the sweep band, and the weighted pass finds nothing. The
+    /// user's music (loud, broadband, gone by probe time), the SNR weighting
+    /// crushes the probe band, and the weighted pass finds nothing. The
     /// unweighted fallback must still measure.
     @Test func aMusicTailInTheAmbientSliceCannotRefuseTheMeasurement() throws {
-        let rate = 24_000.0
-        var scene = scene(rate: rate, downDelay: 36_000, upDelay: 36_180)
+        let rate = 8_000.0
+        var scene = scene(rate: rate,
+                          targetDelay: targetDelay(referenceDelay: 52_000, rate: rate, skewSamples: 60),
+                          referenceDelay: 52_000)
         // Two seconds of loud broadband "music" at the head — ambient only,
-        // absent during the sweeps.
+        // absent during the probe.
         var rng = SeededRNG(seed: 42)
-        for i in 0..<48_000 {
+        for i in 0..<16_000 {
             let u1 = Double.random(in: 1e-12..<1, using: &rng)
             let u2 = Double.random(in: 0..<1, using: &rng)
             scene[i] += Float(0.5 * (-2 * Foundation.log(u1)).squareRoot()
@@ -166,8 +238,8 @@ import Testing
         }
         let result = try #require(
             MicProbeSession.analyze(recording: scene, sampleRate: rate,
-                                    ambientEnd: 45_000),
-            "stale ambient noise must never veto a clean sweep pair")
+                                    ambientEnd: 15_000),
+            "stale ambient noise must never veto a clean lane pair")
         #expect(abs(result.deltaMs - 7.5) < 0.3,
                 "the fallback still measures the true Δ: got \(result.deltaMs)")
     }
@@ -177,40 +249,44 @@ import Testing
     /// arrivals that day scored 684 to 1,724.
     @Test func aWeakOrImpossibleMeasurementIsRefused() {
         let accept = MicProbeSession.accepting
-        #expect(accept(.init(deltaMs: -4_876.46, confidence: 7.2)) == nil,
+        #expect(accept(.init(deltaMs: -4_876.46, confidence: 7.2, peakMargin: 10)) == nil,
                 "the live false match is refused")
-        #expect(accept(.init(deltaMs: 441.28, confidence: 7.2)) == nil,
+        #expect(accept(.init(deltaMs: 441.28, confidence: 7.2, peakMargin: 10)) == nil,
                 "a weak match is refused even at a plausible delay")
-        #expect(accept(.init(deltaMs: -4_876.46, confidence: 683.8)) == nil,
+        #expect(accept(.init(deltaMs: -4_876.46, confidence: 683.8, peakMargin: 10)) == nil,
                 "a delay beyond the reference buffer is refused however strong")
-        #expect(accept(.init(deltaMs: 441.28, confidence: 683.8)) != nil,
+        #expect(accept(.init(deltaMs: 441.28, confidence: 683.8, peakMargin: 10)) != nil,
                 "the weakest true reading of the day still lands")
+        #expect(accept(.init(deltaMs: 441.28, confidence: 683.8, peakMargin: 1.9)) == nil,
+                "a rival within 6 dB of the winner is refused however strong")
+        #expect(accept(.init(deltaMs: 441.28, confidence: 683.8, peakMargin: 2.0)) != nil,
+                "a winner just past 6 dB over its rival lands")
     }
 
-    /// A 6.5 s capture whose first sample was taken 3 s before the arm gate
+    /// A 15 s capture whose first sample was taken 3 s before the arm gate
     /// opened, on a pinned clock (not wall time): two seconds of loud broadband sound at the head (music still
-    /// draining out of the speakers), then quiet room, the reference sweep at
-    /// 3.6 s and, when `bluetoothSweepMs` is set, the Bluetooth sweep that
-    /// much later.
-    private func loudHeadRun(bluetoothSweepMs: Double?) async -> MicProbeSession.Result? {
-        let rate = 24_000.0
-        let down = SyncProbe.SweepDesign.downSweep(sampleRate: rate, duration: MicProbeSession.sweepSeconds)
-        let up = SyncProbe.SweepDesign.upSweep(sampleRate: rate, duration: MicProbeSession.sweepSeconds)
-        let downAt = 3.6
+    /// draining out of the speakers), then quiet room, the reference lane at
+    /// 3.6 s + one lane spacing and, when `bluetoothSkewMs` is set, the
+    /// Bluetooth lane one spacing earlier, late by that skew.
+    private func loudHeadRun(bluetoothSkewMs: Double?) async -> MicProbeSession.Result? {
+        let rate = 8_000.0
+        let lane = SyncProbe.lane(sampleRate: rate)
+        let referenceAt = Int((3.6 + SyncProbe.Layout.laneSpacingSeconds) * rate)
         var rng = SeededRNG(seed: 7)
         func gauss() -> Double {
             let u1 = Double.random(in: 1e-12..<1, using: &rng)
             let u2 = Double.random(in: 0..<1, using: &rng)
             return (-2 * Foundation.log(u1)).squareRoot() * Foundation.cos(2 * .pi * u2)
         }
-        let scene: [Float] = (0..<Int(6.5 * rate)).map { i in
+        var scene: [Float] = (0..<Int(15 * rate)).map { i in
             let t = Double(i) / rate
-            var sample = 0.002 * gauss() + (t < 2 ? 0.05 * gauss() : 0)
-            sample += 0.0875 * SyncProbe.value(down, at: t - downAt)
-            if let bluetoothSweepMs {
-                sample += 0.02 * SyncProbe.value(up, at: t - downAt - bluetoothSweepMs / 1000)
-            }
-            return Float(sample)
+            return Float(0.002 * gauss() + (t < 2 ? 0.05 * gauss() : 0))
+        }
+        for (i, v) in lane.enumerated() { scene[referenceAt + i] += 0.0875 * v }
+        if let bluetoothSkewMs {
+            let targetAt = targetDelay(referenceDelay: referenceAt, rate: rate,
+                                       skewSamples: Int(bluetoothSkewMs / 1000 * rate))
+            for (i, v) in lane.enumerated() { scene[targetAt + i] += 0.02 * v }
         }
         let armGateNanos: Int64 = 1_000_000_000_000
         let recorder = FakeRecorder(rate: rate, scene: scene,
@@ -218,25 +294,25 @@ import Testing
         let session = MicProbeSession(recorder: recorder, timeout: 5, pipelineTail: 0.05,
                                       now: { armGateNanos })
         return await withCheckedContinuation { cont in
-            session.start(stage: { onStarted, onFinished in onStarted(); onFinished() },
+            session.start(stage: { _, onStarted, onFinished in onStarted(0); onFinished() },
                           completion: { cont.resume(returning: $0) })
         }
     }
 
-    /// Customer, v1.2.0: the Bluetooth sweep never reached the mic, and the
-    /// loudest stretch of what played BEFORE the sweeps was taken for it —
+    /// Customer, v1.2.0: the Bluetooth probe never reached the mic, and the
+    /// loudest stretch of what played BEFORE the probe was taken for it —
     /// `ok=1 confidence=5.9–7.9`, Δ −778 to −3748 ms, shown as "implausible".
-    /// Nothing before the sweeps can be a sweep, so the run must fail.
+    /// Nothing before the probe can be a lane, so the run must fail.
     @Test func soundBeforeTheSweepsIsNeverTakenForAMissingSweep() async {
-        let result = await loudHeadRun(bluetoothSweepMs: nil)
+        let result = await loudHeadRun(bluetoothSkewMs: nil)
         #expect(result == nil,
-                "a missing Bluetooth sweep is a failed listen, not a Δ: got \(String(describing: result))")
+                "a missing Bluetooth lane is a failed listen, not a Δ: got \(String(describing: result))")
     }
 
     @Test func aRealPairAfterALoudHeadStillMeasures() async {
-        let result = await loudHeadRun(bluetoothSweepMs: 300)
+        let result = await loudHeadRun(bluetoothSkewMs: 300)
         #expect(result.map { abs($0.deltaMs - 300) < 0.5 } == true,
-                "the sweeps themselves are still found: got \(String(describing: result))")
+                "the lanes themselves are still found: got \(String(describing: result))")
     }
 }
 

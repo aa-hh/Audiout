@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import ProbeKit
 @testable import AudioutCore
 
 private final class Recorder {
@@ -468,8 +469,9 @@ private func proposalValue(_ session: BTAlignmentWizardSession) -> Double? {
     }
 
     /// The two tick timbres are split by TRANSPORT (the Bluetooth fan-out gets
-    /// the bright click, the engine feed the low knock), so whether the pair
-    /// sounds different is a fact about the two speakers' transports — and it
+    /// the higher (660 Hz) mallet note, the engine feed the lower (440 Hz)
+    /// one), so whether the pair sounds different is a fact about the two
+    /// speakers' transports — and it
     /// follows the reference the user can still swap mid-run.
     @Test func thePairSoundsDifferOnlyAcrossTransports() {
         let recorder = Recorder()
@@ -538,6 +540,24 @@ private func proposalValue(_ session: BTAlignmentWizardSession) -> Double? {
         session.offerMeasuredProposal(valueMs: 300)
         #expect(session.screen == .proposal(valueMs: 300), "got \(session.screen)")
         #expect(session.proposalIsRecalled == false, "measured, not recalled")
+        session.cancel()
+    }
+
+    /// Turns red if the bar is sized from the lane layout alone.
+    @Test func theProbeStartSizesTheListenFromThePipelineDelay() {
+        let recorder = Recorder()
+        let session = recorder.makeSession(targetIsBluetooth: true)
+        session.requestListening = { $0(true) }
+        session.start()
+        session.probeDidStart(pipelineDelaySeconds: 5)
+        #expect(session.probeListeningSeconds == MicProbeSession.probeLeadSeconds
+                + SyncProbe.Layout.totalSeconds
+                + MicProbeSession.listeningTailSeconds(pipelineDelaySeconds: 5))
+
+        session.offerMeasuredProposal(valueMs: 300)
+        session.rejectProposal()
+        #expect(session.screen == .listening(isRealignment: false), "got \(session.screen)")
+        #expect(session.probeListeningSeconds == nil, "the next listen starts unsized")
         session.cancel()
     }
 
@@ -1058,11 +1078,11 @@ extension SerializedSharedState {
             #expect(events[0].0 == "bt_sync:mic_permission_answered")
             #expect(events[0].1 == ["granted": "true"])
             #expect(events[1].0 == "bt_sync:listening_ended")
-            #expect(events[1].1 == ["outcome": "measured", "attempt": "1", "value_ms_bucket": "200+"])
+            #expect(events[1].1 == ["outcome": "measured", "attempt": "1", "value_ms_bucket": "200+", "probe_sound": "glide_chord"])
             #expect(events[2].0 == "bt_sync:mic_retried")
             #expect(events[2].1 == [:])
             #expect(events[3].0 == "bt_sync:listening_ended")
-            #expect(events[3].1 == ["outcome": "failed", "attempt": "2"])
+            #expect(events[3].1 == ["outcome": "failed", "attempt": "2", "probe_sound": "glide_chord"])
         }
 
         /// An implausible reading's Try again reports as a retry, and both
@@ -1093,11 +1113,11 @@ extension SerializedSharedState {
                 return
             }
             #expect(events[1].0 == "bt_sync:listening_ended")
-            #expect(events[1].1 == ["outcome": "implausible", "attempt": "1", "value_ms_bucket": "below_-4"])
+            #expect(events[1].1 == ["outcome": "implausible", "attempt": "1", "value_ms_bucket": "below_-4", "probe_sound": "glide_chord"])
             #expect(events[2].0 == "bt_sync:mic_retried")
             #expect(events[2].1 == [:])
             #expect(events[3].0 == "bt_sync:listening_ended")
-            #expect(events[3].1 == ["outcome": "measured", "attempt": "2", "value_ms_bucket": "-4_to_0"])
+            #expect(events[3].1 == ["outcome": "measured", "attempt": "2", "value_ms_bucket": "-4_to_0", "probe_sound": "glide_chord"])
         }
     }
 }

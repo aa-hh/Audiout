@@ -181,11 +181,16 @@ extension SerializedSharedState {
         func start() {}
         func stop() {}
         func setAlignTickMode(_ mode: AlignTickMode) { lock.withLock { _modes.append(mode) } }
-        func stageCompanionMicProbe(staggered: Bool, referenceOnEngine: Bool,
-                                    downWindowUID: String?, upWindowUID: String?,
+        func stageCompanionMicProbe(routed: Bool, referenceOnEngine: Bool,
+                                    targetWindowUID: String?, referenceWindowUID: String?,
                                     onStarted: @escaping () -> Void,
                                     onFinished: @escaping () -> Void) {
             lock.withLock { _stages += 1 }
+            onStarted()
+        }
+        func stageWizardMicProbe(levelStepDB: @escaping () -> Int,
+                                 onStarted: @escaping () -> Void,
+                                 onFinished: @escaping () -> Void) {
             onStarted()
         }
     }
@@ -826,9 +831,13 @@ extension SerializedSharedState {
         engine.releaseWrites()
         await SuiteWait.until { backend.startCompanionAlignmentProbe(targetID: self.btMove.id,
             referenceID: self.btFlip.id, onStarted: {}, onFinished: {}) == nil }
+        await SuiteWait.until { engine.writes.last { $0.0 == ap1.outputID }?.1 == -1.0 }
+        #expect(engine.writes.last { $0.0 == ap1.outputID }?.1 == -1.0,
+                "the phone's probe silences every speaker outside the pair")
+        backend.cancelCompanionAlignmentProbe(targetID: btMove.id)
+        await SuiteWait.until { engine.writes.last { $0.0 == ap1.outputID }?.1 != -1.0 }
         #expect(engine.writes.last { $0.0 == ap1.outputID }?.1 != -1.0,
                 "the final write uses the user's current level, after the old hold finishes")
-        backend.cancelCompanionAlignmentProbe(targetID: btMove.id)
         #expect(start.value != .some(nil), "the cancelled preparation cannot report success late")
     }
 
@@ -1913,6 +1922,24 @@ extension SerializedSharedState {
         backend.setBTWizardTickActive(true, btTargetDeviceID: nil, btReferenceDeviceID: nil)
         #expect(backend.localSinkReferenceDelayMs() == 500)
         backend.setBTWizardTickActive(false, btTargetDeviceID: nil, btReferenceDeviceID: nil)
+    }
+
+    /// The mic probe's listening tail is sized from the room delay `onStarted`
+    /// reports. Turns red if `NativeBackend.stageBTMicProbe` hands `onStarted`
+    /// the delay in milliseconds, or anything but the room delay.
+    @Test func theWizardMicProbeReportsTheRoomDelayInSeconds() {
+        let (backend, _, _, _) = makeBackend()
+        defer { backend.stop() }
+        backend.captureCoordinator = ProbeStagingCapture()
+        backend.start()
+        let reported = LockedBox<TimeInterval?>(nil)
+        backend.stageBTMicProbe(levelStepDB: { 0 },
+                                onStarted: { reported.value = $0 },
+                                onFinished: {})
+        waitFor { reported.value != nil }
+        let roomMs = backend.localSinkReferenceDelayMs()
+        #expect(roomMs > 0, "positive control: a zero room delay reads the same in any unit")
+        #expect(reported.value == Double(roomMs) / 1000)
     }
 
     /// Keep writes the measurement BEFORE the reference comes down, so the new

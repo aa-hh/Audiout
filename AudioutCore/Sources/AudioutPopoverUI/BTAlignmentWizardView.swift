@@ -59,15 +59,15 @@ public final class BTAlignmentWizardView: NSView {
     /// keeps ``introCopy`` verbatim.
     static func introCopyNamingSounds(target: String, targetIsBluetooth: Bool,
                                       reference: String) -> String {
-        let targetSound = targetIsBluetooth ? brightSound : lowSound
-        let referenceSound = targetIsBluetooth ? lowSound : brightSound
+        let targetSound = targetIsBluetooth ? highSound : lowSound
+        let referenceSound = targetIsBluetooth ? lowSound : highSound
         return "You’ll hear \(targetSound) from \(target) and \(referenceSound) "
             + "from \(reference). Tap the one you hear first."
     }
     /// The two timbres in the user's words. Plain description, no instrument
     /// voice: they are sounds in the room, not readings.
-    private static let brightSound = "a bright click"
-    private static let lowSound = "a low knock"
+    private static let highSound = "a higher note"
+    private static let lowSound = "a lower note"
     /// The old "Can't tell", renamed because it is no longer a shrug: a
     /// posterior treats "both at once" as evidence that the offset is inside
     /// the ear's fusion window, which is the direct answer to "it sounded
@@ -245,8 +245,8 @@ public final class BTAlignmentWizardView: NSView {
     /// The supporting line under the headline, the same for both variants:
     /// what the Mac is doing, and the one thing the room can do to help.
     static let listeningBody =
-        "Your Mac is measuring the delay with its built-in microphone. "
-        + "Keep the room quiet for a few seconds."
+        "Each speaker plays a low tone that slides down over a soft chord, one after the other. "
+        + "Your Mac is timing them with its built-in microphone. Keep the room quiet."
     /// A proposal RECALLED from a previous run, reached only when the mic
     /// never listened — nothing was measured, so the number is a question.
     static func recalledProposalCopy(valueMs: Int) -> String {
@@ -311,9 +311,8 @@ public final class BTAlignmentWizardView: NSView {
     }
 
     private let session: BTAlignmentWizardSession
-    /// The picker is INTRO-ONLY on screen (spec §1) but PERSISTENT in memory:
-    /// the host can still swap the reference mid-run, and that swap arrives
-    /// through this menu's own item dispatch.
+    /// The picker is INTRO-ONLY (spec §1): it is disabled once the run leaves
+    /// the intro, which locks the reference for the rest of the run.
     private let referencePopUp = NSPopUpButton(frame: .zero, pullsDown: false)
     /// The picker's full-measure width — see ``addReferenceRow``.
     private lazy var referencePopUpWidth: NSLayoutConstraint =
@@ -402,16 +401,25 @@ public final class BTAlignmentWizardView: NSView {
     /// an empty 15 pt row plus the 28 pt band break put 55 pt of nothing
     /// between the stage and the first word.
     private var readoutHeightConstraint: NSLayoutConstraint!
+    /// The listening screen's progress bar and the timer that fills it from
+    /// the probe's start; both nil on every other screen.
+    private var probeProgress: NSProgressIndicator?
+    private var probeProgressTimer: Timer?
 
     public init(session: BTAlignmentWizardSession) {
         self.session = session
         super.init(frame: NSRect(x: 0, y: 0, width: Self.viewWidth, height: 0))
         buildChrome()
         session.onScreenChange = { [weak self] screen in self?.render(screen) }
+        session.onProbeStarted = { [weak self] in self?.startProbeProgress() }
         render(session.screen)
     }
 
     public required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    /// Stop or Esc while listening changes no screen, so `render` never
+    /// stops the progress timer; the view going away must.
+    deinit { stopProbeProgress() }
 
     // MARK: Chrome
 
@@ -721,6 +729,7 @@ public final class BTAlignmentWizardView: NSView {
 
     private func render(_ screen: BTAlignmentWizardSession.Screen) {
         clearContent()
+        stopProbeProgress()
 
         styleReadout(hero: false)
         updateTitleRow(for: screen)
@@ -801,6 +810,7 @@ public final class BTAlignmentWizardView: NSView {
             addListeningMic()
             addHeadline(headline)
             addBody(Self.listeningBody)
+            addProbeProgress()
             addCornerRow(trailing: (Self.stopTitle, #selector(stopClicked(_:)), nil))
             setAccessibilityLabel(headline + ". " + Self.listeningBody)
 
@@ -927,7 +937,7 @@ public final class BTAlignmentWizardView: NSView {
 
     /// The intro's sentence, with the two sounds named only when the pair
     /// actually makes two — the session owns that fact, since it owns the
-    /// reference the user can still swap mid-run.
+    /// reference.
     private func introBody() -> String {
         guard session.pairSoundsDiffer, let reference = session.reference else {
             return Self.introCopy
@@ -966,6 +976,7 @@ public final class BTAlignmentWizardView: NSView {
     public func showTargetLost() {
         session.onScreenChange = nil
         clearContent()
+        stopProbeProgress()
         styleReadout(hero: false)
         readout.stringValue = ""
         titleLabel.stringValue = Self.wizardTitle(target: session.targetName)
@@ -1162,6 +1173,40 @@ public final class BTAlignmentWizardView: NSView {
         contentStack.addArrangedSubview(mic)
     }
 
+    /// The listening screen's determinate bar: empty until the probe starts,
+    /// then filled over the probe's lead plus its two lanes. Driven by a
+    /// plain timer, no animation API, so headless and Reduce Motion need no
+    /// branch.
+    private func addProbeProgress() {
+        let bar = NSProgressIndicator()
+        bar.translatesAutoresizingMaskIntoConstraints = false
+        bar.style = .bar
+        bar.isIndeterminate = false
+        bar.minValue = 0
+        bar.maxValue = 1
+        bar.doubleValue = 0
+        bar.widthAnchor.constraint(equalToConstant: Self.bodyMeasure).isActive = true
+        contentStack.addArrangedSubview(bar)
+        probeProgress = bar
+        if session.probeStartedAt != nil { startProbeProgress() }
+    }
+
+    private func startProbeProgress() {
+        guard probeProgress != nil, probeProgressTimer == nil,
+              let total = session.probeListeningSeconds else { return }
+        probeProgressTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30, repeats: true) { [weak self] _ in
+            guard let self, let bar = self.probeProgress,
+                  let started = self.session.probeStartedAt else { return }
+            bar.doubleValue = min(1, Date().timeIntervalSince(started) / total)
+        }
+    }
+
+    private func stopProbeProgress() {
+        probeProgressTimer?.invalidate()
+        probeProgressTimer = nil
+        probeProgress = nil
+    }
+
     /// The intro's panels: measuring from the room on the LEADING side, the
     /// Mac's own paired-click run on the trailing one. Neither is pressable —
     /// Start, below both, stays the page's one primary control and the only
@@ -1331,8 +1376,11 @@ public final class BTAlignmentWizardView: NSView {
             item.representedObject = option.id
             referencePopUp.menu?.addItem(item)
         }
-        // One candidate is not a choice — that case renders as plain text.
-        referencePopUp.isEnabled = referenceOptions.count > 1
+        // One candidate is not a choice — that case renders as plain text. Once
+        // the run has left the intro the reference is locked (owner, 2026-10-06).
+        let onIntro: Bool
+        if case .intro = session.screen { onIntro = true } else { onIntro = false }
+        referencePopUp.isEnabled = referenceOptions.count > 1 && onIntro
         if let id = session.reference?.id,
            let index = referenceOptions.firstIndex(where: { $0.id == id }) {
             referencePopUp.selectItem(at: index)
@@ -1580,6 +1628,10 @@ public final class BTAlignmentWizardView: NSView {
     // MARK: Test-support hooks (performClick = real dispatch)
 
     var test_screen: BTAlignmentWizardSession.Screen { session.screen }
+    var test_hasProgressBar: Bool {
+        guard let probeProgress else { return false }
+        return probeProgress.isDescendant(of: contentStack)
+    }
     var test_stage: AlignmentStageView { stage }
     /// Every direct text label in the mounted band, in reading order — the
     /// listening screen splits its message across a display headline and a body

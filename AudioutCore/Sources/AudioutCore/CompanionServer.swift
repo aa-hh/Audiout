@@ -473,7 +473,7 @@ public final class CompanionServer: @unchecked Sendable {
         }
     }
 
-    /// Tell the phone that staged a sync-calibration run that its sweeps have
+    /// Tell the phone that staged a sync-calibration run that its probe has
     /// entered the feed — its cue to start recording. Addressed to exactly one
     /// client, like the icon pages and for the same reason: nobody else asked
     /// for this run and nobody else's microphone is in the room. A clientID

@@ -247,11 +247,10 @@ public final class MembershipRowView: NSView {
     /// together from one decision, because every path that can change them
     /// (a host refresh, an arming flip, a toggle) can change all three.
     ///
-    /// ONE unavailable tone, and all three elements take it together: each
-    /// states the same fact, so splitting them across tones makes the row
-    /// argue with itself. On the warm pane that tone is `labelCool2` —
-    /// authored, all four variants, 4.59:1 on dark `raised` and 5.30:1 on the
-    /// light ground.
+    /// An unavailable speaker takes the sidebar's ink, so the same fact reads
+    /// the same on both sides of the window: the name in `labelCool`, the
+    /// glyph and the "Unavailable" word in `labelCool2` — authored, all four
+    /// variants, 4.59:1 on dark `raised` and 5.30:1 on the light ground.
     ///
     /// NOT `.disabledControlTextColor`: it is black at 24.7% alpha, so it
     /// composites against its ground to 1.80:1 on `raised` — under half the
@@ -271,7 +270,7 @@ public final class MembershipRowView: NSView {
         switch surface {
         case .warmPane:
             guard isAvailable else {
-                nameLabel.textColor = Tokens.Color.labelCool2
+                nameLabel.textColor = Tokens.Color.labelCool
                 iconView.contentTintColor = Tokens.Color.labelCool2
                 unavailableLabel.textColor = Tokens.Color.labelCool2
                 return

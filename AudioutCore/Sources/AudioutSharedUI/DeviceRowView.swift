@@ -325,7 +325,7 @@ public final class DeviceRowView: NSView {
     /// treatment (v4 §Call-1 + v4.1 item 8): desaturated fader/readout AND —
     /// new in item 8 — dimmed FEED text. Stored (not just a local in
     /// ``apply``) so ``updateFeedText()`` dims the composite the same way
-    /// ``faderCell``/``readoutLabel`` already do. Set every `apply`.
+    /// ``fader`` already does. Set every `apply`.
     var controlsMuted = false
     /// `device.connectionState` as of the PREVIOUS `apply`, `nil` before the
     /// first one. Tracked ONLY to detect the item-8 "successful connect" EDGE
@@ -345,17 +345,9 @@ public final class DeviceRowView: NSView {
     /// animation entirely, snap to resolved", spec item 9). Set every `apply`;
     /// defaults off so non-energize callers are byte-for-byte unchanged.
     var energizePending = false
-    let slider = NSSlider()
-    /// The Warm Signal fader skin over `slider` (drawing-only `NSSliderCell`
-    /// swap — behavior/keyboard/VoiceOver stay stock): recessed `well` trough,
-    /// gold `ember → gold` fill iff the row is route-armed (the same §3.3
-    /// predicate the corner dot renders), rounded-rect `raised` thumb. See
-    /// ``WarmFaderCell``.
-    let faderCell = WarmFaderCell()
-    /// Small right-aligned `%` readout sitting immediately right of the slider
-    /// (change 4 — a device row now shows its volume number too, tight against
-    /// the slider like the Main Out row, on the same shared column).
-    let readoutLabel = NSTextField(labelWithString: "")
+    /// The volume slider and its `%` readout. Its gold fill takes the same
+    /// §3.3 route-armed predicate the corner dot renders.
+    let fader = RowVolumeFader()
     let muteButton = NSButton()
     /// The Equalizer door, leading of mute on every row with an equalizer.
     /// Mounted only when ``supportsEqualizer``; the layout reserves its slot on
@@ -713,7 +705,7 @@ public final class DeviceRowView: NSView {
         self.feedAppGroupNames = appRouteGroupNames
         // The fader's engaged (gold) fill reuses the EXACT same predicate the
         // dot renders — one armed truth, two instruments (spec §3.3 / §5).
-        faderCell.isRouteArmed = isRouteArmed
+        fader.isRouteArmed = isRouteArmed
         // Muted-unconnected controls (v4 §Call-1 + v4.1 item 8): a
         // connecting/reconnecting or failed device — or an unavailable one —
         // renders its controls muted (desaturated + lower-contrast), "not
@@ -726,12 +718,12 @@ public final class DeviceRowView: NSView {
         case .connected:                                            controlsMuted = false
         case .off:                                                  controlsMuted = !device.isAvailable
         }
-        faderCell.isMutedControl = controlsMuted
+        fader.isMutedControl = controlsMuted
         // Cast feed-gain pending state (host-owned, id-keyed timer — the
         // "not yet gold" hold while the gesture is still in flight to the
         // receiver's audio feed).
         self.volumePendingApply = volumePendingApply
-        if faderCell.isPendingApply != volumePendingApply {
+        if fader.isPendingApply != volumePendingApply {
             // Live diagnosis (2026-08-23): log BOTH transitions — an unlogged
             // true->false stamp between draws would explain a fill that never
             // visibly changes — and invalidate the slider explicitly rather
@@ -739,12 +731,11 @@ public final class DeviceRowView: NSView {
             Telemetry.log(.cast, "cast_pending_cell", [
                 "device": device.id,
                 "to": volumePendingApply ? "true" : "false",
-                "armed": faderCell.isRouteArmed ? "true" : "false",
-                "enabled": slider.isEnabled ? "true" : "false",
-                "inWindow": slider.window != nil ? "true" : "false",
+                "armed": fader.isRouteArmed ? "true" : "false",
+                "enabled": fader.isAdjustable ? "true" : "false",
+                "inWindow": fader.window != nil ? "true" : "false",
             ])
-            faderCell.isPendingApply = volumePendingApply
-            slider.needsDisplay = true
+            fader.isPendingApply = volumePendingApply
         }
 
         // Item 8's brighten EDGE — "on successful connect it brightens to
@@ -778,13 +769,8 @@ public final class DeviceRowView: NSView {
         resolveSublabel()
         updateFeedText()
 
-        // Don't fight a live drag: only push the model value into the slider
-        // when the user isn't dragging it. (The readout is kept live during a
-        // drag by the slider action; on a model refresh it shows the model value.)
-        if !isDraggingSlider {
-            slider.integerValue = device.volume
-            readoutLabel.stringValue = VolumePercent.label(device.volume)
-        }
+        // The fader ignores this push while the user is dragging it.
+        fader.value = device.volume
         // The volume slider + mute are usable whenever the device is available
         // and controllable (selected member OR an app-redirect target) — kept
         // SEPARATE from `selected` so the "System" routing token stays keyed off
@@ -794,22 +780,11 @@ public final class DeviceRowView: NSView {
         // (dropped the old `!device.isMuted` term) so the user can set the level
         // they'll hear the moment they unmute, instead of the slider going dark
         // the instant they mute.
-        slider.isEnabled = hasLiveConnection && controllable
+        fader.isAdjustable = hasLiveConnection && controllable
         muteButton.isEnabled = hasLiveConnection && controllable
         updateEQButton()
         muteButton.state = device.isMuted ? .on : .off
         updateMuteTint()
-        // The `%` readout has three states (D6): sounding here reads `goldText`,
-        // a stored-but-idle level reads `emberText`, and a row that is not
-        // adjustable — slider disabled, or the muted-unconnected treatment —
-        // drops to the cool dim `labelCool2`.
-        if !slider.isEnabled || controlsMuted {
-            readoutLabel.textColor = Tokens.Color.labelCool2
-        } else if isRouteArmed {
-            readoutLabel.textColor = Tokens.Color.goldText
-        } else {
-            readoutLabel.textColor = Tokens.Color.emberText
-        }
 
         // Under-name meter visibility (v4 §Call-1): the meter is shown ONLY on
         // armed + unmuted + connected rows (the §3.3 armed predicate captures
@@ -861,7 +836,7 @@ public final class DeviceRowView: NSView {
         unavailableStatusLabel.isHidden = !showUnavailableStatus || offerStands
         unavailableStatusLabel.stringValue = showUnavailableStatus ? (unavailableStatus ?? "") : ""
         unavailableStatusLabel.toolTip = unavailableHelp
-        for control in [slider, muteButton, readoutLabel, eqButton] as [NSView] {
+        for control in [fader, muteButton, eqButton] as [NSView] {
             control.isHidden = showUnavailableStatus
         }
         if showUnavailableStatus {
@@ -1621,8 +1596,6 @@ public final class DeviceRowView: NSView {
 
     // MARK: Build
 
-    private var isDraggingSlider = false
-
     /// Whether this speaker's saved curve is anything but flat — PUSHED by the
     /// host through `apply(...)`; the row reads no tone store of its own.
     private var isEQShaped = false
@@ -1763,25 +1736,10 @@ public final class DeviceRowView: NSView {
         enterPasswordButton.action = #selector(enterPasswordClicked(_:))
         enterPasswordButton.isHidden = true
 
-        slider.translatesAutoresizingMaskIntoConstraints = false
-        // Warm fader skin: install the drawing-only cell BEFORE the value/
-        // target configuration below (a cell swap resets cell-held state, so
-        // everything after re-lands on the new cell). Tracking, keyboard,
-        // scroll-wheel, `isContinuous`, and VoiceOver stay stock NSSlider.
-        slider.cell = faderCell
-        slider.minValue = 0
-        slider.maxValue = 100
-        slider.isContinuous = true            // fire throughout the drag (brief §2)
-        slider.target = self
-        slider.action = #selector(volumeChanged(_:))
-
-        // `%` readout, right-aligned, small secondary — hangs off the slider's
-        // trailing edge (change 4) so the number reads tight against the slider.
-        readoutLabel.translatesAutoresizingMaskIntoConstraints = false
-        readoutLabel.font = Tokens.Font.readout
-        readoutLabel.textColor = Tokens.Color.emberText
-        readoutLabel.alignment = .right
-        readoutLabel.setContentHuggingPriority(.required, for: .horizontal)
+        fader.onChange = { [weak self] volume in
+            guard let self else { return }
+            self.delegate?.deviceRow(self, didSetVolume: volume, for: self.device.id)
+        }
 
         configureAccessoryButton(muteButton, symbol: Self.muteRestSymbolName,
                                   action: #selector(muteToggled(_:)))
@@ -1842,13 +1800,12 @@ public final class DeviceRowView: NSView {
         unavailableStatusLabel.isHidden = true
         addSubview(unavailableStatusLabel)
         addSubview(identityStack)
-        addSubview(slider)
+        addSubview(fader)
         NSLayoutConstraint.activate([
             unavailableStatusLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
             unavailableStatusLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -PopoverColumnGrid.trailingControlTrailing),
-            unavailableStatusLabel.leadingAnchor.constraint(greaterThanOrEqualTo: slider.leadingAnchor),
+            unavailableStatusLabel.leadingAnchor.constraint(greaterThanOrEqualTo: fader.leadingAnchor),
         ])
-        addSubview(readoutLabel)
         addSubview(muteButton)
         if supportsEqualizer { addSubview(eqButton) }
         // FEED column (v4.1 item 3): only a bus row has the free trailing slot.
@@ -1911,18 +1868,12 @@ public final class DeviceRowView: NSView {
             muteButton.centerYAnchor.constraint(equalTo: centerYAnchor),
             muteButton.widthAnchor.constraint(equalToConstant: PopoverColumnGrid.muteWidth),
             muteButton.trailingAnchor.constraint(
-                equalTo: slider.leadingAnchor, constant: -PopoverColumnGrid.muteToSlider),
+                equalTo: fader.leadingAnchor, constant: -PopoverColumnGrid.muteToSlider),
 
-            slider.centerYAnchor.constraint(equalTo: centerYAnchor),
-            slider.widthAnchor.constraint(equalToConstant: PopoverColumnGrid.sliderWidth),
-            slider.trailingAnchor.constraint(equalTo: trailingAnchor,
-                                             constant: -PopoverColumnGrid.sliderTrailing),
-
-            // `%` readout: tight to the right of the slider, fixed-width column.
-            readoutLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
-            readoutLabel.widthAnchor.constraint(equalToConstant: PopoverColumnGrid.readoutWidth),
-            readoutLabel.leadingAnchor.constraint(
-                equalTo: slider.trailingAnchor, constant: PopoverColumnGrid.sliderToReadout),
+            // Slider + `%` readout; the slider lands on `sliderTrailing`.
+            fader.centerYAnchor.constraint(equalTo: centerYAnchor),
+            fader.trailingAnchor.constraint(equalTo: trailingAnchor,
+                                            constant: -PopoverColumnGrid.readoutTrailing),
         ]
 
         // The under-name meter's fixed size (v4 §Call-1), when it's in the stack.
@@ -2460,46 +2411,6 @@ public final class DeviceRowView: NSView {
 
     // MARK: Actions
 
-    @objc private func volumeChanged(_ sender: NSSlider) {
-        // Only a genuine mouse drag suppresses model pushes; keyboard/scroll/AX
-        // changes arrive as single events with no drag in flight.
-        switch NSApp?.currentEvent?.type {
-        case .leftMouseDown, .leftMouseDragged:
-            isDraggingSlider = true
-            installSliderDragEndMonitor()
-        case .leftMouseUp:
-            endSliderDrag()
-        default:
-            break
-        }
-        // Keep the `%` readout live through the drag (change 4 — mirrors
-        // MainOutRowView), since `apply` won't push the model value mid-drag.
-        readoutLabel.stringValue = VolumePercent.label(sender.integerValue)
-        delegate?.deviceRow(self, didSetVolume: sender.integerValue, for: device.id)
-    }
-
-    private var sliderDragEndMonitor: Any?
-
-    /// Arms a scoped `.leftMouseUp` local monitor so a drag whose final
-    /// `volumeChanged` callback doesn't coincide with mouse-up (a fast
-    /// release, or a drag cancelled by Esc) still clears the flag from a real
-    /// gesture end (P1-9), rather than staying wedged until the next drag.
-    private func installSliderDragEndMonitor() {
-        guard sliderDragEndMonitor == nil else { return }
-        sliderDragEndMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseUp]) { [weak self] event in
-            self?.endSliderDrag()   // real gesture end — fires even for a drag whose
-            return event            // final change callback never coincided with mouse-up
-        }
-    }
-
-    private func endSliderDrag() {
-        isDraggingSlider = false
-        if let monitor = sliderDragEndMonitor {
-            NSEvent.removeMonitor(monitor)
-            sliderDragEndMonitor = nil
-        }
-    }
-
     @objc private func muteToggled(_ sender: NSButton) {
         // AppKit has already flipped `sender.state` (pushOnPushOff) by the time
         // the action fires, so this lands the tint instantly on a live click
@@ -2569,10 +2480,7 @@ public final class DeviceRowView: NSView {
     /// since the Warm fader skin swaps the slider's CELL (drawing-only; the
     /// wiring must survive). Mirrors `test_fireCheckboxAction`'s house style.
     public func test_fireSliderAction(settingValueTo value: Int) {
-        slider.integerValue = value
-        guard let action = slider.action,
-              let target = slider.target as? NSObject else { return }
-        _ = target.perform(action, with: slider)
+        fader.test_fireSliderAction(settingValueTo: value)
     }
 
     /// Simulate the user toggling this row's mute button — flips
@@ -2827,14 +2735,7 @@ public final class DeviceRowView: NSView {
         isHovered = false
         setGutterHovered(false)
         setNeedsDisplay(bounds)
-        if window == nil {
-            // A row detached mid-drag (a rebuild while the user is dragging)
-            // must not keep a monitor or a stuck flag (P1-9).
-            endSliderDrag()
-        }
     }
-
-    deinit { endSliderDrag() }
 
     public override func draw(_ dirtyRect: NSRect) {
         if isInMenu {
@@ -3052,8 +2953,8 @@ public final class DeviceRowView: NSView {
                     : "not set")
             syncChipButton.setAccessibilityExpanded(syncDrawerExpanded)
         }
-        slider.setAccessibilityRole(.slider)
-        slider.setAccessibilityLabel("\(device.name) volume")
+        fader.slider.setAccessibilityRole(.slider)
+        fader.slider.setAccessibilityLabel("\(device.name) volume")
         muteButton.setAccessibilityLabel(device.isMuted ? "Unmute \(device.name)" : "Mute \(device.name)")
         // `DeviceNameLabel` reports its own role (a button while pressable); the
         // help text says what the press does.

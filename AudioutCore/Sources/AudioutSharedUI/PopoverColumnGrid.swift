@@ -847,8 +847,12 @@ public enum PopoverColumnGrid {
     /// row type. Sized to clear the readout that hangs off it, the min flex
     /// slack, and the trailing control.
     public static var sliderTrailing: CGFloat {
+        readoutTrailing + readoutWidth + sliderToReadout
+    }
+    /// Distance from the row trailing edge to the `%` readout's trailing edge —
+    /// where rows pin a `RowVolumeFader`'s trailing edge.
+    public static var readoutTrailing: CGFloat {
         trailingControlTrailing + trailingControlWidth + readoutToTrailingControl
-            + readoutWidth + sliderToReadout
     }
     // MARK: Column-center helpers (for the combined section/column header row)
     //

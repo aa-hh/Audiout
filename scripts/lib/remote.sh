@@ -654,6 +654,24 @@ capacity_sweep() {
     done
 }
 
+# While capacity_acquire waits, a mule permit can free up before a local one.
+# A caller that can run its job on the mule sets capacity_mule_retry to a
+# function name; once a minute, if the mule reports a free permit, that function
+# runs. On a result it trusts it exits the script itself; otherwise it returns
+# and the wait goes on. Once the job has actually run on the mule and failed
+# (remote_status set), checking stops: that failure is re-confirmed here, as
+# every remote failure is. A mule that filled up again or did not answer is
+# checked again a minute later.
+capacity_try_mule() {
+    [ -n "${capacity_mule_retry:-}" ] && remote_configured || return 0
+    _tm_free=$(remote_mule_free_count || true)
+    [ -n "$_tm_free" ] && [ "$_tm_free" -gt 0 ] || return 0
+    echo "  capacity: a mule permit freed up — sending this job there." >&2
+    remote_status=""
+    "$capacity_mule_retry" || true
+    [ -z "$remote_status" ] || capacity_mule_retry=""
+}
+
 # capacity_acquire [label] — take one permit, or proceed uncapped after the
 # ceiling. NEVER returns non-zero: a caller that cannot get a permit still has
 # work to do, and refusing would turn machine load into a build failure.
@@ -702,6 +720,7 @@ capacity_acquire() {
         # Re-sweep on the same minute tick as the progress line: a permit that
         # went stale WHILE we waited is the common case in a long wait.
         if [ $((_ca_waited % 60)) -eq 0 ]; then
+            capacity_try_mule
             capacity_sweep
             echo "  capacity: still waiting (${_ca_waited}s of ${_ca_ceiling}s)" >&2
         fi

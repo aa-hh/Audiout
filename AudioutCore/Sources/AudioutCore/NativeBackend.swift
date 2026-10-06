@@ -3730,12 +3730,19 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                         if rejectedStored { self.passwordStore.removePassword(for: id) }
                         self.removeFromAddedLocked(id)
                         self.failedGate.insert(id)
-                        let keepAvailable = Self.waitsForPassword(cause, fedPassword: self.fedCredential(id))
+                        let fedCredential = self.fedCredential(id)
+                        // The sender drops its own copy of the key when an
+                        // encrypted SETUP times out (airplay.c `start_failure`),
+                        // reported as a plain failure. Forget the fed key so the
+                        // next feed sends the stored one again; the Keychain
+                        // keeps it, since the receiver did not refuse it.
+                        self.fedDescriptors[id]?.authKey = nil
+                        let keepAvailable = Self.waitsForPassword(cause, fedPassword: fedCredential)
                         self.applyLocal(id) {
                             $0.isSelected = false; $0.isAvailable = keepAvailable
                             if rejectedStored { $0.hasStoredPassword = false }
                         }
-                        if Self.awaitsPassword(cause, fedPassword: self.fedCredential(id)) {
+                        if Self.awaitsPassword(cause, fedPassword: fedCredential) {
                             self.setConnectionState(.awaitingPassword, for: id)
                             return (cause, false)
                         }

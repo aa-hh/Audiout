@@ -236,7 +236,7 @@ public final class SpeakerPasswordSheetViewController: NSViewController, NSTextF
         }
         let text = passwordField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else {
-            show(result: kind == .password ? Self.emptyPasswordText : Self.emptyCodeText(deviceName: deviceName))
+            show(result: Self.emptyPasswordText)
             return
         }
         passwordField.isEnabled = false
@@ -296,6 +296,20 @@ public final class SpeakerPasswordSheetViewController: NSViewController, NSTextF
     public var test_resultText: String? {
         _ = view
         return resultLine.stringValue
+    }
+
+    /// Whether the result line is hidden.
+    public var test_resultLineIsHidden: Bool {
+        _ = view
+        return resultLine.isHidden
+    }
+
+    /// The height the result line keeps when empty: its active minimum-height constraint, 0 without one.
+    public var test_resultLineMinHeight: CGFloat {
+        _ = view
+        return resultLine.constraints.first {
+            $0.isActive && $0.firstAttribute == .height && $0.relation == .greaterThanOrEqual
+        }?.constant ?? 0
     }
 
     /// The result line's text colour.

@@ -3513,6 +3513,30 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         #expect(connectionState(backend, device.id) == .awaitingPassword)
     }
 
+    // Keeping the fed key in `fedDescriptors` after a plain connect failure
+    // turns it red: the sender clears its own copy when an encrypted SETUP times
+    // out, so the next join must feed the stored key again or the receiver shows a code.
+    @Test func aTimedOutSetupRefeedsTheStoredPairingOnTheNextJoin() async {
+        let store = InMemoryAirPlayPasswordStore()
+        let device = ap2Device(access: .onScreenCode)
+        store.setPairingKey("KEY1", for: device.id)
+        let (backend, engine, discovery) = makeBackend(passwordStore: store)
+        defer { backend.stop() }
+        engine.addFailures = [device.outputID.rawValue]
+        engine.addFailureError = .sessionFailed
+        await startAndDiscover(backend, engine, discovery, device)
+
+        backend.setOutputSet([device.id])
+        await pollUntil { engine.addedIDs.contains(device.outputID) && self.connectionState(backend, device.id) != .connecting }
+        let fedBefore = engine.fedDescriptorList.count
+        engine.addFailures = []
+        backend.setOutputSet([])
+        backend.setOutputSet([device.id])
+        await pollUntil { self.connectionState(backend, device.id) == .connected }
+        #expect(engine.fedDescriptorList.dropFirst(fedBefore).last?.authKey == "KEY1")
+        #expect(store.pairingKey(for: device.id) == "KEY1")
+    }
+
     /// Feeding the stored pairing key again after the receiver refused it, when
     /// the Keychain delete left it in place (no `rejectedPairingKeyIDs` skip),
     /// turns it red: the join refeeds the stale key and loops.

@@ -135,11 +135,13 @@ import AudioutSharedUI
         #expect(sheet.test_resultText == "That code didn't work. Check the screen and try again.")
     }
 
-    // Turns red if the result line is hidden until a submit again, which makes the sheet grow when "Connecting…" appears.
+    // Turns red if the result line is hidden until a submit again or loses its minimum-height constraint, either of which makes the sheet grow when "Connecting…" appears.
     @Test func resultLineHoldsItsSpaceBeforeAnySubmit() {
         for kind in [SpeakerPasswordSheetViewController.CredentialKind.password, .onScreenCode] {
             let sheet = SpeakerPasswordSheetViewController(deviceName: "Kitchen", kind: kind)
             #expect(sheet.test_resultText == "")
+            #expect(!sheet.test_resultLineIsHidden)
+            #expect(sheet.test_resultLineMinHeight > 0)
         }
     }
 

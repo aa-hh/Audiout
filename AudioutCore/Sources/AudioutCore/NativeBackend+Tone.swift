@@ -940,6 +940,7 @@ extension NativeBackend {
                 Telemetry.log(.cast, "cast_lead_tracked", [
                     "device": id,
                     "lead_ms": String(settlement.leadMs),
+                    "window_samples": String(CastRoomDelay.trackingWindowSamples),
                     "hold_ms": String(castRoomDelay.holdMs(forID: id)),
                     "old_share_ms": String(feedDelayMs),
                     "new_share_ms": String(Swift.max(0, roomDelayLocked() - settlement.leadMs - castRoomDelay.holdMs(forID: id))),

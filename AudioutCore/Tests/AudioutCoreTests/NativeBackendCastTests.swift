@@ -853,15 +853,15 @@ import CoreAudio
         rig.backend.captureControlQueue.sync {}
         let published = rig.capture.preDelayMs.count
 
-        rig.manager.fireLead(id: id, leadMs: 5_490, count: CastRoomDelay.settleSampleCount)
-        waitFor { rig.manager.castRoomDelays.last?.ms == 10 }
+        rig.manager.fireLead(id: id, leadMs: 5_489, count: CastRoomDelay.trackingWindowSamples)
+        waitFor { rig.manager.castRoomDelays.last?.ms == 11 }
         rig.backend.stateQueue.sync {}
         rig.backend.captureControlQueue.sync {}
         #expect(rig.capture.preDelayMs.count == published, "got \(rig.capture.preDelayMs)")
         #expect(rig.backend.localSinkReferenceDelayMs() == 5_615)
         #expect(rig.manager.feedGates.suffix(10).allSatisfy { $0.open }, "got \(rig.manager.feedGates)")
 
-        rig.manager.fireLead(id: id, leadMs: 5_530, count: CastRoomDelay.settleSampleCount)
+        rig.manager.fireLead(id: id, leadMs: 5_530, count: CastRoomDelay.trackingWindowSamples)
         waitFor { rig.capture.preDelayMs.last == 5_645 - rig.backend.startBufferMs }
         #expect(rig.capture.preDelayMs.count == published + 1, "got \(rig.capture.preDelayMs)")
         #expect(rig.backend.localSinkReferenceDelayMs() == 5_645)

@@ -22,8 +22,9 @@ import Foundation
 ///    rather than ten seconds later, mid-song.
 ///  - A lead is believed only once ``settleSampleCount`` consecutive kept
 ///    samples agree to within ±``settleBandMs``; the settled figure is their
-///    median. A Cast session's first seconds contain two or three re-buffers,
-///    and following each one would silence the whole house three times.
+///    trimmed mean, the same estimate tracking takes. A Cast session's first
+///    seconds contain two or three re-buffers, and following each one would
+///    silence the whole house three times.
 ///  - What is compared, raised to and remembered is the settled lead adjusted
 ///    to the fallback hold: `settled + hold − CastFeedRing.macHoldMs`, where
 ///    `hold` is the median Mac hold of the last settle or tracking window
@@ -33,18 +34,18 @@ import Foundation
 ///    below, becomes the term. The room's term also falls when a receiver
 ///    leaves the mix (``setReceivers(_:)``) or a by-ear advance is reduced or
 ///    cleared.
-///  - A settled receiver is tracked: once the median lead plus median hold of
-///    its last ``settleSampleCount`` kept samples moves more than
+///  - A settled receiver is tracked: once the trimmed-mean lead plus median
+///    hold of its last ``trackingWindowSamples`` kept samples moves more than
 ///    ``trackingStepMs`` from the settled lead plus hold, the settled lead and
-///    hold take those medians and the window empties, with no new settle. The
-///    term rises, as at a settle, only when the receiver would need more than
+///    hold take those values and the window empties, with no new settle, so
+///    moves are at least ``trackingWindowSamples`` samples apart. The term
+///    rises, as at a settle, only when the receiver would need more than
 ///    ``raiseThresholdMs`` of negative share; tracking never lowers a term or
 ///    refuses. A full window that lands past ``feedGateBandMs`` settles on its
-///    samples at once instead, once they agree within twice ``settleBandMs``;
-///    until then its oldest sample drops and the receiver stays settled. With a full window the median splits any jump
-///    under ``correctionThresholdMs`` into tracked moves of roughly half the
-///    jump, so that re-settle catches the empty-window case, the one place a
-///    single tracked move could exceed ``feedGateBandMs``.
+///    samples at once instead, once their raw spread is within twice
+///    ``settleBandMs``; until then its oldest sample drops and the receiver
+///    stays settled. That re-settle keeps every tracked move within
+///    ``feedGateBandMs``.
 ///  - A by-ear advance (a negative offset) is added to the receiver's last
 ///    adjusted lead, never to its term: an advance that fits inside the
 ///    receiver's own share moves nothing. The sum stops at ``maxTermMs``, and
@@ -94,15 +95,24 @@ struct CastRoomDelay {
     /// Lower it if the loop's median sits above +10.
     static let raiseThresholdMs = 20
 
+    /// How many kept samples a settled receiver's tracking window holds, about
+    /// a minute at the 1 Hz poll. Its lead is their trimmed mean
+    /// (``trimmedMean(of:)``) and its hold the median of the ones that carry one.
+    /// razor: a Google TV Streamer reports its position in ~20 ms steps and
+    /// flips between two of them every few seconds, so a 10-sample median
+    /// follows the flips (11 audible re-pushes in 4 minutes, live 2026-10-06);
+    /// real drift is ~0.64 ms/min, so a minute of lag costs under 1 ms.
+    static let trackingWindowSamples = 60
+
     /// How far a settled receiver's play-out has to move before its share
-    /// follows: the median lead plus the median hold over its last
-    /// ``settleSampleCount`` kept samples, against the settled lead plus hold
-    /// its share was computed from.
-    /// razor: on the 2026-10-04 Google TV Streamer session (drift 0.64 ms/min)
-    /// a 10-sample window re-pushed 171 times in 48 minutes, mostly on the
-    /// receiver's 22 ms position steps, at a mean 11 ms per change. Widen the
-    /// window, not this step, if the changes are heard.
-    static let trackingStepMs = 5
+    /// follows: the trimmed-mean lead plus the median hold over its last
+    /// ``trackingWindowSamples`` kept samples, against the settled lead plus
+    /// hold its share was computed from.
+    /// razor: replayed on the 2026-10-04 Google TV Streamer session (55
+    /// minutes, drift 0.64 ms/min) this step and window re-push 5 times, each
+    /// 11 ms in the drift's direction. Widen the window, not this step, if the
+    /// moves are heard.
+    static let trackingStepMs = 10
 
     /// How close an unsettled receiver's play-out has to land to the room for
     /// its feed to play. Also the largest move tracking makes (a tracking
@@ -117,8 +127,8 @@ struct CastRoomDelay {
     /// inside its step.
     struct Settlement: Equatable {
         let deviceID: String
-        /// The measured steady lead (median of the settling window), or the
-        /// tracking window's median for a tracked move.
+        /// The measured steady lead (trimmed mean of the settling window), or
+        /// the tracking window's trimmed mean for a tracked move.
         let leadMs: Int
         /// Too far behind live to sync: plays on, contributes no term.
         let refused: Bool
@@ -189,11 +199,11 @@ struct CastRoomDelay {
             } else {
                 guard !receiver.refused else { return nil }
                 receiver.tracking.append((leadMs, holdMs))
-                guard receiver.tracking.count >= Self.settleSampleCount else {
+                guard receiver.tracking.count >= Self.trackingWindowSamples else {
                     receivers[id] = receiver
                     return nil
                 }
-                let trackedLead = Self.median(of: receiver.tracking.map(\.leadMs))
+                let trackedLead = Self.trimmedMean(of: receiver.tracking.map(\.leadMs))
                 let trackedHolds = receiver.tracking.compactMap(\.holdMs)
                 let trackedHold = trackedHolds.isEmpty ? receiver.holdMs : Self.median(of: trackedHolds)
                 let basis = settled + (receiver.holdMs ?? CastFeedRing.macHoldMs)
@@ -246,7 +256,7 @@ struct CastRoomDelay {
             receivers[id] = receiver
             return nil
         }
-        let settled = Self.median(of: receiver.window.map(\.leadMs))
+        let settled = Self.trimmedMean(of: receiver.window.map(\.leadMs))
         // A window with no hold keeps the last one measured.
         let holds = receiver.window.compactMap(\.holdMs)
         if !holds.isEmpty { receiver.holdMs = Self.median(of: holds) }
@@ -268,7 +278,7 @@ struct CastRoomDelay {
                           refused: receiver.refused, termMoved: commitTerm(), tracked: false)
     }
 
-    /// This receiver's measured steady lead, or the tracked median that
+    /// This receiver's measured steady lead, or the tracked trimmed mean that
     /// replaced it, or `nil` while it is still settling (or refused). The Cast feed's own delay is
     /// `roomDelay − settledLeadMs − holdMs(forID:)`: everything the receiver adds by itself is
     /// already in this number, and the delay inserted ahead of it is not
@@ -328,5 +338,13 @@ struct CastRoomDelay {
         return sorted.count.isMultiple(of: 2)
             ? (sorted[middle - 1] + sorted[middle]) / 2
             : sorted[middle]
+    }
+
+    /// The mean of `samples` with the lowest and highest fifth (`count / 5`
+    /// each) dropped, rounded to the nearest millisecond, halves away from zero.
+    private static func trimmedMean(of samples: [Int]) -> Int {
+        let trim = samples.count / 5
+        let kept = samples.sorted().dropFirst(trim).dropLast(trim)
+        return Int((Double(kept.reduce(0, +)) / Double(kept.count)).rounded())
     }
 }

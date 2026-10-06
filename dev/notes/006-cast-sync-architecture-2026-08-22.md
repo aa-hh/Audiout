@@ -162,7 +162,7 @@ touching the others.
 
 **Room-delay policy — high-water mark, settle-gated, never chase:**
 
-2026-10-04: superseded for Cast. A settle now moves a receiver's term both ways past `raiseThresholdMs`, a settled receiver's share follows its tracked lead and hold in steps over 5 ms, and the Cast feed line replays a grow of up to 100 ms behind its crossfade. See `CastRoomDelay.swift`.
+2026-10-04, amended 2026-10-06: superseded for Cast. A settle now moves a receiver's term both ways past `raiseThresholdMs`. A settle and a settled receiver's tracking take the trimmed mean of their leads (the lowest and highest fifth dropped); the share follows the last 60 leads plus their median hold in steps over 10 ms. The Cast feed line replays a grow of up to 100 ms behind its crossfade. See `CastRoomDelay.swift`.
 
 | Event | Action | Who hears what |
 |---|---|---|

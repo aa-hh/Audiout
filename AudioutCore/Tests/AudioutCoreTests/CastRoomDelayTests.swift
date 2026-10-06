@@ -91,15 +91,17 @@ import Testing
     }
 
     /// Sample-to-sample wobble inside the band is what a settle is made of,
-    /// not what stops one: the settled figure is their median.
-    @Test func aSettleTakesTheMedianOfTheWindow() {
+    /// not what stops one: the settled figure is their trimmed mean, the
+    /// lowest and highest fifth dropped and the rest averaged.
+    /// Turns red if the settle takes the median (5,570), the untrimmed mean (5,571), trims anything but a fifth from each end, or truncates instead of rounding.
+    @Test func aSettleTakesTheTrimmedMeanOfTheWindow() {
         var policy = CastRoomDelay()
         policy.setReceivers(["tv"])
         var settlement: CastRoomDelay.Settlement?
-        for lead in [5_450, 5_500, 5_550, 5_500, 5_500, 5_500, 5_500, 5_500, 5_450, 5_550] {
+        for lead in [5_570, 5_570, 5_550, 5_570, 5_640, 5_570, 5_550, 5_570, 5_550, 5_570] {
             if let landed = policy.ingest(leadMs: lead, forID: "tv") { settlement = landed }
         }
-        #expect(settlement?.leadMs == 5_500)
+        #expect(settlement?.leadMs == 5_567)
     }
 
     // MARK: - The term follows each settle
@@ -144,45 +146,45 @@ import Testing
     }
 
     /// Inside the correction band a settled receiver is followed without a
-    /// re-settle: once a full window's median lead plus hold has moved past
-    /// the tracking step, its settled lead takes the median and its share
-    /// follows, while a move that only reaches the step changes nothing. A
-    /// full window that lands past `feedGateBandMs` re-settles instead, once
-    /// its samples agree within twice `settleBandMs`.
-    /// Turns red if a settled receiver's drift inside `correctionThresholdMs` stops being tracked, is acted on before `settleSampleCount` samples or at exactly `trackingStepMs`, re-opens the settle, or lowers the term, or a tracked move larger than `feedGateBandMs` is tracked instead of re-settled, or one whose window spans more than twice `settleBandMs` re-opens the settle instead of waiting for the window to agree.
+    /// re-settle: once a full window's trimmed-mean lead plus median hold has
+    /// moved past the tracking step, its settled lead takes the trimmed mean
+    /// and its share follows, while a move that only reaches the step changes
+    /// nothing. A full window that lands past `feedGateBandMs` re-settles
+    /// instead, once its raw samples agree within twice `settleBandMs`.
+    /// Turns red if a settled receiver's drift inside `correctionThresholdMs` stops being tracked, is acted on before `trackingWindowSamples` samples or at exactly `trackingStepMs`, re-opens the settle, or lowers the term, or a tracked move larger than `feedGateBandMs` is tracked instead of re-settled, or one whose window spans more than twice `settleBandMs` re-opens the settle instead of waiting for the window to agree, or the spread check reads the trimmed samples instead of the raw window.
     @Test func aSettledReceiversDriftIsTrackedWithoutAResettle() {
         var policy = CastRoomDelay()
         policy.setReceivers(["tv"])
         feed(&policy, Self.steadyLeadMs)
 
-        for _ in 0..<(CastRoomDelay.settleSampleCount - 1) {
-            #expect(policy.ingest(leadMs: 5_990, forID: "tv") == nil)
+        for _ in 0..<(CastRoomDelay.trackingWindowSamples - 1) {
+            #expect(policy.ingest(leadMs: 5_989, forID: "tv") == nil)
         }
-        let tracked = policy.ingest(leadMs: 5_990, forID: "tv")
+        let tracked = policy.ingest(leadMs: 5_989, forID: "tv")
         #expect(tracked?.tracked == true)
-        #expect(tracked?.leadMs == 5_990)
+        #expect(tracked?.leadMs == 5_989)
         #expect(tracked?.termMoved == false)
-        #expect(policy.settledLeadMs(forID: "tv") == 5_990)
+        #expect(policy.settledLeadMs(forID: "tv") == 5_989)
         #expect(policy.termMs == 6_000)
 
-        #expect(feed(&policy, 5_995) == nil)
-        #expect(policy.settledLeadMs(forID: "tv") == 5_990)
+        #expect(feed(&policy, 5_999, count: CastRoomDelay.trackingWindowSamples) == nil)
+        #expect(policy.settledLeadMs(forID: "tv") == 5_989)
 
         // 30 ms under the term: past `raiseThresholdMs`, tracked, term kept.
         var lower = CastRoomDelay()
         lower.setReceivers(["tv"])
         feed(&lower, Self.steadyLeadMs)
-        let down = feed(&lower, 5_970)
+        let down = feed(&lower, 5_970, count: CastRoomDelay.trackingWindowSamples)
         #expect(down?.tracked == true)
         #expect(down?.termMoved == false)
         #expect(lower.termMs == 6_000)
 
-        // 110 ms under the tracked basis, on an empty tracking window.
+        // 109 ms under the tracked basis, on an empty tracking window.
         var jumped = CastRoomDelay()
         jumped.setReceivers(["tv"])
         feed(&jumped, Self.steadyLeadMs)
-        #expect(feed(&jumped, 5_990)?.tracked == true)
-        for _ in 0..<(CastRoomDelay.settleSampleCount - 1) {
+        #expect(feed(&jumped, 5_989, count: CastRoomDelay.trackingWindowSamples)?.tracked == true)
+        for _ in 0..<(CastRoomDelay.trackingWindowSamples - 1) {
             #expect(jumped.ingest(leadMs: 5_880, forID: "tv") == nil)
         }
         let resettled = jumped.ingest(leadMs: 5_880, forID: "tv")
@@ -191,15 +193,15 @@ import Testing
         #expect(jumped.settledLeadMs(forID: "tv") == 5_880)
         #expect(jumped.termMs == 5_880)
 
-        // 140 ms off the basis, but the window straddles a 280 ms jump.
+        // 139 ms off the basis on the trimmed samples, but the raw window straddles a 280 ms jump.
         var split = CastRoomDelay()
         split.setReceivers(["tv"])
         feed(&split, 5_490)
-        #expect(feed(&split, 5_500)?.tracked == true)
-        for lead in [5_360, 5_360, 5_360] + Array(repeating: 5_640, count: 7) {
+        #expect(feed(&split, 5_501, count: CastRoomDelay.trackingWindowSamples)?.tracked == true)
+        for lead in Array(repeating: 5_360, count: 12) + Array(repeating: 5_640, count: 48) {
             #expect(split.ingest(leadMs: lead, forID: "tv") == nil)
         }
-        #expect(split.settledLeadMs(forID: "tv") != nil)
+        #expect(split.settledLeadMs(forID: "tv") == 5_501)
     }
 
     /// Tracking compares lead plus hold, and its hold is the median of the
@@ -213,8 +215,10 @@ import Testing
         #expect(policy.holdMs(forID: "tv") == CastFeedRing.macHoldMs)
 
         var last: CastRoomDelay.Settlement?
-        for hold in [nil, nil, nil, nil, 130, 130, 140, nil, nil, 130] as [Int?] {
-            last = policy.ingest(leadMs: 5_500, holdMs: hold, forID: "tv")
+        for _ in 0..<6 {
+            for hold in [nil, nil, nil, nil, 130, 130, 140, nil, nil, 130] as [Int?] {
+                last = policy.ingest(leadMs: 5_500, holdMs: hold, forID: "tv")
+            }
         }
         #expect(last?.tracked == true)
         #expect(last?.termMoved == false)
@@ -231,11 +235,11 @@ import Testing
         var policy = CastRoomDelay()
         policy.setReceivers(["tv"])
         feed(&policy, 5_500)
-        let inside = feed(&policy, 5_515)
+        let inside = feed(&policy, 5_515, count: CastRoomDelay.trackingWindowSamples)
         #expect(inside?.tracked == true)
         #expect(inside?.termMoved == false)
         #expect(policy.termMs == 5_500)
-        let past = feed(&policy, 5_530)
+        let past = feed(&policy, 5_530, count: CastRoomDelay.trackingWindowSamples)
         #expect(past?.tracked == true)
         #expect(past?.termMoved == true)
         #expect(policy.termMs == 5_530)
@@ -248,10 +252,49 @@ import Testing
         feed(&advanced, 5_500)
         #expect(advanced.setAdvanceMs(94, forID: "tv") == true)
         #expect(advanced.termMs == 5_594)
-        #expect(feed(&advanced, 5_515)?.termMoved == false)
+        #expect(feed(&advanced, 5_515, count: CastRoomDelay.trackingWindowSamples)?.termMoved == false)
         #expect(advanced.termMs == 5_594)
-        #expect(feed(&advanced, 5_530)?.termMoved == true)
+        #expect(feed(&advanced, 5_530, count: CastRoomDelay.trackingWindowSamples)?.termMoved == true)
         #expect(advanced.termMs == 5_624)
+    }
+
+    /// A Google TV Streamer reports its position in ~20 ms steps and flips
+    /// between two of them every few seconds, with a stray reading 80–100 ms
+    /// high: none of that moves its share, while a 0.7 ms/min drift moves it
+    /// 11 ms at a time, a minute's window apart.
+    /// Turns red if the tracking window shrinks from `trackingWindowSamples`, its lead stops being the trimmed mean, the step drops below 10 ms, the settle goes back to the median, or the trimmed mean truncates instead of rounding.
+    @Test func positionStepsAreNeverTrackedAndSlowDriftIsTrackedInElevenMsMoves() {
+        var policy = CastRoomDelay()
+        policy.setReceivers(["tv"])
+        let runLengths = [5, 3, 4]
+        var leads: [Int] = []
+        var run = 0
+        while leads.count < 600 {
+            leads += Array(repeating: run.isMultiple(of: 2) ? 5_550 : 5_570, count: runLengths[run % 3])
+            run += 1
+        }
+        leads = Array(leads.prefix(600))
+        for i in leads.indices where i % 10 == 9 { leads[i] = 5_640 }
+        var settles: [[Int]] = []
+        for (i, lead) in leads.enumerated() {
+            if let landed = policy.ingest(leadMs: lead, forID: "tv") {
+                settles.append([i, landed.leadMs, landed.tracked ? 1 : 0])
+            }
+        }
+        #expect(settles == [[9, 5_557, 0]])
+        #expect(policy.settledLeadMs(forID: "tv") == 5_557)
+        #expect(policy.termMs == 5_557)
+
+        var drifting = CastRoomDelay()
+        drifting.setReceivers(["tv"])
+        var moves: [[Int]] = []
+        for i in 0..<3_600 {
+            if let landed = drifting.ingest(leadMs: 5_550 + 7 * i / 600, forID: "tv") {
+                moves.append([i, landed.leadMs, landed.tracked ? 1 : 0, landed.termMoved ? 1 : 0])
+            }
+        }
+        #expect(moves == [[9, 5_550, 0, 1], [972, 5_561, 1, 0], [1_915, 5_572, 1, 1], [2_858, 5_583, 1, 0]])
+        #expect(drifting.termMs == 5_572)
     }
 
     /// A settle exactly at the raise band leaves the room alone; one past it,

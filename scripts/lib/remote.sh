@@ -570,10 +570,10 @@ remote_fetch() {
 # uncapped beside it, so "3 permits" never described what the machine was
 # actually running.
 #
-# Rulings (owner's call, 2026-09-10): no mule wait, 600s local ceiling then
+# Rulings (owner's call, 2026-09-10): no mule wait, 1800s local ceiling then
 # uncapped, sweep-on-acquire.
 #   - no mule wait: remote_run's exit 98 keeps falling straight back to local.
-#   - 600s local ceiling then uncapped: waiting forever would let one wedged
+#   - 1800s local ceiling then uncapped: waiting forever would let one wedged
 #     worktree block every commit on the machine; refusing would fail a commit
 #     for a reason its author cannot see. Degrading is the only option that
 #     leaves the machine usable.
@@ -669,7 +669,7 @@ capacity_acquire() {
     fi
     _ca_base=$(capacity_lock_base)
     _ca_slots=$(capacity_slots)
-    _ca_ceiling=${AUDIOUT_CAPACITY_TIMEOUT:-600}
+    _ca_ceiling=${AUDIOUT_CAPACITY_TIMEOUT:-1800}
     capacity_sweep
     _ca_waited=0
     _ca_announced=0

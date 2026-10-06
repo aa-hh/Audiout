@@ -28,7 +28,7 @@
 #                            foreground run when you know the machine is idle)
 #   AUDIOUT_TEST_NO_CACHE=1 always run, never consult or write the cache
 #   AUDIOUT_TEST_LOCK_TIMEOUT  seconds to wait for a local permit before
-#                            proceeding uncapped (default 600) — an alias for
+#                            proceeding uncapped (default 1800) — an alias for
 #                            AUDIOUT_CAPACITY_TIMEOUT, see scripts/lib/remote.sh
 set -eu
 

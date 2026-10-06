@@ -406,6 +406,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         appRouting: appRouting,
         settings: settings,
         excludedBundleIDs: { [excludedApps] in excludedApps.excludedBundleIDs },
+        speakerLibrary: speakerLibrary,
         serverName: Host.current().localizedName ?? "Mac",
         host: self)
 
@@ -1099,6 +1100,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self, !self.updatingSpeakerSnapshot else { return }
             self.popoverController.refreshSpeakerPresentation()
             self.mixerWindowController?.refreshSpeakerPresentation()
+            self.companionCoordinator.scheduleBroadcast()
         }
         speakerSearch.onChange = { [weak self] in self?.mixerWindowController?.refreshSpeakerPresentation() }
         speakerSearch.isBluetoothAccessGranted = { [weak self] in
@@ -3014,6 +3016,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // while its row still reads "Connected". Show or clear the popover's
             // note; no device model changed — handle it and return.
             popoverController.setCaptureFailureMessage(message)
+            companionCoordinator.noteCaptureFailure(message)
+            companionCoordinator.scheduleBroadcast()
             log("event: \(describe(event))")
             return
         case .routingBlockedNeedsDefault(let active):
@@ -3022,6 +3026,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // back. Show or clear the popover's routing-blocked warning; a whole-app
             // condition with no home on a `Device` — handle it and return.
             popoverController.setRoutingBlockedNeedsDefault(active)
+            companionCoordinator.noteRoutingBlocked(active)
+            companionCoordinator.scheduleBroadcast()
             logEvent(event)
             return
         case .systemVolumeOwnershipChanged(let weOwnIt):

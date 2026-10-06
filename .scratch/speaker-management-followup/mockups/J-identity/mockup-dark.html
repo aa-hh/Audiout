@@ -1,0 +1,319 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Speakers, J Identity</title>
+<style>
+:root{
+  --canvas:#FAFAFB; --panel:#FAFAFB; --raised:#FAFAFB; --well:#E9EAEC;
+  --label:#1D1D1F; --label2:#6B5F4E; --label3:#6B6459; --labelCool:#4E5A63; --labelCool2:#5F6A73;
+  --hairline:#CBCED4; --containerEdge:#AEB3BB; --rim:#66717A;
+  --gold:#E8B84B; --goldText:#825E0F; --ember:#7A5E2A; --inkOnFill:#171104; --failure:#B03327;
+  --sidebar:#EEEEEF; --toolbar:#F4F4F5; --sideSel:#DCDCDE;
+  --popFill:#FFFFFF; --popEdge:rgba(0,0,0,.16); --popShadow:0 .5px 1px rgba(0,0,0,.12);
+  --track:rgba(0,0,0,.14); --knob:#FFFFFF; --knobEdge:rgba(0,0,0,.22);
+  --page:#E4E5E8; --frame:rgba(0,0,0,.18); --note:#5F6A73;
+  color-scheme:light;
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    --canvas:#0A0A0C; --panel:#15171A; --raised:#1F232A; --well:#050507;
+    --label:#F2F2F3; --label2:#B7AC95; --label3:#9E947F; --labelCool:#A9B3BB; --labelCool2:#818C94;
+    --hairline:#2A2E33; --containerEdge:#3D4247; --rim:#6B767D;
+    --goldText:#E8B84B; --ember:#8A6A2F; --failure:#D9564A;
+    --sidebar:#1B1C1F; --toolbar:#18191C; --sideSel:#3A3B3F;
+    --popFill:rgba(255,255,255,.12); --popEdge:rgba(255,255,255,.10); --popShadow:none;
+    --track:rgba(255,255,255,.16); --knob:#C9CBCF; --knobEdge:rgba(0,0,0,.4);
+    --page:#050507; --frame:rgba(255,255,255,.16); --note:#818C94;
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --canvas:#0A0A0C; --panel:#15171A; --raised:#1F232A; --well:#050507;
+  --label:#F2F2F3; --label2:#B7AC95; --label3:#9E947F; --labelCool:#A9B3BB; --labelCool2:#818C94;
+  --hairline:#2A2E33; --containerEdge:#3D4247; --rim:#6B767D;
+  --goldText:#E8B84B; --ember:#8A6A2F; --failure:#D9564A;
+  --sidebar:#1B1C1F; --toolbar:#18191C; --sideSel:#3A3B3F;
+  --popFill:rgba(255,255,255,.12); --popEdge:rgba(255,255,255,.10); --popShadow:none;
+  --track:rgba(255,255,255,.16); --knob:#C9CBCF; --knobEdge:rgba(0,0,0,.4);
+  --page:#050507; --frame:rgba(255,255,255,.16); --note:#818C94;
+  color-scheme:dark;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{background:var(--page)}
+body{font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","Helvetica Neue",sans-serif;font-size:13px;color:var(--label);-webkit-font-smoothing:antialiased;padding:16px 8px}
+::selection{background:rgba(232,184,75,.35)}
+.stage{zoom:2;width:680px;margin:0 auto}
+svg.i{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.4;stroke-linecap:round;stroke-linejoin:round;flex:none}
+#toggle{position:fixed;top:12px;right:12px;z-index:9;font:600 12px -apple-system,sans-serif;padding:6px 12px;border-radius:8px;border:1px solid var(--containerEdge);background:var(--popFill);color:var(--label);cursor:pointer}
+#toggle:focus-visible{outline:2px solid var(--gold);outline-offset:2px}
+
+/* window chrome (unchanged from shipped) */
+.win{width:653px;height:669px;margin:0 auto;border-radius:12px;overflow:hidden;background:var(--canvas);box-shadow:0 0 0 .5px var(--frame),0 18px 40px rgba(0,0,0,.18);display:grid;grid-template-rows:62px 1fr}
+.tb{background:var(--toolbar);border-bottom:1px solid var(--hairline);display:flex;align-items:center;padding:0 14px;position:relative}
+.seg{display:flex;align-items:center;gap:2px;padding:3px;border-radius:999px;border:1px solid var(--containerEdge)}
+.seg span{display:flex;align-items:center;gap:6px;height:26px;padding:0 9px;border-radius:999px;color:var(--label2);font-size:12px}
+.seg span.on{background:var(--sideSel);color:var(--label)}
+.seg svg{width:17px;height:17px}
+.tb .title{position:absolute;left:0;right:0;text-align:center;font-weight:700;font-size:17px;color:var(--label2);pointer-events:none}
+.tb .pin{margin-left:auto;color:var(--label2)}
+.body{display:grid;grid-template-columns:210px 443px;min-height:0}
+
+/* sidebar */
+.sb{background:var(--sidebar);border-right:1px solid var(--hairline);display:flex;flex-direction:column;min-height:0;height:607px}
+.sbList{flex:1;padding:10px 10px 0;overflow:hidden}
+.plate{display:flex;align-items:center;gap:9px;height:34px;padding:0 10px 0 12px;border-radius:10px;border:1px solid var(--containerEdge);background:var(--raised);font-weight:600;font-size:13px;margin-bottom:8px}
+.plate.sel{background:var(--sideSel);border-color:transparent}
+.plate .chev{margin-left:auto;color:var(--label2);display:flex}
+.plate .chev svg{width:11px;height:11px}
+.hdr{display:flex;align-items:center;font-size:11px;font-weight:600;color:var(--label3);padding:8px 4px 3px 22px}
+.hdr .fold{margin-left:auto;font-weight:500}
+.row{display:flex;align-items:center;gap:7px;height:28px;padding:0 8px 0 6px;border-radius:6px;color:var(--label2)}
+.row .n{font-size:13px;color:var(--label);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;min-width:0}
+.row.sel{background:var(--sideSel)}
+.row.away{color:var(--labelCool2)}
+.row.away .n{color:var(--labelCool)}
+.row.two{height:40px;align-items:center}
+.row.two .t{display:flex;flex-direction:column;flex:1;min-width:0;line-height:1.25}
+.row.two .t .n{flex:none}
+.row .s{font-size:11px;color:var(--label2)}
+.row .warn{width:12px;height:12px;color:var(--failure);stroke-width:1.7}
+/* the Mixer's node, in the sidebar's left margin */
+.nd{width:9px;height:9px;border-radius:50%;flex:none}
+.nd.on{background:var(--ember)}
+.nd.away{border:1.5px solid var(--ember)}
+.nd.live{background:var(--gold);border:1px solid var(--ember)}
+.nd.no{visibility:hidden}
+.addbar{height:36px;border-top:1px solid var(--hairline);display:flex;align-items:center;gap:6px;padding:0 14px;color:var(--label);font-size:13px}
+.addbar svg{width:13px;height:13px}
+
+/* content: one page header rhythm */
+.ct{background:var(--panel);height:607px;overflow:hidden}
+.pane{padding:20px 22px 0}
+.ph{display:flex;align-items:center;gap:12px;margin-bottom:20px}
+.idw{width:48px;height:48px;border-radius:16px;border:1px solid var(--containerEdge);display:grid;place-items:center;color:var(--label2);position:relative;flex:none;background:var(--raised)}
+.idw svg{width:26px;height:26px;stroke-width:1.3}
+.idw .pen{position:absolute;right:-4px;bottom:-4px;width:17px;height:17px;border-radius:50%;background:var(--rim);display:grid;place-items:center;border:1.5px solid var(--panel)}
+.idw .pen svg{width:9px;height:9px;stroke:#fff;stroke-width:1.8}
+.ph h1{font-size:16px;font-weight:600;line-height:1.2;letter-spacing:-.005em}
+.ph .sub{font-size:11px;color:var(--label2);margin-top:3px}
+.ph .meta{margin-left:auto;font-size:11px;color:var(--label2)}
+
+/* section label: the scene editor's "Speakers" voice */
+.lbl{display:flex;align-items:center;justify-content:space-between;margin:0 4px 7px;font-size:13px;color:var(--label2)}
+.btn{font-size:12px;height:22px;padding:0 10px;border-radius:6px;background:var(--popFill);border:.5px solid var(--popEdge);box-shadow:var(--popShadow);display:inline-flex;align-items:center;color:var(--label);white-space:nowrap;flex:none}
+.btn.pro{background:var(--gold);color:var(--inkOnFill);border-color:transparent;box-shadow:none}
+
+/* Equalizer: the .well recess */
+.well{background:var(--well);border:1px solid var(--containerEdge);border-radius:26px;padding:12px 20px 2px;box-shadow:inset 0 1px 0 rgba(0,0,0,.18)}
+.eqr{display:grid;grid-template-columns:58px 1fr 50px;align-items:center;height:28px}
+.eqr .c{color:var(--label2);font-size:12px}
+.eqr .r{font-size:11px;font-weight:600;color:var(--label2);text-align:right;font-variant-numeric:tabular-nums}
+.sl{position:relative;height:20px}
+.sl::before{content:"";position:absolute;left:0;right:0;top:8px;height:4px;border-radius:2px;background:var(--track)}
+.sl i{position:absolute;top:1px;width:18px;height:18px;margin-left:-9px;border-radius:50%;background:var(--knob);box-shadow:0 0 0 .5px var(--knobEdge),0 1px 2px rgba(0,0,0,.2)}
+.sl.mid::after{content:"";position:absolute;left:50%;top:4px;width:1px;height:12px;background:var(--rim);opacity:.6}
+.bal{display:flex;align-items:center;gap:6px}
+.bal small{font-size:11px;color:var(--label3)}
+.bal .sl{flex:1}
+.chk{display:flex;align-items:center;gap:7px;height:28px;font-size:13px}
+.chk em{width:14px;height:14px;border-radius:4px;border:.5px solid var(--popEdge);background:var(--popFill);box-shadow:var(--popShadow)}
+.adv{display:flex;align-items:center;gap:7px;height:32px;border-top:1px solid var(--hairline);margin-top:4px;font-size:13px;color:var(--label2)}
+.adv svg{width:9px;height:9px;stroke-width:2}
+.adv small{font-size:11px;color:var(--label3)}
+
+/* row list: the scene editor's outlined 26pt list */
+.list{border:1px solid var(--containerEdge);border-radius:26px;margin-top:18px;overflow:hidden}
+.li{display:flex;align-items:center;gap:10px;min-height:46px;padding:9px 16px 9px 18px}
+.li + .li{border-top:1px solid var(--hairline);margin-left:18px;padding-left:0}
+.li .tx{flex:1;min-width:0}
+.li .k{font-size:13px;color:var(--label)}
+.li .cap{font-size:11px;color:var(--label2);margin-top:2px;line-height:1.35}
+.pop{display:inline-flex;align-items:center;gap:8px;height:22px;padding:0 4px 0 9px;border-radius:6px;background:var(--popFill);border:.5px solid var(--popEdge);box-shadow:var(--popShadow);font-size:12.5px;color:var(--label);flex:none}
+.pop svg{width:11px;height:11px;stroke-width:1.8}
+.links{display:flex;gap:10px;font-size:13px;color:var(--label)}
+.links span{display:inline-flex;align-items:center;gap:2px}
+.links svg{width:10px;height:10px;color:var(--label2)}
+.cw{width:30px;height:30px;border-radius:50%;border:1px solid var(--containerEdge);display:grid;place-items:center;color:var(--label2);flex:none;background:var(--raised)}
+.cw svg{width:16px;height:16px}
+.cw.fail{color:var(--failure)}
+
+/* lower panels */
+.panels{display:flex;gap:18px;margin-top:26px;justify-content:center;align-items:flex-start}
+.pnl figcaption{font-size:11px;font-weight:600;color:var(--label2);margin:0 0 6px 2px;max-width:443px}
+.pnl figcaption span{font-weight:400;color:var(--note)}
+.frame{border-radius:12px;overflow:hidden;box-shadow:0 0 0 .5px var(--frame),0 10px 24px rgba(0,0,0,.14)}
+.key{display:flex;flex-direction:column;gap:5px;margin-top:10px;font-size:11px;color:var(--note)}
+.key div{display:flex;align-items:center;gap:7px}
+</style>
+</head>
+<body>
+<button id="toggle" type="button" aria-label="Switch light or dark appearance">Light / Dark</button>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+ <defs>
+  <symbol id="laptop" viewBox="0 0 24 24"><rect x="4.5" y="6" width="15" height="10" rx="1.2"/><path d="M2.5 18.5h19"/></symbol>
+  <symbol id="spk" viewBox="0 0 24 24"><rect x="7" y="3" width="10" height="18" rx="2"/><circle cx="12" cy="14.5" r="3"/><circle cx="12" cy="7.2" r="1.2"/></symbol>
+  <symbol id="radio" viewBox="0 0 24 24"><rect x="3.5" y="8" width="17" height="11.5" rx="2"/><path d="M7 8 16 4"/><circle cx="9" cy="13.8" r="2.6"/><path d="M15 12h3M15 15.5h3"/></symbol>
+  <symbol id="tv" viewBox="0 0 24 24"><rect x="2.5" y="5" width="14" height="10" rx="1.2"/><path d="M6 18h7"/><rect x="15.5" y="10" width="6" height="9.5" rx="1.2"/><circle cx="18.5" cy="16.5" r="1.4"/></symbol>
+  <symbol id="pod" viewBox="0 0 24 24"><path d="M6.5 6.5c0-1.4 2.5-2.5 5.5-2.5s5.5 1.1 5.5 2.5v11c0 1.4-2.5 2.5-5.5 2.5s-5.5-1.1-5.5-2.5z"/><path d="M6.5 6.5c0 1.4 2.5 2.5 5.5 2.5s5.5-1.1 5.5-2.5"/></symbol>
+  <symbol id="spkOut" viewBox="0 0 24 24"><path d="M5 9.5h3l5-4v13l-5-4H5z"/></symbol>
+  <symbol id="scenes" viewBox="0 0 24 24"><rect x="3" y="5" width="8" height="6" rx="1.4"/><rect x="3" y="13" width="8" height="6" rx="1.4"/><rect x="13" y="5" width="8" height="14" rx="1.4"/></symbol>
+  <symbol id="main" viewBox="0 0 24 24"><rect x="9" y="3.5" width="9" height="17" rx="1.6"/><path d="M3 12h9M9.5 9l3 3-3 3"/></symbol>
+  <symbol id="speakers" viewBox="0 0 24 24"><rect x="4" y="4" width="8" height="16" rx="1.6"/><circle cx="8" cy="14" r="2.2"/><rect x="14" y="7" width="6" height="13" rx="1.4"/><circle cx="17" cy="15.5" r="1.4"/></symbol>
+  <symbol id="chev" viewBox="0 0 24 24"><path d="m9 5 7 7-7 7"/></symbol>
+  <symbol id="disc" viewBox="0 0 24 24"><path d="m8 5 8 7-8 7z" fill="currentColor"/></symbol>
+  <symbol id="updown" viewBox="0 0 24 24"><path d="m7 9 5-5 5 5M7 15l5 5 5-5"/></symbol>
+  <symbol id="tri" viewBox="0 0 24 24"><path d="M12 3.5 22 20H2z"/><path d="M12 10v4.5M12 17.2v.3"/></symbol>
+  <symbol id="bt" viewBox="0 0 24 24"><path d="m7 7 10 10-5 4.5V2.5L17 7 7 17"/></symbol>
+  <symbol id="eye" viewBox="0 0 24 24"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="3"/><path d="M4 20 20 4"/></symbol>
+  <symbol id="plus" viewBox="0 0 24 24"><path d="M12 4v16M4 12h16"/></symbol>
+  <symbol id="pen" viewBox="0 0 24 24"><path d="M5 19 18 6"/></symbol>
+  <symbol id="pinS" viewBox="0 0 24 24"><path d="M8 3h8M9 3v6l-3 4h12l-3-4V3M12 13v8"/></symbol>
+  <symbol id="bars" viewBox="0 0 24 24"><path d="M4 9v6M8 6v12M12 4v16M16 7v10M20 10v4"/></symbol>
+  <symbol id="gear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 3.5l1.6 2.3 2.7-.8.6 2.8 2.7.9-.8 2.7 2.3 1.6-2.3 1.6.8 2.7-2.7.9-.6 2.8-2.7-.8L12 20.5l-1.6-2.3-2.7.8-.6-2.8-2.7-.9.8-2.7L2.9 12l2.3-1.6-.8-2.7 2.7-.9.6-2.8 2.7.8z"/></symbol>
+ </defs>
+</svg>
+
+<div class="stage">
+
+<!-- ============ MAIN WINDOW: Move 2 selected ============ -->
+<div class="win" role="img" aria-label="Scenes window, Move 2 selected, its Equalizer first">
+ <div class="tb">
+  <div class="seg">
+   <span><svg class="i"><use href="#bars"/></svg></span>
+   <span class="on"><svg class="i"><use href="#speakers"/></svg>Scenes</span>
+   <span><svg class="i"><use href="#gear"/></svg></span>
+  </div>
+  <div class="title">Audiout</div>
+  <div class="pin"><svg class="i"><use href="#pinS"/></svg></div>
+ </div>
+ <div class="body">
+  <aside class="sb">
+   <div class="sbList">
+    <div class="plate"><svg class="i"><use href="#scenes"/></svg>Scenes<span class="chev"><svg class="i"><use href="#chev"/></svg></span></div>
+    <div class="hdr">System Audio</div>
+    <div class="row"><span class="nd no"></span><svg class="i"><use href="#main"/></svg><span class="n">Main Audio</span></div>
+    <div class="plate" style="margin-top:10px"><svg class="i"><use href="#speakers"/></svg>Speakers<span class="chev"><svg class="i"><use href="#chev"/></svg></span></div>
+    <div class="hdr">Your speakers</div>
+    <div class="row" title="This Mac"><span class="nd on"></span><svg class="i"><use href="#laptop"/></svg><span class="n">MacBook Pro Speakers</span></div>
+    <div class="row sel" title="Available"><span class="nd on"></span><svg class="i"><use href="#spk"/></svg><span class="n">Move 2</span></div>
+    <div class="row" title="Playing now"><span class="nd live"></span><svg class="i"><use href="#tv"/></svg><span class="n">TV</span></div>
+    <div class="row away" title="Unavailable"><span class="nd away"></span><svg class="i"><use href="#pod"/></svg><span class="n">Bedroom</span></div>
+    <div class="row away" title="Not connected"><span class="nd away"></span><svg class="i"><use href="#radio"/></svg><span class="n">Sonos Move</span></div>
+    <div class="row away" title="Can't be found"><span class="nd away"></span><svg class="i"><use href="#spkOut"/></svg><span class="n">Study</span><svg class="i warn"><use href="#tri"/></svg></div>
+    <div class="hdr">Other speakers<span class="fold">Hide</span></div>
+    <div class="row" title="Connected"><span class="nd no"></span><svg class="i"><use href="#radio"/></svg><span class="n">Onkyo TX-8220</span></div>
+   </div>
+   <div class="addbar"><svg class="i"><use href="#plus"/></svg>Add scene</div>
+  </aside>
+
+  <section class="ct">
+   <div class="pane">
+    <div class="ph">
+     <div class="idw"><svg class="i"><use href="#spk"/></svg><span class="pen"><svg class="i"><use href="#pen"/></svg></span></div>
+     <div><h1>Move 2</h1><div class="sub">AirPlay · Available</div></div>
+    </div>
+
+    <div class="lbl">Equalizer<span class="btn">Reset</span></div>
+    <div class="well">
+     <div class="eqr"><span class="c">Bass</span><div class="sl mid"><i style="left:62%"></i></div><span class="r">+3 dB</span></div>
+     <div class="eqr"><span class="c">Treble</span><div class="sl mid"><i style="left:46%"></i></div><span class="r">−1 dB</span></div>
+     <div class="eqr"><span class="c">Balance</span><div class="bal"><small>L</small><div class="sl mid"><i style="left:50%"></i></div><small>R</small></div><span class="r">Centre</span></div>
+     <div class="chk"><em></em>Loudness</div>
+     <div class="adv"><svg class="i"><use href="#disc"/></svg>Advanced <small>10 bands</small></div>
+    </div>
+
+    <div class="list">
+     <div class="li">
+      <div class="tx"><div class="k">Show in Mixer</div><div class="cap">Listed while it's on the network.</div></div>
+      <span class="pop">When available<svg class="i"><use href="#updown"/></svg></span>
+     </div>
+     <div class="li">
+      <div class="tx"><div class="k">Scenes</div></div>
+      <span class="links"><span>Kitchen<svg class="i"><use href="#chev"/></svg></span><span>Downstairs<svg class="i"><use href="#chev"/></svg></span></span>
+     </div>
+    </div>
+   </div>
+  </section>
+ </div>
+</div>
+
+<!-- ============ LOWER PANELS ============ -->
+<div class="panels">
+
+ <figure class="pnl">
+  <figcaption>Speakers plate clicked <span>· Bluetooth off, one speaker lost. Hide and Forget wait on owner rulings.</span></figcaption>
+  <div class="frame ct" style="width:443px">
+   <div class="pane">
+    <div class="ph">
+     <div class="idw"><svg class="i"><use href="#speakers"/></svg></div>
+     <div><h1>Speakers</h1><div class="sub">6 yours, 1 other</div></div>
+    </div>
+    <div class="list" style="margin-top:0">
+     <div class="li">
+      <span class="cw"><svg class="i"><use href="#bt"/></svg></span>
+      <div class="tx"><div class="k">Bluetooth access is off</div><div class="cap">Audiout can't list Bluetooth speakers until you allow it.</div></div>
+      <span class="btn pro">Open Privacy Settings…</span>
+     </div>
+     <div class="li">
+      <span class="cw"><svg class="i"><use href="#eye"/></svg></span>
+      <div class="tx"><div class="k">Hide speakers not in any scene</div><div class="cap">Moves 2 to Other speakers. They still show up while they play.</div></div>
+      <span class="btn">Hide 2</span>
+     </div>
+     <div class="li">
+      <span class="cw fail"><svg class="i"><use href="#tri"/></svg></span>
+      <div class="tx"><div class="k">1 speaker can't be found</div><div class="cap">Last seen 12 September. Forgetting it takes it out of 1 scene.</div></div>
+      <span class="btn">Forget…</span>
+     </div>
+    </div>
+   </div>
+  </div>
+ </figure>
+
+ <figure class="pnl">
+  <figcaption>Sidebar <span>· TV playing; Onkyo hidden, playing</span></figcaption>
+  <div class="frame" style="width:210px">
+   <aside class="sb" style="border-right:0">
+    <div class="sbList">
+     <div class="plate"><svg class="i"><use href="#scenes"/></svg>Scenes<span class="chev"><svg class="i"><use href="#chev"/></svg></span></div>
+     <div class="hdr">System Audio</div>
+     <div class="row"><span class="nd no"></span><svg class="i"><use href="#main"/></svg><span class="n">Main Audio</span></div>
+     <div class="plate sel" style="margin-top:10px"><svg class="i"><use href="#speakers"/></svg>Speakers<span class="chev"><svg class="i"><use href="#chev"/></svg></span></div>
+     <div class="hdr">Your speakers</div>
+     <div class="row"><span class="nd on"></span><svg class="i"><use href="#laptop"/></svg><span class="n">MacBook Pro Speakers</span></div>
+     <div class="row"><span class="nd on"></span><svg class="i"><use href="#spk"/></svg><span class="n">Move 2</span></div>
+     <div class="row"><span class="nd live"></span><svg class="i"><use href="#tv"/></svg><span class="n">TV</span></div>
+     <div class="row away"><span class="nd away"></span><svg class="i"><use href="#pod"/></svg><span class="n">Bedroom</span></div>
+     <div class="row away"><span class="nd away"></span><svg class="i"><use href="#radio"/></svg><span class="n">Sonos Move</span></div>
+     <div class="row away"><span class="nd away"></span><svg class="i"><use href="#spkOut"/></svg><span class="n">Study</span><svg class="i warn"><use href="#tri"/></svg></div>
+     <div class="hdr">Other speakers<span class="fold">Hide</span></div>
+     <div class="row two"><span class="nd live"></span><svg class="i"><use href="#radio"/></svg><div class="t"><span class="n">Onkyo TX-8220</span><span class="s">In the Mixer while it plays</span></div></div>
+    </div>
+    <div class="addbar"><svg class="i"><use href="#plus"/></svg>Add scene</div>
+   </aside>
+  </div>
+  <div class="key" aria-label="Reviewer key, not in the app">
+   <div><span class="nd on"></span>On the network</div>
+   <div><span class="nd away"></span>Away (still in Your speakers)</div>
+   <div><span class="nd live"></span>Playing now, in either section</div>
+  </div>
+ </figure>
+
+</div>
+</div>
+
+<script>
+(function(){
+  var r=document.documentElement;
+  if(!r.hasAttribute('data-theme')&&window.matchMedia){
+    r.setAttribute('data-theme',matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');
+  }
+  document.getElementById('toggle').addEventListener('click',function(){
+    r.setAttribute('data-theme',r.getAttribute('data-theme')==='dark'?'light':'dark');
+  });
+})();
+</script>
+<script>document.documentElement.setAttribute("data-theme","dark");</script></body>
+</html>

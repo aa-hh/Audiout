@@ -1,0 +1,312 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Speakers on iPhone</title>
+<style>
+:root {
+  /* page */
+  --page: #ECEDEF; --pageInk: #1D1F22; --pageInk2: #5A626A; --pageRule: #CDD1D6; --box: #F7F7F8; --code: #E3E5E8;
+  /* WarmSignal, light half (AudioutRemote/UI/Shared/WarmSignal.swift) */
+  --canvas: #FAFAFB; --raised: #FAFAFB; --well: #E9EAEC; --liveRaised: #FAFAFB;
+  --containerEdge: #AEB3BB; --rim: #66717A; --hairline: #CBCED4;
+  --label: #201D1A; --label2: #6B5F4E; --labelCool: #4E5A63; --labelCool2: #5F6A73;
+  --gold: #E8B84B; --goldText: #E8B84B; --socket: #DFE1E4; --inkOnFill: #171104;
+  --wash: rgba(232,184,75,.06);
+  --deckFill: rgba(255,255,255,.80); --deckShadow: 0 -4px 18px rgba(0,0,0,.08);
+  --tabGlass: rgba(255,255,255,.72); --tabSel: rgba(0,0,0,.06); --tabEdge: rgba(0,0,0,.08);
+  --menu: rgba(250,250,251,.86); --menuSep: rgba(60,60,67,.18); --scrim: rgba(0,0,0,.10);
+  --bezel: #1B1C1F;
+}
+:root[data-theme="dark"] {
+  --page: #121315; --pageInk: #E9EAEC; --pageInk2: #9AA3AB; --pageRule: #2C3036; --box: #1A1C1F; --code: #262A2F;
+  --canvas: #0A0A0C; --raised: #1F232A; --well: #050507; --liveRaised: #2B241C;
+  --containerEdge: #3D4247; --rim: #6B767D; --hairline: #2A2E33;
+  --label: #F5EFE4; --label2: #B7AC95; --labelCool: #A9B3BB; --labelCool2: #818C94;
+  --gold: #E8B84B; --goldText: #E8B84B; --socket: #2A2E33; --inkOnFill: #171104;
+  --wash: rgba(232,184,75,.06);
+  --deckFill: rgba(53,48,42,.62); --deckShadow: 0 -6px 24px rgba(0,0,0,.28);
+  --tabGlass: rgba(30,32,36,.72); --tabSel: rgba(255,255,255,.10); --tabEdge: rgba(255,255,255,.08);
+  --menu: rgba(36,38,42,.88); --menuSep: rgba(235,235,245,.14); --scrim: rgba(0,0,0,.32);
+  --bezel: #2A2C30;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { background: var(--page); overflow: hidden; }
+body { font-family: -apple-system, "SF Pro Text", system-ui, sans-serif; color: var(--pageInk); -webkit-font-smoothing: antialiased; }
+.page { width: 1400px; padding: 22px 28px 20px; }
+.page > header h1 { font-size: 19px; font-weight: 650; letter-spacing: -0.2px; }
+.page > header p { font-size: 12.5px; color: var(--pageInk2); margin-top: 3px; max-width: 1180px; line-height: 1.4; }
+.phones { display: flex; gap: 25px; margin-top: 14px; }
+.col { width: 316px; }
+.tag { font-size: 12px; font-weight: 650; margin-bottom: 7px; }
+.tag span { font-weight: 400; color: var(--pageInk2); }
+.device { zoom: 0.74; width: 426px; height: 898px; padding: 12px; border-radius: 68px; background: var(--bezel); }
+.cap { font-size: 11.5px; line-height: 1.42; color: var(--pageInk2); margin-top: 9px; }
+.cap b { color: var(--pageInk); font-weight: 600; }
+
+/* ------------- the phone ------------- */
+.screen { position: relative; width: 402px; height: 874px; border-radius: 56px; overflow: hidden; background: var(--canvas); color: var(--label); }
+.island { position: absolute; top: 11px; left: 138px; width: 126px; height: 37px; border-radius: 19px; background: #000; z-index: 30; }
+.status { position: absolute; top: 0; left: 0; right: 0; height: 54px; z-index: 25; display: flex; align-items: center; justify-content: space-between; padding: 6px 34px 0 46px; }
+.status .time { font-size: 17px; font-weight: 600; letter-spacing: -0.3px; }
+.status svg { display: block; }
+.titlebar { position: absolute; top: 62px; left: 0; right: 0; height: 54px; padding: 12px 18px 0; z-index: 6; background: var(--canvas); }
+.titlebar h2 { font-size: 32px; line-height: 38px; font-weight: 700; letter-spacing: -0.7px; }
+.viewport { position: absolute; top: 116px; left: 0; right: 0; bottom: 87px; overflow: hidden; }
+.list { position: absolute; left: 0; right: 0; padding: 0 14px; }
+.list.top { top: 0; }
+.list.end { bottom: 0; }
+
+.sh { height: 44px; display: flex; align-items: center; gap: 8px; }
+.sh .chev { width: 9px; height: 9px; margin-left: 4px; flex: none; }
+.sh .t, .sh .n { font-size: 11px; font-weight: 600; white-space: nowrap; }
+.sh .n { color: var(--labelCool2); font-variant-numeric: tabular-nums; }
+.sh .rule { flex: 1; height: 1px; background: var(--containerEdge); }
+.sec { padding-bottom: 4px; }
+.rows { display: flex; flex-direction: column; gap: 8px; }
+
+.row { position: relative; height: 60px; border-radius: 16px; display: flex; align-items: center; gap: 12px; padding: 0 12px; }
+.row.live { background: var(--wash); }
+.halo { position: relative; width: 44px; height: 44px; flex: none; border-radius: 50%; display: grid; place-items: center; }
+.halo svg.g { width: 21px; height: 21px; }
+.halo svg.arc { position: absolute; inset: 0; width: 44px; height: 44px; }
+.row .txt { display: flex; flex-direction: column; gap: 4px; min-width: 0; flex: 1; }
+.row .nm { font-size: 16.5px; letter-spacing: -0.2px; line-height: 20px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.row .sub { font-size: 11px; font-weight: 600; line-height: 13px; }
+.mute { width: 28px; height: 28px; flex: none; border-radius: 10px; background: var(--well); box-shadow: inset 0 0 0 0.5px var(--rim); display: grid; place-items: center; color: var(--label2); }
+.mute svg { width: 13px; height: 13px; }
+
+.chips { display: flex; gap: 8px; padding: 6px 4px; height: 44px; align-items: center; margin-bottom: 2px; }
+.chip { font-size: 11px; font-weight: 600; padding: 7px 14px; border-radius: 10px; background: var(--well); box-shadow: inset 0 0 0 0.5px var(--rim); color: var(--labelCool2); }
+.chip.on { background: var(--gold); box-shadow: inset 0 0 0 1px var(--gold); color: var(--inkOnFill); }
+
+.foot { display: flex; align-items: center; gap: 6px; height: 28px; margin-top: 6px; padding-left: 2px; color: var(--labelCool2); }
+.foot svg { width: 13px; height: 13px; flex: none; }
+.foot span { font-size: 11px; font-weight: 600; }
+
+.deck { position: absolute; left: 14px; right: 14px; bottom: 95px; z-index: 8; border-radius: 26px; padding: 13px 15px 14px; background: var(--deckFill); -webkit-backdrop-filter: blur(22px) saturate(1.4); backdrop-filter: blur(22px) saturate(1.4); box-shadow: var(--deckShadow), inset 0 0 0 0.5px var(--rim); }
+.deck .hd { display: flex; align-items: center; justify-content: space-between; }
+.deck .hd .t { font-size: 11px; font-weight: 600; color: var(--goldText); }
+.deck .hd .pick { display: flex; align-items: center; gap: 5px; font-size: 13px; color: var(--label2); }
+.deck .hd .pick svg { width: 9px; height: 13px; }
+.deck .mr { display: flex; align-items: center; gap: 12px; margin-top: 11px; height: 44px; }
+.deck .mbtn { width: 38px; height: 38px; border-radius: 10px; background: var(--well); box-shadow: inset 0 0 0 0.5px var(--rim); display: grid; place-items: center; color: var(--label2); flex: none; }
+.deck .mbtn svg { width: 16px; height: 16px; }
+.fader { position: relative; flex: 1; height: 44px; }
+.fader .trk { position: absolute; left: 0; right: 0; top: 13px; height: 18px; border-radius: 9px; background: var(--well); box-shadow: inset 0 0 0 1px var(--rim); }
+.fader .fill { position: absolute; left: 1px; top: 14px; height: 16px; border-radius: 8px; background: var(--gold); }
+.fader .cap { position: absolute; top: 5px; width: 22px; height: 34px; border-radius: 11px; background: var(--raised); box-shadow: inset 0 0 0 1px var(--rim); display: grid; place-items: center; }
+.fader .cap i { width: 3px; height: 16px; border-radius: 2px; background: var(--gold); display: block; }
+.deck .ro { font-size: 16px; font-weight: 700; color: var(--goldText); font-variant-numeric: tabular-nums; width: 30px; text-align: right; }
+
+.tabbar { position: absolute; left: 20px; right: 20px; bottom: 25px; height: 62px; z-index: 9; border-radius: 31px; background: var(--tabGlass); -webkit-backdrop-filter: blur(20px) saturate(1.5); backdrop-filter: blur(20px) saturate(1.5); box-shadow: inset 0 0 0 0.5px var(--tabEdge), 0 6px 20px rgba(0,0,0,.10); display: flex; align-items: center; padding: 0 5px; }
+.tabbar .it { flex: 1; height: 52px; border-radius: 26px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; color: var(--labelCool2); }
+.tabbar .it.sel { background: var(--tabSel); color: var(--label); }
+.tabbar .it svg { width: 22px; height: 22px; }
+.tabbar .it b { font-size: 10px; font-weight: 600; }
+.home { position: absolute; bottom: 8px; left: 134px; width: 134px; height: 5px; border-radius: 3px; background: var(--label); opacity: .85; z-index: 10; }
+
+/* long-press menu */
+.scrim { position: absolute; inset: 0; z-index: 20; background: var(--scrim); -webkit-backdrop-filter: blur(16px); backdrop-filter: blur(16px); }
+.lift { position: absolute; left: 14px; right: 14px; z-index: 21; background: var(--canvas); border-radius: 16px; box-shadow: 0 10px 34px rgba(0,0,0,.22); }
+.menu { position: absolute; left: 14px; width: 252px; z-index: 21; border-radius: 22px; background: var(--menu); -webkit-backdrop-filter: blur(30px) saturate(1.6); backdrop-filter: blur(30px) saturate(1.6); box-shadow: 0 12px 40px rgba(0,0,0,.24); overflow: hidden; padding: 4px 0; }
+.menu .mi { height: 46px; display: flex; align-items: center; justify-content: space-between; padding: 0 18px; font-size: 17px; letter-spacing: -0.3px; color: var(--label); }
+.menu .mi svg { width: 19px; height: 19px; }
+.menu .sep { height: 0.5px; background: var(--menuSep); margin: 0 0; }
+.menu .mi.new { position: relative; }
+
+/* notes */
+.notes { display: grid; grid-template-columns: 1.25fr 1fr 1fr; gap: 16px; margin-top: 16px; }
+.box { background: var(--box); border: 1px solid var(--pageRule); border-radius: 12px; padding: 12px 14px; }
+.box h3 { font-size: 12px; font-weight: 650; margin-bottom: 6px; }
+.box p, .box li { font-size: 11.2px; line-height: 1.45; color: var(--pageInk2); }
+.box ul, .box ol { padding-left: 15px; }
+.box li + li { margin-top: 3px; }
+.box b { color: var(--pageInk); font-weight: 600; }
+code { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 10.4px; background: var(--code); padding: 0 3px; border-radius: 3px; color: var(--pageInk); }
+</style>
+</head>
+<body>
+<div class="page">
+  <header>
+    <h1>Speakers tab on iPhone, after the Mac redesign</h1>
+    <p>The owner's fleet from <code>M/FINAL</code>, as the Mac sends it to the phone. iPhone 17 frame (402 × 874 pt) at 74 %. Tokens from the phone's <code>WarmSignal.swift</code>; Speakers row tint at 6 % per the 2026-10-04 ruling. Glyphs are hand-drawn stand-ins for the SF Symbols named in <code>BRIEF.md</code>.</p>
+  </header>
+
+  <div class="phones">
+    <figure class="col">
+      <div class="tag">A · Today <span>end of the list, Unavailable opened</span></div>
+      <div class="device"><div class="screen" id="pA"></div></div>
+      <figcaption class="cap"><b>What ships now.</b> The four headphones hidden on the Mac sit in Unavailable. The two Bluetooth speakers that are only switched off say "Unavailable" like a speaker that left the network.</figcaption>
+    </figure>
+    <figure class="col">
+      <div class="tag">B · Proposed <span>as the tab opens</span></div>
+      <div class="device"><div class="screen" id="pB"></div></div>
+      <figcaption class="cap"><b>Same screen, shorter list.</b> The tab shows only what the Mac's Mixer shows. Fancyy is hidden on the Mac but in use, so it plays here as it does there. Main Audio stays the floating deck.</figcaption>
+    </figure>
+    <figure class="col">
+      <div class="tag">C · Proposed <span>end of the list, Unavailable opened</span></div>
+      <div class="device"><div class="screen" id="pC"></div></div>
+      <figcaption class="cap"><b>Unavailable holds 2, not 6.</b> Bluetooth speakers say "Not connected", the Mac's word. One quiet line counts what the Mac hides; it is text, not a button.</figcaption>
+    </figure>
+    <figure class="col">
+      <div class="tag">D · Only if you say yes <span>to question 2</span></div>
+      <div class="device"><div class="screen" id="pD"></div></div>
+      <figcaption class="cap"><b>Hide lives in the long-press menu.</b> Never a swipe: a sideways drag on a row sets its volume. The row leaves when the Mac confirms. Today's menu is the first item alone.</figcaption>
+    </figure>
+  </div>
+
+  <section class="notes">
+    <div class="box">
+      <h3>What the phone needs from the Mac (audiout-shared, <code>CompanionSnapshot.swift</code>)</h3>
+      <ol>
+        <li><b>New:</b> <code>DeviceState.isVisibleInMixer: Bool?</code>, the Mac's own answer (setting, This Mac, or in use). Optional, so no <code>CompanionProto.version</code> bump; <code>nil</code> from an older Mac shows the speaker.</li>
+        <li><b>Mac change, no new field:</b> also send remembered speakers set to "Show even when unavailable" that haven't appeared since the Mac opened, as unavailable rows, so the phone's Unavailable matches the Mixer.</li>
+        <li><b>Already on the wire:</b> <code>kind</code> (for "Not connected"), <code>isAvailable</code>, <code>connection.state</code>. <code>access</code> and <code>credentialKind</code> arrived in 0.19.0; the phone pins 0.15.0.</li>
+      </ol>
+    </div>
+    <div class="box">
+      <h3>Stays on the Mac</h3>
+      <ul>
+        <li><b>Overview and its five counts.</b> The phone can't see the Mac's search, and its transport chips already split by kind.</li>
+        <li><b>Forget.</b> It applies only to speakers the Mac hasn't seen since it opened, which never reach the phone.</li>
+        <li><b>"Shown in Mixer" and "Hidden unless in use" as headings.</b> The phone applies the setting; it doesn't manage it.</li>
+      </ul>
+    </div>
+    <div class="box">
+      <h3>Your calls (defaults in bold)</h3>
+      <ol>
+        <li>Phone hides what the Mac's Mixer hides, and says how many? <b>Yes.</b></li>
+        <li>Hide from the phone's long-press menu (panel D)? <b>No</b>, change it on the Mac.</li>
+        <li>Send never-seen "Show even when unavailable" speakers? <b>Yes</b>, same release.</li>
+      </ol>
+    </div>
+  </section>
+</div>
+
+<script>
+const S = {
+  speaker: '<svg class="g" viewBox="0 0 24 24"><rect x="5.5" y="2" width="13" height="20" rx="3.2" fill="currentColor"/><circle cx="12" cy="7.2" r="1.7" fill="var(--hb)"/><circle cx="12" cy="14.6" r="3.9" fill="var(--hb)"/><circle cx="12" cy="14.6" r="1.4" fill="currentColor"/></svg>',
+  tv: '<svg class="g" viewBox="0 0 24 24"><rect x="2" y="7" width="20" height="10.5" rx="2.4" fill="currentColor"/><rect x="8.5" y="11" width="7" height="2.4" rx="1.2" fill="var(--hb)"/></svg>',
+  laptop: '<svg class="g" viewBox="0 0 24 24"><rect x="4.2" y="4.8" width="15.6" height="10.8" rx="1.6" fill="none" stroke="currentColor" stroke-width="1.9"/><path d="M1.6 17.6h20.8l-.9 1.9a1.5 1.5 0 0 1-1.3.8H3.8a1.5 1.5 0 0 1-1.3-.8z" fill="currentColor"/></svg>',
+  cast: '<svg class="g" viewBox="0 0 24 24"><rect x="1.5" y="4" width="14" height="10.5" rx="1.8" fill="currentColor"/><path d="M5.5 17.5h6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><rect x="16.8" y="7.5" width="6" height="12.5" rx="1.6" fill="currentColor"/><circle cx="19.8" cy="15.6" r="1.6" fill="var(--hb)"/></svg>',
+  radio: '<svg class="g" viewBox="0 0 24 24"><path d="M6.5 8.2 17 3.6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><rect x="2" y="8" width="20" height="12.5" rx="2.6" fill="currentColor"/><circle cx="8.4" cy="14.25" r="3.4" fill="var(--hb)"/><rect x="14" y="11.4" width="5" height="1.6" rx=".8" fill="var(--hb)"/><rect x="14" y="15.4" width="5" height="1.6" rx=".8" fill="var(--hb)"/></svg>',
+  headphones: '<svg class="g" viewBox="0 0 24 24"><path d="M4.2 15.5v-3.2a7.8 7.8 0 0 1 15.6 0v3.2" fill="none" stroke="currentColor" stroke-width="1.9"/><rect x="2.6" y="13.2" width="5.4" height="8" rx="2.2" fill="currentColor"/><rect x="16" y="13.2" width="5.4" height="8" rx="2.2" fill="currentColor"/></svg>',
+  airpods: '<svg class="g" viewBox="0 0 24 24"><circle cx="7.4" cy="6.8" r="3.6" fill="currentColor"/><rect x="5.7" y="8" width="3" height="11.5" rx="1.5" fill="currentColor"/><circle cx="16.6" cy="6.8" r="3.6" fill="currentColor"/><rect x="15.3" y="8" width="3" height="11.5" rx="1.5" fill="currentColor"/></svg>',
+  wave: '<svg viewBox="0 0 24 24"><path d="M3 9h3.6L11.5 5v14L6.6 15H3z" fill="currentColor"/><path d="M14.6 9.2a4 4 0 0 1 0 5.6M17.4 6.6a7.6 7.6 0 0 1 0 10.8" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>',
+  eyeslash: '<svg viewBox="0 0 24 24"><path d="M2.5 12c2.3-4 5.6-6.2 9.5-6.2s7.2 2.2 9.5 6.2c-2.3 4-5.6 6.2-9.5 6.2S4.8 16 2.5 12z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><circle cx="12" cy="12" r="3" fill="currentColor"/><path d="M4.5 3.5 19.5 20.5" stroke="var(--slashbg)" stroke-width="4" stroke-linecap="round"/><path d="M4.5 3.5 19.5 20.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>',
+  star: '<svg viewBox="0 0 24 24"><path d="M12 3.2l2.6 5.6 6.1.7-4.5 4.2 1.2 6-5.4-3-5.4 3 1.2-6-4.5-4.2 6.1-.7z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg>',
+  updown: '<svg viewBox="0 0 10 14"><path d="M2 5l3-3 3 3M2 9l3 3 3-3" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+  tabSpeakers: '<svg viewBox="0 0 24 24"><path d="M3 9h3.6L11.5 5v14L6.6 15H3z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="M14.6 9.2a4 4 0 0 1 0 5.6M17.4 6.6a7.6 7.6 0 0 1 0 10.8" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>',
+  tabApps: '<svg viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.7"><rect x="3.5" y="3.5" width="7" height="7" rx="1.8"/><rect x="13.5" y="3.5" width="7" height="7" rx="1.8"/><rect x="3.5" y="13.5" width="7" height="7" rx="1.8"/><rect x="13.5" y="13.5" width="7" height="7" rx="1.8"/></g></svg>',
+  tabScenes: '<svg viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.7"><rect x="2.5" y="4" width="19" height="7" rx="2"/><rect x="2.5" y="13.5" width="8" height="6.5" rx="2"/><rect x="13.5" y="13.5" width="8" height="6.5" rx="2"/></g></svg>',
+  tabGear: '<svg viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="3.2"/><path d="M12 2.8v2.6M12 18.6v2.6M2.8 12h2.6M18.6 12h2.6M5.5 5.5l1.9 1.9M16.6 16.6l1.9 1.9M5.5 18.5l1.9-1.9M16.6 7.4l1.9-1.9"/><circle cx="12" cy="12" r="6.6"/></g></svg>'
+};
+
+const statusBar = `<div class="island"></div><div class="status"><span class="time">9:41</span>
+<svg width="74" height="13" viewBox="0 0 74 13"><g fill="currentColor"><rect x="0" y="8.5" width="3.2" height="4" rx="1"/><rect x="4.6" y="6.5" width="3.2" height="6" rx="1"/><rect x="9.2" y="4" width="3.2" height="8.5" rx="1"/><rect x="13.8" y="1.5" width="3.2" height="11" rx="1"/>
+<path d="M30 3.2a10 10 0 0 1 13.4 0l-1.4 1.5a8 8 0 0 0-10.6 0zM32.4 5.9a6.4 6.4 0 0 1 8.6 0l-1.4 1.5a4.4 4.4 0 0 0-5.8 0zM34.8 8.6a3 3 0 0 1 3.8 0L36.7 10.6z"/>
+<rect x="49.5" y=".8" width="22" height="11.4" rx="3.4" fill="none" stroke="currentColor" stroke-width="1" opacity=".45"/><rect x="51.3" y="2.6" width="15.5" height="7.8" rx="1.8"/><rect x="72.3" y="4.4" width="1.4" height="4" rx=".7" opacity=".45"/></g></svg></div>`;
+
+function chev(collapsed) {
+  const r = collapsed ? 135 : -45;
+  return `<svg class="chev" viewBox="0 0 9 9" style="transform:rotate(${r}deg)"><path d="M0.9 0V8.1H9" fill="none" stroke="var(--labelCool2)" stroke-width="1.8" stroke-linejoin="miter"/></svg>`;
+}
+function header(title, count, opts = {}) {
+  const tint = opts.live ? 'var(--goldText)' : 'var(--labelCool2)';
+  return `<div class="sh">${chev(opts.collapsed)}<span class="t" style="color:${tint}">${title}</span><span class="n">${count}</span><span class="rule"></span></div>`;
+}
+// LevelDial: 300 of 360 degrees, gap centred on 129.6 degrees from twelve o'clock.
+function arcSVG(vol) {
+  const cx = 22, cy = 22, r = 20.2, start = 129.6 + 30, sweep = 300;
+  const pt = a => { const t = (a - 90) * Math.PI / 180; return [cx + r * Math.cos(t), cy + r * Math.sin(t)]; };
+  const path = (a0, a1) => { const [x0, y0] = pt(a0), [x1, y1] = pt(a1); const large = (a1 - a0) > 180 ? 1 : 0; return `M${x0.toFixed(2)} ${y0.toFixed(2)}A${r} ${r} 0 ${large} 1 ${x1.toFixed(2)} ${y1.toFixed(2)}`; };
+  const [dx, dy] = (() => { const t = (129.6 - 90) * Math.PI / 180; return [cx + 19.4 * Math.cos(t), cy + 19.4 * Math.sin(t)]; })();
+  return `<svg class="arc" viewBox="0 0 44 44"><path d="${path(start, start + sweep)}" fill="none" stroke="var(--well)" stroke-width="3.6"/>` +
+    `<path d="${path(start, start + sweep * vol / 100)}" fill="none" stroke="var(--gold)" stroke-width="3.6" stroke-linecap="butt"/>` +
+    `<circle cx="${dx.toFixed(2)}" cy="${dy.toFixed(2)}" r="5.5" fill="var(--socket)" stroke="var(--liveRaised)" stroke-width="1.5"/></svg>`;
+}
+// state: live | ready | away
+function row(name, icon, state, sub, vol) {
+  const live = state === 'live', away = state === 'away';
+  const haloBg = live ? 'var(--liveRaised)' : 'var(--raised)';
+  const ink = live ? 'var(--label)' : away ? 'var(--labelCool2)' : 'var(--labelCool)';
+  const subInk = live ? 'var(--goldText)' : 'var(--labelCool2)';
+  const rim = live ? arcSVG(vol) : `<span style="position:absolute;inset:0;border-radius:50%;box-shadow:inset 0 0 0 1px var(--containerEdge)"></span>`;
+  return `<div class="row ${live ? 'live' : ''}">
+    <div class="halo" style="background:${haloBg};--hb:${haloBg};color:${ink};opacity:${away ? 0.45 : 1}">${rim}${S[icon]}</div>
+    <div class="txt"><span class="nm" style="color:${ink};font-weight:${live ? 600 : 400}">${name}</span><span class="sub" style="color:${subInk}">${sub}</span></div>
+    ${live ? `<div class="mute">${S.wave}</div>` : ''}
+  </div>`;
+}
+const chips = `<div class="chips"><span class="chip on">All</span><span class="chip">AirPlay</span><span class="chip">Bluetooth</span><span class="chip">Cast</span></div>`;
+const deck = `<div class="deck"><div class="hd"><span class="t">Main Audio</span><span class="pick">Selected Speakers ${S.updown}</span></div>
+  <div class="mr"><div class="mbtn">${S.wave}</div><div class="fader"><div class="trk"></div><div class="fill" style="width:calc((100% - 2px) * .64)"></div><div class="cap" style="left:calc(64% - 11px)"><i></i></div></div><span class="ro">64</span></div></div>`;
+const tabbar = `<div class="tabbar"><div class="it sel">${S.tabSpeakers}<b>Speakers</b></div><div class="it">${S.tabApps}<b>Apps</b></div><div class="it">${S.tabScenes}<b>Scenes</b></div><div class="it">${S.tabGear}<b>Settings</b></div></div><div class="home"></div>`;
+
+const playing = [row('Sonos Move', 'speaker', 'live', 'Playing', 62), row('TV', 'tv', 'live', 'Playing', 48), row('Fancyy', 'speaker', 'live', 'Playing', 35)];
+const ready = [row('MacBook Pro Speakers', 'laptop', 'ready', 'Ready'), row('Alec’s MacBook Pro', 'laptop', 'ready', 'Ready'), row('casty', 'cast', 'ready', 'Ready'), row('casty', 'cast', 'ready', 'Ready'), row('Mac Cast Receiver', 'cast', 'ready', 'Ready')];
+
+function sec(h, rows) { return `<div class="sec">${h}<div class="rows">${rows.join('')}</div></div>`; }
+function phone(id, listHTML, where, extra = '') {
+  document.getElementById(id).innerHTML = statusBar +
+    `<div class="titlebar"><h2>Speakers</h2></div><div class="viewport"><div class="list ${where}">${listHTML}</div></div>` + deck + tabbar + extra;
+}
+
+// A: today, end of list
+phone('pA',
+  sec(header('Playing', 3, { live: true }), playing) + chips +
+  sec(header('Ready', 5), ready) +
+  sec(header('Unavailable', 6), [
+    row('A AirPods Max', 'headphones', 'away', 'Unavailable'), row('AirPods Pro', 'airpods', 'away', 'Unavailable'),
+    row('Alec’s AirPods Pro', 'airpods', 'away', 'Unavailable'), row('JBL Flip 5', 'radio', 'away', 'Unavailable'),
+    row('Move 2 (SONOS Bedroom)', 'radio', 'away', 'Unavailable'), row('WH-1000XM3', 'headphones', 'away', 'Unavailable')]),
+  'end');
+
+// B: proposed, as opened
+phone('pB',
+  sec(header('Playing', 3, { live: true }), playing) + chips +
+  sec(header('Ready', 5), ready) +
+  sec(header('Unavailable', 2, { collapsed: true }), []) + footLine(4),
+  'top');
+
+// C: proposed, end of list
+phone('pC',
+  sec(header('Playing', 3, { live: true }), playing) + chips +
+  sec(header('Ready', 5), ready) +
+  sec(header('Unavailable', 2), [row('JBL Flip 5', 'radio', 'away', 'Not connected'), row('Move 2 (SONOS Bedroom)', 'radio', 'away', 'Not connected')]) +
+  footLine(4),
+  'end');
+
+// D: long press on a Ready row, with the optional Hide item
+phone('pD',
+  sec(header('Playing', 3, { live: true }), playing) + chips +
+  sec(header('Ready', 5), ready) +
+  sec(header('Unavailable', 2, { collapsed: true }), []) + footLine(4),
+  'top',
+  `<div class="scrim"></div>
+   <div class="lift" style="top:${116 + 44 * 2 + 3 * 60 + 2 * 8 + 4 + 44 + 2 + 60 + 8}px">${row('Alec’s MacBook Pro', 'laptop', 'ready', 'Ready')}</div>
+   <div class="menu" style="top:${116 + 44 * 2 + 3 * 60 + 2 * 8 + 4 + 44 + 2 + 60 + 8 + 60 + 12}px;--slashbg:var(--menu)">
+     <div class="mi">Add to Favourites ${S.star}</div><div class="sep"></div>
+     <div class="mi new">Hide unless in use ${S.eyeslash}</div>
+   </div>`);
+
+function footLine(n) {
+  return `<div class="foot" style="--slashbg:var(--canvas)">${S.eyeslash}<span>${n} speakers hidden unless in use</span></div>`;
+}
+
+// End-of-list panels clear the deck: the deck's measured height + 16, as SpeakerConsole does.
+for (const id of ['pA', 'pC']) {
+  const scr = document.getElementById(id);
+  const d = scr.querySelector('.deck');
+  const clear = (95 - 87) + d.offsetHeight + 16;
+  scr.querySelector('.list').style.paddingBottom = clear + 'px';
+}
+for (const id of ['pB', 'pD']) {
+  const scr = document.getElementById(id);
+  scr.querySelector('.list').style.paddingBottom = '240px';
+}
+</script>
+</body>
+</html>

@@ -165,6 +165,28 @@ import AudioutProtocol
         #expect(ctx.groupController.isSpeakerSelected("office"), "falls back to setDeviceSelected(_, true)")
     }
 
+    // MARK: submitSpeakerPassword
+
+    /// Dropping the trim-and-empty check sends a blank password to the
+    /// speaker instead of refusing it; this turns red.
+    @Test func submitSpeakerPasswordRefusesABlankPassword() async throws {
+        let ctx = try await makeContext()
+        let result = ctx.dispatcher.execute(.submitSpeakerPassword(id: "office", password: "  "))
+        #expect(!result.applied)
+        #expect(result.refusalReason == "Enter the speaker's password.")
+        #expect(!ctx.groupController.isSpeakerSelected("office"))
+    }
+
+    /// Turns red if a password submitted from the phone selects a speaker the
+    /// user never joined; the phone's submit must match the Mac sheet's, which
+    /// retries without inventing membership.
+    @Test func submitSpeakerPasswordRetriesTheSpeaker() async throws {
+        let ctx = try await makeContext()
+        let result = ctx.dispatcher.execute(.submitSpeakerPassword(id: "office", password: "secret"))
+        #expect(result.applied)
+        #expect(!ctx.groupController.isSpeakerSelected("office"), "the retry never selects; membership stays the checkbox's job")
+    }
+
     // MARK: setMainOut — selected / group / refusals
 
     @Test func setMainOutSelectedDevices() async throws {

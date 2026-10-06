@@ -346,7 +346,7 @@ import Testing
         #expect(ring.timing.delayLineMs == 300)
     }
 
-    @Test func setLevelRoundTrips() throws {
+    @Test func setLevelRoundTrips() async throws {
         guard #available(macOS 15, *) else { return }
         let (fake, endpoint) = try startFake()
         defer { fake.stop() }
@@ -366,12 +366,10 @@ import Testing
         try #require(waitUntil(timeout: 5) { connected.value != nil }, "the observing connection never completed")
 
         var level: Double?
-        let deadline = Date().addingTimeInterval(3)
-        repeat {
+        await SuiteWait.until("the receiver's level becomes 0.4") {
             level = receiverVolume(client)
-            if let level, abs(level - 0.4) < 0.001 { break }
-            Thread.sleep(forTimeInterval: 0.1)
-        } while Date() < deadline
+            return level.map { abs($0 - 0.4) < 0.001 } ?? false
+        }
         let observed = level ?? -1
         #expect(abs(observed - 0.4) < 0.001,
                 Comment(rawValue: "the receiver's level never became 0.4 (saw \(observed))"))
@@ -557,7 +555,7 @@ import Testing
                 Comment(rawValue: "never reported nil on deselect, saw \(lagLog.all)"))
     }
 
-    @Test func attenuationReceiverNeverReportsVolumeLag() throws {
+    @Test func attenuationReceiverNeverReportsVolumeLag() async throws {
         guard #available(macOS 15, *) else { return }
         let (fake, endpoint) = try startFake()
         defer { fake.stop() }
@@ -582,9 +580,10 @@ import Testing
         try #require(waitUntil(timeout: 10) { log.contains(.playing) },
                      Comment(rawValue: "never reached PLAYING, saw \(log.all)"))
 
-        // A further wait past PLAYING covers at least two status polls with
-        // no report ever firing.
-        Thread.sleep(forTimeInterval: 2.5)
+        // Two more status polls past PLAYING, and so at least one answered
+        // poll, with no report ever firing.
+        let polled = fake.mediaStatusRequestCount
+        await SuiteWait.until("two more status polls arrive") { fake.mediaStatusRequestCount >= polled + 2 }
         #expect(lagLog.all.isEmpty,
                 Comment(rawValue: "an attenuation receiver reported a volume lag: \(lagLog.all)"))
     }

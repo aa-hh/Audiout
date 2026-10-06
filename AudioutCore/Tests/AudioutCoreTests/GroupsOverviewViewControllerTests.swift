@@ -16,6 +16,25 @@ import AppKit
 @MainActor
 @Suite final class GroupsOverviewViewControllerTests: IsolatedSuite {
 
+    // Counting discovery absence as unavailable for a connected Cast session breaks this card's count.
+    @Test func unavailableCountIncludesMissingMembersAndUsesRememberedKinds() throws {
+        let bt = Device(id: "bt", name: "Saved Bluetooth", kind: .bluetooth)
+        let cast = Device(id: "cast", name: "TV", kind: .cast, isAvailable: false, connectionState: .connected)
+        let scene = group("g", "Scene", members: ["bt", "cast", "unknown"])
+        let library = SpeakerLibraryController(loadPersisted: false)
+        library.update(liveDevices: [bt], groups: [scene])
+        library.update(liveDevices: [cast], groups: [scene])
+        let (pane, _) = try makeOverview(groups: [scene], devices: [cast])
+        pane.speakerLibrary = library
+        pane.reload(devices: [cast])
+        #expect(pane.test_cardMetaText(id: "g") == "3 speakers · 2 unavailable")
+        #expect(pane.test_cardAccessibilityLabel(id: "g") == "Scene, 3 speakers · 2 unavailable")
+        #expect(pane.test_chipSymbols(id: "g") == [Device.Kind.bluetooth.symbolName, Device.Kind.cast.symbolName, "speaker"])
+        library.setVisibility(.hideWhenNotInUse, for: "cast")
+        pane.reload(devices: [cast])
+        #expect(pane.test_cardMetaText(id: "g") == "3 speakers · 2 unavailable")
+    }
+
     private func tempDirectory() -> URL {
         let dir = scratchDir.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -25,6 +44,8 @@ import AppKit
     private func makeGroupController() -> GroupController {
         GroupController(backend: MockBackend(fleet: []),
                         store: GroupStore(directory: tempDirectory()),
+                        routingStore: RoutingStore(directory: scratchDir),
+                        settings: AppSettings(defaults: isolatedDefaults),
                         loadPersisted: false)
     }
 

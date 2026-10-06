@@ -84,6 +84,8 @@ struct ControlPanelWindowControllerTests {
         #expect(panel.level == .floating)
         #expect(panel.hidesOnDeactivate)
         #expect(!panel.becomesKeyOnlyIfNeeded)
+        // Tab has no loop to follow when this is off.
+        #expect(panel.autorecalculatesKeyViewLoop)
         #expect(!panel.isReleasedWhenClosed)
         // Decided policy (P3/W7): menu-bar app, no window restoration.
         #expect(!panel.isRestorable)

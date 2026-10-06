@@ -41,6 +41,12 @@ import AudioutCore
 /// to a backend directly.
 public final class DeviceRowView: NSView {
 
+    /// Hosts append display actions to the row's existing menu.
+    public var additionalContextMenuItemsProvider: ((DeviceRowView) -> [NSMenuItem])?
+
+    /// The host supplies whether this row still represents a live Equalizer target.
+    public var equalizerActionAvailable = true
+
     /// Callbacks for the row's controls. The host controller implements these
     /// and maps them onto `GroupController` / the backend.
     ///
@@ -93,6 +99,11 @@ public final class DeviceRowView: NSView {
         /// raised after refusing a second speaker under the one-speaker limit.
         /// Default no-op for hosts that never offer it.
         func deviceRowDidRequestSwitchHere(_ row: DeviceRowView)
+        /// The user asked to enter this speaker's AirPlay password, from the
+        /// row's "Enter Password…" link or a click on a selected row already
+        /// waiting for one. The host raises its password sheet. Default no-op
+        /// for hosts without the sheet.
+        func deviceRowDidRequestPasswordEntry(_ row: DeviceRowView)
     }
 
     /// Control-Center row density: comfortable height that seats a mini switch,
@@ -220,7 +231,22 @@ public final class DeviceRowView: NSView {
     /// `configureAccessibility()` (called outside `apply`'s own scope) can
     /// speak its equivalent.
     private var volumePendingApply = false
-    let nameLabel = NSTextField(labelWithString: "")
+    /// Whether the `%` readout breathes with the thumb: pending AND the
+    /// readout would otherwise read `goldText` (the engaged state).
+    private var readoutBreathes = false
+    private var liveVolumeAvailable = true
+    let nameLabel = DeviceNameLabel(labelWithString: "")
+    /// Stock `lock.fill` after the name, shown for any speaker that asks for a
+    /// password, an on-screen code or a Home member. Row ink, never gold.
+    let lockGlyphView = NSImageView()
+    let unavailableStatusLabel = NSTextField(labelWithString: "")
+    private var unavailableStatus: String?
+    private var unavailableHelp: String?
+    private var nameRecoveryEnabled = false
+    private var hasLiveConnection: Bool { device.isAvailable || device.connectionState == .connected }
+    private var canRecoverByName: Bool {
+        !hasLiveConnection && (device.isBluetooth || nameRecoveryEnabled)
+    }
     /// The single sublabel line under the name (Warm Signal v4.1 item 3 —
     /// re-scoped from the retired routing ladder): carries ONLY state words now.
     /// The one remaining rung is the Muted token, shown iff the device is
@@ -234,8 +260,8 @@ public final class DeviceRowView: NSView {
     /// composite joined by " · "), hosted in a plain horizontal `NSStackView`.
     /// Every pill carries TEXT ONLY; its tint says whether the value it names
     /// is sounding (D7): the main-mix segment (``mainMixSourceName``, "System"
-    /// or the active group's name) reads `goldText` while the main mix is
-    /// armed here, an app pill reads `goldText` while its feed is live, and
+    /// or the active group's name) reads primary `label` while the main mix is
+    /// armed here, an app pill reads `label` while its feed is live, and
     /// both fall back to `label2` (`label3` while the row is not adjustable).
     /// A `.failed`/unavailable device OVERRIDES
     /// this with a SINGLE failure-red pill instead ("Couldn't connect" /
@@ -274,6 +300,10 @@ public final class DeviceRowView: NSView {
     /// state, raised when a second speaker is refused under the one-speaker limit.
     let switchOfferButton = NSButton()
     var switchOfferOffered = false
+    /// "Enter Password…", in the same slot, shown while the speaker waits for
+    /// its first password (`.awaitingPassword`).
+    let enterPasswordButton = NSButton()
+    var enterPasswordOffered = false
     /// The FEED column's main-mix segment text, or `nil` when this row is not
     /// currently a member of the ACTIVE main-mix target (a redirect-only row
     /// can still show app segments alone). "System" for a manual Selected-
@@ -342,7 +372,7 @@ public final class DeviceRowView: NSView {
     private static let muteEngagedSymbolName = RowAccessorySymbol.muteEngaged
     /// The Equalizer door's at-rest symbol — the outline square.
     private static let eqRestSymbolName = RowAccessorySymbol.equalizerRest
-    /// The Equalizer door's ENGAGED symbol — the filled square.
+    /// The filled square: the heading icon's shaped state (`equalizerShapedHeadingMarkImage(in:pointSize:)`), never drawn on the door.
     private static let eqEngagedSymbolName = RowAccessorySymbol.equalizerEngaged
     /// The point size every accessory glyph on this row that is NOT one of the
     /// four custom symbols is drawn at. The symbols carry their own
@@ -554,8 +584,16 @@ public final class DeviceRowView: NSView {
                       switchOfferOffered: Bool = false,
                       volumePendingApply: Bool = false,
                       isEQShaped: Bool = false,
-                      localFallbackOutput: Bool = false) {
+                      localFallbackOutput: Bool = false,
+                      unavailableStatus: String? = nil,
+                      unavailableHelp: String? = nil,
+                      nameRecoveryEnabled: Bool = false,
+                      liveVolumeAvailable: Bool = true) {
         self.device = device
+        self.liveVolumeAvailable = liveVolumeAvailable
+        self.unavailableStatus = unavailableStatus
+        self.unavailableHelp = unavailableHelp
+        self.nameRecoveryEnabled = nameRecoveryEnabled
         self.isEQShaped = isEQShaped
         self.isSelectedInSet = selected
         self.localFallbackOutput = localFallbackOutput
@@ -584,7 +622,7 @@ public final class DeviceRowView: NSView {
         // therefore keeps a live toggle regardless of availability; an
         // unavailable+UNselected row keeps the dead toggle (nothing to drop).
         enableCheckbox.state = selected ? .on : .off
-        enableCheckbox.isEnabled = showsToggle && (device.isAvailable || selected)
+        enableCheckbox.isEnabled = showsToggle && (hasLiveConnection || selected)
         enableCheckbox.toolTip = (busActive && showsToggle)
             ? (selected ? "Remove \(device.name) from the mix" : "Add \(device.name) to the mix")
             : nil
@@ -623,6 +661,13 @@ public final class DeviceRowView: NSView {
             : { [weak self] in self?.presentIconMenu() }
         iconView.setAccessibilityLabel("Speaker options")
         nameLabel.stringValue = device.name
+        lockGlyphView.isHidden = device.airPlayAccess == .open
+        switch device.airPlayAccess {
+        case .open: lockGlyphView.setAccessibilityLabel(nil)
+        case .password: lockGlyphView.setAccessibilityLabel("Password protected")
+        case .onScreenCode: lockGlyphView.setAccessibilityLabel("Code required")
+        case .homeMembersOnly: lockGlyphView.setAccessibilityLabel("Home members only")
+        }
         alphaValue = 1.0
 
         // Connection halo ring: driven off `connectionState` ALONE (spec §3.2 /
@@ -659,6 +704,7 @@ public final class DeviceRowView: NSView {
         // speaker's dot stays the connecting ring's hollow `rim`.
         armedDotView.apply(armed: isRouteArmed && isConnected)
         nameLabel.textColor = rowTextColor
+        lockGlyphView.contentTintColor = rowTextColor
 
         // FEED column (v4.1 item 3): main-mix segment wording — "System" for a
         // manual member, the active group's name for a group-target member;
@@ -679,8 +725,9 @@ public final class DeviceRowView: NSView {
         // below. Stored on `self` (not just local) so `updateFeedText()`
         // reads the same value.
         switch device.connectionState {
-        case .connecting, .reconnecting, .failed: controlsMuted = true
-        case .connected, .off:                    controlsMuted = !device.isAvailable
+        case .connecting, .reconnecting, .awaitingPassword, .failed: controlsMuted = true
+        case .connected:                                            controlsMuted = false
+        case .off:                                                  controlsMuted = !device.isAvailable
         }
         faderCell.isMutedControl = controlsMuted
         // Cast feed-gain pending state (host-owned, id-keyed timer — the
@@ -750,22 +797,14 @@ public final class DeviceRowView: NSView {
         // (dropped the old `!device.isMuted` term) so the user can set the level
         // they'll hear the moment they unmute, instead of the slider going dark
         // the instant they mute.
-        slider.isEnabled = device.isAvailable && controllable
-        muteButton.isEnabled = device.isAvailable && controllable
+        slider.isEnabled = hasLiveConnection && controllable
+        muteButton.isEnabled = hasLiveConnection && controllable
         updateEQButton()
         muteButton.state = device.isMuted ? .on : .off
         updateMuteTint()
-        // The `%` readout has three states (D6): sounding here reads `goldText`,
-        // a stored-but-idle level reads `emberText`, and a row that is not
-        // adjustable — slider disabled, or the muted-unconnected treatment —
-        // drops to the cool dim `labelCool2`.
-        if !slider.isEnabled || controlsMuted {
-            readoutLabel.textColor = Tokens.Color.labelCool2
-        } else if isRouteArmed {
-            readoutLabel.textColor = Tokens.Color.goldText
-        } else {
-            readoutLabel.textColor = Tokens.Color.emberText
-        }
+        readoutLabel.textColor = restingReadoutInk
+        readoutBreathes = volumePendingApply && slider.isEnabled && !controlsMuted && isRouteArmed
+        updatePendingReadoutInk(faderCell.pulseStrength)
 
         // Under-name meter visibility (v4 §Call-1): the meter is shown ONLY on
         // armed + unmuted + connected rows (the §3.3 armed predicate captures
@@ -800,7 +839,7 @@ public final class DeviceRowView: NSView {
             self.alignmentSource = alignmentSource
             self.movedSinceLastTimeMs = movedSinceLastTimeMs
             self.syncDrawerExpanded = syncDrawerExpanded
-            syncChipButton.isEnabled = device.isAvailable
+            syncChipButton.isEnabled = hasLiveConnection
             updateSyncChip()
         }
 
@@ -812,6 +851,22 @@ public final class DeviceRowView: NSView {
         // membership/dim state. No-op when `showsBus` is false.
         updateBus()
 
+        let showUnavailableStatus = !hasLiveConnection && device.connectionState == .off && unavailableStatus != nil
+        let offerStands = removalUndoOffered || switchOfferOffered
+        unavailableStatusLabel.isHidden = !showUnavailableStatus || offerStands
+        unavailableStatusLabel.stringValue = showUnavailableStatus ? (unavailableStatus ?? "") : ""
+        unavailableStatusLabel.toolTip = unavailableHelp
+        for control in [slider, muteButton, readoutLabel, eqButton] as [NSView] {
+            control.isHidden = showUnavailableStatus
+        }
+        if showUnavailableStatus {
+            hideSublabel()
+            syncChipButton.isHidden = true
+            feedStack.isHidden = true
+        }
+        nameLabel.onPress = { [weak self] in self?.performNameAction() }
+        nameLabel.recoveryEnabled = canRecoverByName
+        nameLabel.toggleEnabled = enableCheckbox.isEnabled
         configureAccessibility()
         setNeedsDisplay(bounds)
     }
@@ -856,7 +911,7 @@ public final class DeviceRowView: NSView {
             // reconnect attempt"). AirPlay rows never pair `.connecting` with
             // unavailable, so this is BT-scoped on purpose.
             node = .connecting
-        } else if !device.isAvailable {
+        } else if !device.isAvailable && device.connectionState != .connected {
             // Unavailable signature (spec §3.6 matrix): a HOLLOW node the line
             // detours — an unavailable device is not currently in the mix,
             // whatever its held checkbox state says. The dim flag reaches a
@@ -879,9 +934,9 @@ public final class DeviceRowView: NSView {
             // §Call-1 node vocabulary): connecting/reconnecting → plain gold node, line stops short;
             // failed → failure-red ring; connected/idle → filled gold.
             switch device.connectionState {
-            case .connecting, .reconnecting: node = .connecting
-            case .failed:                    node = .failed
-            case .connected, .off:           node = .member
+            case .connecting, .reconnecting, .awaitingPassword: node = .connecting
+            case .failed:                                       node = .failed
+            case .connected, .off:                              node = .member
             }
         } else if localFallbackOutput {
             // The speakers are unreachable and the engine dropped audio back to
@@ -999,15 +1054,13 @@ public final class DeviceRowView: NSView {
         muteButton.setAccessibilityLabel(engaged ? "Unmute \(device.name)" : "Mute \(device.name)")
     }
 
-    /// The Equalizer door's active MARK: a shaped curve draws
-    /// ``RowAccessorySymbol/equalizerEngaged`` — the FILLED square, its
-    /// enclosure in an opaque ``Tokens/Color/equalizer``, the two band
-    /// sliders punched through it as transparency — the row shows through
-    /// the marks, the treatment the owner approved (2026-09-05). A flat curve draws
-    /// ``RowAccessorySymbol/equalizerRest``, the outline square in the same
-    /// neutral ink mute wears at rest. Mute sits 6 pt trailing wearing the
-    /// same square: the two engaged marks are one object in two colours
-    /// (owner's call, 2026-09-04), and hue alone says which control it is.
+    /// The Equalizer door's MARK: the door draws
+    /// ``RowAccessorySymbol/equalizerRest``, the OUTLINE square, in both
+    /// states — in ``Tokens/Color/equalizer`` when the curve is shaped and in
+    /// the neutral ink mute wears at rest when it is flat (the owner kept the
+    /// outline on the row, 2026-09-26). The filled
+    /// ``RowAccessorySymbol/equalizerEngaged`` is the heading icon's shaped
+    /// state only (``equalizerShapedHeadingMarkImage(in:pointSize:)``), never the door's.
     ///
     /// WHY GREEN AND NOT GOLD. The door wore ``Tokens/Color/goldText`` until
     /// the symbols landed, and gold means "audio is flowing here" everywhere
@@ -1023,11 +1076,38 @@ public final class DeviceRowView: NSView {
         eqButton.setAccessibilityLabel("Equalizer for \(device.name)")
         eqButton.setAccessibilityValue(isEQShaped ? "Shaped" : "Flat")
         // One shape, two inks.
-        eqButton.image = RowAccessorySymbol.image(
-            named: Self.eqRestSymbolName,
-            ink: isEQShaped
-                ? Self.engagedInk(fill: Tokens.Color.equalizer, in: effectiveAppearance)
-                : Self.restInk(in: effectiveAppearance))
+        eqButton.image = isEQShaped
+            ? Self.equalizerEngagedMarkImage(in: effectiveAppearance)
+            : Self.equalizerRestMarkImage(in: effectiveAppearance)
+    }
+
+    /// The engaged and at-rest equalizer marks, drawn from this file so the
+    /// green stays here. The row's door uses the outline in both inks. The
+    /// icon leading the Equalizer heading on the speaker page and the Main
+    /// Audio page uses the outline at rest and
+    /// ``equalizerShapedHeadingMarkImage(in:pointSize:)``, the filled square, when shaped.
+    public static func equalizerEngagedMarkImage(in appearance: NSAppearance) -> NSImage? {
+        RowAccessorySymbol.image(
+            named: eqRestSymbolName,
+            ink: engagedInk(fill: Tokens.Color.equalizer, in: appearance))
+    }
+
+    public static func equalizerRestMarkImage(
+        in appearance: NSAppearance,
+        pointSize: CGFloat = RowAccessorySymbol.pointSize
+    ) -> NSImage? {
+        RowAccessorySymbol.image(
+            named: eqRestSymbolName, ink: restInk(in: appearance), pointSize: pointSize)
+    }
+
+    public static func equalizerShapedHeadingMarkImage(
+        in appearance: NSAppearance,
+        pointSize: CGFloat = RowAccessorySymbol.pointSize
+    ) -> NSImage? {
+        RowAccessorySymbol.image(
+            named: eqEngagedSymbolName,
+            ink: engagedInk(fill: Tokens.Color.equalizer, in: appearance),
+            pointSize: pointSize)
     }
 
     /// The engaged ink: `fill` over everything the symbol draws — on mute's
@@ -1070,7 +1150,41 @@ public final class DeviceRowView: NSView {
         super.viewDidChangeEffectiveAppearance()
         updateEQButton()
         updateMuteTint()
+        updatePendingReadoutInk(faderCell.pulseStrength)
     }
+
+    /// The `%` readout has three states (D6): sounding here reads `goldText`,
+    /// a stored-but-idle level reads `emberText`, and a row that is not
+    /// adjustable — slider disabled, or the muted-unconnected treatment —
+    /// drops to the cool dim `labelCool2`.
+    private var restingReadoutInk: NSColor {
+        if !slider.isEnabled || controlsMuted { return Tokens.Color.labelCool2 }
+        return isRouteArmed ? Tokens.Color.goldText : Tokens.Color.emberText
+    }
+
+    /// Drop a pending Cast volume hold at once, with no arrival, for a
+    /// surface that is hiding: the fader stops glowing and its timer stops,
+    /// and the readout takes back the ink `apply` chose for it.
+    public func cancelPendingHold() {
+        volumePendingApply = false
+        readoutBreathes = false
+        faderCell.cancelPendingHold()
+        readoutLabel.textColor = restingReadoutInk
+        configureAccessibility()
+    }
+
+    /// The readout's breath while a Cast volume is pending: dim to live ink
+    /// in step with the thumb, held dim under Reduce Motion. Outside the
+    /// hold it leaves the colour `apply` chose alone.
+    private func updatePendingReadoutInk(_ strength: CGFloat?) {
+        guard readoutBreathes else { return }
+        readoutLabel.textColor = PendingPulse.ink(
+            strength: faderCell.reduceMotion ? nil : strength, in: effectiveAppearance)
+    }
+
+    /// Room for the pending glow's outermost halo ring between the slider's
+    /// frame and its trough, at each end.
+    private static let faderHaloRoom: CGFloat = 3
 
     /// Alpha applied to `enableCheckbox` when `apply(selectionDimmed:)` is true
     /// (A1) — a visual de-emphasis, not a disablement (the checkbox stays
@@ -1102,7 +1216,7 @@ public final class DeviceRowView: NSView {
         }
         if case .failed = device.connectionState {
             hideSublabel()
-        } else if !device.isAvailable {
+        } else if !hasLiveConnection {
             hideSublabel()
         } else if device.isMuted {
             // A muted row always says so (owner's call, 2026-08-23) —
@@ -1127,7 +1241,7 @@ public final class DeviceRowView: NSView {
             // Failure-exclusive red (spec §2/§3.5/R8) — paired with the red
             // failed halo ring.
             showSublabel("Couldn't connect", color: Tokens.Color.failure)
-        } else if !device.isAvailable {
+        } else if !hasLiveConnection {
             showSublabel("Unavailable", color: Tokens.Color.labelCool2)
         } else if let routing = legacyRoutingLine() {
             // S3 (spec §3.5): a ROW-muted device prepends the Muted token to
@@ -1223,7 +1337,7 @@ public final class DeviceRowView: NSView {
     /// endpoint appears — the connecting ring/node carry that state, so don't
     /// shout "Unavailable" over an attempt still in flight.
     private var showsUnavailableFeedGlyph: Bool {
-        guard busActive, !device.isAvailable else { return false }
+        guard busActive, !hasLiveConnection else { return false }
         switch device.connectionState {
         case .failed: return false
         case .connecting, .reconnecting: return !device.isBluetooth
@@ -1289,20 +1403,21 @@ public final class DeviceRowView: NSView {
         }
         var segments: [FeedSegment] = []
         // Pill tint says what is SOUNDING (D7): the main-mix pill goes
-        // `goldText` while the main mix is armed on this row, an app pill goes
-        // `goldText` while its feed is confirmed live, and anything not
-        // sounding wears the chrome tone. A row in the muted-unconnected
+        // `label` while the main mix is armed on this row, an app pill goes
+        // `label` while its feed is confirmed live, and anything not sounding
+        // wears the chrome tone. Primary text, not `goldText` (owner, 2026-10-04):
+        // gold on the `well` fill measured only 4.90:1 in light mode. A row in the muted-unconnected
         // treatment drops the whole column to `label3`.
         if let mainMixSourceName {
             let color = controlsMuted
                 ? Tokens.Color.label3
-                : (isMainMixArmed ? Tokens.Color.goldText : Tokens.Color.label2)
+                : (isMainMixArmed ? Tokens.Color.label : Tokens.Color.label2)
             segments.append(.init(text: mainMixSourceName, color: color))
         }
         for name in feedAppNames {
             let color = controlsMuted
                 ? Tokens.Color.label3
-                : (hasLiveFeeds ? Tokens.Color.goldText : Tokens.Color.label2)
+                : (hasLiveFeeds ? Tokens.Color.label : Tokens.Color.label2)
             segments.append(.init(text: name, color: color))
         }
         setFeedSegments(segments)
@@ -1382,11 +1497,18 @@ public final class DeviceRowView: NSView {
         (centered ? feedStackCenterConstraint : feedStackLeadingConstraint)?.isActive = true
     }
 
+    /// At most this many value pills are ever named on the row (owner's
+    /// call, 2026-10-04): the first two, then "+N" for the rest, with the
+    /// hover tooltip carrying every name. Three or more named pills read as
+    /// a list, not a status.
+    static let maxNamedFeedPills = 2
+
     /// Compose `segments` (main-mix + app tokens, already colored) into ONE
     /// PILL EACH, with the spec item 3 STATIC overflow
-    /// rule: try showing every value's pill first; if the row of pills
-    /// doesn't fit `PopoverColumnGrid.feedColumnWidth`, drop values from the
-    /// TAIL one at a time (never cut a pill mid-string) and append a trailing
+    /// rule: try showing the first `maxNamedFeedPills` values; if that row of pills
+    /// doesn't fit the row's own slot — `PopoverColumnGrid.feedColumnWidth`,
+    /// or `btFeedSlotWidth` on a row that also carries the SYNC chip — drop
+    /// values from the TAIL one at a time (never cut a pill mid-string) and append a trailing
     /// "+N" pill for the dropped count — no interactive reveal, locked.
     /// Clears the pills when there is nothing to show at all.
     private func setFeedSegments(_ segments: [FeedSegment]) {
@@ -1422,7 +1544,12 @@ public final class DeviceRowView: NSView {
             NSAttributedString(string: "+\(count)", attributes: [.font: font, .foregroundColor: chromeColor])
         }
 
-        let available = PopoverColumnGrid.feedColumnWidth
+        // Measure against the slot the stack is actually clipped to: a
+        // sync-capable row (Bluetooth, Cast, the Mac's own) keeps only the
+        // chip's leftover, and measuring the full column there let a second
+        // pill pass the check and then get cut off mid-word by the mask.
+        let available = showsSyncControls
+            ? PopoverColumnGrid.btFeedSlotWidth : PopoverColumnGrid.feedColumnWidth
         // A lone segment has no overflow GROUP to collapse into — the floor
         // stays "show the one clipped pill" (spec item 3, "a clipped single
         // pill beats showing nothing"). But when there's a genuine overflow
@@ -1433,7 +1560,7 @@ public final class DeviceRowView: NSView {
         // accurate, legible count beats a barely-visible fragment of one.
         let minVisibleCount = segments.count > 1 ? 0 : 1
 
-        var visibleCount = segments.count
+        var visibleCount = min(segments.count, Self.maxNamedFeedPills)
         var committed: [NSAttributedString] = []
         while true {
             let overflowCount = segments.count - visibleCount
@@ -1580,6 +1707,13 @@ public final class DeviceRowView: NSView {
         nameLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
         nameLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
+        lockGlyphView.image = NSImage(systemSymbolName: "lock.fill", accessibilityDescription: nil)?
+            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 10, weight: .semibold))
+        lockGlyphView.image?.isTemplate = true
+        lockGlyphView.setContentHuggingPriority(.required, for: .horizontal)
+        lockGlyphView.setContentCompressionResistancePriority(.required, for: .horizontal)
+        lockGlyphView.isHidden = true
+
         // Status sublabel (2026-07-17): one line driven by the precedence ladder
         // (failed / unavailable / routing). Small and secondary; `resolveSublabel`
         // shows/hides it and `applyNameStackLayout` centers the name accordingly.
@@ -1640,6 +1774,23 @@ public final class DeviceRowView: NSView {
         removalUndoStack.addArrangedSubview(removalUndoButton)
         removalUndoStack.isHidden = true
         switchOfferButton.isHidden = true
+        // An underlined caption-size text link, unlike the two bordered offers
+        // above: the underline is its control signal, as on the licence gate's
+        // quiet links.
+        enterPasswordButton.translatesAutoresizingMaskIntoConstraints = false
+        enterPasswordButton.bezelStyle = .accessoryBar
+        enterPasswordButton.isBordered = false
+        enterPasswordButton.controlSize = .small
+        enterPasswordButton.attributedTitle = NSAttributedString(
+            string: "Enter Password…",
+            attributes: [
+                .font: Tokens.Font.caption,
+                .foregroundColor: Tokens.Color.label2,
+                .underlineStyle: NSUnderlineStyle.single.rawValue,
+            ])
+        enterPasswordButton.target = self
+        enterPasswordButton.action = #selector(enterPasswordClicked(_:))
+        enterPasswordButton.isHidden = true
 
         slider.translatesAutoresizingMaskIntoConstraints = false
         // Warm fader skin: install the drawing-only cell BEFORE the value/
@@ -1647,6 +1798,8 @@ public final class DeviceRowView: NSView {
         // everything after re-lands on the new cell). Tracking, keyboard,
         // scroll-wheel, `isContinuous`, and VoiceOver stay stock NSSlider.
         slider.cell = faderCell
+        faderCell.haloRoom = Self.faderHaloRoom
+        faderCell.onPulse = { [weak self] strength in self?.updatePendingReadoutInk(strength) }
         slider.minValue = 0
         slider.maxValue = 100
         slider.isContinuous = true            // fire throughout the drag (brief §2)
@@ -1693,7 +1846,13 @@ public final class DeviceRowView: NSView {
         identityStack.alignment = .leading
         identityStack.spacing = 2
         identityStack.distribution = .fill
-        identityStack.addArrangedSubview(nameLabel)
+        // The lock rides after the name; the name keeps its low priorities, so
+        // it truncates first and the lock is never squeezed out.
+        let nameLine = NSStackView(views: [nameLabel, lockGlyphView])
+        nameLine.orientation = .horizontal
+        nameLine.spacing = 4
+        nameLine.translatesAutoresizingMaskIntoConstraints = false
+        identityStack.addArrangedSubview(nameLine)
         if showsMeter {
             identityStack.addArrangedSubview(meterView)
             meterView.isHidden = true   // shown only on armed rows (gated in `apply`)
@@ -1706,8 +1865,21 @@ public final class DeviceRowView: NSView {
         addSubview(haloRingView)           // ring around the icon glyph
         addSubview(armedDotView)           // gold route-armed dot on its corner
         haloRingView.cutoutDot = armedDotView
+        unavailableStatusLabel.translatesAutoresizingMaskIntoConstraints = false
+        unavailableStatusLabel.font = Tokens.Font.caption
+        unavailableStatusLabel.textColor = Tokens.Color.labelCool2
+        unavailableStatusLabel.alignment = .right
+        unavailableStatusLabel.lineBreakMode = .byTruncatingTail
+        unavailableStatusLabel.isHidden = true
+        addSubview(unavailableStatusLabel)
         addSubview(identityStack)
         addSubview(slider)
+        NSLayoutConstraint.activate([
+            unavailableStatusLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
+            unavailableStatusLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -PopoverColumnGrid.trailingControlTrailing),
+            unavailableStatusLabel.leadingAnchor.constraint(greaterThanOrEqualTo: slider.leadingAnchor,
+                                                            constant: Self.faderHaloRoom),
+        ])
         addSubview(readoutLabel)
         addSubview(muteButton)
         if supportsEqualizer { addSubview(eqButton) }
@@ -1716,6 +1888,7 @@ public final class DeviceRowView: NSView {
             addSubview(feedStack)
             addSubview(removalUndoStack)   // same slot, shown only while offered
             addSubview(switchOfferButton)  // same slot, shown only while offered
+            addSubview(enterPasswordButton) // same slot, shown only while offered
         }
         // Bluetooth SYNC chip (T6), sharing that slot's left portion — sync
         // rows re-anchor the FEED pill to the far right below.
@@ -1770,18 +1943,30 @@ public final class DeviceRowView: NSView {
             muteButton.centerYAnchor.constraint(equalTo: centerYAnchor),
             muteButton.widthAnchor.constraint(equalToConstant: PopoverColumnGrid.muteWidth),
             muteButton.trailingAnchor.constraint(
-                equalTo: slider.leadingAnchor, constant: -PopoverColumnGrid.muteToSlider),
+                equalTo: slider.leadingAnchor,
+                constant: -(PopoverColumnGrid.muteToSlider - Self.faderHaloRoom)),
 
             slider.centerYAnchor.constraint(equalTo: centerYAnchor),
-            slider.widthAnchor.constraint(equalToConstant: PopoverColumnGrid.sliderWidth),
-            slider.trailingAnchor.constraint(equalTo: trailingAnchor,
-                                             constant: -PopoverColumnGrid.sliderTrailing),
+            // The slider's frame is bigger than its trough so the pending
+            // glow's 3 pt halo is never cut off. Stock height is 16 pt, which
+            // clipped the 17 pt thumb by half a point; 24 pt holds thumb plus
+            // ring, centred, so the track stays put. Width gains
+            // `faderHaloRoom` at each end, which the cell leaves empty, and
+            // every neighbour's constant gives it back: the trough, the mute
+            // glyph and the readout land where they did at `sliderWidth`.
+            slider.heightAnchor.constraint(equalToConstant: 24),
+            slider.widthAnchor.constraint(
+                equalToConstant: PopoverColumnGrid.sliderWidth + 2 * Self.faderHaloRoom),
+            slider.trailingAnchor.constraint(
+                equalTo: trailingAnchor,
+                constant: -(PopoverColumnGrid.sliderTrailing - Self.faderHaloRoom)),
 
             // `%` readout: tight to the right of the slider, fixed-width column.
             readoutLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
             readoutLabel.widthAnchor.constraint(equalToConstant: PopoverColumnGrid.readoutWidth),
             readoutLabel.leadingAnchor.constraint(
-                equalTo: slider.trailingAnchor, constant: PopoverColumnGrid.sliderToReadout),
+                equalTo: slider.trailingAnchor,
+                constant: PopoverColumnGrid.sliderToReadout - Self.faderHaloRoom),
         ]
 
         // The under-name meter's fixed size (v4 §Call-1), when it's in the stack.
@@ -1833,6 +2018,12 @@ public final class DeviceRowView: NSView {
                     constant: -PopoverColumnGrid.trailingControlTrailing),
                 switchOfferButton.centerYAnchor.constraint(equalTo: centerYAnchor),
                 switchOfferButton.heightAnchor.constraint(
+                    greaterThanOrEqualToConstant: PopoverColumnGrid.removalUndoButtonHeight),
+                enterPasswordButton.trailingAnchor.constraint(
+                    equalTo: trailingAnchor,
+                    constant: -PopoverColumnGrid.trailingControlTrailing),
+                enterPasswordButton.centerYAnchor.constraint(equalTo: centerYAnchor),
+                enterPasswordButton.heightAnchor.constraint(
                     greaterThanOrEqualToConstant: PopoverColumnGrid.removalUndoButtonHeight),
                 // ≥24 pt of hit height; the small bezel draws centred inside it.
                 removalUndoButton.heightAnchor.constraint(
@@ -2201,6 +2392,10 @@ public final class DeviceRowView: NSView {
         delegate?.deviceRowDidRequestSwitchHere(self)
     }
 
+    @objc private func enterPasswordClicked(_ sender: NSButton) {
+        delegate?.deviceRowDidRequestPasswordEntry(self)
+    }
+
     /// Show/hide the offer. It borrows the reserved trailing slot, so whatever
     /// normally lives there yields for as long as the offer stands: the FEED
     /// pills (empty anyway on a just-removed device) and, on a Bluetooth row,
@@ -2212,7 +2407,11 @@ public final class DeviceRowView: NSView {
             "Undo removing \(device.name) from Main Audio")
         switchOfferButton.isHidden = !switchOfferOffered
         switchOfferButton.setAccessibilityLabel("Play on \(device.name) instead")
-        if removalUndoOffered || switchOfferOffered {
+        enterPasswordOffered = device.connectionState == .awaitingPassword
+            && !removalUndoOffered && !switchOfferOffered
+        enterPasswordButton.isHidden = !enterPasswordOffered
+        enterPasswordButton.setAccessibilityLabel("Enter the password for \(device.name)")
+        if removalUndoOffered || switchOfferOffered || enterPasswordOffered {
             feedStack.isHidden = true
             if showsSyncControls { syncChipButton.isHidden = true }
         } else if showsSyncControls {
@@ -2254,7 +2453,7 @@ public final class DeviceRowView: NSView {
     func buildContextMenu() -> NSMenu? {
         let menu = NSMenu()
         menu.autoenablesItems = false
-        if supportsEqualizer {
+        if supportsEqualizer && equalizerActionAvailable {
             let eq = NSMenuItem(title: "Equalizer…",
                                 action: #selector(equalizerMenuItemSelected(_:)),
                                 keyEquivalent: "")
@@ -2269,6 +2468,9 @@ public final class DeviceRowView: NSView {
             align.isEnabled = device.isAvailable
             menu.addItem(align)
         }
+        let additions = additionalContextMenuItemsProvider?(self) ?? []
+        if menu.numberOfItems > 0, !additions.isEmpty { menu.addItem(.separator()) }
+        for item in additions { menu.addItem(item) }
         return menu.numberOfItems == 0 ? nil : menu
     }
 
@@ -2290,11 +2492,13 @@ public final class DeviceRowView: NSView {
     }
 
     @objc private func equalizerMenuItemSelected(_ sender: NSMenuItem) {
+        guard equalizerActionAvailable else { return }
         delegate?.deviceRowDidRequestEqualizer(self, fromButton: false)
     }
 
     /// The row's Equalizer BUTTON — the same place the menu item opens.
     @objc private func equalizerButtonClicked(_ sender: NSButton) {
+        guard equalizerActionAvailable else { return }
         delegate?.deviceRowDidRequestEqualizer(self, fromButton: true)
     }
 
@@ -2352,18 +2556,26 @@ public final class DeviceRowView: NSView {
         delegate?.deviceRow(self, didToggleEnabled: sender.state == .on, for: device.id)
     }
 
-    /// Clicking the device NAME toggles the ENABLED checkbox (2026-07-17), firing
-    /// the SAME delegate path as the checkbox itself. A disabled checkbox (an
-    /// unavailable device) keeps the click a no-op — the same conditions
-    /// `enableCheckbox.isEnabled` uses. For a `.failed` device this re-enables
-    /// it (= retry), which is intended.
+    /// A name click first asks the host to recover when `canRecoverByName` (an
+    /// unavailable Bluetooth row, or an unavailable AirPlay/Cast row the host
+    /// marked `nameRecoveryEnabled`), without touching membership. Otherwise it
+    /// toggles the ENABLED checkbox through the same delegate path as the
+    /// checkbox itself: a disabled checkbox keeps it a no-op, and a `.failed`
+    /// device re-enables (= retry), which is intended.
     @objc private func nameClicked(_ sender: NSClickGestureRecognizer) {
-        // A greyed Bluetooth row's click CONNECTS (BT-UI "click to connect" is
-        // the row's ordinary click behavior, never a printed instruction).
-        // Ordered before the enabled guard: an unavailable+unselected row's
-        // checkbox is disabled, which is exactly the greyed case.
-        if device.isBluetooth, !device.isAvailable {
+        performNameAction()
+    }
+
+    private func performNameAction() {
+        if canRecoverByName {
             delegate?.deviceRowDidRequestReconnect(self)
+            return
+        }
+        // A click on the name of a selected row that waits for its password
+        // asks for the password; the checkbox still removes it.
+        if device.connectionState == .awaitingPassword && isSelectedInSet {
+            enableCheckbox.state = .on
+            delegate?.deviceRowDidRequestPasswordEntry(self)
             return
         }
         guard enableCheckbox.isEnabled else { return }
@@ -2378,7 +2590,7 @@ public final class DeviceRowView: NSView {
     /// cool `labelCool`.
     var rowTextColor: NSColor {
         if isInMenu, enclosingMenuItem?.isHighlighted == true { return .selectedMenuItemTextColor }
-        if !device.isAvailable { return Tokens.Color.labelCool2 }
+        if !hasLiveConnection { return Tokens.Color.labelCool2 }
         return isRouteArmed ? Tokens.Color.label : Tokens.Color.labelCool
     }
 
@@ -2446,15 +2658,9 @@ public final class DeviceRowView: NSView {
     /// same delegate path). Mirrors the real gesture handler: on a disabled
     /// checkbox it's a no-op.
     public func test_clickName() {
-        // Mirrors the real gesture handler's greyed-BT branch (BT-UI).
-        if device.isBluetooth, !device.isAvailable {
-            delegate?.deviceRowDidRequestReconnect(self)
-            return
-        }
-        guard enableCheckbox.isEnabled else { return }
-        let flipped = enableCheckbox.state != .on
-        enableCheckbox.state = flipped ? .on : .off
-        delegate?.deviceRow(self, didToggleEnabled: flipped, for: device.id)
+        guard let gesture = nameLabel.gestureRecognizers.first,
+              let action = gesture.action, let target = gesture.target as? NSObject else { return }
+        _ = target.perform(action, with: gesture)
     }
 
     public func test_clickEQButton() { eqButton.performClick(nil) }
@@ -2686,13 +2892,12 @@ public final class DeviceRowView: NSView {
             // without an `apply` — a menu redraw is its only signal, so only
             // this path still needs a draw-time re-stamp (perf P3-11 / P2-2).
             nameLabel.textColor = rowTextColor
+            lockGlyphView.contentTintColor = rowTextColor
         } else {
             // Menu-less host (popover card / mixer window). A rounded pill behind
-            // the row: a gold 12 % wash while the row is SOUNDING (D1 —
-            // `isRouteArmed`, the iPhone's "gold at 12% behind a live row"),
-            // else a fainter neutral hover wash on pointer-over. Both are driven
-            // off state that ``apply`` resets, so a row that stops sounding
-            // returns to a fully clean background (T-U8 bug fix).
+            // the row: only a neutral hover wash on pointer-over, driven off
+            // state that ``apply`` resets, so a row never keeps a stale
+            // background (T-U8 bug fix).
             let rect = bounds.insetBy(dx: PopoverColumnGrid.selectionHighlightInsetX,
                                       dy: PopoverColumnGrid.selectionHighlightInsetY)
             let path = NSBezierPath(roundedRect: rect,
@@ -2706,12 +2911,12 @@ public final class DeviceRowView: NSView {
         super.draw(dirtyRect)
     }
 
-    /// The wash `draw(_:)` paints behind a menu-less row right now, `nil` for
-    /// none. The status dot's cut-out wears the same value (`isHovered` and
-    /// `isRouteArmed` push it), so it never shows as a ring on the wash.
+    /// The wash `draw(_:)` paints behind a menu-less row: the neutral hover
+    /// wash on pointer-over, else `nil`. The status dot's cut-out wears the
+    /// same value (`isHovered` and `isRouteArmed` push it), so it never shows
+    /// as a ring on the wash.
     private var rowWash: NSColor? {
         guard !isInMenu else { return nil }
-        if isRouteArmed { return Tokens.Color.gold.withAlphaComponent(PopoverColumnGrid.rowLiveWashAlpha) }
         if isHovered { return Tokens.Color.engagedChrome.withAlphaComponent(PopoverColumnGrid.rowHoverWashAlpha) }
         return nil
     }
@@ -2781,9 +2986,8 @@ public final class DeviceRowView: NSView {
     /// Simulate a host asking this row to flash (A4 test hook).
     public func test_flashRow() { flashRow() }
 
-    /// Whether the row is currently painting its live gold wash. It follows the
-    /// armed predicate (D1) — a row that stops sounding MUST report `false`.
-    public var test_isShowingLiveWash: Bool { !isInMenu && isRouteArmed }
+    /// The wash `draw(_:)` paints behind the row right now, `nil` for none.
+    public var test_rowWash: NSColor? { rowWash }
     /// Whether a transient hover wash is currently active (must reset on deselect).
     public var test_isHovered: Bool { isHovered }
 
@@ -2825,8 +3029,9 @@ public final class DeviceRowView: NSView {
         // unavailable) so the composed announcement never double-speaks the
         // same fact through two channels.
         let feedClause = feedAccessibilityClause.map { ", \($0)" } ?? ""
+        let volumeClause = liveVolumeAvailable ? ", volume \(VolumePercent.spoken(device.volume))" : ""
         setAccessibilityLabel(
-            "\(device.name), \(membership), volume \(VolumePercent.spoken(device.volume))\(stateClause)\(feedClause)")
+            "\(device.name), \(membership)\(volumeClause)\(stateClause)\(feedClause)")
 
         // The row's VALUE carries the live signal channels (S2/S3 — every
         // visual state has a spoken equivalent, shipped with the drawing):
@@ -2845,7 +3050,11 @@ public final class DeviceRowView: NSView {
         }
         // Same trade on the unavailable rung: its word left the column on the
         // same day and for the same reason, so it arrives here instead.
-        if showsUnavailableFeedGlyph { valueParts.append(Self.unavailableHeadline) }
+        if !unavailableStatusLabel.isHidden {
+            valueParts.append(unavailableStatusLabel.stringValue)
+        } else if showsUnavailableFeedGlyph {
+            valueParts.append(Self.unavailableHeadline)
+        }
         if device.isMuted || isMasterMuted { valueParts.append("muted") }
         if isRouteArmed { valueParts.append(hasLiveFeeds ? "playing here" : "armed") }
         if volumePendingApply { valueParts.append("applying volume") }
@@ -2890,12 +3099,14 @@ public final class DeviceRowView: NSView {
         slider.setAccessibilityRole(.slider)
         slider.setAccessibilityLabel("\(device.name) volume")
         muteButton.setAccessibilityLabel(device.isMuted ? "Unmute \(device.name)" : "Mute \(device.name)")
-        // The name-click is a mouse convenience; the switch stays the
-        // authoritative accessibility control. A hint on the name label documents
-        // the click for VoiceOver users who land on it.
-        nameLabel.setAccessibilityHelp(
-            isSelectedInSet ? "Click to remove from Selected Speakers"
-                            : "Click to add to Selected Speakers")
+        // `DeviceNameLabel` reports its own role (a button while pressable); the
+        // help text says what the press does.
+        nameLabel.setAccessibilityLabel(device.name)
+        nameLabel.setAccessibilityHelp(canRecoverByName
+            ? (unavailableHelp ?? "Reconnect speaker")
+            : (isSelectedInSet ? "Click to remove from Selected Speakers" : "Click to add to Selected Speakers"))
+        if canRecoverByName { nameLabel.toolTip = unavailableHelp ?? "Reconnect speaker" }
+        unavailableStatusLabel.setAccessibilityHelp(unavailableHelp)
     }
 
     /// The spoken FEED clause (v4.1 item 3) — the same `mainMixSourceName` +
@@ -2912,7 +3123,8 @@ public final class DeviceRowView: NSView {
     private var feedAccessibilityClause: String? {
         guard busActive else { return nil }
         if case .failed = device.connectionState { return nil }
-        if !device.isAvailable { return nil }
+        if device.connectionState == .awaitingPassword { return nil }
+        if !hasLiveConnection { return nil }
         let names = feedNames(qualifiedByGroup: true)
         guard !names.isEmpty else { return nil }
         return "playing " + names.joined(separator: ", ")
@@ -2934,6 +3146,7 @@ public final class DeviceRowView: NSView {
         case .connecting:    return "connecting"
         case .reconnecting:  return "reconnecting"
         case .connected:     return "connected"
+        case .awaitingPassword: return "waiting for password"
         case .failed:        return "couldn't connect"
         }
     }
@@ -3033,6 +3246,7 @@ public extension DeviceRowView.Delegate {
     func deviceRowDidRequestUndoRemoval(_ row: DeviceRowView) {}
     /// Default no-op — only the popover offers "Play here".
     func deviceRowDidRequestSwitchHere(_ row: DeviceRowView) {}
+    func deviceRowDidRequestPasswordEntry(_ row: DeviceRowView) {}
 }
 
 // MARK: - Invisible switch cell (spec §4.8)
@@ -3066,5 +3280,36 @@ public final class InvisibleSwitchCell: NSButtonCell {
 
     public override func drawFocusRingMask(withFrame cellFrame: NSRect, in controlView: NSView) {
         NSBezierPath(ovalIn: nodeRingRect(for: cellFrame)).fill()
+    }
+}
+
+final class DeviceNameLabel: NSTextField {
+    var onPress: (() -> Void)?
+    var recoveryEnabled = false
+    var toggleEnabled = false
+    private var isPressable: Bool { recoveryEnabled || toggleEnabled }
+    // NSButton's own rule: with keyboard navigation off a click must not leave a focus ring on the name.
+    override var acceptsFirstResponder: Bool { isPressable && (NSApp?.isFullKeyboardAccessEnabled ?? false) }
+    override func drawFocusRingMask() { bounds.fill() }
+    override var focusRingMaskBounds: NSRect { bounds }
+    // VoiceOver offers a press only on a button, so the role follows the same gate as the press itself.
+    override func accessibilityRole() -> NSAccessibility.Role? { isPressable ? .button : .staticText }
+    override func accessibilityPerformPress() -> Bool {
+        guard isPressable else { return false }
+        onPress?()
+        return true
+    }
+    override func keyDown(with event: NSEvent) {
+        if isPressable, event.keyCode == 36 || event.keyCode == 49 {
+            onPress?()
+        } else if event.keyCode == 48 {
+            if event.modifierFlags.contains(.shift) {
+                window?.selectPreviousKeyView(nil)
+            } else {
+                window?.selectNextKeyView(nil)
+            }
+        } else {
+            super.keyDown(with: event)
+        }
     }
 }

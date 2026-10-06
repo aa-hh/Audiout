@@ -19,11 +19,17 @@ import Foundation
 /// `.failed` survives the device being dropped from the expected-selected set
 /// (that removal is failure *cleanup*, not a state override), and only clears
 /// on `.off` when the device disappears entirely, or on retry (`.connecting`).
+/// A password wait: `.connecting → .awaitingPassword`, then
+/// `.awaitingPassword → .connecting` on a submitted password or a retry, and
+/// `.awaitingPassword → .off` on deselect or disappearance.
 public enum ConnectionState: Equatable, Sendable {
     case off
     case connecting
     case connected
     case reconnecting
+    /// The receiver demanded a password and none has been supplied. Not an
+    /// error: a refused password is `.failed(.authRequired)`.
+    case awaitingPassword
     case failed(ConnectionFailure)
 }
 
@@ -40,7 +46,13 @@ public struct ConnectionFailure: Equatable, Sendable {
         case notResponding    // advertised but AirPlay service not answering
         case vanished         // no longer advertised on the network
         case refusedOrBusy    // refused/403 — often an exclusive session elsewhere
-        case authRequired     // password / pairing needed (unsupported)
+        case authRequired     // the speaker's AirPlay password is needed
+        // An Apple TV wants the code it shows on its screen (status-flags bits
+        // 3/9). Copy only: entering the code arrives in PR 2.
+        case codeRequired
+        // The receiver accepts only people in its Home (`act=2` or bit 10),
+        // which needs a Home member's iCloud identity a third-party sender lacks.
+        case homeMembersOnly
         case droppedMidStream // was connected, silently dropped, recovery failed
         case timedOut         // connecting never resolved within 10 s
         // No shared PTP clock was reachable at connect time (T4,
@@ -96,7 +108,9 @@ extension ConnectionFailure {
         case .notResponding:    return "Didn't respond"
         case .vanished:         return "Not on the network"
         case .refusedOrBusy:    return "Connection refused"
-        case .authRequired:     return "Password required"
+        case .authRequired:     return "Password didn't work"
+        case .codeRequired:     return "Code required"
+        case .homeMembersOnly:  return "Home members only"
         case .droppedMidStream: return "Connection dropped"
         case .timedOut:         return "Took too long"
         case .timingUnavailable: return "Sync unavailable"
@@ -118,11 +132,11 @@ extension ConnectionFailure {
         case .refusedOrBusy:
             return "The speaker refused the connection. Another device may hold an exclusive session. Stop playback from other apps or restart the speaker, then try again."
         case .authRequired:
-            // A Mac receiver in "Current User" access-control mode is by far the
-            // most common way to hit this (live 2026-08-06: act=2 in the TXT
-            // record), and it has a receiver-side fix — name it. Entering a
-            // password in Audiout itself is roadmapped, not shipped.
-            return "This speaker requires a password or pairing. If it's a Mac, set AirPlay Receiver to allow “Anyone on the same network” in its System Settings, then try again. Entering a password here isn't supported yet."
+            return "The speaker didn't accept that password. Enter it again to connect."
+        case .codeRequired:
+            return "This Apple TV shows a code on its screen when a new device connects. Entering it here isn't supported yet."
+        case .homeMembersOnly:
+            return "This speaker only accepts people who share its Home. On a Mac, set AirPlay Receiver to allow “Anyone on the same network” in System Settings; on a HomePod or Apple TV, change its AirPlay access in the Home app. Then try again."
         case .droppedMidStream:
             return "The speaker dropped the stream and reconnecting failed. Check the speaker, then try again."
         case .timedOut:

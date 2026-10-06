@@ -86,8 +86,15 @@ import AppKit
     @Test func greyedBTRowNameClickRequestsReconnectNotSelection() {
         let spy = SpyDelegate()
         let row = makeRow(btDevice(available: false), delegate: spy)
+        row.apply(row.device, selected: false, unavailableStatus: "Not connected")
+        let node = row.test_busNode
         row.test_clickName()
-        #expect(spy.reconnects == [btDevice().id], "a greyed BT row's click CONNECTS")
+        row.test_pressNameKey(49)
+        #expect(row.test_pressNameAccessibility())
+        #expect(row.test_busNode == node)
+        #expect(row.test_unavailableStatusText == "Not connected")
+        #expect(row.test_liveControlsHidden)
+        #expect(spy.reconnects == [btDevice().id, btDevice().id, btDevice().id], "a greyed BT row's click CONNECTS")
         #expect(spy.toggles.isEmpty, "…and never edits membership")
     }
 
@@ -641,8 +648,10 @@ import AppKit
 @MainActor
 @Suite(.serialized) struct BTPopoverRowsTests {
 
+    private let isolation = TestIsolation(owner: "BTPopoverRowsTests")
+
     private func tempDirectory() -> URL {
-        FileManager.default.temporaryDirectory
+        isolation.scratchDir
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
     }
 
@@ -657,8 +666,10 @@ import AppKit
         let controller = GroupController(backend: backend,
                                          store: GroupStore(directory: tempDirectory()),
                                          routingStore: RoutingStore(directory: tempDirectory()),
+                                         settings: AppSettings(defaults: isolation.makeDefaults()),
                                          loadPersisted: false)
-        let popover = PopoverController()
+        let popover = PopoverController(appRouting: AppRoutingController(
+            store: AppRouteStore(directory: tempDirectory()), loadPersisted: false))
         popover.configure(groupController: controller)
         popover.test_isShownOverride = true
         if !fleet.isEmpty {
@@ -690,12 +701,13 @@ import AppKit
 
     // MARK: Subsection — always renders (BT-LIST) + recency sort
 
-    @Test func bluetoothSubsectionHeaderAlwaysRendersWithAConnectRowWhenEmpty() {
+    // An empty Bluetooth heading must disappear while Pair remains reachable.
+    @Test func emptyBluetoothHasPairFooterWithoutAnEmptyHeading() {
         let (popover, _, _) = makePopover()
         popover.update(devices: [local(), airplay()])
-        #expect(popover.test_subsectionTitles() == ["AirPlay Speakers", "Bluetooth Speakers"])
+        #expect(popover.test_subsectionTitles() == ["AirPlay Speakers"])
         #expect(popover.test_bluetoothRowOrder().isEmpty)
-        #expect(popover.test_bluetoothConnectRowShown())
+        #expect(popover.test_pairBluetoothButton != nil)
     }
 
     /// The "Offset" column title (the card header's, since 2026-08-28) is
@@ -707,8 +719,8 @@ import AppKit
     @Test func offsetColumnTitleIsPrintedOnlyWhenSyncChipRowsExist() {
         let (popover, _, _) = makePopover()
         popover.update(devices: [airplay()])
-        #expect(popover.test_bluetoothConnectRowShown(),
-                "precondition: the subsection is in its empty state")
+        #expect(popover.test_pairBluetoothButton != nil,
+                "pairing remains available without a Bluetooth row")
         #expect(!popover.test_offsetColumnTitleShown(),
                 "no chip rows under it means no column to name")
 
@@ -766,19 +778,16 @@ import AppKit
                 "AirPlay rows never do")
     }
 
-    // MARK: OUTPUT DEVICES "+" menu
-
-    @Test func plusMenuOffersPairingAndDispatchesThroughRealMenuActions() {
-        let (popover, _, _) = makePopover()
+    // Pair must use the native footer action without changing playback membership.
+    @Test func pairFooterDispatchesThroughRealTargetAction() {
+        let (popover, controller, _) = makePopover()
         popover.update(devices: [local(), airplay()])
         var paired = 0
         popover.onPairBluetoothSpeaker = { paired += 1 }
-
-        let menu = popover.test_outputDevicesPlusMenu()
-        #expect(menu.items.map(\.title)
-                == ["Save Selected Speakers as scene", "Pair a Bluetooth speaker…"])
-        menu.performActionForItem(at: 1)   // real AppKit menu dispatch
+        let selection = controller.selectedDeviceIDs
+        popover.test_tapPairBluetooth()
         #expect(paired == 1)
+        #expect(controller.selectedDeviceIDs == selection)
     }
 
     // MARK: SYNC plumbing — cache, closures, chip seeding
@@ -962,8 +971,10 @@ import AppKit
 @MainActor
 @Suite(.serialized) struct BTSyncDrawerAccordionTests {
 
+    private let isolation = TestIsolation(owner: "BTSyncDrawerAccordionTests")
+
     private func tempDirectory() -> URL {
-        FileManager.default.temporaryDirectory
+        isolation.scratchDir
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
     }
 
@@ -973,8 +984,10 @@ import AppKit
         let controller = GroupController(backend: backend,
                                          store: GroupStore(directory: tempDirectory()),
                                          routingStore: RoutingStore(directory: tempDirectory()),
+                                         settings: AppSettings(defaults: isolation.makeDefaults()),
                                          loadPersisted: false)
-        let popover = PopoverController()
+        let popover = PopoverController(appRouting: AppRoutingController(
+            store: AppRouteStore(directory: tempDirectory()), loadPersisted: false))
         popover.configure(groupController: controller)
         popover.test_isShownOverride = true
         if !fleet.isEmpty {
@@ -1248,7 +1261,9 @@ extension SerializedSharedState {
     ///
     /// It replaces the seat-border suite that stood here: the border, the
     /// gold seat and the `inkOnFill` pin all retired with the drawn seat.
-    @Test func theEngagedDoorPaintsTheReservedHueWithMarksPunchedThrough() {
+    @Test func theEngagedDoorPaintsTheReservedHueWithMarksPunchedThrough() throws {
+        // Removing this install makes the pixels depend on another suite running first.
+        try #require(CompiledSymbolFixture.install() != nil, "the symbol fixture failed to compile")
         defer { Tokens.test_increaseContrastOverride = nil }
         let device = Device(id: "C4-38-75-0E-BF-4A:output", name: "Sonos Move 2",
                             kind: .bluetooth, supportsAirPlay2: false)

@@ -5,6 +5,7 @@ import Testing
 
     private let allCauses: [ConnectionFailure.Cause] = [
         .notResponding, .vanished, .refusedOrBusy, .authRequired,
+        .codeRequired, .homeMembersOnly,
         .droppedMidStream, .timedOut, .unknown,
     ]
 
@@ -53,8 +54,16 @@ import Testing
                 "The speaker refused the connection. Another device may hold an exclusive session. Stop playback from other apps or restart the speaker, then try again."
             ),
             .authRequired: (
-                "Password required",
-                "This speaker requires a password or pairing. If it's a Mac, set AirPlay Receiver to allow “Anyone on the same network” in its System Settings, then try again. Entering a password here isn't supported yet."
+                "Password didn't work",
+                "The speaker didn't accept that password. Enter it again to connect."
+            ),
+            .codeRequired: (
+                "Code required",
+                "This Apple TV shows a code on its screen when a new device connects. Entering it here isn't supported yet."
+            ),
+            .homeMembersOnly: (
+                "Home members only",
+                "This speaker only accepts people who share its Home. On a Mac, set AirPlay Receiver to allow “Anyone on the same network” in System Settings; on a HomePod or Apple TV, change its AirPlay access in the Home app. Then try again."
             ),
             .droppedMidStream: (
                 "Connection dropped",

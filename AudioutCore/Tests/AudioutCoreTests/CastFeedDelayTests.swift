@@ -188,10 +188,12 @@ import Testing
         let done = DispatchSemaphore(value: 0)
         var finished = DispatchTimeoutResult.timedOut
         ring.test_withLockHeld {
-            DispatchQueue.global().async {
+            // Own threads, not the global queue: a loaded suite can leave a
+            // global-queue block unstarted past the 5 s, which reads as a wait.
+            Thread {
                 for block in 0..<firstRun { ring.push(Self.ramp(block: block)) }
                 done.signal()
-            }
+            }.start()
             finished = done.wait(timeout: .now() + 5)
         }
         #expect(finished == .success)
@@ -201,12 +203,12 @@ import Testing
         #expect(first == (0..<(firstRun * 512)).map { Int16(truncatingIfNeeded: $0) })
 
         let secondRun = 640
-        DispatchQueue.global().async {
+        Thread {
             for block in firstRun..<(firstRun + secondRun) {
                 while (ring.bufferedFrames ?? 0) > 44_100 { usleep(200) }
                 ring.push(Self.ramp(block: block))
             }
-        }
+        }.start()
         var second: [Int16] = []
         let deadline = Date().addingTimeInterval(10)
         while second.count < secondRun * 512, Date() < deadline {

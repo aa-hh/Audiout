@@ -444,6 +444,42 @@ extension SerializedEngineState {
             #expect(mappedID?.rawValue == 0x112233445566)
         }
 
+        private func storedPassword(_ key: String) -> String? {
+            cfg_gettsec(cfg, "airplay", key).flatMap { cfg_getstr($0, "password") }.map { String(cString: $0) }
+        }
+
+        // Turns red if feedDescriptor stops keying a RAOP password on the part of
+        // the name after '@', which is what raop_device_cb looks up.
+        @Test func raopFeedStoresPasswordUnderNameAfterAt() async {
+            defer { conffile_set_device_password("Kitchen", nil) }
+            let engine = AirPlayEngine()
+
+            _ = await engine.feedDescriptorForTest(DeviceDescriptor(
+                name: "112233445566@Kitchen", address: "192.168.1.51", family: .ipv4, port: 5000,
+                kind: .raop, txtRecord: ["deviceid": "11:22:33:44:55:66"], password: "secret"
+            ))
+            #expect(storedPassword("Kitchen") == "secret")
+        }
+
+        // Turns red if feedDescriptor stops keying an AirPlay 2 password on the
+        // whole name, or stops clearing it when a later feed carries none.
+        @Test func airplayFeedStoresPasswordUnderWholeNameAndClearsIt() async {
+            defer { conffile_set_device_password("Loft", nil) }
+            let engine = AirPlayEngine()
+
+            let loft = DeviceDescriptor(
+                name: "Loft", address: "192.168.1.52", family: .ipv4, port: 7000,
+                txtRecord: ["deviceid": "AA:BB:CC:DD:EE:01"], password: "attic"
+            )
+            _ = await engine.feedDescriptorForTest(loft)
+            #expect(storedPassword("Loft") == "attic")
+
+            var cleared = loft
+            cleared.password = nil
+            _ = await engine.feedDescriptorForTest(cleared)
+            #expect(cfg_gettsec(cfg, "airplay", "Loft") == nil)
+        }
+
         @Test func descriptorWithoutDeviceIDIsInvalid() {
             let desc = DeviceDescriptor(
                 name: "NoID", address: "10.0.0.1", family: .ipv4, port: 7000,

@@ -356,28 +356,41 @@ import CoreAudio
     /// known receiver is a blip, not a departure — the flip waits out
     /// ``NativeBackend/castAbsenceGrace``, and a reappearance inside it cancels.
     @Test func oneMissedBrowseKeepsTheCastRowAvailable() {
-        let rig = makeBackend(castAbsenceGrace: 1)
+        let clock = ManualDelayClock()
+        let rig = makeBackend(castAbsenceGrace: 1, delayClock: hopToQueue(clock))
         let id = Self.graceRecord.id
         rig.cast.fire([Self.graceRecord])
         waitFor { Self.device(rig.backend, id)?.isAvailable == true }
 
         rig.cast.fire([])
-        SuiteWait.settle(0.3)
+        waitFor { clock.pendingCount == 1 }
+        clock.advance(by: 0.5)
         #expect(Self.device(rig.backend, id)?.isAvailable == true,
                 "one omitted browse must not grey the row")
 
         // Back inside the grace: the pending flip is cancelled, so waiting the
         // whole grace out from here changes nothing.
         rig.cast.fire([Self.graceRecord])
-        SuiteWait.settle(1.3)
+        _ = rig.backend.devices  // stateQueue.sync: the re-listing is applied before the clock moves
+        clock.advance(by: 1.0)
         #expect(Self.device(rig.backend, id)?.isAvailable == true,
                 "a receiver that comes back inside the grace stays available")
 
         // Missing for the whole grace: now it really has left the network.
         rig.cast.fire([])
-        waitFor(timeout: 3) { Self.device(rig.backend, id)?.isAvailable == false }
+        waitFor { clock.pendingCount == 1 }
+        clock.advance(by: 1.0)
+        waitFor { Self.device(rig.backend, id)?.isAvailable == false }
         #expect(Self.device(rig.backend, id)?.isAvailable == false)
         #expect(rig.backend.devices.filter { $0.id == id }.count == 1, "the row never vanishes")
+    }
+
+    /// The manual clock performs jobs on the caller's thread, but `expireCastAbsence`
+    /// must run on `stateQueue`, so each fired job re-enqueues the original work there.
+    private func hopToQueue(_ manual: ManualDelayClock) -> NativeBackend.DelayClock {
+        return { delay, queue, work in
+            manual.clock(delay, queue, DispatchWorkItem { queue.async(execute: work) })
+        }
     }
 
     // MARK: - CAST-OUT selection

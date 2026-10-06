@@ -729,11 +729,16 @@ extension PopoverController: AppRowView.Delegate {
         limitNoteRaised = false
         // A thank-you card up at hide counts as seen (no closed event).
         retireThankYouCardOnHide()
-        // Nor does the Cast feed-gain pending fill.
-        for timer in castVolumePendingTimers.values { timer.invalidate() }
-        castVolumePendingTimers.removeAll()
-        castVolumePendingIDs.removeAll()
-        for row in deviceRowsByID.values { row.resetLevel() }
+        // Nor do the Cast pending glows.
+        for timer in castPendingTimers.values.flatMap(\.values) { timer.invalidate() }
+        castPendingTimers.removeAll()
+        castPendingIDs.removeAll()
+        for row in deviceRowsByID.values {
+            row.resetLevel()
+            // The ids are cleared above, but the rows only learn it on the
+            // next `apply`; until then a fader would keep glowing unseen.
+            row.cancelPendingHold()
+        }
         mainOutRow.resetLevel()
         for row in appRowsByBundleID.values { row.resetLevel() }
         onMeteringActiveChange?(false)

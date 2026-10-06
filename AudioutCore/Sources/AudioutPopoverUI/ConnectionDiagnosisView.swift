@@ -59,6 +59,9 @@ public final class ConnectionDiagnosisView: NSView {
     /// the panel (`PopoverPanelViewController`); this view owns no open/closed
     /// state of its own and never removes itself.
     public var onDismiss: (() -> Void)?
+    /// Called instead of `onRetry` when the cause is `.authRequired`: the
+    /// button reads "Enter Password…" and the host opens the password sheet.
+    public var onEnterPassword: (() -> Void)?
 
     private var failure: ConnectionFailure
     private var deviceName: String
@@ -103,6 +106,7 @@ public final class ConnectionDiagnosisView: NSView {
         suggestionLabel.stringValue = failure.suggestion
         copyDetailsButton.isEnabled = failure.detail != nil
         copyDetailsButton.isHidden = failure.detail == nil
+        retryButton.title = failure.cause == .authRequired ? "Enter Password…" : "Try again"
 
         configureAccessibility()
         needsLayout = true
@@ -132,7 +136,8 @@ public final class ConnectionDiagnosisView: NSView {
 
         configureSmallButton(retryButton, title: "Try again", action: #selector(retryClicked(_:)))
         configureSmallButton(copyDetailsButton, title: "Copy details", action: #selector(copyDetailsClicked(_:)))
-        // "Try again" is the default action (P1-6): Return fires it without a
+        // The default button ("Try again", or "Enter Password…" for a password
+        // demand) is the default action (P1-6): Return fires it without a
         // click, the stock `.rounded` bezel renders the default treatment on
         // its own.
         retryButton.keyEquivalent = "\r"
@@ -268,7 +273,11 @@ public final class ConnectionDiagnosisView: NSView {
     // MARK: Actions
 
     @objc private func retryClicked(_ sender: NSButton) {
-        onRetry?()
+        if failure.cause == .authRequired, let onEnterPassword {
+            onEnterPassword()
+        } else {
+            onRetry?()
+        }
     }
 
     @objc private func copyDetailsClicked(_ sender: NSButton) {
@@ -287,7 +296,9 @@ public final class ConnectionDiagnosisView: NSView {
         background.setAccessibilityRole(.group)
         background.setAccessibilityLabel("Connection problem for \(deviceName): \(failure.headline). \(failure.suggestion)")
 
-        retryButton.setAccessibilityLabel("Try again connecting to \(deviceName)")
+        retryButton.setAccessibilityLabel(failure.cause == .authRequired
+            ? "Enter the password for \(deviceName)"
+            : "Try again connecting to \(deviceName)")
         copyDetailsButton.setAccessibilityLabel("Copy connection details for \(deviceName)")
         dismissButton.setAccessibilityLabel("Dismiss")
     }
@@ -314,6 +325,9 @@ public final class ConnectionDiagnosisView: NSView {
     public var test_retryKeyEquivalent: String { retryButton.keyEquivalent }
     /// The dismiss button's key equivalent — Escape (P1-6).
     public var test_dismissKeyEquivalent: String { dismissButton.keyEquivalent }
+
+    /// The retry button's current title ("Try again" or "Enter Password…").
+    public var test_retryButtonTitle: String { retryButton.title }
 
     /// Simulate a "Try again" click.
     public func test_tapRetry() { retryClicked(retryButton) }

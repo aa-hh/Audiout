@@ -23,6 +23,27 @@ public protocol CastPCMSource: AnyObject {
     var bufferedFrames: Int? { get }
 }
 
+/// Monotonic seconds since boot.
+public typealias CastUptimeClock = @Sendable () -> TimeInterval
+
+/// Runs `work` on `queue` once `delaySeconds` have passed. Cancelling `work`
+/// stops it.
+public typealias CastDelayClock = @Sendable (_ delaySeconds: Double,
+                                             _ queue: DispatchQueue,
+                                             _ work: DispatchWorkItem) -> Void
+
+/// The shipping time source: `DispatchTime.now().uptimeNanoseconds` in seconds.
+/// Only tests pass anything else, so a lead or a stall can be stepped instead
+/// of waited out.
+public let castDispatchUptimeClock: CastUptimeClock = {
+    Double(DispatchTime.now().uptimeNanoseconds) / 1_000_000_000
+}
+
+/// The shipping delay: `asyncAfter` on the wall clock.
+public let castDispatchDelayClock: CastDelayClock = { delaySeconds, queue, work in
+    queue.asyncAfter(deadline: .now() + delaySeconds, execute: work)
+}
+
 public extension CastPCMSource {
     var bufferedFrames: Int? { nil }
 }
@@ -110,6 +131,8 @@ public final class CastLiveAudioServer: @unchecked Sendable {
     private let allowedPeer: String?
     private let maxConnections: Int
     private let idleDeadline: TimeInterval
+    /// What the pacing clock reads.
+    private let uptimeClock: CastUptimeClock
 
     public init(
         source: CastPCMSource,
@@ -117,7 +140,8 @@ public final class CastLiveAudioServer: @unchecked Sendable {
         primeMilliseconds: Int = 0,
         allowedPeer: String? = nil,
         maxConnections: Int = 32,
-        idleDeadline: TimeInterval = 30
+        idleDeadline: TimeInterval = 30,
+        uptimeClock: @escaping CastUptimeClock = castDispatchUptimeClock
     ) {
         self.source = source
         self.loopbackOnly = loopbackOnly
@@ -125,6 +149,7 @@ public final class CastLiveAudioServer: @unchecked Sendable {
         self.allowedPeer = allowedPeer
         self.maxConnections = maxConnections
         self.idleDeadline = idleDeadline
+        self.uptimeClock = uptimeClock
     }
 
     public var port: UInt16 { portLock.withLock { _port } }
@@ -345,21 +370,20 @@ public final class CastLiveAudioServer: @unchecked Sendable {
         // GET. A buffering source is empty at this point — the ring was reset
         // to the live edge moments ago — so starting here means demanding
         // audio nobody has produced yet, forever.
-        var startedAt: DispatchTime?
+        var startedAt: TimeInterval?
         var streamedFrames = 0
-        let waitingSince = DispatchTime.now()
+        let waitingSince = uptimeClock()
         timer.setEventHandler { [weak self] in
             guard let self else { return }
             guard let clockStart = startedAt else {
-                let waited = Double(DispatchTime.now().uptimeNanoseconds
-                    - waitingSince.uptimeNanoseconds) / 1_000_000_000
+                let waited = self.uptimeClock() - waitingSince
                 if waited < Self.cushionDeadline,
                    let buffered = self.source.bufferedFrames,
                    buffered < Self.cushionFrames { return }
-                startedAt = DispatchTime.now()
+                startedAt = self.uptimeClock()
                 return
             }
-            let elapsed = Double(DispatchTime.now().uptimeNanoseconds - clockStart.uptimeNanoseconds) / 1_000_000_000
+            let elapsed = self.uptimeClock() - clockStart
             let due = Int(elapsed * Double(Self.sampleRate)) - streamedFrames
             guard due > 0 else { return }
             self.sendChunk(self.source.render(frames: due), on: connection)

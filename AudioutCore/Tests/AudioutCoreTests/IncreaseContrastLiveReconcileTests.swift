@@ -227,6 +227,18 @@ import ObjectiveC.runtime
         #expect(viewsThatIgnoredTheFlip(views).isEmpty)
     }
 
+    // MARK: Equalizer
+
+    /// Turns red if any of the 13 EQ sliders stops calling `redrawOnAccessibilityDisplayChange()`, which strands its green fill at the old contrast.
+    @Test func theEQSlidersRedraw() {
+        let editor = EQEditorView(settings: AppSettings(defaults: isolatedDefaults))
+        editor.widthAnchor.constraint(equalToConstant: 300).isActive = true
+        editor.layoutSubtreeIfNeeded()
+        let sliders = editor.test_sliders.enumerated().map { (name: "slider \($0.offset)", view: $0.element as NSView) }
+        #expect(sliders.count == 13)
+        #expect(viewsThatIgnoredTheFlip(sliders).isEmpty)
+    }
+
     @Test func theSettingsValueReadoutRedraws() {
         let well = SettingsForm.readoutWell(NSTextField(labelWithString: "35%"), width: 44)
         let views = customDrawingViews(in: well)

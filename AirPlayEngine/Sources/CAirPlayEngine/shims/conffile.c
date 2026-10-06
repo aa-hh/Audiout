@@ -21,11 +21,14 @@
 //   airplay_shared.control_port   int   0       (ephemeral bind)
 //   (start_buffer_ms is served via outputs_buffer_duration_ms_get, not here.)
 //
-// Per-device (airplay.<name>) overrides: cfg_gettsec returns NULL, so every
-// `if (devcfg && ...)` branch in airplay.c short-circuits to the built-in
-// per-device defaults (max_volume=11, all bools off, nickname/password NULL).
-// The engine surfaces per-device overrides through the Swift addOutput
-// descriptor (seam-map §3.1 "Shim decision"), not through this config.
+// Per-device (airplay.<name>) overrides: a small table keyed by the name the
+// vendored device callbacks pass to cfg_gettsec, filled by
+// conffile_set_device_password from the Swift feedDescriptor. cfg_gettsec
+// returns an entry's section only while it holds a password, so every other
+// device still gets NULL and airplay.c/raop.c take their built-in per-device
+// defaults. A returned section serves only the password; every other
+// per-device key reads as its default (max_volume=11, bools off, nickname NULL).
+// Reads and writes both run on the engine thread, so the table has no lock.
 //
 // `libhash` (the AirPlay device id + PTP clock-id seed) is derived in Swift
 // from the client name and the install seed and pushed in through
@@ -38,6 +41,7 @@
 
 #include <assert.h>
 #include <stddef.h>
+#include <stdlib.h>
 #include <string.h>
 
 /* Unknown-key policy (first-light hardening #5). Historically every cfg_get*
@@ -105,16 +109,38 @@ static struct conffile_config config = {
                                           * never touches the ffmpeg encoder. */
 };
 
-/* cfg_s stays opaque in the header; a trivial complete type here. The two
- * sentinels below just need to be non-NULL so cfg_getsec(cfg, ...) chains are
- * safe (the section identity is irrelevant — the value accessors key on the
- * option name, and all our option names are globally unique). */
-struct cfg_s { int _unused; };
+/* cfg_s stays opaque in the header. The root and the sentinel just need to be
+ * non-NULL so cfg_getsec(cfg, ...) chains are safe, and both keep a NULL
+ * password; only a per-device section from the table below carries one. The
+ * global value accessors key on the option name, which is globally unique. */
+struct cfg_s { const char *password; };
 
 static cfg_t cfg_root = { 0 };
 cfg_t *cfg = &cfg_root;
 
 static cfg_t cfg_section_sentinel = { 0 };
+
+/* Per-device sections, keyed by the cfg_gettsec title. Entries are never
+ * removed; a cleared entry keeps its name with a NULL password. */
+struct conffile_device
+{
+  char *name;
+  struct cfg_s section;
+  struct conffile_device *next;
+};
+
+static struct conffile_device *conffile_devices = NULL;
+
+static struct conffile_device *
+conffile_device_find(const char *name)
+{
+  struct conffile_device *d;
+
+  for (d = conffile_devices; d; d = d->next)
+    if (strcmp(d->name, name) == 0)
+      return d;
+  return NULL;
+}
 
 /* OwnTone derives libhash from the (expanded) library name via murmur_hash64
  * and uses it as the AirPlay device id + PTP clock-id seed (airplay.c:918/4291/
@@ -162,6 +188,39 @@ conffile_set_libhash(uint64_t h)
   libhash = h;
 }
 
+void
+conffile_set_device_password(const char *name, const char *password)
+{
+  struct conffile_device *d;
+
+  if (!name)
+    return;
+
+  d = conffile_device_find(name);
+  if (!d)
+    {
+      if (!password)
+        return;
+      d = calloc(1, sizeof(*d));
+      if (!d)
+        return;
+      d->name = strdup(name);
+      if (!d->name)
+        {
+          free(d);
+          return;
+        }
+      d->next = conffile_devices;
+      conffile_devices = d;
+    }
+
+  // razor: the previous copy is never freed, because device->password and
+  // session->password alias it (airplay.c:4129, :1706, raop.c:4472,
+  // shims/outputs.c:143). Each replacement leaks one short string; refcount it
+  // if that ever matters.
+  d->section.password = password ? strdup(password) : NULL;
+}
+
 /* -------------------------------- accessors ------------------------------- */
 
 cfg_t *
@@ -175,19 +234,31 @@ cfg_getsec(cfg_t *sec, const char *name)
 cfg_t *
 cfg_gettsec(cfg_t *sec, const char *name, const char *title)
 {
+  struct conffile_device *d;
+
   (void)sec;
   (void)name;
-  (void)title;
-  // No per-device overrides in the in-memory config — short-circuits airplay.c's
-  // `if (devcfg && ...)` branches to the per-device defaults.
+  if (!title)
+    return NULL;
+
+  // Only a device with a password gets a section; every other device keeps
+  // airplay.c's `if (devcfg && ...)` branches on their per-device defaults.
+  d = conffile_device_find(title);
+  if (d && d->section.password)
+    return &d->section;
   return NULL;
 }
 
 char *
 cfg_getstr(cfg_t *sec, const char *name)
 {
-  (void)sec;
   if (!name)
+    return NULL;
+
+  // Per-device str keys, read only through a section cfg_gettsec returned.
+  if (sec && strcmp(name, "password") == 0)
+    return (char *)sec->password;
+  if (sec && strcmp(name, "nickname") == 0)
     return NULL;
 
   if (strcmp(name, "user_agent") == 0)
@@ -197,9 +268,8 @@ cfg_getstr(cfg_t *sec, const char *name)
   if (strcmp(name, "bind_address") == 0)  // general.bind_address (PTP + net_bind)
     return (char *)config.bind_address;
 
-  // Per-device str keys (nickname/password) only reach here via a non-NULL
-  // devcfg, which cfg_gettsec never returns — so any name we get here is an
-  // unserved global key. Make the miss loud instead of silently returning NULL.
+  // Anything else is an unserved key. Make the miss loud instead of silently
+  // returning NULL.
   conffile_unknown_key("cfg_getstr", name);
   return NULL;
 }
@@ -225,7 +295,6 @@ cfg_getint(cfg_t *sec, const char *name)
 int
 cfg_getbool(cfg_t *sec, const char *name)
 {
-  (void)sec;
   if (!name)
     return 0;
 
@@ -239,9 +308,17 @@ cfg_getbool(cfg_t *sec, const char *name)
   if (strcmp(name, "uncompressed_alac") == 0)
     return config.uncompressed_alac;
 
-  // All per-device bool keys (exclude/permanent/exclusive/airplay2_disable/
-  // ptp_disable) are only read behind a `devcfg && ...` guard in airplay.c, and
-  // cfg_gettsec never hands back a non-NULL devcfg — so those never reach here.
+  // Per-device bool keys (exclude/permanent/exclusive/airplay2_disable/
+  // raop_disable/ptp_disable) are read behind a `devcfg && ...` guard, so they
+  // arrive only for a device with a password section. None is configurable:
+  // each is off. The silent answer is for a table section only; the root and
+  // the sentinel fall through to the unknown-key path.
+  if (sec && sec != &cfg_root && sec != &cfg_section_sentinel
+      && (strcmp(name, "exclude") == 0 || strcmp(name, "permanent") == 0
+          || strcmp(name, "exclusive") == 0 || strcmp(name, "airplay2_disable") == 0
+          || strcmp(name, "raop_disable") == 0 || strcmp(name, "ptp_disable") == 0))
+    return 0;
+
   // The only global bool the vendored cluster reads is "ipv6" (misc.c net
   // helpers). Anything else is a genuine unserved key: make it loud rather than
   // masquerading as a false/off default.

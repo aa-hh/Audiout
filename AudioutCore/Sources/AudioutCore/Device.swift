@@ -1,5 +1,18 @@
 import Foundation
 
+/// What an AirPlay receiver asks of a sender before it plays, read from its
+/// Bonjour records.
+public enum AirPlayAccess: String, Sendable {
+    /// No credential needed.
+    case open
+    /// A password: AirPlay 1 `pw`, or AirPlay 2 status-flags bit 7.
+    case password
+    /// A code shown on the receiver's screen: status-flags bits 3 or 9. Acted on in PR 2.
+    case onScreenCode
+    /// `act=2` or bit 10: needs a Home member's iCloud identity, which a third-party sender cannot present.
+    case homeMembersOnly
+}
+
 /// A single AirPlay output the app can discover and control.
 ///
 /// This is a *value type* on purpose: the backend owns the source of truth and
@@ -184,6 +197,13 @@ public struct Device: Identifiable, Equatable, Sendable {
     /// promise something that cannot happen.
     public var btHardwareVolumeCapable: Bool?
 
+    /// What this receiver asks for before it plays. `.open` for every
+    /// non-AirPlay kind.
+    public var airPlayAccess: AirPlayAccess
+
+    /// The backend has a password on file for this speaker.
+    public var hasStoredPassword: Bool
+
     /// Product phrases that make a Bluetooth device's model unambiguous, and
     /// the SF Symbol each one earns. MOST SPECIFIC FIRST: the first phrase
     /// found anywhere in the name wins, so "AirPods Pro" and "AirPods Max" can
@@ -277,7 +297,9 @@ public struct Device: Identifiable, Equatable, Sendable {
         eqBypassReason: EQBypassReason? = nil,
         castVolumeLagSeconds: Int? = nil,
         bluetoothDeviceClassMinor: UInt32? = nil,
-        btHardwareVolumeCapable: Bool? = nil
+        btHardwareVolumeCapable: Bool? = nil,
+        airPlayAccess: AirPlayAccess = .open,
+        hasStoredPassword: Bool = false
     ) {
         self.id = id
         self.name = name
@@ -294,6 +316,8 @@ public struct Device: Identifiable, Equatable, Sendable {
         self.castVolumeLagSeconds = castVolumeLagSeconds
         self.bluetoothDeviceClassMinor = bluetoothDeviceClassMinor
         self.btHardwareVolumeCapable = btHardwareVolumeCapable
+        self.airPlayAccess = airPlayAccess
+        self.hasStoredPassword = hasStoredPassword
     }
 }
 

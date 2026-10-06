@@ -999,13 +999,13 @@ import AppKit
         let (popover, _) = makePopover()
         let row = selectMixedBT(popover)
         let menu = row?.test_contextMenu()
-        #expect(menu?.items.map(\.title) == ["Equalizer…", "Align by ear…"],
+        #expect(menu?.items.map(\.title) == ["Equalizer…", "Align by ear…", "", "Show in Mixer", "When available", "Always", "Hide when not in use", "", "Speaker settings…"],
                 "the discoverable route — ⌥ alone is invisible")
         #expect(fireAlignItem(menu))
         #expect(popover.test_btWizardIsOpen())
 
         #expect(popover.test_deviceRow(for: "office")?.test_contextMenu()?.items.map(\.title)
-                == ["Equalizer…"],
+                == ["Equalizer…", "", "Show in Mixer", "When available", "Always", "Hide when not in use", "", "Speaker settings…"],
                 "AirPlay rows carry the Equalizer door but no alignment item")
     }
 

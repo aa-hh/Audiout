@@ -46,9 +46,10 @@ extension NativeBackend {
             castAbsenceGeneration += 1
             let generation = castAbsenceGeneration
             castAbsenceFlips[id] = generation
-            stateQueue.asyncAfter(deadline: .now() + castAbsenceGrace) { [weak self] in
+            let work = DispatchWorkItem { [weak self] in
                 self?.expireCastAbsence(id, generation)
             }
+            delayClock(castAbsenceGrace, stateQueue, work)
         }
     }
 
@@ -84,6 +85,7 @@ extension NativeBackend {
         case .connecting: return "connecting"
         case .connected: return "connected"
         case .reconnecting: return "reconnecting"
+        case .awaitingPassword: return "awaitingPassword"
         case .failed(let failure): return "failed(\(failure.cause))"
         }
     }

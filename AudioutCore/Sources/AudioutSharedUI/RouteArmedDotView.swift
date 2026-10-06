@@ -27,7 +27,7 @@ import AppKit
 /// ground (`Tokens.Color.panel`, what `ControlPanelBackingView` fills the
 /// popover with) that cuts it out of the glyph, so the full
 /// 8 pt dot reads as a badge over the glyph, not part of it. A device row
-/// paints a wash behind itself (gold while armed, neutral on hover) and a
+/// paints a neutral hover wash behind itself and a
 /// one-shot gold attention flash; the cut-out carries the same wash
 /// (`rowWash`) and the same flash (`flash(_:)`), so it matches the ground it
 /// sits on instead of showing as a lighter (light) or black (dark) ring.

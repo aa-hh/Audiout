@@ -751,10 +751,15 @@ connecting ring and an underlined caption-size "Enter Password…" or
 "Enter Code…" link in the trailing slot (the same slot as the Undo and Play
 here offers), which, like a click on the selected row, raises the sheet; red is
 reserved for a refused password or code. A code receiver gets the sheet's code
-variant: the heading "Enter the code shown on “<name>”", a plain field (the
-code is already shown unmasked on the receiver's screen), "Enter the code on
-the screen." on an empty Connect, and "That code didn't work. Check the screen
-and try again." for a refused code. It opens by itself when a join the user
+variant: the heading "Enter the code shown on “<name>”", then four stock
+one-digit boxes (44×40 pt, 8 pt apart, centred 22 pt medium monospaced
+digits, no placeholder) that take digits only. Focus moves on as each digit
+lands, Delete on an empty box steps back to the one before, a pasted string
+spreads across the boxes, and the fourth digit connects by itself. Connect
+stays for keyboard users and shows "Enter the code on the screen." for fewer
+than four digits; a refused code ("That code didn't work. Check the screen
+and try again.") clears the boxes and returns focus to the first. VoiceOver
+reads the row as "AirPlay code" and each box as "digit N of 4". It opens by itself when a join the user
 clicked in this popover (the row, or the panel's Try again) starts waiting for
 its code, once per click; a launch restore or a group activation never opens
 it. Otherwise the row's link or a click on the waiting row opens it.

@@ -804,8 +804,7 @@ import AudioutProtocol
         let row = try #require(popover.test_deviceRow(for: "office"))
         row.test_clickEnterPassword()
         let sheet = try #require(popover.test_passwordSheet())
-        sheet.test_setPasswordText("1234")
-        sheet.test_tapConnect()
+        sheet.test_typeIntoBox(0, "1234")
         pushOffice(popover, backend) {
             $0.airPlayAccess = .onScreenCode
             $0.connectionState = .failed(ConnectionFailure(cause: .codeRequired))

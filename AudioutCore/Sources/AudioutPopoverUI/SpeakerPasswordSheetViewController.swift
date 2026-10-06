@@ -7,14 +7,15 @@ import AudioutSharedUI
 /// receiver shows on its screen (`CredentialKind`). Same shape as
 /// `LicenseSheetViewController` (Settings): a 320-pt stack, one field, a result
 /// line that appears only after a submit, Cancel (Escape) and a gold Connect
-/// (Return).
+/// (Return). The code kind shows four one-digit boxes in place of the field,
+/// and the fourth digit submits by itself.
 ///
 /// The sheet stores nothing and connects nothing: `onSubmit` hands the typed
 /// password to the host, which stores it and retries the speaker, then calls
 /// `showResult` when the attempt fails or dismisses the sheet when it connects.
 /// Headless tests hold the controller and drive it through the `test_` hooks.
 @MainActor
-public final class SpeakerPasswordSheetViewController: NSViewController {
+public final class SpeakerPasswordSheetViewController: NSViewController, NSTextFieldDelegate {
 
     private static let sheetContentWidth: CGFloat = 320
 
@@ -37,8 +38,13 @@ public final class SpeakerPasswordSheetViewController: NSViewController {
 
     private let deviceName: String
     private let kind: CredentialKind
-    /// A code is shown unmasked on the receiver's screen, so its field hides nothing.
+    /// The password kind's field; the code kind never adds it to the view.
     private let passwordField: NSTextField
+    /// The code kind's four one-digit boxes; empty for the password kind.
+    private let codeBoxes: [NSTextField]
+    private var focusedBoxIndex = 0
+    /// What each code box held after the last text change was handled.
+    private var lastDigits = Array(repeating: "", count: 4)
     private let resultLine = NSTextField(wrappingLabelWithString: "")
     private let cancelButton = NSButton()
     private var connectButton: ProminentButton!
@@ -52,6 +58,7 @@ public final class SpeakerPasswordSheetViewController: NSViewController {
         self.deviceName = deviceName
         self.kind = kind
         passwordField = kind == .password ? NSSecureTextField() : NSTextField()
+        codeBoxes = kind == .onScreenCode ? (0..<4).map { _ in NSTextField() } : []
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -62,11 +69,38 @@ public final class SpeakerPasswordSheetViewController: NSViewController {
         heading.font = .boldSystemFont(ofSize: NSFont.systemFontSize)
         heading.lineBreakMode = .byTruncatingTail
 
-        passwordField.placeholderString = kind == .password ? "Password" : "Code"
-        passwordField.setAccessibilityLabel(kind == .password ? "AirPlay password" : "AirPlay code")
-        passwordField.translatesAutoresizingMaskIntoConstraints = false
-        passwordField.usesSingleLineMode = true
-        passwordField.cell?.isScrollable = true
+        let entry: NSView
+        var entryConstraints: [NSLayoutConstraint] = []
+        if kind == .password {
+            passwordField.placeholderString = "Password"
+            passwordField.setAccessibilityLabel("AirPlay password")
+            passwordField.translatesAutoresizingMaskIntoConstraints = false
+            passwordField.usesSingleLineMode = true
+            passwordField.cell?.isScrollable = true
+            entry = passwordField
+        } else {
+            for (i, box) in codeBoxes.enumerated() {
+                box.alignment = .center
+                // 22 pt is this row's own size, not a shared voice.
+                box.font = .monospacedDigitSystemFont(ofSize: 22, weight: .medium)
+                box.usesSingleLineMode = true
+                box.delegate = self
+                box.translatesAutoresizingMaskIntoConstraints = false
+                box.setAccessibilityLabel("digit \(i + 1) of 4")
+                entryConstraints += [
+                    box.widthAnchor.constraint(equalToConstant: 44),
+                    box.heightAnchor.constraint(equalToConstant: 40),
+                ]
+            }
+            let row = NSStackView(views: codeBoxes)
+            row.orientation = .horizontal
+            row.spacing = 8
+            row.translatesAutoresizingMaskIntoConstraints = false
+            row.setAccessibilityElement(true)
+            row.setAccessibilityRole(.group)
+            row.setAccessibilityLabel("AirPlay code")
+            entry = row
+        }
 
         resultLine.font = Tokens.Font.caption
         resultLine.textColor = Tokens.Color.label2
@@ -94,7 +128,7 @@ public final class SpeakerPasswordSheetViewController: NSViewController {
         buttonRow.spacing = 8
         buttonRow.translatesAutoresizingMaskIntoConstraints = false
 
-        let stack = NSStackView(views: [heading, passwordField, resultLine, buttonRow])
+        let stack = NSStackView(views: [heading, entry, resultLine, buttonRow])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 12
@@ -109,15 +143,65 @@ public final class SpeakerPasswordSheetViewController: NSViewController {
             stack.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -20),
             stack.widthAnchor.constraint(equalToConstant: Self.sheetContentWidth),
             heading.widthAnchor.constraint(lessThanOrEqualTo: stack.widthAnchor),
-            passwordField.widthAnchor.constraint(equalTo: stack.widthAnchor),
             buttonRow.widthAnchor.constraint(equalTo: stack.widthAnchor),
-        ])
+        ] + entryConstraints)
+        if kind == .password {
+            passwordField.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+        }
         view = container
     }
 
     public override func viewDidAppear() {
         super.viewDidAppear()
-        view.window?.makeFirstResponder(passwordField)
+        if kind == .onScreenCode {
+            focusBox(0)
+        } else {
+            view.window?.makeFirstResponder(passwordField)
+        }
+    }
+
+    private func focusBox(_ i: Int) {
+        focusedBoxIndex = i
+        view.window?.makeFirstResponder(codeBoxes[i])
+    }
+
+    /// Runs on every text change in a code box and keeps only ASCII digits.
+    /// Two digits in a box that held one means the user typed over it with the
+    /// caret beside the old digit: the new digit replaces it. Anything else
+    /// spreads from the edited box onward, so a pasted code fills every box.
+    public func controlTextDidChange(_ obj: Notification) {
+        guard let box = obj.object as? NSTextField,
+              let i = codeBoxes.firstIndex(where: { $0 === box }) else { return }
+        var digits = box.stringValue.filter { $0.isASCII && $0.isNumber }
+        let old = lastDigits[i]
+        if !old.isEmpty, digits.count == 2, let at = digits.firstIndex(of: Character(old)) {
+            digits.remove(at: at)
+            box.stringValue = digits
+            focusBox(min(i + 1, codeBoxes.count - 1))
+        } else {
+            box.stringValue = ""
+            var last = i - 1
+            for (offset, digit) in digits.prefix(codeBoxes.count - i).enumerated() {
+                codeBoxes[i + offset].stringValue = String(digit)
+                last = i + offset
+            }
+            focusBox(min(last + 1, codeBoxes.count - 1))
+        }
+        lastDigits = codeBoxes.map(\.stringValue)
+        if codeBoxes.allSatisfy({ !$0.stringValue.isEmpty }) {
+            connectTapped()
+        }
+    }
+
+    /// Delete on an empty box clears the box before it and moves there.
+    public func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+        guard commandSelector == #selector(NSResponder.deleteBackward(_:)),
+              let i = codeBoxes.firstIndex(where: { $0 === control }),
+              codeBoxes[i].stringValue.isEmpty, i > 0 else { return false }
+        codeBoxes[i - 1].stringValue = ""
+        lastDigits[i - 1] = ""
+        focusBox(i - 1)
+        return true
     }
 
     @objc private func cancelTapped() {
@@ -125,6 +209,18 @@ public final class SpeakerPasswordSheetViewController: NSViewController {
     }
 
     @objc private func connectTapped() {
+        if kind == .onScreenCode {
+            let code = codeBoxes.map(\.stringValue).joined()
+            guard code.count == codeBoxes.count else {
+                show(result: Self.emptyCodeText)
+                return
+            }
+            codeBoxes.forEach { $0.isEnabled = false }
+            connectButton.isEnabled = false
+            show(result: Self.connectingText)
+            onSubmit?(code)
+            return
+        }
         let text = passwordField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else {
             show(result: kind == .password ? Self.emptyPasswordText : Self.emptyCodeText)
@@ -143,6 +239,14 @@ public final class SpeakerPasswordSheetViewController: NSViewController {
         passwordField.isEnabled = true
         connectButton.isEnabled = true
         show(result: text)
+        if kind == .onScreenCode {
+            codeBoxes.forEach {
+                $0.stringValue = ""
+                $0.isEnabled = true
+            }
+            lastDigits = codeBoxes.map(\.stringValue)
+            focusBox(0)
+        }
     }
 
     private func show(result: String) {
@@ -152,7 +256,7 @@ public final class SpeakerPasswordSheetViewController: NSViewController {
 
     // MARK: Test-support hooks
 
-    /// Replace the field's text, as typing would.
+    /// Replace the password kind's field text, as typing would.
     public func test_setPasswordText(_ text: String) {
         _ = view
         passwordField.stringValue = text
@@ -180,5 +284,31 @@ public final class SpeakerPasswordSheetViewController: NSViewController {
     public var test_connectButton: NSButton {
         _ = view
         return connectButton
+    }
+
+    /// Put `text` in code box `index` and deliver the change, as typing or paste would.
+    public func test_typeIntoBox(_ index: Int, _ text: String) {
+        _ = view
+        codeBoxes[index].stringValue = text
+        controlTextDidChange(Notification(name: NSControl.textDidChangeNotification, object: codeBoxes[index]))
+    }
+
+    /// Press Delete in the focused code box.
+    public func test_backspace() {
+        _ = view
+        _ = control(codeBoxes[focusedBoxIndex], textView: NSTextView(),
+                    doCommandBy: #selector(NSResponder.deleteBackward(_:)))
+    }
+
+    /// The code boxes' digits, joined.
+    public var test_codeDigits: String {
+        _ = view
+        return codeBoxes.map(\.stringValue).joined()
+    }
+
+    /// The code box that holds focus.
+    public var test_focusedBoxIndex: Int {
+        _ = view
+        return focusedBoxIndex
     }
 }

@@ -2,6 +2,7 @@
 
 import Testing
 import AppKit
+import Foundation
 @testable import AudioutCore
 @testable import AudioutSharedUI
 @testable import AudioutWindowUI
@@ -10,6 +11,53 @@ import AppKit
 /// edit made there reaches the card overview.
 @MainActor
 struct GroupEditorClickTargetTests {
+    private let isolation = TestIsolation(owner: "GroupEditorClickTargetTests")
+
+    // Dropping absent IDs from candidates prevents removing missing members while retaining a nonempty scene.
+    @Test func missingMemberRemovalKeepsFinalMemberAndVisibilitySeparate() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let backend = MockBackend(fleet: [])
+        let groups = GroupController(backend: backend, store: GroupStore(directory: directory),
+                                     routingStore: RoutingStore(directory: directory),
+                                     settings: AppSettings(defaults: isolation.isolatedDefaults), loadPersisted: false)
+        let bt = Device(id: "bt", name: "Bluetooth", kind: .bluetooth, isAvailable: false)
+        let scene = Group(id: "g", name: "Scene", memberIDs: ["bt", "missing"], memberVolumes: [:])
+        try groups.saveGroup(scene)
+        let library = SpeakerLibraryController(loadPersisted: false)
+        library.update(liveDevices: [bt], groups: [scene])
+        library.setVisibility(.hideWhenNotInUse, for: "bt")
+        let pane = GroupEditorViewController(groupController: groups)
+        pane.speakerLibrary = library
+        pane.loadViewIfNeeded()
+        pane.show(groupID: "g", devices: [bt])
+        #expect(pane.test_candidateDeviceIDs.contains("missing"))
+        #expect(pane.test_presentationText(for: "bt") == "Not connected")
+        #expect(pane.test_reassuranceText == "Changes are saved as you go.")
+        pane.test_setMembership(false, for: "missing")
+        #expect(groups.groups.first?.memberIDs == ["bt"])
+        #expect(library.visibility(for: "bt") == .hideWhenNotInUse)
+        pane.test_setMembership(true, for: "missing")
+        pane.test_setMembership(false, for: "bt")
+        #expect(groups.groups.first?.memberIDs == ["missing"])
+        #expect(!pane.test_isMembershipRowEnabled(for: "missing"))
+        #expect(pane.test_deleteButtonVisible)
+        pane.test_setMembership(false, for: "missing")
+        #expect(groups.groups.first?.memberIDs == ["missing"])
+        #expect(groups.activeGroupID == nil)
+    }
+
+    // Turns red when the membership row reads availability from discovery alone, dimming a connected Cast member or captioning it unavailable.
+    @Test func connectedCastMemberUsesSharedAvailabilityInDrawnNode() throws {
+        let device = Device(id: "cast", name: "Cast", kind: .cast, isAvailable: false,
+                            connectionState: .connected)
+        let library = SpeakerLibraryController(loadPersisted: false)
+        library.update(liveDevices: [device], groups: [])
+        let row = MembershipRowView(device: device, checked: true, surface: .warmPane)
+        row.applyPresentation(try #require(library.record(for: device.id)))
+        #expect(!row.test_isDimmed)
+        #expect(row.test_presentationText == "")
+    }
 
     private func warmRow() -> MembershipRowView {
         let device = Device(id: "d1", name: "Speaker", kind: .sonos,

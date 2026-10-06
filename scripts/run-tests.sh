@@ -16,7 +16,11 @@
 #      `--filter A` pass covers the A part of a later `--filter A|B`.
 #
 # Usage:  scripts/run-tests.sh [extra swift-test args...]
+#         scripts/run-tests.sh --shard N [extra swift-test args...]
+#           one of the GitHub workflow's shards (scripts/lib/suite-shards.sh)
 # Env:
+#   AUDIOUT_TEST_SHARDS    most processes a full mule run may fan out to;
+#                            default 3; 1 = one process as before
 #   AUDIOUT_TEST_MODE      serial runs strictly one test at a time
 #                            (--no-parallel; for flake hunting, slower).
 #                            Anything else or unset runs --parallel.
@@ -130,6 +134,7 @@ slots=${AUDIOUT_TEST_SLOTS:-$(git config --get audiout.localSlots 2>/dev/null ||
 # worktree's hook against the primary checkout's scripts/ when the worktree
 # predates them, and the library must travel with the script that sources it.
 . "$(cd "$(dirname "$0")" && pwd)/lib/remote.sh"
+. "$(cd "$(dirname "$0")" && pwd)/lib/suite-shards.sh"
 remote_tried=0
 
 # Thin test-specific wrapper over remote_run. Its own return codes, which are
@@ -163,6 +168,193 @@ run_remote() {
         serial) rargs="--disable-keychain --no-parallel" ;;
         *)      rargs="--disable-keychain --parallel" ;;
     esac
+
+    # A full AudioutCore run: build once on the mule, then one `swift test`
+    # per free mule permit, split the way the GitHub `tests` workflow splits
+    # it (scripts/lib/suite-shards.sh). One process has one main thread and
+    # most suites are main-actor UI tests, so a single full process takes
+    # about as long as the workflow's shards added together. `--ignore-lock`
+    # lets the processes share the one .build tree the build just finished;
+    # without it each waits for the one before it.
+    k=0
+    shards=${AUDIOUT_TEST_SHARDS:-3}
+    if [ $# -eq 0 ] && [ "$pkg" = "AudioutCore" ] \
+        && [ "${AUDIOUT_TEST_MODE:-parallel}" != "serial" ] && [ "$shards" -ge 2 ]; then
+        if [ "$shards" -gt "$suite_shards_max" ]; then shards=$suite_shards_max; fi
+        k=$(remote_mule_free_count || echo 0)
+        if [ "$k" -gt "$shards" ]; then k=$shards; fi
+    fi
+    if [ "$k" -ge 2 ]; then
+        echo "  suite: full run — building once on $remote_host, then $k test processes." >&2
+        rrc=0
+        remote_run "$repo_root" "cd $pkg && swift build --build-tests --disable-keychain" || rrc=$?
+        if [ "$rrc" -eq 2 ] && [ "${AUDIOUT_TRUST_REMOTE_FAILURE:-0}" = "1" ]; then
+            echo "  suite: remote reported FAILURES — trusting it (AUDIOUT_TRUST_REMOTE_FAILURE=1)." >&2
+            return 3
+        fi
+        if [ "$rrc" -eq 2 ]; then
+            case "${remote_failure_kind:-}" in
+                tests)
+                    echo "  suite: remote reported named test FAILURES — trusting that verdict, not re-running here." >&2
+                    return 3
+                    ;;
+                *)
+                    echo "  suite: remote failed without a verdict (${remote_failure_kind:-unknown}) — re-running locally to confirm." >&2
+                    return 2
+                    ;;
+            esac
+        fi
+        [ "$rrc" -ne 0 ] && return 1
+
+        # Each process runs in a background subshell, so remote_run's globals
+        # cannot come back from it: its exit code, remote_status and
+        # remote_failure_kind go through a file beside its log instead. The
+        # runner's pid is in both names, so two sessions' runs never share them.
+        suite_log="${AUDIOUT_TEST_LOG:-/tmp/audiout-suite-last.log}"
+        shard_base="${suite_log%.log}.$$.shard"
+        t0=$(date +%s)
+        pids=
+        i=1
+        while [ "$i" -le "$k" ]; do
+            (
+                suite_shards_args "$i" "$k"
+                remote_status=
+                src=0
+                remote_run "$repo_root" "cd $pkg && swift test $rargs --skip-build --ignore-lock$(remote_quote_args "$suite_shards_flag" "$suite_shards_regex")" \
+                    >"$shard_base$i.log" 2>&1 || src=$?
+                echo "$src ${remote_status:-} ${remote_failure_kind:-}" >"$shard_base$i.rc"
+            ) &
+            pids="$pids $!"
+            i=$((i + 1))
+        done
+        for p in $pids; do wait "$p" || true; done
+
+        # A shard the mule turned away while it was reachable -- no free permit,
+        # usually because another session took one during the build -- runs
+        # here by itself, after the mule shards, one at a time, with a local
+        # permit like any local run. Nothing waits for a mule permit.
+        i=1
+        while [ "$i" -le "$k" ]; do
+            read -r src sst skind <"$shard_base$i.rc"
+            if [ "$src" -eq 1 ] && ! grep -q 'remote: unreachable' "$shard_base$i.log"; then
+                echo "  suite: shard $i/$k: no mule permit — running it on this machine." >&2
+                suite_shards_args "$i" "$k"
+                # Serial mode never shards, so a shard always runs --parallel.
+                test_args=--parallel
+                AUDIOUT_CAPACITY_NO_TRAP=1 capacity_acquire suite
+                trap 'capacity_release' EXIT HUP INT TERM
+                local_swift_test "$shard_base$i.log" "$suite_shards_flag" "$suite_shards_regex"
+                capacity_release
+                trap - EXIT HUP INT TERM
+                echo "$status $status local" >"$shard_base$i.rc"
+            fi
+            i=$((i + 1))
+        done
+        t1=$(date +%s)
+
+        : >"$suite_log"
+        i=1
+        while [ "$i" -le "$k" ]; do
+            echo "=== shard $i/$k ===" >>"$suite_log"
+            cat "$shard_base$i.log" >>"$suite_log"
+            i=$((i + 1))
+        done
+
+        # The summary line arrives with an SF Symbol glyph and colour codes
+        # around it; keep only the words from "Test run with" on.
+        esc=$(printf '\033')
+        tot_n=0
+        tot_m=0
+        failed=0
+        passed=
+        verdict=
+        noverdict=
+        i=1
+        while [ "$i" -le "$k" ]; do
+            read -r src sst skind <"$shard_base$i.rc"
+            slog="$shard_base$i.log"
+            line=$(sed "s/$esc\[[0-9;]*m//g" "$slog" | grep 'Test run with ' | tail -1 \
+                | sed 's/.*Test run with /Test run with /' || true)
+            nm=$(printf '%s\n' "$line" \
+                | sed -n 's/^Test run with \([0-9]*\) tests* in \([0-9]*\) suites* passed.*/\1 \2/p')
+            why=
+            if [ "$src" -eq 0 ] && [ -z "$nm" ]; then
+                # Exit 0 without a summary line is no verdict, not a pass.
+                src=2
+                sst=1
+                skind=noverdict
+                why="exit 0 with no \"Test run with\" line in its output"
+            fi
+            nm=${nm:-0 0}
+            if [ "$src" -eq 0 ]; then
+                echo "  suite: shard $i/$k: $line" >&2
+                tot_n=$((tot_n + ${nm% *}))
+                tot_m=$((tot_m + ${nm#* }))
+                if [ "$i" -lt "$k" ]; then passed="$passed $i"; fi
+            else
+                failed=1
+                if [ "$skind" = local ]; then
+                    why="ran on this machine, swift test exited $src"
+                    # Named the same way as the unsharded local run below.
+                    lfailed=$(tr -d '\r' < "$slog" | grep ' Test ' | grep ' failed after ' \
+                        | sed -e 's/.* Test //' -e 's/ failed after .*//' | grep -v '^run with ' || true)
+                    nlfailed=$(printf '%s' "$lfailed" | grep -c . || true)
+                    if [ "$nlfailed" -gt 0 ]; then
+                        why="$why — $nlfailed test(s) failed: $(printf '%s' "$lfailed" | tr '\n' ' ')"
+                    fi
+                elif [ "$src" -eq 1 ]; then
+                    why="could not run on the remote"
+                elif [ "$skind" = nobuild ]; then
+                    # A shard runs --skip-build, which never prints "Build
+                    # complete!", so remote_run calls any failure without a
+                    # named test a build that did not finish. The build passed
+                    # above; this is a test process that died.
+                    skind=noverdict
+                    why="its test process ended (exit $sst) without naming a failing test"
+                elif [ -z "$why" ]; then
+                    why=$(grep '  remote: ran and FAILED there — ' "$slog" | tail -1 | sed 's/^ *//' || true)
+                fi
+                echo "  suite: shard $i/$k FAILED — $why" >&2
+                # A local shard's failure is this machine's own verdict, the
+                # same as an unsharded local run's.
+                if [ -z "$verdict" ] && { [ "$skind" = tests ] || [ "$skind" = local ] \
+                    || { [ "${AUDIOUT_TRUST_REMOTE_FAILURE:-0}" = "1" ] && [ "$src" -eq 2 ]; }; }; then
+                    verdict=$i
+                    remote_status=$sst
+                    # Tells the caller this verdict came from this Mac.
+                    if [ "$skind" = local ]; then verdict_local=1; fi
+                fi
+                if [ -z "$noverdict" ]; then noverdict=$i; fi
+            fi
+            i=$((i + 1))
+        done
+        rm -f "$shard_base"*.log "$shard_base"*.rc
+
+        if [ "$failed" -eq 0 ]; then
+            tw=tests
+            sw=suites
+            if [ "$tot_n" -eq 1 ]; then tw=test; fi
+            if [ "$tot_m" -eq 1 ]; then sw=suite; fi
+            echo "  suite: Test run with $tot_n $tw in $tot_m $sw passed after $((t1 - t0)) seconds — $k shards on $remote_host." >&2
+            return 0
+        fi
+
+        # A listed shard that passed is stamped under its exact arguments, so
+        # only the same shard run again (`--shard i`) reuses it. Never per-name
+        # stamps: a later plain `--filter AnalyticsTests` is a substring match
+        # that also runs WizardDoorAnalyticsTests and others from other shards,
+        # and would skip them as passed. The last shard stamps nothing.
+        for i in $passed; do
+            suite_shards_args "$i" "$k"
+            suite_cache_record "$key" "$suite_shards_flag" "$suite_shards_regex"
+        done
+        if [ -n "$verdict" ]; then
+            echo "  suite: full output in $suite_log — grep 'recorded an issue' for the assertion." >&2
+            return 3
+        fi
+        echo "  suite: shard $noverdict/$k gave no verdict — re-running the full suite on this machine." >&2
+        return 2
+    fi
 
     # The remote command is a STRING the far shell re-parses, so caller flags
     # must be quoted INTO it: an unquoted `--filter "A|B"` arrived there as a
@@ -204,11 +396,81 @@ run_remote() {
     return 0
 }
 
+# local_swift_test <log> [swift-test args...]
+# Run `swift test $test_args <args>` here, its output also written to <log>,
+# and set status to swift's exit code. The unsharded local run below and a
+# shard the mule turned away (run_remote) both go through this.
+local_swift_test() {
+    _lt_log=$1
+    shift
+    # --- cold checkouts: resolve solo first --------------------------------------
+    # A run that has to MATERIALISE .build/checkouts while another SwiftPM process
+    # races it over the shared package cache is what produced the "unable to read
+    # tree" Sparkle failures during the merge guards. Doing the checkout step on its
+    # own first removes the race; a warm checkout skips this entirely. Best-effort:
+    # a resolve failure is left for `swift test` below to report properly.
+    if [ ! -d "$core/.build/checkouts" ] || [ -z "$(ls -A "$core/.build/checkouts" 2>/dev/null)" ]; then
+        echo "  suite: cold package checkouts — resolving first, on its own." >&2
+        ( cd "$core" && swift package resolve ) >&2 || true
+    fi
+
+    # Clear any compiler left orphaned by a killed wrapper before competing for
+    # the lock -- see scripts/reap-orphaned-swift.sh for why this is not paranoia.
+    bash "$(dirname "$0")/reap-orphaned-swift.sh" || true
+
+    # `set -e` is off for this one command so a failure reaches the cache logic
+    # (which must NOT write a stamp) and the trap, rather than exiting immediately.
+    set +e
+    # $test_args is deliberately UNQUOTED: it must reach swift test as a flag
+    # (`--parallel` or `--no-parallel`) rather than as one quoted word. "$@" stays
+    # quoted so caller arguments with spaces survive.
+    # shellcheck disable=SC2086
+    #
+    # Backgrounded under `set -m` so the subshell becomes its own PROCESS GROUP,
+    # then killed as a group if this wrapper dies. Without that, a timeout or a
+    # Ctrl-C leaves the compiler running, holding SwiftPM's per-`.build` lock, and
+    # every later build queues behind it silently -- the failure looks like a slow
+    # build and cost hours on 2026-09-04. `wait` still yields the real exit status.
+    set -m
+    # Output also lands in $1 so a failure can be NAMED after the fact.
+    # The commit guard's 4001-test merge run on 2026-10-04 reported "1 issue" and
+    # nothing else, which cost a second 5-minute full run just to learn which test.
+    # `pipefail` inside the subshell makes its exit status swift's, not tee's.
+    ( set -o pipefail; cd "$core" && swift test $test_args "$@" 2>&1 | tee "$_lt_log" >&2 ) &
+    swift_pgid=$!
+    # `|| true`: by the time this trap fires the group is usually already reaped
+    # by the `wait` below, so kill fails with "no such process" -- and under
+    # `set -e` a failing trap command aborts the rest of the trap (skipping the
+    # release) and overrides the exit code, turning a pass into a false failure.
+    # Same fix as PR #165; carried here because this line changed too.
+    trap 'kill -- -"$swift_pgid" 2>/dev/null || true; capacity_release' EXIT HUP INT TERM
+    wait "$swift_pgid"
+    status=$?
+    set +m
+    set -e
+}
+
 # The pass cache (source hash, stamps, which earlier passes cover this run)
 # lives in scripts/lib/suite-cache.sh, resolved beside this script for the same
 # reason remote.sh is above.
 . "$(cd "$(dirname "$0")" && pwd)/lib/suite-cache.sh"
 key=$(suite_cache_source_hash "$repo_root" "$pkg")
+
+# `--shard N` becomes that shard's own --filter or --skip, ahead of the cache
+# lookup, so the cache and swift both see the real arguments.
+if [ "${1:-}" = "--shard" ]; then
+    case "${2:-}" in
+        ''|*[!0-9]*) n=0 ;;
+        *) n=$2 ;;
+    esac
+    if [ "$n" -lt 1 ] || [ "$n" -gt "$suite_shards_max" ]; then
+        echo "  suite: --shard takes a number from 1 to $suite_shards_max." >&2
+        exit 64
+    fi
+    shift 2
+    suite_shards_args "$n" "$suite_shards_max"
+    set -- "$suite_shards_flag" "$suite_shards_regex" "$@"
+fi
 
 if suite_cache_satisfied "$key" "$@"; then
     echo "  suite: sources unchanged since a passing run — skipping." >&2
@@ -229,14 +491,15 @@ if [ "$suite_cache_kind" = "suites" ] && [ "$suite_cache_missing" != "$suite_cac
 fi
 
 # --- prefer-remote ----------------------------------------------------------
-# With `audiout.testPrefer = permits` (the setting 2026-09-11 to 2026-10-04; `remote` since), go to
-# the other Mac FIRST only when it has at least as many free capacity permits
-# as this one — see remote_permits_win. `= remote` goes there first
-# unconditionally, which keeps THIS machine free but piles every job onto the
-# mule while the local permits idle; `= cpu` compares load average, which
-# misreports this wait-bound suite. Local slots remain the fallback in every
-# mode, so an asleep/offline/unmeasurable remote costs one 5s probe and
-# behaves exactly as if none were configured.
+# With `audiout.testPrefer = remote` (the setting since 2026-10-04), every job
+# goes to the other Mac FIRST and comes back here only when every mule permit
+# is held (remote_run's exit 98), so this machine takes only the overflow.
+# `= permits` (2026-09-11 to 2026-10-04) goes there first only when it has at
+# least as many free capacity permits as this one — see remote_permits_win.
+# `= cpu` compares load average, which misreports this wait-bound suite.
+# Local slots remain the fallback in every mode, so an asleep/offline/
+# unmeasurable remote costs one 5s probe and behaves exactly as if none were
+# configured.
 # `|| true` under `set -e`: "stay local" is a non-zero return from remote_wins,
 # and a bare call would abort the whole script instead of falling through.
 try_remote_first=0
@@ -254,7 +517,11 @@ if [ "$try_remote_first" -eq 1 ] && [ "$remote_tried" -eq 0 ]; then
     elif [ "$rrc" -eq 3 ]; then
         # The remote's verdict is final. No pass stamp, no local re-run, and
         # nothing local has been acquired yet, so there is no permit to unwind.
-        echo "  suite: FAILED on remote $remote_host — not re-run here." >&2
+        if [ "${verdict_local:-0}" = "1" ]; then
+            echo "  suite: FAILED on this machine." >&2
+        else
+            echo "  suite: FAILED on remote $remote_host — not re-run here." >&2
+        fi
         exit "${remote_status:-1}"
     elif [ "$rrc" -eq 1 ]; then
         # 1 = could not use the remote at all. 2 = it ran and failed, and has
@@ -303,7 +570,11 @@ if [ "${AUDIOUT_TEST_NO_LOCK:-0}" != "1" ] && [ "$remote_tried" -eq 0 ]; then
             # Same final verdict as the prefer-remote path above. This site is
             # reached whenever the local slots were busy, and missing it would
             # leave every overflowed run still building the tree twice.
-            echo "  suite: FAILED on remote $remote_host — not re-run here." >&2
+            if [ "${verdict_local:-0}" = "1" ]; then
+                echo "  suite: FAILED on this machine." >&2
+            else
+                echo "  suite: FAILED on remote $remote_host — not re-run here." >&2
+            fi
             exit "${remote_status:-1}"
         fi
         echo "  suite: all $slots test slots busy — waiting for one to free." >&2
@@ -338,53 +609,9 @@ if [ "$acquired" -eq 1 ]; then
     echo "  suite: $test_args." >&2
 fi
 
-# --- cold checkouts: resolve solo first --------------------------------------
-# A run that has to MATERIALISE .build/checkouts while another SwiftPM process
-# races it over the shared package cache is what produced the "unable to read
-# tree" Sparkle failures during the merge guards. Doing the checkout step on its
-# own first removes the race; a warm checkout skips this entirely. Best-effort:
-# a resolve failure is left for `swift test` below to report properly.
-if [ ! -d "$core/.build/checkouts" ] || [ -z "$(ls -A "$core/.build/checkouts" 2>/dev/null)" ]; then
-    echo "  suite: cold package checkouts — resolving first, on its own." >&2
-    ( cd "$core" && swift package resolve ) >&2 || true
-fi
-
-# Clear any compiler left orphaned by a killed wrapper before competing for
-# the lock -- see scripts/reap-orphaned-swift.sh for why this is not paranoia.
-bash "$(dirname "$0")/reap-orphaned-swift.sh" || true
-
 # --- run --------------------------------------------------------------------
-# `set -e` is off for this one command so a failure reaches the cache logic
-# (which must NOT write a stamp) and the trap, rather than exiting immediately.
-set +e
-# $test_args is deliberately UNQUOTED: it must reach swift test as a flag
-# (`--parallel` or `--no-parallel`) rather than as one quoted word. "$@" stays
-# quoted so caller arguments with spaces survive.
-# shellcheck disable=SC2086
-#
-# Backgrounded under `set -m` so the subshell becomes its own PROCESS GROUP,
-# then killed as a group if this wrapper dies. Without that, a timeout or a
-# Ctrl-C leaves the compiler running, holding SwiftPM's per-`.build` lock, and
-# every later build queues behind it silently -- the failure looks like a slow
-# build and cost hours on 2026-09-04. `wait` still yields the real exit status.
-set -m
-# Output also lands in $suite_log so a failure can be NAMED after the fact.
-# The commit guard's 4001-test merge run on 2026-10-04 reported "1 issue" and
-# nothing else, which cost a second 5-minute full run just to learn which test.
-# `pipefail` inside the subshell makes its exit status swift's, not tee's.
 suite_log="${AUDIOUT_TEST_LOG:-/tmp/audiout-suite-last.log}"
-( set -o pipefail; cd "$core" && swift test $test_args "$@" 2>&1 | tee "$suite_log" >&2 ) &
-swift_pgid=$!
-# `|| true`: by the time this trap fires the group is usually already reaped
-# by the `wait` below, so kill fails with "no such process" -- and under
-# `set -e` a failing trap command aborts the rest of the trap (skipping the
-# release) and overrides the exit code, turning a pass into a false failure.
-# Same fix as PR #165; carried here because this line changed too.
-trap 'kill -- -"$swift_pgid" 2>/dev/null || true; capacity_release' EXIT HUP INT TERM
-wait "$swift_pgid"
-status=$?
-set +m
-set -e
+local_swift_test "$suite_log" "$@"
 
 if [ "$status" -eq 0 ]; then
     suite_cache_record "$key" "$@"

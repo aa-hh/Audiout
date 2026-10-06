@@ -634,7 +634,7 @@ public enum PopoverColumnGrid {
 
     /// Height of the inline rename field. Tall enough to read as a control
     /// (rather than a label with a box around it) while still fitting beside
-    /// the 64 pt icon well in the side-by-side header band.
+    /// the 48 pt icon well in the side-by-side header band.
     public static let titleFieldHeight: CGFloat = 28
     /// Corner radius of the inline rename field — the control radius every
     /// field and button in the app wears.

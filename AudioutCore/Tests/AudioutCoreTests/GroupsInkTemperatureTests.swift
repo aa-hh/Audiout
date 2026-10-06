@@ -276,7 +276,7 @@ import AppKit
                                 item: SidebarViewController.Node(.header("Speakers"))) as? NSTableCellView)
         expectSameToken(headerCell.textField?.textColor, Tokens.Color.label2, "sidebar header cell")
 
-        for (payload, label) in [(SidebarViewController.Node.Payload.groupsOverview, "pinned Groups row"),
+        for (payload, label) in [(SidebarViewController.Node.Payload.speakersOverview, "Speakers plate"),
                                  (.mainOut, "Main Audio row"),
                                  (.device(makeDevice()), "device row")] {
             let cell = try #require(

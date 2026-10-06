@@ -4,28 +4,27 @@ import AppKit
 import AudioutCore
 import AudioutSharedUI
 
-/// The Groups SCREEN's content controller (one-surface app, roadmap 032): a
-/// CONFIGURATION-ONLY owner of the groups sidebar/editor plumbing. Viewing or
-/// editing a group here NEVER activates it or moves audio — activation lives
-/// in the Mixer screen.
+/// The Scenes and Speakers screens' content controller (one-surface app): a
+/// CONFIGURATION-ONLY owner of the scene editor and speaker sidebar plumbing.
+/// Viewing or editing a scene or a speaker here NEVER activates it or moves
+/// audio — activation lives in the Mixer screen.
 ///
-/// It owns an `NSSplitViewController` whose sidebar item is a source-list
-/// `NSOutlineView` (`SidebarViewController` — the device fleet) and whose
-/// content item is swapped between four panes: the saved-group card overview
-/// (`GroupsOverviewViewController`, the sidebar's pinned "Scenes" row), the
-/// group editor (`GroupEditorViewController`, pushed in place when a card is
-/// opened), the device detail pane (`DeviceDetailViewController`, when a device
-/// is selected), and the whole-mix `MainOutDetailViewController` (the sidebar's
-/// "Main Audio" row). It owns NO window: the app's `AppSurfaceController` hosts
-/// `contentController` as the surface's Groups screen and tells this controller
-/// when that screen is visible via `setHostVisible(_:)` (the standalone Groups
-/// window was retired in U6).
+/// It vends two roots. `scenesContentController` is a footer-bearing
+/// `ContentPaneHostViewController` swapped between the saved-scene card
+/// overview (`GroupsOverviewViewController`) and the scene editor
+/// (`GroupEditorViewController`, pushed in place when a card is opened).
+/// `speakersContentController` is an `NSSplitViewController` whose sidebar
+/// item is a source-list `NSOutlineView` (`SidebarViewController`, the speaker
+/// list) and whose content item is a second host swapped between the Speakers
+/// page (`SpeakersPageViewController`, the sidebar's "Speakers" plate), a
+/// speaker's page (`DeviceDetailViewController`) and the whole-mix
+/// `MainOutDetailViewController` (the sidebar's "Main Audio" row). It owns NO
+/// window: the app's `AppSurfaceController` hosts the roots and tells this
+/// controller which one is visible via `setVisibleTab(_:)`.
 ///
-/// AUTO-SELECT: with no sidebar selection the controller selects the pinned
-/// Groups ROW and shows the overview — which absorbed the old "No groups yet"
-/// pane as its own zero-groups canvas, so there is one landing place instead of
-/// two and no first-saved-group favouritism. The content area is never a no-op
-/// view.
+/// DEFAULTS: the scenes host starts on the card overview, which draws its own
+/// zero-scenes canvas; a deselected sidebar lands on the Speakers page. The
+/// content area is never a no-op view.
 ///
 /// Group creation is a standard macOS sheet (`GroupCreationSheetController`)
 /// presented over the hosting window; creating a group never activates it
@@ -53,6 +52,8 @@ public final class MixerWindowController {
     /// The UI-agnostic group model shared with the menu. Source of truth for
     /// groups; the screen reads it and writes through it, never around it.
     private let groupController: GroupController
+    private let speakerLibrary: SpeakerLibraryController
+    private let ownsSpeakerLibrary: Bool
 
     /// Resolves/persists per-device icon overrides, shared with every child
     /// pane so the sidebar, editor/creation checklists, and the detail pane all
@@ -75,6 +76,7 @@ public final class MixerWindowController {
     private let detailViewController: DeviceDetailViewController
     private let mainOutDetailViewController: MainOutDetailViewController
     private let overviewViewController: GroupsOverviewViewController
+    private let speakersPageViewController: SpeakersPageViewController
 
     /// Tone seams, wired by the app to the backend. This controller never
     /// calls a backend itself (`AGENTS.md`) — it only forwards what the two
@@ -90,6 +92,9 @@ public final class MixerWindowController {
     public var mainOutEQProvider: (() -> DeviceEQ)?
     /// The device page's "Forget" on its Password row, with the device id.
     public var onForgetAirPlayPassword: ((String) -> Void)?
+    /// Asks the host to bring the Scenes screen forward: a scene created from
+    /// the Speakers sidebar opens its editor there.
+    public var onRequestScenesTab: (() -> Void)?
 
     /// A selection that arrived before the snapshot carrying its device did —
     /// the popover's "Equalizer…" deep link can name a speaker this screen has
@@ -99,19 +104,18 @@ public final class MixerWindowController {
     /// or not at all.
     private var pendingSelection: SidebarSelection?
 
-    /// Hosts the swapped content pane (editor / detail / empty) PLUS the
-    /// persistent footer caption pinned beneath it. SCOPED TO THE CONTENT
-    /// SPLIT ITEM ONLY — the sidebar split item runs the full height of the
-    /// split view down to its own "Add scene" bar, with no footer stealing
-    /// its bottom space (design review 2026-07-18: the footer used to wrap
-    /// the whole split view, which left a gap above it under the sidebar
-    /// too). The footer is content, not chrome — it ships wherever the
-    /// content is hosted. See `AudioutWindowUI/AGENTS.md`.
-    private let contentHostViewController = ContentPaneHostViewController()
+    /// The Scenes screen's root: the card overview or the editor, above the
+    /// persistent footer caption. Never itself swapped; only its child changes.
+    private let scenesHost = ContentPaneHostViewController(
+        footerText: "Set up scenes here, then switch to the Mixer to play")
 
-    /// The content split item — wraps `contentHostViewController`, which is
-    /// never itself swapped; only its inner child (editor / detail / empty)
-    /// changes as the sidebar selection changes.
+    /// The content beside the sidebar: the Speakers page, a speaker's page or
+    /// Main Audio. No footer, so the content runs the full height like the
+    /// sidebar does.
+    private let speakersHost = ContentPaneHostViewController(footerText: nil)
+
+    /// The split's content item — wraps `speakersHost`, which is never itself
+    /// swapped; only its inner child changes as the sidebar selection changes.
     private let contentSplitItem: NSSplitViewItem
 
     /// The sidebar split item, kept so `refreshAll()` can re-assert that it is
@@ -122,14 +126,22 @@ public final class MixerWindowController {
                deviceIconController: DeviceIconController = DeviceIconController(loadPersisted: false),
                appRouting: AppRoutingController? = nil,
                btHardwareVolumeStore: BTHardwareVolumeStore? = nil,
-               settings: AppSettings = AppSettings()) {
+               settings: AppSettings = AppSettings(),
+               speakerLibrary: SpeakerLibraryController? = nil) {
         self.groupController = groupController
+        self.ownsSpeakerLibrary = speakerLibrary == nil
+        self.speakerLibrary = speakerLibrary ?? SpeakerLibraryController(loadPersisted: false)
         self.deviceIconController = deviceIconController
         self.sidebarViewController = SidebarViewController()
         self.editorViewController = GroupEditorViewController(groupController: groupController)
         self.detailViewController = DeviceDetailViewController(groupController: groupController, settings: settings)
         self.mainOutDetailViewController = MainOutDetailViewController(settings: settings)
         self.overviewViewController = GroupsOverviewViewController(groupController: groupController)
+        self.speakersPageViewController = SpeakersPageViewController(library: self.speakerLibrary,
+                                                                     groupController: groupController)
+        editorViewController.speakerLibrary = self.speakerLibrary
+        detailViewController.speakerLibrary = self.speakerLibrary
+        overviewViewController.speakerLibrary = self.speakerLibrary
 
         // Share the one icon controller across every pane so a per-device
         // override picked anywhere renders identically everywhere.
@@ -187,10 +199,11 @@ public final class MixerWindowController {
         sidebarItem.canCollapse = false
         sidebarSplitItem = sidebarItem
 
-        // Content item — wraps the footer-bearing host, which starts on the
-        // overview (empty canvas until the first group is saved).
-        contentHostViewController.setContent(overviewViewController)
-        contentSplitItem = NSSplitViewItem(viewController: contentHostViewController)
+        // The scenes host starts on the overview (empty canvas until the first
+        // scene is saved); the speakers host on the Speakers page.
+        scenesHost.setContent(overviewViewController)
+        speakersHost.setContent(speakersPageViewController)
+        contentSplitItem = NSSplitViewItem(viewController: speakersHost)
 
         splitViewController.addSplitViewItem(sidebarItem)
         splitViewController.addSplitViewItem(contentSplitItem)
@@ -201,6 +214,18 @@ public final class MixerWindowController {
         // `refreshAll()`/auto-select runs, and those run on `update(devices:)`
         // before any host has mounted the content.
         splitViewController.loadViewIfNeeded()
+
+        detailViewController.onVisibilityChange = { [weak self] in self?.refreshAll() }
+        // The sidebar's two groups ARE the visibility setting: its menu and
+        // drag write through the one library, then every list re-reads it.
+        sidebarViewController.onSetVisibility = { [weak self] ids, visibility in
+            guard let self else { return }
+            if self.speakerLibrary.setVisibility(visibility, for: ids) { self.refreshAll() }
+        }
+        // Every Forget door runs the same confirm.
+        sidebarViewController.onForget = { [weak self] ids in self?.requestForget(ids: ids) }
+        speakersPageViewController.onForget = { [weak self] ids in self?.requestForget(ids: ids) }
+        detailViewController.onForget = { [weak self] id in self?.requestForget(ids: [id]) }
 
         // The panes report tone gestures; this controller forwards them
         // untouched to whoever owns the backend.
@@ -220,6 +245,9 @@ public final class MixerWindowController {
         // activating, so `activeGroupID` is untouched and no audio moves.
         detailViewController.onSelectGroup = { [weak self] groupID in
             self?.select(.group(id: groupID))
+            // The editor lives in the scenes host; without the tab switch the
+            // click lands on a screen nobody is looking at.
+            self?.onRequestScenesTab?()
         }
 
         // Sidebar selection drives the content pane.
@@ -236,13 +264,9 @@ public final class MixerWindowController {
         sidebarViewController.onNewGroupFromSelection = { [weak self] deviceIDs in
             self?.presentCreateSheet(preselected: deviceIDs)
         }
-        // A card opens its group's editor as an IN-PANE push: the sidebar keeps
-        // the Groups row highlighted (`select` maps a `.group` target onto it),
-        // so the fleet list never moves under the pointer.
+        // A card opens its scene's editor as an IN-PANE push in the scenes host.
         overviewViewController.onOpenGroup = { [weak self] groupID in
-            guard let self else { return }
-            self.sidebarViewController.select(.group(id: groupID), notify: false)
-            self.showEditor(for: groupID)
+            self?.showEditor(for: groupID)
         }
         // Both of the overview's "+" doors — the dashed grid tile and the empty
         // canvas's centred one — run the same creation sheet as the sidebar's.
@@ -254,7 +278,6 @@ public final class MixerWindowController {
         // groups moved into the pane; the flow is unchanged.)
         overviewViewController.onRequestRename = { [weak self] groupID in
             guard let self else { return }
-            self.sidebarViewController.select(.group(id: groupID), notify: false)
             self.showEditor(for: groupID)
             self.editorViewController.focusRenameField()
         }
@@ -262,13 +285,10 @@ public final class MixerWindowController {
         // confirm-then-delete flow its button does.
         overviewViewController.onRequestDelete = { [weak self] groupID in
             guard let self else { return }
-            self.sidebarViewController.select(.group(id: groupID), notify: false)
             self.showEditor(for: groupID)
             self.editorViewController.requestDelete()
         }
-        // "‹ Scenes" / Escape / ⌘[ pops the editor back to the overview. The
-        // Scenes row was already the selected one, so nothing in the sidebar
-        // moves.
+        // "‹ Scenes" / Escape / ⌘[ pops the editor back to the overview.
         editorViewController.onBack = { [weak self] in
             self?.dismissEditor()
         }
@@ -276,7 +296,7 @@ public final class MixerWindowController {
         // overview, now one card lighter).
         editorViewController.onDidDeleteGroup = { [weak self] in
             self?.refreshAll()
-            self?.showDefaultContent()
+            self?.showOverview()
         }
         // Renames / membership edits refresh the sidebar labels in place, AND
         // re-read the card overview: it is a projection of the same model, and
@@ -290,12 +310,6 @@ public final class MixerWindowController {
             refreshSidebar()
             overviewViewController.reload(devices: orderedDevices())
         }
-        // Escape out of a rename hands keyboard focus to the sidebar's row
-        // list — the one control present whatever pane is showing. Anywhere
-        // else (including nowhere) leaves Tab with nothing to advance from.
-        editorViewController.onDidCancelRename = { [weak self] in
-            self?.sidebarViewController.claimKeyboardFocus()
-        }
         // Build the three swapped panes' view trees HERE rather than on the
         // first swap that shows one. Measured headless with the seven-speaker
         // demo fleet: the first `showDetail` — the Mixer row's "Equalizer…"
@@ -307,7 +321,7 @@ public final class MixerWindowController {
         // takes them off the click path too.
         for pane in [detailViewController as NSViewController,
                      mainOutDetailViewController,
-                     editorViewController] {
+                     editorViewController, speakersPageViewController] {
             pane.loadViewIfNeeded()
             // Loading the tree is only half of it: the first swap that shows a
             // pane also pays for solving its constraints from nothing. Solving
@@ -334,24 +348,34 @@ public final class MixerWindowController {
     /// (same B8 problem, same fix shape, one host each).
     public var test_isVisibleOverride = false
 
-    private var hostIsVisible = false
+    /// The two roots this controller vends.
+    public enum Tab: Sendable { case scenes, speakers }
 
-    /// Set by the host showing ``contentController`` (the one surface's Groups
-    /// screen), so the refresh gate below asks about the content the user is
-    /// actually looking at. Turning it on
-    /// refreshes immediately: `update(devices:)` kept storing snapshots while
-    /// hidden, so there is always a current one to catch up to.
-    /// `PopoverController.surfaceDidShow()` is the same idea, one host over.
-    public func setHostVisible(_ visible: Bool) {
-        hostIsVisible = visible
-        if visible { refreshAll() }
+    private var visibleTab: Tab?
+
+    /// Set by the host showing ``scenesContentController`` or
+    /// ``speakersContentController`` (nil when it shows neither). Each root
+    /// repaints only while it is the tab on screen, so turning a tab on
+    /// refreshes it immediately: `update(devices:)` and the Speakers page's
+    /// setters kept storing state while it was hidden, so there is always a
+    /// current one to catch up to. `PopoverController.surfaceDidShow()` is the
+    /// same idea, one host over.
+    public func setVisibleTab(_ tab: Tab?) {
+        visibleTab = tab
+        if tab != nil { refreshAll() }
     }
 
-    /// Whether the content should be treated as visible for refresh-gating
-    /// purposes — a host showing this content, or the test override. Mirrors
+    /// Whether either root should be treated as visible for refresh-gating
+    /// purposes — a host showing one, or the test override. Mirrors
     /// `PopoverController.isEffectivelyShown`.
     private var isEffectivelyVisible: Bool {
-        hostIsVisible || test_isVisibleOverride
+        visibleTab != nil || test_isVisibleOverride
+    }
+
+    /// Whether `tab`'s root is the one on screen; the test override stands in
+    /// for both.
+    private func isShowing(_ tab: Tab) -> Bool {
+        visibleTab == tab || test_isVisibleOverride
     }
 
     /// Push the latest device snapshot. Refreshes the sidebar and the visible
@@ -362,36 +386,79 @@ public final class MixerWindowController {
     /// full rebuild while hidden avoids doing real work (sidebar node-tree
     /// rebuild + `NSOutlineView` reload + content-pane re-render) that nobody
     /// can see (B8, mirrors `PopoverController`'s identical fix for the same
-    /// problem). `setHostVisible(true)` still refreshes unconditionally, so
+    /// problem). `setVisibleTab(_:)` with a tab still refreshes unconditionally, so
     /// the screen always shows current data the moment it appears.
     public func update(devices: [Device]) {
         devicesByID = Dictionary(uniqueKeysWithValues: devices.map { ($0.id, $0) })
+        if ownsSpeakerLibrary { speakerLibrary.update(liveDevices: devices, groups: groupController.groups) }
         guard isEffectivelyVisible else { return }
         refreshAll()
     }
 
-    /// The root content view controller — the split view (sidebar full-height
-    /// + the footer-bearing content host swapping overview/editor/detail panes).
-    /// This is what the app's surface hosts as the Groups screen — one
-    /// controller, whatever the host, footer included. Refreshing the content
-    /// before handing it off keeps a freshly-hosted screen correct.
-    public var contentController: NSViewController {
-        refreshAll()
+    /// The Scenes screen's root: the footer-bearing host swapping the card
+    /// overview and the editor. Refreshing before handing it off keeps a
+    /// freshly-hosted screen correct.
+    public var scenesContentController: NSViewController {
+        refreshAll(handedOff: .scenes)
+        return scenesHost
+    }
+
+    /// The Speakers screen's root: the split view, the sidebar full-height
+    /// beside the host swapping the Speakers page, a speaker's page and Main
+    /// Audio.
+    public var speakersContentController: NSViewController {
+        refreshAll(handedOff: .speakers)
         return splitViewController
     }
 
     // MARK: Selection → content pane
 
+    public func refreshSpeakerPresentation() {
+        guard isEffectivelyVisible else { return }
+        refreshAll()
+    }
+
+    /// The Speakers page, for the app's Bluetooth access and Pair wiring.
+    public var speakersPage: SpeakersPageViewController { speakersPageViewController }
+
+    /// The Speakers page's Bluetooth access row (`nil` hides it). Stored at
+    /// once, painted only while the Speakers tab is on screen;
+    /// `setVisibleTab(_:)` catches a hidden page up.
+    public func setSpeakerBluetoothAccess(_ access: SpeakerBluetoothAccessPresentation?) {
+        speakersPageViewController.setBluetoothAccess(access)
+        reloadSpeakersPageIfShown()
+    }
+
+    /// Whether the app's `SpeakerSearch` has finished, for the Speakers page's
+    /// caption and lost-speaker row. Stored and painted like the access row.
+    public func setSpeakerSearchDone(_ done: Bool) {
+        speakersPageViewController.isSearchDone = done
+        reloadSpeakersPageIfShown()
+    }
+
+    private func reloadSpeakersPageIfShown() {
+        guard isShowing(.speakers), speakersHost.currentChild === speakersPageViewController else { return }
+        speakersPageViewController.reload()
+    }
+
+    /// Reads the saved tone of a speaker the Mac can't find; forwarded to the
+    /// speaker page, which reads it once per show.
+    public var storedDeviceEQ: ((String) -> DeviceEQ?)? {
+        get { detailViewController.storedDeviceEQ }
+        set { detailViewController.storedDeviceEQ = newValue }
+    }
+
     private func handleSidebarSelection(_ selection: SidebarSelection?) {
         switch selection {
+        case .speakersOverview:
+            showSpeakersPage()
         case .groupsOverview:
             showOverview()
         case .group(let id):
-            // Selecting a group ONLY shows its editor (rename / membership /
-            // delete). CONFIG-ONLY: selection never activates the group or moves
-            // audio — activation lives in the Mixer screen, not here.
+            // Selecting a scene ONLY shows its editor (rename / membership /
+            // delete) in the scenes host; the sidebar is untouched. CONFIG-ONLY:
+            // selection never activates the scene or moves audio.
             showEditor(for: id)
-            refreshSidebar()
         case .device(let id):
             // Selecting a device shows its detail pane. CONFIG-ONLY: this never
             // activates a group, changes routing, or moves audio.
@@ -399,19 +466,21 @@ public final class MixerWindowController {
         case .mainOut:
             showMainOut()
         case .none:
-            showDefaultContent()
+            showDefaultSpeakersContent()
         }
     }
 
-    /// The screen's AUTO-SELECT rule (direction C): with no explicit selection,
-    /// select the pinned Groups ROW and show the card overview. It replaces the
-    /// old "first saved group's editor, else the empty pane" pair — the
-    /// overview is the same landing place whether there are zero groups or ten
-    /// (it draws its own empty canvas), and it opens no group's editor on the
-    /// user's behalf.
-    private func showDefaultContent() {
+    /// A deselected sidebar lands on the Speakers page. `.groupsOverview` has
+    /// no sidebar row, so selecting it clears the highlight.
+    private func showDefaultSpeakersContent() {
         sidebarViewController.select(.groupsOverview, notify: false)
-        showOverview()
+        showSpeakersPage()
+    }
+
+    private func showSpeakersPage() {
+        shownDetailDeviceID = nil
+        speakersPageViewController.reload()
+        swapSpeakers(to: speakersPageViewController)
     }
 
     /// Step back from a group's editor to the card overview: the "‹ Scenes"
@@ -420,7 +489,7 @@ public final class MixerWindowController {
     /// through to closing the window.
     @discardableResult
     public func dismissEditor() -> Bool {
-        guard currentContent === editorViewController else { return false }
+        guard scenesHost.currentChild === editorViewController else { return false }
         showOverview()
         return true
     }
@@ -428,24 +497,22 @@ public final class MixerWindowController {
     /// Show the saved-group card overview, re-read from the current model +
     /// fleet snapshot.
     private func showOverview() {
-        shownDetailDeviceID = nil
         overviewViewController.reload(devices: orderedDevices())
-        swapContent(to: overviewViewController)
+        swapScenes(to: overviewViewController)
     }
 
     /// Show the detail pane for `deviceID` — the page that DESCRIBES and TUNES
-    /// that speaker. Falls back to the default
-    /// content when the id isn't in the current snapshot (a stale selection) so
-    /// the content area is never left on a device that no longer exists.
+    /// that speaker. Falls back to the Speakers page when the library no
+    /// longer knows the id (a stale selection, or a forgotten speaker) so the
+    /// content area is never left on a speaker that no longer exists.
     private func showDetail(for deviceID: String) {
-        guard let device = devicesByID[deviceID] else {
-            shownDetailDeviceID = nil
-            showDefaultContent()
+        guard let record = speakerLibrary.record(for: deviceID) else {
+            showDefaultSpeakersContent()
             return
         }
         shownDetailDeviceID = deviceID
-        detailViewController.show(device: device)
-        swapContent(to: detailViewController)
+        detailViewController.show(record: record)
+        swapSpeakers(to: detailViewController)
     }
 
     /// Show the whole-mix page. Nothing to look up — the one thing it renders
@@ -453,13 +520,12 @@ public final class MixerWindowController {
     private func showMainOut() {
         shownDetailDeviceID = nil
         mainOutDetailViewController.show(eq: mainOutEQProvider?() ?? .flat)
-        swapContent(to: mainOutDetailViewController)
+        swapSpeakers(to: mainOutDetailViewController)
     }
 
     private func showEditor(for groupID: String) {
-        shownDetailDeviceID = nil
         editorViewController.show(groupID: groupID, devices: orderedDevices())
-        swapContent(to: editorViewController)
+        swapScenes(to: editorViewController)
     }
 
     /// Select `selection` from OUTSIDE the sidebar — the popover's
@@ -472,20 +538,137 @@ public final class MixerWindowController {
     /// `update(devices:)`. The pending selection is applied at the end of the
     /// first `refreshAll()` whose snapshot carries the id.
     public func select(_ selection: SidebarSelection) {
-        if case .device(let id) = selection, devicesByID[id] == nil {
+        if case .device(let id) = selection, speakerLibrary.record(for: id) == nil {
             pendingSelection = selection
             return
         }
         pendingSelection = nil
-        sidebarViewController.select(selection, notify: false)
+        switch selection {
+        case .group, .groupsOverview:
+            break   // scenes live in the other tab; the sidebar is untouched
+        default:
+            sidebarViewController.select(selection, notify: false)
+        }
         handleSidebarSelection(selection)
+    }
+
+    // MARK: Forget
+
+    /// Ask before forgetting `ids` (every door hands only speakers the Mac
+    /// can't find). Refuses outright when forgetting would leave a scene with
+    /// no speaker: deleting that scene is the user's call, and deleting a
+    /// scene can move audio, so this flow never does it.
+    private func requestForget(ids: Set<String>) {
+        guard !ids.isEmpty else { return }
+        guard let window = splitViewController.view.window, !HeadlessRuntime.isActive else {
+            // No confirmation means no forget; `test_confirmForget(ids:)` is
+            // the headless path.
+            return
+        }
+        let refused = !blockingScenes(for: ids).isEmpty || !routedSpeakers(ids).isEmpty
+        makeForgetAlert(ids: ids).beginSheetModal(for: window) { [weak self] response in
+            guard response == .alertFirstButtonReturn, !refused else { return }
+            self?.performForget(ids: ids)
+        }
+    }
+
+    private func affectedScenes(for ids: Set<String>) -> [Group] {
+        groupController.groups.filter { !Set($0.memberIDs).isDisjoint(with: ids) }
+    }
+
+    /// Scenes whose every member is being forgotten: removing them would
+    /// leave the scene empty, which `GroupController` refuses.
+    private func blockingScenes(for ids: Set<String>) -> [Group] {
+        groupController.groups.filter { Set($0.memberIDs).isSubset(of: ids) }
+    }
+
+    /// Speakers Main Audio or an app is still set to play on. Core skips
+    /// them, so the confirm refuses them in words instead. A recovery lookup
+    /// or a Bluetooth reconnect attempt keeps a row visible (`isInUse`) but
+    /// never blocks Forget.
+    private func routedSpeakers(_ ids: Set<String>) -> [SpeakerPresentationRecord] {
+        speakerLibrary.records.filter { ids.contains($0.id) && $0.isRouted }
+    }
+
+    /// The confirm, in the shape of the scene editor's delete alert: Forget
+    /// first and destructive but off Return, Cancel on Return. A refusal is
+    /// one OK button that says which scene to delete first, or which speaker
+    /// is still in use.
+    private func makeForgetAlert(ids: Set<String>) -> NSAlert {
+        let alert = NSAlert()
+        let name = ids.count == 1 ? ids.first.map { speakerLibrary.record(for: $0)?.displayName ?? $0 } : nil
+        let blocking = blockingScenes(for: ids)
+        if !blocking.isEmpty {
+            alert.messageText = name.map { "Can\u{2019}t forget \u{201C}\($0)\u{201D}" }
+                ?? "Can\u{2019}t forget \(ids.count) speakers"
+            let scenes = blocking.map { "\u{201C}\($0.name)\u{201D}" }.joined(separator: ", ")
+            alert.informativeText = blocking.count == 1
+                ? "Delete \(scenes) first: it has no other speaker."
+                : "Delete \(scenes) first: they have no other speaker."
+            alert.addButton(withTitle: "OK")
+            return alert
+        }
+        let routed = routedSpeakers(ids)
+        if !routed.isEmpty {
+            alert.messageText = name.map { "Can\u{2019}t forget \u{201C}\($0)\u{201D}" }
+                ?? "Can\u{2019}t forget \(ids.count) speakers"
+            let names = routed.map { "\u{201C}\($0.displayName)\u{201D}" }.joined(separator: ", ")
+            alert.informativeText = "Main Audio or an app is still set to play on \(names). Change that in the Mixer first."
+            alert.addButton(withTitle: "OK")
+            return alert
+        }
+        alert.messageText = name.map { "Forget \u{201C}\($0)\u{201D}?" } ?? "Forget \(ids.count) speakers?"
+        let subject = name == nil ? "They" : "It"
+        switch affectedScenes(for: ids).count {
+        case 0: alert.informativeText = name == nil ? "They aren\u{2019}t in any scene." : "It isn\u{2019}t in any scene."
+        case 1: alert.informativeText = "\(subject) will be removed from 1 scene."
+        case let m: alert.informativeText = "\(subject) will be removed from \(m) scenes."
+        }
+        alert.addButton(withTitle: "Forget")
+        alert.addButton(withTitle: "Cancel")
+        alert.alertStyle = .warning
+        alert.buttons[0].hasDestructiveAction = true
+        alert.buttons[0].keyEquivalent = ""
+        alert.buttons[1].keyEquivalent = "\r"
+        return alert
+    }
+
+    /// A throw from Core (a failed scene write, or a scene that would be
+    /// emptied) reports nothing there, so it gets the scene editor's
+    /// plain-words alert here. Either way every list re-reads the stores, and
+    /// a forgotten speaker whose page is showing falls back to the Speakers
+    /// page.
+    private func performForget(ids: Set<String>) {
+        do {
+            try speakerLibrary.forget(ids, scenes: groupController)
+        } catch {
+            test_forgetFailureReported = true
+            GroupEditorViewController.presentPersistFailureAlert(
+                message: ids.count == 1 ? "Couldn\u{2019}t forget the speaker." : "Couldn\u{2019}t forget the speakers.",
+                over: splitViewController.view.window)
+        }
+        refreshAll()
+    }
+
+    /// Where "Manage speakers…" lands: This Mac's page, else the first speaker
+    /// in the sidebar's order, else the Speakers page.
+    public var firstSpeakerSelection: SidebarSelection {
+        let records = speakerLibrary.records
+        if let mac = records.first(where: \.isLocalDevice) { return .device(id: mac.id) }
+        // The sidebar's order: alphabetical, the "In the Mixer" group first.
+        let byName = records.sorted {
+            let comparison = $0.displayName.localizedStandardCompare($1.displayName)
+            return comparison == .orderedSame ? $0.id < $1.id : comparison == .orderedAscending
+        }
+        let first = byName.first { $0.visibility != .hideWhenNotInUse } ?? byName.first
+        return first.map { .device(id: $0.id) } ?? .speakersOverview
     }
 
     /// Apply a deep link that was waiting for its device to show up. Runs at
     /// the END of `refreshAll()` so it wins over the auto-select rule that ran
     /// earlier in the same pass.
     private func applyPendingSelection() {
-        guard case .device(let id)? = pendingSelection, devicesByID[id] != nil else { return }
+        guard case .device(let id)? = pendingSelection, speakerLibrary.record(for: id) != nil else { return }
         let selection = pendingSelection!
         pendingSelection = nil
         sidebarViewController.select(selection, notify: false)
@@ -499,8 +682,9 @@ public final class MixerWindowController {
     /// Present the standard macOS "Add scene" sheet over the hosting window
     /// (revamp: replaces the old in-pane draft). The name is prefilled with the next
     /// "Scene N"; `preselected` seeds the membership checklist (from a device
-    /// multi-selection, or empty). On create: refresh, select the resolved group
-    /// in the sidebar, and open its editor — NO activation, CONFIG-ONLY.
+    /// multi-selection, or empty). On create: refresh, open the resolved
+    /// scene's editor in the scenes host, and ask the host for the Scenes
+    /// screen — NO activation, CONFIG-ONLY.
     ///
     /// Fully constructible/drivable headless: the controller is built and its
     /// `onComplete` wired unconditionally, but the actual sheet is only
@@ -519,18 +703,18 @@ public final class MixerWindowController {
             self.createSheetController = nil
             guard let result else { return }   // cancelled
             self.refreshAll()
-            self.sidebarViewController.select(.group(id: result.group.id), notify: false)
             self.showEditor(for: result.group.id)
+            self.onRequestScenesTab?()
         }
         createSheetController = sheet
-        // Present the sheet over the split view controller so it re-parents to
-        // whichever window currently hosts the content (the one surface's
-        // shell). Gate on the split VC's OWN host window (`view.window`): an
-        // on-screen host means there's a real sheet parent; headless runs
-        // (host never shown) keep the reference and drive it via the test
-        // hooks instead.
-        if let host = splitViewController.view.window, host.isVisible {
-            splitViewController.presentAsSheet(sheet)
+        // Present over whichever root is on screen: the overview's "+" sits in
+        // the scenes host, the sidebar's add bar in the split view. Gate on
+        // that root's OWN host window (`view.window`): an on-screen host means
+        // there's a real sheet parent; headless runs (host never shown, or
+        // `HeadlessRuntime`) keep the reference and drive it via the test hooks.
+        let presenter: NSViewController = scenesHost.view.window?.isVisible == true ? scenesHost : splitViewController
+        if let host = presenter.view.window, host.isVisible, !HeadlessRuntime.isActive {
+            presenter.presentAsSheet(sheet)
         }
     }
 
@@ -549,63 +733,76 @@ public final class MixerWindowController {
         }
     }
 
-    /// Swap the pane shown INSIDE `contentHostViewController` (editor / detail
-    /// / empty). The content split item itself is never swapped anymore — only
-    /// its inner child changes — so the footer beneath it never moves and the
-    /// sidebar item is untouched by any of this.
-    private func swapContent(to controller: NSViewController) {
-        contentHostViewController.setContent(controller)
+    /// Swap the child shown inside the scenes host (overview / editor). The
+    /// host itself is never swapped, so its footer never moves.
+    private func swapScenes(to controller: NSViewController) {
+        scenesHost.setContent(controller)
     }
 
-    /// The view controller currently shown inside the content host (editor /
-    /// detail / empty pane), for structural comparisons.
-    private var currentContent: NSViewController? { contentHostViewController.currentChild }
+    /// Swap the child beside the sidebar (Speakers page / speaker page / Main
+    /// Audio). The split item itself is never swapped.
+    private func swapSpeakers(to controller: NSViewController) {
+        speakersHost.setContent(controller)
+    }
 
     // MARK: Refresh
 
-    private func refreshAll() {
+    /// Repaint each root that is on screen, plus `handedOff`, the root a
+    /// content getter is about to hand its host. A hidden root keeps its
+    /// stored state until `setVisibleTab(_:)` shows it.
+    private func refreshAll(handedOff: Tab? = nil) {
         // A collapsed sidebar is unrecoverable (see the split-item setup), and
         // `canCollapse` does not stop AppKit collapsing it on its own. This
         // runs on mount and whenever the screen becomes visible — exactly when
         // it has to be whole.
         if sidebarSplitItem.isCollapsed { sidebarSplitItem.isCollapsed = false }
 
+        if ownsSpeakerLibrary { speakerLibrary.update(liveDevices: Array(devicesByID.values), groups: groupController.groups) }
         let devices = orderedDevices()
-        reloadSidebarIfNeeded(groups: groupController.groups,
-                             activeGroupID: groupController.activeGroupID,
-                             devices: devices)
-        // Refresh whichever content pane is showing. The create sheet is a
-        // separate presentation (not the content pane) — it is never disturbed
+        // Refresh the visible hosts' current children. The create sheet is a
+        // separate presentation (not a content pane) — it is never disturbed
         // here.
-        if currentContent === editorViewController {
+        if isShowing(.scenes) || handedOff == .scenes {
+            refreshScenes(devices: devices)
+        }
+        if isShowing(.speakers) || handedOff == .speakers {
+            reloadSidebarIfNeeded(devices: devices)
+            refreshSpeakers()
+        }
+
+        applyPendingSelection()
+    }
+
+    private func refreshScenes(devices: [Device]) {
+        if scenesHost.currentChild === editorViewController {
             if let id = editorViewController.editingGroupID,
                groupController.groups.contains(where: { $0.id == id }) {
                 editorViewController.show(groupID: id, devices: devices)
             } else {
-                // The edited group disappeared (deleted elsewhere) — fall back.
-                showDefaultContent()
+                // The edited scene disappeared (deleted elsewhere) — fall back.
+                showOverview()
             }
-        } else if currentContent === detailViewController {
+        } else if scenesHost.currentChild === overviewViewController {
+            // The card field is a pure projection of the model + the fleet, so
+            // a fresher snapshot just redraws it (a rename, a new scene from
+            // the popover's quick-save, a member back online).
+            overviewViewController.reload(devices: devices)
+        }
+    }
+
+    private func refreshSpeakers() {
+        let speakersChild = speakersHost.currentChild
+        if speakersChild === detailViewController {
             // Re-render the detail pane from the fresher snapshot; if the shown
-            // device has since disappeared, fall back to the default content.
-            if let id = shownDetailDeviceID, let device = devicesByID[id] {
-                detailViewController.refresh(device: device)
+            // speaker has since disappeared, fall back to the Speakers page.
+            if let id = shownDetailDeviceID, let record = speakerLibrary.record(for: id) {
+                detailViewController.refresh(record: record)
             } else {
-                showDefaultContent()
+                showDefaultSpeakersContent()
             }
-        } else if currentContent === overviewViewController {
-            if sidebarViewController.currentSelection == nil {
-                // The very first refresh: the host starts on the overview, so
-                // this branch — not the `else` below — is where AUTO-SELECT
-                // has to seed the Groups row's highlight.
-                showDefaultContent()
-            } else {
-                // The card field is a pure projection of the model + the
-                // fleet, so a fresher snapshot just redraws it (a rename, a new
-                // group from the popover's quick-save, a member back online).
-                overviewViewController.reload(devices: devices)
-            }
-        } else if currentContent === mainOutDetailViewController {
+        } else if speakersChild === speakersPageViewController {
+            speakersPageViewController.reload()
+        } else if speakersChild === mainOutDetailViewController {
             // Nothing in a snapshot can invalidate the whole mix, and the page
             // owns its own in-flight tone state now (`MainOutDetailViewController
             // .pendingEdit`) — a per-event re-pull here bought nothing but a
@@ -613,8 +810,6 @@ public final class MixerWindowController {
             // during a drag. The one legitimate pull is at `showMainOut()`,
             // on open.
         }
-
-        applyPendingSelection()
     }
 
     /// Unconditional — callers of this one reach it after a user ACTION
@@ -623,11 +818,9 @@ public final class MixerWindowController {
     /// so the NEXT `update(devices:)` compares against the truth rather than
     /// whatever the last snapshot-driven reload happened to see.
     private func refreshSidebar() {
-        let groups = groupController.groups
-        let activeGroupID = groupController.activeGroupID
         let devices = orderedDevices()
-        lastSidebarProjection = sidebarProjection(groups: groups, activeGroupID: activeGroupID, devices: devices)
-        sidebarViewController.reload(groups: groups, activeGroupID: activeGroupID, devices: devices)
+        lastSidebarProjection = sidebarProjection(devices: devices)
+        sidebarViewController.reload(devices: devices, presentationRecords: speakerLibrary.records)
         test_sidebarReloadCount += 1
     }
 
@@ -639,61 +832,54 @@ public final class MixerWindowController {
     /// projection instead of rebuilding the node tree unconditionally is what
     /// turns that flood back into a no-op. Not a general diffing framework:
     /// one struct, one equality check.
-    private func reloadSidebarIfNeeded(groups: [Group], activeGroupID: String?, devices: [Device]) {
-        let projection = sidebarProjection(groups: groups, activeGroupID: activeGroupID, devices: devices)
+    private func reloadSidebarIfNeeded(devices: [Device]) {
+        let projection = sidebarProjection(devices: devices)
         guard projection != lastSidebarProjection else { return }
         lastSidebarProjection = projection
-        sidebarViewController.reload(groups: groups, activeGroupID: activeGroupID, devices: devices)
+        sidebarViewController.reload(devices: devices, presentationRecords: speakerLibrary.records)
         test_sidebarReloadCount += 1
     }
 
-    /// Exactly what the sidebar's cells render (`SidebarViewController`'s
-    /// device/group row cell), named as one Equatable value so a reload can be
-    /// gated on it changing rather than on the raw model arrays changing.
+    /// What the sidebar's cells render (`SidebarViewController`'s
+    /// device/group row cell), read from the presentation records the cells
+    /// read, so a connection that keeps a speaker available after its
+    /// discovery entry lapsed still repaints its dot and dimming. Named as one
+    /// Equatable value so a reload can be gated on it changing rather than on
+    /// the raw model arrays changing.
     private struct SidebarProjection: Equatable {
-        struct GroupCell: Equatable {
-            let id: String
-            let name: String
-            let iconSymbolName: String?
-        }
         struct DeviceCell: Equatable {
             let id: String
             let name: String
             let kind: Device.Kind
             let isAvailable: Bool
             let iconSymbolName: String
+            let visibility: SpeakerMixerVisibility?
+            let isInUse: Bool
+            let isFound: Bool
         }
-        let groups: [GroupCell]
-        let activeGroupID: String?
         let devices: [DeviceCell]
     }
 
     private var lastSidebarProjection: SidebarProjection?
 
-    private func sidebarProjection(
-        groups: [Group], activeGroupID: String?, devices: [Device]
-    ) -> SidebarProjection {
+    private func sidebarProjection(devices: [Device]) -> SidebarProjection {
         SidebarProjection(
-            groups: groups.map {
-                .init(id: $0.id, name: $0.name, iconSymbolName: $0.iconSymbolName)
-            },
-            activeGroupID: activeGroupID,
             devices: devices.map {
-                .init(id: $0.id, name: $0.name, kind: $0.kind, isAvailable: $0.isAvailable,
-                      iconSymbolName: deviceIconController.symbolName(for: $0))
+                let record = speakerLibrary.record(for: $0.id)
+                return SidebarProjection.DeviceCell(id: $0.id, name: $0.name, kind: $0.kind,
+                             isAvailable: record?.isAvailable ?? $0.isAvailable,
+                             iconSymbolName: deviceIconController.symbolName(for: $0),
+                             visibility: record?.visibility,
+                             isInUse: record?.isInUse ?? false,
+                             isFound: record.map { r in r.liveDevice != nil } ?? true)
             })
     }
 
     /// Available speakers first, then the unavailable ones, alphabetical
-    /// within each — every list on this screen (sidebar, editor, sheet,
-    /// overview) reads this one order. Sort-to-the-bottom is the owner's call
-    /// (2026-08-28) over keep-in-place; the accepted trade is that a
-    /// speaker's row moves when its availability flips.
+    /// within each — the editor, the sheet and the overview read this one
+    /// order. The sidebar sorts itself.
     private func orderedDevices() -> [Device] {
-        devicesByID.values.sorted {
-            (($0.isAvailable ? 0 : 1), $0.name, $0.id)
-                < (($1.isAvailable ? 0 : 1), $1.name, $1.id)
-        }
+        speakerLibrary.records.map(\.renderingDevice)
     }
 
     // MARK: Test-support hooks
@@ -704,6 +890,8 @@ public final class MixerWindowController {
     // suites can drive the same paths and assert structure + model state.
 
     /// The child controllers, for structural assertions.
+    public var test_isShowingSpeakersPage: Bool { speakersHost.currentChild === speakersPageViewController }
+    public var test_speakersPage: SpeakersPageViewController { speakersPageViewController }
     public var test_sidebar: SidebarViewController { sidebarViewController }
     public var test_editor: GroupEditorViewController { editorViewController }
     public var test_detail: DeviceDetailViewController { detailViewController }
@@ -718,28 +906,42 @@ public final class MixerWindowController {
 
     /// True when the editor pane is the visible content (vs detail/empty pane).
     public var test_isShowingEditor: Bool {
-        currentContent === editorViewController
+        scenesHost.currentChild === editorViewController
     }
 
-    /// True when the read-only device detail pane is the visible content.
+    /// True when the speaker page is the content beside the sidebar.
     public var test_isShowingDetail: Bool {
-        currentContent === detailViewController
+        speakersHost.currentChild === detailViewController
     }
 
-    /// True when the whole-mix Main Audio page is the visible content.
+    /// True when the whole-mix Main Audio page is the content beside the sidebar.
     public var test_isShowingMainOut: Bool {
-        currentContent === mainOutDetailViewController
+        speakersHost.currentChild === mainOutDetailViewController
     }
 
     /// The deep link still waiting for the device it names, or nil.
     public var test_pendingSelection: SidebarSelection? { pendingSelection }
 
-    /// True when the saved-group card overview is the visible content (its own
-    /// `test_isShowingEmptyCanvas` says whether it is drawing cards or the
-    /// zero-groups canvas).
-    public var test_isShowingOverview: Bool {
-        currentContent === overviewViewController
+    /// True when the saved-scene card overview is the scenes host's content
+    /// (its own `test_isShowingEmptyCanvas` says whether it is drawing cards
+    /// or the zero-scenes canvas).
+    public var test_isShowingScenesOverview: Bool {
+        scenesHost.currentChild === overviewViewController
     }
+
+    /// The Forget confirm (or refusal) for `ids`, as `requestForget` builds it.
+    public func test_makeForgetAlert(ids: Set<String>) -> NSAlert {
+        makeForgetAlert(ids: ids)
+    }
+
+    /// The confirm's "Forget" answer, without the sheet.
+    public func test_confirmForget(ids: Set<String>) {
+        performForget(ids: ids)
+    }
+
+    /// True once a failed Forget was reported instead of swallowed. Headless
+    /// seam: the alert itself is a window-guarded sheet.
+    public private(set) var test_forgetFailureReported = false
 
     /// Simulate the user selecting a sidebar row (nil = deselect → AUTO-SELECT).
     public func test_select(_ selection: SidebarSelection?) {
@@ -767,13 +969,13 @@ public final class MixerWindowController {
 
     /// The persistent footer caption's text (always present, whatever hosts
     /// the content — see `ContentPaneHostViewController`).
-    public var test_footerText: String { contentHostViewController.test_footerText }
+    public var test_footerText: String { scenesHost.test_footerText }
 
     /// The height the persistent footer strip takes out of the screen's
     /// content area, so a test can derive the budget a swapped content pane
     /// actually gets: `screen content height − this`.
     public var test_contentPaneChromeHeight: CGFloat {
-        contentHostViewController.test_chromeHeight
+        scenesHost.test_chromeHeight
     }
 }
 
@@ -810,21 +1012,26 @@ final class HairlineView: NSView {
 
 // MARK: - ContentPaneHostViewController
 
-/// Hosts the swapped content pane (overview / editor / detail) plus the
-/// persistent footer caption pinned beneath it. This exists so the footer is
-/// scoped to the CONTENT split item only — the sidebar split item runs the
-/// full height of the split view, with no footer stealing its bottom space
-/// (design review 2026-07-18). `setContent(_:)` swaps the inner child view
-/// controller; this host controller itself is never swapped, so the footer
-/// never moves as the sidebar selection changes.
+/// Hosts a swapped content pane plus, when given one, a persistent footer
+/// caption pinned beneath it. Two instances: the Scenes screen's root (with
+/// the footer) and the Speakers screen's content beside the sidebar (without
+/// one). `setContent(_:)` swaps the inner child view controller; this host
+/// controller itself is never swapped, so the footer never moves.
 final class ContentPaneHostViewController: NSViewController {
 
-    /// Persistent secondary-color caption beneath the content pane. ALWAYS
-    /// visible. Pairs with, but doesn't duplicate, the overview's lighter
-    /// zero-groups nudge (`GroupsOverviewViewController`'s empty canvas): the
-    /// footer is the one full teaching line; that subtitle is a shorter
-    /// contextual nudge shown only when there's nothing else on screen.
-    private let footerLabel = NSTextField(labelWithString: "Set up scenes here, then switch to the Mixer to play")
+    /// Persistent secondary-color caption beneath the content pane, or nil
+    /// for a host with none. Pairs with, but doesn't duplicate, the overview's
+    /// lighter zero-groups nudge (`GroupsOverviewViewController`'s empty
+    /// canvas): the footer is the one full teaching line; that subtitle is a
+    /// shorter contextual nudge shown only when there's nothing else on screen.
+    private let footerLabel: NSTextField?
+
+    init(footerText: String?) {
+        footerLabel = footerText.map { NSTextField(labelWithString: $0) }
+        super.init(nibName: nil, bundle: nil)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     /// The container the swapped child view fills; sits above the footer.
     private let contentContainer = NSView()
@@ -839,12 +1046,6 @@ final class ContentPaneHostViewController: NSViewController {
     private(set) var currentChild: NSViewController?
 
     override func loadView() {
-        footerLabel.translatesAutoresizingMaskIntoConstraints = false
-        footerLabel.font = Tokens.Font.caption
-        footerLabel.textColor = Tokens.Color.label2
-        footerLabel.alignment = .center
-        footerLabel.lineBreakMode = .byTruncatingTail
-
         contentContainer.translatesAutoresizingMaskIntoConstraints = false
 
         // Warm Signal §5.3: the CONTENT pane (swapped pane + footer strip)
@@ -861,9 +1062,27 @@ final class ContentPaneHostViewController: NSViewController {
         let titleBarSeam = HairlineView()
         titleBarSeam.translatesAutoresizingMaskIntoConstraints = false
         root.addSubview(contentContainer)
-        root.addSubview(footerLabel)
+        var constraints: [NSLayoutConstraint] = []
+        if let footerLabel {
+            footerLabel.translatesAutoresizingMaskIntoConstraints = false
+            footerLabel.font = Tokens.Font.caption
+            footerLabel.textColor = Tokens.Color.label2
+            footerLabel.alignment = .center
+            footerLabel.lineBreakMode = .byTruncatingTail
+            root.addSubview(footerLabel)
+            constraints += [
+                contentContainer.bottomAnchor.constraint(equalTo: footerLabel.topAnchor,
+                                                         constant: -Self.footerGap),
+                footerLabel.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 8),
+                footerLabel.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -8),
+                footerLabel.bottomAnchor.constraint(equalTo: root.bottomAnchor,
+                                                    constant: -Self.footerBottomInset),
+            ]
+        } else {
+            constraints.append(contentContainer.bottomAnchor.constraint(equalTo: root.bottomAnchor))
+        }
         root.addSubview(titleBarSeam)
-        NSLayoutConstraint.activate([
+        NSLayoutConstraint.activate(constraints + [
             // The SAFE-AREA top, not the root's: in a `.fullSizeContentView`
             // host this pane extends UNDER the title bar and a seam at
             // `root.topAnchor` would be hidden behind it; with no overlapping
@@ -876,12 +1095,6 @@ final class ContentPaneHostViewController: NSViewController {
             contentContainer.topAnchor.constraint(equalTo: root.topAnchor),
             contentContainer.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             contentContainer.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            contentContainer.bottomAnchor.constraint(equalTo: footerLabel.topAnchor,
-                                                     constant: -Self.footerGap),
-            footerLabel.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 8),
-            footerLabel.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -8),
-            footerLabel.bottomAnchor.constraint(equalTo: root.bottomAnchor,
-                                                constant: -Self.footerBottomInset),
         ])
         view = root
     }
@@ -894,6 +1107,7 @@ final class ContentPaneHostViewController: NSViewController {
     var test_chromeHeight: CGFloat {
         loadViewIfNeeded()
         view.layoutSubtreeIfNeeded()
+        guard let footerLabel else { return 0 }
         return footerLabel.fittingSize.height + Self.footerGap + Self.footerBottomInset
     }
 
@@ -926,7 +1140,7 @@ final class ContentPaneHostViewController: NSViewController {
     }
 
     /// The persistent footer caption's text (structural test hook).
-    var test_footerText: String { footerLabel.stringValue }
+    var test_footerText: String { footerLabel?.stringValue ?? "" }
 }
 
 // GroupsEmptyStateViewController is GONE (direction C): the overview's empty

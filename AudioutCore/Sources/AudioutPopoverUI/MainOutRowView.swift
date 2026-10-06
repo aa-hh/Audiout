@@ -78,6 +78,8 @@ public final class MainOutRowView: NSView {
     public static let rowHeight: CGFloat = 44
 
     public weak var delegate: Delegate?
+    private var saveSceneAction: (() -> Void)?
+    private var saveSceneEnabled = false
 
     /// Under-name VU meter (task T4a) — the master row gets a LIVE meter (SPEC:
     /// Main Out shares the same level as the device meters for now, until
@@ -225,7 +227,11 @@ public final class MainOutRowView: NSView {
     public func apply(options: [Option], current: MainOutTarget, master: Int, isMuted: Bool = false,
                       connectionState: ConnectionState = .off,
                       localOnlyArmed: Bool = false,
-                      busOriginDimmed: Bool? = nil) {
+                      busOriginDimmed: Bool? = nil,
+                      saveSceneEnabled: Bool = false,
+                      onSaveScene: (() -> Void)? = nil) {
+        self.saveSceneEnabled = saveSceneEnabled
+        self.saveSceneAction = onSaveScene
         self.options = options
         isMasterMuted = isMuted
         muteButton.state = isMuted ? .on : .off
@@ -277,6 +283,7 @@ public final class MainOutRowView: NSView {
         groupGlowView.isHidden = !isGroupTarget
 
         let menu = destinationPopUp.menu ?? NSMenu()
+        menu.autoenablesItems = false
         menu.removeAllItems()
         selectedTitle = nil
         var currentItem: NSMenuItem?
@@ -324,6 +331,17 @@ public final class MainOutRowView: NSView {
                 currentButtonTitle = option.buttonTitle
             }
             menu.addItem(item)
+        }
+        if onSaveScene != nil {
+            if !options.contains(where: { $0.isHeader && $0.title == "Scenes" }) {
+                if !menu.items.isEmpty { menu.addItem(.separator()) }
+                menu.addItem(.sectionHeader(title: "Scenes"))
+            }
+            let save = NSMenuItem(title: "Save selected speakers as scene", action: #selector(saveSceneSelected(_:)), keyEquivalent: "")
+            save.target = self
+            save.indentationLevel = 1
+            save.isEnabled = saveSceneEnabled
+            menu.addItem(save)
         }
         destinationPopUp.menu = menu
         // Show the currently selected target as the button's visible title
@@ -679,6 +697,11 @@ public final class MainOutRowView: NSView {
     }
 
     // MARK: Actions
+
+    @objc private func saveSceneSelected(_ sender: NSMenuItem) {
+        guard saveSceneEnabled, sender.isEnabled else { return }
+        saveSceneAction?()
+    }
 
     @objc private func selectionChanged(_ sender: NSMenuItem) {
         guard let target = sender.representedObject as? MainOutTarget else { return }

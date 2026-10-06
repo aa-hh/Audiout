@@ -160,8 +160,9 @@ public enum Tokens {
         /// `DeviceRowView`). Alias of
         /// `NSColor.selectedContentBackgroundColor`.
         public static var selectedContentBackground: NSColor { .selectedContentBackgroundColor }
-        /// Opaque shadow color for card/panel drop shadows (`CardView`). Alias
-        /// of `NSColor.black`.
+        /// Black for flat inset shades clipped inside a recess (a fader's
+        /// trough, the Equalizer `.well`, a plate's lip) and for darkening
+        /// blends; never an `NSShadow` drop shadow. Alias of `NSColor.black`.
         public static var shadow: NSColor { .black }
         /// Fully transparent fill, used to make a layer's background see
         /// through to a view behind it (`ControlPanelWindowController`). Alias
@@ -420,23 +421,36 @@ public enum Tokens {
         }
 
         /// **Equalizer** — the counterpart to ``muted``: the one hue that
-        /// means "this speaker's curve is not flat". Its consumer is the
-        /// device row's engaged Equalizer door
-        /// (`DeviceRowView.updateEQButton()`), which fills the
-        /// `custom.slider.horizontal.2.square.fill` symbol's enclosing square
-        /// OPAQUELY in this tone and draws the two band sliders inside it in
-        /// WHITE.
+        /// means "this speaker's curve is not flat". It marks a shaped curve
+        /// in four places:
+        /// - the device row's Equalizer door in the Mixer
+        ///   (`DeviceRowView.updateEQButton()`): the OUTLINE square, inked in
+        ///   this tone;
+        /// - the icon leading the Equalizer heading on the speaker page and
+        ///   the Main Audio page: the FILLED square in this tone, drawn by
+        ///   `DeviceRowView`'s mark helpers;
+        /// - the moved stretch of each EQ slider (`EQGainFillCell` in
+        ///   `EQEditorView.swift`), between the slider's neutral point and
+        ///   its knob;
+        /// - the Advanced scope (`EQResponseCurveView`): the shaped trace and
+        ///   its wash. The scope's band gridlines are reference marks drawn
+        ///   in this tone in every state, flat included.
         ///
-        /// WHERE IT MAY NOT APPEAR: anywhere else, on the same fence
-        /// ``muted`` carries. It is not a general "on" green, not a success
-        /// tone, and not available to a second control that happens to be
-        /// engaged. A door that is dark for some other reason — unavailable,
-        /// unsupported — keeps its at-rest ink.
+        /// WHERE IT MAY NOT APPEAR: anywhere else. `DeviceRowMutedStateTests`
+        /// fences the literal to exactly four source files —
+        /// `DeviceRowView.swift`, `DeviceRowView+TestSupport.swift`,
+        /// `EQEditorView.swift` and `EQResponseCurveView.swift` — so a fifth
+        /// is a design decision. It is not a general "on" green, not a
+        /// success tone, and not available to a second control that happens
+        /// to be engaged. A door that is dark for some other reason —
+        /// unavailable, unsupported — keeps its at-rest ink.
         ///
-        /// TWO VALUES, and they are a PAIR with ``muted`` rather than two
-        /// inks tuned apart. Both marks are 1.5 pt outlines 6 pt from each
-        /// other, so a difference in presence between them reads as one
-        /// control being engaged harder than the other.
+        /// FOUR HEXES: a light and a dark value, plus an Increase Contrast
+        /// variant of each. The standard light and dark values are a PAIR with
+        /// ``muted`` rather than two inks tuned apart. Both row marks are
+        /// 1.5 pt outlines 6 pt from each other, so a difference in presence
+        /// between them reads as one control being engaged harder than the
+        /// other.
         ///
         /// WHAT "PAIR" MEANS DEPENDS ON THE GROUND, and getting that wrong is
         /// how the first attempt at this failed. On the dark row the two marks
@@ -490,8 +504,22 @@ public enum Tokens {
         /// hue could deepen". Chroma is the lever, not lightness: at 0.091 no
         /// ratio saves it, and 0.111 at the old hue was still not enough to
         /// read as a colour on paper.
+        ///
+        /// CONTRAST RATIONALE FOR INCREASE CONTRAST (measured; floor 3:1):
+        /// dark Increase Contrast `#5FD597` = 10.79 canvas / 9.79 panel /
+        /// 8.60 raised / 11.10 well / 7.42 hover wash. Light Increase
+        /// Contrast `#005A28` = 8.08 flat ground / 7.00 well / 6.45 hover
+        /// wash. The token now also sits on `well`, the EQ pages' recessed
+        /// section under the slider fills, and on `panel`/`canvas` behind
+        /// the heading icon: standard dark `#41B07A` is 7.48 on well,
+        /// standard light `#007835` is 4.67 on well. It also draws the Advanced
+        /// scope's shaped trace and band gridlines on `scopeGround`, always
+        /// with its dark hexes: `#41B07A` 6.92, `#5FD597` 10.65 (the trace's
+        /// figures).
         public static var equalizer: NSColor {
-            warmDynamic(name: "equalizer", dark: 0x41B07A, light: 0x007835)
+            warmDynamic(
+                name: "equalizer", dark: 0x41B07A, darkHighContrast: 0x5FD597,
+                light: 0x007835, lightHighContrast: 0x005A28)
         }
 
         /// The COOL body ink — the same second-rung job as ``label2`` on a
@@ -821,12 +849,13 @@ public enum Tokens {
         //
         // CONTRAST RATIONALE for the whole block — everything that carries
         // meaning is measured against `scopeGround`, not against `panel`,
-        // because the ground is what it is drawn on: dark `gold` ≈ 10.2:1,
-        // subtle-dial `gold` ≈ 7.1:1, `scopeFlatLine` ≈ 6.0:1,
-        // `scopeBypassLine` ≈ 4.7:1 — all clear the ≥3:1 non-text floor.
-        // The grid is a GRIDLINE (pure reference, never the state), so the
-        // floor does not apply to it; the dotted zero line reuses
-        // `scopeFlatLine`.
+        // because the ground is what it is drawn on: `equalizer`, the shaped
+        // trace, ≈ 6.9:1 (Increase Contrast ≈ 10.7:1; only its dark hexes
+        // reach the scope, which draws under a pinned dark appearance),
+        // `scopeFlatLine` ≈ 6.0:1, `scopeBypassLine` ≈ 4.7:1 — all clear the
+        // ≥3:1 non-text floor. The grid is a GRIDLINE (pure reference, never
+        // the state, drawn in `equalizer` at 0.14 alpha), so the floor does
+        // not apply to it; the dotted zero line reuses `scopeFlatLine`.
 
         /// The scope's ground — the near-black screen the trace is drawn on.
         public static var scopeGround: NSColor {

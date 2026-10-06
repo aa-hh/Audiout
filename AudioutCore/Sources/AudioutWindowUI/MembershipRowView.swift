@@ -76,8 +76,11 @@ public final class MembershipRowView: NSView {
     private let checkbox = NSButton()
     private let iconView = NSImageView()
     private let nameLabel = NSTextField(labelWithString: "")
-    /// Small secondary annotation shown only for an unavailable member
-    /// ("Unavailable") — never a routing/status claim, just presence.
+    private var presentation: SpeakerPresentationRecord?
+    /// The trailing caption, never a routing claim. Without a presentation
+    /// record it shows only "Unavailable"/"Not connected" for an unavailable
+    /// member (`apply`); with a record it always shows the status line (when
+    /// unavailable) plus the Mixer-visibility context (`applyPresentation`).
     private let unavailableLabel = NSTextField(labelWithString: "")
 
     /// The checkbox's DRAWN skin on `.warmPane` (Warm Signal v4 §Call-1): a
@@ -164,7 +167,11 @@ public final class MembershipRowView: NSView {
         unavailableLabel.translatesAutoresizingMaskIntoConstraints = false
         unavailableLabel.font = Tokens.Font.caption
         unavailableLabel.stringValue = "Unavailable"
-        unavailableLabel.setContentHuggingPriority(.required, for: .horizontal)
+        unavailableLabel.maximumNumberOfLines = 2
+        unavailableLabel.alignment = .right
+        unavailableLabel.lineBreakMode = .byTruncatingTail
+        unavailableLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        unavailableLabel.setContentHuggingPriority(.defaultHigh, for: .horizontal)
 
         addSubview(checkbox)
         addSubview(iconView)
@@ -258,10 +265,12 @@ public final class MembershipRowView: NSView {
     /// — the group is armed AND the device is in it (C5). Everything else is
     /// cool. The system sheet's branch takes the neutral ink ladder — label,
     /// label2, label3 — with no temperature split.
+    private var isAvailable: Bool { presentation?.isAvailable ?? device.isAvailable }
+
     private func applyInk() {
         switch surface {
         case .warmPane:
-            guard device.isAvailable else {
+            guard isAvailable else {
                 nameLabel.textColor = Tokens.Color.labelCool2
                 iconView.contentTintColor = Tokens.Color.labelCool2
                 unavailableLabel.textColor = Tokens.Color.labelCool2
@@ -272,8 +281,8 @@ public final class MembershipRowView: NSView {
             iconView.contentTintColor = live ? Tokens.Color.label2 : Tokens.Color.labelCool2
             unavailableLabel.textColor = Tokens.Color.labelCool2
         case .systemSheet:
-            nameLabel.textColor = device.isAvailable ? Tokens.Color.label : Tokens.Color.label3
-            iconView.contentTintColor = device.isAvailable ? Tokens.Color.label2 : Tokens.Color.label3
+            nameLabel.textColor = isAvailable ? Tokens.Color.label : Tokens.Color.label3
+            iconView.contentTintColor = isAvailable ? Tokens.Color.label2 : Tokens.Color.label3
             unavailableLabel.textColor = Tokens.Color.label3
         }
     }
@@ -292,7 +301,7 @@ public final class MembershipRowView: NSView {
         // member keeps its seat and rim on the rail and goes grey where it
         // would be gold, so it still reads as "in this group, not playing".
         busView.apply(node: checked ? .member : .nonMember,
-                      dimmed: !device.isAvailable,
+                      dimmed: !isAvailable,
                       armed: railArmed)
     }
 
@@ -318,6 +327,7 @@ public final class MembershipRowView: NSView {
         applyInk()
 
         unavailableLabel.isHidden = device.isAvailable
+        unavailableLabel.stringValue = device.kind == .bluetooth ? "Not connected" : "Unavailable"
 
         setAccessibilityLabel(
             "\(device.name)\(device.isAvailable ? "" : ", unavailable")")
@@ -326,6 +336,25 @@ public final class MembershipRowView: NSView {
         updateBus()
     }
 
+    public func applyPresentation(_ record: SpeakerPresentationRecord?) {
+        presentation = record
+        applyInk()
+        updateBus()
+        guard let record else { return }
+        let status = record.isAvailable ? "" : record.status.text
+        unavailableLabel.stringValue = status
+        unavailableLabel.isHidden = status.isEmpty
+        unavailableLabel.toolTip = unavailableLabel.stringValue
+        nameLabel.toolTip = record.secondaryText
+        if record.kind == nil {
+            iconView.image = DeviceIcon.image("speaker")
+        }
+        setAccessibilityLabel(record.accessibilityIdentity + (record.isAvailable ? "" : ", " + record.status.text))
+        updateCheckboxAccessibilityLabel()
+    }
+
+    public var test_presentationText: String { unavailableLabel.stringValue }
+
     /// Re-announce the checkbox's VERB from the CURRENT membership state. It
     /// used to be written once in ``apply(device:checked:iconSymbolName:)`` and
     /// never again, so a row toggled in place kept telling VoiceOver to "Add"
@@ -333,7 +362,7 @@ public final class MembershipRowView: NSView {
     /// this.
     private func updateCheckboxAccessibilityLabel() {
         checkbox.setAccessibilityLabel(
-            checked ? "Remove \(device.name) from scene" : "Add \(device.name) to scene")
+            checked ? "Remove \(presentation?.accessibilityIdentity ?? device.name) from scene" : "Add \(presentation?.accessibilityIdentity ?? device.name) to scene")
     }
 
     /// Enable or disable the membership checkbox, with an optional tooltip
@@ -556,7 +585,7 @@ public final class MembershipRowView: NSView {
     public var test_nameText: String { nameLabel.stringValue }
 
     /// Whether the row is currently rendered dimmed (unavailable device).
-    public var test_isDimmed: Bool { !device.isAvailable }
+    public var test_isDimmed: Bool { surface == .warmPane ? busView.test_dimmed : !isAvailable }
 
     /// The surface this row was built for.
     public var test_surface: Surface { surface }

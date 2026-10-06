@@ -25,6 +25,8 @@ import AudioutProtocol
 @MainActor
 @Suite(.serialized) struct PopoverControllerTests {
 
+    private let isolation = TestIsolation(owner: "PopoverControllerTests")
+
     private func makePopover(
         appRouting: AppRoutingController? = nil,
         runningAppsProvider: (() -> [RunningAppInfo])? = nil
@@ -35,6 +37,7 @@ import AudioutProtocol
         let controller = GroupController(backend: backend,
                                          store: GroupStore(directory: tempDirectory()),
                                          routingStore: RoutingStore(directory: tempDirectory()),
+                                         settings: AppSettings(defaults: isolation.makeDefaults()),
                                          loadPersisted: false)
         let popover: PopoverController
         switch (appRouting, runningAppsProvider) {
@@ -43,9 +46,9 @@ import AudioutProtocol
         case let (appRouting?, nil):
             popover = PopoverController(appRouting: appRouting)
         case let (nil, provider?):
-            popover = PopoverController(runningAppsProvider: provider)
+            popover = PopoverController(appRouting: tempAppRoutingController(), runningAppsProvider: provider)
         case (nil, nil):
-            popover = PopoverController()
+            popover = PopoverController(appRouting: tempAppRoutingController())
         }
         popover.configure(groupController: controller)
         controller.ensureDefaultSelection()
@@ -75,7 +78,7 @@ import AudioutProtocol
     }
 
     private func tempDirectory() -> URL {
-        let dir = FileManager.default.temporaryDirectory
+        let dir = isolation.scratchDir
             .appendingPathComponent("PopoverControllerTests-\(UUID().uuidString)", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
@@ -120,8 +123,9 @@ import AudioutProtocol
         try await waitForFleet(backend, count: 7)
         let controller = GroupController(backend: backend, store: store,
                                          routingStore: RoutingStore(directory: tempDirectory()),
+                                         settings: AppSettings(defaults: isolation.makeDefaults()),
                                          loadPersisted: true)
-        let popover = PopoverController()
+        let popover = PopoverController(appRouting: tempAppRoutingController())
         popover.configure(groupController: controller)
         controller.ensureDefaultSelection()
         popover.test_isShownOverride = true
@@ -316,7 +320,7 @@ import AudioutProtocol
         let dispatcher = CompanionCommandDispatcher(
             groupController: controller,
             appRouting: tempAppRoutingController(),
-            settings: AppSettings(),
+            settings: AppSettings(defaults: isolation.makeDefaults()),
             isExcluded: { _ in false },
             setLocalPlaybackVolume: { _, _ in },
             applyStartBuffer: { _ in })
@@ -549,8 +553,9 @@ import AudioutProtocol
         let controller = GroupController(backend: backend,
                                          store: GroupStore(directory: tempDirectory()),
                                          routingStore: RoutingStore(directory: tempDirectory()),
+                                         settings: AppSettings(defaults: isolation.makeDefaults()),
                                          loadPersisted: false)
-        let popover = PopoverController()
+        let popover = PopoverController(appRouting: tempAppRoutingController())
         popover.configure(groupController: controller)
         controller.ensureDefaultSelection()
         // A closed popover no longer rebuilds on `update(devices:)` (audit B8);
@@ -3359,37 +3364,44 @@ import AudioutProtocol
         #expect(popover.test_diagnosisPanel(for: "office") != nil, "the retry failing again re-surfaces the panel")
     }
 
-    // MARK: F1 — Devices "+" footer strip (a menu since BT-UI)
+    // MARK: Speaker management actions
 
-    /// The "+" lives in the card's BOTTOM footer strip, not the header row
-    /// (2026-08-08): no header accessory exists, and the strip is the last row
-    /// of the card — below every subsection.
-    @Test func devicesPlusIsTheCardsLastRowNotAHeaderAccessory() async throws {
-        let (popover, _, _) = try await makePopover()
-        #expect(popover.test_cardAccessoryEnabled(title: "Output Speakers") == nil,
-                "the header row carries no accessory any more")
-        #expect(popover.test_devicesFooterIsLastCardRow,
-                "the + strip is the last row of the Output Devices card")
-        popover.test_tapDevicesFooterAdd()   // headless: the popUp itself is gated
+    // Header collapse must not intercept the native Manage action.
+    @Test func manageSpeakersDispatchesFromTheHeaderWithoutCollapsing() async throws {
+        let (popover, controller, _) = try await makePopover()
+        let button = try #require(popover.test_manageSpeakersButton)
+        #expect(button.title == "Manage speakers…")
+        #expect(button.accessibilityLabel() == button.title)
+        var opened = 0
+        popover.onManageSpeakers = { opened += 1 }
+        let selection = controller.selectedDeviceIDs
+        let collapsed = popover.test_isCardCollapsed(title: "Output Speakers")
+        popover.test_tapManageSpeakers()
+        #expect(opened == 1)
+        #expect(popover.test_isCardCollapsed(title: "Output Speakers") == collapsed)
+        #expect(controller.selectedDeviceIDs == selection)
+        #expect(popover.test_pairBluetoothIsLastCardRow)
     }
 
-    /// The Devices card's "+" fronts a MENU: its save item creates a group
-    /// through real `NSMenu` dispatch, never collapses the card, and the item's
-    /// enabled state tracks `canSaveCurrentSetup` (the "+" itself never
-    /// disables, so "Pair a Bluetooth speaker…" is always reachable).
-    @Test func devicesSaveGroupAccessoryCreatesGroupWithoutCollapsing() async throws {
+    private func saveSceneMenu(_ popover: PopoverController) throws -> NSMenu {
+        popover.refreshMainOutRow()
+        return try #require(popover.test_mainOutRow.test_menuItem(titled: "Save selected speakers as scene")?.menu)
+    }
+
+    // The Main Audio Save action must create a scene and disable after saving it.
+    @Test func mainAudioSaveCreatesSceneWithoutCollapsing() async throws {
         let (popover, controller, _) = try await makePopover()
         _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
-        var menu = popover.test_outputDevicesPlusMenu()
-        #expect(menu.items.first?.isEnabled == true, "a non-empty, not-yet-saved selection ⇒ save item enabled")
+        var menu = try saveSceneMenu(popover)
+        var index = try #require(menu.items.firstIndex { $0.title == "Save selected speakers as scene" })
+        #expect(menu.items[index].isEnabled)
         let wasCollapsed = popover.test_isCardCollapsed(title: "Output Speakers")
-
-        menu.performActionForItem(at: 0)   // real AppKit menu dispatch
-        #expect(controller.groups.count == 1, "the save item created a group")
-        #expect(popover.test_isCardCollapsed(title: "Output Speakers") == wasCollapsed, "the menu action did NOT collapse the card")
-        // The just-saved selection now equals a group ⇒ the save ITEM disables.
-        menu = popover.test_outputDevicesPlusMenu()
-        #expect(menu.items.first?.isEnabled == false, "selection already saved as a group ⇒ save item disables")
+        menu.performActionForItem(at: index)
+        #expect(controller.groups.count == 1)
+        #expect(popover.test_isCardCollapsed(title: "Output Speakers") == wasCollapsed)
+        menu = try saveSceneMenu(popover)
+        index = try #require(menu.items.firstIndex { $0.title == "Save selected speakers as scene" })
+        #expect(!menu.items[index].isEnabled)
     }
 
     // MARK: V14 — keyboard selection movement (host half)
@@ -3565,6 +3577,22 @@ import AudioutProtocol
         #expect(!popover.test_structuralRebuildDeferred, "and the debt cleared")
     }
 
+    // Turns red when `refreshSpeakerPresentation()` rebuilds under a live slider drag instead of recording the rebuild as owed.
+    @Test func aSpeakerPresentationRefreshWaitsOutASliderDrag() async throws {
+        let (popover, _, backend) = try await makePopover()
+        let before = popover.test_rebuildCount
+
+        popover.test_setLiveSliderDrag(true)
+        popover.refreshSpeakerPresentation()
+        #expect(popover.test_rebuildCount == before, "no rebuild may run under the user's finger")
+        #expect(popover.test_structuralRebuildDeferred, "the rebuild is owed")
+
+        popover.test_setLiveSliderDrag(false)
+        popover.update(devices: backend.devices)
+        #expect(popover.test_rebuildCount > before, "the next update pays the debt")
+        #expect(!popover.test_structuralRebuildDeferred)
+    }
+
     // MARK: "Save Selected Speakers as group" reports its failures (hardening 11)
 
     /// The success path stays exactly as it was, and reports no failure.
@@ -3573,9 +3601,9 @@ import AudioutProtocol
         _ = controller.setDeviceSelected("office", true)
         #expect(!popover.test_saveGroupFailureReported, "nothing has failed yet")
 
-        let menu = popover.test_outputDevicesPlusMenu()
+        let menu = try saveSceneMenu(popover)
         let index = try #require(menu.items.firstIndex {
-            $0.title == "Save Selected Speakers as scene"
+            $0.title == "Save selected speakers as scene"
         })
         menu.performActionForItem(at: index)
 
@@ -3601,17 +3629,18 @@ import AudioutProtocol
         let controller = GroupController(backend: backend,
                                          store: GroupStore(directory: unwritable),
                                          routingStore: RoutingStore(directory: tempDirectory()),
+                                         settings: AppSettings(defaults: isolation.makeDefaults()),
                                          loadPersisted: false)
-        let popover = PopoverController()
+        let popover = PopoverController(appRouting: tempAppRoutingController())
         popover.configure(groupController: controller)
         controller.ensureDefaultSelection()
         popover.test_isShownOverride = true
         popover.update(devices: backend.devices)
         _ = controller.setDeviceSelected("office", true)
 
-        let menu = popover.test_outputDevicesPlusMenu()
+        let menu = try saveSceneMenu(popover)
         let index = try #require(menu.items.firstIndex {
-            $0.title == "Save Selected Speakers as scene"
+            $0.title == "Save selected speakers as scene"
         })
         menu.performActionForItem(at: index)
 
@@ -3629,8 +3658,9 @@ import AudioutProtocol
         let controller = GroupController(backend: backend,
                                          store: GroupStore(directory: tempDirectory()),
                                          routingStore: RoutingStore(directory: tempDirectory()),
+                                         settings: AppSettings(defaults: isolation.makeDefaults()),
                                          loadPersisted: false)
-        let popover = PopoverController()
+        let popover = PopoverController(appRouting: tempAppRoutingController())
         popover.configure(groupController: controller)
         popover.test_isShownOverride = true
         popover.update(devices: devices)
@@ -3649,8 +3679,8 @@ import AudioutProtocol
         let (popover, _) = makeFleetPopover([localMac()])
         popover.rebuildForOpen()
         #expect(popover.test_speakerSearchStateText == "Looking for speakers…")
-        #expect(popover.test_bluetoothConnectRowShown(),
-                "the Bluetooth affordance still stands beside it")
+        #expect(popover.test_pairBluetoothButton != nil,
+                "pairing remains available below the list")
         #expect(popover.test_subsectionTitles().contains("AirPlay Speakers"),
                 "the state line is grouped under the header that names it")
     }
@@ -3696,9 +3726,8 @@ import AudioutProtocol
         ])
         popover.rebuildForOpen()
         #expect(popover.test_speakerSearchStateText == nil)
-        #expect(popover.test_subsectionTitles()
-                == ["AirPlay Speakers", "Bluetooth Speakers"],
-                "no empty AirPlay header, no missing one (the Mac row is pinned above the subsections)")
+        #expect(popover.test_subsectionTitles() == ["AirPlay Speakers"],
+                "the available AirPlay row has its header; Bluetooth has no empty heading")
     }
 
     // MARK: System-AirPlay guard note (Wave 3 W3-T3)
@@ -4314,6 +4343,8 @@ extension SerializedSharedState {
     @MainActor
     @Suite struct PopoverConnectionAnalyticsTests {
 
+    private let isolation = TestIsolation(owner: "PopoverConnectionAnalyticsTests")
+
         private final class Captured: @unchecked Sendable {
             private let lock = NSLock()
             private var items: [(String, [String: String])] = []
@@ -4332,7 +4363,7 @@ extension SerializedSharedState {
         }
 
         private func tempDirectory() -> URL {
-            FileManager.default.temporaryDirectory
+            isolation.scratchDir
                 .appendingPathComponent("PopoverConnectionAnalytics-\(UUID().uuidString)",
                                         isDirectory: true)
         }
@@ -4358,8 +4389,10 @@ extension SerializedSharedState {
             let controller = GroupController(backend: backend,
                                              store: GroupStore(directory: tempDirectory()),
                                              routingStore: RoutingStore(directory: tempDirectory()),
+                                             settings: AppSettings(defaults: isolation.makeDefaults()),
                                              loadPersisted: false)
-            let popover = PopoverController()
+            let popover = PopoverController(appRouting: AppRoutingController(
+                store: AppRouteStore(directory: tempDirectory()), loadPersisted: false))
             popover.configure(groupController: controller)
             popover.test_isShownOverride = true
             popover.update(devices: fleet(office: .off))
@@ -4415,6 +4448,46 @@ extension SerializedSharedState {
             }
             #expect(seen.properties(of: "connection:connected")
                     == (intent == .unwanted ? [] : [["kind": "homePod"]]))
+        }
+
+        // Turns red when `mixer:reconnect_requested` fires for a name click that reconnects nothing: an AirPlay speaker looked for on the network, or a Bluetooth speaker the backend no longer lists.
+        @Test func aReconnectIsCapturedOnlyWhenABluetoothSpeakerIsAskedToReconnect() throws {
+            let local = Device(id: "local-mac", name: "This Mac", kind: .localMac, isLocalDevice: true)
+            let office = Device(id: "office", name: "Office", kind: .homePod, isAvailable: false)
+            let bt = Device(id: "bt", name: "Desk", kind: .bluetooth, isAvailable: false, supportsAirPlay2: false)
+            let gone = Device(id: "gone", name: "Gone", kind: .bluetooth, isAvailable: false, supportsAirPlay2: false)
+            let backend = MockBackend(fleet: [local, office, bt], staggerDiscovery: false,
+                                      emitsLevels: false, simulatesDropouts: false)
+            backend.start()
+            backend.test_settle()
+            let controller = GroupController(backend: backend,
+                                             store: GroupStore(directory: tempDirectory()),
+                                             routingStore: RoutingStore(directory: tempDirectory()),
+                                             settings: AppSettings(defaults: isolation.makeDefaults()),
+                                             loadPersisted: false)
+            let popover = PopoverController(
+                appRouting: AppRoutingController(store: AppRouteStore(directory: tempDirectory()),
+                                                 loadPersisted: false),
+                speakerRecovery: SpeakerRecoveryController(schedule: { _, _ in {} }))
+            popover.configure(groupController: controller)
+            popover.test_isShownOverride = true
+            popover.bluetoothPermissionProvider = { .granted }
+            var pairings = 0
+            popover.onPairBluetoothSpeaker = { pairings += 1 }
+            popover.update(devices: [local, office, bt, gone])
+            popover.test_speakerLibrary.setVisibility(.always, for: ["office", "bt", "gone"])
+            popover.update(devices: [local, office, bt])
+            for id in ["office", "gone", "bt"] {
+                try #require(popover.test_deviceRow(for: id) != nil, "\(id) has a row to click")
+            }
+
+            let seen = captured {
+                popover.test_deviceRow(for: "office")?.test_clickName()
+                popover.test_deviceRow(for: "gone")?.test_clickName()
+                popover.test_deviceRow(for: "bt")?.test_clickName()
+            }
+            #expect(pairings == 1, "the speaker the backend no longer lists opened pairing")
+            #expect(seen.properties(of: "mixer:reconnect_requested") == [[:]])
         }
     }
 }

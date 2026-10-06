@@ -89,6 +89,7 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
     private var headerClickRecognizersByHeader: [String: NSClickGestureRecognizer] = [:]
     /// Header accessory buttons keyed by section title (F1).
     private var accessoryButtonsByHeader: [String: NSButton] = [:]
+    private var leadingActionButtonsByHeader: [String: NSButton] = [:]
     /// Card-note labels (`addCardNote`) keyed by section title, in add order
     /// (A1 test hook).
     private var notesByHeader: [String: [NSTextField]] = [:]
@@ -612,6 +613,7 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
         pendingCollapsed.removeAll()
         headerClickRecognizersByHeader.removeAll()
         accessoryButtonsByHeader.removeAll()
+        leadingActionButtonsByHeader.removeAll()
         notesByHeader.removeAll()
         columnTitleLabelsByHeader.removeAll()
     }
@@ -689,6 +691,8 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
                    secondTrailingTitleLeadingFromTrailing: CGFloat = 0,
                    secondTrailingTitleToolTip: String? = nil,
                    trailingAccessory accessory: HeaderAccessory? = nil,
+                   leadingActionTitle: String? = nil,
+                   onLeadingAction: (() -> Void)? = nil,
                    collapsible: Bool = false,
                    collapsed: Bool = false,
                    scrollsBody: Bool = false,
@@ -772,6 +776,25 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
                                             constant: titleLeadingConstant),
             label.centerYAnchor.constraint(equalTo: headerWrap.centerYAnchor),
         ])
+
+        if let leadingActionTitle, let onLeadingAction {
+            let button = NSButton(title: leadingActionTitle, target: nil, action: nil)
+            button.translatesAutoresizingMaskIntoConstraints = false
+            button.bezelStyle = .accessoryBar
+            button.controlSize = .small
+            button.font = Tokens.Font.menuItem
+            button.setAccessibilityLabel(leadingActionTitle)
+            let target = ClosureActionTarget(onLeadingAction)
+            button.target = target
+            button.action = #selector(ClosureActionTarget.fire)
+            objc_setAssociatedObject(button, &Self.actionTargetKey, target, .OBJC_ASSOCIATION_RETAIN)
+            headerWrap.addSubview(button)
+            NSLayoutConstraint.activate([
+                button.leadingAnchor.constraint(equalTo: label.trailingAnchor, constant: 12),
+                button.centerYAnchor.constraint(equalTo: label.centerYAnchor),
+            ])
+            leadingActionButtonsByHeader[header] = button
+        }
 
         // The column-header label on the RIGHT of the same row, centered over its
         // column via the shared grid's trailing-anchored center helper so it lines
@@ -918,6 +941,10 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
         // synchronously (non-animated) once the body exists — the header alone has
         // nothing to collapse yet.
         if collapsible { pendingCollapsed[header] = collapsed }
+    }
+
+    func test_leadingActionButton(title: String) -> NSButton? {
+        leadingActionButtonsByHeader[title]
     }
 
     /// Add a content row (Main Out row, group header, device row) into the

@@ -916,7 +916,9 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
         // cards draw zero chrome of their own now) BEFORE this card, skipped
         // for the very first section.
         if stackView.arrangedSubviews.contains(where: { $0 is CardView }) {
-            let divider = CardDividerView()
+            // `containerEdge`: it crosses bare canvas, where the in-container
+            // `hairline` never goes.
+            let divider = RuleView(tone: .containerEdge)
             divider.translatesAutoresizingMaskIntoConstraints = false
             stackView.addArrangedSubview(divider)
             NSLayoutConstraint.activate([
@@ -1560,9 +1562,9 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
 
     /// Show (or, with `nil`, clear) a full-width warning banner PINNED above every
     /// card — used by the generalized silence watchdog to say "Speakers unreachable
-    /// — playing on this Mac. Will resume automatically." A stock system-orange
-    /// rounded inset card with a warning glyph and a wrapping label; system colors
-    /// only, no custom drawing. `clearRows()` drops it along with the cards, so the
+    /// — playing on this Mac. Will resume automatically." The `.warning` note
+    /// banner: `Tokens.Color.failure` on the shared tinted inset ground, a warning
+    /// glyph and a wrapping label. `clearRows()` drops it along with the cards, so the
     /// host re-applies it at the tail of every `rebuild()`.
     ///
     /// `action`, when non-nil, renders a trailing call-to-action button — the
@@ -1882,31 +1884,6 @@ private final class ClosureActionTarget: NSObject {
     @objc func fire() { action() }
 }
 
-/// The 1 px divider between de-nested cards — the ONLY visual separation
-/// between them now that they draw no material/shadow/rim of their own
-/// (`CardView`). It crosses bare canvas rather than sitting inside a
-/// container, and it is the section's own boundary, so it stamps
-/// `containerEdge` (Rule 5: a divider on bare canvas never wears the
-/// in-container token) — measured 1.95:1 on the dark canvas, 2.02:1 on the
-/// light one. Purely
-/// decorative and non-interactive; `beginCard` inserts one into `stackView`
-/// before every card after the first.
-private final class CardDividerView: NSView {
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
-        wantsLayer = true
-        layer?.backgroundColor = Tokens.Color.containerEdge.cgColor
-    }
-
-    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-
-    override func hitTest(_ point: NSPoint) -> NSView? { nil }
-
-    override func viewDidChangeEffectiveAppearance() {
-        super.viewDidChangeEffectiveAppearance()
-        layer?.backgroundColor = Tokens.Color.containerEdge.cgColor
-    }
-}
 
 /// The header rows' host view: a plain container that, when told it is a
 /// collapse click target (`showsHoverWash` — C4 keeps the WHOLE row as the

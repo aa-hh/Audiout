@@ -48,8 +48,11 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
     private let gutterLine = NSTextField(wrappingLabelWithString: "")
     private var registerButton: ProminentButton!
     private var resendButton: ProminentButton!
-    private let pasteKeyButton = NSButton()
-    private let lostKeyButton = NSButton()
+    /// The quiet tier's two links. Underlined so they read as tappable text,
+    /// the one signal that separates them from the plain sentence above; gold
+    /// stays spent on Register alone.
+    private let pasteKeyButton = TextLinkButton(title: "Paste key")
+    private let lostKeyButton = TextLinkButton(title: "I lost my key")
     private let buyButton = NSButton()
     private let quitButton = NSButton()
     private let trialButton = NSButton()
@@ -222,17 +225,11 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
         gutter.translatesAutoresizingMaskIntoConstraints = false
         gutter.addSubview(gutterLine)
 
-        pasteKeyButton.isBordered = false
-        pasteKeyButton.controlSize = .regular
         pasteKeyButton.target = self
         pasteKeyButton.action = #selector(pasteKeyTapped)
-        setPasteKeyEnabled(true)
 
-        lostKeyButton.isBordered = false
-        lostKeyButton.controlSize = .regular
         lostKeyButton.target = self
         lostKeyButton.action = #selector(lostKeyTapped)
-        setQuietLinkTitle("I lost my key", on: lostKeyButton)
 
         buyButton.title = "Buy Audiout"
         buyButton.bezelStyle = .rounded
@@ -366,28 +363,6 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
         return button
     }
 
-    /// The quiet tier's two links. `ProminentButton` stamps its own title, so
-    /// these carry their ink themselves.
-    private func setQuietLinkTitle(_ title: String, on button: NSButton,
-                                   ink: NSColor = Tokens.Color.label2) {
-        // Underlined so "Paste key" / "I lost my key" read as tappable text —
-        // the one signal that separates them from the plain sentence above. No
-        // colour change: gold stays spent on Register alone.
-        button.attributedTitle = NSAttributedString(
-            string: title,
-            attributes: [.foregroundColor: ink,
-                         .font: Tokens.Font.body,
-                         .underlineStyle: NSUnderlineStyle.single.rawValue])
-    }
-
-    /// The ink IS the disabled look: an attributed title carries its own
-    /// colour, so `isEnabled` alone leaves the link at full strength.
-    private func setPasteKeyEnabled(_ enabled: Bool) {
-        pasteKeyButton.isEnabled = enabled
-        setQuietLinkTitle("Paste key", on: pasteKeyButton,
-                          ink: enabled ? Tokens.Color.label2
-                                       : Tokens.Color.label3)
-    }
 
     /// Authored rather than inferred from frames: field, the commit button,
     /// the two links, the trial offer where there is one, then the two
@@ -542,8 +517,8 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
         registerButton.keyEquivalent = ""
         resendButton.isHidden = false
         resendButton.keyEquivalent = "\r"
-        setQuietLinkTitle("Back to your key", on: lostKeyButton)
-        setPasteKeyEnabled(false)
+        lostKeyButton.linkTitle = "Back to your key"
+        pasteKeyButton.isEnabled = false
         show("Enter the email you bought with.")
         applyTabOrder()
         view.window?.makeFirstResponder(keyField)
@@ -561,8 +536,8 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
         resendButton.keyEquivalent = ""
         registerButton.isHidden = false
         registerButton.keyEquivalent = "\r"
-        setQuietLinkTitle("I lost my key", on: lostKeyButton)
-        setPasteKeyEnabled(true)
+        lostKeyButton.linkTitle = "I lost my key"
+        pasteKeyButton.isEnabled = true
         if !keepingLine { show("") }
         applyTabOrder()
         updateSceneForText()

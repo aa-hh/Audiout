@@ -299,7 +299,7 @@ public final class DeviceRowView: NSView {
     var switchOfferOffered = false
     /// "Enter Password…", in the same slot, shown while the speaker waits for
     /// its first password (`.awaitingPassword`).
-    let enterPasswordButton = NSButton()
+    let enterPasswordButton = TextLinkButton(title: "Enter Password…", size: .caption)
     var enterPasswordOffered = false
     /// The FEED column's main-mix segment text, or `nil` when this row is not
     /// currently a member of the ACTIVE main-mix target (a redirect-only row
@@ -1746,19 +1746,8 @@ public final class DeviceRowView: NSView {
         removalUndoStack.isHidden = true
         switchOfferButton.isHidden = true
         // An underlined caption-size text link, unlike the two bordered offers
-        // above: the underline is its control signal, as on the licence gate's
-        // quiet links.
+        // above: the underline is its control signal.
         enterPasswordButton.translatesAutoresizingMaskIntoConstraints = false
-        enterPasswordButton.bezelStyle = .accessoryBar
-        enterPasswordButton.isBordered = false
-        enterPasswordButton.controlSize = .small
-        enterPasswordButton.attributedTitle = NSAttributedString(
-            string: "Enter Password…",
-            attributes: [
-                .font: Tokens.Font.caption,
-                .foregroundColor: Tokens.Color.label2,
-                .underlineStyle: NSUnderlineStyle.single.rawValue,
-            ])
         enterPasswordButton.target = self
         enterPasswordButton.action = #selector(enterPasswordClicked(_:))
         enterPasswordButton.isHidden = true

@@ -1020,32 +1020,6 @@ public final class MixerWindowController {
 // when the owner picked it as the ONE background every surface screen sits on
 // (live build review 2026-08-07). This file keeps using it unchanged.
 
-/// A one-token divider line. `draw(_:)`-based rather than a frozen layer color
-/// for the same reason as `WarmPanelView`: `Tokens.Color.hairline` re-resolves
-/// per appearance and Increase Contrast on every paint. Non-interactive — it is
-/// pure chrome and must never swallow a click meant for what it borders.
-final class HairlineView: NSView {
-
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
-        redrawOnAccessibilityDisplayChange()
-    }
-
-    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-
-    override func hitTest(_ point: NSPoint) -> NSView? { nil }
-
-    override func draw(_ dirtyRect: NSRect) {
-        Tokens.Color.hairline.setFill()
-        bounds.fill()
-    }
-
-    override func viewDidChangeEffectiveAppearance() {
-        super.viewDidChangeEffectiveAppearance()
-        needsDisplay = true
-    }
-}
-
 // MARK: - ContentPaneHostViewController
 
 /// Hosts a swapped content pane plus, when given one, a persistent footer
@@ -1095,7 +1069,7 @@ final class ContentPaneHostViewController: NSViewController {
         // reads muddy rather than deliberate. A hairline makes it an edge on
         // purpose. Scoped to the content pane only — the sidebar runs the full
         // split-view height by design, so a border there would cut across it.
-        let titleBarSeam = HairlineView()
+        let titleBarSeam = RuleView(tone: .hairline)
         titleBarSeam.translatesAutoresizingMaskIntoConstraints = false
         root.addSubview(contentContainer)
         var constraints: [NSLayoutConstraint] = []

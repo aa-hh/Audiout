@@ -1323,7 +1323,7 @@ extension DeviceDetailViewController: EQEditorViewDelegate {
 /// A scene link's trailing chevron: pure signal, never a click target. It
 /// sits ON the link button, so without this the glyph would refuse the click
 /// the rest of the link accepts. Same `hitTest`-nil pattern as
-/// `HairlineView`/`GroupedSectionView`; no `draw(_:)` of its own.
+/// `RuleView`/`GroupedSectionView`; no `draw(_:)` of its own.
 final class ClickThroughImageView: NSImageView {
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
 }

@@ -11,12 +11,15 @@ import AppKit
 /// HEADER PARITY + the elastic content column (design review 2026-07-25).
 ///
 /// The Groups window swaps its whole content pane when the sidebar selection
-/// moves between a group and a device. If the icon well, the title, or the
-/// header band land differently in the two panes, that swap reads as the window
-/// twitching — which is exactly what happened when the two controllers carried
-/// hand-copied literals and drifted ~22.5 pt apart. Both panes now read
-/// `GroupsPaneLayout`; these tests assert the REAL laid-out frames still match,
-/// so a future edit to one pane can't quietly desync the other.
+/// moves between a group and a device. If the header band height or the text
+/// block's vertical centring differ between the two panes, that swap reads as
+/// the window twitching — which is exactly what happened when the two
+/// controllers carried hand-copied literals and drifted ~22.5 pt apart. Both
+/// panes now read `GroupsPaneLayout`; these tests assert the REAL laid-out
+/// frames still share the band height and the vertical centring, so a future
+/// edit to one pane can't quietly desync the other. The icon's x differs by
+/// design: the speaker and Main Audio pages start it at
+/// `railFreeContentLeadingInset`, the scene editor at `contentLeadingInset`.
 ///
 /// The elastic-column half guards the other half of the same design: the
 /// sections stretch with the pane (they used to hug ~277 pt of intrinsic

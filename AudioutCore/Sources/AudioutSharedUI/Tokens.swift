@@ -421,23 +421,36 @@ public enum Tokens {
         }
 
         /// **Equalizer** — the counterpart to ``muted``: the one hue that
-        /// means "this speaker's curve is not flat". Its consumer is the
-        /// device row's engaged Equalizer door
-        /// (`DeviceRowView.updateEQButton()`), which fills the
-        /// `custom.slider.horizontal.2.square.fill` symbol's enclosing square
-        /// OPAQUELY in this tone and draws the two band sliders inside it in
-        /// WHITE.
+        /// means "this speaker's curve is not flat". It marks a shaped curve
+        /// in four places:
+        /// - the device row's Equalizer door in the Mixer
+        ///   (`DeviceRowView.updateEQButton()`): the OUTLINE square, inked in
+        ///   this tone;
+        /// - the icon leading the Equalizer heading on the speaker page and
+        ///   the Main Audio page: the FILLED square in this tone, drawn by
+        ///   `DeviceRowView`'s mark helpers;
+        /// - the moved stretch of each EQ slider (`EQGainFillCell` in
+        ///   `EQEditorView.swift`), between the slider's neutral point and
+        ///   its knob;
+        /// - the Advanced scope (`EQResponseCurveView`): the shaped trace and
+        ///   its wash. The scope's band gridlines are reference marks drawn
+        ///   in this tone in every state, flat included.
         ///
-        /// WHERE IT MAY NOT APPEAR: anywhere else, on the same fence
-        /// ``muted`` carries. It is not a general "on" green, not a success
-        /// tone, and not available to a second control that happens to be
-        /// engaged. A door that is dark for some other reason — unavailable,
-        /// unsupported — keeps its at-rest ink.
+        /// WHERE IT MAY NOT APPEAR: anywhere else. `DeviceRowMutedStateTests`
+        /// fences the literal to exactly four source files —
+        /// `DeviceRowView.swift`, `DeviceRowView+TestSupport.swift`,
+        /// `EQEditorView.swift` and `EQResponseCurveView.swift` — so a fifth
+        /// is a design decision. It is not a general "on" green, not a
+        /// success tone, and not available to a second control that happens
+        /// to be engaged. A door that is dark for some other reason —
+        /// unavailable, unsupported — keeps its at-rest ink.
         ///
-        /// TWO VALUES, and they are a PAIR with ``muted`` rather than two
-        /// inks tuned apart. Both marks are 1.5 pt outlines 6 pt from each
-        /// other, so a difference in presence between them reads as one
-        /// control being engaged harder than the other.
+        /// FOUR HEXES: a light and a dark value, plus an Increase Contrast
+        /// variant of each. The standard light and dark values are a PAIR with
+        /// ``muted`` rather than two inks tuned apart. Both row marks are
+        /// 1.5 pt outlines 6 pt from each other, so a difference in presence
+        /// between them reads as one control being engaged harder than the
+        /// other.
         ///
         /// WHAT "PAIR" MEANS DEPENDS ON THE GROUND, and getting that wrong is
         /// how the first attempt at this failed. On the dark row the two marks

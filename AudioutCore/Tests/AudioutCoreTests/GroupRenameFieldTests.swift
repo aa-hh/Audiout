@@ -183,6 +183,26 @@ import AppKit
         #expect(field.width > 140, "…but it did grow to use the room it has")
     }
 
+    // Turns red when the name-and-badge stack hugs its views at or above the rename field's width preference (240), which squeezes the field towards the badge's width while a scene plays.
+    @Test func thePlayingBadgeNeverNarrowsALongName() throws {
+        let (window, controller, group) = try makeWindow()
+        window.test_editor.test_commitRenameViaReturn(
+            "A very very long group name that could never fit in this header band")
+        settle(window)
+        let badgeHidden = window.test_editor.test_titleFieldFrame.width
+
+        controller.activateGroup(id: group.id)
+        window.test_editor.show(groupID: group.id, devices: (0..<4).map {
+            Device(id: "d\($0)", name: "Device \($0)", kind: .generic, isAvailable: true)
+        })
+        settle(window)
+        #expect(window.test_editor.test_playingBadgeVisible)
+        let badgeShown = window.test_editor.test_titleFieldFrame.width
+        #expect(badgeShown > 140, "the field must not fall to its floor while the badge shows")
+        #expect(abs(badgeShown - badgeHidden) <= 0.5,
+                "the badge sits under the field and takes none of its width")
+    }
+
     @Test func aLongNameNeverWidensThePane() throws {
         let (window, _, _) = try makeWindow()
         settle(window)

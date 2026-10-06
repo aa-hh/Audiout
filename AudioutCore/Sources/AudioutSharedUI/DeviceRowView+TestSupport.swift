@@ -256,16 +256,13 @@ extension DeviceRowView {
     /// A pixel comparison against the same symbol built from the same ink,
     /// so the hook reads the drawn image rather than a flag.
     public var test_eqDrawsEngagedSymbol: Bool {
-        matchesSymbol(eqButton.image, RowAccessorySymbol.equalizerRest,
-                      ink: Self.engagedInk(fill: Tokens.Color.equalizer,
-                                           in: effectiveAppearance))
+        matches(eqButton.image, RowAccessorySymbol.equalizerDoor(shaped: true, in: effectiveAppearance))
     }
 
     /// Whether the door CURRENTLY draws its AT-REST symbol — the outline
     /// square in one neutral ink.
     public var test_eqDrawsRestSymbol: Bool {
-        matchesSymbol(eqButton.image, RowAccessorySymbol.equalizerRest,
-                      ink: Self.restInk(in: effectiveAppearance))
+        matches(eqButton.image, RowAccessorySymbol.equalizerDoor(shaped: false, in: effectiveAppearance))
     }
 
     /// The door glyph's frame in the row's own coordinates, after a layout
@@ -358,26 +355,21 @@ extension DeviceRowView {
     /// ``Tokens/Color/muted`` ink resolved in this row's own appearance —
     /// a raster comparison, so the test reads pixels rather than intent.
     public var test_mutePillIsMutedHue: Bool {
-        matchesSymbol(muteButton.image, RowAccessorySymbol.muteEngaged,
-                      ink: Self.engagedInk(fill: Tokens.Color.muted,
-                                           in: effectiveAppearance))
+        matches(muteButton.image, RowAccessorySymbol.mute(engaged: true, in: effectiveAppearance))
     }
 
     /// Whether the mute button is drawing its AT-REST symbol.
     public var test_muteDrawsRestSymbol: Bool {
-        matchesSymbol(muteButton.image, RowAccessorySymbol.muteRest,
-                      ink: Self.restInk(in: effectiveAppearance))
+        matches(muteButton.image, RowAccessorySymbol.mute(engaged: false, in: effectiveAppearance))
     }
 
-    /// Whether `drawn` rasterises identically to `name` built with `ink`.
-    /// A pixel comparison rather than a name lookup: an `NSImage` reconfigured
-    /// with a `SymbolConfiguration` reports no name to read back, and
-    /// comparing rasters pins the ink, the point size and the weight in one
-    /// assertion.
-    private func matchesSymbol(_ drawn: NSImage?, _ name: String, ink: NSColor) -> Bool {
+    /// Whether `drawn` rasterises identically to `reference`. A pixel
+    /// comparison rather than a name lookup: an `NSImage` reconfigured with a
+    /// `SymbolConfiguration` reports no name to read back, and comparing
+    /// rasters pins the ink, the point size and the weight in one assertion.
+    private func matches(_ drawn: NSImage?, _ reference: NSImage?) -> Bool {
         guard let drawn = drawn?.tiffRepresentation,
-              let reference = RowAccessorySymbol.image(named: name, ink: ink)?
-                  .tiffRepresentation
+              let reference = reference?.tiffRepresentation
         else { return false }
         return drawn == reference
     }

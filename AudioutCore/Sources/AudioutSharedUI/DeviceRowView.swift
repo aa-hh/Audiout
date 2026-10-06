@@ -360,16 +360,6 @@ public final class DeviceRowView: NSView {
     /// Mounted only when ``supportsEqualizer``; the layout reserves its slot on
     /// every row either way, so the name truncates identically across rows.
     let eqButton = NSButton()
-    /// The mute button's at-rest symbol — the outline square with the
-    /// speaker and no slash.
-    private static let muteRestSymbolName = RowAccessorySymbol.muteRest
-    /// The mute button's ENGAGED symbol — the same outline square with the
-    /// slash added. The slash belongs to this state only.
-    private static let muteEngagedSymbolName = RowAccessorySymbol.muteEngaged
-    /// The Equalizer door's at-rest symbol — the outline square.
-    private static let eqRestSymbolName = RowAccessorySymbol.equalizerRest
-    /// The filled square: the heading icon's shaped state (`equalizerShapedHeadingMarkImage(in:pointSize:)`), never drawn on the door.
-    private static let eqEngagedSymbolName = RowAccessorySymbol.equalizerEngaged
     /// The point size every accessory glyph on this row that is NOT one of the
     /// four custom symbols is drawn at. The symbols carry their own
     /// (``RowAccessorySymbol/pointSize``), larger, because their enclosing
@@ -1034,10 +1024,7 @@ public final class DeviceRowView: NSView {
     private func updateMuteTint() {
         let engaged = muteButton.state == .on
         // The slash belongs to the muted state only; both states are outlines.
-        muteButton.image = RowAccessorySymbol.image(
-            named: engaged ? Self.muteEngagedSymbolName : Self.muteRestSymbolName,
-            ink: engaged ? Self.engagedInk(fill: Tokens.Color.muted, in: effectiveAppearance)
-                         : Self.restInk(in: effectiveAppearance))
+        muteButton.image = RowAccessorySymbol.mute(engaged: engaged, in: effectiveAppearance)
         muteButton.setAccessibilityLabel(engaged ? "Unmute \(device.name)" : "Mute \(device.name)")
     }
 
@@ -1047,7 +1034,7 @@ public final class DeviceRowView: NSView {
     /// the neutral ink mute wears at rest when it is flat (the owner kept the
     /// outline on the row, 2026-09-26). The filled
     /// ``RowAccessorySymbol/equalizerEngaged`` is the heading icon's shaped
-    /// state only (``equalizerShapedHeadingMarkImage(in:pointSize:)``), never the door's.
+    /// state only (``RowAccessorySymbol/equalizerHeading(shaped:in:pointSize:)``), never the door's.
     ///
     /// WHY GREEN AND NOT GOLD. The door wore ``Tokens/Color/goldText`` until
     /// the symbols landed, and gold means "audio is flowing here" everywhere
@@ -1063,64 +1050,7 @@ public final class DeviceRowView: NSView {
         eqButton.setAccessibilityLabel("Equalizer for \(device.name)")
         eqButton.setAccessibilityValue(isEQShaped ? "Shaped" : "Flat")
         // One shape, two inks.
-        eqButton.image = isEQShaped
-            ? Self.equalizerEngagedMarkImage(in: effectiveAppearance)
-            : Self.equalizerRestMarkImage(in: effectiveAppearance)
-    }
-
-    /// The engaged and at-rest equalizer marks, drawn from this file so the
-    /// green stays here. The row's door uses the outline in both inks. The
-    /// icon leading the Equalizer heading on the speaker page and the Main
-    /// Audio page uses the outline at rest and
-    /// ``equalizerShapedHeadingMarkImage(in:pointSize:)``, the filled square, when shaped.
-    public static func equalizerEngagedMarkImage(in appearance: NSAppearance) -> NSImage? {
-        RowAccessorySymbol.image(
-            named: eqRestSymbolName,
-            ink: engagedInk(fill: Tokens.Color.equalizer, in: appearance))
-    }
-
-    public static func equalizerRestMarkImage(
-        in appearance: NSAppearance,
-        pointSize: CGFloat = RowAccessorySymbol.pointSize
-    ) -> NSImage? {
-        RowAccessorySymbol.image(
-            named: eqRestSymbolName, ink: restInk(in: appearance), pointSize: pointSize)
-    }
-
-    public static func equalizerShapedHeadingMarkImage(
-        in appearance: NSAppearance,
-        pointSize: CGFloat = RowAccessorySymbol.pointSize
-    ) -> NSImage? {
-        RowAccessorySymbol.image(
-            named: eqEngagedSymbolName,
-            ink: engagedInk(fill: Tokens.Color.equalizer, in: appearance),
-            pointSize: pointSize)
-    }
-
-    /// The engaged ink: `fill` over everything the symbol draws — on mute's
-    /// slashed outline that is the square, the speaker and the slash — so
-    /// the state needs no second colour.
-    ///
-    /// Resolved in the row's own appearance before it reaches the drawing: a
-    /// dynamic `NSColor` would otherwise resolve against whatever appearance
-    /// happens to be current when the image is composited.
-    static func engagedInk(fill: NSColor, in appearance: NSAppearance) -> NSColor {
-        var resolved = fill
-        appearance.performAsCurrentDrawingAppearance { resolved = fill.usingColorSpace(.sRGB) ?? fill }
-        return resolved
-    }
-
-    /// The at-rest ink, so the outline square and the mark inside it read as
-    /// a single drawn line. `label` is the row's accessory ink — light warm
-    /// grey in dark, dark warm brown in light — and the contrast suites
-    /// already hold it to the body floor on every ground this row puts
-    /// behind it.
-    static func restInk(in appearance: NSAppearance) -> NSColor {
-        var resolved = Tokens.Color.label
-        appearance.performAsCurrentDrawingAppearance {
-            resolved = Tokens.Color.label.usingColorSpace(.sRGB) ?? Tokens.Color.label
-        }
-        return resolved
+        eqButton.image = RowAccessorySymbol.equalizerDoor(shaped: isEQShaped, in: effectiveAppearance)
     }
 
     /// The configuration every accessory glyph on this row that is NOT one of
@@ -1748,12 +1678,14 @@ public final class DeviceRowView: NSView {
             self.delegate?.deviceRow(self, didSetVolume: volume, for: self.device.id)
         }
 
-        configureAccessoryButton(muteButton, symbol: Self.muteRestSymbolName,
-                                  action: #selector(muteToggled(_:)))
+        RowAccessorySymbol.configure(
+            muteButton, image: RowAccessorySymbol.mute(engaged: false, in: effectiveAppearance),
+            target: self, action: #selector(muteToggled(_:)))
         // Same accessory voice as mute, but a plain push button: this one is a
         // DOOR (it opens the Groups screen's equalizer), never a toggle.
-        configureAccessoryButton(eqButton, symbol: Self.eqRestSymbolName,
-                                 action: #selector(equalizerButtonClicked(_:)))
+        RowAccessorySymbol.configure(
+            eqButton, image: RowAccessorySymbol.equalizerDoor(shaped: false, in: effectiveAppearance),
+            target: self, action: #selector(equalizerButtonClicked(_:)))
         eqButton.setButtonType(.momentaryChange)
         eqButton.title = ""          // a door, not a labelled control
         eqButton.toolTip = "Equalizer"
@@ -2049,30 +1981,6 @@ public final class DeviceRowView: NSView {
     /// offset is needed. Retained as the single call site the sublabel ladder
     /// already funnels through, in case a later density setting needs it.
     private func applyNameStackLayout(twoLine: Bool) {}
-
-    private func configureAccessoryButton(_ button: NSButton, symbol: String,
-                                          action: Selector) {
-        button.translatesAutoresizingMaskIntoConstraints = false
-        button.bezelStyle = .accessoryBar        // SPEC §9 device-row mute
-        button.setButtonType(.pushOnPushOff)
-        button.isBordered = false
-        // `symbol` is only the SEEDED glyph, and it is one of the four custom
-        // symbols — `NSImage(systemSymbolName:)` finds Apple's own and would
-        // return nil for it. The mute button swaps its own in
-        // `updateMuteTint()` (slashed while engaged) and the Equalizer door
-        // re-makes its own in `updateEQButton()`.
-        button.image = RowAccessorySymbol.image(named: symbol,
-                                                ink: Self.restInk(in: effectiveAppearance))
-        button.imagePosition = .imageOnly
-        // Unscaled: the symbol's image box is wider than the 24 pt column by
-        // its empty side bearings, and the default `.scaleProportionallyDown`
-        // would shrink the whole mark to fit them in. See
-        // ``RowAccessorySymbol/pointSize``.
-        button.imageScaling = .scaleNone
-        button.contentTintColor = Tokens.Color.label2
-        button.target = self
-        button.action = action
-    }
 
     // MARK: Bluetooth SYNC chip (PLAN-BT-SYNC-DRAWER T6)
 

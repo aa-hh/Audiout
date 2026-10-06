@@ -432,17 +432,9 @@ public final class MainOutRowView: NSView {
         // mute that changes nothing but its tint reads as no mute at all. This
         // is only the seeded image; `updateMuteTint()` owns both states and
         // re-makes it on every appearance change.
-        muteButton.translatesAutoresizingMaskIntoConstraints = false
-        muteButton.setButtonType(.pushOnPushOff)
-        muteButton.isBordered = false
-        muteButton.imagePosition = .imageOnly
-        // Unscaled — see ``RowAccessorySymbol/pointSize``.
-        muteButton.imageScaling = .scaleNone
-        muteButton.image = RowAccessorySymbol.image(
-            named: RowAccessorySymbol.muteRest,
-            ink: Tokens.Color.label2)
-        muteButton.target = self
-        muteButton.action = #selector(muteToggled(_:))
+        RowAccessorySymbol.configure(
+            muteButton, image: RowAccessorySymbol.mute(engaged: false, in: effectiveAppearance),
+            target: self, action: #selector(muteToggled(_:)))
         muteButton.setContentHuggingPriority(.required, for: .horizontal)
 
         // Named SoundSource-style destination dropdown (task B): a real
@@ -467,7 +459,7 @@ public final class MainOutRowView: NSView {
         destinationPopUp.setContentCompressionResistancePriority(.required, for: .horizontal)
 
         nameLabel.translatesAutoresizingMaskIntoConstraints = false
-        nameLabel.font = Tokens.Font.body
+        nameLabel.font = Tokens.Font.menuItem   // the device and app rows' name face
         nameLabel.textColor = Tokens.Color.label
         nameLabel.lineBreakMode = .byTruncatingTail
         nameLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
@@ -627,35 +619,11 @@ public final class MainOutRowView: NSView {
         let engaged = muteButton.state == .on
         // The slash belongs to the muted state only; both states are
         // outlines — see `DeviceRowView.updateMuteTint()`.
-        muteButton.image = RowAccessorySymbol.image(
-            named: engaged ? RowAccessorySymbol.muteEngaged : RowAccessorySymbol.muteRest,
-            ink: engaged ? Self.engagedInk(in: effectiveAppearance)
-                         : Self.restInk(in: effectiveAppearance))
+        muteButton.image = RowAccessorySymbol.mute(engaged: engaged, in: effectiveAppearance)
         configureAccessibility()
     }
 
-    /// ``Tokens/Color/muted`` over the whole slashed outline — square,
-    /// speaker and slash. Resolved in this row's own appearance,
-    /// because a dynamic `NSColor` would otherwise resolve against whichever
-    /// appearance is current when the image is composited.
-    private static func engagedInk(in appearance: NSAppearance) -> NSColor {
-        var fill = Tokens.Color.muted
-        appearance.performAsCurrentDrawingAppearance {
-            fill = Tokens.Color.muted.usingColorSpace(.sRGB) ?? fill
-        }
-        return fill
-    }
-
-    /// One neutral ink over the whole outline square.
-    private static func restInk(in appearance: NSAppearance) -> NSColor {
-        var ink = Tokens.Color.label
-        appearance.performAsCurrentDrawingAppearance {
-            ink = Tokens.Color.label.usingColorSpace(.sRGB) ?? ink
-        }
-        return ink
-    }
-
-    /// The pill's engaged fill is a static `CGColor` — re-stamp on a live
+    /// The mute mark's ink is baked into its image — re-make it on a live
     /// light/dark or Increase-Contrast switch (ring/dot/bus handle their own).
     public override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
@@ -790,9 +758,8 @@ public final class MainOutRowView: NSView {
     public var test_isMutePillEngaged: Bool {
         guard muteButton.state == .on,
               let drawn = muteButton.image?.tiffRepresentation,
-              let reference = RowAccessorySymbol.image(
-                named: RowAccessorySymbol.muteEngaged,
-                ink: Self.engagedInk(in: effectiveAppearance))?.tiffRepresentation
+              let reference = RowAccessorySymbol.mute(
+                engaged: true, in: effectiveAppearance)?.tiffRepresentation
         else { return false }
         return drawn == reference
     }

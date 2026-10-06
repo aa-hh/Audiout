@@ -1599,12 +1599,10 @@ final class EqualizerMarkView: NSView {
         let scale = window?.backingScaleFactor ?? 2
         let image: NSImage?
         if isShaped {
-            image = DeviceRowView.equalizerShapedHeadingMarkImage(
-                in: effectiveAppearance, pointSize: RowAccessorySymbol.headingPointSize)
+            image = RowAccessorySymbol.equalizerHeading(shaped: true, in: effectiveAppearance)
             drawnSymbolName = RowAccessorySymbol.equalizerEngaged
         } else {
-            image = DeviceRowView.equalizerRestMarkImage(
-                in: effectiveAppearance, pointSize: RowAccessorySymbol.headingPointSize)
+            image = RowAccessorySymbol.equalizerHeading(shaped: false, in: effectiveAppearance)
             drawnSymbolName = RowAccessorySymbol.equalizerRest
         }
         CATransaction.begin()

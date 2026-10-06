@@ -347,7 +347,7 @@ gate does not have. It is not a general-purpose "identity color" system:
 nothing outside the Setup spine may draw from this family.
 
 **The Muted-Hue Fence.** One token, `Tokens.Color.muted` (`#8E93F0` dark /
-`#4A50C7` light, Increase Contrast `#ADB1F7` / `#393FA8`), means one thing:
+`#585EC7` light, no separate Increase Contrast pair), means one thing:
 this output is deliberately silent. Its only consumer is the engaged mute
 control on the device row and the Main Audio row, which draws the slashed
 outline symbol (`RowAccessorySymbol.muteEngaged`) in this ink (see Row

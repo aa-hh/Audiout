@@ -3583,8 +3583,12 @@ public final class PopoverController: NSObject {
                 openDiagnosisIDs.remove(device.id)
                 dismissedDiagnosisIDs.remove(device.id)
                 // A code speaker the user just clicked opens its sheet once,
-                // as the wait begins; a repeat report is not a new wait.
-                if previous != .awaitingPassword, codeJoinClickedIDs.remove(device.id) != nil {
+                // as the wait begins; a repeat report is not a new wait. A
+                // hidden popover cannot present the sheet, and a retained one
+                // would refuse every later link click, so a hidden wait spends
+                // the click and the row's link opens the sheet later.
+                if previous != .awaitingPassword, codeJoinClickedIDs.remove(device.id) != nil,
+                   isEffectivelyShown {
                     presentPasswordSheet(for: device.id)
                 }
             case .connecting, .reconnecting:
@@ -3696,10 +3700,10 @@ public final class PopoverController: NSObject {
         if result.refusalReason == nil, showsCode(id) { codeJoinClickedIDs.insert(id) }
     }
 
-    /// Whether `id` is a receiver that shows a code on its screen.
+    /// Whether `id` is a receiver that shows a code on its screen once and keeps
+    /// the pairing. An every-time code receiver takes no code (`.codeEveryTimeUnsupported`).
     private func showsCode(_ id: String) -> Bool {
-        let access = devicesByID[id]?.airPlayAccess
-        return access == .onScreenCode || access == .onScreenCodeEveryTime
+        devicesByID[id]?.airPlayAccess == .onScreenCode
     }
 
     /// Ask for `id`'s AirPlay password. Connect stores it and retries through
@@ -3709,7 +3713,7 @@ public final class PopoverController: NSObject {
     /// is up its speaker's diagnosis panel does not open; Cancel on a
     /// still-failed speaker opens it.
     func presentPasswordSheet(for id: String) {
-        guard passwordSheet == nil else { return }
+        guard passwordSheet == nil, devicesByID[id]?.airPlayAccess != .onScreenCodeEveryTime else { return }
         let isCode = showsCode(id)
         Analytics.capture("airplay:code_prompt_shown", ["kind": isCode ? "onScreenCode" : "password"])
         let sheet = SpeakerPasswordSheetViewController(deviceName: devicesByID[id]?.name ?? "",

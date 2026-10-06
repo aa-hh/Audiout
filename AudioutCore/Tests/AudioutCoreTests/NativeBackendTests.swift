@@ -3420,6 +3420,36 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         #expect(connectionState(backend, device.id) == .awaitingPassword)
     }
 
+    /// The state-stream arm failing the row as `.failed(.codeRequired)` (with an
+    /// `airplay:session_failed`) when the echo of a refused stored pairing key
+    /// lands before the converge catch turns it red: the catch's extra attempt
+    /// owns that join's result, and the popover would open "Code didn't work"
+    /// for a code nobody typed.
+    @Test func aRefusedPairingEchoThatBeatsTheCatchStillEndsInTheWait() async {
+        let store = InMemoryAirPlayPasswordStore()
+        let device = ap2Device(access: .onScreenCode)
+        store.setPairingKey("OLD", for: device.id)
+        let (backend, engine, discovery) = makeBackend(passwordStore: store)
+        defer { backend.stop() }
+        engine.addFailures = [device.outputID.rawValue]
+        engine.addFailureError = .passwordRequired
+        let sawRefusal = OnceFlag()
+        engine.onMirroredAddFailure = { _ in
+            // The echo is applied with the key's delete, before the add throws.
+            await pollUntil { backend.devices.first { $0.id == device.id }?.hasStoredPassword == false }
+            if self.failureCause(backend, device.id) == .codeRequired { _ = sawRefusal.testAndSet() }
+        }
+        await startAndDiscover(backend, engine, discovery, device)
+
+        backend.setOutputSet([device.id])
+        await pollUntil { self.connectionState(backend, device.id) == .awaitingPassword }
+        #expect(sawRefusal.testAndSet() == false, "the row read Code didn't work before the catch's extra attempt")
+        #expect(engine.addedIDs.filter { $0 == device.outputID }.count == 2)
+        #expect(store.pairingKey(for: device.id) == nil)
+        #expect(engine.fedDescriptorList.last?.authKey == nil)
+        #expect(connectionState(backend, device.id) == .awaitingPassword)
+    }
+
     /// Feeding the stored pairing key again after the receiver refused it, when
     /// the Keychain delete left it in place (no `rejectedPairingKeyIDs` skip),
     /// turns it red: the join refeeds the stale key and loops.
@@ -3440,19 +3470,53 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         #expect(connectionState(backend, device.id) == .awaitingPassword)
     }
 
-    /// Storing the key an every-time receiver (status-flags bit 3) discards anyway turns it red.
-    @Test func anEveryTimeReceiverStoresNoPairing() async {
+    /// The discovery re-feed falling back to the refused key still held in
+    /// `fedDescriptors` (the fallback skipping the `rejectedPairingKeyIDs` check)
+    /// turns it red: a re-announce puts the refused key back on the device.
+    @Test func aRefusedPairingIsNotFedBackByADiscoveryUpdate() async {
         let store = InMemoryAirPlayPasswordStore()
-        let (backend, engine, device) = await joinCodeSpeaker(.onScreenCodeEveryTime, store: store)
+        let device = ap2Device(access: .onScreenCode)
+        store.setPairingKey("OLD", for: device.id)
+        let (backend, engine, discovery) = makeBackend(passwordStore: store)
         defer { backend.stop() }
-        engine.authorizeResults[device.outputID.rawValue] = .success("KEY1")
-        engine.addFailures = []
-        await submitAndWait(backend, "1234", for: device.id)
-        backend.retryOutput(device.id)
+        await startAndDiscover(backend, engine, discovery, device)
+        backend.setOutputSet([device.id])
         await pollUntil { self.connectionState(backend, device.id) == .connected }
+        #expect(engine.fedDescriptorList.last?.authKey == "OLD")
+
+        engine.pushState(device.outputID, .passwordRequired)
+        await pollUntil { backend.devices.first { $0.id == device.id }?.hasStoredPassword == false }
+        let fedBefore = engine.fedDescriptorList.count
+        discovery.fire(.updated(ap2Device(name: "Moved Move", access: .onScreenCode)))
+        await pollUntil { engine.fedDescriptorList.count > fedBefore }
+        #expect(!engine.fedDescriptorList.dropFirst(fedBefore).contains { $0.authKey == "OLD" })
+    }
+
+    /// Mapping an every-time receiver's (status-flags bit 3) code demand to the
+    /// code wait, or sending its typed code to `engine.authorize`, turns it red:
+    /// the sender frees the key and asks for a fresh code on every start, so the
+    /// retry would wait for a code forever.
+    @Test func anEveryTimeReceiverFailsAsUnsupportedAndTakesNoCode() async {
+        let store = InMemoryAirPlayPasswordStore()
+        let (backend, engine, discovery) = makeBackend(passwordStore: store)
+        defer { backend.stop() }
+        let device = ap2Device(access: .onScreenCodeEveryTime)
+        engine.addFailures = [device.outputID.rawValue]
+        engine.addFailureError = .passwordRequired
+        await startAndDiscover(backend, engine, discovery, device)
+        backend.setOutputSet([device.id])
+        await pollUntil { self.failureCause(backend, device.id) != nil }
+        #expect(failureCause(backend, device.id) == .codeEveryTimeUnsupported)
+        #expect(backend.devices.first { $0.id == device.id }?.isAvailable == false)
+
+        engine.authorizeResults[device.outputID.rawValue] = .success("KEY1")
+        let completed = OnceFlag()
+        backend.submitAirPlayPassword("1234", for: device.id, source: "mac") { _ = completed.testAndSet() }
+        backend.stateQueue.sync {}
+        await MainActor.run {}
+        #expect(engine.authorizeCalls.isEmpty)
         #expect(store.pairingKey(for: device.id) == nil)
-        #expect(backend.devices.first { $0.id == device.id }?.hasStoredPassword == false)
-        #expect(engine.fedDescriptorList.last?.authKey == nil)
+        #expect(completed.testAndSet() == false, "an every-time receiver takes no code, so nothing retries")
     }
 
     /// Mapping a password demand from a Home-only receiver (a Mac in Current

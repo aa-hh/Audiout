@@ -385,7 +385,7 @@ import AudioutProtocol
         let appRouting = makeAppRouting()
 
         func build(storedPassword: Bool, awaitingPassword: Bool = false,
-                   access: AirPlayAccess = .password) -> Snapshot {
+                   access: AirPlayAccess = .password, cause: ConnectionFailure.Cause? = nil) -> Snapshot {
             CompanionSnapshotBuilder.build(
                 devices: backend.devices.map { device in
                     var device = device
@@ -393,6 +393,7 @@ import AudioutProtocol
                         device.airPlayAccess = access
                         device.hasStoredPassword = storedPassword
                         if awaitingPassword { device.connectionState = .awaitingPassword }
+                        if let cause { device.connectionState = .failed(ConnectionFailure(cause: cause)) }
                     }
                     return device
                 },
@@ -434,17 +435,18 @@ import AudioutProtocol
         #expect(waiting.connection.failureSuggestion == nil)
         #expect(waiting.connection.failureCause == nil)
 
-        for access in [AirPlayAccess.onScreenCode, .onScreenCodeEveryTime] {
-            let code = try #require(
-                build(storedPassword: false, access: access).devices.first { $0.id == "speaker-b" })
-            #expect(code.connection.credentialKind == "onScreenCode")
-        }
+        let code = try #require(
+            build(storedPassword: false, access: .onScreenCode).devices.first { $0.id == "speaker-b" })
+        #expect(code.connection.credentialKind == "onScreenCode")
         let paired = try #require(
             build(storedPassword: true, access: .onScreenCode).devices.first { $0.id == "speaker-b" })
         #expect(paired.connection.credentialKind == nil)
         let everyTime = try #require(
-            build(storedPassword: false, access: .onScreenCodeEveryTime).devices.first { $0.id == "speaker-b" })
+            build(storedPassword: false, access: .onScreenCodeEveryTime, cause: .codeEveryTimeUnsupported)
+                .devices.first { $0.id == "speaker-b" })
         #expect(everyTime.connection.access == "onScreenCodeEveryTime")
+        #expect(everyTime.connection.credentialKind == nil)
+        #expect(everyTime.connection.failureCause == "codeEveryTimeUnsupported")
     }
 
     /// Dropping `access` from the `off` or `failed` state in

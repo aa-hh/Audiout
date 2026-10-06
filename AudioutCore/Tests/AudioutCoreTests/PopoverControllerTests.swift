@@ -850,6 +850,33 @@ import AudioutProtocol
         #expect(popover.test_passwordSheet() === sheet)
     }
 
+    // Turns red if the `.awaitingPassword` arm opens the code sheet while the popover is hidden, where the retained sheet cannot present and blocks every later link click.
+    @Test func aCodeWaitWhileThePopoverIsHiddenOpensNoSheetAndTheLinkStillWorks() async throws {
+        let (popover, _, backend) = try await makePopover()
+        pushOffice(popover, backend) {
+            $0.airPlayAccess = .onScreenCode
+            $0.connectionState = .off
+        }
+        let row = try #require(popover.test_deviceRow(for: "office"))
+        popover.deviceRow(row, didToggleEnabled: true, for: "office")
+
+        popover.test_isShownOverride = false
+        pushOffice(popover, backend) {
+            $0.airPlayAccess = .onScreenCode
+            $0.connectionState = .awaitingPassword
+        }
+        #expect(popover.test_passwordSheet() == nil)
+
+        popover.test_isShownOverride = true
+        pushOffice(popover, backend) {
+            $0.airPlayAccess = .onScreenCode
+            $0.connectionState = .awaitingPassword
+        }
+        #expect(popover.test_passwordSheet() == nil, "the hidden wait spent the click")
+        try #require(popover.test_deviceRow(for: "office")).test_clickEnterPassword()
+        #expect(popover.test_passwordSheet() != nil)
+    }
+
     // Turns red if the `.awaitingPassword` arm opens the sheet for a speaker missing from `codeJoinClickedIDs`.
     @Test func aCodeWaitNobodyClickedHereOpensNoSheet() async throws {
         let (popover, _, backend) = try await makePopover()

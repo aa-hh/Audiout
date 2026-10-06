@@ -50,6 +50,10 @@ public struct ConnectionFailure: Equatable, Sendable {
         // The receiver refused the code the user typed, or dropped the pairing
         // it held (status-flags bits 3/9).
         case codeRequired
+        // The receiver asks for a fresh code on every connection (status-flags
+        // bit 3): the sender drops the pairing and asks again on every start,
+        // so no typed code can carry the join through.
+        case codeEveryTimeUnsupported
         // The receiver accepts only people in its Home (`act=2` or bit 10),
         // which needs a Home member's iCloud identity a third-party sender lacks.
         case homeMembersOnly
@@ -110,6 +114,7 @@ extension ConnectionFailure {
         case .refusedOrBusy:    return "Connection refused"
         case .authRequired:     return "Password didn't work"
         case .codeRequired:     return "Code didn't work"
+        case .codeEveryTimeUnsupported: return "Needs a code every time"
         case .homeMembersOnly:  return "Home members only"
         case .droppedMidStream: return "Connection dropped"
         case .timedOut:         return "Took too long"
@@ -135,6 +140,8 @@ extension ConnectionFailure {
             return "The speaker didn't accept that password. Enter it again to connect."
         case .codeRequired:
             return "The code wasn't accepted. Try again and enter the code shown on the screen."
+        case .codeEveryTimeUnsupported:
+            return "This speaker asks for a new code on every connection. Audiout can't do that yet."
         case .homeMembersOnly:
             return "This speaker only accepts people who share its Home. On a Mac, set AirPlay Receiver to allow “Anyone on the same network” in System Settings; on a HomePod or Apple TV, change its AirPlay access in the Home app. Then try again."
         case .droppedMidStream:

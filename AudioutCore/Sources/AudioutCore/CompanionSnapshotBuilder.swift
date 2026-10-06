@@ -286,14 +286,14 @@ public enum CompanionSnapshotBuilder {
     /// `credentialKind` is `"password"` in every state while a password
     /// speaker has none on file, and `"onScreenCode"` while a speaker that
     /// shows a code has no pairing on file, so the phone can offer to enter one.
+    /// An every-time code receiver takes no code (`.codeEveryTimeUnsupported`), so it has none.
     /// A password wait is `"awaitingPassword"` with no failure fields: it is
     /// not a failure; a refused password is `"failed"` with its cause.
     private static func connectionInfo(_ device: Device) -> DeviceState.ConnectionInfo {
         let credentialKind: String?
         switch device.airPlayAccess {
         case .password where !device.hasStoredPassword: credentialKind = "password"
-        case .onScreenCode where !device.hasStoredPassword,
-             .onScreenCodeEveryTime where !device.hasStoredPassword: credentialKind = "onScreenCode"
+        case .onScreenCode where !device.hasStoredPassword: credentialKind = "onScreenCode"
         default: credentialKind = nil
         }
         let access = device.airPlayAccess.rawValue

@@ -1752,13 +1752,6 @@ public final class DeviceRowView: NSView {
         enterPasswordButton.bezelStyle = .accessoryBar
         enterPasswordButton.isBordered = false
         enterPasswordButton.controlSize = .small
-        enterPasswordButton.attributedTitle = NSAttributedString(
-            string: "Enter Password…",
-            attributes: [
-                .font: Tokens.Font.caption,
-                .foregroundColor: Tokens.Color.label2,
-                .underlineStyle: NSUnderlineStyle.single.rawValue,
-            ])
         enterPasswordButton.target = self
         enterPasswordButton.action = #selector(enterPasswordClicked(_:))
         enterPasswordButton.isHidden = true

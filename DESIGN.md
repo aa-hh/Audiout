@@ -736,7 +736,9 @@ every join) or a Home member carries a stock `lock.fill` (10pt semibold,
 template) 4pt after its name. It takes the name's own ink (`rowTextColor`),
 never gold, and the name truncates before the lock gives way. Its spoken label
 names the kind of lock: "Password protected", "Code required" for both code
-kinds, "Home members only". Joining a password speaker with nothing saved, or
+kinds, "Home members only". A receiver that asks for a code on every join
+shows the lock and never waits for a code: its join fails with "Needs a code
+every time", and no sheet opens for it. Joining a password speaker with nothing saved, or
 the diagnosis panel's "Enter Password…" button, raises a sheet on the panel
 (`SpeakerPasswordSheetViewController`): a bold one-line heading, a stock secure
 field, then Cancel and a gold `ProminentButton` Connect, right-aligned. A
@@ -817,7 +819,7 @@ the can't-be-found list. Then an outlined list whose rows start on the same
 explains the current choice beside its pop-up (absent for This Mac),
 **Scenes**, linking each scene the speaker belongs to, one link per line on
 the row's trailing side, and, only while a password or pairing is saved for
-the speaker, **Password** (**Pairing** for a receiver that shows a code),
+the speaker, **Password** (**Pairing** for a receiver that shows a code the first time only),
 captioned "Saved", with a small stock Forget button.
 
 Scene checkboxes change membership. Their rows give an unavailable member's

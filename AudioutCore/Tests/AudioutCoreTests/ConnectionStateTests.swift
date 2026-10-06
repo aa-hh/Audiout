@@ -5,7 +5,7 @@ import Testing
 
     private let allCauses: [ConnectionFailure.Cause] = [
         .notResponding, .vanished, .refusedOrBusy, .authRequired,
-        .codeRequired, .homeMembersOnly,
+        .codeRequired, .codeEveryTimeUnsupported, .homeMembersOnly,
         .droppedMidStream, .timedOut, .unknown,
     ]
 
@@ -60,6 +60,10 @@ import Testing
             .codeRequired: (
                 "Code didn't work",
                 "The code wasn't accepted. Try again and enter the code shown on the screen."
+            ),
+            .codeEveryTimeUnsupported: (
+                "Needs a code every time",
+                "This speaker asks for a new code on every connection. Audiout can't do that yet."
             ),
             .homeMembersOnly: (
                 "Home members only",

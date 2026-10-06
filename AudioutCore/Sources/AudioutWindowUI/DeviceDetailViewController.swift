@@ -36,7 +36,7 @@ import AudioutSharedUI
 ///   reports out through ``onSelectGroup`` and the host opens that scene's
 ///   editor. Selecting is NOT activating. "Password" ("Saved" and a Forget
 ///   button) joins them only while the backend has a password on file; for a
-///   receiver that shows a code the row reads "Pairing" and stands for the
+///   receiver that shows a code the first time only the row reads "Pairing" and stands for the
 ///   stored pairing key.
 ///
 /// The whole column SCROLLS (`../AGENTS.md`): the Equalizer's Advanced fold
@@ -807,9 +807,7 @@ public final class DeviceDetailViewController: NSViewController {
 
         showInMixerRow.isHidden = isThisMac
         passwordRow.isHidden = shownDevice?.hasStoredPassword != true
-        let access = shownDevice?.airPlayAccess
-        passwordRow.titleLabel.stringValue =
-            access == .onScreenCode || access == .onScreenCodeEveryTime ? "Pairing" : "Password"
+        passwordRow.titleLabel.stringValue = shownDevice?.airPlayAccess == .onScreenCode ? "Pairing" : "Password"
         listWell.rows = listStack.arrangedSubviews.filter { !$0.isHidden }
 
         for pin in [listBelowEQWell, listBelowBTVolume, listBelowForget, listBelowHeader,

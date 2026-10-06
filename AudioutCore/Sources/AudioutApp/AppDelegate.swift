@@ -961,7 +961,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // a direct call beside it posts the same registration a second time.
         // The case the monitor cannot see — a trial started at the gate while
         // the app is already running, which follows no path change — belongs to
-        // the gate's own pass handler.
+        // the gate's own pass handler. The monitor also re-asks about a stored
+        // key the server never answered about, and pushes the resulting token
+        // to connected phones through `applyLicenseState`.
         //
         // The check-in and validate calls below run on the state as it stands
         // now: nothing waits on an answer here, so a key that arrives later is
@@ -969,6 +971,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         trialReachability = TrialReachability(settings: settings,
                                               onRegistered: { [weak self] in
             self?.useNewTrialKey()
+        }, onValidated: { [weak self] in
+            self?.applyLicenseState()
         })
         trialReachability?.start()
 
@@ -3374,25 +3378,32 @@ extension AppDelegate: CompanionCoordinatorHost {
 
     /// A licence key bought on the phone. Kept in this target
     /// because it needs `LicenseValidator`, the gate window and
-    /// `applyLicenseState`, none of which an AppKit-free type owns.
+    /// `applyLicenseState`, none of which an AppKit-free type owns. The phone
+    /// is answered only after the licence server's verdict; with the gate up,
+    /// an accepted key then opens it, and the gate's own pass runs
+    /// `applyLicenseState` and the check-in.
     @MainActor
     func activateLicenseKey(_ key: String,
                             reply: @escaping (CompanionServer.CommandResult) -> Void) {
-        if let gate = licenseGateWindowController {
-            // The gate is still up: its own field already runs the
-            // validate/store/pass sequence, so hand the key to it rather than
-            // racing it with a second validator.
-            gate.submit(key: key)
-            reply(CompanionServer.CommandResult(applied: true))
+        // The gate's check and the phone's must not race on the same stored
+        // key, so the phone is told to retry rather than silently dropped or
+        // falsely accepted.
+        if licenseGateWindowController?.isChecking == true {
+            reply(CompanionServer.CommandResult(applied: false, refusalReason: "Your Mac is checking another licence key. Try again in a moment."))
             return
         }
         CompanionLicenseActivation(settings: settings).activate(key: key) { [weak self] result in
             reply(result)
+            guard let self, !self.isTerminating else { return }
+            if result.applied, let gate = self.licenseGateWindowController {
+                gate.passWithStoredKey()
+                return
+            }
             // `applyLicenseState` is what pushes the companion token that
-            // unlocks the phone.
-            guard result.applied, let self, !self.isTerminating else { return }
+            // unlocks the phone. A refusal re-reads state too, because the
+            // activation may have restored the previous key.
             self.applyLicenseState()
-            LicenseCheckIn(settings: self.settings).checkInIfNeeded()
+            if result.applied { LicenseCheckIn(settings: self.settings).checkInIfNeeded() }
         }
     }
 

@@ -1,0 +1,345 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Scenes direction D</title>
+<style>
+  body { margin:0; background:#4a4d52; font-family:-apple-system,"SF Pro Text",system-ui,sans-serif; color:#f2f2f2; }
+  .page { padding:20px 24px 28px; display:grid; grid-template-columns:713px 713px; column-gap:32px; row-gap:22px; width:1458px; }
+  .cap { font-size:13px; font-weight:600; margin:0 0 7px 2px; color:#f4f4f4; }
+  .cap span { font-weight:400; color:#cfd2d6; }
+  .shell { border-radius:12px; overflow:hidden; box-shadow:0 10px 30px rgba(0,0,0,.35), 0 0 0 0.5px rgba(0,0,0,.5); width:713px; }
+  .title { grid-column:1 / span 2; font-size:20px; font-weight:700; margin:0; }
+  .title span { font-size:13px; font-weight:400; color:#d6d8dc; margin-left:10px; }
+  svg text { font-family:-apple-system,"SF Pro Text",system-ui,sans-serif; }
+</style></head>
+<body>
+<div class="page" id="page">
+  <p class="title">Scenes, direction D: one matrix of speakers against scenes <span>713 pt surface · rows in the Mixer's order · one rail per scene · the live scene's rail is gold</span></p>
+</div>
+<script>
+const DARK = { name:'dark', panel:'#15171A', toolbar:'#1C1E22', well:'#050507', raised:'#1F232A', label:'#DCDCDD', label2:'#B7AC95', label3:'#9E947F',
+  labelCool:'#A9B3BB', labelCool2:'#818C94', hairline:'#2A2E33', edge:'#3D4247', rim:'#6B767D', gold:'#E8B84B', goldText:'#E8B84B',
+  ember:'#8A6A2F', socket:'#2A2E33', magenta:'#FF90E9', glowA:0.22, wash:'255,255,255', washK:0.85, discEdge:null,
+  menu:'rgba(42,42,46,0.98)', menuEdge:'rgba(255,255,255,0.14)', menuText:'#ECECEC', tip:'#2B2C30', tipText:'#E6E6E6', tipEdge:'#45474C' };
+const LIGHT = { name:'light', panel:'#FAFAFB', toolbar:'#F0F0F2', well:'#E9EAEC', raised:'#FAFAFB', label:'#262626', label2:'#6B5F4E', label3:'#6B6459',
+  labelCool:'#4E5A63', labelCool2:'#5F6A73', hairline:'#CBCED4', edge:'#AEB3BB', rim:'#66717A', gold:'#E8B84B', goldText:'#825E0F',
+  ember:'#7A5E2A', socket:'#DFE1E4', magenta:'#752C68', glowA:0.10, wash:'0,0,0', washK:0.85, discEdge:'#7A5E2A',
+  menu:'rgba(246,246,247,0.98)', menuEdge:'rgba(0,0,0,0.16)', menuText:'#1E1E1E', tip:'#F4F4F4', tipText:'#222', tipEdge:'#C7C7C7' };
+const W = 713, TB = 34, H = 100, ROW = 42, HDR = 22, NAMECOL = 210, COLW = 84, PLUSW = 64;
+
+/* ---- glyphs: rough stand-ins for the SF Symbols the app draws ---- */
+function glyph(kind, x, y, c, sw=1.4) {
+  const st = `fill="none" stroke="${c}" stroke-width="${sw}" stroke-linejoin="round" stroke-linecap="round"`;
+  switch (kind) {
+    case 'laptop': return `<rect x="${x-8}" y="${y-6}" width="16" height="10" rx="1.5" ${st}/><path d="M${x-10.5} ${y+6.5}H${x+10.5}" ${st}/>`;
+    case 'homepod': return `<rect x="${x-6}" y="${y-8}" width="12" height="16" rx="5" ${st}/><path d="M${x-4} ${y-5.5}H${x+4}" ${st}/>`;
+    case 'tv': return `<rect x="${x-8.5}" y="${y-7}" width="17" height="14" rx="3" ${st}/><text x="${x}" y="${y+3}" font-size="7.5" font-weight="700" fill="${c}" text-anchor="middle">tv</text>`;
+    case 'receiver': return `<rect x="${x-9.5}" y="${y-1}" width="19" height="7.5" rx="1.5" ${st}/><path d="M${x-4} ${y-4.5}Q${x} ${y-8} ${x+4} ${y-4.5}M${x-2} ${y-2.8}Q${x} ${y-4.6} ${x+2} ${y-2.8}" ${st}/><circle cx="${x-5}" cy="${y+2.7}" r="0.9" fill="${c}"/><circle cx="${x+5}" cy="${y+2.7}" r="0.9" fill="${c}"/>`;
+    case 'speaker': return `<rect x="${x-6}" y="${y-8.5}" width="12" height="17" rx="2.5" ${st}/><circle cx="${x}" cy="${y+2.8}" r="3.1" ${st}/><circle cx="${x}" cy="${y-4.3}" r="1.3" ${st}/>`;
+    case 'round': return `<circle cx="${x}" cy="${y}" r="8" ${st}/><circle cx="${x}" cy="${y}" r="3" ${st}/>`;
+    case 'split': return `<rect x="${x-8}" y="${y-6.5}" width="7" height="5.5" rx="1.2" ${st}/><rect x="${x-8}" y="${y+1}" width="7" height="5.5" rx="1.2" ${st}/><rect x="${x+1}" y="${y-6.5}" width="7" height="13" rx="1.2" ${st}/>`;
+    case 'house': return `<path d="M${x-8} ${y-0.5}L${x} ${y-8}L${x+8} ${y-0.5}M${x-6} ${y-2}V${y+7}H${x+6}V${y-2}M${x-2} ${y+7}V${y+2}H${x+2}V${y+7}" ${st}/>`;
+    case 'sparkle': return `<path d="M${x-1} ${y-8}Q${x} ${y-1} ${x+6} ${y}Q${x} ${y+1} ${x-1} ${y+8}Q${x-2} ${y+1} ${x-8} ${y}Q${x-2} ${y-1} ${x-1} ${y-8}Z" ${st}/><path d="M${x+6} ${y-8}V${y-4}M${x+4} ${y-6}H${x+8}" ${st}/>`;
+    case 'moon': return `<path d="M${x+3} ${y-8}A8 8 0 1 0 ${x+8} ${y+3}A6 6 0 0 1 ${x+3} ${y-8}Z" ${st}/>`;
+    case 'sun': return `<circle cx="${x}" cy="${y}" r="3.6" ${st}/>` + [0,45,90,135,180,225,270,315].map(a=>{const r=a*Math.PI/180;return `<path d="M${x+Math.cos(r)*6} ${y+Math.sin(r)*6}L${x+Math.cos(r)*8.4} ${y+Math.sin(r)*8.4}" ${st}/>`}).join('');
+    case 'fork': return `<path d="M${x-4} ${y-8}V${y-2}Q${x-4} ${y+1} ${x-2} ${y+1}V${y+8}M${x-2} ${y-8}V${y-3}M${x} ${y-8}V${y-2}Q${x} ${y+1} ${x-2} ${y+1}M${x+5} ${y+8}V${y-8}Q${x+2} ${y-6} ${x+2} ${y-1}H${x+5}" ${st}/>`;
+    case 'case': return `<rect x="${x-8.5}" y="${y-4}" width="17" height="11" rx="2" ${st}/><path d="M${x-3} ${y-4}V${y-7}H${x+3}V${y-4}M${x-8.5} ${y+1}H${x+8.5}" ${st}/>`;
+    case 'note': return `<path d="M${x-3} ${y+5}V${y-6}L${x+6} ${y-8}V${y+3}" ${st}/><circle cx="${x-5}" cy="${y+5}" r="2.4" ${st}/><circle cx="${x+4}" cy="${y+3}" r="2.4" ${st}/>`;
+    case 'bed': return `<path d="M${x-9} ${y-6}V${y+7}M${x-9} ${y+3}H${x+9}V${y+7}M${x-9} ${y-1}H${x+9}V${y+3}" ${st}/><circle cx="${x-5}" cy="${y-3}" r="1.8" ${st}/>`;
+    case 'heart': return `<path d="M${x} ${y+7}C${x-10} ${y}${''} ${x-7} ${y-8} ${x} ${y-3}C${x+7} ${y-8} ${x+10} ${y} ${x} ${y+7}Z" ${st}/>`;
+    case 'bolt': return `<path d="M${x+2} ${y-8}L${x-5} ${y+1}H${x}L${x-2} ${y+8}L${x+5} ${y-1}H${x}Z" ${st}/>`;
+    case 'cup': return `<path d="M${x-7} ${y-4}H${x+5}V${y+3}Q${x+5} ${y+7} ${x-1} ${y+7}Q${x-7} ${y+7} ${x-7} ${y+3}Z M${x+5} ${y-2}Q${x+9} ${y-2} ${x+9} ${y+1}Q${x+9} ${y+4} ${x+5} ${y+3}" ${st}/>`;
+    case 'leaf': return `<path d="M${x-7} ${y+7}Q${x-8} ${y-7} ${x+7} ${y-7}Q${x+8} ${y+6} ${x-7} ${y+7}ZM${x-7} ${y+7}L${x+2} ${y-2}" ${st}/>`;
+    case 'game': return `<rect x="${x-9}" y="${y-5}" width="18" height="10" rx="5" ${st}/><path d="M${x-5} ${y-2}V${y+2}M${x-7} ${y}H${x-3}" ${st}/><circle cx="${x+4}" cy="${y-1}" r="0.9" fill="${c}"/><circle cx="${x+6}" cy="${y+1.5}" r="0.9" fill="${c}"/>`;
+    case 'star': return `<path d="M${x} ${y-8}L${x+2.4} ${y-2.6}L${x+8} ${y-2.2}L${x+3.7} ${y+1.4}L${x+5} ${y+7.5}L${x} ${y+4.3}L${x-5} ${y+7.5}L${x-3.7} ${y+1.4}L${x-8} ${y-2.2}L${x-2.4} ${y-2.6}Z" ${st}/>`;
+    case 'plus': return `<path d="M${x} ${y-6.5}V${y+6.5}M${x-6.5} ${y}H${x+6.5}" fill="none" stroke="${c}" stroke-width="1.7" stroke-linecap="round"/>`;
+  }
+  return '';
+}
+const esc = s => s.replace(/&/g,'&amp;').replace(/</g,'&lt;');
+function T(x, y, s, o={}) {
+  return `<text x="${x}" y="${y}" font-size="${o.size||13}" font-weight="${o.w||400}" fill="${o.fill}" text-anchor="${o.anchor||'start'}"${o.op?` opacity="${o.op}"`:''}${o.tab?' style="font-variant-numeric:tabular-nums"':''}>${esc(s)}</text>`;
+}
+function wash(C, a) { return `rgba(${C.wash},${(a*C.washK).toFixed(3)})`; }
+
+/* ---- data: the snapshot fleet ---- */
+const ROWS = [
+  { id:'mac', name:'MacBook Pro Speakers', g:'laptop' },
+  { hdr:'ap', title:'AirPlay Speakers' },
+  { id:'bed', name:'Bedroom HomePod', g:'homepod' },
+  { id:'ltv', name:'Living Room TV', g:'tv' },
+  { id:'mix', name:'Mixer', g:'receiver' },
+  { id:'mv2', name:'Move 2', g:'speaker' },
+  { id:'off', name:'Office', g:'speaker' },
+  { id:'snm', name:'Sonos Move', g:'speaker' },
+  { id:'den', name:'Den', g:'speaker', un:'Unavailable' },
+  { hdr:'bt', title:'Bluetooth Speakers' },
+  { id:'beo', name:'Beosound A1', g:'round' },
+  { id:'onk', name:'Onkyo TX-8220', g:'receiver', un:'Not connected' },
+];
+const ALL = ROWS.filter(r=>r.id).map(r=>r.id);
+const SCENES = [
+  { id:'down', name:'Downstairs', g:'split', m:['off','snm'], live:true },
+  { id:'whole', name:'Whole House', g:'house', m:ALL },
+  { id:'party', name:'Party', g:'sparkle', m:['bed','off','snm','beo'], apps:['Music'] },
+];
+const UNAV = new Set(['den','onk']);
+
+function musicIcon(x, y) {
+  return `<g><defs><linearGradient id="mg${x|0}" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#FC5C7D"/><stop offset="1" stop-color="#F9324B"/></linearGradient></defs>
+  <rect x="${x-9}" y="${y-9}" width="18" height="18" rx="4.5" fill="url(#mg${x|0})"/>${glyph('note', x, y+0.5, '#fff', 1.5)}</g>`;
+}
+
+/* ---- the surface ---- */
+function surface(o) {
+  const C = o.theme === 'dark' ? DARK : LIGHT;
+  const scenes = o.scenes || SCENES;
+  const folded = new Set(o.folded || []);
+  const off = o.offset || 0;
+  const y0 = TB + 1;
+  // lay out rows
+  let y = y0 + H + 1, curHdr = null, L = [];
+  const rows = o.rows || ROWS;
+  for (const r of rows) {
+    if (r.hdr) { curHdr = r.hdr; L.push({ ...r, top:y, cy:y + HDR/2 }); y += HDR; }
+    else if (folded.has(curHdr)) L.push({ ...r, hidden:true, parent:curHdr });
+    else { L.push({ ...r, top:y, cy:y + ROW/2 }); y += ROW; }
+  }
+  const rowsEnd = y;
+  const anyApps = !o.empty && scenes.some(s => s.apps);
+  let appTop = rowsEnd + 4, footTop = anyApps ? appTop + 1 + 40 : rowsEnd;
+  const Hh = o.crop ? rowsEnd + 6 : footTop + 6 + 14 + 8;
+  const plusX = o.pinPlus ? W - PLUSW : NAMECOL + scenes.length * COLW;
+  const colX = i => NAMECOL + i * COLW - off;
+  const cxOf = i => colX(i) + COLW / 2;
+  const seatTop = y0 + H - 8 - 30, seatCY = seatTop + 15, seatBot = seatTop + 30;
+  let s = [];
+  s.push(`<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${Hh}" viewBox="0 0 ${W} ${Hh}">`);
+  s.push(`<defs><radialGradient id="glow-${o.key}"><stop offset="0" stop-color="${C.magenta}" stop-opacity="${C.glowA}"/><stop offset="1" stop-color="${C.magenta}" stop-opacity="0"/></radialGradient>
+    <clipPath id="clip-${o.key}"><rect x="${NAMECOL}" y="0" width="${plusX - NAMECOL}" height="${Hh}"/></clipPath>
+    <linearGradient id="fade-${o.key}" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="${C.panel}" stop-opacity="0"/><stop offset="1" stop-color="${C.panel}" stop-opacity="1"/></linearGradient></defs>`);
+  s.push(`<rect width="${W}" height="${Hh}" fill="${C.panel}"/>`);
+
+  // toolbar strip (shared chrome, drawn approximately)
+  s.push(`<rect width="${W}" height="${TB}" fill="${C.toolbar}"/><rect y="${TB}" width="${W}" height="1" fill="${C.hairline}"/>`);
+  s.push(`<rect x="10" y="3" width="176" height="28" rx="14" fill="${wash(C,0.06)}"/>`);
+  s.push(`<rect x="41" y="6" width="84" height="22" rx="11" fill="${wash(C,0.18)}"/>`);
+  s.push(`<path d="M20 12H34M20 17H34M20 22H34" stroke="${C.label2}" stroke-width="1.3" stroke-linecap="round"/><circle cx="30" cy="12" r="2" fill="${C.toolbar}" stroke="${C.label2}" stroke-width="1.3"/><circle cx="24" cy="17" r="2" fill="${C.toolbar}" stroke="${C.label2}" stroke-width="1.3"/><circle cx="29" cy="22" r="2" fill="${C.toolbar}" stroke="${C.label2}" stroke-width="1.3"/>`);
+  s.push(glyph('split', 56, 17, C.label, 1.3) + T(70, 21, 'Scenes', { size:11, w:500, fill:C.label }));
+  s.push(glyph('speaker', 143, 17, C.label2, 1.2));
+  s.push(`<circle cx="170" cy="17" r="5.5" fill="none" stroke="${C.label2}" stroke-width="1.3"/><circle cx="170" cy="17" r="2" fill="none" stroke="${C.label2}" stroke-width="1.2"/>`);
+  s.push(T(W/2, 21.5, 'Audiout', { size:13, w:600, fill:C.label2, anchor:'middle' }));
+  s.push(`<path d="M${W-25} 9V25M${W-29} 9H${W-21}M${W-29} 17H${W-21}" stroke="${C.label2}" stroke-width="1.3" stroke-linecap="round"/>`);
+
+  // corner: page title + count
+  s.push(T(14, y0 + 30, 'Scenes', { size:16, w:600, fill:C.label }));
+  const cnt = o.empty ? 'No scenes' : `${scenes.filter(x=>!x.draft).length} scenes`;
+  s.push(T(14, y0 + 48, cnt, { size:11, fill:C.labelCool, tab:true }));
+  // rule under header band, from the icon column
+  s.push(`<rect x="14" y="${y0 + H}" width="${W - 28}" height="1" fill="${C.edge}"/>`);
+
+  // hover crosshair washes (under everything)
+  if (o.hover) {
+    const r = L.find(x => x.id === o.hover.row), i = scenes.findIndex(x => x.id === o.hover.scene);
+    s.push(`<rect x="5" y="${r.top + 2}" width="${W - 10}" height="${ROW - 4}" rx="10" fill="${wash(C,0.10)}"/>`);
+    s.push(`<rect x="${colX(i) + 4}" y="${y0 + 6}" width="${COLW - 8}" height="${H - 10}" rx="10" fill="${wash(C,0.10)}"/>`);
+  }
+
+  // rows: icon + name, subsection headers
+  for (const r of L) {
+    if (r.hidden) continue;
+    if (r.hdr) {
+      const f = folded.has(r.hdr);
+      const chev = f ? `M33 ${r.cy-4}L37 ${r.cy}L33 ${r.cy+4}` : `M31 ${r.cy-2}L35 ${r.cy+2}L39 ${r.cy-2}`;
+      s.push(`<path d="${chev}" fill="none" stroke="${C.label3}" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>`);
+      s.push(T(46, r.cy + 4, r.title, { size:11, w:500, fill:C.label3 }));
+      continue;
+    }
+    const un = UNAV.has(r.id);
+    s.push(glyph(r.g, 27, r.cy, un ? C.labelCool2 : C.labelCool));
+    if (un) {
+      s.push(T(48, r.cy - 2, r.name, { fill:C.labelCool }));
+      s.push(T(48, r.cy + 12, r.un, { size:11, fill:C.labelCool2 }));
+    } else s.push(T(48, r.cy + 4.5, r.name, { fill: o.empty ? C.labelCool : C.label }));
+  }
+
+  // ---- scene columns (clipped, scrollable) ----
+  s.push(`<g clip-path="url(#clip-${o.key})">`);
+  scenes.forEach((sc, i) => {
+    const cx = cxOf(i);
+    const tone = sc.live ? C.gold : C.ember;
+    const mem = new Set(sc.m);
+    // header stack, bottom-aligned on the seat
+    if (!sc.draft) s.push(`<circle cx="${cx}" cy="${seatCY}" r="30" fill="url(#glow-${o.key})"/>`);
+    s.push(`<rect x="${cx-15}" y="${seatTop}" width="30" height="30" rx="9" fill="${C.well}" stroke="${sc.live ? C.gold : C.edge}" stroke-width="${sc.live ? 1.5 : 1}"/>`);
+    s.push(glyph(sc.g, cx, seatCY, sc.draft ? C.labelCool2 : (sc.live ? C.label : C.labelCool)));
+    const unCount = sc.m.filter(id => UNAV.has(id)).length;
+    let lines = [];
+    if (sc.draft) lines = [{ t:'Pick speakers', fill:C.labelCool2 }];
+    else {
+      lines.push({ t:`${sc.m.length} speaker${sc.m.length===1?'':'s'}`, fill:C.labelCool, tab:true });
+      if (sc.live) lines.push({ t:'Playing', fill:C.goldText, w:500 });
+      else if (unCount) lines.push({ t:`${unCount} unavailable`, fill:C.labelCool });
+    }
+    let ly = seatTop - 7 - (lines.length - 1) * 13;
+    const nameY = ly - 15;
+    if (sc.draft) {
+      s.push(`<rect x="${cx-38}" y="${nameY-13}" width="76" height="19" rx="5" fill="${C.well}" stroke="${C.edge}"/>`);
+      s.push(`<rect x="${cx-40.5}" y="${nameY-15.5}" width="81" height="24" rx="7" fill="none" stroke="rgba(64,140,255,0.75)" stroke-width="3"/>`);
+      s.push(T(cx-33, nameY+1, sc.typed, { size:11, w:600, fill:C.label }));
+      s.push(`<rect x="${cx-33 + sc.typed.length*6.1 + 1}" y="${nameY-9}" width="1" height="12" fill="${C.label}"/>`);
+    } else if (sc.renaming) {
+      s.push(`<rect x="${cx-38}" y="${nameY-13}" width="76" height="19" rx="5" fill="${C.well}" stroke="${C.edge}"/>`);
+      s.push(T(cx, nameY+1, sc.name, { size:11, w:600, fill:C.label, anchor:'middle' }));
+    } else s.push(T(cx, nameY, sc.name, { size:11, w:600, fill: sc.live ? C.label : C.labelCool, anchor:'middle' }));
+    lines.forEach((ln, k) => s.push(T(cx, ly + k*13, ln.t, { size:11, w:ln.w||400, fill:ln.fill, anchor:'middle', tab:ln.tab })));
+
+    // rail: starts under the seat, detours round non-members, ends at the lowest reached point
+    const reached = [];
+    let curHdrLocal = null;
+    for (const r of L) {
+      if (r.hdr) { curHdrLocal = r; continue; }
+      if (r.hidden) { if (mem.has(r.id)) curHdrLocal.dot = curHdrLocal.dot || new Set(), curHdrLocal.dot.add(sc.id); continue; }
+      if (mem.has(r.id)) reached.push(r.cy);
+    }
+    const dots = L.filter(r => r.hdr && r.dot && r.dot.has(sc.id));
+    const below = o.crop && sc.m.some(id => !L.find(r => r.id === id));
+    const endY = below ? Hh : Math.max(-1, ...reached, ...dots.map(d => d.cy));
+    let p = '';
+    if (endY > 0 && !sc.draft) {
+      let cur = seatBot + 3;
+      for (const r of L) {
+        if (r.hidden) continue;
+        if (r.cy > endY) break;
+        if (r.hdr) {
+          if (r.dot && r.dot.has(sc.id)) { p += `M${cx} ${cur}V${r.cy - 5.5}`; cur = r.cy + 5.5; }
+          continue;
+        }
+        if (mem.has(r.id)) { p += `M${cx} ${cur}V${r.cy - 10.5}`; cur = r.cy + 10.5; }
+        else { p += `M${cx} ${cur}V${r.cy - 12}A12 12 0 0 0 ${cx} ${r.cy + 12}`; cur = r.cy + 12; }
+      }
+      if (below) p += `M${cx} ${cur}V${Hh}`;
+      s.push(`<path d="${p}" fill="none" stroke="${tone}" stroke-width="2"/>`);
+      dots.forEach(d => s.push(`<circle cx="${cx}" cy="${d.cy}" r="2.5" fill="${tone}"/>`));
+    }
+    // points
+    for (const r of L) {
+      if (r.hdr || r.hidden) continue;
+      const hov = o.hover && o.hover.row === r.id && o.hover.scene === sc.id;
+      if (mem.has(r.id)) {
+        if (UNAV.has(r.id)) s.push(`<circle cx="${cx}" cy="${r.cy}" r="6" fill="${C.socket}" stroke="${tone}" stroke-width="3"/>`);
+        else s.push(`<circle cx="${cx}" cy="${r.cy}" r="7.5" fill="${tone}"${C.discEdge ? ` stroke="${C.discEdge}" stroke-width="1"` : ''}/>`);
+      } else {
+        s.push(`<circle cx="${cx}" cy="${r.cy}" r="${hov ? 6.5 : 4.7}" fill="none" stroke="${C.rim}" stroke-width="1.6"/>`);
+      }
+      if (o.focus && o.focus.row === r.id && o.focus.scene === sc.id)
+        s.push(`<circle cx="${cx}" cy="${r.cy}" r="12" fill="none" stroke="rgba(64,140,255,0.75)" stroke-width="3"/>`);
+    }
+    // app routing cells
+    if (anyApps && sc.apps) s.push(musicIcon(cx, appTop + 1 + 20));
+  });
+  s.push(`</g>`);
+
+  // fixed edges while scrolled
+  if (off) {
+    s.push(`<rect x="${NAMECOL}" y="${y0+4}" width="1" height="${Hh - y0 - 8}" fill="${C.edge}"/>`);
+  }
+  if (o.pinPlus) {
+    s.push(`<rect x="${plusX}" y="${y0}" width="${PLUSW}" height="${Hh - y0}" fill="${C.panel}"/><rect x="${plusX}" y="${y0+4}" width="1" height="${Hh - y0 - 8}" fill="${C.edge}"/>`);
+    s.push(`<rect x="${NAMECOL + 90}" y="${Hh - 9}" width="150" height="5" rx="2.5" fill="${wash(C,0.35)}"/>`);
+  }
+  // Add scene column
+  {
+    const cx = plusX + PLUSW / 2, dis = o.plusDisabled ? ' opacity="0.4"' : '';
+    s.push(`<g${dis}><rect x="${cx-14}" y="${seatTop+1}" width="28" height="28" rx="9" fill="none" stroke="${C.edge}" stroke-width="1"/>${glyph('plus', cx, seatCY, C.label2)}`);
+    s.push(T(cx, seatTop - 7, 'Add scene', { size:11, fill:C.label2, anchor:'middle' }) + `</g>`);
+  }
+
+  // empty-state message beside the Add scene column
+  if (o.empty) {
+    const mx = plusX + PLUSW + 18;
+    s.push(T(mx, y0 + 40, 'Set up a scene', { size:13, fill:C.label2 }));
+    s.push(T(mx, y0 + 58, 'Save a set of speakers as a scene, then switch to it in two', { size:11, w:500, fill:C.label2 }));
+    s.push(T(mx, y0 + 72, 'clicks from the menu bar.', { size:11, w:500, fill:C.label2 }));
+  }
+
+  // App Routing row
+  if (anyApps) {
+    s.push(`<rect x="14" y="${appTop}" width="${W - 28}" height="1" fill="${C.edge}"/>`);
+    s.push(T(14, appTop + 19, 'App Routing', { size:11, w:600, fill:C.label2 }));
+    s.push(T(14, appTop + 33, 'Set in the Mixer', { size:11, fill:C.labelCool2 }));
+  }
+  // footer caption
+  if (!o.crop) s.push(T(W/2, Hh - 12, o.footer || 'Set up scenes here, then switch to the Mixer to play', { size:11, fill:C.label2, anchor:'middle' }));
+  else s.push(`<rect x="0" y="${Hh - 40}" width="${W}" height="40" fill="url(#fade-${o.key})"/>`);
+
+  // overlays
+  if (o.tooltip) {
+    const r = L.find(x => x.id === o.hover.row), i = scenes.findIndex(x => x.id === o.hover.scene);
+    const tx = cxOf(i) + 10, ty = r.cy + 14, tw = o.tooltip.length * 5.9 + 14;
+    s.push(`<rect x="${tx}" y="${ty}" width="${tw}" height="20" rx="4" fill="${C.tip}" stroke="${C.tipEdge}" stroke-width="0.6"/>` + T(tx + 7, ty + 14, o.tooltip, { size:11, fill:C.tipText }));
+  }
+  if (o.menu) {
+    const i = scenes.findIndex(x => x.id === o.menu), mx = cxOf(i) - 6, my = seatTop - 18;
+    const items = ['Rename…', 'Change icon…', '-', 'Delete scene…'];
+    const h = 5 + 22*3 + 11 + 5;
+    s.push(`<rect x="${mx}" y="${my}" width="160" height="${h}" rx="7" fill="${C.menu}" stroke="${C.menuEdge}" stroke-width="0.8"/>`);
+    let iy = my + 5;
+    items.forEach((it, k) => {
+      if (it === '-') { s.push(`<rect x="${mx+10}" y="${iy+5}" width="140" height="1" fill="${C.menuEdge}"/>`); iy += 11; return; }
+      if (k === 1) s.push(`<rect x="${mx+5}" y="${iy}" width="150" height="22" rx="4" fill="#0A64D6"/>`);
+      s.push(T(mx + 16, iy + 15.5, it, { size:13, fill: k === 1 ? '#fff' : C.menuText }));
+      iy += 22;
+    });
+  }
+  if (o.picker) {
+    const i = scenes.findIndex(x => x.id === o.picker), cx = cxOf(i);
+    const pw = 262, ph = 232, px = cx - pw/2, py = seatBot + 12;
+    const bg = C.name === 'dark' ? '#25272B' : '#F7F7F8', be = C.name === 'dark' ? 'rgba(255,255,255,0.14)' : 'rgba(0,0,0,0.18)';
+    s.push(`<g filter="drop-shadow(0 8px 18px rgba(0,0,0,0.25))"><path d="M${px+10} ${py}H${cx-9}L${cx} ${py-9}L${cx+9} ${py}H${px+pw-10}Q${px+pw} ${py} ${px+pw} ${py+10}V${py+ph-10}Q${px+pw} ${py+ph} ${px+pw-10} ${py+ph}H${px+10}Q${px} ${py+ph} ${px} ${py+ph-10}V${py+10}Q${px} ${py} ${px+10} ${py}Z" fill="${bg}" stroke="${be}" stroke-width="0.8"/></g>`);
+    s.push(`<rect x="${px+12}" y="${py+12}" width="${pw-24}" height="22" rx="6" fill="${C.name==='dark'?'#1B1C1F':'#FFFFFF'}" stroke="${C.hairline}"/>`);
+    s.push(`<circle cx="${px+24}" cy="${py+22.5}" r="3.6" fill="none" stroke="${C.labelCool2}" stroke-width="1.3"/><path d="M${px+26.8} ${py+25.3}L${px+29.5} ${py+28}" stroke="${C.labelCool2}" stroke-width="1.3" stroke-linecap="round"/>`);
+    s.push(T(px+35, py+27, 'Search or type a symbol name', { size:12, fill:C.labelCool2 }));
+    const gl = ['split','house','sparkle','moon','sun','note','fork','case','bed','tv','speaker','homepod','round','heart','bolt','cup','leaf','game','star','laptop','receiver','house','moon','note'];
+    gl.forEach((g, k) => {
+      const gx = px + 12 + (k % 6) * 40, gy = py + 44 + Math.floor(k / 6) * 34;
+      const sel = g === 'sparkle';
+      s.push(`<rect x="${gx}" y="${gy}" width="36" height="30" rx="6" fill="${sel ? '#0A64D6' : C.well}" stroke="${sel ? '#0A64D6' : C.hairline}"/>`);
+      s.push(glyph(g, gx + 18, gy + 15, sel ? '#fff' : C.labelCool, 1.3));
+    });
+    const by = py + ph - 34;
+    s.push(`<rect x="${px+12}" y="${by}" width="118" height="22" rx="6" fill="${C.name==='dark'?'#3A3C41':'#FFFFFF'}" stroke="${C.hairline}"/>` + T(px+71, by+15, 'Use default icon', { size:12, fill:C.label, anchor:'middle' }));
+    s.push(`<rect x="${px+pw-72}" y="${by}" width="60" height="22" rx="6" fill="#0A64D6"/>` + T(px+pw-42, by+15, 'Apply', { size:12, w:500, fill:'#fff', anchor:'middle' }));
+  }
+  s.push(`</svg>`);
+  return s.join('\n');
+}
+
+const frames = [
+  { cap:'1 · Dark, at rest', sub:'Downstairs is what Main Audio plays to, so its rail is gold; the others are ember. Keyboard focus on Office in Whole House.',
+    o:{ key:'a', theme:'dark', focus:{ row:'off', scene:'whole' } } },
+  { cap:'2 · Light, pointing at a cell', sub:'The row and the column header both take the 0.10 wash. Bluetooth is folded: a dot on its header line for each scene with a Bluetooth member.',
+    o:{ key:'b', theme:'light', hover:{ row:'mv2', scene:'party' }, tooltip:'Add Move 2 to Party', folded:['bt'] } },
+  { cap:'3 · Dark, adding a scene', sub:'The Add scene column inserted a column with its name field focused. It is saved once the first speaker is picked; Escape cancels.',
+    o:{ key:'c', theme:'dark', plusDisabled:true, footer:'Pick at least one speaker to save this scene. Escape cancels.',
+        scenes:[...SCENES, { id:'new', name:'', typed:'Kitchen', g:'split', m:[], draft:true }] } },
+  { cap:'4 · Light, changing an icon', sub:'Clicking a seat (or Change icon… in its menu) opens the existing icon picker as a popover off the seat.',
+    o:{ key:'d', theme:'light', picker:'party' } },
+  { cap:'5 · Light, no scenes', sub:'The speakers stay listed with no points; today’s empty copy sits beside the Add scene column.',
+    o:{ key:'e', theme:'light', empty:true, scenes:[] } },
+  { cap:'6 · Dark, eight scenes (cropped)', sub:'Columns scroll sideways under a fixed speaker column; Add scene stays at the right edge. Right-click on a header gives the scene’s menu.',
+    o:{ key:'f', theme:'dark', crop:true, pinPlus:true, offset:30, menu:'party',
+        rows: ROWS.slice(0, 6),
+        scenes:[ SCENES[0], SCENES[1], SCENES[2],
+          { id:'kit', name:'Kitchen', g:'fork', m:['mix','bed'] },
+          { id:'din', name:'Dinner', g:'cup', m:['ltv','bed','off'] },
+          { id:'pat', name:'Patio', g:'sun', m:['mv2'] },
+          { id:'late', name:'Late night', g:'moon', m:['bed'] },
+          { id:'work', name:'Work', g:'case', m:['mac'] } ] } },
+];
+const page = document.getElementById('page');
+for (const f of frames) {
+  const d = document.createElement('div');
+  d.innerHTML = `<p class="cap">${f.cap} <span>${f.sub}</span></p><div class="shell">${surface(f.o)}</div>`;
+  page.appendChild(d);
+}
+</script>
+</body></html>

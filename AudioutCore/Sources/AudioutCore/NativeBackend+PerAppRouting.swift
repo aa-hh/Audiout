@@ -2157,7 +2157,7 @@ extension NativeBackend {
                 cause = .unknown
             }
             // A password demand nobody answered yet is a wait, not a failure.
-            let awaitsPassword = Self.awaitsPassword(cause, fedPassword: self.fedDescriptors[deviceID]?.password)
+            let awaitsPassword = Self.awaitsPassword(cause, fedPassword: self.fedCredential(deviceID))
             if !awaitsPassword {
                 Telemetry.fail(.airplay, "airplay:connect_failed",
                                local: ["device": deviceID, "op": op, "stream": "\(stream)", "error": "\(error)"],

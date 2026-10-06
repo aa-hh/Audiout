@@ -623,13 +623,18 @@ public final class PopoverController: NSObject {
     var diagnosisPanelsByID: [String: ConnectionDiagnosisView] = [:]
 
     /// The AirPlay password sheet while it is up, and the speaker it asks for.
-    /// Opened only by a user act (the diagnosis panel's button or a join of a
-    /// protected speaker), never by a background reconnect.
+    /// Opened only by a user act (the diagnosis panel's button, the row's link,
+    /// a join of a password speaker, or a join of a code speaker reaching its
+    /// wait through `codeJoinClickedIDs`), never by a background reconnect.
     var passwordSheet: SpeakerPasswordSheetViewController?
     var passwordSheetDeviceID: String?
     /// Set on Connect, cleared by the next failure edge for that speaker, so a
     /// failure that happened before the submit never reads as its answer.
     var passwordSheetSubmitted = false
+    /// Speakers whose join the user clicked in this popover and that show a
+    /// code. Consumed by the first `.awaitingPassword` edge, dropped by any
+    /// `.connected`, `.failed` or `.off` edge for that speaker and by Cancel.
+    var codeJoinClickedIDs: Set<String> = []
 
     /// Name-click Bluetooth attempts retain their outcome until the surface closes.
     var btConnectAttemptIDs: Set<String> = []
@@ -1191,6 +1196,8 @@ public final class PopoverController: NSObject {
 
     /// The password sheet's answer to a refused password; the phone shows its own copy.
     static let passwordRejectedText = "That password didn't work. Check it and try again."
+    /// The code sheet's answer to a refused code; the phone shows its own copy.
+    static let codeRejectedText = "That code didn't work. Check the screen and try again."
 
     /// Whether the generalized silence watchdog (R11) has fallen back to local
     /// playback because zero desired devices stayed connected. Drives the banner;
@@ -3427,6 +3434,7 @@ public final class PopoverController: NSObject {
                 // what keeps a mid-episode dismissal honored — a still-`.failed`
                 // re-report breaks here, so the panel never pops back.
                 guard !previous.isFailedState else { break }
+                codeJoinClickedIDs.remove(device.id)
                 // Only a speaker the user asked for is worth an event —
                 // selected, a redirect target, or a member of the playing
                 // group. The backend fails every speaker it can see, wanted or
@@ -3453,11 +3461,14 @@ public final class PopoverController: NSObject {
                 if device.id == passwordSheetDeviceID, passwordSheetSubmitted,
                    case .failed(let failure) = current {
                     passwordSheetSubmitted = false
-                    passwordSheet?.showResult(failure.cause == .authRequired
-                        ? Self.passwordRejectedText
-                        : failure.headline)
+                    switch failure.cause {
+                    case .codeRequired: passwordSheet?.showResult(Self.codeRejectedText)
+                    case .authRequired: passwordSheet?.showResult(Self.passwordRejectedText)
+                    default: passwordSheet?.showResult(failure.headline)
+                    }
                 }
             case .connected, .off:
+                codeJoinClickedIDs.remove(device.id)
                 if current == .connected && device.id == passwordSheetDeviceID {
                     dismissPasswordSheet()
                 }
@@ -3476,6 +3487,15 @@ public final class PopoverController: NSObject {
                 // the door, so no panel.
                 openDiagnosisIDs.remove(device.id)
                 dismissedDiagnosisIDs.remove(device.id)
+                // A code speaker the user just clicked opens its sheet once,
+                // as the wait begins; a repeat report is not a new wait. A
+                // hidden popover cannot present the sheet, and a retained one
+                // would refuse every later link click, so a hidden wait spends
+                // the click and the row's link opens the sheet later.
+                if previous != .awaitingPassword, codeJoinClickedIDs.remove(device.id) != nil,
+                   isEffectivelyShown {
+                    presentPasswordSheet(for: device.id)
+                }
             case .connecting, .reconnecting:
                 // In-flight: leave any open panel alone (a retry keeps its
                 // context on screen until the attempt resolves). Deliberately
@@ -3582,6 +3602,13 @@ public final class PopoverController: NSObject {
         Analytics.capture("connection:retry_clicked")
         let result = groupController?.retryConnection(for: id) ?? .ok
         handleSelection(result, deviceID: id)
+        if result.refusalReason == nil, showsCode(id) { codeJoinClickedIDs.insert(id) }
+    }
+
+    /// Whether `id` is a receiver that shows a code on its screen once and keeps
+    /// the pairing. An every-time code receiver takes no code (`.codeEveryTimeUnsupported`).
+    private func showsCode(_ id: String) -> Bool {
+        devicesByID[id]?.airPlayAccess == .onScreenCode
     }
 
     /// Ask for `id`'s AirPlay password. Connect stores it and retries through
@@ -3591,9 +3618,11 @@ public final class PopoverController: NSObject {
     /// is up its speaker's diagnosis panel does not open; Cancel on a
     /// still-failed speaker opens it.
     func presentPasswordSheet(for id: String) {
-        guard passwordSheet == nil else { return }
-        Analytics.capture("airplay:code_prompt_shown", ["kind": "password"])
-        let sheet = SpeakerPasswordSheetViewController(deviceName: devicesByID[id]?.name ?? "")
+        guard passwordSheet == nil, devicesByID[id]?.airPlayAccess != .onScreenCodeEveryTime else { return }
+        let isCode = showsCode(id)
+        Analytics.capture("airplay:code_prompt_shown", ["kind": isCode ? "onScreenCode" : "password"])
+        let sheet = SpeakerPasswordSheetViewController(deviceName: devicesByID[id]?.name ?? "",
+                                                       kind: isCode ? .onScreenCode : .password)
         sheet.onSubmit = { [weak self] text in
             guard let self else { return }
             self.passwordSheetSubmitted = true
@@ -3620,6 +3649,7 @@ public final class PopoverController: NSObject {
 
     private func dismissPasswordSheet() {
         let sheet = passwordSheet
+        if let id = passwordSheetDeviceID { codeJoinClickedIDs.remove(id) }
         passwordSheet = nil
         passwordSheetDeviceID = nil
         passwordSheetSubmitted = false
@@ -3716,6 +3746,9 @@ extension PopoverController: DeviceRowView.Delegate {
         if on, result.refusalReason == nil, let device = devicesByID[id],
            device.airPlayAccess == .password, !device.hasStoredPassword {
             presentPasswordSheet(for: id)
+        }
+        if on, result.refusalReason == nil, showsCode(id) {
+            codeJoinClickedIDs.insert(id)
         }
     }
 

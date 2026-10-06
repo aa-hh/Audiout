@@ -26,7 +26,7 @@ import AudioutSharedUI
     @Test func allCausesRenderTheirOwnCopy() {
         let causes: [ConnectionFailure.Cause] = [
             .notResponding, .vanished, .refusedOrBusy, .authRequired,
-            .codeRequired, .homeMembersOnly,
+            .codeRequired, .codeEveryTimeUnsupported, .homeMembersOnly,
             .droppedMidStream, .timedOut, .unknown,
         ]
         for cause in causes {

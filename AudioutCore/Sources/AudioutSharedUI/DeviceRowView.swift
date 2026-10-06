@@ -148,17 +148,24 @@ public final class DeviceRowView: NSView {
     /// model `isSelectedInSet` and always reset in ``apply(_:selected:…)`` and on
     /// re-parenting, so a hover can never "stick" as a stale highlight after the
     /// pointer leaves the popover without a matching `mouseExited` (T-U8 bug).
-    private var isHovered: Bool = false {
-        didSet { armedDotView.rowWash = rowWash }
+    private var isHovered: Bool { hoverTracker.isHovered }
+    private lazy var hoverTracker = HoverTracker(view: self) { [weak self] _ in
+        guard let self else { return }
+        self.armedDotView.rowWash = self.rowWash
+        self.refreshBusHoverCue()
+        self.setNeedsDisplay(self.bounds)
     }
 
     /// Transient pointer-in-the-gutter state, the same discipline as
     /// `isHovered` (reset on `apply` and re-parenting via
-    /// ``setGutterHovered(_:)``). Stored — rather than pushed straight into
-    /// the bus skin — because the node's hover RESIZE resolves from BOTH
-    /// flags (``refreshBusHoverCue()``): the gutter resizes any live node, and
-    /// row hover additionally resizes an unselected one.
-    private var isGutterHovered: Bool = false
+    /// ``setGutterHovered(_:)``). Kept apart from row hover because the
+    /// node's hover RESIZE resolves from BOTH flags (``refreshBusHoverCue()``):
+    /// the gutter resizes any live node, and row hover additionally resizes an
+    /// unselected one.
+    private var isGutterHovered: Bool { gutterHoverTracker.isHovered }
+    private lazy var gutterHoverTracker = HoverTracker(
+        view: self, rect: { [weak self] in self?.gutterHitRect ?? .zero }
+    ) { [weak self] _ in self?.refreshBusHoverCue() }
 
     /// The PRIMARY "Selected Speakers" membership control (SPEC §9b device-row
     /// toggle). An `NSButton` **checkbox** (`.switch` button type, empty title)
@@ -231,9 +238,6 @@ public final class DeviceRowView: NSView {
     /// `configureAccessibility()` (called outside `apply`'s own scope) can
     /// speak its equivalent.
     private var volumePendingApply = false
-    /// Whether the `%` readout breathes with the thumb: pending AND the
-    /// readout would otherwise read `goldText` (the engaged state).
-    private var readoutBreathes = false
     private var liveVolumeAvailable = true
     let nameLabel = DeviceNameLabel(labelWithString: "")
     /// Stock `lock.fill` after the name, shown for any speaker that asks for a
@@ -302,7 +306,7 @@ public final class DeviceRowView: NSView {
     var switchOfferOffered = false
     /// "Enter Password…", in the same slot, shown while the speaker waits for
     /// its first password (`.awaitingPassword`).
-    let enterPasswordButton = NSButton()
+    let enterPasswordButton = TextLinkButton(title: "Enter Password…", size: .caption)
     var enterPasswordOffered = false
     /// The FEED column's main-mix segment text, or `nil` when this row is not
     /// currently a member of the ACTIVE main-mix target (a redirect-only row
@@ -328,7 +332,7 @@ public final class DeviceRowView: NSView {
     /// treatment (v4 §Call-1 + v4.1 item 8): desaturated fader/readout AND —
     /// new in item 8 — dimmed FEED text. Stored (not just a local in
     /// ``apply``) so ``updateFeedText()`` dims the composite the same way
-    /// ``faderCell``/``readoutLabel`` already do. Set every `apply`.
+    /// ``fader`` already does. Set every `apply`.
     var controlsMuted = false
     /// `device.connectionState` as of the PREVIOUS `apply`, `nil` before the
     /// first one. Tracked ONLY to detect the item-8 "successful connect" EDGE
@@ -348,32 +352,14 @@ public final class DeviceRowView: NSView {
     /// animation entirely, snap to resolved", spec item 9). Set every `apply`;
     /// defaults off so non-energize callers are byte-for-byte unchanged.
     var energizePending = false
-    let slider = NSSlider()
-    /// The Warm Signal fader skin over `slider` (drawing-only `NSSliderCell`
-    /// swap — behavior/keyboard/VoiceOver stay stock): recessed `well` trough,
-    /// gold `ember → gold` fill iff the row is route-armed (the same §3.3
-    /// predicate the corner dot renders), rounded-rect `raised` thumb. See
-    /// ``WarmFaderCell``.
-    let faderCell = WarmFaderCell()
-    /// Small right-aligned `%` readout sitting immediately right of the slider
-    /// (change 4 — a device row now shows its volume number too, tight against
-    /// the slider like the Main Out row, on the same shared column).
-    let readoutLabel = NSTextField(labelWithString: "")
+    /// The volume slider and its `%` readout. Its gold fill takes the same
+    /// §3.3 route-armed predicate the corner dot renders.
+    let fader = RowVolumeFader(haloRoom: DeviceRowView.faderHaloRoom)
     let muteButton = NSButton()
     /// The Equalizer door, leading of mute on every row with an equalizer.
     /// Mounted only when ``supportsEqualizer``; the layout reserves its slot on
     /// every row either way, so the name truncates identically across rows.
     let eqButton = NSButton()
-    /// The mute button's at-rest symbol — the outline square with the
-    /// speaker and no slash.
-    private static let muteRestSymbolName = RowAccessorySymbol.muteRest
-    /// The mute button's ENGAGED symbol — the same outline square with the
-    /// slash added. The slash belongs to this state only.
-    private static let muteEngagedSymbolName = RowAccessorySymbol.muteEngaged
-    /// The Equalizer door's at-rest symbol — the outline square.
-    private static let eqRestSymbolName = RowAccessorySymbol.equalizerRest
-    /// The filled square: the heading icon's shaped state (`equalizerShapedHeadingMarkImage(in:pointSize:)`), never drawn on the door.
-    private static let eqEngagedSymbolName = RowAccessorySymbol.equalizerEngaged
     /// The point size every accessory glyph on this row that is NOT one of the
     /// four custom symbols is drawn at. The symbols carry their own
     /// (``RowAccessorySymbol/pointSize``), larger, because their enclosing
@@ -605,7 +591,7 @@ public final class DeviceRowView: NSView {
         // (T-U8 root-cause fix — hover is transient, selection is model-driven).
         // The gutter's socket hover is the same kind of transient state, cleared
         // on the same beat and re-established by the row's own tracking area.
-        self.isHovered = false
+        setHovered(false)
         setGutterHovered(false)
 
         // Primary membership control: ON iff the device is in the Selected
@@ -716,7 +702,7 @@ public final class DeviceRowView: NSView {
         self.feedAppGroupNames = appRouteGroupNames
         // The fader's engaged (gold) fill reuses the EXACT same predicate the
         // dot renders — one armed truth, two instruments (spec §3.3 / §5).
-        faderCell.isRouteArmed = isRouteArmed
+        fader.isRouteArmed = isRouteArmed
         // Muted-unconnected controls (v4 §Call-1 + v4.1 item 8): a
         // connecting/reconnecting or failed device — or an unavailable one —
         // renders its controls muted (desaturated + lower-contrast), "not
@@ -729,12 +715,12 @@ public final class DeviceRowView: NSView {
         case .connected:                                            controlsMuted = false
         case .off:                                                  controlsMuted = !device.isAvailable
         }
-        faderCell.isMutedControl = controlsMuted
+        fader.isMutedControl = controlsMuted
         // Cast feed-gain pending state (host-owned, id-keyed timer — the
         // "not yet gold" hold while the gesture is still in flight to the
         // receiver's audio feed).
         self.volumePendingApply = volumePendingApply
-        if faderCell.isPendingApply != volumePendingApply {
+        if fader.isPendingApply != volumePendingApply {
             // Live diagnosis (2026-08-23): log BOTH transitions — an unlogged
             // true->false stamp between draws would explain a fill that never
             // visibly changes — and invalidate the slider explicitly rather
@@ -742,12 +728,11 @@ public final class DeviceRowView: NSView {
             Telemetry.log(.cast, "cast_pending_cell", [
                 "device": device.id,
                 "to": volumePendingApply ? "true" : "false",
-                "armed": faderCell.isRouteArmed ? "true" : "false",
-                "enabled": slider.isEnabled ? "true" : "false",
-                "inWindow": slider.window != nil ? "true" : "false",
+                "armed": fader.isRouteArmed ? "true" : "false",
+                "enabled": fader.isAdjustable ? "true" : "false",
+                "inWindow": fader.window != nil ? "true" : "false",
             ])
-            faderCell.isPendingApply = volumePendingApply
-            slider.needsDisplay = true
+            fader.isPendingApply = volumePendingApply
         }
 
         // Item 8's brighten EDGE — "on successful connect it brightens to
@@ -781,13 +766,8 @@ public final class DeviceRowView: NSView {
         resolveSublabel()
         updateFeedText()
 
-        // Don't fight a live drag: only push the model value into the slider
-        // when the user isn't dragging it. (The readout is kept live during a
-        // drag by the slider action; on a model refresh it shows the model value.)
-        if !isDraggingSlider {
-            slider.integerValue = device.volume
-            readoutLabel.stringValue = VolumePercent.label(device.volume)
-        }
+        // The fader ignores this push while the user is dragging it.
+        fader.value = device.volume
         // The volume slider + mute are usable whenever the device is available
         // and controllable (selected member OR an app-redirect target) — kept
         // SEPARATE from `selected` so the "System" routing token stays keyed off
@@ -797,14 +777,11 @@ public final class DeviceRowView: NSView {
         // (dropped the old `!device.isMuted` term) so the user can set the level
         // they'll hear the moment they unmute, instead of the slider going dark
         // the instant they mute.
-        slider.isEnabled = hasLiveConnection && controllable
+        fader.isAdjustable = hasLiveConnection && controllable
         muteButton.isEnabled = hasLiveConnection && controllable
         updateEQButton()
         muteButton.state = device.isMuted ? .on : .off
         updateMuteTint()
-        readoutLabel.textColor = restingReadoutInk
-        readoutBreathes = volumePendingApply && slider.isEnabled && !controlsMuted && isRouteArmed
-        updatePendingReadoutInk(faderCell.pulseStrength)
 
         // Under-name meter visibility (v4 §Call-1): the meter is shown ONLY on
         // armed + unmuted + connected rows (the §3.3 armed predicate captures
@@ -856,7 +833,7 @@ public final class DeviceRowView: NSView {
         unavailableStatusLabel.isHidden = !showUnavailableStatus || offerStands
         unavailableStatusLabel.stringValue = showUnavailableStatus ? (unavailableStatus ?? "") : ""
         unavailableStatusLabel.toolTip = unavailableHelp
-        for control in [slider, muteButton, readoutLabel, eqButton] as [NSView] {
+        for control in [fader, muteButton, eqButton] as [NSView] {
             control.isHidden = showUnavailableStatus
         }
         if showUnavailableStatus {
@@ -1032,7 +1009,7 @@ public final class DeviceRowView: NSView {
     ///
     /// WHAT IT MAY NOT GO BACK TO. Three treatments are retired here, and
     /// none may return. The first was an `engagedChrome` capsule at
-    /// ``PopoverColumnGrid/mutePillFillAlpha`` behind an unslashed speaker — a
+    /// ``PopoverColumnGrid/engagedFillAlpha`` behind an unslashed speaker — a
     /// faint grey pill that read as nothing (owner's call, 2026-09-04: "the
     /// active mute state does not look like any other mute state I have seen
     /// in my life"). The second was its replacement, an opaque `muted` rounded
@@ -1047,10 +1024,7 @@ public final class DeviceRowView: NSView {
     private func updateMuteTint() {
         let engaged = muteButton.state == .on
         // The slash belongs to the muted state only; both states are outlines.
-        muteButton.image = RowAccessorySymbol.image(
-            named: engaged ? Self.muteEngagedSymbolName : Self.muteRestSymbolName,
-            ink: engaged ? Self.engagedInk(fill: Tokens.Color.muted, in: effectiveAppearance)
-                         : Self.restInk(in: effectiveAppearance))
+        muteButton.image = RowAccessorySymbol.mute(engaged: engaged, in: effectiveAppearance)
         muteButton.setAccessibilityLabel(engaged ? "Unmute \(device.name)" : "Mute \(device.name)")
     }
 
@@ -1060,11 +1034,11 @@ public final class DeviceRowView: NSView {
     /// the neutral ink mute wears at rest when it is flat (the owner kept the
     /// outline on the row, 2026-09-26). The filled
     /// ``RowAccessorySymbol/equalizerEngaged`` is the heading icon's shaped
-    /// state only (``equalizerShapedHeadingMarkImage(in:pointSize:)``), never the door's.
+    /// state only (``RowAccessorySymbol/equalizerHeading(shaped:in:pointSize:)``), never the door's.
     ///
     /// WHY GREEN AND NOT GOLD. The door wore ``Tokens/Color/goldText`` until
     /// the symbols landed, and gold means "audio is flowing here" everywhere
-    /// else — including the live wash this row draws behind the door. One hue
+    /// else — the fader fill and the readout beside the door. One hue
     /// cannot carry both. ``Tokens/Color/equalizer`` carries the measurements
     /// and the separation from ``Tokens/Color/muted`` beside it.
     ///
@@ -1076,64 +1050,7 @@ public final class DeviceRowView: NSView {
         eqButton.setAccessibilityLabel("Equalizer for \(device.name)")
         eqButton.setAccessibilityValue(isEQShaped ? "Shaped" : "Flat")
         // One shape, two inks.
-        eqButton.image = isEQShaped
-            ? Self.equalizerEngagedMarkImage(in: effectiveAppearance)
-            : Self.equalizerRestMarkImage(in: effectiveAppearance)
-    }
-
-    /// The engaged and at-rest equalizer marks, drawn from this file so the
-    /// green stays here. The row's door uses the outline in both inks. The
-    /// icon leading the Equalizer heading on the speaker page and the Main
-    /// Audio page uses the outline at rest and
-    /// ``equalizerShapedHeadingMarkImage(in:pointSize:)``, the filled square, when shaped.
-    public static func equalizerEngagedMarkImage(in appearance: NSAppearance) -> NSImage? {
-        RowAccessorySymbol.image(
-            named: eqRestSymbolName,
-            ink: engagedInk(fill: Tokens.Color.equalizer, in: appearance))
-    }
-
-    public static func equalizerRestMarkImage(
-        in appearance: NSAppearance,
-        pointSize: CGFloat = RowAccessorySymbol.pointSize
-    ) -> NSImage? {
-        RowAccessorySymbol.image(
-            named: eqRestSymbolName, ink: restInk(in: appearance), pointSize: pointSize)
-    }
-
-    public static func equalizerShapedHeadingMarkImage(
-        in appearance: NSAppearance,
-        pointSize: CGFloat = RowAccessorySymbol.pointSize
-    ) -> NSImage? {
-        RowAccessorySymbol.image(
-            named: eqEngagedSymbolName,
-            ink: engagedInk(fill: Tokens.Color.equalizer, in: appearance),
-            pointSize: pointSize)
-    }
-
-    /// The engaged ink: `fill` over everything the symbol draws — on mute's
-    /// slashed outline that is the square, the speaker and the slash — so
-    /// the state needs no second colour.
-    ///
-    /// Resolved in the row's own appearance before it reaches the drawing: a
-    /// dynamic `NSColor` would otherwise resolve against whatever appearance
-    /// happens to be current when the image is composited.
-    static func engagedInk(fill: NSColor, in appearance: NSAppearance) -> NSColor {
-        var resolved = fill
-        appearance.performAsCurrentDrawingAppearance { resolved = fill.usingColorSpace(.sRGB) ?? fill }
-        return resolved
-    }
-
-    /// The at-rest ink, so the outline square and the mark inside it read as
-    /// a single drawn line. `label` is the row's accessory ink — light warm
-    /// grey in dark, dark warm brown in light — and the contrast suites
-    /// already hold it to the body floor on every ground this row puts
-    /// behind it.
-    static func restInk(in appearance: NSAppearance) -> NSColor {
-        var resolved = Tokens.Color.label
-        appearance.performAsCurrentDrawingAppearance {
-            resolved = Tokens.Color.label.usingColorSpace(.sRGB) ?? Tokens.Color.label
-        }
-        return resolved
+        eqButton.image = RowAccessorySymbol.equalizerDoor(shaped: isEQShaped, in: effectiveAppearance)
     }
 
     /// The configuration every accessory glyph on this row that is NOT one of
@@ -1150,40 +1067,20 @@ public final class DeviceRowView: NSView {
         super.viewDidChangeEffectiveAppearance()
         updateEQButton()
         updateMuteTint()
-        updatePendingReadoutInk(faderCell.pulseStrength)
-    }
-
-    /// The `%` readout has three states (D6): sounding here reads `goldText`,
-    /// a stored-but-idle level reads `emberText`, and a row that is not
-    /// adjustable — slider disabled, or the muted-unconnected treatment —
-    /// drops to the cool dim `labelCool2`.
-    private var restingReadoutInk: NSColor {
-        if !slider.isEnabled || controlsMuted { return Tokens.Color.labelCool2 }
-        return isRouteArmed ? Tokens.Color.goldText : Tokens.Color.emberText
     }
 
     /// Drop a pending Cast volume hold at once, with no arrival, for a
     /// surface that is hiding: the fader stops glowing and its timer stops,
-    /// and the readout takes back the ink `apply` chose for it.
+    /// and the readout takes back its resting ink.
     public func cancelPendingHold() {
         volumePendingApply = false
-        readoutBreathes = false
-        faderCell.cancelPendingHold()
-        readoutLabel.textColor = restingReadoutInk
+        fader.cancelPendingHold()
         configureAccessibility()
     }
 
-    /// The readout's breath while a Cast volume is pending: dim to live ink
-    /// in step with the thumb, held dim under Reduce Motion. Outside the
-    /// hold it leaves the colour `apply` chose alone.
-    private func updatePendingReadoutInk(_ strength: CGFloat?) {
-        guard readoutBreathes else { return }
-        readoutLabel.textColor = PendingPulse.ink(
-            strength: faderCell.reduceMotion ? nil : strength, in: effectiveAppearance)
-    }
-
     /// Room for the pending glow's outermost halo ring between the slider's
-    /// frame and its trough, at each end.
+    /// frame and its trough, at each end. The neighbours' constants give it
+    /// back, so the trough, mute glyph and readout land where they would at 0.
     private static let faderHaloRoom: CGFloat = 3
 
     /// Alpha applied to `enableCheckbox` when `apply(selectionDimmed:)` is true
@@ -1650,8 +1547,6 @@ public final class DeviceRowView: NSView {
 
     // MARK: Build
 
-    private var isDraggingSlider = false
-
     /// Whether this speaker's saved curve is anything but flat — PUSHED by the
     /// host through `apply(...)`; the row reads no tone store of its own.
     private var isEQShaped = false
@@ -1761,7 +1656,7 @@ public final class DeviceRowView: NSView {
             button.translatesAutoresizingMaskIntoConstraints = false
             button.bezelStyle = .rounded
             button.controlSize = .small
-            button.font = .systemFont(ofSize: NSFont.systemFontSize(for: .small))
+            button.font = Tokens.Font.caption
             button.title = title
             button.target = self
             button.action = action
@@ -1775,51 +1670,25 @@ public final class DeviceRowView: NSView {
         removalUndoStack.isHidden = true
         switchOfferButton.isHidden = true
         // An underlined caption-size text link, unlike the two bordered offers
-        // above: the underline is its control signal, as on the licence gate's
-        // quiet links.
+        // above: the underline is its control signal.
         enterPasswordButton.translatesAutoresizingMaskIntoConstraints = false
-        enterPasswordButton.bezelStyle = .accessoryBar
-        enterPasswordButton.isBordered = false
-        enterPasswordButton.controlSize = .small
-        enterPasswordButton.attributedTitle = NSAttributedString(
-            string: "Enter Password…",
-            attributes: [
-                .font: Tokens.Font.caption,
-                .foregroundColor: Tokens.Color.label2,
-                .underlineStyle: NSUnderlineStyle.single.rawValue,
-            ])
         enterPasswordButton.target = self
         enterPasswordButton.action = #selector(enterPasswordClicked(_:))
         enterPasswordButton.isHidden = true
 
-        slider.translatesAutoresizingMaskIntoConstraints = false
-        // Warm fader skin: install the drawing-only cell BEFORE the value/
-        // target configuration below (a cell swap resets cell-held state, so
-        // everything after re-lands on the new cell). Tracking, keyboard,
-        // scroll-wheel, `isContinuous`, and VoiceOver stay stock NSSlider.
-        slider.cell = faderCell
-        faderCell.haloRoom = Self.faderHaloRoom
-        faderCell.onPulse = { [weak self] strength in self?.updatePendingReadoutInk(strength) }
-        slider.minValue = 0
-        slider.maxValue = 100
-        slider.isContinuous = true            // fire throughout the drag (brief §2)
-        slider.target = self
-        slider.action = #selector(volumeChanged(_:))
+        fader.onChange = { [weak self] volume in
+            guard let self else { return }
+            self.delegate?.deviceRow(self, didSetVolume: volume, for: self.device.id)
+        }
 
-        // `%` readout, right-aligned, small secondary — hangs off the slider's
-        // trailing edge (change 4) so the number reads tight against the slider.
-        readoutLabel.translatesAutoresizingMaskIntoConstraints = false
-        readoutLabel.font = Tokens.Font.readout
-        readoutLabel.textColor = Tokens.Color.emberText
-        readoutLabel.alignment = .right
-        readoutLabel.setContentHuggingPriority(.required, for: .horizontal)
-
-        configureAccessoryButton(muteButton, symbol: Self.muteRestSymbolName,
-                                  action: #selector(muteToggled(_:)))
+        RowAccessorySymbol.configure(
+            muteButton, image: RowAccessorySymbol.mute(engaged: false, in: effectiveAppearance),
+            target: self, action: #selector(muteToggled(_:)))
         // Same accessory voice as mute, but a plain push button: this one is a
         // DOOR (it opens the Groups screen's equalizer), never a toggle.
-        configureAccessoryButton(eqButton, symbol: Self.eqRestSymbolName,
-                                 action: #selector(equalizerButtonClicked(_:)))
+        RowAccessorySymbol.configure(
+            eqButton, image: RowAccessorySymbol.equalizerDoor(shaped: false, in: effectiveAppearance),
+            target: self, action: #selector(equalizerButtonClicked(_:)))
         eqButton.setButtonType(.momentaryChange)
         eqButton.title = ""          // a door, not a labelled control
         eqButton.toolTip = "Equalizer"
@@ -1844,7 +1713,7 @@ public final class DeviceRowView: NSView {
         identityStack.translatesAutoresizingMaskIntoConstraints = false
         identityStack.orientation = .vertical
         identityStack.alignment = .leading
-        identityStack.spacing = 2
+        identityStack.spacing = Tokens.Layout.titleSubtitleSpacing
         identityStack.distribution = .fill
         // The lock rides after the name; the name keeps its low priorities, so
         // it truncates first and the lock is never squeezed out.
@@ -1873,14 +1742,13 @@ public final class DeviceRowView: NSView {
         unavailableStatusLabel.isHidden = true
         addSubview(unavailableStatusLabel)
         addSubview(identityStack)
-        addSubview(slider)
+        addSubview(fader)
         NSLayoutConstraint.activate([
             unavailableStatusLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
             unavailableStatusLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -PopoverColumnGrid.trailingControlTrailing),
-            unavailableStatusLabel.leadingAnchor.constraint(greaterThanOrEqualTo: slider.leadingAnchor,
+            unavailableStatusLabel.leadingAnchor.constraint(greaterThanOrEqualTo: fader.leadingAnchor,
                                                             constant: Self.faderHaloRoom),
         ])
-        addSubview(readoutLabel)
         addSubview(muteButton)
         if supportsEqualizer { addSubview(eqButton) }
         // FEED column (v4.1 item 3): only a bus row has the free trailing slot.
@@ -1943,30 +1811,13 @@ public final class DeviceRowView: NSView {
             muteButton.centerYAnchor.constraint(equalTo: centerYAnchor),
             muteButton.widthAnchor.constraint(equalToConstant: PopoverColumnGrid.muteWidth),
             muteButton.trailingAnchor.constraint(
-                equalTo: slider.leadingAnchor,
+                equalTo: fader.leadingAnchor,
                 constant: -(PopoverColumnGrid.muteToSlider - Self.faderHaloRoom)),
 
-            slider.centerYAnchor.constraint(equalTo: centerYAnchor),
-            // The slider's frame is bigger than its trough so the pending
-            // glow's 3 pt halo is never cut off. Stock height is 16 pt, which
-            // clipped the 17 pt thumb by half a point; 24 pt holds thumb plus
-            // ring, centred, so the track stays put. Width gains
-            // `faderHaloRoom` at each end, which the cell leaves empty, and
-            // every neighbour's constant gives it back: the trough, the mute
-            // glyph and the readout land where they did at `sliderWidth`.
-            slider.heightAnchor.constraint(equalToConstant: 24),
-            slider.widthAnchor.constraint(
-                equalToConstant: PopoverColumnGrid.sliderWidth + 2 * Self.faderHaloRoom),
-            slider.trailingAnchor.constraint(
-                equalTo: trailingAnchor,
-                constant: -(PopoverColumnGrid.sliderTrailing - Self.faderHaloRoom)),
-
-            // `%` readout: tight to the right of the slider, fixed-width column.
-            readoutLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
-            readoutLabel.widthAnchor.constraint(equalToConstant: PopoverColumnGrid.readoutWidth),
-            readoutLabel.leadingAnchor.constraint(
-                equalTo: slider.trailingAnchor,
-                constant: PopoverColumnGrid.sliderToReadout - Self.faderHaloRoom),
+            // Slider + `%` readout; the slider lands on `sliderTrailing`.
+            fader.centerYAnchor.constraint(equalTo: centerYAnchor),
+            fader.trailingAnchor.constraint(equalTo: trailingAnchor,
+                                            constant: -PopoverColumnGrid.readoutTrailing),
         ]
 
         // The under-name meter's fixed size (v4 §Call-1), when it's in the stack.
@@ -2136,30 +1987,6 @@ public final class DeviceRowView: NSView {
     /// already funnels through, in case a later density setting needs it.
     private func applyNameStackLayout(twoLine: Bool) {}
 
-    private func configureAccessoryButton(_ button: NSButton, symbol: String,
-                                          action: Selector) {
-        button.translatesAutoresizingMaskIntoConstraints = false
-        button.bezelStyle = .accessoryBar        // SPEC §9 device-row mute
-        button.setButtonType(.pushOnPushOff)
-        button.isBordered = false
-        // `symbol` is only the SEEDED glyph, and it is one of the four custom
-        // symbols — `NSImage(systemSymbolName:)` finds Apple's own and would
-        // return nil for it. The mute button swaps its own in
-        // `updateMuteTint()` (slashed while engaged) and the Equalizer door
-        // re-makes its own in `updateEQButton()`.
-        button.image = RowAccessorySymbol.image(named: symbol,
-                                                ink: Self.restInk(in: effectiveAppearance))
-        button.imagePosition = .imageOnly
-        // Unscaled: the symbol's image box is wider than the 24 pt column by
-        // its empty side bearings, and the default `.scaleProportionallyDown`
-        // would shrink the whole mark to fit them in. See
-        // ``RowAccessorySymbol/pointSize``.
-        button.imageScaling = .scaleNone
-        button.contentTintColor = Tokens.Color.label2
-        button.target = self
-        button.action = action
-    }
-
     // MARK: Bluetooth SYNC chip (PLAN-BT-SYNC-DRAWER T6)
 
     /// The align-by-ear tooltip. The BUTTON moved off the row into the drawer
@@ -2196,8 +2023,7 @@ public final class DeviceRowView: NSView {
     /// The chip's tabular-figures label font: monospaced DIGITS so a stepper
     /// change can't make the chip's number jitter in width under the fixed
     /// `syncChipWidth` column — the same answer the drawer's value field uses.
-    private static let syncChipFont =
-        NSFont.monospacedDigitSystemFont(ofSize: NSFont.smallSystemFontSize, weight: .regular)
+    private static let syncChipFont = Tokens.Font.captionDigits
 
     /// Relocated from the deleted Settings › Audio › Advanced sync-offset row.
     /// Its "takes effect next time" sentence is gone on purpose: the row applies
@@ -2244,12 +2070,11 @@ public final class DeviceRowView: NSView {
     /// - **untuned** (D10) — "Not set" in `label3` inside a DASHED
     ///   border: the discoverability affordance, since zero reads as finished
     ///   while "Not set" reads as an invitation;
-    /// - **drawer open** — the app's established ENGAGED-CONTROL treatment,
-    ///   identical in recipe to the mute pill (``updateMuteTint()``): a
-    ///   translucent ``Tokens/Color/engagedChrome`` fill at
-    ///   `mutePillFillAlpha` plus a matching glyph, label and border. Its TEXT
-    ///   colour therefore matches the tuned-resting state — the FILL and border
-    ///   are what carry "open", exactly as the pill does for mute. Deliberately
+    /// - **drawer open** — the app's ENGAGED-CONTROL treatment, the one a
+    ///   pressed toolbar seat also wears: a translucent
+    ///   ``Tokens/Color/engagedChrome`` fill at `engagedFillAlpha` plus a
+    ///   matching glyph, label and border. Its TEXT colour matches the
+    ///   tuned-resting state — the FILL and border carry "open". Deliberately
     ///   not gold: gold is the route-armed/primary vocabulary and this chip is a
     ///   secondary, transient affordance.
     private func updateSyncChip() {
@@ -2504,46 +2329,6 @@ public final class DeviceRowView: NSView {
 
     // MARK: Actions
 
-    @objc private func volumeChanged(_ sender: NSSlider) {
-        // Only a genuine mouse drag suppresses model pushes; keyboard/scroll/AX
-        // changes arrive as single events with no drag in flight.
-        switch NSApp?.currentEvent?.type {
-        case .leftMouseDown, .leftMouseDragged:
-            isDraggingSlider = true
-            installSliderDragEndMonitor()
-        case .leftMouseUp:
-            endSliderDrag()
-        default:
-            break
-        }
-        // Keep the `%` readout live through the drag (change 4 — mirrors
-        // MainOutRowView), since `apply` won't push the model value mid-drag.
-        readoutLabel.stringValue = VolumePercent.label(sender.integerValue)
-        delegate?.deviceRow(self, didSetVolume: sender.integerValue, for: device.id)
-    }
-
-    private var sliderDragEndMonitor: Any?
-
-    /// Arms a scoped `.leftMouseUp` local monitor so a drag whose final
-    /// `volumeChanged` callback doesn't coincide with mouse-up (a fast
-    /// release, or a drag cancelled by Esc) still clears the flag from a real
-    /// gesture end (P1-9), rather than staying wedged until the next drag.
-    private func installSliderDragEndMonitor() {
-        guard sliderDragEndMonitor == nil else { return }
-        sliderDragEndMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseUp]) { [weak self] event in
-            self?.endSliderDrag()   // real gesture end — fires even for a drag whose
-            return event            // final change callback never coincided with mouse-up
-        }
-    }
-
-    private func endSliderDrag() {
-        isDraggingSlider = false
-        if let monitor = sliderDragEndMonitor {
-            NSEvent.removeMonitor(monitor)
-            sliderDragEndMonitor = nil
-        }
-    }
-
     @objc private func muteToggled(_ sender: NSButton) {
         // AppKit has already flipped `sender.state` (pushOnPushOff) by the time
         // the action fires, so this lands the tint instantly on a live click
@@ -2613,10 +2398,7 @@ public final class DeviceRowView: NSView {
     /// since the Warm fader skin swaps the slider's CELL (drawing-only; the
     /// wiring must survive). Mirrors `test_fireCheckboxAction`'s house style.
     public func test_fireSliderAction(settingValueTo value: Int) {
-        slider.integerValue = value
-        guard let action = slider.action,
-              let target = slider.target as? NSObject else { return }
-        _ = target.perform(action, with: slider)
+        fader.test_fireSliderAction(settingValueTo: value)
     }
 
     /// Simulate the user toggling this row's mute button — flips
@@ -2712,37 +2494,13 @@ public final class DeviceRowView: NSView {
 
     // MARK: Highlight + hover (brief §2/§5 — menu host only)
 
-    /// Marks the SECOND tracking area (the bus gutter) so the shared
-    /// `mouseEntered`/`mouseExited` owner can tell the two apart.
-    private static let gutterTrackingKey = "gutter"
-
     public override func updateTrackingAreas() {
         super.updateTrackingAreas()
-        trackingAreas.forEach(removeTrackingArea)
-        // Re-tracking means the geometry moved under the pointer — drop the
-        // gutter hover rather than leaving a socket lit for a region that has
-        // shifted; the tracking area's own `.mouseMoved` stream re-establishes
-        // it on the next move.
-        setGutterHovered(false)
-        addTrackingArea(NSTrackingArea(
-            rect: bounds,
-            options: [.mouseEnteredAndExited, .mouseMoved, .activeInActiveApp, .inVisibleRect],
-            owner: self
-        ))
+        hoverTracker.update()
         // The bus gutter's own region: hovering it grows the node (its "I am
-        // clickable" affordance). Same rect as the checkbox's
-        // expanded hit box, read off the control itself so the two can't drift.
-        if busActive {
-            // Explicit rect, so NO `.inVisibleRect` here — that option makes
-            // AppKit ignore the rect and track the whole visible bounds, which
-            // would make the gutter area a duplicate of the row area above.
-            addTrackingArea(NSTrackingArea(
-                rect: gutterHitRect,
-                options: [.mouseEnteredAndExited, .activeInActiveApp],
-                owner: self,
-                userInfo: ["zone": Self.gutterTrackingKey]
-            ))
-        }
+        // clickable" affordance). Same rect as the checkbox's expanded hit
+        // box, read off the control itself so the two can't drift.
+        gutterHoverTracker.update(active: busActive)
     }
 
     /// The bus gutter's hit/hover rect in this row's coordinates — the
@@ -2752,23 +2510,6 @@ public final class DeviceRowView: NSView {
     private var gutterHitRect: NSRect {
         busActive ? enableCheckbox.frame : .zero
     }
-
-    private func isGutterArea(_ event: NSEvent) -> Bool {
-        (event.trackingArea?.userInfo?["zone"] as? String) == Self.gutterTrackingKey
-    }
-
-    public override func mouseEntered(with event: NSEvent) {
-        if isGutterArea(event) { setGutterHovered(true) } else { setHovered(true) }
-    }
-
-    public override func mouseExited(with event: NSEvent) {
-        if isGutterArea(event) { setGutterHovered(false) } else { setHovered(false) }
-    }
-
-    /// Reconciles hover against the true pointer position (P2-1) — fed by the
-    /// bounds tracking area's own `.mouseMoved` option now, not an app-wide
-    /// `NSEvent` monitor (see ``refreshHoverFromPointer()``).
-    public override func mouseMoved(with event: NSEvent) { refreshHoverFromPointer() }
 
     /// C3: a pointing-hand cursor over the NAME label only (its click toggles
     /// membership, ``nameClicked(_:)``) — scoped to `nameLabel.frame`, not the
@@ -2809,8 +2550,7 @@ public final class DeviceRowView: NSView {
     /// invite a click it would refuse.
     private func setGutterHovered(_ hovered: Bool) {
         guard busActive else { return }
-        isGutterHovered = hovered
-        refreshBusHoverCue()
+        gutterHoverTracker.setHovered(hovered)
     }
 
     /// Resolve whether the node previews its post-click size for the pointer:
@@ -2830,55 +2570,20 @@ public final class DeviceRowView: NSView {
         busView.setHovered(inviting && enableCheckbox.isEnabled)
     }
 
-    /// Set the transient hover flag and repaint only when it actually changes.
-    private func setHovered(_ hovered: Bool) {
-        guard isHovered != hovered else { return }
-        isHovered = hovered
-        refreshBusHoverCue()
-        setNeedsDisplay(bounds)
-    }
-
-    /// Re-evaluate hover from the *actual* pointer position. This is the general
-    /// root-cause fix for a hover that "sticks": the `NSTrackingArea` only emits
-    /// `mouseExited` when the pointer crosses into another tracked region, so a
-    /// row with a dead zone directly below it (the bottom-most row — under it lie
-    /// the card's bottom padding, the inter-card gap and the footer, none of them
-    /// tracked) never receives an exit. Driving hover off the real pointer
-    /// position makes the highlight clear for ANY row, last or not. Fed by the
-    /// row's OWN bounds tracking area's `.mouseMoved` stream (P2-1) — an
-    /// `NSTrackingArea` with that option delivers `mouseMoved(with:)` to its
-    /// owner without any window `acceptsMouseMovedEvents` opt-in, so no
-    /// app-wide monitor is needed any more.
-    private func refreshHoverFromPointer() {
-        guard let window = window else {
-            setHovered(false)
-            setGutterHovered(false)
-            return
-        }
-        let local = convert(window.mouseLocationOutsideOfEventStream, from: nil)
-        setHovered(bounds.contains(local))
-        setGutterHovered(gutterHitRect.contains(local))
-    }
+    /// Set the transient hover flag; the tracker repaints only on a change.
+    private func setHovered(_ hovered: Bool) { hoverTracker.setHovered(hovered) }
 
     /// Belt-and-suspenders against a sticky hover: whenever the row is added to /
     /// removed from a window (a popover rebuild, scroll, or close), drop any
     /// transient hover so it can't persist as a stale highlight (T-U8). The
     /// row's own tracking area (re-established by `updateTrackingAreas`) is
-    /// what keeps hover live going forward — no app-local monitor to
-    /// (un)install any more (P2-1).
+    /// what keeps hover live going forward.
     public override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        isHovered = false
+        setHovered(false)
         setGutterHovered(false)
         setNeedsDisplay(bounds)
-        if window == nil {
-            // A row detached mid-drag (a rebuild while the user is dragging)
-            // must not keep a monitor or a stuck flag (P1-9).
-            endSliderDrag()
-        }
     }
-
-    deinit { endSliderDrag() }
 
     public override func draw(_ dirtyRect: NSRect) {
         if isInMenu {
@@ -2898,14 +2603,8 @@ public final class DeviceRowView: NSView {
             // the row: only a neutral hover wash on pointer-over, driven off
             // state that ``apply`` resets, so a row never keeps a stale
             // background (T-U8 bug fix).
-            let rect = bounds.insetBy(dx: PopoverColumnGrid.selectionHighlightInsetX,
-                                      dy: PopoverColumnGrid.selectionHighlightInsetY)
-            let path = NSBezierPath(roundedRect: rect,
-                                    xRadius: PopoverColumnGrid.selectionHighlightCornerRadius,
-                                    yRadius: PopoverColumnGrid.selectionHighlightCornerRadius)
-            if let rowWash {
-                rowWash.setFill()
-                path.fill()
+            if isHovered {
+                PopoverColumnGrid.fillRowWash(in: bounds, alpha: PopoverColumnGrid.rowHoverWashAlpha)
             }
         }
         super.draw(dirtyRect)
@@ -3035,7 +2734,7 @@ public final class DeviceRowView: NSView {
 
         // The row's VALUE carries the live signal channels (S2/S3 — every
         // visual state has a spoken equivalent, shipped with the drawing):
-        // "muted" for the engaged mute pill / drained meter, and the armed
+        // "muted" for the engaged mute mark / drained meter, and the armed
         // dot's wording — "playing here" when a confirmed live feed lights it,
         // "armed" for the held main-mix route.
         var valueParts: [String] = []
@@ -3096,8 +2795,8 @@ public final class DeviceRowView: NSView {
                     : "not set")
             syncChipButton.setAccessibilityExpanded(syncDrawerExpanded)
         }
-        slider.setAccessibilityRole(.slider)
-        slider.setAccessibilityLabel("\(device.name) volume")
+        fader.slider.setAccessibilityRole(.slider)
+        fader.slider.setAccessibilityLabel("\(device.name) volume")
         muteButton.setAccessibilityLabel(device.isMuted ? "Unmute \(device.name)" : "Mute \(device.name)")
         // `DeviceNameLabel` reports its own role (a button while pressable); the
         // help text says what the press does.
@@ -3173,12 +2872,12 @@ extension DeviceRowView: RailNodeProviding {
 ///
 /// Colours resolve at DRAW time (never stamped into a `CALayer`), so light/
 /// dark, Increase Contrast and the accent dial all land without this cell
-/// observing anything — unlike the mute pill, whose `CGColor` fill needs a
-/// `viewDidChangeEffectiveAppearance` re-stamp.
+/// observing anything — unlike the accessory marks, whose ink is baked into
+/// the image and needs a `viewDidChangeEffectiveAppearance` re-make.
 final class SyncChipCell: NSButtonCell {
     /// The drawer for this row is open: the app's engaged-control treatment
-    /// (translucent accent fill + accent border), the exact recipe
-    /// `DeviceRowView.updateMuteTint()` uses — NOT a solid gold fill.
+    /// (translucent ``Tokens/Color/engagedChrome`` fill at
+    /// ``PopoverColumnGrid/engagedFillAlpha`` + border) — NOT a solid gold fill.
     var isEngaged = false
     /// This device has never been tuned (D10): dashed border, "Not set".
     var isUntuned = false
@@ -3206,11 +2905,11 @@ final class SyncChipCell: NSButtonCell {
     }
 
     /// The engaged fill — ``Tokens/Color/engagedChrome`` at
-    /// `mutePillFillAlpha`, never a solid gold. `nil` in every other state: a
+    /// `engagedFillAlpha`, never a solid gold. `nil` in every other state: a
     /// resting chip is an outline only.
     var fillColor: NSColor? {
         guard isEngaged else { return nil }
-        return Tokens.Color.engagedChrome.withAlphaComponent(PopoverColumnGrid.mutePillFillAlpha)
+        return Tokens.Color.engagedChrome.withAlphaComponent(PopoverColumnGrid.engagedFillAlpha)
     }
 
     /// Engaged borrows the engaged-chrome tone; untuned uses the `label3` its

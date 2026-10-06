@@ -186,7 +186,7 @@ final class RoundedContainerView: NSView {
 
     init(fill: NSColor = Tokens.Color.panel,
          border: NSColor = Tokens.Color.hairline,
-         radius: CGFloat = Tokens.Layout.groupedSectionCornerRadius) {
+         radius: CGFloat = Tokens.Layout.permissionCardCornerRadius) {
         self.fill = fill
         self.border = border
         self.radius = radius

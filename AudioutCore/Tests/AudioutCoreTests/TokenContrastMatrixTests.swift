@@ -31,7 +31,7 @@ import AppKit
 ///    against EACH OTHER) — `MembershipWellContrastTests`' job; this file
 ///    only uses those tokens as fixed GROUNDS for a foreground instrument.
 ///  - The floor-exempt backdrops `canvas`, `panel`, `raised`, `well`,
-///    `liveRow`, `liveRaised`, `glow`, `socket` and `meter` — each documented
+///    `glow`, `socket` and `meter` — each documented
 ///    as a quiet surface in its own Tokens.swift rationale. `socket` is exempt
 ///    from a GROUND floor only: it is always ringed, and Test D below pins it
 ///    against the ring. `panel` is likewise exempt as a ground, but Test A
@@ -154,7 +154,7 @@ extension SerializedSharedState {
         let textGrounds: [(String, NSColor)] = [("canvas", canvas), ("panel", panel),
                                                 ("raised", raised), ("well", well)]
 
-        // The one WASHED ground a device row's mute pill also sits on, built
+        // The one WASHED ground a device row's mute mark also sits on, built
         // the way `DeviceRowView.draw(_:)` builds it: the row's `panel`
         // ground under the neutral hover wash. It is not a token, so it
         // cannot be named as one — it is composited per appearance and
@@ -216,8 +216,8 @@ extension SerializedSharedState {
                          groundsFor: sameGrounds([("panel", panel), ("raised", raised), ("well", well)])),
             ContrastEntry(name: "ring", token: Tokens.Color.ring, floor: 3.0,
                          groundsFor: sameGrounds([("canvas", canvas), ("panel", panel), ("raised", raised)])),
-            // The mute pill is OPAQUE, so it is measured on every ground a
-            // device row can put behind it — at rest, live-washed, hovered.
+            // The muted mark's ink is measured on every ground a device row can
+            // put behind it — at rest and hovered.
             ContrastEntry(name: "muted", token: Tokens.Color.muted, floor: 3.0,
                          groundsFor: { appearanceName in
                              [("canvas", canvas), ("panel", panel), ("raised", raised)]
@@ -240,11 +240,6 @@ extension SerializedSharedState {
             // Ready/Connected word) and a glyph, so it carries the body floor.
             ContrastEntry(name: "speakersAccent", token: Tokens.Color.speakersAccent, floor: 4.5,
                          groundsFor: sameGrounds([("panel", panel), ("raised", raised), ("well", well)])),
-            // `panel` is a BACKDROP everywhere else; on the mute pill it is the
-            // ink the slashed glyph is knocked out in, so it carries a glyph
-            // floor there and nowhere else.
-            ContrastEntry(name: "panel knocked out of muted", token: panel, floor: 4.5,
-                         groundsFor: sameGrounds([("muted", Tokens.Color.muted)])),
             ContrastEntry(name: "rim", token: Tokens.Color.rim, floor: 3.0,
                          groundsFor: sameGrounds([("canvas", canvas), ("panel", panel),
                                                   ("raised", raised), ("well", well)])),

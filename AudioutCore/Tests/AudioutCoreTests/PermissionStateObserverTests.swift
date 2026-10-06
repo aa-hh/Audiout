@@ -120,17 +120,6 @@ import CoreFoundation
         return condition()
     }
 
-    /// Deadline for a BARRIER — a wait for something that must happen, as
-    /// opposed to a wait-and-hope. Generous on purpose: a barrier costs only as
-    /// long as the thing it waits for actually takes (milliseconds on an idle
-    /// machine), so a long deadline buys tolerance of a loaded one for free.
-    /// A fixed sleep can't make that trade — it always costs its full length and
-    /// still races. This suite runs `@MainActor` (via ``IsolatedSuite``) and a
-    /// Darwin notification is delivered on the main run loop, so it shares one
-    /// thread with every other main-actor test in the process — several of which
-    /// block it outright (`RunLoop.current.run(until:)`, `Thread.sleep`).
-    private static let barrierTimeout: TimeInterval = 10
-
     // MARK: The grant edge
 
     /// The core contract: a kick that resolves `.granted` latches the fresh
@@ -274,7 +263,7 @@ import CoreFoundation
 
         // Let the launch kick's spawn finish, so the count below can only move
         // for the notification and nothing is left queued behind it.
-        let launchSettled = await pollUntil(timeout: Self.barrierTimeout) { spawns.isSettled }
+        let launchSettled = await pollUntil { spawns.isSettled }
         try #require(launchSettled, "the launch kick's spawn never completed — infrastructure, not the observer")
         let spawnsBeforePost = spawns.spawns
         #expect(spawnsBeforePost > 0, "start() performs the launch kick")
@@ -282,9 +271,9 @@ import CoreFoundation
         // Two separate failures, kept separate: the post not reaching this
         // process at all, and an armed observer not reacting to one that did.
         post(name)
-        let firstPostDelivered = await pollUntil(timeout: Self.barrierTimeout) { witness.posts == 1 }
+        let firstPostDelivered = await pollUntil { witness.posts == 1 }
         try #require(firstPostDelivered, "the post never reached this process — infrastructure, not the observer")
-        let armedObserverReacted = await pollUntil(timeout: Self.barrierTimeout) { spawns.spawns > spawnsBeforePost }
+        let armedObserverReacted = await pollUntil { spawns.spawns > spawnsBeforePost }
         try #require(armedObserverReacted, "an armed observer must re-check when the notification fires")
         let spawnsAfterPost = spawns.spawns
 
@@ -295,7 +284,7 @@ import CoreFoundation
         // waiting for it means the assertion can no longer pass merely because
         // the second post hadn't been delivered yet.
         post(name)
-        let secondPostDelivered = await pollUntil(timeout: Self.barrierTimeout) { witness.posts == 2 }
+        let secondPostDelivered = await pollUntil { witness.posts == 2 }
         try #require(secondPostDelivered, "the post never reached this process — infrastructure, not the observer")
         #expect(spawns.spawns == spawnsAfterPost,
                 "a removed observer must not be called back — a live one is a dangling pointer")

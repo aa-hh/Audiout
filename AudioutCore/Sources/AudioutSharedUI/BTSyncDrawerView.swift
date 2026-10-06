@@ -181,6 +181,9 @@ public final class BTSyncDrawerView: NSView {
     public init() {
         super.init(frame: .zero)
         commonInit()
+        // `draw(_:)` reads `containerEdge`, whose Increase Contrast hex the
+        // toggle swaps without an appearance change.
+        redrawOnAccessibilityDisplayChange()
     }
 
     @available(*, unavailable)

@@ -22,10 +22,9 @@ public protocol SyncValueFieldEditorDelegate: AnyObject {
 /// readout (PLAN-BT-SYNC-DRAWER T5) doesn't fork a second copy of the
 /// hard-won Return/focus-loss/arrow handling — that behaviour was expensive
 /// to get right the first time (see the row's own commit history) and this
-/// type exists so a second control never has to re-learn it. `DeviceRowView`
-/// keeps its own copy for now; T6 deletes it and switches the row over to
-/// this type. The brief duplication between the two commits is expected and
-/// fine per the plan.
+/// type exists so a second control never has to re-learn it. The drawer is
+/// its only user: the row now shows the offset on `SyncChipCell` and has no
+/// text field.
 ///
 /// Two behaviours the row's field never needed, both required here:
 /// - **Tolerant parsing.** Parses `Double(...)` and rounds through
@@ -37,11 +36,10 @@ public protocol SyncValueFieldEditorDelegate: AnyObject {
 ///   text the user changed their mind about must not evaporate silently on
 ///   the next blur, it must be discardable on demand.
 ///
-/// **Signed while editing, host-formatted at rest.** The drawer's readout
-/// shows a bare magnitude beside a "later"/"earlier" suffix (D7 — never a
-/// bare signed number) but the underlying trim IS signed, so a no-op edit
-/// (click in, press Return with nothing changed) must not silently flip its
-/// direction. The fix: the field shows the host's `displayText` (from
+/// **Signed while editing, host-formatted at rest.** At rest the drawer's
+/// readout shows the host's text, a signed value with an "ms" suffix
+/// ("−414 ms"). A no-op edit (click in, press Return with nothing changed)
+/// must give back the same signed trim. So the field shows the host's `displayText` (from
 /// ``setCommittedValue(_:displayText:)``) whenever it is not being edited,
 /// and switches to a plain signed number (`"-22.4"`) the instant editing
 /// begins — round-tripping an untouched edit back to the exact same signed

@@ -383,7 +383,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// The app's device model, kept as a pure function of backend events. Keyed
     /// by `Device.id`. T-U2 reads this to build rows; for now it just backs the
     /// placeholder master-volume value the status symbol tracks.
-    private var devicesByID: [String: Device] = [:]
+    private var devicesByID: [String: Device] = [:] {
+        // The Touch Bar play button pulses while any speaker is still starting
+        // (a Cast receiver loading). The bar drops repeats of the same value.
+        didSet {
+            if hasTouchBar {
+                touchBarFullBar.setAwaitingPlayback(devicesByID.values.hasDeviceStillConnecting)
+            }
+        }
+    }
 
     /// The live per-device CONFIRMED per-app streaming map (`BackendEvent
     /// .routedApps`), mirroring `PopoverController`'s own `liveRoutedAppNames`

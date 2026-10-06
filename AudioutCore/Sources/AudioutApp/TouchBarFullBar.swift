@@ -116,6 +116,7 @@ final class TouchBarFullBar: NSObject, NSTouchBarDelegate {
     /// is not restored automatically.
     private func reassert() {
         TouchBarPrivateAPI.presentFullWidth(bar)
+        applyAwaitingPlayback()
     }
 
     // MARK: - Play/pause state
@@ -184,6 +185,46 @@ final class TouchBarFullBar: NSObject, NSTouchBarDelegate {
 
     private var playPauseSymbol: String { isPlaying ? "pause.fill" : "play.fill" }
 
+    /// While a speaker has been told to play but has not yet confirmed that
+    /// sound is coming out (a Cast receiver loading, which can take seconds),
+    /// the play/pause button pulses its opacity so a press visibly registered.
+    /// It goes steady again once every speaker confirms or gives up. With
+    /// Reduce Motion on it holds at half opacity instead of pulsing. The glyph
+    /// is untouched: play versus pause still follows the audio level above.
+    func setAwaitingPlayback(_ waiting: Bool) {
+        guard waiting != awaitingPlayback else { return }
+        awaitingPlayback = waiting
+        applyAwaitingPlayback()
+    }
+
+    private var awaitingPlayback = false
+    private static let pulseKey = "com.audiout.bar.awaitingPlaybackPulse"
+
+    /// Also called when the button is rebuilt and when the bar comes back after
+    /// a dim, because either can leave a fresh layer with no animation on it.
+    private func applyAwaitingPlayback() {
+        guard let button = playPauseButton else { return }
+        button.wantsLayer = true
+        button.layer?.removeAnimation(forKey: Self.pulseKey)
+        guard awaitingPlayback else {
+            button.alphaValue = 1
+            return
+        }
+        if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            button.alphaValue = 0.5
+            return
+        }
+        button.alphaValue = 1
+        let pulse = CABasicAnimation(keyPath: "opacity")
+        pulse.fromValue = 1.0
+        pulse.toValue = 0.35
+        pulse.duration = 0.8
+        pulse.autoreverses = true
+        pulse.repeatCount = .infinity
+        pulse.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        button.layer?.add(pulse, forKey: Self.pulseKey)
+    }
+
     // MARK: - The bar
 
     /// The one bar we ever present. The private dismiss matches on OBJECT
@@ -242,6 +283,7 @@ final class TouchBarFullBar: NSObject, NSTouchBarDelegate {
                 SystemAuxKey.playPause.post()
             }
             playPauseButton = item.view as? NSButton
+            applyAwaitingPlayback()
             return item
         case ItemID.next:
             return button(identifier, symbol: "forward.end", label: "Next") {

@@ -133,7 +133,7 @@ rounded:
   row: "16pt"
   panel: "26pt"
   popoverShell: "12pt"
-  groupedSection: "10pt"
+  permissionCard: "10pt"
 spacing:
   surfaceWidth: "713pt"
   sidebarWidth: "210pt"
@@ -148,6 +148,13 @@ spacing:
   trailingControlWidth: "200pt"
   bodyRowHeight: "42pt"
   mainAudioRowHeight: "44pt"
+  titleSubtitleSpacing: "2pt"
+opacity:
+  rowHoverWash: "0.10 (PopoverColumnGrid.rowHoverWashAlpha)"
+  rowSelectionWash: "0.18 (PopoverColumnGrid.rowSelectionWashAlpha)"
+  engagedFill: "0.22 (PopoverColumnGrid.engagedFillAlpha)"
+  insetCardTint: "0.12 (PopoverColumnGrid.insetCardTintAlpha)"
+  insetShade: "0.18 (Tokens.Color.insetShadeAlpha)"
 components:
   button-prominent:
     backgroundColor: "{colors.gold}"
@@ -427,12 +434,15 @@ sidebar and the scene editor's membership rows.
 `Tokens.Color.engagedChrome` (an alias of `label`) on one alpha ladder: 0.06
 for the header strip's resting capsule, `PopoverColumnGrid.rowHoverWashAlpha`
 (0.10) for hover, `rowSelectionWashAlpha` (0.18) for a selected or current
-item, and 0.22 for a press. Increase Contrast multiplies each step by 1.5,
-capped at 1. On a Mixer row the wash is a rounded rectangle inset 5 × 2 pt at
-the `control` radius, painted by `PopoverColumnGrid.fillRowWash(in:alpha:)`.
-`HoverTracker` (`AudioutSharedUI`) owns each row's tracking area and re-reads
-the pointer on both `updateTrackingAreas` and `mouseMoved`, so a row rebuilt
-under a still pointer neither stays lit nor misses the hover. Users: the
+item, and `engagedFillAlpha` (0.22) for the open sync chip and a pressed
+header-strip button. Only the header strip scales with Increase Contrast
+(each step × 1.5, capped at 1); the row washes keep the same alpha. On a
+Mixer row the wash is a rounded rectangle inset 5 × 2 pt at the `control`
+radius, painted by `PopoverColumnGrid.fillRowWash(in:alpha:)`.
+`HoverTracker` (`AudioutSharedUI`) owns the tracking area of each Mixer row,
+card and subsection header and scene-editor membership row, and re-reads the
+pointer whenever the area is rebuilt and on every pointer move, so a row
+rebuilt under a still pointer neither stays lit nor misses the hover. Users: the
 header strip, card and subsection headers, device and app rows, the icon
 well, the sync chip. A wash is never gold.
 
@@ -517,7 +527,8 @@ relative to a text style.
 - **Title Large / Subtitle Large** (`titleLarge` 400/15pt, `subtitleLarge`
   400/12pt): the licence gate's explanation and key field, and the Scenes
   overview's empty-state subtitle.
-- **Body** (400, 13pt; `bodyEmphasized` 600/13pt for the sidebar plates):
+- **Body** (400, 13pt; `bodyEmphasized` 600/13pt for the sidebar plates and
+  the password sheet's heading):
   list-row titles, form labels, and a section title above a box (the scene
   editor's "Speakers"), in `label2`. The Equalizer heading is the one section
   title set in Heading.
@@ -527,7 +538,7 @@ relative to a text style.
 - **Caption** (400, 11pt; `captionMedium` 500/11pt; `captionEmphasized`
   600/11pt; `captionDigits` 400/11pt with tabular digits for the sidebar's
   "N unavailable" divider and the Overview's total): secondary/detail text —
-  sublabels, readouts, hints, footers. `noteLabel` is the
+  sublabels, readouts, hints, footers. `noteLabel` (`AudioutSharedUI`) is the
   explanatory note under a box: caption in `label2`, wrapping to at most two
   lines with the second truncating.
 - **Micro Label** (600, 10pt, sentence case): the state vocabulary ("Muted")
@@ -607,7 +618,10 @@ as scene** under Scenes, including when no scene has been saved.
 forwards rather than duplicates: 14pt leading and trailing insets (30pt for
 an indented row, `indentedLeadingInset`), a 26pt icon column, a 150pt
 slider, a 40pt readout column, a 24pt mute control, a 200pt trailing-control
-column, and a 42pt body row height (44pt for Main Audio). The trailing column
+column, and a 42pt body row height (44pt for Main Audio). A name and the
+sublabel or caption line under it sit `Tokens.Layout.titleSubtitleSpacing`
+(2pt) apart, on Mixer rows, list rows, page headers and sidebar rows alike.
+The trailing column
 is 200pt so a row can show "System" plus one app pill beside the 84pt Offset
 chip; the surface grew to 713pt to pay for it. Columns anchor to the row's
 trailing edge, matching the iPhone file's own row-as-fader grammar in AppKit
@@ -627,7 +641,8 @@ a 1 pt `hairline` rule under the title bar at the safe-area top (the content
 pane only; the sidebar runs the full height). The Scenes host adds a footer:
 one centred caption line in `label2`, 6 pt below the page and 8 pt above the
 window's bottom edge. Every window page is a top-anchored scrolling column
-capped at `GroupsPaneLayout.contentMaxWidth`.
+capped at `GroupsPaneLayout.contentMaxWidth`, its document view a
+`FlippedView` (`AudioutWindowUI`) so content starts at the top.
 
 The **Speakers page** (`SpeakersPageViewController`), behind the sidebar's
 Overview plate, lists no speakers. It opens with the shared page header (see
@@ -673,8 +688,9 @@ and, in light, edge weight alone carry depth. `Tokens.Color.shadow` (an
 alias of `NSColor.black`) has four real consumers, every one of them a flat
 clipped band rather than a blurred `NSShadow`: `AlignmentPlateCell` (the
 wizard's answer-plate lip shading, rim shadow blend, and chip shadow fill),
-`WarmFaderCell` (the fader trough's inset shade, 0.18 alpha),
-`GroupedSectionView`'s `.well` style (a 1pt band at that same 0.18, clipped
+`WarmFaderCell` (the fader trough's inset shade at
+`Tokens.Color.insetShadeAlpha`, 0.18),
+`GroupedSectionView`'s `.well` style (a 1pt band at that same alpha, clipped
 inside the shape's top edge), and `SetupPreviewFrameView` (the onboarding demo
 frame, which blends the same 0.18 lip and a 0.06 darkening of its own `well`
 fill, because it is layer-backed rather than hand-drawn). `.well` is the page card recessed: the
@@ -739,10 +755,10 @@ same amounts (rows, cards, seats and chips on Groups). Two further radii are
 Mac-only and predate the shared ladder, kept because nothing forced their
 consolidation: **popover shell** (12pt — `ControlPanelBackingView`'s bubble
 body and the quit-in-progress HUD, previously two independent literals) and
-**grouped section** (10pt — onboarding's permission card, matching System
-Settings' own inset-list card radius, not the shared `control` value by
-intent even though the number happens to match). Despite its name it does not
-round `GroupedSectionView`, which takes **panel** or **row**.
+**permission card** (10pt, `permissionCardCornerRadius` — onboarding's
+permission card, matching System Settings' own inset-list card radius, not
+the shared `control` value by intent even though the number happens to
+match). `GroupedSectionView` takes **panel** or **row**, never this one.
 
 On the speaker page and the Main Audio page every box (the Equalizer well and
 the list) rounds at **row** (16pt), so the page carries one corner. The scene
@@ -874,8 +890,8 @@ takes the name's own ink (`rowTextColor`), never gold, and the name truncates
 before the lock gives way. Its spoken label names the kind of lock. Joining a
 password speaker with nothing saved, or the diagnosis panel's
 "Enter Password…" button, raises a sheet on the panel
-(`SpeakerPasswordSheetViewController`): a bold one-line heading, a stock secure
-field, then Cancel and a gold `ProminentButton` Connect, right-aligned. A
+(`SpeakerPasswordSheetViewController`): a one-line heading in
+`bodyEmphasized`, a stock secure field, then Cancel and a gold `ProminentButton` Connect, right-aligned. A
 caption-size result line appears only once Connect is pressed: "Connecting…",
 then the reason if the attempt fails. A connect dismisses the sheet. The
 row shows no diagnosis panel while its sheet is up; Cancel with the speaker
@@ -932,7 +948,7 @@ The slider wears `WarmFaderCell`, a drawing-only skin over stock
 | Volume still landing on a Cast speaker (`isPendingApply`) | dashed gold, 6 pt dashes, 4 pt gaps |
 
 The trough is 5 pt of `well` with a `rim` edge and a 1 pt top shade
-(`shadow` at 0.18); the thumb is a 10 × 17 pt capsule, a `raised` body read
+(`shadow` at `insetShadeAlpha`); the thumb is a 10 × 17 pt capsule, a `raised` body read
 by its `rim` edge, that stops flush with the track's ends.
 
 `LevelMeterView` is the meter under a row's name: a 74 × 3 pt bar (6 pt on
@@ -982,8 +998,8 @@ small action button. The message is never `label3`: the line that explains
 why a card is empty must not be the faintest text on the panel.
 
 ### Note Banner, Inset Cards and the Thank-You Card (Mixer)
-**Note banner** (`SystemAirPlayNoteBannerView`): a glyph and a wrapping label
-in the system label colour on a `TintedNoteBackgroundView`. It mounts in two
+**Note banner** (`SystemAirPlayNoteBannerView`, a `TintedNoteBackgroundView`
+subclass): a glyph and a wrapping label in `label`. It mounts in two
 places, the warning banner at the top of the panel and the note slot. Two
 severities:
 
@@ -997,9 +1013,11 @@ underlined `TextLinkButton` left of it; never more than one link beside a
 button. A banner is not dismissible.
 
 `TintedNoteBackgroundView` (`AudioutSharedUI`) is the ground every tinted
-notice shares: the tint at 12 %, a 10 pt (`control`) corner, and a 1 pt
-border in the full tint under Increase Contrast, re-stamped when that setting
-changes.
+notice shares: the tint at 12 % (`PopoverColumnGrid.insetCardTintAlpha`), a
+10 pt (`control`) corner, and a 1 pt border in the full tint under Increase
+Contrast, re-stamped when that setting changes. Three tints: `ring` for the
+info banner, `failure` for the warning banner and the diagnosis card, `gold`
+for the thank-you card.
 
 **Thank-you card**: the note slot's other occupant, shown once after a
 purchase. The same background in `gold`, 112 pt tall, the emitter's settled
@@ -1016,7 +1034,7 @@ the trailing edge and 4 pt above and below, pads its content 10 pt, and
 mounts through the panel's `insertRow` / `removeRow`, one per row.
 
 **Dismissing.** Every dismissible Mixer notice closes with the diagnosis
-card's ✕: `xmark` at 12 pt bold in `label2`, a hit area of at least 24 × 24
+card's ✕ (`NSButton.noticeDismissButton`, `AudioutPopoverUI`): `xmark` at 12 pt bold in `label2`, a hit area of at least 24 × 24
 pt, and Escape as its key. The thank-you card is the exception and keeps its
 **Close** text button.
 
@@ -1024,7 +1042,8 @@ pt, and Escape as its key. The thank-you card is the exception and keeps its
 `TextLinkButton` (`AudioutSharedUI`) is the app's one underlined text link:
 the underline is its only signal, in `label2` (`label3` while disabled), with
 the pointing-hand cursor, at `.body` or `.caption` size. Users: a note
-banner's text action, a row's "Enter Password…", the licence gate's link.
+banner's text action, a row's "Enter Password…", the licence gate's two
+links.
 Never gold.
 
 ### Failure Pill (Mixer FEED column)
@@ -1170,7 +1189,7 @@ anything.
 Every window page opens with one header, `PageHeaderView`
 (`AudioutWindowUI`): the 48 pt icon well, the name in `heading`, and an
 optional caption line in `labelCool`, the name and caption sitting as one
-block centred on the well, 2 pt apart. On the Overview, a speaker's page and
+block centred on the well, `titleSubtitleSpacing` (2 pt) apart. On the Overview, a speaker's page and
 Main Audio the well starts on the page's rail-free 14 pt inset, level with
 the list and the "Equalizer" heading below it; the scene editor starts it at
 its rail inset, and passes its editable name field as the title.
@@ -1195,8 +1214,9 @@ editor, which carries the note "Changes will be applied when the speaker next
 connects." A speaker the Mac can't find shows no editor; when its curve is
 shaped it shows the same note. A Forget button appears only for a speaker on
 the can't-be-found list. Then an outlined list of `ListRowView` rows on the
-same 14 pt inset: on a Bluetooth speaker that can take it, **Volume** with
-the "Control speaker volume" switch; **Show in Mixer**, whose caption
+same 14 pt inset: first, on a Bluetooth speaker that can take it, **Control
+speaker volume**, captioned with what it does, with a trailing stock
+checkbox; **Show in Mixer**, whose caption
 explains the current choice beside its pop-up (absent for This Mac),
 **Scenes**, linking each scene the speaker belongs to, one link per line on
 the row's trailing side, and, only while a password is saved for the speaker,
@@ -1216,8 +1236,9 @@ Overview and a speaker's page:
 
 - an optional 16 pt leading glyph (`ListRowView.glyph`, default `label2`),
   10 pt before the text;
-- the title in `body` / `label`, and an optional caption 2 pt below in
-  `caption` / `labelCool`, at most two lines;
+- the title in `body` / `label`, and an optional caption
+  `titleSubtitleSpacing` (2 pt) below in `caption` / `labelCool`, at most two
+  lines;
 - one optional trailing accessory 10 pt after the text: a button, pop-up,
   switch, spinner, link stack or chevron;
 - 9 pt top and bottom padding, a 44 pt minimum height, and the page's
@@ -1236,8 +1257,8 @@ different instrument, never by length.
 | Style | Fill | Edge | Default radius | Dividers | Used for |
 |---|---|---|---|---|---|
 | `.card` | `raised` | 1 pt `containerEdge` | `panel` | `containerEdge` | the list on the Overview, a speaker's page and the scene editor |
-| `.well` | `well`, 1 pt `shadow` band at 0.18 inside the top edge | 1 pt `containerEdge` | `panel` | `containerEdge` | both Equalizers |
-| `.bare` | none | none | none | `hairline` | the page header's band |
+| `.well` | `well`, 1 pt `shadow` band at `insetShadeAlpha` inside the top edge | 1 pt `containerEdge` | `panel` | `containerEdge` | both Equalizers |
+| `.bare` | none | none | none | `hairline` | no page uses it today |
 
 A page may set `radiusOverride`; the speaker page and the Main Audio page
 round every box at `row`. Dividers start at `contentLeadingInset` and stop
@@ -1382,9 +1403,11 @@ a Mixer card or subsection folding, a row revealed or removed through
 disclosures. It tweens one value, a clip's height constraint, over
 `Tokens.Motion.collapseRevealDuration` (0.15 s) on a quadratic ease-in-out,
 ticked by the display link, and lays everything else out from that value on
-each tick. `FoldingClipView` (`AudioutSharedUI`) is the clip it drives: it
-owns the collapsed-height constraint, seeds from the live constant, and
-hides its content on arriving closed. Constants are set directly, never
+each tick. `FoldingClipView` (`AudioutSharedUI`) is the clip for the two
+Advanced disclosures: it owns the collapsed-height constraint, seeds from the
+live constant, and hides its content on arriving closed. Card bodies and the
+panel's row clips keep their own clips, because the rail reads their
+generation or closing guard, which `FoldingClipView` does not model. Constants are set directly, never
 through `animator()` or an `NSAnimationContext`, because a second clock on
 the same value falls out of phase with the window. In-surface fades (a
 screen mounting, the thank-you card appearing) ride the same clock.

@@ -141,8 +141,7 @@ struct CastRoomDelay {
 
     /// The furthest a receiver's feed rate moves from the server's clock,
     /// either way.
-    /// razor: five times the 20 ppm recorded, 0.17 cents of pitch, inside the
-    /// ±200 ppm ``FractionalResampler`` was validated for.
+    /// razor: five times the 20 ppm recorded, 0.17 cents of pitch.
     static let speedMatchMaxPpm: Double = 100
 
     /// Errors a settled receiver's speed window needs before it sets a rate;

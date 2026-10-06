@@ -46,6 +46,28 @@ import Testing
         return stride(from: 0, to: samples.count, by: 2).map { samples[$0] }
     }
 
+    /// S16LE stereo of a sine at `frequency` Hz, both channels, for stream
+    /// frames `start..<start + frames` at 44.1 kHz.
+    private func sine(frequency: Double, amplitude: Double, start: Int, frames: Int) -> Data {
+        var out = Data(count: frames * 4)
+        out.withUnsafeMutableBytes { raw in
+            let samples = raw.bindMemory(to: Int16.self)
+            for frame in 0..<frames {
+                let value = Int16((amplitude * sin(2 * .pi * frequency * Double(start + frame) / 44_100)).rounded())
+                samples[frame * 2] = value
+                samples[frame * 2 + 1] = value
+            }
+        }
+        return out
+    }
+
+    /// RMS of channel 0, in dB of one sample step.
+    private func rmsDB(_ pcm: Data) -> Double {
+        let values = frameValues(pcm)
+        let power = values.reduce(0.0) { $0 + Double($1) * Double($1) } / Double(values.count)
+        return 10 * log10(power)
+    }
+
     // MARK: - The bypass is structural
 
     @Test func aFeedNeverAskedForADelayHasNoLine() {
@@ -366,18 +388,16 @@ import Testing
 
     // MARK: - Where the time goes
 
-    private func ts(_ nanos: Int64) -> timespec {
-        timespec(tv_sec: Int(nanos / 1_000_000_000), tv_nsec: Int(nanos % 1_000_000_000))
-    }
-
     private func close(_ a: Double?, _ b: Double) -> Bool {
         guard let a else { return false }
         return abs(a - b) <= 0.01
     }
 
-    /// Turns red if the ring stops stamping pushed blocks with their capture
-    /// pts and push time, or if `reset()` stops realigning the stamp cursor to
-    /// the first post-reset push.
+    /// Turns red if the ring's push and render stamps go back to being read on
+    /// two different clocks, if the frame's in-block offset creeps back into
+    /// `ioprocToPushMs`, if a per-read maximum fails to reset when `timing` is
+    /// read, or if `reset()` stops realigning the stamp cursor to the first
+    /// post-reset push.
     @Test func eachRenderedFrameReadsBackItsCaptureAndPushTimes() {
         let ms: Int64 = 1_000_000
         let t0: Int64 = 1_000 * ms
@@ -385,8 +405,10 @@ import Testing
         ring.setDelayMs(1000)
         for k in 0..<60 {
             let pts = t0 + Int64(k) * 20 * ms
-            ring.push(tone(frames: 882), pts: ts(pts), nowNanos: pts + 23 * ms)
+            ring.push(tone(frames: 882), captureNanos: pts, nowNanos: pts + 23 * ms)
         }
+        let latePts = t0 + 60 * 20 * ms
+        ring.push(tone(frames: 882), captureNanos: latePts, nowNanos: latePts + 40 * ms)
 
         _ = ring.render(frames: 441, nowNanos: t0 + 1207 * ms)
         var timing = ring.timing
@@ -398,18 +420,23 @@ import Testing
         #expect(close(last?.pacingPhaseMs, 1184))
         #expect(close(last?.ageMs, 2207))
         #expect(timing.renderedFramesSinceReset == 441)
+        #expect(close(timing.ioprocToPushMaxMs, 40))
+        #expect(close(timing.ringWaitMaxMs, 1184))
+        let again = ring.timing
+        #expect(again.ioprocToPushMaxMs == 0)
+        #expect(again.ringWaitMaxMs == 0)
 
-        // Halfway into the first block: its frame 441 was captured 10 ms after
-        // the block's pts and had 10 ms queued ahead of it.
+        // Halfway into the first block: its frame 441 had 10 ms queued ahead
+        // of it, and its block's push lateness is still the whole block's.
         _ = ring.render(frames: 882, nowNanos: t0 + 1217 * ms)
         last = ring.timing.lastRender
-        #expect(close(last?.ioprocToPushMs, 13))
+        #expect(close(last?.ioprocToPushMs, 23))
         #expect(close(last?.queueAheadMs, 10))
         #expect(close(last?.ringWaitMs, 1194))
 
         ring.reset()
         let t1 = t0 + 5_000 * ms
-        ring.push(tone(frames: 882), pts: ts(t1), nowNanos: t1 + 5 * ms)
+        ring.push(tone(frames: 882), captureNanos: t1, nowNanos: t1 + 5 * ms)
         _ = ring.render(frames: 441, nowNanos: t1 + 30 * ms)
         timing = ring.timing
         last = timing.lastRender
@@ -442,7 +469,7 @@ import Testing
 
     /// At 100 ppm a render of 882 frames reads 882.0882 captured frames, the
     /// fraction carried from one render to the next.
-    /// Turns red if the rate stops reaching the render, the resampler restarts at each render (about 2,000 frames off), or a render rounds the rate to whole frames instead of carrying the fraction (90 frames off).
+    /// Turns red if the rate stops reaching the render or a render drops the fractional position instead of carrying it (44,100 left both ways).
     @Test func aFeedRateConsumesItsShareOfCapturedFramesExactlyOverALongRun() {
         let ring = CastFeedRing()
         ring.setRatePpm(100)
@@ -451,13 +478,13 @@ import Testing
             ring.push(tone(frames: 882))
             _ = ring.render(frames: 882)
         }
-        #expect(ring.bufferedFrames == 44_010)
+        #expect(ring.bufferedFrames == 44_012)
         #expect(ring.stats.underrunFrames == 0)
     }
 
     /// A rate of 0 is the plain copy whether or not it was ever set, and a GET
     /// takes a ring that once had a rate back to it.
-    /// Turns red if a rate of 0 sends the feed through the resampler (its primed frames leave a 2-frame silent tail), or `reset()` leaves a ring that once had a rate on the resampler.
+    /// Turns red if a rate of 0 sends the feed through the resampler (its 16-frame look-ahead leaves a 16-frame silent tail), or `reset()` leaves a ring that once had a rate on the resampler.
     @Test func aFeedRateOfZeroIsTheByteForBytePathAndAGETReturnsToIt() {
         let untouched = CastFeedRing()
         let zero = CastFeedRing()
@@ -482,7 +509,7 @@ import Testing
 
     /// A faster rate that would read the ring below its standing queue runs
     /// at 1 instead, so the queue holds and nothing underruns past the refill.
-    /// Turns red if a rate above 1 is applied when it would take the ring below its standing queue (3,262 left), or the rate is ignored (3,528 left).
+    /// Turns red if a rate above 1 is applied when it would take the ring below its standing queue (3,264 left).
     @Test func aFasterFeedRateNeverTakesTheStandingQueue() {
         let ring = CastFeedRing(standingQueueMs: 80)
         ring.setRatePpm(100)
@@ -492,7 +519,93 @@ import Testing
             _ = ring.render(frames: 882)
         }
         #expect(ring.stats.underrunFrames == 3_528)
-        #expect(ring.bufferedFrames == 3_526)
+        #expect(ring.bufferedFrames == 3_528)
+    }
+
+    /// A rate held at a fixed fraction of a frame keeps the level of every
+    /// tone up to 18 kHz, and rate 0 at that phase is transparent.
+    /// Turns red if the Cast feed's interpolator returns to the 4-tap cubic (−4.58 dB at 16 kHz and −0.74 dB at 10 kHz at half a frame) or its cutoff drops below half the sample rate.
+    @Test func aFeedRateKeepsTheLevelToEighteenKilohertzAtAFixedPhase() {
+        let inputDB = 20 * log10(16_384 / 2.0.squareRoot())
+        for mu in [0.25, 0.5, 0.75] {
+            for frequency in [1_000.0, 10_000, 16_000, 18_000] {
+                let ring = CastFeedRing()
+                ring.push(sine(frequency: frequency, amplitude: 16_384, start: 0, frames: 7_056))
+                ring.setRatePpm(mu * 1_000_000)
+                _ = ring.render(frames: 1)
+                ring.setRatePpm(0)
+                _ = ring.render(frames: 64)
+                let level = rmsDB(ring.render(frames: 4_410))
+                #expect(abs(level - inputDB) < 0.05, "\(frequency) Hz at \(mu) of a frame: \(level - inputDB) dB")
+            }
+        }
+    }
+
+    /// At 20 ppm the phase passes every fraction of a frame; a 16 kHz tone
+    /// keeps one level through all of it.
+    /// Turns red if the Cast feed is read through the 4-tap cubic again, whose 16 kHz level swings 4.6 dB each time the phase passes half a frame.
+    @Test func aFeedRateKeepsTheTrebleLevelSteadyAsItsPhaseTurns() {
+        let ring = CastFeedRing()
+        var pushedFrames = 0
+        func pushBlock() {
+            ring.push(sine(frequency: 16_000, amplitude: 16_384, start: pushedFrames, frames: 882))
+            pushedFrames += 882
+        }
+        for _ in 0..<5 { pushBlock() }
+        ring.setRatePpm(20)
+        var output = Data()
+        for _ in 0..<150 {
+            pushBlock()
+            output.append(ring.render(frames: 882))
+        }
+        let window = 4_410 * 4
+        let levels = stride(from: 0, to: output.count, by: window).map {
+            rmsDB(output.subdata(in: $0..<($0 + window)))
+        }
+        let swing = (levels.max() ?? 0) - (levels.min() ?? 0)
+        #expect(swing < 0.1, "16 kHz level swings \(swing) dB")
+        #expect(ring.stats.underrunFrames == 0)
+    }
+
+    /// The plain copy, the switch onto the resampler, renders of every size
+    /// and the ring's wrap all read one continuous stream at the set rate.
+    /// Turns red if switching onto the resampler skips or repeats a frame, the fractional position restarts at a render boundary, or a tap read across the ring's wrap comes from the wrong slot.
+    @Test func aFeedRateReadsOneContinuousStreamAcrossRendersTheSwitchOnAndTheWrap() {
+        let ring = CastFeedRing()
+        var pushedFrames = 0
+        func pushBlock() {
+            ring.push(sine(frequency: 1_000, amplitude: 10_000, start: pushedFrames, frames: 882))
+            pushedFrames += 882
+        }
+        for _ in 0..<5 { pushBlock() }
+        #expect(ring.render(frames: 1_000) == sine(frequency: 1_000, amplitude: 10_000, start: 0, frames: 1_000))
+        ring.setRatePpm(100)
+        let chunks = [441, 1_323, 7, 1_757]
+        var output: [Int16] = []
+        for index in 0..<130 {
+            pushBlock()
+            output += frameValues(ring.render(frames: chunks[index % chunks.count]))
+        }
+        var worst = 0.0
+        for (offset, value) in output.enumerated() {
+            let position = 1_000 + Double(offset) * (1 + 100e-6)
+            let expected = 10_000 * sin(2 * .pi * 1_000 * position / 44_100)
+            worst = max(worst, abs(Double(value) - expected))
+        }
+        #expect(worst <= 2, "worst frame is \(worst) steps off")
+        #expect(ring.stats.underrunFrames == 0)
+    }
+
+    /// Turns red if the rows stop being scaled to sum to 1 (raw windowed-sinc rows miss by up to 3.4e-5).
+    @Test func everyRowOfTheCastResamplerTableSumsToOne() {
+        let taps = CastSincResampler.taps
+        let table = CastSincResampler.table
+        var worst = 0.0
+        for row in 0...CastSincResampler.phases {
+            let sum = table[(row * taps)..<((row + 1) * taps)].reduce(0.0) { $0 + Double($1) }
+            worst = max(worst, abs(sum - 1))
+        }
+        #expect(worst < 2e-6, "worst row misses 1 by \(worst)")
     }
 
     // MARK: - The controller's and the user's terms compose

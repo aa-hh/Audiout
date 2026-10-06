@@ -1905,7 +1905,8 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             let suppressed = self.btTrimLock.withLock { self.companionProgramSuppressed }
             let delivered = suppressed
                 ? CapturedBuffer(channelData: buffer.channelData.map { Data(count: $0.count) },
-                                 frameCount: buffer.frameCount, pts: buffer.pts)
+                                 frameCount: buffer.frameCount, pts: buffer.pts,
+                                 machNanos: buffer.machNanos)
                 : buffer
             self.routeMixer.handleBuffer(bundleID: bundleID, buffer: delivered)
             self.leveledInjector.handleBuffer(bundleID: bundleID, buffer: delivered)

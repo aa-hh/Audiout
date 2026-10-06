@@ -281,10 +281,12 @@ import Testing
     }
 
     /// Turns red if the served stream's timing report breaks either identity
-    /// (age is capture-to-push plus feed delay plus ring wait; ring wait is
-    /// queue ahead plus pacing phase), reports a queue ahead outside the 2 s
-    /// ring or a capture-to-push below 0, stops rendering the 1 s prime as
-    /// silence, or never carries the applied 300 ms feed delay to a rendered frame.
+    /// (age is the block's capture-to-push plus feed delay plus ring wait, less
+    /// the frame's place in its block; ring wait is queue ahead plus pacing
+    /// phase), reports a queue ahead outside the 2 s ring or a capture-to-push
+    /// below the 20 ms the writer stamps on the raw mach clock, stops rendering
+    /// the 1 s prime as silence, or never carries the applied 300 ms feed delay
+    /// to a rendered frame.
     @Test func theServedStreamReportsItsPrimeCushionAndFeedDelay() throws {
         guard #available(macOS 15, *) else { return }
         let (fake, endpoint) = try startFake()
@@ -300,15 +302,18 @@ import Testing
         let block = tone(frames: 882)
         writer.setEventHandler {
             // Stamped with the capture time of the block's first frame, 20 ms
-            // before it is handed over, which is what NativeCaptureCoordinator
-            // passes the fan-out.
+            // before it is handed over, on the raw mach clock, which is what
+            // NativeCaptureCoordinator passes the fan-out.
             var now = timespec()
             clock_gettime(CLOCK_MONOTONIC, &now)
             let pts = SyncTiming.monotonicNanos(now) - 20_000_000
+            let captureNanos = Int64(CoreAudioSystemTap.machNanoseconds(fromHostTime: mach_absolute_time()))
+                - 20_000_000
             // A loaded machine merges missed ticks into one fire; `data` counts them.
             for _ in 0..<max(1, Int(writer.data)) {
                 feed.write(pcm: block, pts: timespec(tv_sec: Int(pts / 1_000_000_000),
-                                                     tv_nsec: Int(pts % 1_000_000_000)))
+                                                     tv_nsec: Int(pts % 1_000_000_000)),
+                           captureNanos: captureNanos)
             }
         }
         writer.resume()
@@ -327,12 +332,14 @@ import Testing
         let stats = ring.stats
         let last = try #require(timing.lastRender)
         #expect(last.delayLineMs == 0)
-        #expect(abs(last.ageMs - (last.ioprocToPushMs + last.delayLineMs + last.ringWaitMs)) < 0.01, "\(last)")
+        #expect((-20.01...0.01).contains(
+            last.ageMs - (last.ioprocToPushMs + last.delayLineMs + last.ringWaitMs)), "\(last)")
         #expect(abs(last.ringWaitMs - (last.queueAheadMs + last.pacingPhaseMs)) < 0.01, "\(last)")
         // What the 2 s ring held ahead of the frame when its block was pushed.
         #expect((0...2_000).contains(last.queueAheadMs), "queueAheadMs \(last.queueAheadMs)")
-        // Stamped 20 ms before the push, less the frame's place in its 20 ms block.
-        #expect(last.ioprocToPushMs >= -1, "ioprocToPushMs \(last.ioprocToPushMs)")
+        // Stamped 20 ms before the push; the whole block's lateness, so no
+        // in-block offset comes off it.
+        #expect(last.ioprocToPushMs >= 19, "ioprocToPushMs \(last.ioprocToPushMs)")
         // The prime, rendered whole as silence: a refilling ring takes nothing
         // for it, and a stall only adds underruns.
         #expect(stats.underrunFrames >= 44_100, "underrunFrames \(stats.underrunFrames)")

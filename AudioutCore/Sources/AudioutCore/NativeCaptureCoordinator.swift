@@ -1587,7 +1587,7 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         pacerEmittedFrames += frames
         deliver(pcm, pts: timespec(tv_sec: Int(ptsNanos / 1_000_000_000),
                                    tv_nsec: Int(ptsNanos % 1_000_000_000)),
-                snapshot: snapshot, btPCM: bedded,
+                captureNanos: 0, snapshot: snapshot, btPCM: bedded,
                 btSweepFreePCM: beddedNoProbe.isEmpty ? nil : beddedNoProbe,
                 btSweepOwnerUID: sweepOwnerUID)
     }
@@ -1799,7 +1799,7 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             leveledClockLock.unlock()
         }
 
-        deliver(pcm, pts: buffer.pts, snapshot: snapshot)
+        deliver(pcm, pts: buffer.pts, captureNanos: Int64(buffer.machNanos), snapshot: snapshot)
     }
 
     // MARK: - Leveled-app fallback clock
@@ -1898,7 +1898,7 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         leveledClockEmittedFrames += frames
         deliver(pcm, pts: timespec(tv_sec: Int(ptsNanos / 1_000_000_000),
                                    tv_nsec: Int(ptsNanos % 1_000_000_000)),
-                snapshot: snapshot)
+                captureNanos: 0, snapshot: snapshot)
     }
 
     /// The delivery tail every producer shares — the engine write, both
@@ -1918,7 +1918,8 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     /// takes `btPCM` (the block carrying the sweep), every other Bluetooth
     /// device's takes `btSweepFreePCM`. Both `nil` — every run that is not
     /// that one — leaves the fan-out the single write it has always been.
-    private func deliver(_ pcm: Data, pts: timespec, snapshot: BufferSnapshot,
+    private func deliver(_ pcm: Data, pts: timespec, captureNanos: Int64,
+                         snapshot: BufferSnapshot,
                          btPCM: Data? = nil,
                          btSweepFreePCM: Data? = nil,
                          btSweepOwnerUID: String? = nil) {
@@ -2003,14 +2004,17 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             }
         }
 
-        // CAST-FANOUT: the fourth consumer of the identical converted PCM+pts.
-        // No widen/base-resample step — a Cast receiver is fed the S16LE
-        // 44.1 kHz stream verbatim. `castSink` is nil unless
-        // ``setCastSink(_:renderProcessPID:)`` ran with a non-nil sink, so with
-        // no Cast device selected this path costs one nil check and the engine
-        // write above is byte-for-byte what it always was.
+        // The Cast slot gets the capture time on the raw mach clock, because the
+        // Cast feed ring subtracts it from its own raw-clock push and render
+        // stamps; `pts` goes over unchanged, for parity with the other consumers.
+        // A real tap block brings its own (`captureNanos`); a synthetic block
+        // (0) samples both clocks fresh, so `timed`'s steering can reach it only
+        // over that block's own age, never from an offset cached long ago.
         if let castSink = snapshot.castSink {
-            castSink.write(pcm: pcm, pts: pts)
+            let cast = captureNanos != 0
+                ? captureNanos
+                : SyncTiming.monotonicNanos(pts) &- CoreAudioSystemTap.sampleMachToMonotonicOffsetNanos()
+            castSink.write(pcm: pcm, pts: pts, captureNanos: cast)
         }
 
         // Level pass-through: compute RMS on the CONVERTED S16LE buffer once, for
@@ -2052,7 +2056,7 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             deliver(Data(count: chunk * bytesPerFrame),
                     pts: timespec(tv_sec: Int(ptsNanos / 1_000_000_000),
                                   tv_nsec: Int(ptsNanos % 1_000_000_000)),
-                    snapshot: snapshot)
+                    captureNanos: 0, snapshot: snapshot)
             emitted += chunk
             remaining -= chunk
         }
@@ -2754,11 +2758,14 @@ public struct CapturedBuffer: Sendable {
     public var frameCount: Int
     /// Presentation timestamp of the first frame (from the capture clock).
     public var pts: timespec
+    /// Raw mach nanoseconds of the first frame, 0 when the producer has none.
+    public var machNanos: UInt64
 
-    public init(channelData: [Data], frameCount: Int, pts: timespec) {
+    public init(channelData: [Data], frameCount: Int, pts: timespec, machNanos: UInt64 = 0) {
         self.channelData = channelData
         self.frameCount = frameCount
         self.pts = pts
+        self.machNanos = machNanos
     }
 }
 
@@ -2866,11 +2873,23 @@ public protocol PCMSink: Sendable {
     /// ``write(pcm:pts:)`` per entry so existing fakes keep compiling and keep
     /// recording. ``EngineSink`` overrides it with the genuinely batched call.
     func write(streams: [(pcm: Data, streamId: UInt32)], pts: timespec)
+
+    /// Forward one buffer with its `pts` and its capture time in raw mach
+    /// nanoseconds, the clock the Cast feed ring stamps its push and render on.
+    ///
+    /// The default below is a TEST CONVENIENCE, not the real path: it drops
+    /// `captureNanos` and calls ``write(pcm:pts:)`` so existing fakes keep
+    /// compiling and keep recording. ``CastFanOut`` overrides it.
+    func write(pcm: Data, pts: timespec, captureNanos: Int64)
 }
 
 extension PCMSink {
     public func write(streams: [(pcm: Data, streamId: UInt32)], pts: timespec) {
         for entry in streams { write(pcm: entry.pcm, pts: pts) }
+    }
+
+    public func write(pcm: Data, pts: timespec, captureNanos: Int64) {
+        write(pcm: pcm, pts: pts)
     }
 }
 
@@ -3831,7 +3850,8 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
                 frameCount = Int(b.mDataByteSize) / frameBytes
             }
             guard !channelData.isEmpty else { return }
-            onBuffer?(CapturedBuffer(channelData: channelData, frameCount: frameCount, pts: pts))
+            onBuffer?(CapturedBuffer(channelData: channelData, frameCount: frameCount, pts: pts,
+                                     machNanos: machNanos))
         }
         _ = channels
         guard err == noErr else {

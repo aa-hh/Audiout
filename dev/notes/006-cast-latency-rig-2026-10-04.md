@@ -33,7 +33,7 @@ Rows are in stream order.
 
 | Stage | Today | Whose | Rig reads it as |
 |---|---|---|---|
-| Capture callback to fan-out push | One tap block, at most about 12 ms | Ours | `ioproc_to_push_ms` |
+| Capture callback to fan-out push | The whole block's push lateness, about 0 to 2 ms | Ours | `ioproc_to_push_ms`, with `ioproc_to_push_max_ms` |
 | Feed delay line | `room - settledLead + offset`; 0 for the receiver that set the term, seconds for a faster second receiver | Ours, by policy | `delay_line_ms` |
 | Ring queue, the standing cushion | About 500 ms (`cushionFrames` 22 050) | Ours | `queue_ahead_ms` |
 | Pacing phase | 0 to 20 ms (`chunkInterval` 0.020) | Ours | `pacing_phase_ms` |
@@ -64,12 +64,20 @@ With the switch on, every status poll (once a second) writes one `cast_stage_tim
 line to `~/Library/Logs/Audiout/telemetry.jsonl`, whether or not the poll's lead sample is
 kept. Fields, all strings: `device`, `lead_ms`, `kept` (`1`/`0`), `age_ms`,
 `ioproc_to_push_ms`, `delay_line_ms`, `queue_ahead_ms`, `pacing_phase_ms`, `ring_wait_ms`
-(each one decimal, or `nil` before the first render that takes real frames, and again after every feed reset until pacing takes real frames; the prime renders none from an empty ring), `e2e_ms`, `queued_ms`, `rendered_s`
+(each one decimal, or `nil` before the first render that takes real frames, and again after every feed reset until pacing takes real frames; the prime renders none from an empty ring), `ioproc_to_push_max_ms`, `ring_wait_max_ms`
+(the maximum since the previous line, one decimal, `0.0` when nothing was pushed or
+rendered in it), `e2e_ms`, `queued_ms`, `rendered_s`
 (frames rendered since the last feed reset, in seconds), `fanout_drops` (writes the
 fan-out threw away on a busy lock).
 
-The identity: `age = ioproc_to_push + delay_line + ring_wait`, and
-`pacing_phase = ring_wait - queue_ahead`.
+The identity: `age = ioproc_to_push + delay_line + ring_wait - (the rendered frame's
+offset into its block)`, because `ioproc_to_push` is the whole block's push lateness and
+`age` is the frame's own; and `pacing_phase = ring_wait - queue_ahead`.
+
+Since 2026-10-06 every stamp is on the raw mach clock: before, the capture `pts` (mach
+plus an offset frozen at tap start) was subtracted from `CLOCK_MONOTONIC`, which the time
+daemon `timed` slews and steps, so its corrections showed up as phantom changes in
+`age_ms` and `ioproc_to_push_ms`.
 
 Watch it live:
 

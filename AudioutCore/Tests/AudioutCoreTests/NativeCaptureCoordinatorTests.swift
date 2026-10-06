@@ -148,6 +148,18 @@ extension SerializedSharedState {
         var batched: [(streams: [(pcm: Data, streamId: UInt32)], pts: timespec)] { lock.withLock { batches } }
     }
 
+    /// Records the capture time of every three-argument write, the one the
+    /// coordinator hands the Cast slot.
+    private final class CastSpySink: PCMSink, @unchecked Sendable {
+        let lock = NSLock()
+        private var captures: [Int64] = []
+        func write(pcm: Data, pts: timespec) {}
+        func write(pcm: Data, pts: timespec, captureNanos: Int64) {
+            lock.withLock { captures.append(captureNanos) }
+        }
+        var captureNanos: [Int64] { lock.withLock { captures } }
+    }
+
     /// Deterministic converter: emits a fixed non-empty S16LE payload per buffer so
     /// the test can assert "converted-and-forwarded" without AVFoundation, and can
     /// be scripted to drop (return nil) a buffer.
@@ -234,12 +246,12 @@ extension SerializedSharedState {
     /// delivers, and the one the dropped-cycle fill leaves alone.
     private static let blockDurationNanos: UInt64 = 90_703
 
-    private func buffer(hostTime: UInt64, frames: Int = 4) -> CapturedBuffer {
+    private func buffer(hostTime: UInt64, frames: Int = 4, machNanos: UInt64 = 0) -> CapturedBuffer {
         // planar stereo Float32: two channel buffers, `frames` samples each.
         let bytesPerChannel = frames * MemoryLayout<Float32>.size
         let ch = Data(count: bytesPerChannel)
         let pts = timespec(tv_sec: Int(hostTime / 1_000_000_000), tv_nsec: Int(hostTime % 1_000_000_000))
-        return CapturedBuffer(channelData: [ch, ch], frameCount: frames, pts: pts)
+        return CapturedBuffer(channelData: [ch, ch], frameCount: frames, pts: pts, machNanos: machNanos)
     }
 
     // Forwards to the shared helper: generous ceiling, not an expected wait —
@@ -1969,6 +1981,56 @@ extension SerializedSharedState {
         waitFor { sink.forwarded.count == 8 }
         #expect(sink.forwarded.count == 8, "detaching must not disturb the engine's stream")
         #expect(castSpy.forwarded.count == 3, "and nothing more reaches a detached Cast slot")
+    }
+
+    /// Turns red if the Cast slot's capture time goes back to the pts clock, so
+    /// a step in the pts offset reaches the Cast ring, or if the engine's pts
+    /// stops being handed over unmodified.
+    @Test func castSlotGetsTheRawCaptureTimeThroughAPtsOffsetStep() {
+        let tap = FakeTap()
+        let sink = SpySink()
+        let castSpy = CastSpySink()
+        let coordinator = makeCoordinator(tap: tap, sink: sink, converter: FakeConverter())
+        coordinator.setCastSink(castSpy, renderProcessPID: getpid())
+        coordinator.start()
+
+        // Backwards, so the dropped-cycle fill (forward holes only) adds no writes.
+        let offset: UInt64 = 5_000_000_000
+        let machs = (1...3).map { UInt64($0) * Self.blockDurationNanos }
+        let ptss = [machs[0] + offset, machs[1] + offset, machs[2] + offset - 24_000_000]
+        for (mach, pts) in zip(machs, ptss) { tap.pushBuffer(buffer(hostTime: pts, machNanos: mach)) }
+        waitFor { castSpy.captureNanos.count == 3 }
+        waitFor { sink.forwarded.count == 3 }
+
+        #expect(castSpy.captureNanos == machs.map { Int64($0) })
+        #expect(sink.forwarded.map { UInt64($0.pts.tv_sec) * 1_000_000_000 + UInt64($0.pts.tv_nsec) } == ptss)
+    }
+
+    /// Turns red if a synthetic block's Cast capture time goes back to a cached
+    /// offset (a stale offset puts it minutes or hours off the raw clock).
+    @Test func aSyntheticBlockGetsACastCaptureTimeOnTheRawClockNow() {
+        let tap = FakeTap()
+        let sink = SpySink()
+        let castSpy = CastSpySink()
+        let coordinator = makeCoordinator(tap: tap, sink: sink, converter: FakeConverter())
+        coordinator.setCastSink(castSpy, renderProcessPID: getpid())
+        coordinator.start()
+
+        // A real tap buffer whose pts offset is 5 s off the true one: anything
+        // that caches the offset from tap buffers carries this error forward.
+        tap.pushBuffer(buffer(hostTime: 5_000_000_000 + Self.blockDurationNanos,
+                              machNanos: Self.blockDurationNanos))
+        waitFor { castSpy.captureNanos.count == 1 }
+
+        coordinator.test_setWizardModeWithoutPacerTimer()
+        coordinator.test_pumpWizardTick(frames: 4_096)
+        let rawNow = Int64(CoreAudioSystemTap.machNanoseconds(fromHostTime: mach_absolute_time()))
+        waitFor { castSpy.captureNanos.count == 2 }
+
+        #expect(castSpy.captureNanos.count == 2)
+        // 1 s, not a few ms: a loaded machine can pause the thread between the
+        // stamp and this read, while the cached-offset defect is 5 s off.
+        #expect(abs(rawNow - (castSpy.captureNanos.last ?? 0)) <= 1_000_000_000)
     }
 
     // MARK: - CAST-SYNC (the AirPlay pre-delay line)

@@ -444,7 +444,7 @@ extension SerializedSharedState {
         let clock = ManualDelayClock()
         let (backend, bt, sink, _) = makeBackend(
             storeDirectory: dir,
-            delayClock: { d, q, w in clock.clock(d, q, DispatchWorkItem { q.async(execute: w) }) },
+            delayClock: clock.queueHoppingClock,
             uptimeClock: clock.uptime)
         defer { backend.stop() }
         let capture = ProbeStagingCapture()
@@ -1099,7 +1099,7 @@ extension SerializedSharedState {
         // render poll also runs on this clock and must run on `stateQueue`.
         let (backend, bt, _, _) = makeBackend(
             engine: engine, discovery: discovery,
-            delayClock: { d, q, w in clock.clock(d, q, DispatchWorkItem { q.async(execute: w) }) },
+            delayClock: clock.queueHoppingClock,
             uptimeClock: clock.uptime)
         defer { engine.releaseWrites(); backend.stop() }
         backend.captureCoordinator = ProbeStagingCapture()

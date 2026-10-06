@@ -153,6 +153,8 @@ Xcode it finds: `sudo xcode-select -s
 /Applications/<Xcode>.app/Contents/Developer`. `AUDIOUT_TEST_MODE=serial`
 runs the suite strictly one test at a time, for flake hunting only, never for a gate.
 
+**Code a real-time test drives brings that test along.** Before committing a production change, run `bash scripts/real-time-tests.sh <changed source files>`; every test it lists gets converted to the wait helpers in root [`AGENTS.md`](AGENTS.md) ("How a test waits without the wall clock") in the same PR, or gets a roadmap entry naming the test, its wait and the code that drives it.
+
 **Flaky tests are quarantined.** A test that fails in the merge queue and passes on rerun is skipped with a dated reason and a GitHub issue, in the same PR that hits it.
 
 **A pass covers everything it ran.** The runner stamps each green run in `/tmp/audiout-suite-cache` and skips a later run on byte-identical sources that an earlier pass already covered: a green full run satisfies any later filtered run, and a green `--filter A` lets a later `--filter A|B` run only `B` (the runner prints which suites it skipped). This is how a filtered run while coding counts toward Guard 4 at commit. `AUDIOUT_TEST_NO_CACHE=1` turns the cache off for a run; `bash scripts/test-suite-cache.sh` tests the cache itself.

@@ -375,9 +375,7 @@ import Testing
             startupRebufferAfter: startupRebufferAfter,
             clockDriftPPM: clockDriftPPM,
             uptimeClock: manual.uptime,
-            delayClock: { delay, queue, work in
-                manual.clock(delay, queue, DispatchWorkItem { queue.async(execute: work) })
-            }
+            delayClock: manual.queueHoppingClock
         )
     }
 

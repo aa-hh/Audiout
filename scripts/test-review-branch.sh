@@ -2,7 +2,8 @@
 # Proves scripts/review-branch.sh picks the right review level, hands the
 # right passes and models to the Claude session, scores and drops findings,
 # posts one PR comment and a `review` commit status, blocks only on HIGH, and
-# stops after two rounds, reading the round from the PR's comments.
+# stops after two rounds, reading the round from the PR's comments. It also
+# proves the deep pass's model follows risk vs size and round 2 inherits it.
 #
 # Clones the current checkout into a temp dir and brings over this checkout's
 # review script and instruction files. A helper plays the Claude session: it
@@ -157,7 +158,7 @@ review
 grep -q '^Review level: skip' "$out" && ok "a: level skip" || { fail "a: not skip"; show; }
 [ "$rc" = 0 ] && [ ! -s "$PRINTED" ] && ok "a: no pass handed over" || fail "a: rc $rc, passes: $(cat "$PRINTED")"
 if [ "$(statuses)" = 1 ] && [ "$(comments)" = 1 ] \
-   && head -n 1 "$GH_COMMENT" | grep -qx "<!-- audiout-review round=1 head=$(git rev-parse HEAD) level=skip high=0 changes=none -->" \
+   && head -n 1 "$GH_COMMENT" | grep -qx "<!-- audiout-review round=1 head=$(git rev-parse HEAD) level=skip high=0 changes=none deep=- -->" \
    && [ "$(status_call)" = "api repos/aa-hh/Audiout/statuses/$(git rev-parse HEAD) -f context=review -f state=success -f description=skip" ]; then
   ok "a: success status 'skip' on HEAD, comment carries the round marker"
 else fail "a: gh calls: $(cat "$GH_CALLS")"; fi
@@ -186,7 +187,7 @@ grep -q 'Then run: bash scripts/review-branch.sh --continue' "$out" && ok "c: ha
 [ ! -e "$(pending_path)" ] && ok "c: pending directory removed" || fail "c: pending directory left"
 [ "$rc" = 0 ] && ok "c: exit 0" || fail "c: exit $rc"
 grep -q '^pr comment 42 --body-file ' "$GH_CALLS" && [ "$(comments)" = 1 ] \
-  && head -n 1 "$GH_COMMENT" | grep -qx "<!-- audiout-review round=1 head=$(git rev-parse HEAD) level=cheap high=0 changes=[0-9a-f]* -->" \
+  && head -n 1 "$GH_COMMENT" | grep -qx "<!-- audiout-review round=1 head=$(git rev-parse HEAD) level=cheap high=0 changes=[0-9a-f]* deep=- -->" \
   && sed -n 2p "$GH_COMMENT" | grep -qx '## Review: cheap, round 1' && grep -qx 'Review: no findings' "$GH_COMMENT" \
   && ok "c: one comment on PR 42: marker, heading, then 'Review: no findings'" || { fail "c: comment wrong"; cat "$GH_CALLS" "$GH_COMMENT" >&2; }
 status_call | grep -q -- '-f state=success -f description=cheap, round 1, 0 HIGH$' \
@@ -194,6 +195,7 @@ status_call | grep -q -- '-f state=success -f description=cheap, round 1, 0 HIGH
 [ "$(head -n 1 "$GH_CALLS" | cut -d' ' -f1-2)" = "pr view" ] && [ "$(tail -n 1 "$GH_CALLS" | cut -d' ' -f1)" = api ] \
   && ok "c: comment posted before the status" || fail "c: gh call order: $(cat "$GH_CALLS")"
 last_log | grep -q "$(printf '\tcheap\t0\t0\t0\t0\t')" && ok "c: log counts 0 0 0 0" || fail "c: log line '$(last_log)'"
+[ "$(last_log | cut -f9)" = - ] && ok "c: log gains a trailing - column" || fail "c: log column 9 '$(last_log | cut -f9)'"
 
 # (d) 400 lines: full, four reviewers with their own model.
 # Catches: a reviewer on the wrong model, or the history pass without its git limits.
@@ -203,7 +205,11 @@ review
 grep -q '^Review level: full' "$out" && ok "d: level full" || { fail "d: not full"; show; }
 n=$(wc -l < "$PRINTED" | tr -d ' ')
 [ "$n" = 4 ] && ok "d: four reviewer passes" || fail "d: $n passes"
-[ "$(printed 'deep  model=fable  ')" = 1 ] && ok "d: deep reviewer on fable" || fail "d: passes: $(cat "$PRINTED")"
+[ "$(printed 'deep  model=opus  ')" = 1 ] && ok "d: deep reviewer on opus for a size-only full" || fail "d: passes: $(cat "$PRINTED")"
+sed -n 2p "$GH_COMMENT" | grep -qx '## Review: full, round 1 (deep pass: opus)' \
+  && head -n 1 "$GH_COMMENT" | grep -q ' deep=opus -->$' && [ "$(last_log | cut -f9)" = opus ] \
+  && ok "d: heading, marker and log name opus" || fail "d: deep record wrong: $(head -n 2 "$GH_COMMENT")"
+
 [ "$(printed 'rules  model=sonnet  ')" = 1 ] && [ "$(printed 'history  model=sonnet  ')" = 1 ] \
   && [ "$(printed 'comments  model=sonnet  ')" = 1 ] && ok "d: three sonnet reviewers" || fail "d: sonnet passes wrong"
 grep -q 'The history pass may only run git log and git blame' "$out" \
@@ -217,6 +223,10 @@ make_branch risky "$license" 20
 review
 grep -q '^Review level: full (20 product lines, risk: AudioutCore/Sources/AudioutCore/LicenseGate.swift)' "$out" \
   && ok "e: risk path forces full" || { fail "e: not full"; show; }
+# Catches: the deep model ignoring the risk path, or the record naming another model.
+[ "$(printed 'deep  model=fable  ')" = 1 ] && sed -n 2p "$GH_COMMENT" | grep -qx '## Review: full, round 1 (deep pass: fable)' \
+  && head -n 1 "$GH_COMMENT" | grep -q ' deep=fable -->$' && [ "$(last_log | cut -f9)" = fable ] \
+  && ok "e: risk path puts the deep pass on fable, recorded" || fail "e: deep record wrong: $(cat "$PRINTED")"
 
 # (f) Scoring: one haiku pass per finding, under 75 dropped and listed apart.
 # A surviving LOW is posted but does not block.
@@ -312,6 +322,33 @@ review
   && status_call | grep -q -- '-f state=failure -f description=full, round 1, 1 HIGH$' \
   && ok "g5: same head → failure status re-posted, exit 1, no new review" || { fail "g5: exit $rc"; show; }
 
+# (g6) Round 2 inherits round 1's deep model.
+# Catches: round 2 recomputing the deep model from its own diff instead of reading the marker.
+reset_answers
+echo 'HIGH | a.swift:1 | x' > "$ANSWERS/comments"
+make_branch inherit "$analytics" 400
+review
+[ "$(printed 'deep  model=opus  ')" = 1 ] && ok "g6: round 1 deep on opus" || fail "g6: passes: $(cat "$PRINTED")"
+reset_answers
+echo '// fix' >> "$license"
+git add "$license" && git commit -q --no-verify -m fix
+review
+grep -q '^Review level: full (1 product lines, risk: .*LicenseGate.swift), round 2' "$out" \
+  && [ "$(printed 'deep  model=opus  ')" = 1 ] && sed -n 2p "$GH_COMMENT" | grep -qx '## Review: full, round 2 (deep pass: opus)' \
+  && head -n 1 "$GH_COMMENT" | grep -q ' deep=opus -->$' \
+  && ok "g6: round 2 keeps opus although the risk path alone says fable" || { fail "g6: round 2 wrong"; show; }
+
+# (g7) An old marker without deep= gets the rule applied to this round's diff.
+# Catches: a missing deep= field breaking round 2 or leaving the deep model empty.
+reset_answers
+make_branch old-marker "$analytics" 10
+echo "<!-- audiout-review round=1 head=$(git rev-parse HEAD) level=full high=1 changes=stale -->" > "$GH_THREAD"
+for i in $(seq 1 400); do echo "// line $i" >> "$analytics"; done
+git add "$analytics" && git commit -q --no-verify -m big
+review
+grep -q 'round 2$' "$out" && [ "$(printed 'deep  model=opus  ')" = 1 ] && head -n 1 "$GH_COMMENT" | grep -q ' deep=opus -->$' \
+  && ok "g7: old marker, deep pass on opus by the size rule" || { fail "g7: wrong"; show; }
+
 # (h) A HIGH the scorer doubts is dropped and does not block.
 # Catches: dropped findings still counting toward the block.
 reset_answers
@@ -327,9 +364,10 @@ make_branch escalate "$analytics" 120
 review
 grep -q '^ESCALATE:' "$out" && ok "i: escalation printed" || { fail "i: no ESCALATE line"; show; }
 n=$(wc -l < "$PRINTED" | tr -d ' ')
-[ "$n" = 5 ] && [ "$(head -n 1 "$PRINTED" | cut -d' ' -f1)" = cheap ] && [ "$(printed 'model=fable')" = 1 ] \
+[ "$n" = 5 ] && [ "$(head -n 1 "$PRINTED" | cut -d' ' -f1)" = cheap ] && [ "$(printed 'model=opus')" = 1 ] \
   && ok "i: cheap pass then four reviewers" || fail "i: passes: $(cat "$PRINTED")"
 last_log | grep -q "$(printf '\tfull-escalated\t')" && ok "i: logged full-escalated" || fail "i: log line '$(last_log)'"
+[ "$(last_log | cut -f9)" = opus ] && ok "i: escalated deep pass logged as opus" || fail "i: log column 9 '$(last_log | cut -f9)'"
 
 # (j) Cheap findings are counted unscored; a MEDIUM does not block.
 # Catches: cheap findings dropped, sent to the scorer, or a MEDIUM blocking.

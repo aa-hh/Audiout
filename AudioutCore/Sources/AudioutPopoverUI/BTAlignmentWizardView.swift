@@ -3,7 +3,6 @@
 import AppKit
 import AudioutCore
 import AudioutSharedUI
-import ProbeKit
 
 /// The alignment wizard's window content (wizard-stage v2 spec §3/§4): one
 /// FIXED chassis — title row, ``AlignmentStageView``, readout caption —
@@ -312,9 +311,8 @@ public final class BTAlignmentWizardView: NSView {
     }
 
     private let session: BTAlignmentWizardSession
-    /// The picker is INTRO-ONLY on screen (spec §1) but PERSISTENT in memory:
-    /// the host can still swap the reference mid-run, and that swap arrives
-    /// through this menu's own item dispatch.
+    /// The picker is INTRO-ONLY (spec §1): it is disabled once the run leaves
+    /// the intro, which locks the reference for the rest of the run.
     private let referencePopUp = NSPopUpButton(frame: .zero, pullsDown: false)
     /// The picker's full-measure width — see ``addReferenceRow``.
     private lazy var referencePopUpWidth: NSLayoutConstraint =
@@ -939,7 +937,7 @@ public final class BTAlignmentWizardView: NSView {
 
     /// The intro's sentence, with the two sounds named only when the pair
     /// actually makes two — the session owns that fact, since it owns the
-    /// reference the user can still swap mid-run.
+    /// reference.
     private func introBody() -> String {
         guard session.pairSoundsDiffer, let reference = session.reference else {
             return Self.introCopy
@@ -1194,9 +1192,8 @@ public final class BTAlignmentWizardView: NSView {
     }
 
     private func startProbeProgress() {
-        guard probeProgress != nil, probeProgressTimer == nil else { return }
-        let total = session.probeListeningSeconds
-            ?? (MicProbeSession.probeLeadSeconds + SyncProbe.Layout.totalSeconds)
+        guard probeProgress != nil, probeProgressTimer == nil,
+              let total = session.probeListeningSeconds else { return }
         probeProgressTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30, repeats: true) { [weak self] _ in
             guard let self, let bar = self.probeProgress,
                   let started = self.session.probeStartedAt else { return }

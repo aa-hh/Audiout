@@ -546,8 +546,8 @@ public final class PopoverController: NSObject {
     var btWizardMicProbe: MicProbeSession?
     /// Bumped on every live preview push. The probe result is only trusted if
     /// the preview it was measured under is STILL the one applied — an answer
-    /// (or a reference swap) mid-probe moves the sink under the sweep, and a
-    /// measurement across that splice would be about two different timelines.
+    /// mid-probe moves the sink under the sweep, and a measurement across that
+    /// splice would be about two different timelines.
     var btWizardPreviewGeneration = 0
     /// The preview value in force when the probe's sweeps started — the
     /// measured Δ corrects THIS value into the proposal.

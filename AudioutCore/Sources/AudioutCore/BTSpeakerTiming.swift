@@ -294,8 +294,9 @@ public final class BTSpeakerTiming: @unchecked Sendable {
     /// offset or replace it, and record the alignment either way.
     ///
     /// `correctedMs` is the offset the caller is about to store, already
-    /// through its own stagger and clamp arithmetic — this type does none of
-    /// that and hands the number back untouched. Call it BEFORE the store
+    /// through its own clamp (the phone's offset arrives with the lane spacing
+    /// already removed) — this type does none of that and hands the number
+    /// back untouched. Call it BEFORE the store
     /// write, because the decision reads what is stored now. A `keepStored`
     /// still records the alignment: the phone confirmed the number, and a
     /// confirmed number is no longer last time's.

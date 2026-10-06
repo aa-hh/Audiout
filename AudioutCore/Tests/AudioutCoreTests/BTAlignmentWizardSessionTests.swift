@@ -469,8 +469,9 @@ private func proposalValue(_ session: BTAlignmentWizardSession) -> Double? {
     }
 
     /// The two tick timbres are split by TRANSPORT (the Bluetooth fan-out gets
-    /// the bright click, the engine feed the low knock), so whether the pair
-    /// sounds different is a fact about the two speakers' transports — and it
+    /// the higher (660 Hz) mallet note, the engine feed the lower (440 Hz)
+    /// one), so whether the pair sounds different is a fact about the two
+    /// speakers' transports — and it
     /// follows the reference the user can still swap mid-run.
     @Test func thePairSoundsDifferOnlyAcrossTransports() {
         let recorder = Recorder()

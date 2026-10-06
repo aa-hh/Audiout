@@ -30,17 +30,17 @@ import Testing
         let scene: [Float]
         let failsToStart: Bool
         let firstSampleHostNanos: Int64?
-        let roomDBFS: Double?
+        let roomSlices: [Double]
         private(set) var stopped = false
         init(rate: Double = 8_000, scene: [Float] = [], failsToStart: Bool = false,
-             firstSampleHostNanos: Int64? = nil, roomDBFS: Double? = nil) {
+             firstSampleHostNanos: Int64? = nil, roomSlices: [Double] = []) {
             self.rate = rate
             self.scene = scene
             self.failsToStart = failsToStart
             self.firstSampleHostNanos = firstSampleHostNanos
-            self.roomDBFS = roomDBFS
+            self.roomSlices = roomSlices
         }
-        func recentRMSdBFS(seconds: Double) -> Double? { roomDBFS }
+        func recentRMSdBFS(seconds: Double, slices: Int) -> [Double] { Array(roomSlices.prefix(slices)) }
         struct StartFailure: Error {}
         func start() throws -> Double {
             if failsToStart { throw StartFailure() }
@@ -119,13 +119,13 @@ import Testing
         let finishedAt = Box()
         let _: MicProbeSession.Result? = await withCheckedContinuation { cont in
             session.start(stage: { _, onStarted, onFinished in
-                onStarted(0.6)
+                onStarted(0.2) // real-time-ok: the session's tail wait is a real queue timer with no clock seam; 0.2 s against the 0.05 s margin is the least that still shows the reported delay was waited
                 finishedAt.at = Date()
                 onFinished()
             }, completion: { cont.resume(returning: $0) })
         }
         let waited = finishedAt.at.map { Date().timeIntervalSince($0) } ?? 0
-        #expect(waited >= 0.6, "the capture waits the reported 0.6 s: waited \(waited)")
+        #expect(waited >= 0.2, "the capture waits the reported 0.2 s: waited \(waited)")
     }
 
     @Test func aRunWhoseProbeNeverPlaysTimesOutToNil() async {
@@ -185,9 +185,9 @@ import Testing
 
     /// The stage closure's level question is answered from the recorder's own
     /// reading of the room. Turns red if `MicProbeSession.start` stops passing
-    /// `recentRMSdBFS(seconds:)` through `levelStepDB(ambientRMSdBFS:)`.
+    /// `recentRMSdBFS(seconds:slices:)` through `levelStepDB(ambientRMSdBFS:)`.
     @Test func theStageClosureAsksTheRecorderForTheRoom() async {
-        let recorder = FakeRecorder(rate: 8_000, scene: [], roomDBFS: -55)
+        let recorder = FakeRecorder(rate: 8_000, scene: [], roomSlices: [-55])
         let session = MicProbeSession(recorder: recorder, timeout: 1, pipelineTail: 0.05)
         final class Box: @unchecked Sendable { var step: Int? }
         let box = Box()
@@ -198,6 +198,24 @@ import Testing
             }, completion: { cont.resume(returning: $0) })
         }
         #expect(box.step == 12, "a −55 dBFS room asks for the +12 dB step")
+    }
+
+    /// Music the wizard just silenced is still loud in the newest half second
+    /// while an older slice already hears the quiet room. Turns red if
+    /// `MicProbeSession.start` reads the room from the newest slice alone (or
+    /// any slice but the quietest) instead of the minimum of the last three.
+    @Test func aLoudNewestSliceOverAQuietRoomKeepsTheStagedLevel() async {
+        let recorder = FakeRecorder(rate: 8_000, scene: [], roomSlices: [-50, -75, -55])
+        let session = MicProbeSession(recorder: recorder, timeout: 1, pipelineTail: 0.05)
+        final class Box: @unchecked Sendable { var step: Int? }
+        let box = Box()
+        _ = await withCheckedContinuation { (cont: CheckedContinuation<MicProbeSession.Result?, Never>) in
+            session.start(stage: { levelStepDB, onStarted, onFinished in
+                box.step = levelStepDB()
+                onStarted(0); onFinished()
+            }, completion: { cont.resume(returning: $0) })
+        }
+        #expect(box.step == 0, "the quietest slice, −75 dBFS, is the room: no level step")
     }
 
     /// The live 2026-08-28 refusal: the ambient slice carries the tail of the

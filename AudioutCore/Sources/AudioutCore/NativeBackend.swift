@@ -499,7 +499,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// has a single producer, and a second run would replace the first's
     /// staging under it. `btTrimLock`.
     var companionAlignmentRun: CompanionAlignmentRun?
-    /// Nil outside an audition; otherwise only these two outputs keep their gain.
+    /// Nil outside an audition or a wizard run; otherwise only these two outputs keep their gain.
     /// All reads and writes are on stateQueue.
     var companionTickParticipants: Set<String>?
     /// Audio callbacks take only btTrimLock for this snapshot, never stateQueue.

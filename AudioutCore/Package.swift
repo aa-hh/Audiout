@@ -269,8 +269,7 @@ let package = Package(
             // field's SETTLED state, shader generated from the shared numbers.
             dependencies: ["AudioutCore", "AudioutSharedUI",
                            "AudioutWindowUI", "AudioutSettingsUI",
-                           .product(name: "AudioutField", package: "audiout-shared"),
-                           .product(name: "ProbeKit", package: "audiout-shared")],
+                           .product(name: "AudioutField", package: "audiout-shared")],
             swiftSettings: [.unsafeFlags(swiftClangImporterFlags)]
         ),
         // The pure-AppKit mixer window (SPEC §9 "Full window"): a

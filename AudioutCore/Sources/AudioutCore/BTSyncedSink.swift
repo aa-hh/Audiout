@@ -2017,16 +2017,16 @@ final class BTSyncedSink: @unchecked Sendable {
         sink?.setEQ(eq)
     }
 
-    /// The UIDs whose delay gate has opened — the devices actually hearing
-    /// audio right now. A uid with no sink (its `AudioObjectID` never resolved)
-    /// or whose engine failed to start is simply absent, which is what makes
-    /// the caller's `.connecting` hold degrade instead of hang.
     /// One on-demand `bt_sink_health` line per sink in `uids`, tagged `at`.
     func logHealthNow(at: String, uids: Set<String>) {
         let sinks = tableLock.withLock { sinksByUID.filter { uids.contains($0.key) }.values }
         for sink in sinks { sink.logHealthNow(at: at) }
     }
 
+    /// The UIDs whose delay gate has opened — the devices actually hearing
+    /// audio right now. A uid with no sink (its `AudioObjectID` never resolved)
+    /// or whose engine failed to start is simply absent, which is what makes
+    /// the caller's `.connecting` hold degrade instead of hang.
     func renderingDeviceUIDs() -> Set<String> {
         let sinks = tableLock.withLock { Array(sinksByUID.values) }
         return Set(sinks.lazy.filter(\.hasStartedRendering).map(\.deviceUID))

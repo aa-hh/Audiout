@@ -188,6 +188,11 @@ extension SerializedSharedState {
             lock.withLock { _stages += 1 }
             onStarted()
         }
+        func stageWizardMicProbe(levelStepDB: @escaping () -> Int,
+                                 onStarted: @escaping () -> Void,
+                                 onFinished: @escaping () -> Void) {
+            onStarted()
+        }
     }
 
     private final class ScriptedLocalPlayback: LocalPlaybackControlling, @unchecked Sendable {
@@ -1912,6 +1917,24 @@ extension SerializedSharedState {
         backend.setBTWizardTickActive(true, btTargetDeviceID: nil, btReferenceDeviceID: nil)
         #expect(backend.localSinkReferenceDelayMs() == 500)
         backend.setBTWizardTickActive(false, btTargetDeviceID: nil, btReferenceDeviceID: nil)
+    }
+
+    /// The mic probe's listening tail is sized from the room delay `onStarted`
+    /// reports. Turns red if `NativeBackend.stageBTMicProbe` hands `onStarted`
+    /// the delay in milliseconds, or anything but the room delay.
+    @Test func theWizardMicProbeReportsTheRoomDelayInSeconds() {
+        let (backend, _, _, _) = makeBackend()
+        defer { backend.stop() }
+        backend.captureCoordinator = ProbeStagingCapture()
+        backend.start()
+        let reported = LockedBox<TimeInterval?>(nil)
+        backend.stageBTMicProbe(levelStepDB: { 0 },
+                                onStarted: { reported.value = $0 },
+                                onFinished: {})
+        waitFor { reported.value != nil }
+        let roomMs = backend.localSinkReferenceDelayMs()
+        #expect(roomMs > 0, "positive control: a zero room delay reads the same in any unit")
+        #expect(reported.value == Double(roomMs) / 1000)
     }
 
     /// Keep writes the measurement BEFORE the reference comes down, so the new

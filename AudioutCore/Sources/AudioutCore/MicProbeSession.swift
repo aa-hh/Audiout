@@ -62,15 +62,17 @@ public protocol MicProbeRecording {
     /// without this; the chirp wizard measures one arrival against another
     /// inside the same capture and never asks.
     var firstSampleHostNanos: Int64? { get }
-    /// RMS of the last `seconds` of capture in dBFS, nil while fewer samples
-    /// than that have arrived. The probe reads the room with it just before
-    /// arming, to pick its level step.
-    func recentRMSdBFS(seconds: Double) -> Double?
+    /// RMS in dBFS of each of the last `slices` back-to-back `seconds`-long
+    /// stretches of capture, newest first. Only fully captured stretches
+    /// count, so it is empty while fewer than `seconds` of samples have
+    /// arrived. The probe reads the room with it just before arming, to pick
+    /// its level step.
+    func recentRMSdBFS(seconds: Double, slices: Int) -> [Double]
 }
 
 public extension MicProbeRecording {
     var firstSampleHostNanos: Int64? { nil }
-    func recentRMSdBFS(seconds: Double) -> Double? { nil }
+    func recentRMSdBFS(seconds: Double, slices: Int) -> [Double] { [] }
 }
 
 /// Captures the Mac's BUILT-IN microphone, pinned by device ID.
@@ -124,12 +126,15 @@ public final class BuiltInMicRecorder: MicProbeRecording {
         return timelineBroken ? nil : firstSampleNanos
     }
 
-    public func recentRMSdBFS(seconds: Double) -> Double? {
+    public func recentRMSdBFS(seconds: Double, slices: Int) -> [Double] {
         lock.lock(); defer { lock.unlock() }
         let count = Int(seconds * lockedSampleRate)
-        guard count > 0, samples.count >= count else { return nil }
-        let sumSquares = samples[(samples.count - count)...].reduce(0.0) { $0 + Double($1) * Double($1) }
-        return 10 * log10(max(sumSquares / Double(count), 1e-20))
+        guard count > 0 else { return [] }
+        return (0..<min(slices, samples.count / count)).map { slice in
+            let end = samples.count - slice * count
+            let sumSquares = samples[(end - count)..<end].reduce(0.0) { $0 + Double($1) * Double($1) }
+            return 10 * log10(max(sumSquares / Double(count), 1e-20))
+        }
     }
 
     public func start() throws -> Double {
@@ -377,7 +382,10 @@ public final class MicProbeSession {
             recordingBegan = Self.nowNanos()
             let recorder = recorder
             stage({ [weak self] in
-                let rms = recorder.recentRMSdBFS(seconds: 0.5)
+                // The quietest of the last three half-second slices: music the
+                // wizard just silenced can still be draining from the speakers,
+                // and a slice it no longer reaches is the room.
+                let rms = recorder.recentRMSdBFS(seconds: 0.5, slices: 3).min()
                 let step = Self.levelStepDB(ambientRMSdBFS: rms)
                 self?.queue.async { self?.levelStepDB = step; self?.ambientDBFS = rms }
                 return step

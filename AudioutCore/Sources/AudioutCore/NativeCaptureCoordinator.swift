@@ -1577,7 +1577,7 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         let window = injector.mixWizardVariants(
             into: &pcm, bedded: &bedded, beddedNoProbe: &beddedNoProbe)
         if injector.takeProbeCompletion() {
-            // The sweeps are fully in the feed: start the by-ear grid (a clean
+            // The probe is fully in the feed: start the by-ear grid (a clean
             // interval away) and let the mic session know the tail is coming.
             // A COMPANION run skips the handover — the phone decides what
             // follows a measurement, and ticking on unasked would put a
@@ -1587,7 +1587,7 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             micProbeFinished = nil
             if let finished { DispatchQueue.global(qos: .userInitiated).async(execute: finished) }
         }
-        // Which Bluetooth sink, if any, is to hear the sweep in THIS block.
+        // Which Bluetooth sink, if any, is to hear the probe in THIS block.
         let sweepOwnerUID = window.flatMap { index -> String? in
             companionProbeWindowUIDs.indices.contains(index)
                 ? companionProbeWindowUIDs[index] : nil

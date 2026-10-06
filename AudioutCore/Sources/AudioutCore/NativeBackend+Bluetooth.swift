@@ -981,8 +981,8 @@ public protocol BTOutputControlling: AnyObject {
     /// IDEMPOTENT for the tick itself: a redundant edge does nothing at all.
     /// Both edges re-anchor every sink, and the panel's Done button issues a
     /// second `false` after a terminal screen already stopped the tick. The
-    /// participant hold is the exception — it is recomputed on every call, so a
-    /// reference swapped mid-run comes back off the hold without a tick edge.
+    /// participant hold is the exception — it is recomputed on every call,
+    /// because a `false` also clears the participants, edge or not.
     func setBTWizardTickActive(_ active: Bool, btTargetDeviceID: String?,
                                btReferenceDeviceID: String?)
     /// The wizard panel is going away for good — Keep, Discard, Done, ✕,
@@ -1078,7 +1078,7 @@ public protocol BTOutputControlling: AnyObject {
     /// Returns a refusal reason for the preconditions only this layer can
     /// answer (the target has no live Bluetooth sink; a run, fine-tune session
     /// or Mac wizard is already up), or `nil` once staged. `onStarted` fires
-    /// when the sweeps enter the feed, `onFinished` when the last sweep frame
+    /// when the probe enters the feed, `onFinished` when its last frame
     /// does; a run torn down early fires neither, and the phone recovers by
     /// timeout. Nothing about the device's tuning changes until a measurement
     /// is reported back.
@@ -1560,9 +1560,9 @@ extension NativeBackend: BTOutputControlling {
 
     public func setBTWizardTickActive(_ active: Bool, btTargetDeviceID: String?,
                                       btReferenceDeviceID: String?) {
-        // NOT edge-guarded, unlike everything below: the host re-pushes a `true`
-        // when the user swaps the reference mid-run, and the new reference has
-        // to come back off the hold that the old one was exempt from.
+        // NOT edge-guarded, unlike everything below: a `false` also clears the
+        // participants, and that has to happen even when the tick already
+        // stopped. (The reference is locked once the run leaves the intro.)
         updateBTWizardParticipantHold(
             active: active, targetUID: btTargetDeviceID, referenceUID: btReferenceDeviceID)
         // Idempotent (see the protocol): everything below is an EDGE cost — a
@@ -1614,15 +1614,17 @@ extension NativeBackend: BTOutputControlling {
         }
     }
 
-    /// Hold every selected Bluetooth speaker that is NOT part of the comparison
-    /// silent for the run, and let them all back in when it ends.
+    /// Hold every output that is NOT part of the comparison silent for the
+    /// run — other Bluetooth speakers, Cast, AirPlay and the Mac's own sink —
+    /// and let them all back in when it ends.
     ///
-    /// The reference is exempt only when it is itself a Bluetooth device — a
-    /// Mac reference renders through a different sink entirely and is not in
-    /// this set to begin with, so passing its id costs nothing. Applied through
-    /// the ordinary composed-gain seam: no rebuild, no gap, and the wizard's
-    /// arm gate (which keys off `hasStartedRendering`) is unaffected because a
-    /// gain of 0 is still a released, rendering sink.
+    /// With a reference named, the target and reference become
+    /// `companionTickParticipants`, per-app program and local playback are
+    /// suppressed, and the non-participants drop out of the room delay; when
+    /// that moves the room delay, every sink re-anchors on it. Held Bluetooth
+    /// speakers go silent through the ordinary composed-gain seam: no rebuild,
+    /// no gap, and the wizard's arm gate (which keys off `hasStartedRendering`)
+    /// is unaffected because a gain of 0 is still a released, rendering sink.
     private func updateBTWizardParticipantHold(
         active: Bool, targetUID: String?, referenceUID: String?
     ) {
@@ -1824,10 +1826,10 @@ extension NativeBackend: BTOutputControlling {
             onFinished: { [weak self] in
                 onFinished()
                 // The air lags the feed by the sinks' pipeline delay, so the
-                // AUDIO stands down a tail's worth after the last sweep FRAME —
+                // AUDIO stands down a tail's worth after the last probe FRAME —
                 // the same figure the mic session waits out (`MicProbeSession
                 // .pipelineTailSeconds`). The RUN outlives it: the phone waits
-                // its own tail after being told the sweeps finished, then
+                // its own tail after being told the probe finished, then
                 // transforms the recording, and only then reports.
                 self?.captureControlQueue.asyncAfter(
                     deadline: .now() + MicProbeSession.pipelineTailSeconds

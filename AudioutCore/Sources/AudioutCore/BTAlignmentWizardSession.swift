@@ -75,9 +75,10 @@ public final class BTAlignmentWizardSession {
         public let id: String
         public let name: String
         /// Which fan-out this speaker plays through, and so WHICH SOUND it
-        /// makes during the run: the Bluetooth fan-out carries the bright
-        /// click, the engine feed (AirPlay, and the Mac's own output) the low
-        /// knock. See ``BTAlignmentWizardSession/pairSoundsDiffer``.
+        /// makes during the run: the Bluetooth fan-out carries the higher
+        /// (660 Hz) mallet note, the engine feed (AirPlay, and the Mac's own
+        /// output) the lower (440 Hz) one. See
+        /// ``BTAlignmentWizardSession/pairSoundsDiffer``.
         public let isBluetooth: Bool
         public init(id: String, name: String, isBluetooth: Bool = false) {
             self.id = id
@@ -386,8 +387,8 @@ public final class BTAlignmentWizardSession {
         }
     }
 
-    /// The tick gate goes on either way: the backend plays the probe's sweeps
-    /// in place of the first ticks and re-arms the ticks itself afterwards.
+    /// The tick gate goes on either way: the backend plays the probe in place
+    /// of the first ticks and re-arms the ticks itself afterwards.
     private func beginRun(listening: Bool) {
         // A fresh injector comes up with a fresh beat clock, so whatever tempo
         // the session pushed before is void.
@@ -403,7 +404,7 @@ public final class BTAlignmentWizardSession {
     /// Show the listening screen and count the pass. Shared by the run's start
     /// and a measured proposal's first rejection. The probe measures against
     /// whatever the device is playing at, so the base value is what has to be on
-    /// the wire while the sweeps run.
+    /// the wire while the probe plays.
     private func enterListening() {
         probeStartedAt = nil
         probeListeningSeconds = nil
@@ -418,9 +419,9 @@ public final class BTAlignmentWizardSession {
     /// just tried and could not confirm it, so asking "still right?" would be
     /// leaning on the one thing that was checked and not confirmed.
     ///
-    /// A failed FIRST listen plays the sweeps once more before giving up. The
+    /// A failed FIRST listen plays the probe once more before giving up. The
     /// commonest reason nothing was heard is a Bluetooth speaker that had not
-    /// played since it connected and was still waking when the sweeps
+    /// played since it connected and was still waking when the probe
     /// arrived; the first pass woke it, so the second is heard. That spends
     /// the run's second mic attempt, so a measurement the retry produces is
     /// judged by ear if rejected, never listened to a third time.

@@ -617,6 +617,19 @@ public final class GroupEditorViewController: NSViewController {
 
     // MARK: Actions
 
+    /// Save the active field editor before the host changes scenes.
+    func finishRename() -> Bool {
+        guard let fieldEditor = nameField.currentEditor() else { return true }
+        nameField.stringValue = fieldEditor.string
+        guard commitRename() else {
+            restoreNameField()
+            fieldEditor.string = nameField.stringValue
+            return false
+        }
+        nameField.abortEditing()
+        return true
+    }
+
     @objc private func nameCommitted(_ sender: NSTextField) {
         commitRename()
     }
@@ -859,6 +872,7 @@ public final class GroupEditorViewController: NSViewController {
     /// Run the same confirm-then-delete flow the "Delete scene…" button does —
     /// the sidebar's context-menu "Delete scene…" path.
     public func requestDelete() {
+        test_deleteRequestCount += 1
         deleteTapped(deleteButton)
     }
 
@@ -1097,6 +1111,8 @@ public final class GroupEditorViewController: NSViewController {
     /// the user instead of swallowed. Headless seam for the failure paths,
     /// which present no sheet without a window.
     public private(set) var test_saveFailureReported = false
+
+    private(set) var test_deleteRequestCount = 0
 
     /// True once a rename was refused because another group already had that
     /// name. Headless seam — the explanation is a window-guarded sheet.

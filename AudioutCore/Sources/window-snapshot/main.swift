@@ -45,10 +45,10 @@
 //                      carrying the shown device's CURRENT override — the
 //                      gold "current icon" selection ring — in a narrowed
 //                      search grid
-//   7. edit-active-group — the Edit Group pane while the shown group is the
-//                      ACTIVE Main Out target (thin gold ring on the icon
-//                      well); activation happens through the model — the
-//                      window stays config-only
+//   7. edit-active-group — the active group's scene page keeps a neutral
+//                      icon well, with no gold ring or playback status.
+//                      Model activation prepares other snapshot state;
+//                      it never changes the scene page's appearance.
 //   8. three-scenes — three saved scenes in the sidebar, with Party's page
 //
 // Run: `swift run window-snapshot [output-dir]`.
@@ -836,12 +836,9 @@ func run() -> Int32 {
             snapshotStandaloneView(picker.view, label: "6-icon-picker",
                                    appearanceName: appearanceName, outDir: outDir)
 
-            // 7. Edit pane for the ACTIVE group (Warm Signal W3, spec §5.3):
-            // the icon well carries the thin gold ring while the shown group
-            // is the Main Out target. Activation happens through the MODEL
-            // (`GroupController.activateGroup`), exactly as the popover would
-            // — the window itself stays config-only; this render just shows
-            // how the editor looks while its group is playing.
+            // 7. The active group's scene page keeps its neutral icon well,
+            // without a gold ring or playback status. Model activation below
+            // prepares other snapshot state, not the scene page's appearance.
             controller.activateGroup(id: saved.id)
             windowController.update(devices: backend.devices)
             windowController.test_select(.group(id: saved.id))

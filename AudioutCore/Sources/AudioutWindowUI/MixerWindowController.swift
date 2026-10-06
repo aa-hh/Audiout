@@ -237,12 +237,12 @@ public final class MixerWindowController {
         scenesSidebarViewController.onSelect = { [weak self] id in self?.showEditor(for: id) }
         scenesSidebarViewController.onAddScene = { [weak self] in self?.presentCreateSheet(preselected: []) }
         scenesSidebarViewController.onRequestRename = { [weak self] id in
-            self?.showEditor(for: id)
-            self?.editorViewController.focusRenameField()
+            guard let self, self.showEditor(for: id) else { return }
+            self.editorViewController.focusRenameField()
         }
         scenesSidebarViewController.onRequestDelete = { [weak self] id in
-            self?.showEditor(for: id)
-            self?.editorViewController.requestDelete()
+            guard let self, self.showEditor(for: id) else { return }
+            self.editorViewController.requestDelete()
         }
         emptyPageViewController.onAddScene = { [weak self] in self?.presentCreateSheet(preselected: []) }
         editorViewController.onDidDeleteGroup = { [weak self] in self?.refreshAll() }
@@ -450,10 +450,17 @@ public final class MixerWindowController {
         swapSpeakers(to: mainOutDetailViewController)
     }
 
-    private func showEditor(for groupID: String) {
+    @discardableResult
+    private func showEditor(for groupID: String) -> Bool {
+        if let currentID = editorViewController.editingGroupID, currentID != groupID,
+           !editorViewController.finishRename() {
+            scenesSidebarViewController.select(sceneID: currentID, notify: false)
+            return false
+        }
         scenesSidebarViewController.select(sceneID: groupID, notify: false)
         editorViewController.show(groupID: groupID, devices: orderedDevices())
         swapScenes(to: editorViewController)
+        return true
     }
 
     /// Select `selection` from OUTSIDE the sidebar — the popover's

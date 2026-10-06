@@ -356,7 +356,7 @@ import AppKit
         #expect(window.test_sidebar.currentSelection == .device(id: "office"))
     }
 
-    // Disconnecting the scene row from its page or activating it on selection turns it red.
+    // Disconnecting scene selection, dropping its pending rename, or activating playback turns it red.
     @Test func selectingASceneRowShowsItsPage() async throws {
         let (window, controller, backend) = try await makeWindow()
         let first = try makeGroup1(controller)
@@ -370,7 +370,11 @@ import AppKit
         defer { window.test_editor.test_settleCount() }
         #expect(window.test_editor.editingGroupID == first.id)
         #expect(!window.test_editor.test_captionIsRolling)
+        #expect(host.makeFirstResponder(window.test_editor.test_titleField))
+        let fieldEditor = try #require(window.test_editor.test_titleField.currentEditor() as? NSTextView)
+        fieldEditor.insertText("Saved before selection", replacementRange: NSRange(location: 0, length: fieldEditor.string.utf16.count))
         window.test_scenesSidebar.test_select(sceneID: saved.id)
+        #expect(controller.groups.first { $0.id == first.id }?.name == "Saved before selection")
         #expect(window.test_isShowingEditor)
         #expect(window.test_editor.editingGroupID == saved.id)
         #expect(window.test_editor.test_captionText == "1 speaker")
@@ -449,7 +453,7 @@ import AppKit
         #expect(controller.activeGroupID == nil, "creating never activates")
     }
 
-    // Disconnecting the scene row's Rename menu from its page turns it red.
+    // Dropping the current scene's pending rename before the other scene's Rename menu opens turns it red.
     @Test func aScenesRenameOpensItsPage() async throws {
         let (window, controller, backend) = try await makeWindow()
         let first = try makeGroup1(controller)
@@ -460,8 +464,12 @@ import AppKit
         host.contentViewController = window.scenesContentController
         host.contentView?.layoutSubtreeIfNeeded()
         #expect(window.test_editor.editingGroupID == first.id)
+        #expect(host.makeFirstResponder(window.test_editor.test_titleField))
+        let fieldEditor = try #require(window.test_editor.test_titleField.currentEditor() as? NSTextView)
+        fieldEditor.insertText("Saved before Rename", replacementRange: NSRange(location: 0, length: fieldEditor.string.utf16.count))
         #expect(window.test_scenesSidebar.test_contextMenuItems(for: saved.id) == ["Rename…", "Delete scene…"])
         #expect(window.test_scenesSidebar.test_clickContextMenuItem("Rename…", for: saved.id))
+        #expect(controller.groups.first { $0.id == first.id }?.name == "Saved before Rename")
         #expect(window.test_isShowingEditor)
         #expect(window.test_editor.editingGroupID == saved.id)
         #expect(window.test_scenesSidebar.selectedSceneID == saved.id)
@@ -469,17 +477,73 @@ import AppKit
         #expect(host.firstResponder === window.test_editor.test_titleField.currentEditor())
     }
 
-    // Bypassing confirmation or failing to show the empty page after deletion turns it red.
+    // Dropping the pending rename before another scene's Delete menu, or bypassing confirmation, turns it red.
     @Test func aScenesDeleteRunsTheConfirmationFlow() async throws {
         let (window, controller, backend) = try await makeWindow()
-        let saved = try makeGroup1(controller)
+        let first = try makeGroup1(controller)
+        let saved = try controller.createGroup(name: "Other scene", memberIDs: ["local-mac"], memberVolumes: [:]).group
         window.update(devices: backend.devices)
+        let host = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 700, height: 505),
+                            styleMask: [.titled], backing: .buffered, defer: true)
+        host.contentViewController = window.scenesContentController
+        host.contentView?.layoutSubtreeIfNeeded()
+        #expect(host.makeFirstResponder(window.test_editor.test_titleField))
+        let fieldEditor = try #require(window.test_editor.test_titleField.currentEditor() as? NSTextView)
+        fieldEditor.insertText("Saved before Delete", replacementRange: NSRange(location: 0, length: fieldEditor.string.utf16.count))
         #expect(window.test_scenesSidebar.test_clickContextMenuItem("Delete scene…", for: saved.id))
+        #expect(controller.groups.first { $0.id == first.id }?.name == "Saved before Delete")
+        #expect(window.test_editor.editingGroupID == saved.id)
         #expect(window.test_isShowingEditor)
-        #expect(!controller.groups.isEmpty)
+        #expect(controller.groups.count == 2)
+        window.test_editor.test_confirmDelete()
+        #expect(controller.groups.map(\.id) == [first.id])
         window.test_editor.test_confirmDelete()
         #expect(controller.groups.isEmpty)
         #expect(window.test_isShowingScenesEmptyPage)
+    }
+
+    // Ignoring a refused or failed rename in showEditor, Rename, or Delete turns it red.
+    @Test(arguments: [("selection", false), ("Rename…", false), ("Delete scene…", false), ("selection", true)])
+    func aRefusedRenameKeepsTheCurrentScene(action: String, saveFails: Bool) throws {
+        let directory = tempDirectory()
+        let device = Device(id: "speaker", name: "Speaker", kind: .sonos)
+        let otherDevice = Device(id: "other", name: "Other", kind: .sonos)
+        let controller = GroupController(backend: MockBackend(fleet: []),
+            store: GroupStore(directory: directory), routingStore: RoutingStore(directory: scratchDir),
+            settings: AppSettings(defaults: isolatedDefaults), loadPersisted: false)
+        let first = try controller.createGroup(name: "Alpha", memberIDs: [device.id], memberVolumes: [:]).group
+        let target = try controller.createGroup(name: "Beta", memberIDs: [otherDevice.id], memberVolumes: [:]).group
+        #expect(first.id != target.id)
+        let window = MixerWindowController(groupController: controller,
+            settings: AppSettings(defaults: isolatedDefaults))
+        window.test_isVisibleOverride = true
+        window.update(devices: [device, otherDevice])
+        let host = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 700, height: 505),
+                            styleMask: [.titled], backing: .buffered, defer: true)
+        host.contentViewController = window.scenesContentController
+        host.contentView?.layoutSubtreeIfNeeded()
+        #expect(window.test_editor.editingGroupID == first.id)
+        #expect(host.makeFirstResponder(window.test_editor.test_titleField))
+        let fieldEditor = try #require(window.test_editor.test_titleField.currentEditor() as? NSTextView)
+        fieldEditor.insertText(saveFails ? "Changed" : target.name,
+            replacementRange: NSRange(location: 0, length: fieldEditor.string.utf16.count))
+        if saveFails {
+            // A file at this test store's directory makes the pending rename write fail.
+            try FileManager.default.removeItem(at: directory)
+            #expect(FileManager.default.createFile(atPath: directory.path, contents: Data()))
+        }
+
+        if action == "selection" { window.test_scenesSidebar.test_select(sceneID: target.id) }
+        else { #expect(window.test_scenesSidebar.test_clickContextMenuItem(action, for: target.id)) }
+
+        #expect(window.test_editor.editingGroupID == first.id)
+        #expect(window.test_scenesSidebar.selectedSceneID == first.id)
+        #expect(controller.groups.map(\.name) == [first.name, target.name])
+        #expect(window.test_editor.test_nameFieldValue == first.name)
+        #expect(fieldEditor.string == first.name)
+        #expect(host.firstResponder === fieldEditor)
+        #expect(saveFails ? window.test_editor.test_saveFailureReported : window.test_editor.test_duplicateNameRefused)
+        if action == "Delete scene…" { #expect(window.test_editor.test_deleteRequestCount == 0) }
     }
 
     @Test func sidebarSupportsMultipleSelection() async throws {

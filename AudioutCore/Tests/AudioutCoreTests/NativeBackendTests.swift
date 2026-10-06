@@ -130,6 +130,9 @@ private final class SpyEngine: EngineControlling, @unchecked Sendable {
     /// any single device — must stay 1 with per-device serialization.
     private var inFlightByID: [UInt64: Int] = [:]
     private(set) var maxConcurrentPerDevice = 0
+    /// Adds or removes for `id` still running, so a test can wait for a
+    /// scripted failure to have actually thrown.
+    func opsInFlight(for id: OutputID) -> Int { lock.withLock { inFlightByID[id.rawValue] ?? 0 } }
 
     private var continuation: AsyncStream<(OutputID, OutputState)>.Continuation?
     private var remoteContinuation: AsyncStream<RemoteEvent>.Continuation?
@@ -3912,7 +3915,14 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         }
         let binds = { engine.streamAddCalls.filter { $0.0 == device.outputID }.count }
         let isAvailable = { backend.devices.first { $0.id == device.id }?.isAvailable }
-        let unbound = { backend.stateQueue.sync { backend.streamBindings[device.id] == nil } }
+        // The binding drops as soon as the pushed failure is applied, while the
+        // scripted add is still in flight; waiting on the binding alone let the
+        // test retype and retry inside one poll gap of `onMirroredAddFailure`,
+        // which then never saw the failure and held the add for 120 s.
+        let unbound = {
+            engine.opsInFlight(for: device.outputID) == 0
+                && backend.stateQueue.sync { backend.streamBindings[device.id] == nil }
+        }
 
         backend.updateAppRoutes([route("com.foo", name: "Foo", toDevice: device.id)])
         await pollUntil { binds() == 1 }
@@ -8783,7 +8793,14 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         }
         let binds = { engine.streamAddCalls.filter { $0.0 == device.outputID }.count }
         let isAvailable = { backend.devices.first { $0.id == device.id }?.isAvailable }
-        let unbound = { backend.stateQueue.sync { backend.streamBindings[device.id] == nil } }
+        // The binding drops as soon as the pushed failure is applied, while the
+        // scripted add is still in flight; waiting on the binding alone let the
+        // test retype and retry inside one poll gap of `onMirroredAddFailure`,
+        // which then never saw the failure and held the add for 120 s.
+        let unbound = {
+            engine.opsInFlight(for: device.outputID) == 0
+                && backend.stateQueue.sync { backend.streamBindings[device.id] == nil }
+        }
 
         backend.updateAppRoutes([route("com.foo", name: "Foo", toDevice: device.id)])
         await pollUntil { binds() == 1 }
@@ -9531,7 +9548,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         // own test, `syncedLocalTransitionHorizonProductionDefaultIsUnchanged`.
         let clock = ManualDelayClock()
         let (backend, engine, discovery, _, sink, macSelected) = makeSyncedLocalBackend(
-            macSelectedByDefault: false, syncedLocalSettleWindow: 0.05, uptimeClock: clock.uptime)
+            macSelectedByDefault: false, syncedLocalSettleWindow: 0.05, uptimeClock: clock.uptime) // real-time-ok: the settle window is still a real stateQueue timer, not on delayClock, and the test clock already spaces the clicks, so only 50 ms of real time has to pass between them
         defer { backend.stop() }
 
         let device = ap2Device(id: "AA:BB:CC:DD:EE:94", name: "Slow Cadence Speaker")
@@ -12644,7 +12661,14 @@ extension SerializedSharedState {
         }
         let binds = { engine.streamAddCalls.filter { $0.0 == device.outputID }.count }
         let isAvailable = { backend.devices.first { $0.id == device.id }?.isAvailable }
-        let unbound = { backend.stateQueue.sync { backend.streamBindings[device.id] == nil } }
+        // The binding drops as soon as the pushed failure is applied, while the
+        // scripted add is still in flight; waiting on the binding alone let the
+        // test retype and retry inside one poll gap of `onMirroredAddFailure`,
+        // which then never saw the failure and held the add for 120 s.
+        let unbound = {
+            engine.opsInFlight(for: device.outputID) == 0
+                && backend.stateQueue.sync { backend.streamBindings[device.id] == nil }
+        }
 
         backend.updateAppRoutes([route("com.foo", name: "Foo", toDevice: device.id)])
         await pollUntil { binds() == 1 }
@@ -12666,6 +12690,8 @@ extension SerializedSharedState {
         await pollUntil { failureCause() == .unknown }
         #expect(failureCause() == .unknown)
         #expect(binds() == 2)
+        // The telemetry sink is delivered on its own queue, so wait for the line.
+        await pollUntil { !telemetryLines(box, evt: "airplay:connect_failed", device: device.id).isEmpty }
         #expect(!telemetryLines(box, evt: "airplay:connect_failed", device: device.id).isEmpty)
     }
 

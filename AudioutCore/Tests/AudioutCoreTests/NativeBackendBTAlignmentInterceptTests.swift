@@ -1040,7 +1040,7 @@ extension SerializedSharedState {
         // run let the 4 s stop deadline expire while the restoration was held.
         let deadlines = ManualDelayClock()
         let (backend, bt, _, _) = makeBackend(engine: engine, discovery: discovery,
-                                              delayClock: deadlines.clock)
+                                              delayClock: deadlines.clock, uptimeClock: deadlines.uptime)
         defer { engine.releaseWrites(); backend.stop() }
         backend.captureCoordinator = ProbeStagingCapture()
         backend.start()

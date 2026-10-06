@@ -189,14 +189,6 @@ import CoreAudio
         func set(_ v: Bool) { lock.withLock { value = v } }
     }
 
-    /// The manual clock performs jobs on the caller's thread, and the settle body
-    /// must run on `stateQueue`, so each job hops to the queue the backend named.
-    fileprivate func queueHopping(_ manual: ManualDelayClock) -> NativeBackend.DelayClock {
-        { delaySeconds, queue, work in
-            manual.clock(delaySeconds, queue, DispatchWorkItem { queue.async(execute: work) })
-        }
-    }
-
     private func waitFor(timeout: TimeInterval? = nil,
                      sourceLocation: SourceLocation = #_sourceLocation,
                      _ cond: @escaping () -> Bool) {
@@ -380,7 +372,7 @@ import CoreAudio
     @Test func rapidToggleBurstProducesAtMostOneTransition() {
         let clock = ManualDelayClock()
         let (backend, sink, macSelected) = makeBackend(macSelectedByDefault: false, syncedLocalSettleWindow: 0.15,
-                                                       delayClock: queueHopping(clock))
+                                                       delayClock: clock.queueHoppingClock)
         defer { backend.stop() }
 
         macSelected.set(true);  backend.setOutputSet(["airplay-1"])
@@ -407,7 +399,7 @@ import CoreAudio
     @Test func netNoOpBurstDoesNothing() {
         let clock = ManualDelayClock()
         let (backend, sink, macSelected) = makeBackend(macSelectedByDefault: true, syncedLocalSettleWindow: 0.15,
-                                                       delayClock: queueHopping(clock))
+                                                       delayClock: clock.queueHoppingClock)
         defer { backend.stop() }
 
         // Settle into ON first (applied == true), same as every other test here.
@@ -443,7 +435,7 @@ import CoreAudio
     @Test func stopCancelsPendingSettle() {
         let clock = ManualDelayClock()
         let (backend, sink, macSelected) = makeBackend(macSelectedByDefault: false, syncedLocalSettleWindow: 1.0,
-                                                       delayClock: queueHopping(clock))
+                                                       delayClock: clock.queueHoppingClock)
 
         macSelected.set(true)
         backend.setOutputSet(["airplay-1"])   // schedules a settle 1 s out

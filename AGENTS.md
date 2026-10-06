@@ -162,6 +162,33 @@ repo. `AudioutCore` pins it by version.
      refuses sleeps, `asyncAfter`, `SuiteWait.settle(`, every `.wait(timeout:`
      and fractional-second Timeout/Delay/Deadline/Interval/Grace/Window/Seconds
      values; a hang ceiling is a valid `real-time-ok:` reason.
+- **How a test waits without the wall clock.** Each case has one helper:
+  1. When the delay is a background queue rather than a timer, wait for the
+     event with `pollUntil` or `SuiteWait.until`. Both return the moment the
+     condition holds; the 120 s ceiling only bites when it never does. The
+     test telemetry sink delivers on its own queue, so wait for a log line
+     before reading it.
+  2. `ManualDelayClock` runs fired jobs on the caller's thread. When the job
+     touches state owned by `stateQueue`, `captureControlQueue` or main, pass
+     its `queueHoppingClock` instead of `clock`.
+  3. A fake engine call has finished only when `opsInFlight(for:)` reads 0,
+     not when its side effects show.
+  4. Drain a queue that holds a lock before acting on what it guards, as
+     `test_waitForPendingRebuild()` drains the Bluetooth sink's graph queue.
+  5. UI timers do not run in tests: they check `HeadlessRuntime.isActive`.
+  6. When real-time timing is the thing under test, keep it real and mark the
+     line `// real-time-ok: <reason>`; never fake it.
+- **Touching code a real-time test drives means fixing that test.** When a
+  change edits production code that a test still exercises through the real
+  clock (a line Guard 11 would refuse today, or one carrying `real-time-ok:`),
+  the same PR converts that test to the helpers above. If that is out of
+  scope, add a roadmap entry naming the test (file:line), its wait, and the
+  code that drives it:
+  `echo '{"title":"...","why":"...","what":"...","source":"claude-suggested","status":"planned"}' | node ~/.claude/plugins/cache/foundry/foreman/0.46.0-alpha/scripts/roadmap.js add`.
+  Never hand-edit `ROADMAP.jsonl`. `bash scripts/real-time-tests.sh <changed
+  source files>` lists those tests' waits: it matches the types the files
+  declare at top level against test files, so read each hit before acting.
+  `bash scripts/test-real-time-tests.sh` tests it.
 - **Flag finished worktrees `.prunable`; never hand-delete them.** Fifteen
   worktrees' SwiftPM caches once filled the disk to zero bytes free mid-build.
   `scripts/housekeeping.sh` (invoked automatically by `scripts/run-tests.sh`

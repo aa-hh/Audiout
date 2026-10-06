@@ -334,7 +334,7 @@ import CoreAudio
     /// ``NativeBackend/castAbsenceGrace``, and a reappearance inside it cancels.
     @Test func oneMissedBrowseKeepsTheCastRowAvailable() {
         let clock = ManualDelayClock()
-        let rig = makeBackend(castAbsenceGrace: 1, delayClock: hopToQueue(clock))
+        let rig = makeBackend(castAbsenceGrace: 1, delayClock: clock.queueHoppingClock)
         let id = Self.graceRecord.id
         rig.cast.fire([Self.graceRecord])
         waitFor { Self.device(rig.backend, id)?.isAvailable == true }
@@ -360,14 +360,6 @@ import CoreAudio
         waitFor { Self.device(rig.backend, id)?.isAvailable == false }
         #expect(Self.device(rig.backend, id)?.isAvailable == false)
         #expect(rig.backend.devices.filter { $0.id == id }.count == 1, "the row never vanishes")
-    }
-
-    /// The manual clock performs jobs on the caller's thread, but `expireCastAbsence`
-    /// must run on `stateQueue`, so each fired job re-enqueues the original work there.
-    private func hopToQueue(_ manual: ManualDelayClock) -> NativeBackend.DelayClock {
-        return { delay, queue, work in
-            manual.clock(delay, queue, DispatchWorkItem { queue.async(execute: work) })
-        }
     }
 
     // MARK: - CAST-OUT selection

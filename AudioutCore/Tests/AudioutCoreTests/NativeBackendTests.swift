@@ -1495,6 +1495,13 @@ final class ManualDelayClock: @unchecked Sendable {
     var clock: NativeBackend.DelayClock {
         { [self] delaySeconds, _, work in lock.withLock { jobs.append((now + delaySeconds, work)) } }
     }
+    /// Like `clock`, but each fired job runs on the queue the backend named, which
+    /// backend state owned by `stateQueue`, `captureControlQueue` or main requires.
+    var queueHoppingClock: NativeBackend.DelayClock {
+        { [self] delaySeconds, queue, work in
+            clock(delaySeconds, queue, DispatchWorkItem { queue.async(execute: work) })
+        }
+    }
     var uptime: NativeBackend.UptimeClock {
         { [self] in lock.withLock { now } }
     }

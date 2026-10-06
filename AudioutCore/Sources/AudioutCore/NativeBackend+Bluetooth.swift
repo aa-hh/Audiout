@@ -380,8 +380,7 @@ extension NativeBackend {
         // Scheduled ON `stateQueue`, so a newer toggle's cancel (above) before this
         // fires simply drops it — no double-firing, no stale work after a newer
         // decision landed.
-        self.stateQueue.asyncAfter(
-            deadline: .now() + self.syncedLocalSettleWindow, execute: work)
+        self.delayClock(self.syncedLocalSettleWindow, self.stateQueue, work)
     }
 
     /// T1/T2: the quiet window elapsed — run AT MOST one real transition for the
@@ -612,7 +611,7 @@ extension NativeBackend {
         let claimed = perApp ? btPerAppClaimedUIDs.contains(id) : expectedSelected.contains(id)
         guard claimed, known[id]?.isBluetooth == true else { return }
         setConnectionState(.connecting, for: id)
-        btConnectingDeadlines[id] = Date().addingTimeInterval(btRenderStartTimeout)
+        btConnectingDeadlines[id] = uptimeClock() + btRenderStartTimeout
         scheduleBTRenderPollLocked()
     }
 
@@ -622,7 +621,7 @@ extension NativeBackend {
         guard btRenderPollWork == nil, !btConnectingDeadlines.isEmpty else { return }
         let work = DispatchWorkItem { [weak self] in self?.pollBTRenderStart() }
         btRenderPollWork = work
-        stateQueue.asyncAfter(deadline: .now() + Self.btRenderPollInterval, execute: work)
+        delayClock(Self.btRenderPollInterval, stateQueue, work)
     }
 
     /// Read the rendering set off `captureControlQueue` (which owns `btSink`)
@@ -655,7 +654,7 @@ extension NativeBackend {
     private func applyBTRenderStart(
         _ rendering: Set<String>, anchored: Set<String>?
     ) {   // on stateQueue
-        let now = Date()
+        let now = uptimeClock()
         for (id, deadline) in btConnectingDeadlines {
             guard expectedSelected.contains(id) || btPerAppClaimedUIDs.contains(id) else {
                 btConnectingDeadlines[id] = nil
@@ -720,20 +719,21 @@ extension NativeBackend {
             self.btEnumerator?.refresh()
             self.stateQueue.async { [weak self] in
                 guard let self else { return }
-                let now = Date()
-                let diedRecently = self.btSinkDeathAt[uid].map { now.timeIntervalSince($0) < 10 } ?? false
+                let now = self.uptimeClock()
+                let diedRecently = self.btSinkDeathAt[uid].map { now - $0 < 10 } ?? false
                 if resolves && !diedRecently {
                     self.btSinkDeathAt[uid] = now
                     self.reapplyBTSinkLocked()
                     return
                 }
                 self.markBTDeviceLostLocked(uid)
-                self.stateQueue.asyncAfter(deadline: .now() + self.btSinkDeathRecoverySeconds) { [weak self] in
+                let work = DispatchWorkItem { [weak self] in
                     self?.captureControlQueue.async { [weak self] in
                         self?.btEnumerator?.stop()
                         self?.btEnumerator?.start()
                     }
                 }
+                self.delayClock(self.btSinkDeathRecoverySeconds, self.stateQueue, work)
                 self.reconcileSilenceWatchdog()
                 self.reapplyBTSinkLocked()
             }
@@ -2200,7 +2200,7 @@ extension NativeBackend: BTOutputControlling {
     }
 
     private func monitorCompanionAuditionPair(id: UUID) {
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+        let work = DispatchWorkItem { [weak self] in
             guard let self, let audition = self.btTrimLock.withLock({ self.companionAudition }),
                   audition.id == id, audition.phase == .active else { return }
             if !self.companionAuditionPairIsLive(targetID: audition.targetID,
@@ -2211,6 +2211,7 @@ extension NativeBackend: BTOutputControlling {
                 self.monitorCompanionAuditionPair(id: id)
             }
         }
+        delayClock(0.25, .main, work)
     }
 
     public func endCompanionAlignmentAudition(

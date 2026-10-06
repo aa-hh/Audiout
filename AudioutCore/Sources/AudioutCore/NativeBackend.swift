@@ -354,15 +354,16 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
 
     // MARK: Bluetooth connect lifecycle (BT-LIFECYCLE)
 
-    /// Every BT id currently held at `.connecting`, with the instant its hold
-    /// expires. An entry exists ONLY while the row is breathing; the promotion
-    /// to `.connected` (or the degrade to `.failed`) removes it. On `stateQueue`.
-    var btConnectingDeadlines: [String: Date] = [:]
+    /// Every BT id currently held at `.connecting`, with the `uptimeClock`
+    /// seconds at which its hold expires. An entry exists ONLY while the row is
+    /// breathing; the promotion to `.connected` (or the degrade to `.failed`)
+    /// removes it. On `stateQueue`.
+    var btConnectingDeadlines: [String: TimeInterval] = [:]
 
-    /// When each Bluetooth UID's sink last died and was rebuilt, so a second
-    /// death inside 10 s marks the speaker gone instead of looping on a
-    /// zombie object id. On `stateQueue`.
-    var btSinkDeathAt: [String: Date] = [:]
+    /// When each Bluetooth UID's sink last died and was rebuilt, in
+    /// `uptimeClock` seconds, so a second death inside 10 s marks the speaker
+    /// gone instead of looping on a zombie object id. On `stateQueue`.
+    var btSinkDeathAt: [String: TimeInterval] = [:]
 
     /// How long after a sink death marks a speaker gone the enumerator is
     /// restarted, which re-emits the full list: it otherwise emits only on a
@@ -1584,9 +1585,10 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         queue.asyncAfter(deadline: .now() + delaySeconds, execute: work)
     }
 
-    /// Runs the backed-off retries (`.processNotYetAudible`, rebind recovery,
-    /// whole-system capture) and the companion audition's preparation, lease and
-    /// stop deadlines. Only the tests pass anything but ``dispatchDelayClock``:
+    /// The backend's own one-shot delays go through this clock, except the ones
+    /// that are real audio timing (the probe pipeline tail, the companion demo
+    /// legs) and the wizard arm gate, which stay on dispatch timers. Only the
+    /// tests pass anything but ``dispatchDelayClock``:
     /// on the wall clock, a loaded test run let a 0.05 s backoff burn every
     /// rebind attempt before the test's next step, and a 4 s stop deadline
     /// expire mid-restoration.
@@ -1600,8 +1602,8 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         Double(DispatchTime.now().uptimeNanoseconds) / 1_000_000_000
     }
 
-    /// The backend's one reading of "now" for the synced-local churn horizon and
-    /// the companion audition deadlines. Tests pass a manual one.
+    /// The backend's one reading of "now" for every deadline it stores. Tests
+    /// pass a manual one.
     let uptimeClock: UptimeClock
 
     // MARK: Metering (T3 — three real level sources through the event channel)

@@ -78,12 +78,10 @@ import Testing
         return connection
     }
 
-    /// Sends one request and collects the response until `until` is satisfied,
-    /// the server closes, or `timeout` elapses.
+    /// Sends one request and collects the response until `until` is satisfied or the server closes.
     private func exchange(
         port: UInt16,
         request: String,
-        timeout: TimeInterval,
         until: (Data) -> Bool
     ) async -> (data: Data, completed: Bool) {
         let collector = Collector()
@@ -109,7 +107,7 @@ import Testing
         }
         connection.start(queue: netQueue)
 
-        await SuiteWait.until(timeout: timeout) { collector.completed || until(collector.data) }
+        await SuiteWait.until("the live audio server answers or closes the connection") { collector.completed || until(collector.data) }
         let result = (collector.data, collector.completed)
         connection.cancel()
         return result
@@ -156,7 +154,7 @@ import Testing
         let (server, port) = try await startServer()
         defer { server.stop() }
 
-        let (response, _) = await exchange(port: port, request: "GET /live.wav HTTP/1.1\r\nHost: x\r\n\r\n", timeout: 2) {
+        let (response, _) = await exchange(port: port, request: "GET /live.wav HTTP/1.1\r\nHost: x\r\n\r\n") {
             guard let (_, body) = self.split($0) else { return false }
             return self.chunks(body).count >= 4
         }
@@ -206,7 +204,7 @@ import Testing
         let (server, port) = try await startServer()
         defer { server.stop() }
 
-        let (response, completed) = await exchange(port: port, request: "HEAD /live.wav HTTP/1.1\r\nHost: x\r\n\r\n", timeout: 2) { _ in false }
+        let (response, completed) = await exchange(port: port, request: "HEAD /live.wav HTTP/1.1\r\nHost: x\r\n\r\n") { _ in false }
         #expect(completed, "the server should close after answering a HEAD")
         let (head, body) = try #require(split(response), "no complete response head arrived")
         #expect(head.hasPrefix("HTTP/1.1 200 OK"))
@@ -217,7 +215,7 @@ import Testing
         let (server, port) = try await startServer()
         defer { server.stop() }
 
-        let (response, _) = await exchange(port: port, request: "POST /live.wav HTTP/1.1\r\nHost: x\r\n\r\n", timeout: 2) {
+        let (response, _) = await exchange(port: port, request: "POST /live.wav HTTP/1.1\r\nHost: x\r\n\r\n") {
             $0.count >= 12
         }
         #expect(String(decoding: response, as: UTF8.self).hasPrefix("HTTP/1.1 405"))
@@ -232,7 +230,6 @@ import Testing
         let (refused, refusedCompleted) = await exchange(
             port: wrongPort,
             request: "GET /live.wav HTTP/1.1\r\nHost: x\r\n\r\n",
-            timeout: 2,
             until: { _ in false }
         )
         #expect(refusedCompleted, "a connection from a non-matching peer should be cancelled, not served")
@@ -244,7 +241,6 @@ import Testing
         let (admitted, _) = await exchange(
             port: rightPort,
             request: "GET /live.wav HTTP/1.1\r\nHost: x\r\n\r\n",
-            timeout: 2,
             until: { self.split($0) != nil }
         )
         let (head, _) = try #require(split(admitted), "the real receiver's own address must still be admitted")
@@ -276,7 +272,6 @@ import Testing
         let (secondResponse, secondCompleted) = await exchange(
             port: port,
             request: "GET /live.wav HTTP/1.1\r\nHost: x\r\n\r\n",
-            timeout: 2,
             until: { _ in false }
         )
         #expect(secondCompleted, "a connection past the cap should be cancelled on arrival, not queued")
@@ -290,7 +285,7 @@ import Testing
         let (server, port) = try await startServer(idleDeadline: 0.3)
         defer { server.stop() }
 
-        let (response, completed) = await exchange(port: port, request: "", timeout: 2, until: { _ in false })
+        let (response, completed) = await exchange(port: port, request: "", until: { _ in false })
         #expect(completed, "a connection that never sends a request should be closed after the idle deadline")
         #expect(response.isEmpty)
     }

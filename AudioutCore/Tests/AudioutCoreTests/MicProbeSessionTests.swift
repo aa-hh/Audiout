@@ -188,7 +188,7 @@ import Testing
     }
 
     /// A 6.5 s capture whose first sample was taken 3 s before the arm gate
-    /// opened: two seconds of loud broadband sound at the head (music still
+    /// opened, on a pinned clock (not wall time): two seconds of loud broadband sound at the head (music still
     /// draining out of the speakers), then quiet room, the reference sweep at
     /// 3.6 s and, when `bluetoothSweepMs` is set, the Bluetooth sweep that
     /// much later.
@@ -212,11 +212,11 @@ import Testing
             }
             return Float(sample)
         }
-        var now = timespec()
-        clock_gettime(CLOCK_MONOTONIC, &now)
+        let armGateNanos: Int64 = 1_000_000_000_000
         let recorder = FakeRecorder(rate: rate, scene: scene,
-                                    firstSampleHostNanos: SyncTiming.monotonicNanos(now) - 3_000_000_000)
-        let session = MicProbeSession(recorder: recorder, timeout: 5, pipelineTail: 0.05)
+                                    firstSampleHostNanos: armGateNanos - 3_000_000_000)
+        let session = MicProbeSession(recorder: recorder, timeout: 5, pipelineTail: 0.05,
+                                      now: { armGateNanos })
         return await withCheckedContinuation { cont in
             session.start(stage: { onStarted, onFinished in onStarted(); onFinished() },
                           completion: { cont.resume(returning: $0) })

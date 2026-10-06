@@ -2455,3 +2455,98 @@ private actor CountBox {
     private var count = 0
     func increment() -> Int { count += 1; return count }
 }
+
+/// Installs the process-global `Analytics` sink, which the parallel suite above
+/// cannot do; see `SerializedSharedStateSuite.swift`.
+extension SerializedSharedState {
+    @MainActor
+    @Suite struct GroupControllerLaunchClampAnalyticsTests {
+
+        private final class Captured: @unchecked Sendable {
+            private let lock = NSLock()
+            private var items: [(String, [String: String])] = []
+            func append(_ name: String, _ properties: [String: String] = [:]) {
+                lock.withLock { items.append((name, properties)) }
+            }
+            func names() -> [String] { lock.withLock { items }.map(\.0) }
+            func properties() -> [[String: String]] { lock.withLock { items }.map(\.1) }
+        }
+
+        private let isolation = TestIsolation(owner: "GroupControllerLaunchClampAnalyticsTests")
+
+        private func withSink(_ body: (Captured) throws -> Void) rethrows {
+            let captured = Captured()
+            Analytics.install(Analytics.Sink(capture: { name, props in
+                captured.append(name, props)
+            }, captureError: { _, _ in }, consentChanged: { _ in }), consent: true)
+            defer { Analytics.install(nil, consent: false) }
+            try body(captured)
+        }
+
+        private func limitedController(stored: [String], mainOut: MainOutTarget = .selectedDevices,
+                                       group: Group? = nil) throws -> GroupController {
+            let routing = RoutingStore(directory: FileManager.default.temporaryDirectory
+                .appendingPathComponent(UUID().uuidString, isDirectory: true))
+            try routing.save(.init(selectedDeviceIDs: stored, mainOut: mainOut))
+            let settings = AppSettings(defaults: isolation.isolatedDefaults)
+            settings.reconnectAtLaunch = true
+            let backend = MockBackend(fleet: .demoFleet, staggerDiscovery: false, emitsLevels: false,
+                                      simulatesDropouts: false)
+            let controller = GroupController(
+                backend: backend,
+                store: GroupStore(directory: FileManager.default.temporaryDirectory
+                    .appendingPathComponent(UUID().uuidString, isDirectory: true)),
+                routingStore: routing, settings: settings, loadPersisted: false)
+            controller.limitsToOneSpeaker = true
+            controller.updateDevices(.demoFleet)
+            if let group { _ = try controller.saveGroup(group) }
+            return controller
+        }
+
+        /// Red if the clamp stops recording itself or the lift stops reporting.
+        @Test func clampThenLiftReportsSpeakers() throws {
+            try withSink { captured in
+                let controller = try limitedController(stored: ["office", "sonos-move"])
+                controller.ensureDefaultSelection()
+                controller.limitsToOneSpeaker = false
+                #expect(captured.names() == ["license:launch_clamp_lifted"])
+                #expect(captured.properties() == [["clamped": "speakers", "speaker_count": "2"]])
+            }
+        }
+
+        /// Red if a scene clamp is miscounted as speakers.
+        @Test func sceneClampThenLiftReportsScene() throws {
+            try withSink { captured in
+                let controller = try limitedController(
+                    stored: ["office"], mainOut: .group(id: "g1"),
+                    group: Group(id: "g1", name: "Pair", memberIDs: ["office", "sonos-move", "homepod-bed"],
+                                 memberVolumes: [:]))
+                controller.ensureDefaultSelection()
+                controller.limitsToOneSpeaker = false
+                #expect(captured.names() == ["license:launch_clamp_lifted"])
+                #expect(captured.properties() == [["clamped": "scene", "speaker_count": "3"]])
+            }
+        }
+
+        /// Red if a later lift is counted after the first re-assignment.
+        @Test func laterLiftAfterStillLimitedAnswerIsNotCounted() throws {
+            try withSink { captured in
+                let controller = try limitedController(stored: ["office", "sonos-move"])
+                controller.ensureDefaultSelection()
+                controller.limitsToOneSpeaker = true
+                controller.limitsToOneSpeaker = false
+                #expect(captured.names().isEmpty)
+            }
+        }
+
+        /// Red if an unclamped launch is counted as a lifted clamp.
+        @Test func liftWithoutClampIsNotCounted() throws {
+            try withSink { captured in
+                let controller = try limitedController(stored: ["office"])
+                controller.ensureDefaultSelection()
+                controller.limitsToOneSpeaker = false
+                #expect(captured.names().isEmpty)
+            }
+        }
+    }
+}

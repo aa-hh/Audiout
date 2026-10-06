@@ -58,15 +58,24 @@ public enum StoreRecovery {
     /// already on its way to reporting a corrupt file, and a second failure
     /// there has nothing better to offer than the first.
     public static func quarantine(_ fileURL: URL) {
-        let base = fileURL.deletingPathExtension().lastPathComponent
-        let destination = fileURL
-            .deletingLastPathComponent()
-            .appendingPathComponent("\(base).corrupt-\(Int(Date().timeIntervalSince1970)).json")
         do {
-            try FileManager.default.moveItem(at: fileURL, to: destination)
+            try FileManager.default.moveItem(at: fileURL, to: corruptCopyURL(for: fileURL))
         } catch {
             return
         }
         lock.withLock { quarantined.append(fileURL.lastPathComponent) }
+    }
+
+    /// Copy a store file to the name ``quarantine(_:)`` uses, leaving it in place, for a load that kept the
+    /// entries it could read and dropped the rest: the next save would otherwise overwrite the dropped ones.
+    /// Not listed in ``quarantinedFileNames``, because nothing the user set went back to its default.
+    public static func preserveCopy(_ fileURL: URL) {
+        try? FileManager.default.copyItem(at: fileURL, to: corruptCopyURL(for: fileURL))
+    }
+
+    private static func corruptCopyURL(for fileURL: URL) -> URL {
+        let base = fileURL.deletingPathExtension().lastPathComponent
+        return fileURL.deletingLastPathComponent()
+            .appendingPathComponent("\(base).corrupt-\(Int(Date().timeIntervalSince1970)).json")
     }
 }

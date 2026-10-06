@@ -178,7 +178,7 @@ import AppKit
     @Test func everyTraceToneClearsTheFloorAgainstTheScopeGround() {
         let floor: CGFloat = 3
         let ground = resolved(Tokens.Color.scopeGround, appearanceName: .darkAqua)
-        for (name, token) in [("gold", Tokens.Color.gold),
+        for (name, token) in [("equalizer", Tokens.Color.equalizer),
                               ("scopeFlatLine", Tokens.Color.scopeFlatLine),
                               ("scopeBypassLine", Tokens.Color.scopeBypassLine)] {
             let ratio = contrastRatio(resolved(token, appearanceName: .darkAqua), ground)
@@ -201,8 +201,8 @@ import AppKit
 
     /// The dB ruler is TEXT on the scope's ground, so it answers to the 4.5:1
     /// text floor, not the 3:1 instrument floor — which is exactly why it is
-    /// `secondaryLabel` and not the `tertiaryLabel` the band captions use
-    /// (tertiary lands near 2.2:1 here).
+    /// `label2` and not the `label3` the band captions use
+    /// (`label3` lands near 2.2:1 here).
     @Test func theRulerTextClearsTheTextFloorOnTheScopeGround() {
         for appearance in [NSAppearance.Name.darkAqua, .accessibilityHighContrastDarkAqua] {
             let ground = resolved(Tokens.Color.scopeGround, appearanceName: appearance)
@@ -249,8 +249,10 @@ import AppKit
         _ = view.dataWithPDF(inside: view.bounds)
         #expect(view.test_staticFigureBuildCount == 1)
 
-        // The tokens are baked into the raster, so a re-tint has to rebuild it.
-        NotificationCenter.default.post(name: Tokens.accentStyleDidChangeNotification, object: nil)
+        // The tokens are baked into the raster, so an Increase Contrast change
+        // has to rebuild it.
+        NSWorkspace.shared.notificationCenter.post(
+            name: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification, object: nil)
         _ = view.dataWithPDF(inside: view.bounds)
         #expect(view.test_staticFigureBuildCount == 2)
     }

@@ -31,7 +31,7 @@ import AppKit
 ///    against EACH OTHER) — `MembershipWellContrastTests`' job; this file
 ///    only uses those tokens as fixed GROUNDS for a foreground instrument.
 ///  - The floor-exempt backdrops `canvas`, `panel`, `raised`, `well`,
-///    `liveRow`, `liveRaised`, `glow`, `socket` and `meter` — each documented
+///    `glow`, `socket` and `meter` — each documented
 ///    as a quiet surface in its own Tokens.swift rationale. `socket` is exempt
 ///    from a GROUND floor only: it is always ringed, and Test D below pins it
 ///    against the ring. `panel` is likewise exempt as a ground, but Test A
@@ -41,14 +41,6 @@ import AppKit
 extension SerializedSharedState {
 
 @Suite final class TokenContrastMatrixTests: IsolatedSuite {
-
-    deinit {
-        // Both are process-global test seams; restore them unconditionally so
-        // no other test in the process inherits a dialed accent or a forced
-        // Increase-Contrast reading.
-        Tokens.accentStyle = .fullGold
-        Tokens.test_increaseContrastOverride = nil
-    }
 
     // MARK: - Ported helpers (see `OnboardingPermissionColorTests` for provenance)
 
@@ -162,7 +154,7 @@ extension SerializedSharedState {
         let textGrounds: [(String, NSColor)] = [("canvas", canvas), ("panel", panel),
                                                 ("raised", raised), ("well", well)]
 
-        // The one WASHED ground a device row's mute pill also sits on, built
+        // The one WASHED ground a device row's mute mark also sits on, built
         // the way `DeviceRowView.draw(_:)` builds it: the row's `panel`
         // ground under the neutral hover wash. It is not a token, so it
         // cannot be named as one — it is composited per appearance and
@@ -176,6 +168,12 @@ extension SerializedSharedState {
             return [("hover wash", wash(Tokens.Color.engagedChrome, PopoverColumnGrid.rowHoverWashAlpha))]
         }
 
+        func sidebarGrounds(_ appearanceName: NSAppearance.Name) -> [(String, NSColor)] {
+            let hex: (r: CGFloat, g: CGFloat, b: CGFloat) = appearanceName == .darkAqua
+                ? (0x2C, 0x2C, 0x2E) : (0xE8, 0xE8, 0xEA)
+            return [("sidebar", NSColor(srgbRed: hex.r / 255, green: hex.g / 255, blue: hex.b / 255, alpha: 1))]
+        }
+
         let entries: [ContrastEntry] = [
             // TEXT, floor 4.5:1
             ContrastEntry(name: "label2", token: Tokens.Color.label2, floor: 4.5,
@@ -186,9 +184,18 @@ extension SerializedSharedState {
                          groundsFor: sameGrounds(textGrounds)),
             ContrastEntry(name: "labelCool2", token: Tokens.Color.labelCool2, floor: 4.5,
                          groundsFor: sameGrounds(textGrounds)),
+            // The sidebar's resting grounds. These two are the assumed darkest light and
+            // lightest dark sidebar grounds for macOS 14.4-26, which are unmeasured;
+            // macOS 27 measured #F0F0F0 / #282828.
+            ContrastEntry(name: "labelCool on sidebar", token: Tokens.Color.labelCool, floor: 4.5,
+                         groundsFor: sidebarGrounds),
+            ContrastEntry(name: "labelCool2 on sidebar", token: Tokens.Color.labelCool2, floor: 3.0,
+                         groundsFor: sidebarGrounds),
             ContrastEntry(name: "goldText", token: Tokens.Color.goldText, floor: 4.5,
                          groundsFor: sameGrounds(textGrounds)),
             ContrastEntry(name: "emberText", token: Tokens.Color.emberText, floor: 4.5,
+                         groundsFor: sameGrounds(textGrounds)),
+            ContrastEntry(name: "pendingInkDim", token: Tokens.Color.pendingInkDim, floor: 4.5,
                          groundsFor: sameGrounds(textGrounds)),
             // The ink of every gold-filled call to action — the prominent button
             // and the alignment wizard's primary plates, both of which pin gold
@@ -209,8 +216,8 @@ extension SerializedSharedState {
                          groundsFor: sameGrounds([("panel", panel), ("raised", raised), ("well", well)])),
             ContrastEntry(name: "ring", token: Tokens.Color.ring, floor: 3.0,
                          groundsFor: sameGrounds([("canvas", canvas), ("panel", panel), ("raised", raised)])),
-            // The mute pill is OPAQUE, so it is measured on every ground a
-            // device row can put behind it — at rest, live-washed, hovered.
+            // The muted mark's ink is measured on every ground a device row can
+            // put behind it — at rest and hovered.
             ContrastEntry(name: "muted", token: Tokens.Color.muted, floor: 3.0,
                          groundsFor: { appearanceName in
                              [("canvas", canvas), ("panel", panel), ("raised", raised)]
@@ -221,16 +228,18 @@ extension SerializedSharedState {
             // had NO entry here until 2026-09-14, which is why `#227950` could
             // ship at 2.66:1 on the live wash — the same omission this file
             // already records against `gold`, repeated one token later.
+            // Measured on the row grounds for the door and on `well` for the
+            // EQ sliders' green fills.
             ContrastEntry(name: "equalizer", token: Tokens.Color.equalizer, floor: 3.0,
                          groundsFor: { appearanceName in
-                             [("canvas", canvas), ("panel", panel), ("raised", raised)]
+                             [("canvas", canvas), ("panel", panel), ("raised", raised),
+                              ("well", well)]
                                  + rowWashGrounds(appearanceName)
                          }),
-            // `panel` is a BACKDROP everywhere else; on the mute pill it is the
-            // ink the slashed glyph is knocked out in, so it carries a glyph
-            // floor there and nowhere else.
-            ContrastEntry(name: "panel knocked out of muted", token: panel, floor: 4.5,
-                         groundsFor: sameGrounds([("muted", Tokens.Color.muted)])),
+            // The Speakers tab's green is TEXT (the Available label, the counts, the
+            // Ready/Connected word) and a glyph, so it carries the body floor.
+            ContrastEntry(name: "speakersAccent", token: Tokens.Color.speakersAccent, floor: 4.5,
+                         groundsFor: sameGrounds([("panel", panel), ("raised", raised), ("well", well)])),
             ContrastEntry(name: "rim", token: Tokens.Color.rim, floor: 3.0,
                          groundsFor: sameGrounds([("canvas", canvas), ("panel", panel),
                                                   ("raised", raised), ("well", well)])),
@@ -263,6 +272,19 @@ extension SerializedSharedState {
                     }
                 }
             }
+        }
+    }
+
+    // Turns red if either dark equalizer hex falls under 3:1 on scopeGround, the ground the scope's shaped trace draws on in both appearances.
+    @Test func equalizerTraceClearsTheFloorOnTheScopeGround() {
+        defer { Tokens.test_increaseContrastOverride = nil }
+        for icOn in [false, true] {
+            Tokens.test_increaseContrastOverride = icOn
+            let ratio = measuredRatio(Tokens.Color.equalizer, over: Tokens.Color.scopeGround,
+                                      appearanceName: .darkAqua)
+            let ratioString = String(format: "%.2f", ratio)
+            let message = "equalizer vs scopeGround darkAqua ic=\(icOn): \(ratioString):1 under 3.0:1"
+            #expect(ratio >= 3.0, Comment(rawValue: message))
         }
     }
 

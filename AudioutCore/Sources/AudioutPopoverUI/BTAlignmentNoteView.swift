@@ -36,8 +36,10 @@ final class BTAlignmentNoteView: NSView {
     private static let verticalInset: CGFloat = 4
     private static let contentPadding: CGFloat = 10
     private static let backgroundCornerRadius: CGFloat = Tokens.Layout.Radius.control
-    private static let copyToHideGap: CGFloat = 8
-    private static let hideButtonSize: CGFloat = 16
+    /// Sized with the ✕'s 24 pt hit area and 6 pt inset so the sentence keeps
+    /// the wrap width it had beside the old 16 pt ✕.
+    private static let copyToHideGap: CGFloat = 4
+    private static let hideButtonSize: CGFloat = 24
 
     /// The sentence is drawn by a label but CLICKED as a button: passing the
     /// hit test through is what lets the wrapping label keep its own width
@@ -49,7 +51,8 @@ final class BTAlignmentNoteView: NSView {
     private let background = NSView()
     private let sentenceButton = NSButton()
     private let copyLabel = PassThroughLabel(labelWithString: "")
-    private let hideButton = NSButton()
+    private lazy var hideButton = NSButton.noticeDismissButton(
+        target: self, action: #selector(hideClicked(_:)), closesOnEscape: false)
     private var copyWidthConstraint: NSLayoutConstraint?
     private let deviceName: String
 
@@ -59,6 +62,7 @@ final class BTAlignmentNoteView: NSView {
         autoresizingMask = [.width]
         translatesAutoresizingMaskIntoConstraints = true
         buildSubviews()
+        redrawOnAccessibilityDisplayChange()
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
@@ -93,17 +97,6 @@ final class BTAlignmentNoteView: NSView {
         copyLabel.setAccessibilityElement(false)
         sentenceButton.addSubview(copyLabel)
 
-        hideButton.translatesAutoresizingMaskIntoConstraints = false
-        hideButton.bezelStyle = .accessoryBar
-        hideButton.isBordered = false
-        hideButton.imagePosition = .imageOnly
-        hideButton.imageScaling = .scaleProportionallyDown
-        hideButton.image = NSImage(systemSymbolName: "xmark", accessibilityDescription: "Dismiss")?
-            .withSymbolConfiguration(.init(pointSize: 10, weight: .semibold))
-        hideButton.contentTintColor = Tokens.Color.label3
-        hideButton.target = self
-        hideButton.action = #selector(hideClicked(_:))
-        hideButton.setAccessibilityLabel("Dismiss")
         background.addSubview(hideButton)
 
         let copyWidth = copyLabel.widthAnchor.constraint(equalToConstant: 300)
@@ -131,9 +124,9 @@ final class BTAlignmentNoteView: NSView {
             hideButton.leadingAnchor.constraint(equalTo: sentenceButton.trailingAnchor,
                                                 constant: Self.copyToHideGap),
             hideButton.trailingAnchor.constraint(equalTo: background.trailingAnchor,
-                                                 constant: -Self.contentPadding),
+                                                 constant: -NSButton.noticeDismissInset),
             hideButton.topAnchor.constraint(equalTo: background.topAnchor,
-                                            constant: Self.contentPadding),
+                                            constant: NSButton.noticeDismissInset),
             hideButton.widthAnchor.constraint(equalToConstant: Self.hideButtonSize),
             hideButton.heightAnchor.constraint(equalToConstant: Self.hideButtonSize),
         ])
@@ -145,7 +138,7 @@ final class BTAlignmentNoteView: NSView {
     }
 
     /// The sentence: explanation in the compact secondary voice, invitation in
-    /// gold semibold — one string so it wraps as one paragraph.
+    /// `goldText` semibold (`gold` is a fill, too faint as light-mode text) — one string so it wraps as one paragraph.
     private static func attributedCopy(name: String) -> NSAttributedString {
         let paragraph = NSMutableParagraphStyle()
         paragraph.lineBreakMode = .byWordWrapping
@@ -156,9 +149,8 @@ final class BTAlignmentNoteView: NSView {
                          .paragraphStyle: paragraph])
         text.append(NSAttributedString(
             string: noteAlignCall,
-            attributes: [.font: NSFont.systemFont(ofSize: Tokens.Font.detail.pointSize,
-                                                  weight: .semibold),
-                         .foregroundColor: Tokens.Color.gold,
+            attributes: [.font: Tokens.Font.captionEmphasized,
+                         .foregroundColor: Tokens.Color.goldText,
                          .paragraphStyle: paragraph]))
         return text
     }
@@ -186,6 +178,16 @@ final class BTAlignmentNoteView: NSView {
         copyLabel.attributedStringValue = Self.attributedCopy(name: deviceName)
     }
 
+    /// The Increase Contrast toggle changes no appearance; its redraw request
+    /// lands here, where the frozen layer colours are restamped.
+    override var wantsUpdateLayer: Bool { true }
+
+    override func updateLayer() {
+        super.updateLayer()
+        applyBackgroundTint()
+        copyLabel.needsDisplay = true
+    }
+
     override func resetCursorRects() {
         super.resetCursorRects()
         addCursorRect(sentenceButton.convert(sentenceButton.bounds, to: self),
@@ -194,7 +196,7 @@ final class BTAlignmentNoteView: NSView {
 
     override func layout() {
         let available = bounds.width - Self.leadingInset - Self.horizontalInset
-            - 2 * Self.contentPadding - Self.copyToHideGap - Self.hideButtonSize
+            - Self.contentPadding - Self.copyToHideGap - Self.hideButtonSize - NSButton.noticeDismissInset
         if available > 0, copyWidthConstraint?.constant != available {
             copyWidthConstraint?.constant = available
         }
@@ -210,4 +212,5 @@ final class BTAlignmentNoteView: NSView {
     var test_copyText: String { copyLabel.attributedStringValue.string }
     func test_clickAlign() { sentenceButton.performClick(nil) }
     func test_clickHide() { hideButton.performClick(nil) }
+    var test_hideKeyEquivalent: String { hideButton.keyEquivalent }
 }

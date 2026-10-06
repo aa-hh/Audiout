@@ -469,6 +469,11 @@ extension NativeBackend {
             // mid-apply. Runs inside this critical section so the enqueued
             // start/stop order matches the decision order exactly.
             self.reconcileCaptureGate()
+            // Main Out gaining or losing its last non-local output flips who owns
+            // the Mac's level, so the local players' gain follows. The query is
+            // read only here, while main is parked on this `sync`.
+            self.localRowDrivesMainLatched = self.localRowDrivesMainQuery?() ?? ids.isEmpty
+            self.pushLocalPlaybackGainLocked()
             // Intent changed: re-evaluate the silence watchdog. Selecting a device (or
             // activating a group) with nothing yet `.connected` arms the countdown;
             // deselecting everything (or dropping to a local-only selection) clears any
@@ -724,11 +729,23 @@ extension NativeBackend {
         // CAST-OUT: a Cast row's "Try again" re-runs the whole session recipe in
         // the manager — no engine OutputID exists for it either.
         if retryCastOutput(id) { return }
-        let kick: OutputID? = stateQueue.sync {
+        enum Kick { case wholeSystem(OutputID), perAppPassword }
+        let kick: Kick? = stateQueue.sync {
             // Only a still-DESIRED id can be retried — intent lives in
             // `expectedSelected` (what the routing brain last asked for), and a
             // retry never invents membership. An already-`.connected` id has
-            // nothing to retry.
+            // nothing to retry. The one exception is a per-app route target
+            // waiting for a password: it is re-driven without membership.
+            if !self.expectedSelected.contains(id),
+               let device = self.known[id], !device.isLocalDevice,
+               self.routesTargetDeviceLocked(id),
+               Self.waitsForPasswordEntry(device.connectionState) {
+                // An offline speaker has nothing to feed, and making it
+                // available would replay the route into a bind that cannot succeed.
+                guard self.lastDescriptors[id] != nil else { return nil }
+                Telemetry.log(.airplay, "connect_requested", ["device": id, "trigger": "retry"])
+                return .perAppPassword
+            }
             guard self.expectedSelected.contains(id),
                   let device = self.known[id], !device.isLocalDevice,
                   device.connectionState != .connected,
@@ -749,10 +766,40 @@ extension NativeBackend {
             // F-REBIND: the USER asked for this connect, same as a fresh toggle.
             self.userConnectSeed.insert(id)
             Telemetry.log(.airplay, "connect_requested", ["device": id, "trigger": "retry"])
-            return outputID
+            return .wholeSystem(outputID)
         }
-        guard let kick else { return }
-        Task { [weak self] in await self?.convergeDevice(id: id, outputID: kick) }
+        switch kick {
+        case .wholeSystem(let outputID)?:
+            Task { [weak self] in await self?.convergeDevice(id: id, outputID: outputID) }
+        case .perAppPassword?:
+            // Feed the typed password, then write `.off` so the row is available
+            // and reachable again; the route replay issues the `.bind`, and
+            // `performBindOp` writes `.connecting` when it does. An app that is
+            // not running issues no bind and the row stays `.off`.
+            Task { [weak self] in
+                guard let self else { return }
+                if let descriptor = self.descriptorToFeed(id: id) {
+                    do {
+                        try await self.engine.updateDiscovery(descriptor)
+                    } catch {
+                        Telemetry.fail(.airplay, "airplay:connect_failed",
+                                       local: ["device": id, "detail": String(describing: error)],
+                                       shared: ["cause": "unknown"])
+                        self.stateQueue.sync {
+                            self.setPerAppConnectionStateLocked(
+                                .failed(ConnectionFailure(cause: .unknown, detail: String(describing: error))), for: id)
+                        }
+                        return
+                    }
+                    self.stateQueue.sync { self.fedDescriptors[id] = descriptor }
+                }
+                self.stateQueue.sync {
+                    self.setPerAppConnectionStateLocked(.off, for: id, makingAvailable: true)
+                }
+            }
+        case nil:
+            return
+        }
     }
 
     /// BT-RECONNECT (Wave 4): handle `retryOutput` for a `.bluetooth` id.

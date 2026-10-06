@@ -9,12 +9,16 @@ import AudioutSharedUI
 ///
 /// **HEADER PARITY IS GEOMETRIC, NOT DECORATIVE.** Switching the sidebar
 /// selection between a group and a device swaps the whole content pane; if the
-/// icon well or the title lands on a different x, or the header band is a
-/// different height, the swap reads as the window twitching. The two panes used
-/// to carry hand-copied literals and drifted ~22.5 pt apart (design review
+/// header band is a different height, or the name block sits off the icon's
+/// centre line, the swap reads as the window twitching. The two panes used to
+/// carry hand-copied literals and drifted ~22.5 pt apart (design review
 /// 2026-07-25). Every shared number now lives HERE, once, and
-/// `GroupsHeaderParityTests` asserts the two panes' real laid-out frames still
-/// match.
+/// `GroupsHeaderParityTests` asserts the panes' real laid-out frames still
+/// share the band height and the vertical centring. The icon's x is NOT
+/// shared: the speaker and Main Audio pages start it at
+/// `railFreeContentLeadingInset`, lined up with their Equalizer heading, while
+/// the scene editor keeps `contentLeadingInset` for its rail, so the icon
+/// moves sideways on a switch between a scene and a speaker by design.
 ///
 /// What is deliberately NOT shared: the SKIN. A group's title is an editable
 /// field (filled, bordered, pencil); a device's is a bare label. That
@@ -55,7 +59,7 @@ enum GroupsPaneLayout {
     /// sum can never exceed the one fixed surface frame:
     /// `SurfaceLayout.contentPaneWidth` (`SurfaceLayout.width` minus
     /// `MixerWindowController`'s pinned sidebar) minus both column margins,
-    /// which evaluates to 415. Raise it and the whole screen would ask to
+    /// which evaluates to 475. Raise it and the whole screen would ask to
     /// grow past the fixed frame; the sections already fill the pane exactly
     /// here, so there is nothing to gain by doing so.
     static let contentMaxWidth: CGFloat = SurfaceLayout.contentPaneWidth - columnInset - columnTrailingInset
@@ -65,22 +69,22 @@ enum GroupsPaneLayout {
     /// exclusively. Derived from the popover's own grid so the two surfaces
     /// can't drift.
     ///
-    /// **The HEADER of both panes uses this**, rail or no rail, because the
-    /// icon + name are what visibly jump when the sidebar selection switches
-    /// between a group and a device — keeping them locked is worth carrying an
-    /// unused lane in the device pane's header (design review 2026-07-25).
+    /// The scene editor's header and rail, and the Speakers page's header, use this.
     static let contentLeadingInset: CGFloat = PopoverColumnGrid.firstElementLeading(indented: false)
 
-    /// Where content starts inside a section that has NO rail running past it —
-    /// the device pane's metadata rows. Reserving the full spine gutter there
-    /// left those sections looking hollow on their leading edge, since nothing
-    /// occupies the lane (design review 2026-07-25: *"it looks empty in devices
-    /// because there's no rail"*). Only rows below the header take this; the
-    /// header keeps ``contentLeadingInset`` so it stays pinned to the editor's.
+    /// Where content starts inside a section that has NO rail running past it.
+    /// The speaker page and the Main Audio page start everything here, their
+    /// header icon included, so the icon lines up with the "Equalizer" heading;
+    /// the scene editor and the Speakers page start their header icon at
+    /// `contentLeadingInset` instead.
     static let railFreeContentLeadingInset: CGFloat = PopoverColumnGrid.leadingInset
     /// Where content STOPS inside a section, measured from the section's
     /// trailing edge.
     static let contentTrailingInset: CGFloat = PopoverColumnGrid.trailingInset
+    /// The width a note on a rail-free page wraps against: the column cap
+    /// minus the content lane's two insets.
+    static let railFreeContentWidth: CGFloat =
+        contentMaxWidth - railFreeContentLeadingInset - contentTrailingInset
 
     /// Inset from the header section's top/bottom borders to the icon well.
     static let headerPadding: CGFloat = 16

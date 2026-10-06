@@ -1,0 +1,277 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Speakers, Direction A</title>
+<style>
+:root{
+  --chrome:#F5F5F6; --ground:#FAFAFB; --raised:#FAFAFB; --well:#E9EAEC;
+  --sidebar:#F0F0F0; --sideSel:#D6D6D6; --sideDivider:#DDDDDD; --bottomBar:#EAEAEA;
+  --label:rgba(0,0,0,.86); --label2:#6B5F4E; --label3:#6B6459;
+  --labelCool:#4E5A63; --labelCool2:#5F6A73; --sideCap:#8C8C8C;
+  --hairline:#CBCED4; --containerEdge:#AEB3BB; --rim:#66717A;
+  --goldText:#825E0F; --wash:rgba(0,0,0,.075);
+  --popBg:#FFFFFF; --popEdge:rgba(0,0,0,.14); --segBg:#F5F5F6; --segEdge:#C9C9CC;
+  --outer:#DCDDE0; --panelNote:#5F6A73;
+  color-scheme:light;
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    --chrome:#151719; --ground:#15171A; --raised:#1F232A; --well:#050507;
+    --sidebar:#282828; --sideSel:#424242; --sideDivider:#000000; --bottomBar:#2C2C2C;
+    --label:rgba(255,255,255,.88); --label2:#B7AC95; --label3:#9E947F;
+    --labelCool:#A9B3BB; --labelCool2:#818C94; --sideCap:#8A8A8A;
+    --hairline:#2A2E33; --containerEdge:#3D4247; --rim:#6B767D;
+    --goldText:#E8B84B; --wash:rgba(255,255,255,.08);
+    --popBg:#3A3C40; --popEdge:rgba(255,255,255,.10); --segBg:#1B1D20; --segEdge:#3A3D42;
+    --outer:#0B0B0D; --panelNote:#818C94;
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --chrome:#151719; --ground:#15171A; --raised:#1F232A; --well:#050507;
+  --sidebar:#282828; --sideSel:#424242; --sideDivider:#000000; --bottomBar:#2C2C2C;
+  --label:rgba(255,255,255,.88); --label2:#B7AC95; --label3:#9E947F;
+  --labelCool:#A9B3BB; --labelCool2:#818C94; --sideCap:#8A8A8A;
+  --hairline:#2A2E33; --containerEdge:#3D4247; --rim:#6B767D;
+  --goldText:#E8B84B; --wash:rgba(255,255,255,.08);
+  --popBg:#3A3C40; --popEdge:rgba(255,255,255,.10); --segBg:#1B1D20; --segEdge:#3A3D42;
+  --outer:#0B0B0D; --panelNote:#818C94;
+  color-scheme:dark;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{background:var(--outer)}
+body{font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","Helvetica Neue",sans-serif;
+  -webkit-font-smoothing:antialiased;color:var(--label);font-size:13px;line-height:1.25;
+  padding:0 0 48px}
+::selection{background:var(--wash)}
+svg{display:block;flex:none}
+.ico{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.3;stroke-linecap:round;stroke-linejoin:round}
+
+/* theme toggle */
+.toggle{position:fixed;top:12px;right:12px;z-index:9;font:600 12px -apple-system,sans-serif;
+  padding:6px 12px;border-radius:999px;border:1px solid var(--containerEdge);
+  background:var(--ground);color:var(--label);cursor:pointer}
+.toggle:focus-visible{outline:2px solid var(--rim);outline-offset:2px}
+
+/* window: authored in points, zoomed 2x to 1306 x 1338 */
+.stage{width:1306px;margin:0 auto}
+.win{zoom:2;width:653px;height:669px;position:relative;overflow:hidden;border-radius:13px;
+  background:var(--ground);box-shadow:0 0 0 .5px rgba(0,0,0,.25),0 12px 30px rgba(0,0,0,.22)}
+.toolbar{position:absolute;left:0;top:0;right:0;height:62px;background:var(--chrome);
+  border-bottom:.5px solid var(--hairline)}
+.seg{position:absolute;left:30px;top:19px;height:34px;width:150px;border-radius:17px;
+  border:1px solid var(--segEdge);background:var(--segBg);display:flex;align-items:center;padding:0 3px;gap:4px}
+.seg .s{height:28px;display:flex;align-items:center;justify-content:center;color:var(--labelCool);border-radius:14px}
+.seg .s.w{width:32px}
+.seg .s.on{background:var(--sideSel);padding:0 12px 0 8px;gap:6px;color:var(--labelCool2);font-size:12px}
+.wordmark{position:absolute;left:0;right:0;top:24px;text-align:center;font-weight:700;font-size:17px;color:var(--label2);letter-spacing:.2px}
+.pin{position:absolute;right:20px;top:27px;color:var(--labelCool)}
+
+.sidebar{position:absolute;left:0;top:62px;bottom:0;width:210px;background:var(--sidebar);
+  border-right:.5px solid var(--sideDivider)}
+.scenesBtn{position:absolute;left:10px;top:10px;width:190px;height:36px;border-radius:10px;
+  border:1px solid var(--containerEdge);background:var(--ground);display:flex;align-items:center;
+  padding:0 10px 0 16px;gap:10px;font-size:13px}
+.scenesBtn .grow{flex:1}
+.sideCap{position:absolute;left:14px;top:66px;font-size:11px;font-weight:500;color:var(--sideCap)}
+.sideRow{position:absolute;left:10px;width:190px;display:flex;align-items:center;gap:10px;padding-left:16px;height:28px}
+.sideRow.sel{background:var(--sideSel);border-radius:6px;padding-left:15px}
+.sideRow.sel span{font-weight:600;color:var(--label2)}
+.sideDev{position:absolute;left:38px;width:160px;display:flex;align-items:center;gap:13px}
+.sideDev .t{display:flex;flex-direction:column;min-width:0}
+.sideDev .n{font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sideDev .st{font-size:11px;color:var(--label2);margin-top:1px}
+.sideDev.dim .n{color:var(--label3)}
+.sideDev .ico{color:var(--labelCool)}
+.bottomBar{position:absolute;left:0;bottom:0;width:210px;height:28px;background:var(--bottomBar);
+  display:flex;align-items:center;gap:6px;padding-left:9px;font-size:13px}
+
+/* content pane */
+.content{position:absolute;left:211px;top:62px;right:0;bottom:0}
+.pageFoot{position:absolute;left:0;right:0;bottom:16px;text-align:center;font-size:11.5px;color:var(--label2)}
+.pane{padding:12px 14px 0 14px}
+
+/* page header, same row as the Scenes cards page */
+.hdr{display:flex;align-items:center;height:30px;gap:8px}
+.hdr .ico{color:var(--labelCool)}
+.hdr h1{font-size:16px;font-weight:600;letter-spacing:-.1px}
+.hdr .sp{flex:1}
+.hdr .count{font-size:11px;color:var(--label2);font-variant-numeric:tabular-nums}
+.pop{display:inline-flex;align-items:center;gap:8px;height:22px;padding:0 6px 0 9px;border-radius:6px;
+  background:var(--popBg);box-shadow:0 0 0 .5px var(--popEdge),0 .5px 1.5px rgba(0,0,0,.16);font-size:13px;color:var(--label)}
+.pop .chev{width:9px;height:12px}
+
+/* captioned sections */
+.cap{font-size:13px;color:var(--label2);margin:12px 0 5px 2px}
+.cap:first-of-type{margin-top:8px}
+.sec{border:1px solid var(--containerEdge);border-radius:16px;background:var(--ground);overflow:hidden}
+.row{position:relative;display:flex;align-items:center;height:38px;padding:0 10px 0 10px;gap:10px;cursor:default}
+.row + .row::before{content:"";position:absolute;left:44px;right:0;top:0;border-top:1px solid var(--hairline)}
+.row.sel{background:var(--wash)}
+.row.sel + .row::before,.row.sel::before{border-color:transparent}
+.well{width:24px;height:24px;border-radius:50%;background:var(--well);box-shadow:inset 0 0 0 1px var(--containerEdge);
+  display:flex;align-items:center;justify-content:center;color:var(--labelCool)}
+.well .ico{width:14px;height:14px}
+.name{flex:1;min-width:0;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.row.cool .name{color:var(--labelCool)}
+.trail{display:flex;flex-direction:column;align-items:flex-end;font-size:11px;line-height:13px;color:var(--labelCool2);text-align:right}
+.trail .ov{color:var(--label)}
+.row > .chev{color:var(--label3);width:12px;height:12px}
+
+/* Bluetooth permission row, inside the Bluetooth section */
+.perm{position:relative;display:flex;gap:10px;padding:9px 12px 10px 10px;align-items:flex-start}
+.perm::before{content:"";position:absolute;left:44px;right:0;top:0;border-top:1px solid var(--hairline)}
+.perm .t{font-size:11px;line-height:14px;color:var(--labelCool2)}
+.perm .link{display:inline-block;margin-top:3px;font-size:11px;color:var(--goldText);font-weight:500;cursor:pointer}
+.perm .link:hover{text-decoration:underline;text-underline-offset:2px}
+
+.foot{font-size:13px;line-height:17px;color:var(--label2);margin:14px 2px 0 2px}
+
+/* state panels below the window */
+.panels{display:flex;gap:40px;justify-content:center;margin:56px auto 0;width:1306px}
+.panel{width:auto}
+.panel h2{font-size:15px;font-weight:600;color:var(--label);margin:0 0 4px 4px}
+.panel p{font-size:12px;color:var(--panelNote);margin:0 0 12px 4px;max-width:600px}
+.mini{zoom:1.4;width:442px;background:var(--ground);border-radius:10px;padding-bottom:14px;
+  box-shadow:0 0 0 .5px rgba(0,0,0,.25),0 8px 22px rgba(0,0,0,.18)}
+</style>
+</head>
+<body>
+<button class="toggle" id="toggle" type="button" aria-label="Switch light or dark">Appearance: auto</button>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <symbol id="i-laptop" viewBox="0 0 16 16"><rect x="3" y="3.5" width="10" height="7" rx="1"/><path d="M1.5 12.5h13"/></symbol>
+    <symbol id="i-speaker" viewBox="0 0 16 16"><rect x="4.5" y="1.5" width="7" height="13" rx="1.5"/><circle cx="8" cy="5" r=".9"/><circle cx="8" cy="10" r="2"/></symbol>
+    <symbol id="i-radio" viewBox="0 0 16 16"><rect x="1.5" y="5.5" width="13" height="8.5" rx="1.5"/><path d="M4 5.5l7-3.5"/><circle cx="6" cy="9.75" r="2.1"/><path d="M10.5 8.5h1.5M10.5 11h1.5"/></symbol>
+    <symbol id="i-tv" viewBox="0 0 16 16"><rect x="1.5" y="2.5" width="10.5" height="8" rx="1"/><path d="M4 13.5h5"/><rect x="10" y="7" width="4.5" height="7" rx="1"/><circle cx="12.25" cy="11.3" r=".9"/></symbol>
+    <symbol id="i-pod" viewBox="0 0 16 16"><rect x="4" y="2.5" width="8" height="11" rx="3"/><path d="M5.5 4.5h5"/></symbol>
+    <symbol id="i-missing" viewBox="0 0 16 16"><path d="M2.5 6h2.6L8.8 3v10L5.1 10H2.5z"/></symbol>
+    <symbol id="i-pair" viewBox="0 0 16 16"><rect x="1.5" y="2" width="5.5" height="12" rx="1.2"/><rect x="9" y="2" width="5.5" height="12" rx="1.2"/><circle cx="4.25" cy="10" r="1.5"/><circle cx="11.75" cy="10" r="1.5"/><circle cx="4.25" cy="5" r=".6"/><circle cx="11.75" cy="5" r=".6"/></symbol>
+    <symbol id="i-scenes" viewBox="0 0 16 16"><rect x="1.5" y="2" width="5.5" height="5" rx="1.2"/><rect x="1.5" y="9" width="5.5" height="5" rx="1.2"/><rect x="9" y="2" width="5.5" height="12" rx="1.2"/></symbol>
+    <symbol id="i-chev" viewBox="0 0 16 16"><path d="M6 3.5l4.5 4.5L6 12.5"/></symbol>
+    <symbol id="i-updown" viewBox="0 0 9 12"><path d="M1.5 4.5L4.5 1.5l3 3M1.5 7.5l3 3 3-3"/></symbol>
+    <symbol id="i-wave" viewBox="0 0 16 16"><path d="M2 6v4M4.5 4v8M7 2v12M9.5 4.5v7M12 3v10M14.5 6.5v3"/></symbol>
+    <symbol id="i-gear" viewBox="0 0 16 16"><circle cx="8" cy="8" r="2.3"/><path d="M8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2M3.4 3.4l1.4 1.4M11.2 11.2l1.4 1.4M3.4 12.6l1.4-1.4M11.2 4.8l1.4-1.4"/></symbol>
+    <symbol id="i-pin" viewBox="0 0 16 16"><path d="M5 2h6M6 2v5L4 10h8l-2-3V2M8 10v4.5"/></symbol>
+    <symbol id="i-main" viewBox="0 0 16 16"><rect x="5.5" y="1.5" width="8" height="13" rx="1.5"/><path d="M1.5 8h6M5 5.5L7.5 8 5 10.5"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 16 16"><path d="M8 3v10M3 8h10"/></symbol>
+    <symbol id="i-info" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6.2"/><path d="M8 7.2V11"/><circle cx="8" cy="4.9" r=".5" fill="currentColor"/></symbol>
+  </defs>
+</svg>
+
+<div class="stage">
+  <div class="win" role="img" aria-label="Scenes window, Speakers page, direction A">
+    <div class="toolbar">
+      <div class="seg">
+        <div class="s w"><svg class="ico"><use href="#i-wave"/></svg></div>
+        <div class="s on"><svg class="ico"><use href="#i-pair"/></svg>Scenes</div>
+        <div class="s w"><svg class="ico"><use href="#i-gear"/></svg></div>
+      </div>
+      <div class="wordmark">Audiout</div>
+      <svg class="ico pin"><use href="#i-pin"/></svg>
+    </div>
+
+    <aside class="sidebar">
+      <div class="scenesBtn"><svg class="ico"><use href="#i-scenes"/></svg><span class="grow">Scenes</span><svg class="ico" style="width:12px;height:12px"><use href="#i-chev"/></svg></div>
+      <div class="sideCap">System Audio</div>
+      <div class="sideRow" style="top:85px"><svg class="ico"><use href="#i-main"/></svg><span>Main Audio</span></div>
+      <div class="sideRow sel" style="top:115px"><span>Speakers</span></div>
+      <div id="sideDevs"></div>
+      <div class="bottomBar"><svg class="ico" style="width:13px;height:13px;color:var(--labelCool)"><use href="#i-plus"/></svg>Add scene</div>
+    </aside>
+
+    <main class="content">
+      <div class="pane" id="mainPane"></div>
+      <div class="pageFoot">Set up scenes here, then switch to the Mixer to play</div>
+    </main>
+  </div>
+</div>
+
+<section class="panels">
+  <div class="panel">
+    <h2>Rows selected</h2>
+    <p>Click or Shift-click selects; the wash is neutral. The count becomes the bulk pop-up. Onkyo is hidden but playing, so its caption says why it still shows.</p>
+    <div class="mini"><div class="pane" id="selPane"></div></div>
+  </div>
+  <div class="panel">
+    <h2>Bluetooth access denied</h2>
+    <p>The explanation lives inside the Bluetooth section, under the speakers it affects. Its button is the page's one gold element.</p>
+    <div class="mini"><div class="pane" id="btPane"></div></div>
+  </div>
+</section>
+
+<script>
+const VIS = {when:"When available in Mixer", always:"Always in Mixer", hide:"Hidden from Mixer", mac:"Always shown in Mixer"};
+const speakers = [
+  {sec:"This Mac", icon:"laptop", name:"MacBook Pro Speakers", vis:"mac", side:"Available"},
+  {sec:"AirPlay Speakers", icon:"speaker", name:"Move 2", vis:"when", side:"Available"},
+  {sec:"AirPlay Speakers", icon:"pod", name:"Bedroom", vis:"always", status:"Unavailable", cool:true, side:"Unavailable"},
+  {sec:"Cast Speakers", icon:"tv", name:"TV", vis:"when", side:"Connected"},
+  {sec:"Bluetooth Speakers", icon:"radio", name:"Onkyo TX-8220", vis:"hide", side:"Connected"},
+  {sec:"Bluetooth Speakers", icon:"radio", name:"Sonos Move", vis:"always", status:"Not connected", cool:true, side:"Not connected"},
+  {sec:"Missing Speakers", icon:"missing", name:"Missing speaker", vis:"always", cool:true, side:"Missing speaker"}
+];
+// sidebar keeps its own order (the shipped sidebar)
+const sideOrder = ["MacBook Pro Speakers","Move 2","Onkyo TX-8220","TV","Bedroom","Missing speaker","Sonos Move"];
+const icon = (id, cls="ico") => `<svg class="${cls}"><use href="#i-${id}"/></svg>`;
+
+document.getElementById("sideDevs").innerHTML = sideOrder.map((n,i)=>{
+  const s = speakers.find(x=>x.name===n);
+  const dim = ["Unavailable","Not connected","Missing speaker"].includes(s.side);
+  return `<div class="sideDev${dim?" dim":""}" style="top:${152+i*44}px">${icon(s.icon)}<div class="t"><span class="n">${n}</span><span class="st">${s.side}</span></div></div>`;
+}).join("");
+
+function row(s, opts={}){
+  const lines = [];
+  if (opts.override) lines.push(`<span class="ov">Shown while in use</span>`);
+  else if (s.status) lines.push(`<span>${s.status}</span>`);
+  lines.push(`<span>${VIS[s.vis]}</span>`);
+  return `<div class="row${s.cool?" cool":""}${opts.sel?" sel":""}" role="row" aria-selected="${!!opts.sel}">
+    <div class="well">${icon(s.icon)}</div>
+    <div class="name">${s.name}</div>
+    <div class="trail">${lines.join("")}</div>
+    ${icon("chev","ico chev")}
+  </div>`;
+}
+function header(right){
+  return `<div class="hdr">${icon("pair")}<h1>Speakers</h1><div class="sp"></div>${right}</div>`;
+}
+function sections(list, opts={}){
+  const order = ["This Mac","AirPlay Speakers","Cast Speakers","Bluetooth Speakers","Missing Speakers"];
+  return order.filter(sec=>list.some(s=>s.sec===sec)).map(sec=>{
+    const rows = list.filter(s=>s.sec===sec).map(s=>row(s,{sel:(opts.sel||[]).includes(s.name), override:(opts.override||[]).includes(s.name)})).join("");
+    const extra = (sec==="Bluetooth Speakers" && opts.btDenied) ? `<div class="perm">
+      <div class="well">${icon("info")}</div>
+      <div><div class="t">Allow Bluetooth access in System Settings to see paired speakers that are not connected.</div>
+      <span class="link" role="button" tabindex="0">Open Bluetooth Privacy…</span></div></div>` : "";
+    return `<div class="cap">${sec}</div><div class="sec" role="rowgroup">${rows}${extra}</div>`;
+  }).join("");
+}
+const FOOT = `<div class="foot">Mixer visibility applies across all scenes. Scene membership stays separate.</div>`;
+
+document.getElementById("mainPane").innerHTML =
+  header(`<span class="count">7 speakers · 3 unavailable</span>`) + sections(speakers) + FOOT;
+
+document.getElementById("selPane").innerHTML =
+  header(`<span class="count">2 selected</span><span class="pop">Mixed${icon("updown","ico chev")}</span>`) +
+  sections(speakers.filter(s=>["AirPlay Speakers","Cast Speakers","Bluetooth Speakers"].includes(s.sec)),
+           {sel:["Move 2","Bedroom"], override:["Onkyo TX-8220"]});
+
+document.getElementById("btPane").innerHTML =
+  header(`<span class="count">7 speakers · 3 unavailable</span>`) +
+  sections(speakers.filter(s=>["Cast Speakers","Bluetooth Speakers","Missing Speakers"].includes(s.sec)), {btDenied:true});
+
+// appearance toggle: auto -> light -> dark
+const modes = ["auto","light","dark"]; let m = 0;
+document.getElementById("toggle").addEventListener("click", e=>{
+  m = (m+1)%3;
+  if (modes[m]==="auto") document.documentElement.removeAttribute("data-theme");
+  else document.documentElement.setAttribute("data-theme", modes[m]);
+  e.currentTarget.textContent = "Appearance: " + modes[m];
+});
+</script>
+</body>
+</html>

@@ -31,23 +31,37 @@ extension NativeBackend {
     /// `backend as? MeteringControlling`. The `?` sub-components are `nil` in
     /// tests / the UI-only smoke path (harmless no-ops).
     public func setMeteringActive(_ active: Bool) {
-        captureCoordinator?.setMeteringActive(active)
-        routeMixer.setMeteringActive(active)
-        leveledInjector.setMeteringActive(active)
-        localPlaybackEngine?.setMeteringActive(active)
-        let diff: (start: Set<String>, stop: Set<String>) = stateQueue.sync {
-            self.meteringActive = active
-            if active {
-                // A sample stored while the popover was closed is stale — it must
-                // not replay as the first frame on reopen.
+        applyMeteringGates { $0.meteringActive = active }
+    }
+
+    /// The Touch Bar's reason to keep levels flowing (see
+    /// ``MeteringControlling/setDeviceLevelsWanted(_:)``). Leaves the
+    /// metering-only taps to the popover gate alone.
+    public func setDeviceLevelsWanted(_ wanted: Bool) {
+        applyMeteringGates { $0.deviceLevelsWanted = wanted }
+    }
+
+    /// Flip one gate, then forward the combined ``levelsFlowing`` to every RMS
+    /// source and reconcile the metering-only taps against the popover gate.
+    private func applyMeteringGates(_ change: (NativeBackend) -> Void) {
+        let (flowing, diff): (Bool, (start: Set<String>, stop: Set<String>)) = stateQueue.sync {
+            let wasFlowing = self.levelsFlowing
+            change(self)
+            if self.levelsFlowing && !wasFlowing {
+                // A sample stored while levels were off is stale — it must not
+                // replay as the first frame.
                 self.systemRMSLock.lock()
                 self.systemRMSDirty = false
                 self.systemRMSLock.unlock()
-                self.scheduleSystemRMSDrainLocked()
             }
-            // When inactive the drain chain stops itself on its next fire.
-            return self.meteringTapDiffLocked()
+            // When off, the drain chain stops itself on its next fire.
+            self.scheduleSystemRMSDrainLocked()
+            return (self.levelsFlowing, self.meteringTapDiffLocked())
         }
+        captureCoordinator?.setMeteringActive(flowing)
+        routeMixer.setMeteringActive(flowing)
+        leveledInjector.setMeteringActive(flowing)
+        localPlaybackEngine?.setMeteringActive(flowing)
         applyMeteringTapDiff(diff)
     }
 
@@ -168,7 +182,7 @@ extension NativeBackend {
     /// On `stateQueue`.
     func drainSystemRMS() {   // on stateQueue
         levelDrainScheduled = false
-        guard meteringActive else { return }
+        guard levelsFlowing else { return }
         systemRMSLock.lock()
         let dirty = systemRMSDirty
         let rms = systemRMSSlot
@@ -187,7 +201,7 @@ extension NativeBackend {
     /// Arm the next drain, single-flight and only while metering is on.
     /// On `stateQueue`.
     private func scheduleSystemRMSDrainLocked() {   // on stateQueue
-        guard meteringActive, !levelDrainScheduled else { return }
+        guard levelsFlowing, !levelDrainScheduled else { return }
         levelDrainScheduled = true
         stateQueue.asyncAfter(deadline: .now() + .nanoseconds(Int(levelEmitIntervalNanos))) { [weak self] in
             self?.drainSystemRMS()
@@ -204,7 +218,7 @@ extension NativeBackend {
     /// display cadence exactly like a device row.
     func emitAppLevel(bundleID: String, rms: Float) {
         stateQueue.async {
-            guard self.meteringActive else { return }
+            guard self.levelsFlowing else { return }
             self.scheduleLevelEmit(key: .app(bundleID), rms: rms,
                                    now: DispatchTime.now().uptimeNanoseconds)
             self.latestAppLevel[bundleID] = rms

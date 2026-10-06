@@ -14,11 +14,11 @@ import AppKit
 /// ("separation comes from surfaces, never from recoloring text") — the deal
 /// changed, so the test that enforced it did too.
 ///
-/// Two things it still pins from the old lock, unchanged:
-///   - the SIDEBAR keeps stock semantic ink. AppKit only re-inks a source-list
-///     row's text over the emphasized selection pill when the colour is a
-///     system semantic, so a cool authored token would sit grey on a selected
-///     row's accent pill.
+/// Two things it still pins from the old lock, one of them changed since:
+///   - the SIDEBAR, changed since: its secondary inks are cool (`labelCool`,
+///     `labelCool2`), and a selected row re-inks every one of them to the
+///     selection pill's text colour, which AppKit does on its own only for a
+///     system semantic colour.
 ///   - the editor's checklist really does paint `raised` and `containerEdge`,
 ///     sampled off a real offscreen render rather than a re-typed expectation.
 ///
@@ -225,10 +225,11 @@ import AppKit
         expectSameToken(row.test_nameColor, Tokens.Color.labelCool, "non-member name in an armed group")
     }
 
-    @Test func unavailableMemberRowIsOneCoolTone() {
+    // Inking the unavailable name in anything but the sidebar's labelCool, or warming it when the scene plays, turns it red.
+    @Test func unavailableMemberRowTakesTheSidebarsInk() {
         let row = MembershipRowView(device: makeDevice(isAvailable: false), checked: true, surface: .warmPane)
         row.railArmed = true
-        expectSameToken(row.test_nameColor, Tokens.Color.labelCool2, "unavailable member name")
+        expectSameToken(row.test_nameColor, Tokens.Color.labelCool, "unavailable member name")
         expectSameToken(row.test_glyphTint, Tokens.Color.labelCool2, "unavailable member glyph")
         expectSameToken(row.test_unavailableLabelColor, Tokens.Color.labelCool2, "the \"Unavailable\" word")
         #expect(row.test_drawsGlyphTile)
@@ -266,30 +267,68 @@ import AppKit
         #expect(editor.test_identityGlowSide == GroupEditorViewController.iconGlowSide)
     }
 
-    // MARK: 10. The sidebar keeps stock ink
+    // MARK: 10. The sidebar's secondary inks are cool
 
-    @Test func sidebarCellsKeepStockInk() throws {
+    // Turns red when a sidebar title, subsection header, divider, plate or speaker row goes back to a warm ink (label2, label3, ember, gold or failure), or the headers and unreachable rows stop being cool.
+    @Test func sidebarSecondaryInksAreCool() throws {
         let sidebar = SidebarViewController()
-
-        let headerCell = try #require(
-            sidebar.outlineView(NSOutlineView(), viewFor: nil,
-                                item: SidebarViewController.Node(.header("Speakers"))) as? NSTableCellView)
-        expectSameToken(headerCell.textField?.textColor, Tokens.Color.label2, "sidebar header cell")
-
-        for (payload, label) in [(SidebarViewController.Node.Payload.groupsOverview, "pinned Groups row"),
-                                 (.mainOut, "Main Audio row"),
-                                 (.device(makeDevice()), "device row")] {
-            let cell = try #require(
-                sidebar.outlineView(NSOutlineView(), viewFor: nil,
-                                    item: SidebarViewController.Node(payload)) as? NSTableCellView)
-            expectSameToken(cell.textField?.textColor, Tokens.Color.label, "sidebar \(label)")
+        func cell(_ payload: SidebarViewController.Node.Payload) throws -> NSView {
+            try #require(sidebar.outlineView(NSOutlineView(), viewFor: nil,
+                                             item: SidebarViewController.Node(payload)))
+        }
+        func all<T: NSView>(_ type: T.Type, in root: NSView) -> [T] {
+            root.subviews.flatMap { sub -> [T] in ((sub as? T).map { [$0] } ?? []) + all(type, in: sub) }
         }
 
-        let unavailableCell = try #require(
-            sidebar.outlineView(NSOutlineView(), viewFor: nil,
-                                item: SidebarViewController.Node(.device(makeDevice(isAvailable: false)))) as? NSTableCellView)
-        expectSameToken(unavailableCell.textField?.textColor, Tokens.Color.label3,
-                        "sidebar unavailable-device row")
+        let section = try cell(.header("Speakers"))
+        expectSameToken(all(NSTextField.self, in: section).first?.textColor, Tokens.Color.labelCool, "section title")
+        let subsection = try cell(.header("Shown in Mixer"))
+        expectSameToken(all(NSTextField.self, in: subsection).first?.textColor, Tokens.Color.labelCool,
+                        "subsection header")
+        let divider = try cell(.divider(2))
+        let overview = try cell(.speakersOverview)
+        let mainAudio = try cell(.mainOut)
+        let reachable = try #require(try cell(.device(makeDevice())) as? IconLabelCellView)
+        expectSameToken(reachable.nameLabel.textColor, Tokens.Color.label, "reachable name")
+        let unreachable = try #require(try cell(.device(makeDevice(id: "dev-2", isAvailable: false)))
+                                       as? IconLabelCellView)
+        expectSameToken(unreachable.nameLabel.textColor, Tokens.Color.labelCool, "unreachable name")
+        expectSameToken(unreachable.imageView?.contentTintColor, Tokens.Color.labelCool2, "unreachable icon")
+
+        // A bare node has no record, so it never carries the caption: build
+        // that row from a hidden speaker in use.
+        let library = SpeakerLibraryController(loadPersisted: false)
+        library.update(liveDevices: [Device(id: "onkyo", name: "Onkyo", kind: .bluetooth, connectionState: .connected)],
+                       groups: [])
+        library.setVisibility(.hideWhenNotInUse, for: ["onkyo"])
+        let captionedSidebar = SidebarViewController()
+        captionedSidebar.loadViewIfNeeded()
+        captionedSidebar.view.frame = NSRect(x: 0, y: 0, width: 210, height: 400)
+        captionedSidebar.reload(devices: library.records.map(\.renderingDevice), presentationRecords: library.records)
+        let captioned = try #require(captionedSidebar.test_deviceCell(id: "onkyo"))
+        try #require(captionedSidebar.test_rowCaption(id: "onkyo") != nil)
+
+        let warm = [(Tokens.Color.label2, "label2"), (Tokens.Color.label3, "label3"), (Tokens.Color.ember, "ember"),
+                    (Tokens.Color.gold, "gold"), (Tokens.Color.failure, "failure")]
+        func isToken(_ ink: NSColor?, _ token: NSColor) -> Bool {
+            guard let ink else { return false }
+            return [NSAppearance.Name.aqua, .darkAqua].allSatisfy { name in
+                sameColor(resolved(ink, appearanceName: name), resolved(token, appearanceName: name))
+            }
+        }
+        let cells: [(String, NSView)] = [("section title", section), ("subsection header", subsection),
+                                         ("divider", divider), ("Overview plate", overview),
+                                         ("Main Audio plate", mainAudio), ("reachable row", reachable),
+                                         ("unreachable row", unreachable), ("captioned row", captioned)]
+        for (name, view) in cells {
+            let inks = all(NSTextField.self, in: view).map(\.textColor)
+                + all(NSImageView.self, in: view).map(\.contentTintColor)
+            for ink in inks {
+                for (token, tokenName) in warm {
+                    #expect(!isToken(ink, token), "\(name) has an ink in \(tokenName)")
+                }
+            }
+        }
     }
 
     // MARK: 11. The checklist card's real pixels
@@ -345,19 +384,67 @@ import AppKit
 
     // MARK: 13. The icon picker's binary
 
-    @Test func pickerSelectedCellIsGoldWithInkOnFillAndUnselectedIsCool() {
+    // Filling the current icon's cell gold, or with anything but AppKit's own selection colours, turns it red.
+    @Test func pickerSelectedCellWearsTheStockSelectionAndUnselectedIsCool() {
         let picker = IconPickerViewController()
         picker.configure(currentSymbolName: "airpods", defaultSymbolName: "hifispeaker.fill")
         _ = picker.view
 
-        expectSameToken(picker.test_cellGlyphTint(for: "airpods"), Tokens.Color.inkOnFill,
+        // No window, so not key: AppKit's unemphasized selection.
+        expectSameToken(picker.test_cellGlyphTint(for: "airpods"), .unemphasizedSelectedTextColor,
                         "selected cell glyph")
         expectSameStampedColor(picker.test_cellFillColor(for: "airpods"),
-                               Tokens.Color.gold, "selected cell fill")
+                               .unemphasizedSelectedContentBackgroundColor, "selected cell fill")
 
         expectSameToken(picker.test_cellGlyphTint(for: "hifispeaker.fill"), Tokens.Color.labelCool,
                         "unselected cell glyph")
         expectSameStampedColor(picker.test_cellFillColor(for: "hifispeaker.fill"),
                                Tokens.Color.well, "unselected cell fill")
+    }
+
+    // MARK: 14. The Speakers overview carries no warm or alarm ink
+
+    // Drawing any Overview text or glyph in label2, label3, ember, gold or failure turns it red.
+    @Test func overviewPageCarriesNoWarmOrAlarmInk() {
+        let library = SpeakerLibraryController(loadPersisted: false)
+        let mac = Device(id: "mac", name: "Mac", kind: .localMac, isAvailable: true)
+        let kitchen = makeDevice(id: "kitchen", name: "Kitchen")
+        library.update(liveDevices: [mac, kitchen, Device(id: "attic", name: "Attic", kind: .bluetooth, isAvailable: true)],
+                       groups: [], confirmedUsedIDs: ["attic"])
+        library.update(liveDevices: [mac, kitchen], groups: [])
+        var pending: [() -> Void] = []
+        let search = SpeakerSearch(library: library, schedule: { _, fire in pending.append(fire) })
+        search.isLocalNetworkDenied = { true }
+        // Started by the page appearing, so no counts event reaches another suite's sink.
+        search.pageDidAppear()
+        while !pending.isEmpty { pending.removeFirst()() }
+        let page = SpeakersPageViewController(library: library, groupController: makeGroupController())
+        page.search = search
+        page.setBluetoothAccess(SpeakerBluetoothAccessPresentation(status: .unknown, priming: false))
+        #expect(page.test_rowTitles.count == 4, "every row is shown")
+
+        let banned = [("label2", Tokens.Color.label2), ("label3", Tokens.Color.label3), ("ember", Tokens.Color.ember),
+                      ("gold", Tokens.Color.gold), ("failure", Tokens.Color.failure)]
+        func isBanned(_ color: NSColor?) -> String? {
+            guard let color else { return nil }
+            return banned.first { entry in
+                [NSAppearance.Name.aqua, .darkAqua].allSatisfy {
+                    sameColor(resolved(color, appearanceName: $0), resolved(entry.1, appearanceName: $0))
+                }
+            }?.0
+        }
+        var views = [page.view]
+        var checked = 0
+        while let view = views.popLast() {
+            views += view.subviews
+            if let field = view as? NSTextField {
+                checked += 1
+                if let name = isBanned(field.textColor) { Issue.record("\"\(field.stringValue)\" is inked \(name)") }
+            } else if let image = view as? NSImageView {
+                checked += 1
+                if let name = isBanned(image.contentTintColor) { Issue.record("a glyph is tinted \(name)") }
+            }
+        }
+        #expect(checked > 10)
     }
 }

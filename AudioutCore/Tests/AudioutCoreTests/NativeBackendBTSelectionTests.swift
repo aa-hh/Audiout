@@ -396,7 +396,9 @@ import CoreAudio
         silenceFallbackDelay: TimeInterval = NativeBackend.defaultSilenceFallbackDelay,
         btConnection: BTConnectionManaging? = nil,
         btRenderStartTimeout: TimeInterval = 6,
-        injectedPerAppCapture: PerAppCaptureCoordinator? = nil
+        injectedPerAppCapture: PerAppCaptureCoordinator? = nil,
+        delayClock: @escaping NativeBackend.DelayClock = NativeBackend.dispatchDelayClock,
+        uptimeClock: @escaping NativeBackend.UptimeClock = NativeBackend.dispatchUptimeClock
     ) -> (NativeBackend, RecordingEngine, FakeDiscovery, FakeBTEnumerator, SpyBTSink, FakeCapture) {
         let engine = RecordingEngine()
         let discovery = FakeDiscovery()
@@ -410,6 +412,8 @@ import CoreAudio
             systemVolume: NoOpSystemVolume(),
             ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
             injectedPerAppCapture: injectedPerAppCapture,
+            delayClock: delayClock,
+            uptimeClock: uptimeClock,
             silenceFallbackDelay: silenceFallbackDelay,
             systemDefaultOutputIsAirPlayClass: { false },
             aggregateControl: NoOpAggregateControl(),
@@ -1116,7 +1120,8 @@ import CoreAudio
     /// audible, then lands `.connected` — the state the armed dot and the meter
     /// both gate on.
     @Test func selectingAvailableBTBreathesUntilTheSinkRenders() {
-        let (backend, _, _, bt, sink, _) = makeBackend()
+        let clock = ManualDelayClock()
+        let (backend, _, _, bt, sink, _) = makeBackend(delayClock: clock.queueHoppingClock)
         defer { backend.stop() }
         backend.start()
         bt.fire([btMove])
@@ -1129,11 +1134,14 @@ import CoreAudio
 
         // The engine being up is not yet audio: the hold survives a started
         // sink and ends only when the delay gate opens.
-        SuiteWait.settle(0.3)
+        waitFor { clock.pendingCount >= 1 }
+        clock.advance(by: NativeBackend.btRenderPollInterval)
+        waitFor { clock.pendingCount >= 1 }
         #expect(device(backend, btMove.id)?.connectionState == ConnectionState.connecting,
                 "a started-but-silent sink must not light the armed dot")
 
         sink.renderingUIDs = [btMove.id]
+        clock.advance(by: NativeBackend.btRenderPollInterval)
         waitFor { self.device(backend, self.btMove.id)?.connectionState == .connected }
         #expect(device(backend, btMove.id)?.connectionState == ConnectionState.connected)
     }
@@ -1176,13 +1184,19 @@ import CoreAudio
     /// The hold is capped: a sink that never starts rendering degrades to
     /// `.failed` rather than spinning forever.
     @Test func sinkThatNeverRendersDegradesToFailedWithinTheCap() {
-        let (backend, _, _, bt, _, _) = makeBackend(btRenderStartTimeout: 0.2)
+        let clock = ManualDelayClock()
+        let (backend, _, _, bt, _, _) = makeBackend(btRenderStartTimeout: 0.2,
+                                                    delayClock: clock.queueHoppingClock,
+                                                    uptimeClock: clock.uptime)
         defer { backend.stop() }
         backend.start()
         bt.fire([btMove])
         waitFor { self.device(backend, self.btMove.id)?.isAvailable == true }
 
         backend.setOutputSet([btMove.id])
+        waitFor { self.device(backend, self.btMove.id)?.connectionState == .connecting }
+        waitFor { clock.pendingCount >= 1 }
+        clock.advance(by: 0.3)
         waitFor {
             if case .failed = self.device(backend, self.btMove.id)?.connectionState { return true }
             return false
@@ -1200,7 +1214,10 @@ import CoreAudio
     /// connected Move 2 with the Mac paused reported "no audio started" six
     /// seconds later, every time.
     @Test func speakerSelectedWithNothingPlayingLandsConnectedNotFailed() {
-        let (backend, _, _, bt, sink, _) = makeBackend(btRenderStartTimeout: 0.2)
+        let clock = ManualDelayClock()
+        let (backend, _, _, bt, sink, _) = makeBackend(btRenderStartTimeout: 0.2,
+                                                       delayClock: clock.queueHoppingClock,
+                                                       uptimeClock: clock.uptime)
         defer { backend.stop() }
         sink.anchoredUIDs = []            // a silent Mac: no sink ever anchors
         backend.start()
@@ -1208,6 +1225,9 @@ import CoreAudio
         waitFor { self.device(backend, self.btMove.id)?.isAvailable == true }
 
         backend.setOutputSet([btMove.id])
+        waitFor { self.device(backend, self.btMove.id)?.connectionState == .connecting }
+        waitFor { clock.pendingCount >= 1 }
+        clock.advance(by: 0.3)
         waitFor { self.device(backend, self.btMove.id)?.connectionState == .connected }
         #expect(device(backend, btMove.id)?.connectionState == ConnectionState.connected,
                 "a silent Mac must not turn a healthy speaker into a failed row")
@@ -1576,7 +1596,9 @@ import CoreAudio
     /// Turns red if a per-app-only Bluetooth claim stops breathing `.connecting` until its sink renders, or promotes on anything but rendering.
     @Test func perAppOnlyBTRouteBreathesUntilTheSinkRenders() {
         let perAppCapture = workingPerAppCapture(bundleIDs: ["com.foo"])
-        let (backend, _, _, bt, sink, _) = makeBackend(injectedPerAppCapture: perAppCapture)
+        let clock = ManualDelayClock()
+        let (backend, _, _, bt, sink, _) = makeBackend(injectedPerAppCapture: perAppCapture,
+                                                       delayClock: clock.queueHoppingClock)
         defer { backend.stop() }
         backend.start()
         bt.fire([btMove])
@@ -1585,11 +1607,14 @@ import CoreAudio
         backend.updateAppRoutes([route("com.foo", name: "Foo", toDevice: btMove.id)])
         waitFor { self.device(backend, self.btMove.id)?.connectionState == .connecting }
         #expect(device(backend, btMove.id)?.connectionState == ConnectionState.connecting)
-        SuiteWait.settle(0.3)
+        waitFor { clock.pendingCount >= 1 }
+        clock.advance(by: NativeBackend.btRenderPollInterval)
+        waitFor { clock.pendingCount >= 1 }
         #expect(device(backend, btMove.id)?.connectionState == ConnectionState.connecting,
                 "a started-but-silent sink must not light the dot")
 
         sink.renderingUIDs = [btMove.id]
+        clock.advance(by: NativeBackend.btRenderPollInterval)
         waitFor { self.device(backend, self.btMove.id)?.connectionState == .connected }
         #expect(device(backend, btMove.id)?.connectionState == ConnectionState.connected)
         #expect(device(backend, btMove.id)?.isSelected == false)

@@ -522,9 +522,9 @@ final class EmitterFieldView: NSView {
         var mid = SIMD3<Float>(repeating: 0)
         var peak = SIMD3<Float>(repeating: 0)
         effectiveAppearance.performAsCurrentDrawingAppearance {
-            // `Tokens.Color.accent` is the SEMANTIC alias (`controlAccentColor`,
-            // i.e. system blue by default) — the field's hue is the authored
-            // `gold`, which also follows the accent dial.
+            // The field's hue is the authored `gold`, never the system
+            // `controlAccentColor` (blue by default); `gold` follows the
+            // accent dial.
             let accent = Tokens.Color.gold
             bg = Self.components(of: Tokens.Color.canvas)
             // The site's light ramp inverts — a PALE wash deepening into ink

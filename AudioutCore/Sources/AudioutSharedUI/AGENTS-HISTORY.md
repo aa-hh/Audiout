@@ -105,3 +105,61 @@ SharedUI also hosts shared WINDOW CHROME, not only row views: `ControlPanelWindo
 
 - The rail line's colour never carries a connecting state, but its length does: it stops `busConnectingNodeRailGap` short of a connecting node, which is a plain gold circle; the glyph ring and status dot are dashed `rim`.
 - 2026-10-04: the 12 % gold wash behind a sounding `DeviceRowView` and `AppRowView` is gone. The rail node, the fader fill, the readout ink and the System pill already say sounding; rows now paint only the neutral hover wash, and app rows the neutral selection wash. `PopoverColumnGrid.rowLiveWashAlpha` stays for the Groups overview's live card and Setup's demo row.
+
+## Archived folder rules
+
+# AudioutSharedUI
+
+## Purpose
+
+AppKit row views and window chrome shared by the popover and the Groups screen.
+Pure UI: controls route out through a delegate, never a backend, store,
+or `GroupController`.
+
+## Rules
+
+- Views never read shared model state; hosts push snapshots via `apply(...)`.
+- Row geometry lives in `PopoverColumnGrid`; columns anchor to the row's trailing edge.
+- `test_*` hooks must drive the same delegate path as the live control.
+- `controllable` is separate from `selected`: the checkbox follows `selected` alone.
+- Membership checkbox enablement is `isAvailable || selected`: failure keeps selection intent.
+- A greyed Bluetooth row's name click CONNECTS, never selects.
+- Always write `NSApp?.`; bare `NSApp.` force-unwraps and crashes.
+- TRAP: `CATransition` ignores a custom animation key; it files under "transition".
+- The "Removed, Undo" offer is host state; the row draws it and decides nothing.
+- A never-measured Bluetooth row's SYNC chip is the alignment wizard's door, not a readout.
+- The row's Equalizer button is a DOOR plus one mark; the row edits and stores no tone.
+- The identity stack yields the Equalizer slot on EVERY row, so names truncate alike.
+- Instruments reconcile accessibility-display changes live; the accent dial is a third trigger.
+- No rail, no ring: `BusRailOverlayView.railReaches` decides both, and a failed room is never reached.
+- The rail overlay paints ABOVE every row, so the gutter is the spine's alone: anything that opens under a device row (sync drawer, alignment note, connection diagnosis) starts its content at `PopoverColumnGrid.firstElementLeading`, never inside the gutter.
+- A node can fill with the checkbox off: `localFallbackOutput` draws the Mac as a rail member while the engine plays on it, and edits no selection.
+- Warm ink and gold wash mean `isRouteArmed`; cool means silent. Instruments are flat, no `CALayer` blooms.
+- `Tokens.Color.muted` is fenced to the device row's engaged mute button; a second consumer fails a test.
+- `setContent`'s `defaultSize:` seeds only the first mount of a content controller.
+- `ControlPanelBackingView` is an approved custom-drawn exception; NSPanel has no arrow.
+- `RemoteInviteView`'s tile is FIXED white with black modules in every appearance, dial position and Increase Contrast: a QR code is a print artifact a camera reads, not chrome, so it is the one sanctioned literal colour outside `Tokens`.
+- `Tokens.Color.shadow`'s four real consumers are flat and clipped, never an
+  `NSShadow`: `WarmFaderCell` (here), `AlignmentPlateCell` (`AudioutPopoverUI`),
+  `GroupedSectionView`'s `.well` style (`AudioutWindowUI`, the device
+  detail page's Equalizer recess, 2026-09-04), and `SetupPreviewFrameView`
+  (`AudioutOnboardingUI`, the demo frame's recess, 2026-09-05).
+  `WarmFaderCell`, the `.well` style and the demo frame each draw one
+  inset-shade band; `AlignmentPlateCell` draws two lips (a lit one and a shade
+  one) at its own per-state alphas.
+- No `STABILITY(id)` markers remain in this target; the audit's findings and fix sketches are history in [../../../dev/notes/stability-audit-2026-07-18.md](../../../dev/notes/stability-audit-2026-07-18.md).
+- A permission prompt in flight (`setPermissionPromptInFlight`) suspends the UNPINNED tuck-away on panel AND backing bubble and survives a pin flip; the answer restores manners BEFORE `returnToFront()`, and nothing takes the front while the dialog is up — a TCC dialog that loses focus freezes.
+- Long-form traps and changelog: [AGENTS-HISTORY.md](AGENTS-HISTORY.md); grep before debugging.
+
+## Map
+
+- `DeviceRowView` → the shared device row every host mounts. Read-only test hooks live in `DeviceRowView+TestSupport.swift`.
+- `PopoverColumnGrid` → named column geometry for every row.
+- `ControlPanelBackingView` → custom-drawn panel background with the menu-bar beak.
+- `ProminentButton` → the gold call-to-action button, `inkOnFill` ink.
+- `RemoteInviteView` → the one QR-and-address invitation, hosted by three surfaces.
+- 2026-10-04: Keyboard traversal probes. A code-built `NSWindow` has `autorecalculatesKeyViewLoop` off. An `NSWindow` that is its own first responder ignores Tab even with `initialFirstResponder` set. A non-editable `NSTextField` first responder swallows Tab (`interpretKeyEvents` on it raises unrecognized selector `insertTab:`). `isFullKeyboardAccessEnabled` cannot be turned on inside a test process through `AppleKeyboardUIMode` in any defaults domain, so Tab through buttons is checked live only.
+- 2026-10-04: `makeFirstResponder(_:)` leaves the window first responder when the view's `acceptsFirstResponder` is false (it returns true regardless). A name label is a key stop only under Full Keyboard Access, like NSButton. The shell seeds focus only onto `initialFirstResponder`, and only when it `canBecomeKeyView`.
+- 2026-10-04: `EQGainFillCell`, a drawing-only `NSSliderCell` in `EQEditorView.swift`, exists instead of a stock slider because no stock mechanism fills from 0 dB on macOS 14.4 through 25: `neutralValue` (fill from a centre point) is macOS 26 and later only, and tick-marked sliders are untinted by default. The cell keeps the stock bar and knob and only paints the green stretch.
+- 2026-10-06 (owner's call): the dashed pending fill on a Cast fader is retired. A pending Cast volume now glows white on the fader thumb, and a pending Cast sync offset glows white around the drawer's value field; both breathe 0.45 to 1.0 over 1.2 s, drawn flat with no `NSShadow`, and hold still under Reduce Motion. The dashes existed only because flat tints were invisible on the 5 pt track; the 10×17 pt thumb has room for the signal.
+- 2026-10-06: after three animated explorations (light, time, ink) the owner chose light plus ink for the pending Cast holds. The thumb and the sync value field light from inside on `PendingPulse`: 160 ms ramp, then a 1.4 s breath (0.35 to 1 in 0.4 s ease-out, back in 1.0 s ease-in-out); on landing a rise to 1 in 100 ms and a 450 ms exponential fade; Reduce Motion holds 0.7 and goes out with no fade. Thumb halo is three flat rings at 1/2/3 pt (dark 0.34/0.16/0.07, light 0.50/0.26/0.11), body blended toward the light by 0.85 (dark) or 0.42 (light). The light is white halfway to `glow` in dark only; light mode uses `glow`, since white vanishes on the near-white ground. The row's `%` readout and the field's digits breathe `emberText` to `goldText` (light: `goldText` 40 % toward `inkOnFill`, since light `emberText` matches `goldText`'s luminance). The row's slider is now 24 pt tall so the outer ring is not clipped.

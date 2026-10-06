@@ -26,6 +26,7 @@ import AudioutSharedUI
     @Test func allCausesRenderTheirOwnCopy() {
         let causes: [ConnectionFailure.Cause] = [
             .notResponding, .vanished, .refusedOrBusy, .authRequired,
+            .codeRequired, .codeEveryTimeUnsupported, .homeMembersOnly,
             .droppedMidStream, .timedOut, .unknown,
         ]
         for cause in causes {
@@ -99,6 +100,22 @@ import AudioutSharedUI
         #expect(fired)
     }
 
+    // Making `retryClicked` call `onRetry` for `.authRequired`, or leaving the title "Try again", turns it red.
+    @Test func authCauseButtonOpensPasswordEntryInsteadOfRetrying() {
+        let view = ConnectionDiagnosisView(failure: ConnectionFailure(cause: .authRequired), deviceName: "Den")
+        var retried = false
+        var enteredPassword = false
+        view.onRetry = { retried = true }
+        view.onEnterPassword = { enteredPassword = true }
+        #expect(view.test_retryButtonTitle == "Enter Password…")
+        view.test_tapRetry()
+        #expect(enteredPassword)
+        #expect(!retried)
+
+        view.apply(failure: ConnectionFailure(cause: .timedOut), deviceName: "Den")
+        #expect(view.test_retryButtonTitle == "Try again")
+    }
+
     @Test func tapCopyDetailsFiresOnCopyDetailsWithoutTouchingPasteboard() {
         let view = ConnectionDiagnosisView(
             failure: ConnectionFailure(cause: .droppedMidStream, detail: "dropped at 12:00"),
@@ -153,12 +170,12 @@ import AudioutSharedUI
                 "the failure tint must re-resolve on a live light/dark switch")
 
         // And the re-resolved color is exactly the spec §5.6 treatment — the
-        // `panel` seat washed with the failure-exclusive red at ~12% — under
-        // the NEW appearance, not some third value.
+        // failure-exclusive red at the inset-card alpha — under the NEW
+        // appearance, not some third value.
         var expected: CGColor?
         view.effectiveAppearance.performAsCurrentDrawingAppearance {
-            let seat = Tokens.Color.panel
-            expected = (seat.blended(withFraction: 0.12, of: Tokens.Color.failure) ?? seat).cgColor
+            expected = Tokens.Color.failure
+                .withAlphaComponent(PopoverColumnGrid.insetCardTintAlpha).cgColor
         }
         #expect(dark?.components == expected?.components)
     }
@@ -181,15 +198,15 @@ import AudioutSharedUI
         short.layoutSubtreeIfNeeded()
 
         let long = ConnectionDiagnosisView(
-            failure: ConnectionFailure(cause: .authRequired), deviceName: "Loft")
+            failure: ConnectionFailure(cause: .homeMembersOnly), deviceName: "Loft")
         long.frame = NSRect(x: 0, y: 0, width: 320, height: 0)
         long.layoutSubtreeIfNeeded()
 
-        // `.authRequired` became the longest copy in the table when it gained
-        // the Mac receiver-side fix instructions (2026-08-07 — it was the
-        // SHORTEST before, and this test's short fixture); at a fixed narrow
-        // width it must wrap across more lines than the brief `.timedOut`
-        // copy, i.e. a taller fitting height.
+        // `.homeMembersOnly` is the longest copy in the table: it carries the
+        // receiver-side fix instructions that `.authRequired` held before it
+        // became a short "enter the password" line. At a fixed narrow width it
+        // must wrap across more lines than the brief `.timedOut` copy, i.e. a
+        // taller fitting height.
         #expect(long.fittingSize.height > short.fittingSize.height)
     }
 

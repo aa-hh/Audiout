@@ -214,8 +214,11 @@ public enum PopoverColumnGrid {
     /// sized (116 → 140, Warm Signal C1) so the two longest fixed dropdown
     /// titles, "Follows main output" (the app-row bridge phrase, decision 3) and
     /// the count-free "Selected Speakers" (decision m), fit a small-control
-    /// `NSPopUpButton` untruncated (measured fitting width 137 pt).
-    public static let trailingControlWidth: CGFloat = 140
+    /// `NSPopUpButton` untruncated (measured fitting width 137 pt). Grown
+    /// 140 → 200 on 2026-10-04, paid for by `SurfaceLayout.width`, so the
+    /// Mac's, a Bluetooth or a Cast row can show "System" plus one app pill
+    /// beside the 84 pt Offset chip instead of "+2" alone.
+    public static let trailingControlWidth: CGFloat = 200
     /// The FEED column's available text width (Warm Signal v4.1 item 3) — the
     /// same physical slot as `trailingControlWidth` (the reserved-but-empty
     /// trailing column on a bus row, since the membership control moved to the
@@ -533,26 +536,37 @@ public enum PopoverColumnGrid {
     /// Alpha for the selection wash, drawn in ``Tokens/Color/engagedChrome``.
     /// Used by AppRowView's single-selection highlight.
     public static let rowSelectionWashAlpha: CGFloat = 0.18
-    /// Alpha of the gold wash behind a SOUNDING row (`DeviceRowView.isRouteArmed`,
-    /// `AppRowView`'s routed ∧ running) — the iPhone's 12 % (`gold.opacity(0.12)`);
-    /// measured 1.256:1 on dark `panel`, 1.140:1 on the light ground.
+    /// Alpha of the gold wash behind a sounding card or scene tile
+    /// (`GroupsOverviewViewController`, `SetupCardView`; the Mixer rows draw
+    /// none) — the iPhone's 12 % (`gold.opacity(0.12)`); measured 1.256:1 on
+    /// dark `panel`, 1.140:1 on the light ground.
     public static let rowLiveWashAlpha: CGFloat = 0.12
+    /// Alpha of the tint filling an inset notice card (`TintedNoteBackgroundView`):
+    /// the note banner, the thank-you card and the connection diagnosis card.
+    public static let insetCardTintAlpha: CGFloat = 0.12
 
-    // MARK: The engaged fill behind a row accessory (Warm Signal v3 §3.4/§3.5, S3)
+    /// Fills the shared row wash: ``Tokens/Color/engagedChrome`` at `alpha`
+    /// in a rounded rect inset ``selectionHighlightInsetX`` ×
+    /// ``selectionHighlightInsetY`` from `bounds`, radius
+    /// ``selectionHighlightCornerRadius``. Call from `draw(_:)`.
+    public static func fillRowWash(in bounds: NSRect, alpha: CGFloat) {
+        Tokens.Color.engagedChrome.withAlphaComponent(alpha).setFill()
+        NSBezierPath(roundedRect: bounds.insetBy(dx: selectionHighlightInsetX,
+                                                 dy: selectionHighlightInsetY),
+                     xRadius: selectionHighlightCornerRadius,
+                     yRadius: selectionHighlightCornerRadius).fill()
+    }
+
+    // MARK: The engaged fill (Warm Signal v3 §3.4/§3.5, S3)
     //
-    // A row's two engaged accessory marks — the muted speaker and the
-    // Equalizer door on a shaped curve — are ONE rounded square in two
-    // colours (owner's call, 2026-09-04: "the same object in two colours"),
-    // and that square is now part of the SYMBOL rather than a rectangle drawn
-    // behind it. `RowAccessorySymbol` owns the four images and their point
-    // size; the seat's own geometry constants, `engagedSeatSize` and
-    // `engagedSeatCornerRadius`, retired with the two `NSView`s that drew it.
+    // The row accessory marks no longer draw a fill: their engaged square is
+    // part of the symbol (`RowAccessorySymbol`).
 
-    /// Alpha of an ``Tokens/Color/engagedChrome`` engaged fill — subtle,
-    /// because mute is config-adjacent, not a signal. The strongest alpha in
-    /// that token's ladder, since a seat is smaller than a row wash and needs
-    /// the extra weight to read at glyph scale.
-    public static let mutePillFillAlpha: CGFloat = 0.22
+    /// Alpha of an ``Tokens/Color/engagedChrome`` engaged fill on a small
+    /// control: the open sync chip and a pressed toolbar seat. The strongest
+    /// step in that token's ladder (hover 0.10, selection 0.18), since a
+    /// small control needs the extra weight to read.
+    public static let engagedFillAlpha: CGFloat = 0.22
 
     // MARK: Single-selection highlight (AppRowView, 2026-07-17)
     //
@@ -631,7 +645,7 @@ public enum PopoverColumnGrid {
 
     /// Height of the inline rename field. Tall enough to read as a control
     /// (rather than a label with a box around it) while still fitting beside
-    /// the 64 pt icon well in the side-by-side header band.
+    /// the 48 pt icon well in the side-by-side header band.
     public static let titleFieldHeight: CGFloat = 28
     /// Corner radius of the inline rename field — the control radius every
     /// field and button in the app wears.
@@ -699,7 +713,7 @@ public enum PopoverColumnGrid {
     /// Gap between the FEED pill slot and the SYNC chip that follows it.
     public static let btFeedToSyncGap: CGFloat = 4
     /// The sync-capable row's FEED slot: the trailing-control column's LEADING
-    /// portion — everything the chip and their gap leave (140 − 84 − 4 = 52).
+    /// portion — everything the chip and their gap leave (200 − 84 − 4 = 112).
     /// The pills left-align on `feedColumnLeadingFromTrailing`, and this width
     /// is both their ceiling and the feed stack's clipping bound (the stack
     /// masks to its own bounds), so an overlong pill is cut off at the chip's
@@ -716,9 +730,9 @@ public enum PopoverColumnGrid {
     /// syncChipWidth`), so the title LEFT-ALIGNS over its column exactly as
     /// "Source" left-aligns on `feedColumnLeadingFromTrailing` (sibling
     /// anchor, same card header line). At `Tokens.Font.captionMedium`
-    /// "Source" measures 37.7 pt and starts at 154, ending at 116.3;
+    /// "Source" measures 37.7 pt and starts at 214, ending at 176.3;
     /// "Offset" measures 33.6 pt and starts here at 98, ending at 64.4 —
-    /// **18.3 pt of clear air** between them. Re-anchoring the chip
+    /// **78.3 pt of clear air** between them. Re-anchoring the chip
     /// re-anchors this title, which is the point: the title always sits
     /// over the chip it names. This legend prints exactly once, on the card
     /// header, never on a subsection line.
@@ -844,8 +858,12 @@ public enum PopoverColumnGrid {
     /// row type. Sized to clear the readout that hangs off it, the min flex
     /// slack, and the trailing control.
     public static var sliderTrailing: CGFloat {
+        readoutTrailing + readoutWidth + sliderToReadout
+    }
+    /// Distance from the row trailing edge to the `%` readout's trailing edge —
+    /// where rows pin a `RowVolumeFader`'s trailing edge.
+    public static var readoutTrailing: CGFloat {
         trailingControlTrailing + trailingControlWidth + readoutToTrailingControl
-            + readoutWidth + sliderToReadout
     }
     // MARK: Column-center helpers (for the combined section/column header row)
     //

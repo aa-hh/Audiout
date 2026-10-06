@@ -83,7 +83,7 @@ func run() -> Int32 {
     // The real host seam: the surface marks the Scenes screen visible, which
     // opens the B8 refresh gate — without it every `update(devices:)` below
     // only stores its snapshot and the sidebar renders empty.
-    window.setHostVisible(true)
+    window.setVisibleTab(.scenes)
 
     backend.start()
     guard waitForFleet(backend, count: 7) else {
@@ -91,14 +91,14 @@ func run() -> Int32 {
     }
     window.update(devices: backend.devices)
 
-    // --- 1. Baseline sidebar: the device fleet under the pinned Scenes row
-    //        (direction C — saved groups are cards in the content pane now).
+    // --- 1. Baseline sidebar: the device fleet beside the Speakers page
+    //        (saved scenes are cards on the Scenes screen).
     print("\n[1] Baseline sidebar (zero groups)")
     checks.expectEqual(window.test_sidebar.test_sectionTitles,
-                       ["System Audio", "Speakers"],
-                       "'System Audio' and 'Speakers' are the only sections — groups left the sidebar")
-    checks.expect(window.test_sidebar.test_hasGroupsRow,
-                  "the pinned Scenes row is present")
+                       ["System Audio", "Speakers", "Shown in Mixer"],
+                       "'System Audio', 'Speakers' and 'Shown in Mixer' — scenes left the sidebar")
+    checks.expect(window.test_isShowingSpeakersPage,
+                  "with nothing selected the sidebar's content is the Speakers page")
     checks.expectEqual(window.test_sidebar.test_deviceRowCount, 7,
                        "all 7 devices listed (Speakers section lists every device, flat model)")
     checks.expect(!window.test_isShowingEditor, "no editor shows with zero groups")
@@ -106,8 +106,8 @@ func run() -> Int32 {
     // --- 2. Baseline content: with zero groups the AUTO-SELECT rule lands on
     //        the overview, which draws its own zero-groups canvas.
     print("\n[2] Baseline content pane (the overview's empty canvas at zero groups)")
-    checks.expect(window.test_isShowingOverview,
-                  "the card overview shows when there is nothing selected")
+    checks.expect(window.test_isShowingScenesOverview,
+                  "the Scenes screen starts on the card overview")
     checks.expect(window.test_overview.test_isShowingEmptyCanvas,
                   "with zero groups the overview IS the empty state — no separate pane")
 
@@ -140,8 +140,8 @@ func run() -> Int32 {
     if let createdGroup {
         checks.expectEqual(Set(createdGroup.memberIDs), Set([candidateA, candidateB]),
                            "created group's members are exactly the ones checked")
-        checks.expect(window.test_sidebar.test_groupsRowIsSelected,
-                      "the sidebar highlights the pinned Scenes row, not a row of its own")
+        checks.expect(window.test_sidebar.currentSelection == nil,
+                      "the sidebar has no scene row, so creating one leaves it untouched")
         checks.expect(window.test_isShowingEditor, "editor shows the newly-created group")
         checks.expectEqual(window.test_editor.editingGroupID, createdGroup.id,
                            "editor is editing the created group")
@@ -212,36 +212,34 @@ func run() -> Int32 {
     checks.expect(availableNonMembers.allSatisfy { window.test_editor.test_candidateDeviceIDs.contains($0.id) },
                   "every available non-member device is offered as an editor candidate")
 
-    // --- 7. AUTO-SELECT: deselecting lands on the card overview (never a
-    //        blank/no-op pane, and never one group's editor picked for the
-    //        user). The window has no volume UI at all now — master math is
-    //        exercised by the popover harness.
-    print("\n[7] Auto-select: deselecting lands on the card overview")
+    // --- 7. AUTO-SELECT: deselecting the sidebar lands on the Speakers page
+    //        (never a blank/no-op pane). The window has no volume UI at all
+    //        now — master math is exercised by the popover harness.
+    print("\n[7] Auto-select: deselecting lands on the Speakers page")
     window.test_select(nil)
     drain()
-    checks.expect(window.test_isShowingOverview,
-                  "deselecting auto-selects the Scenes overview")
-    checks.expect(!window.test_isShowingEditor, "and opens no group's editor on the user's behalf")
+    checks.expect(window.test_isShowingSpeakersPage,
+                  "deselecting the sidebar lands on the Speakers page")
     checks.expectEqual(window.test_overview.test_cardGroupIDs, [saved.id],
                        "the saved group has a card")
-    checks.expect(window.test_sidebar.test_groupsRowIsSelected,
-                  "the sidebar reflects the auto-selection")
+    checks.expect(window.test_sidebar.currentSelection == nil,
+                  "the sidebar stays deselected")
     checks.expectEqual(controller.activeGroupID, nil,
                        "auto-selection does NOT activate (config-only)")
 
-    // --- 7b. A card opens its editor in place, with the Scenes row still
-    //         selected (the fleet must not move under the pointer).
+    // --- 7b. A card opens its editor in place on the Scenes screen; the
+    //         sidebar is untouched (the fleet must not move under the pointer).
     print("\n[7b] Clicking a card pushes that group's editor")
     window.test_overview.test_clickCard(id: saved.id)
     drain()
     checks.expect(window.test_isShowingEditor, "the card opened the editor")
     checks.expectEqual(window.test_editor.editingGroupID, saved.id,
                        "the editor is editing the clicked card's group")
-    checks.expect(window.test_sidebar.test_groupsRowIsSelected,
-                  "the Scenes row stays selected throughout the push")
+    checks.expect(window.test_sidebar.currentSelection == nil,
+                  "the push leaves the sidebar untouched")
     window.test_editor.test_goBack()
     drain()
-    checks.expect(window.test_isShowingOverview, "'‹ Scenes' pops back to the card field")
+    checks.expect(window.test_isShowingScenesOverview, "'‹ Scenes' pops back to the card field")
 
     // --- 8. Cancelling a presented create sheet clears it.
     print("\n[8] Cancelling the create sheet clears it")
@@ -270,11 +268,11 @@ func run() -> Int32 {
     window.test_select(nil)
     drain()
     checks.expect(!window.test_isShowingDetail, "deselecting clears the detail pane")
-    checks.expect(window.test_isShowingOverview,
-                  "deselecting auto-selects the card overview (never a blank pane)")
+    checks.expect(window.test_isShowingSpeakersPage,
+                  "deselecting lands on the Speakers page (never a blank pane)")
 
     // --- 10. Delete: removes the group, the overview returns as its own empty
-    //        canvas, the pinned Scenes row stays.
+    //        canvas.
     print("\n[10] Delete group → deleteGroup, the overview's empty canvas returns")
     window.test_select(.group(id: saved.id))
     drain()
@@ -283,12 +281,10 @@ func run() -> Int32 {
     drain()
     checks.expectEqual(controller.groups.count, 0, "deleteGroup removed the group")
     checks.expect(!window.test_isShowingEditor, "the editor clears after delete")
-    checks.expect(window.test_isShowingOverview,
+    checks.expect(window.test_isShowingScenesOverview,
                   "with the last group gone, the overview returns")
     checks.expect(window.test_overview.test_isShowingEmptyCanvas,
                   "drawing its own zero-groups canvas")
-    checks.expect(window.test_sidebar.test_hasGroupsRow,
-                  "the pinned Scenes row stays (this screen is scenes-configuration only)")
 
     print("\n----------------------------------------")
     if checks.failures == 0 {

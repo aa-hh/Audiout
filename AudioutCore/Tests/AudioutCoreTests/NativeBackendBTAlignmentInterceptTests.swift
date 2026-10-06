@@ -181,11 +181,16 @@ extension SerializedSharedState {
         func start() {}
         func stop() {}
         func setAlignTickMode(_ mode: AlignTickMode) { lock.withLock { _modes.append(mode) } }
-        func stageCompanionMicProbe(staggered: Bool, referenceOnEngine: Bool,
-                                    downWindowUID: String?, upWindowUID: String?,
+        func stageCompanionMicProbe(routed: Bool, referenceOnEngine: Bool,
+                                    targetWindowUID: String?, referenceWindowUID: String?,
                                     onStarted: @escaping () -> Void,
                                     onFinished: @escaping () -> Void) {
             lock.withLock { _stages += 1 }
+            onStarted()
+        }
+        func stageWizardMicProbe(levelStepDB: @escaping () -> Int,
+                                 onStarted: @escaping () -> Void,
+                                 onFinished: @escaping () -> Void) {
             onStarted()
         }
     }
@@ -351,7 +356,8 @@ extension SerializedSharedState {
         engine: RecordingEngine? = nil,
         discovery: FakeDiscovery? = nil,
         perAppCapture: PerAppCaptureCoordinator? = nil,
-        delayClock: @escaping NativeBackend.DelayClock = NativeBackend.dispatchDelayClock
+        delayClock: @escaping NativeBackend.DelayClock = NativeBackend.dispatchDelayClock,
+        uptimeClock: @escaping NativeBackend.UptimeClock = NativeBackend.dispatchUptimeClock
     ) -> (NativeBackend, FakeBTEnumerator, SpyBTSink, EventCollector) {
         let bt = FakeBTEnumerator()
         let backend = NativeBackend(
@@ -364,11 +370,17 @@ extension SerializedSharedState {
             ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
             injectedPerAppCapture: perAppCapture,
             delayClock: delayClock,
+            uptimeClock: uptimeClock,
             systemDefaultOutputIsAirPlayClass: { false },
             aggregateControl: NoOpAggregateControl(),
             handoffWatcherFactory: { onBlockedAttempt in
                 AirPlayHandoffWatcher(spawn: NoOpLogStream(), onBlockedAttempt: onBlockedAttempt)
             })
+        // The 4 s production start deadline is wall time, and a stalled GitHub
+        // runner has taken longer than that to answer the holds, so every start
+        // was refused as "The speaker pair changed". A test about the deadline
+        // itself sets a short one.
+        backend.companionAuditionPreparationSeconds = 60
         let sink = SpyBTSink()
         backend.btSyncedSinkFactory = { sink }
         backend.btDeviceIDForUID = { uid in AudioObjectID(1000 + UInt32(abs(uid.hashValue % 1000))) }
@@ -426,9 +438,14 @@ extension SerializedSharedState {
     }
 
     /// Replacing the wizard pacer with capture-fed companion ticks loses clicks when music is paused.
-    @Test(.enabled(if: ProcessInfo.processInfo.environment["CI"] == nil, "Quarantined on GitHub runners 2026-10-04: the audition start reports 'The speaker pair changed before clicks could start' and the test runs 140 to 160 s on the 3-core runner (three of four runs across PRs #228 and #264); passes locally in 18 s. Issue #258.")) @MainActor func auditionUsesIndependentWizardPacerAndKeepsOnlyPairAudible() async {
+    @Test @MainActor func auditionUsesIndependentWizardPacerAndKeepsOnlyPairAudible() async {
         let dir = scratchDir
-        let (backend, bt, sink, _) = makeBackend(storeDirectory: dir)
+        // The audition's start deadline runs on this clock, so a stalled runner cannot expire it.
+        let clock = ManualDelayClock()
+        let (backend, bt, sink, _) = makeBackend(
+            storeDirectory: dir,
+            delayClock: clock.queueHoppingClock,
+            uptimeClock: clock.uptime)
         defer { backend.stop() }
         let capture = ProbeStagingCapture()
         backend.captureCoordinator = capture
@@ -814,9 +831,13 @@ extension SerializedSharedState {
         engine.releaseWrites()
         await SuiteWait.until { backend.startCompanionAlignmentProbe(targetID: self.btMove.id,
             referenceID: self.btFlip.id, onStarted: {}, onFinished: {}) == nil }
+        await SuiteWait.until { engine.writes.last { $0.0 == ap1.outputID }?.1 == -1.0 }
+        #expect(engine.writes.last { $0.0 == ap1.outputID }?.1 == -1.0,
+                "the phone's probe silences every speaker outside the pair")
+        backend.cancelCompanionAlignmentProbe(targetID: btMove.id)
+        await SuiteWait.until { engine.writes.last { $0.0 == ap1.outputID }?.1 != -1.0 }
         #expect(engine.writes.last { $0.0 == ap1.outputID }?.1 != -1.0,
                 "the final write uses the user's current level, after the old hold finishes")
-        backend.cancelCompanionAlignmentProbe(targetID: btMove.id)
         #expect(start.value != .some(nil), "the cancelled preparation cannot report success late")
     }
 
@@ -1033,7 +1054,7 @@ extension SerializedSharedState {
         // run let the 4 s stop deadline expire while the restoration was held.
         let deadlines = ManualDelayClock()
         let (backend, bt, _, _) = makeBackend(engine: engine, discovery: discovery,
-                                              delayClock: deadlines.clock)
+                                              delayClock: deadlines.clock, uptimeClock: deadlines.uptime)
         defer { engine.releaseWrites(); backend.stop() }
         backend.captureCoordinator = ProbeStagingCapture()
         backend.start()
@@ -1073,10 +1094,15 @@ extension SerializedSharedState {
     @Test @MainActor func theLifetimeCallbackFiresOnceAfterTheRealDrainNotTheTimeout() async {
         let engine = RecordingEngine()
         let discovery = FakeDiscovery()
-        let (backend, bt, _, _) = makeBackend(engine: engine, discovery: discovery)
+        let clock = ManualDelayClock()
+        // Each fired job hops to the queue the backend named: the Bluetooth
+        // render poll also runs on this clock and must run on `stateQueue`.
+        let (backend, bt, _, _) = makeBackend(
+            engine: engine, discovery: discovery,
+            delayClock: clock.queueHoppingClock,
+            uptimeClock: clock.uptime)
         defer { engine.releaseWrites(); backend.stop() }
         backend.captureCoordinator = ProbeStagingCapture()
-        backend.companionAuditionStopSeconds = 0.1
         backend.start()
         let ap1 = airPlay1()
         discovery.fire(.appeared(ap1))
@@ -1109,6 +1135,10 @@ extension SerializedSharedState {
         engine.blockWrites = true
         let stop = LockedBox<String??>(nil)
         backend.endCompanionAlignmentAudition(targetID: btMove.id) { stop.value = .some($0) }
+        // The stop refuses on its timeout because the test moved the clock past
+        // it, not because real time elapsed.
+        await SuiteWait.until { engine.heldCount > 0 }
+        clock.advance(by: backend.companionAuditionStopSeconds)
         await SuiteWait.until { stop.value != nil }
         #expect(stop.value.flatMap { $0 }?.contains("took too long") == true)
         #expect(released.value == 0, "a refused stop does not consume the lifetime signal")
@@ -1892,6 +1922,24 @@ extension SerializedSharedState {
         backend.setBTWizardTickActive(true, btTargetDeviceID: nil, btReferenceDeviceID: nil)
         #expect(backend.localSinkReferenceDelayMs() == 500)
         backend.setBTWizardTickActive(false, btTargetDeviceID: nil, btReferenceDeviceID: nil)
+    }
+
+    /// The mic probe's listening tail is sized from the room delay `onStarted`
+    /// reports. Turns red if `NativeBackend.stageBTMicProbe` hands `onStarted`
+    /// the delay in milliseconds, or anything but the room delay.
+    @Test func theWizardMicProbeReportsTheRoomDelayInSeconds() {
+        let (backend, _, _, _) = makeBackend()
+        defer { backend.stop() }
+        backend.captureCoordinator = ProbeStagingCapture()
+        backend.start()
+        let reported = LockedBox<TimeInterval?>(nil)
+        backend.stageBTMicProbe(levelStepDB: { 0 },
+                                onStarted: { reported.value = $0 },
+                                onFinished: {})
+        waitFor { reported.value != nil }
+        let roomMs = backend.localSinkReferenceDelayMs()
+        #expect(roomMs > 0, "positive control: a zero room delay reads the same in any unit")
+        #expect(reported.value == Double(roomMs) / 1000)
     }
 
     /// Keep writes the measurement BEFORE the reference comes down, so the new

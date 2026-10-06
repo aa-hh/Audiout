@@ -179,6 +179,29 @@ import AudioutProtocol
         #expect(after.devices.first { $0.id == "speaker-b" }?.isMuted == true)
     }
 
+    // Turns red if `GroupController.setMuted` stops forwarding the Mac to `backend.setMuted`, or the phone snapshot stops reporting the Mac's mute.
+    @Test func macRowIsMutedFollowsTheHardwareMute() async throws {
+        let backend = try await makeBackend()
+        let controller = makeGroupController(backend: backend)
+        let appRouting = makeAppRouting()
+
+        controller.setMuted(true, for: "local")
+        await SuiteWait.until("local to read muted on the backend") {
+            backend.devices.first { $0.id == "local" }?.isMuted == true
+        }
+        let snapshot = CompanionSnapshotBuilder.build(
+            devices: backend.devices, groupController: controller, appRouting: appRouting,
+            excludedBundleIDs: noExcludedBundleIDs, iconFor: iconFor, addableApps: noAddableApps,
+            runningRouted: noRunningRouted, liveRoutedAppNames: noLiveRoutedAppNames,
+            localFallbackActive: false, takeoverStatus: nil, serverName: defaultServerName,
+            connectVolume: defaultConnectVolume, connectVolumeMin: defaultConnectVolumeMin,
+            connectVolumeMax: defaultConnectVolumeMax, startBufferMs: defaultStartBufferMs,
+            startBufferOptionsMs: defaultStartBufferOptionsMs
+        )
+        let mac = try #require(snapshot.devices.first { $0.id == "local" })
+        #expect(mac.isMuted == true)
+    }
+
     // MARK: Trap 3 — isMainOutMember
 
     @Test func deviceIsMainOutMemberComesFromGroupControllerIsMainOutMemberNotSelectedDevices() async throws {
@@ -352,13 +375,94 @@ import AudioutProtocol
 
     // MARK: Connection fields (D9 full parity)
 
+    /// Dropping `failureCause`, or sending `credentialKind` for a speaker that
+    /// already has a stored password (or never sending it), turns it red;
+    /// so does sending a password wait as `"failed"` or with a cause, or sending
+    /// no `"onScreenCode"` credential kind for a code speaker with no pairing.
     @Test func connectionCarriesFailureHeadlineAndSuggestion() async throws {
         let backend = try await makeBackend()
         let controller = makeGroupController(backend: backend)
         let appRouting = makeAppRouting()
 
+        func build(storedPassword: Bool, awaitingPassword: Bool = false,
+                   access: AirPlayAccess = .password, cause: ConnectionFailure.Cause? = nil) -> Snapshot {
+            CompanionSnapshotBuilder.build(
+                devices: backend.devices.map { device in
+                    var device = device
+                    if device.id == "speaker-b" {
+                        device.airPlayAccess = access
+                        device.hasStoredPassword = storedPassword
+                        if awaitingPassword { device.connectionState = .awaitingPassword }
+                        if let cause { device.connectionState = .failed(ConnectionFailure(cause: cause)) }
+                    }
+                    return device
+                },
+                groupController: controller, appRouting: appRouting,
+                excludedBundleIDs: noExcludedBundleIDs, iconFor: iconFor, addableApps: noAddableApps,
+                runningRouted: noRunningRouted, liveRoutedAppNames: noLiveRoutedAppNames,
+                localFallbackActive: false, takeoverStatus: nil, serverName: defaultServerName,
+                connectVolume: defaultConnectVolume, connectVolumeMin: defaultConnectVolumeMin,
+                connectVolumeMax: defaultConnectVolumeMax, startBufferMs: defaultStartBufferMs,
+                startBufferOptionsMs: defaultStartBufferOptionsMs
+            )
+        }
+        let snapshot = build(storedPassword: false)
+        let speakerB = try #require(snapshot.devices.first { $0.id == "speaker-b" })
+        let failure = ConnectionFailure(cause: .refusedOrBusy)
+        #expect(speakerB.connection.state == "failed")
+        #expect(speakerB.connection.failureHeadline == failure.headline)
+        #expect(speakerB.connection.failureSuggestion == failure.suggestion)
+        #expect(speakerB.connection.failureCause == "refusedOrBusy")
+        #expect(speakerB.connection.credentialKind == "password")
+
+        // A device with no failure carries no headline/suggestion/cause.
+        let local = try #require(snapshot.devices.first { $0.id == "local" })
+        #expect(local.connection.state == "off")
+        #expect(local.connection.failureHeadline == nil)
+        #expect(local.connection.failureSuggestion == nil)
+        #expect(local.connection.failureCause == nil)
+        #expect(local.connection.credentialKind == nil)
+
+        let stored = try #require(build(storedPassword: true).devices.first { $0.id == "speaker-b" })
+        #expect(stored.connection.credentialKind == nil)
+
+        let waiting = try #require(
+            build(storedPassword: false, awaitingPassword: true).devices.first { $0.id == "speaker-b" })
+        #expect(waiting.connection.state == "awaitingPassword")
+        #expect(waiting.connection.credentialKind == "password")
+        #expect(waiting.connection.access == "password")
+        #expect(waiting.connection.failureHeadline == nil)
+        #expect(waiting.connection.failureSuggestion == nil)
+        #expect(waiting.connection.failureCause == nil)
+
+        let code = try #require(
+            build(storedPassword: false, access: .onScreenCode).devices.first { $0.id == "speaker-b" })
+        #expect(code.connection.credentialKind == "onScreenCode")
+        let paired = try #require(
+            build(storedPassword: true, access: .onScreenCode).devices.first { $0.id == "speaker-b" })
+        #expect(paired.connection.credentialKind == nil)
+        let everyTime = try #require(
+            build(storedPassword: false, access: .onScreenCodeEveryTime, cause: .codeEveryTimeUnsupported)
+                .devices.first { $0.id == "speaker-b" })
+        #expect(everyTime.connection.access == "onScreenCodeEveryTime")
+        #expect(everyTime.connection.credentialKind == nil)
+        #expect(everyTime.connection.failureCause == "codeEveryTimeUnsupported")
+    }
+
+    /// Dropping `access` from the `off` or `failed` state in
+    /// `CompanionSnapshotBuilder.connectionInfo` turns it red.
+    @Test func connectionCarriesTheSpeakersAccessKind() async throws {
+        let backend = try await makeBackend()
+        let controller = makeGroupController(backend: backend)
+        let appRouting = makeAppRouting()
+
         let snapshot = CompanionSnapshotBuilder.build(
-            devices: backend.devices, groupController: controller, appRouting: appRouting,
+            devices: backend.devices.map { device in
+                var device = device
+                device.airPlayAccess = device.id == "speaker-b" ? .password : .open
+                return device
+            },
+            groupController: controller, appRouting: appRouting,
             excludedBundleIDs: noExcludedBundleIDs, iconFor: iconFor, addableApps: noAddableApps,
             runningRouted: noRunningRouted, liveRoutedAppNames: noLiveRoutedAppNames,
             localFallbackActive: false, takeoverStatus: nil, serverName: defaultServerName,
@@ -366,17 +470,12 @@ import AudioutProtocol
             connectVolumeMax: defaultConnectVolumeMax, startBufferMs: defaultStartBufferMs,
             startBufferOptionsMs: defaultStartBufferOptionsMs
         )
-        let speakerB = try #require(snapshot.devices.first { $0.id == "speaker-b" })
-        let failure = ConnectionFailure(cause: .refusedOrBusy)
-        #expect(speakerB.connection.state == "failed")
-        #expect(speakerB.connection.failureHeadline == failure.headline)
-        #expect(speakerB.connection.failureSuggestion == failure.suggestion)
-
-        // A device with no failure carries no headline/suggestion.
-        let local = try #require(snapshot.devices.first { $0.id == "local" })
-        #expect(local.connection.state == "off")
-        #expect(local.connection.failureHeadline == nil)
-        #expect(local.connection.failureSuggestion == nil)
+        let protected = try #require(snapshot.devices.first { $0.id == "speaker-b" })
+        #expect(protected.connection.state == "failed")
+        #expect(protected.connection.access == "password")
+        let openSpeaker = try #require(snapshot.devices.first { $0.id == "local" })
+        #expect(openSpeaker.connection.state == "off")
+        #expect(openSpeaker.connection.access == "open")
     }
 
     // MARK: Passthrough fields
@@ -408,6 +507,101 @@ import AudioutProtocol
         #expect(snapshot.settings.startBufferMs == 1500)
         #expect(snapshot.settings.startBufferOptionsMs == [1000, 1500, 2250])
         #expect(snapshot.devices.first { $0.id == "speaker-a" }?.iconSymbolName == "icon:speaker-a")
+        // Not passed above: every device reads as from an older Mac, and the
+        // two snapshot-level additions are empty.
+        #expect(snapshot.devices.allSatisfy { $0.mixerVisibility == nil && $0.isVisibleInMixer == nil })
+        #expect(snapshot.missingSpeakers == [])
+        #expect(snapshot.note == nil)
+    }
+
+    /// Turns red if `deviceState(for:)` stops reading the library record for
+    /// `mixerVisibility`/`isVisibleInMixer`, or `build` drops, reorders or
+    /// renames the missing speakers or the note it was handed.
+    @Test func speakerVisibilityMissingSpeakersAndTheNoteReachTheSnapshot() async throws {
+        let backend = try await makeBackend()
+        let controller = makeGroupController(backend: backend)
+        let appRouting = makeAppRouting()
+        let library = SpeakerLibraryController(store: SpeakerLibraryStore(directory: tempDirectory()),
+                                               loadPersisted: false)
+        library.update(liveDevices: backend.devices, groups: [])
+        library.setVisibility(.hideWhenNotInUse, for: "speaker-b")
+
+        let snapshot = CompanionSnapshotBuilder.build(
+            devices: backend.devices, groupController: controller, appRouting: appRouting,
+            excludedBundleIDs: noExcludedBundleIDs, iconFor: iconFor, addableApps: noAddableApps,
+            runningRouted: noRunningRouted, liveRoutedAppNames: noLiveRoutedAppNames,
+            localFallbackActive: false, takeoverStatus: nil, serverName: defaultServerName,
+            connectVolume: defaultConnectVolume, connectVolumeMin: defaultConnectVolumeMin,
+            connectVolumeMax: defaultConnectVolumeMax, startBufferMs: defaultStartBufferMs,
+            startBufferOptionsMs: defaultStartBufferOptionsMs,
+            speakerRecord: { library.record(for: $0.id) },
+            missingSpeakers: [(id: "gone-2", name: "Garage", kind: "sonos"),
+                              (id: "gone-1", name: "Attic", kind: nil)],
+            note: (text: "Audiout isn't your Mac's output device.", severity: "warning")
+        )
+
+        let hidden = try #require(snapshot.devices.first { $0.id == "speaker-b" })
+        #expect(hidden.mixerVisibility == "hideWhenNotInUse")
+        #expect(hidden.isVisibleInMixer == false)
+        let local = try #require(snapshot.devices.first { $0.id == "local" })
+        #expect(local.mixerVisibility == "whenAvailable")
+        #expect(local.isVisibleInMixer == true)
+        #expect(snapshot.missingSpeakers == [MissingSpeakerState(id: "gone-1", name: "Attic", kind: nil),
+                                             MissingSpeakerState(id: "gone-2", name: "Garage", kind: "sonos")])
+        #expect(snapshot.note == NoteState(text: "Audiout isn't your Mac's output device.", severity: "warning"))
+    }
+
+    /// Turns red if `deviceState(for:)` stops matching the popover's sounding
+    /// rule: Main Out membership or a live routed app, a connected session
+    /// (This Mac counts at `.off`), the speaker's own mute, or Main Audio's
+    /// mute for a member only.
+    @Test func isPlayingNeedsAConnectedUnmutedMemberAndMainAudioUnmuted() async throws {
+        let backend = try await makeBackend()
+        let controller = makeGroupController(backend: backend)
+        let appRouting = makeAppRouting()
+        controller.setDeviceSelected("speaker-a", true)
+        controller.setDeviceSelected("speaker-b", true)
+        try #require(controller.isMainOutMember("speaker-a") && controller.isMainOutMember("speaker-b"))
+
+        func playing(_ devices: [Device], in controller: GroupController,
+                     liveRoutedAppNames: [String: [String]] = [:]) -> [String: Bool?] {
+            let snapshot = CompanionSnapshotBuilder.build(
+                devices: devices, groupController: controller, appRouting: appRouting,
+                excludedBundleIDs: noExcludedBundleIDs, iconFor: iconFor, addableApps: noAddableApps,
+                runningRouted: noRunningRouted, liveRoutedAppNames: liveRoutedAppNames,
+                localFallbackActive: false, takeoverStatus: nil, serverName: defaultServerName,
+                connectVolume: defaultConnectVolume, connectVolumeMin: defaultConnectVolumeMin,
+                connectVolumeMax: defaultConnectVolumeMax, startBufferMs: defaultStartBufferMs,
+                startBufferOptionsMs: defaultStartBufferOptionsMs
+            )
+            return Dictionary(uniqueKeysWithValues: snapshot.devices.map { ($0.id, $0.isPlaying) })
+        }
+        let connected = [
+            Device(id: "speaker-a", name: "Speaker A", kind: .sonos, connectionState: .connected),
+            Device(id: "speaker-b", name: "Speaker B", kind: .homePod, connectionState: .connected),
+        ]
+
+        controller.setMuted(true, for: "speaker-b")
+        let mixed = playing(connected, in: controller)
+        #expect(mixed["speaker-a"] == true, "connected, unmuted member")
+        #expect(mixed["speaker-b"] == false, "muted member")
+
+        let unconnected = playing([Device(id: "speaker-a", name: "Speaker A", kind: .sonos,
+                                          connectionState: .connecting)], in: controller)
+        #expect(unconnected["speaker-a"] == false, "member not connected yet")
+
+        controller.setMainOutMuted(true)
+        let routedOnly = Device(id: "speaker-c", name: "Speaker C", kind: .sonos, connectionState: .connected)
+        let mainMuted = playing(connected + [routedOnly], in: controller,
+                                liveRoutedAppNames: ["speaker-c": ["Music"]])
+        #expect(mainMuted["speaker-a"] == false, "Main Audio muted")
+        #expect(mainMuted["speaker-c"] == true, "a live routed app plays whatever Main Audio does")
+
+        let macOnly = makeGroupController(backend: backend)
+        macOnly.setDeviceSelected("local", true)
+        try #require(macOnly.isMainOutMember("local"))
+        let mac = playing([Device(id: "local", name: "Mac", kind: .localMac, isLocalDevice: true)], in: macOnly)
+        #expect(mac["local"] == true, "This Mac sits at .off while it plays Main Audio")
     }
 
     // MARK: Main Out target mapping

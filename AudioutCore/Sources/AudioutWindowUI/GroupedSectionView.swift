@@ -3,35 +3,32 @@
 import AppKit
 import AudioutSharedUI
 
-/// The Groups screen's ONE container shape (the macOS System Settings grouped
-/// idiom), in four modes.
+/// The Groups screen's container shape (the macOS System Settings grouped
+/// idiom), in three modes.
 ///
-/// - ``Style/card`` — the page's ONE INSTRUMENT: a rounded
-///   `Tokens.Color.raised` fill with a 1 pt `Tokens.Color.containerEdge` edge,
-///   at the panel radius. On dark, `raised` against the pane's `panel`
+/// - ``Style/card`` — a rounded `Tokens.Color.raised` fill with a 1 pt
+///   `Tokens.Color.containerEdge` edge, at the panel radius unless a page
+///   overrides it (``radiusOverride``). On dark, `raised` against the pane's `panel`
 ///   measures 1.07:1 — below the surface floor — so the EDGE, not the fill, is
 ///   what carries the separation (`containerEdge` vs `raised`: 1.553:1 dark /
 ///   2.020:1 light). Its interior rules are `containerEdge` too: `hairline` on
-///   `raised` is 1.154:1 dark, under any floor. Exactly one box (`.card` or
-///   `.well`) per page: the group editor's Speakers checklist stays `.card`;
-///   both Equalizer pages wear `.well`.
-/// - ``Style/well`` — the same one-instrument role, recessed instead of
+///   `raised` is 1.154:1 dark, under any floor. The group editor's Speakers
+///   checklist and the Speakers page list keep the panel radius; the speaker
+///   page and the Main Audio page set the row radius on every box.
+/// - ``Style/well`` — the same role, recessed instead of
 ///   raised: `Tokens.Color.well` fill (DESIGN.md "Elevation & Depth" — the
 ///   one neutral that stays visibly sunk even where `raised` flattens to the
-///   paper ground in light), the same `containerEdge` edge and panel radius
-///   as `.card`, plus a 1 pt `Tokens.Color.shadow` @ 0.18 band along the
-///   visual top edge — the flat, clipped inset-shade recipe `WarmFaderCell`'s
-///   trough (`WarmFaderCell.swift:87-95`) already draws, no blur, no
+///   paper ground in light), the same `containerEdge` edge and default panel
+///   radius as `.card`, plus a 1 pt `Tokens.Color.shadow` @
+///   `Tokens.Color.insetShadeAlpha` band along the visual top edge — the
+///   flat, clipped inset-shade recipe `WarmFaderCell`'s trough
+///   (`WarmFaderCell.swift:87-95`) already draws, no blur, no
 ///   `NSShadow`. Both Equalizer pages wear it —
 ///   the device detail page and Main Audio: in light, `raised` measures
 ///   identical to the `canvas`/`panel` ground they sit on, so a card there is
 ///   a 1 pt outline around nothing.
-/// - ``Style/panel`` — a stroked-panel row list (the iPhone companion's
-///   PanelRow): `panel` fill, 1 pt `containerEdge` edge at the row radius,
-///   `hairline` dividers. The pane ground is `panel` too, so the stroke is the
-///   card. The fact lists on the detail pages wear it.
 /// - ``Style/bare`` — a DIVIDER-ONLY list: no fill, no border, just the inset
-///   hairlines between rows. What the header bands wear.
+///   hairlines between rows.
 ///
 /// A box is earned by holding a different instrument, never by length.
 ///
@@ -44,12 +41,14 @@ import AudioutSharedUI
 ///   touching the container's edges. A `.card` or `.well` host may use
 ///   `GroupsPaneLayout.cardContentInset` instead when its content is an
 ///   instrument rather than a stack of text rows.
-/// - **Inset dividers** starting at `contentLeadingInset` — the standard
+/// - **Inset dividers** starting at `contentLeadingInset` and stopping
+///   `contentTrailingInset` short of the trailing edge — the standard
 ///   grouped-list separator treatment, never full-bleed under the corners. A
 ///   section holding fewer than two rows draws none, which is what lets this
 ///   same view serve as a plain header band.
-/// - **A radius large enough to read as a shape** in `.card`/`.well`; the
-///   first draft's 6 pt radius rendered visually square.
+/// - **A radius large enough to read as a shape** in `.card`/`.well` (the
+///   panel radius by default, the row radius where a page sets
+///   ``radiusOverride``); the first draft's 6 pt radius rendered visually square.
 ///
 /// `draw(_:)`-based, not a frozen layer color — `DeviceIconWellView`'s pattern:
 /// every token re-resolves per appearance/Increase-Contrast on each paint, and
@@ -75,25 +74,25 @@ final class GroupedSectionView: NSView {
         /// `containerEdge` edge, plus a top-edge inset shade — for a ground
         /// where `raised` would flatten to the surface it sits on.
         case well
-        /// A stroked-panel row list (iOS PanelRow): `panel` fill, 1 pt
-        /// `containerEdge` edge at the row radius, `hairline` dividers. The
-        /// pane ground is `panel` too, so the stroke is the card.
-        case panel
         /// A divider-only list: no fill, no border.
         case bare
     }
 
     /// Defaults to ``Style/card`` so a section is a card unless a page says
-    /// otherwise — there is at most one per page, and it is the loud one.
+    /// otherwise. A page may hold more than one box: the speaker page holds the
+    /// Equalizer well and the list card.
     var style: Style = .card { didSet { needsDisplay = true } }
 
+    /// A page's own corner radius for this box. Nil keeps the style's default.
+    var radiusOverride: CGFloat? { didSet { needsDisplay = true } }
+
     /// The card and the well are both a grouped stack, so they take the panel
-    /// rung; a `.panel` list is a row, so it takes the row rung. `.bare` draws
-    /// no shape, so its value is never read.
+    /// rung. `.bare` draws no shape, so its value is never read.
+    /// ``radiusOverride`` wins when set.
     private var cornerRadius: CGFloat {
+        if let radiusOverride { return radiusOverride }
         switch style {
         case .card, .well: return Tokens.Layout.Radius.panel
-        case .panel: return Tokens.Layout.Radius.row
         case .bare: return 0
         }
     }
@@ -102,14 +101,14 @@ final class GroupedSectionView: NSView {
     static let verticalPadding: CGFloat = 6
     private static let hairlineThickness: CGFloat = 1
     private static let borderWidth: CGFloat = 1
-    /// Alpha of `.well`'s top-edge inset shade (`Tokens.Color.shadow` over
-    /// the well fill) — same alpha `WarmFaderCell`'s trough shade uses.
-    private static let wellTopShadeAlpha: CGFloat = 0.18
 
     /// Where the row's ICON starts, measured from this view's own leading edge
     /// — the inset dividers align to it. Set by the controller so it stays
     /// derived from the shared grid rather than re-typed here.
     var contentLeadingInset: CGFloat = 0 { didSet { needsDisplay = true } }
+
+    /// How far the dividers stop short of this view's trailing edge.
+    var contentTrailingInset: CGFloat = 0 { didSet { needsDisplay = true } }
 
     /// The rows currently laid out over this view, in top-to-bottom order —
     /// read for LIVE frames on every draw, exactly like
@@ -121,20 +120,14 @@ final class GroupedSectionView: NSView {
 
     override func draw(_ dirtyRect: NSRect) {
         switch style {
-        case .card, .well, .panel:
+        case .card, .well:
             // Stroke sits ON the boundary, so inset by half its width to keep
             // the 1pt line crisp instead of straddling the pixel edge.
             let borderRect = bounds.insetBy(dx: Self.borderWidth / 2, dy: Self.borderWidth / 2)
             let radius = cornerRadius
             let shape = NSBezierPath(roundedRect: borderRect,
                                      xRadius: radius, yRadius: radius)
-            let fill: NSColor
-            switch style {
-            case .card: fill = Tokens.Color.raised
-            case .well: fill = Tokens.Color.well
-            default: fill = Tokens.Color.panel
-            }
-            fill.setFill()
+            (style == .card ? Tokens.Color.raised : Tokens.Color.well).setFill()
             shape.fill()
 
             if style == .well {
@@ -147,7 +140,7 @@ final class GroupedSectionView: NSView {
                 // shaded lip on top of the edge stroke below.
                 NSGraphicsContext.current?.saveGraphicsState()
                 shape.addClip()
-                Tokens.Color.shadow.withAlphaComponent(Self.wellTopShadeAlpha).setFill()
+                Tokens.Color.shadow.withAlphaComponent(Tokens.Color.insetShadeAlpha).setFill()
                 let topEdgeY = isFlipped ? borderRect.minY : borderRect.maxY - Self.hairlineThickness
                 NSRect(x: borderRect.minX, y: topEdgeY,
                       width: borderRect.width, height: Self.hairlineThickness).fill()
@@ -164,7 +157,7 @@ final class GroupedSectionView: NSView {
         guard rows.count > 1 else { return }
         // `hairline` on `raised` measures 1.154:1 dark — invisible — so the
         // card (and the well beside it) rules its interior with
-        // `containerEdge` too. On `panel` and on the bare ground `hairline`
+        // `containerEdge` too. On the bare ground `hairline`
         // is 1.314:1 dark / 1.512:1 light and stands, so the lighter weight
         // stays where it reads.
         (style == .card || style == .well ? Tokens.Color.containerEdge : Tokens.Color.hairline).setFill()
@@ -183,7 +176,7 @@ final class GroupedSectionView: NSView {
             // rounded corners and read as a slab, not a list.
             let lineRect = NSRect(x: bounds.minX + contentLeadingInset,
                                   y: midY - Self.hairlineThickness / 2,
-                                  width: bounds.width - contentLeadingInset,
+                                  width: bounds.width - contentLeadingInset - contentTrailingInset,
                                   height: Self.hairlineThickness)
             NSBezierPath(rect: lineRect).fill()
         }

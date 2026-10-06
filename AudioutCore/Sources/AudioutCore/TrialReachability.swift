@@ -16,7 +16,11 @@ import Network
 /// Deliberately narrow. It watches for exactly one thing, and cancels itself
 /// once no later path update could produce a registration — a trial already
 /// registered or already over, or a Mac holding a licence key, which is a
-/// bought copy or a converted trial and never starts a trial again.
+/// bought copy or a converted trial and never starts a trial again. A stored
+/// key with no verdict is also watched, and asked about when a usable path
+/// appears; the monitor delivers the current path on start, so at launch that
+/// key is asked about here as well as by the launch validation, and that
+/// duplicate request is accepted.
 public final class TrialReachability {
 
     /// What a path update leads to. Split out from the monitor so the decision
@@ -27,6 +31,9 @@ public final class TrialReachability {
         /// Tell the server about the trial now.
         case register
 
+        /// Ask the server about the stored key that has no verdict.
+        case validate
+
         /// Nothing to do with this update, but keep watching.
         case wait
 
@@ -36,15 +43,21 @@ public final class TrialReachability {
 
     private let settings: AppSettings
     private let onRegistered: () -> Void
+    private let onValidated: () -> Void
     private let monitor = NWPathMonitor()
 
     /// `onRegistered` runs on the main queue after the server has answered and
     /// its key is stored. The caller owns what a new key means — the check-in,
     /// the validate, the update feed's header — so none of that is decided
     /// here.
-    public init(settings: AppSettings, onRegistered: @escaping () -> Void = {}) {
+    /// `onValidated` runs on the main queue after the server has answered about
+    /// a stored key that had no verdict.
+    public init(settings: AppSettings,
+                onRegistered: @escaping () -> Void = {},
+                onValidated: @escaping () -> Void = {}) {
         self.settings = settings
         self.onRegistered = onRegistered
+        self.onValidated = onValidated
     }
 
     /// Starts watching, unless this build has no licence server to talk to.
@@ -56,12 +69,17 @@ public final class TrialReachability {
             guard let self else { return }
             switch Self.step(for: TrialClock.state(settings: self.settings),
                              hasKey: !(self.settings.licenseKey ?? "").isEmpty,
+                             hasVerdict: self.settings.licenseStatus != nil,
                              satisfied: path.status == .satisfied) {
             case .register:
                 TrialRegistrar.registerIfNeeded(settings: self.settings, completion: { registered in
                     guard registered else { return }
                     self.onRegistered()
                 })
+            case .validate:
+                LicenseValidator(settings: self.settings).validate { [weak self] _ in
+                    self?.onValidated()
+                }
             case .wait:
                 break
             case .stop:
@@ -83,13 +101,15 @@ public final class TrialReachability {
     /// one with no key can still be handed a trial by the welcome gate while
     /// the app runs, and cancelling there would leave that trial with no retry
     /// until the next launch. Only a running, unregistered trial on a usable
-    /// path asks.
-    static func step(for state: TrialState, hasKey: Bool, satisfied: Bool) -> Step {
+    /// path asks, and so does a stored key the server never answered about.
+    static func step(for state: TrialState, hasKey: Bool, hasVerdict: Bool, satisfied: Bool) -> Step {
         switch state {
         case .active(_, _, registered: true), .expired:
             return .stop
         case .none:
-            return hasKey ? .stop : .wait
+            guard hasKey else { return .wait }
+            guard !hasVerdict else { return .stop }
+            return satisfied ? .validate : .wait
         case .active(_, _, registered: false):
             return satisfied ? .register : .wait
         }

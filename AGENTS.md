@@ -157,6 +157,38 @@ repo. `AudioutCore` pins it by version.
      just wrote. One review found six in a single day's work; they read as
      coverage and cover nothing. If the intent is real, rewrite it to read the
      DRAWN or observed result.
+  5. A test that waits for time drives the backend's `uptimeClock`/`delayClock`
+     through `ManualDelayClock.advance(by:)`, never the wall clock. Guard 11
+     refuses sleeps, `asyncAfter`, `SuiteWait.settle(`, every `.wait(timeout:`
+     and fractional-second Timeout/Delay/Deadline/Interval/Grace/Window/Seconds
+     values; a hang ceiling is a valid `real-time-ok:` reason.
+- **How a test waits without the wall clock.** Each case has one helper:
+  1. When the delay is a background queue rather than a timer, wait for the
+     event with `pollUntil` or `SuiteWait.until`. Both return the moment the
+     condition holds; the 120 s ceiling only bites when it never does. The
+     test telemetry sink delivers on its own queue, so wait for a log line
+     before reading it.
+  2. `ManualDelayClock` runs fired jobs on the caller's thread. When the job
+     touches state owned by `stateQueue`, `captureControlQueue` or main, pass
+     its `queueHoppingClock` instead of `clock`.
+  3. A fake engine call has finished only when `opsInFlight(for:)` reads 0,
+     not when its side effects show.
+  4. Drain a queue that holds a lock before acting on what it guards, as
+     `test_waitForPendingRebuild()` drains the Bluetooth sink's graph queue.
+  5. UI timers do not run in tests: they check `HeadlessRuntime.isActive`.
+  6. When real-time timing is the thing under test, keep it real and mark the
+     line `// real-time-ok: <reason>`; never fake it.
+- **Touching code a real-time test drives means fixing that test.** When a
+  change edits production code that a test still exercises through the real
+  clock (a line Guard 11 would refuse today, or one carrying `real-time-ok:`),
+  the same PR converts that test to the helpers above. If that is out of
+  scope, add a roadmap entry naming the test (file:line), its wait, and the
+  code that drives it:
+  `echo '{"title":"...","why":"...","what":"...","source":"claude-suggested","status":"planned"}' | node ~/.claude/plugins/cache/foundry/foreman/0.46.0-alpha/scripts/roadmap.js add`.
+  Never hand-edit `ROADMAP.jsonl`. `bash scripts/real-time-tests.sh <changed
+  source files>` lists those tests' waits: it matches the types the files
+  declare at top level against test files, so read each hit before acting.
+  `bash scripts/test-real-time-tests.sh` tests it.
 - **Flag finished worktrees `.prunable`; never hand-delete them.** Fifteen
   worktrees' SwiftPM caches once filled the disk to zero bytes free mid-build.
   `scripts/housekeeping.sh` (invoked automatically by `scripts/run-tests.sh`
@@ -189,9 +221,12 @@ repo. `AudioutCore` pins it by version.
   Mule pool (remote M3 Air): `git config audiout.remoteSlots` (set to 2).
   Entry points: `scripts/run-tests.sh`, `scripts/build.sh`, `scripts/make-app.sh`,
   `scripts/ios.sh`, `scripts/run-app.sh`, and pre-commit Guard 6 all acquire a
-  permit before work starts. Mule-full falls back to local at once (no wait).
-  Local-full waits up to 600s, printing progress; ceiling reached → proceeds
-  uncapped with a loud warning (never refuses). Sweep on acquire reclaims stale
+  permit before work starts. A full suite run on the mule takes one permit per
+  shard (up to three). Mule-full falls back to local at once (no wait).
+  Local-full waits up to 1800s, printing progress; ceiling reached → proceeds
+  uncapped with a loud warning (never refuses). While it waits, a build or test
+  run checks the mule once a minute and moves there if a mule permit frees
+  first (build.sh and run-tests.sh only). Sweep on acquire reclaims stale
   permits (dead holder, unrecognised job, or held >45 min). `bash scripts/capacity.sh status`
   shows local and mule permits; `bash scripts/test-capacity.sh` self-tests the pool.
 - **A green run is reused, not repeated.** `run-tests.sh` stamps each pass by
@@ -237,9 +272,10 @@ repo. `AudioutCore` pins it by version.
   leaves permanent residue that trashing the `.app` does not remove: a
   preferences domain, TCC grants (a dead row in System Settings › Privacy &
   Security forever), a PUBLIC aggregate audio device that keeps appearing in
-  Sound settings, and a root PTP-helper daemon. This script finds every
-  non-shipping `com.audiout.*` identity across all four surfaces, unions
-  them, and removes the lot — plus the preference domains leaked by the test
+  Sound settings, a root PTP-helper daemon, and a stored AirPlay speaker
+  password in the login keychain. This script finds every non-shipping
+  `com.audiout.*` identity across all five surfaces, unions them, and removes
+  the lot — plus the preference domains leaked by the test
   suites (`swift test` creates a per-test `UserDefaults` suite and never
   removes it; this had reached **48,769 plists**, 98% of everything in
   `~/Library/Preferences`). Dry-run by default; `--apply` to act. The shipping
@@ -338,7 +374,12 @@ warn-only 3/5) are documented in the hook file itself:
   [docs/REVIEW-RUBRIC.md](docs/REVIEW-RUBRIC.md)).
 - **Guard 11 blocks** a commit whose new `@Test` has no comment sentence naming
   the code change that turns it red, a `print(` in a test (`print-ok` exempts),
-  or a new test file holding one test (`new-suite-ok` exempts);
+  a new test file holding one test (`new-suite-ok` exempts), or a real-time
+  wait in a test (`Task.sleep`, `Thread.sleep`, `usleep`, `sleep(`,
+  `asyncAfter`, `SuiteWait.settle(`, any `.wait(timeout:`, or a
+  Timeout/Delay/Deadline/Interval/Grace/Window/Seconds value set to a fraction
+  of a second; `real-time-ok: <reason>` exempts a line, and a hang ceiling is a
+  reason);
   `bash scripts/test-guard-test-discipline.sh` self-tests it.
 - **Guard 12 blocks** a folder AGENTS.md that gains ruling phrasing or grows
   while over its 300-word budget, and any removed line in an AGENTS-HISTORY.md;

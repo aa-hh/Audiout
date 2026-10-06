@@ -13,7 +13,7 @@ import AppKit
 /// PLAN-ONE-SURFACE-032; header reworked to a native window toolbar by the
 /// live-review D1): screen switching (lazy build, `setContent` routing,
 /// per-screen sizes), the Mixer's `surfaceDidShow`/`surfaceDidHide` lifecycle,
-/// pin persistence, toolbar state sync, ⌘1/⌘2/⌘3, and the toolbar chrome
+/// pin persistence, toolbar state sync, ⌘1–⌘4, and the toolbar chrome
 /// inset. Headless: nothing here ever orders a window on screen
 /// (`HeadlessRuntime` gates the shell's presentation calls), so every
 /// assertion reads window/controller STATE, never visibility.
@@ -52,9 +52,9 @@ import AppKit
     }
 
     /// The surface under test plus spy state. The popover controller is real
-    /// (its panel IS the Mixer screen); Groups content is a plain stub — the
+    /// (its panel IS the Mixer screen); Scenes content is a plain stub — the
     /// provider seam is exactly what the app fills with
-    /// `MixerWindowController.contentController`.
+    /// `MixerWindowController.scenesContentController`.
     private func makeSurface(
         settings: AppSettings? = nil
     ) -> (surface: AppSurfaceController, popover: PopoverController,
@@ -74,6 +74,7 @@ import AppKit
                 vc.view = NSView(frame: NSRect(x: 0, y: 0, width: SurfaceLayout.width, height: 464))
                 return vc
             },
+            speakersContent: { NSViewController() },
             settingsContent: { [self] in
                 settingsBuilds += 1
                 return makeSettingsRoot()
@@ -109,12 +110,19 @@ import AppKit
         #expect(surface.test_hostedContentViewController === groupsScreen)
         #expect(groupsBuilds() == 1)
 
+        surface.select(.speakers)
+        let speakersScreen = try #require(surface.test_speakersScreen)
+        #expect(surface.selectedScreen == .speakers)
+        #expect(surface.test_hostedContentViewController === speakersScreen)
+
         surface.select(.settings)
         let settingsScreen = try #require(surface.test_settingsScreen)
         #expect(surface.test_hostedContentViewController === settingsScreen)
         #expect(settingsBuilds() == 1)
 
         surface.select(.groups)
+        surface.select(.speakers)
+        #expect(surface.test_speakersScreen === speakersScreen, "revisiting reuses the built screen")
         surface.select(.settings)
         #expect(groupsBuilds() == 1, "revisiting reuses the built screen")
         #expect(settingsBuilds() == 1, "revisiting reuses the built screen")
@@ -251,6 +259,7 @@ import AppKit
             popoverController: popover,
             settings: AppSettings(defaults: isolatedDefaults),
             groupsContent: { NSViewController() },
+            speakersContent: { NSViewController() },
             settingsContent: { [self] in makeSettingsRoot() },
             frameAutosaveName: NSWindow.FrameAutosaveName(uniqueName("SurfaceTests")))
 
@@ -264,6 +273,42 @@ import AppKit
         let visible = try #require(NSScreen.main).visibleFrame.height
         #expect(window.frame.height <= visible - 16,
                 "…and the screen caps it (got \(window.frame.height), cap \(visible - 16))")
+    }
+
+    // Removing the guarded seed at the end of `AppSurfaceController.mount` leaves the Mixer tab unfocused after a swap with keyboard navigation on; reverting it to `selectNextKeyView(nil)` drops focus into the stub text field with it off, so this test turns red.
+    @Test func screenSwapSeedsAFirstResponderForTab() throws {
+        let backend = MockBackend(fleet: .demoFleet, staggerDiscovery: false,
+                                  emitsLevels: false, simulatesDropouts: false)
+        backend.start()
+        let popover = PopoverController(
+            appRouting: AppRoutingController(store: AppRouteStore(directory: scratchDir),
+                                             loadPersisted: false),
+            runningAppsProvider: { [] })
+        popover.test_isShownOverride = true
+        popover.update(devices: backend.devices)
+        let field = NSTextField(frame: NSRect(x: 10, y: 10, width: 200, height: 24))
+        let surface = AppSurfaceController(
+            popoverController: popover,
+            settings: AppSettings(defaults: isolatedDefaults),
+            groupsContent: {
+                let vc = NSViewController()
+                vc.view = NSView(frame: NSRect(x: 0, y: 0, width: SurfaceLayout.width, height: 464))
+                vc.view.addSubview(field)
+                return vc
+            },
+            speakersContent: { NSViewController() },
+            settingsContent: { [self] in makeSettingsRoot() },
+            frameAutosaveName: NSWindow.FrameAutosaveName(uniqueName("SurfaceTests")))
+
+        surface.show(anchorRect: nil)
+        let window = try #require(surface.shell.window)
+        #expect(window.initialFirstResponder === surface.test_toolbarController.test_tabButton(.mixer))
+        let mixerTab = surface.test_toolbarController.test_tabButton(.mixer)
+        let keyboardNavigation = NSApplication.shared.isFullKeyboardAccessEnabled
+        #expect(window.firstResponder === (keyboardNavigation ? mixerTab : window))
+        surface.select(.groups)
+        #expect(window.firstResponder === (keyboardNavigation ? mixerTab : window))
+        #expect((window.firstResponder as? NSTextView)?.delegate !== field, "a swap never drops focus into content")
     }
 
     // MARK: Mixer show/hide lifecycle (U2 seams)
@@ -307,7 +352,7 @@ import AppKit
         #expect(meteringStates == [true, false, true], "reshow is a fresh Mixer show")
     }
 
-    /// Escape on the Groups screen steps back a level when the screen can;
+    /// Escape on the Scenes screen steps back a level when the screen can;
     /// with nothing left to pop, the same press closes the surface. Headless,
     /// a panel closes once per show, so each test closes exactly once.
     @Test func escapeStepsBackOnTheGroupsScreenBeforeItClosesTheSurface() {
@@ -542,7 +587,7 @@ import AppKit
         #expect(!surface.isPinned)
     }
 
-    /// ⌘1/⌘2/⌘3 moved from the retired header buttons' key equivalents to the
+    /// ⌘1–⌘4 moved from the retired header buttons' key equivalents to the
     /// shell panel's pre-dispatch seam (a toolbar item group carries none).
     @Test func commandNumberShortcutsSelectScreensThroughTheShellSeam() throws {
         let (surface, _, _, _) = makeSurface()
@@ -564,6 +609,10 @@ import AppKit
 
         let cmd3 = try #require(keyEvent("3", command: true))
         #expect(handler(cmd3), "⌘3 is consumed")
+        #expect(surface.selectedScreen == .speakers)
+
+        let cmd4 = try #require(keyEvent("4", command: true))
+        #expect(handler(cmd4), "⌘4 is consumed")
         #expect(surface.selectedScreen == .settings)
 
         let cmd1 = try #require(keyEvent("1", command: true))
@@ -762,7 +811,7 @@ import AppKit
         #expect(surface.clickAction(setupIsOpen: false) == .show)
     }
 
-    /// Every other case here stubs the Groups screen, and a real
+    /// Every other case here stubs the Scenes screen, and a real
     /// `NSSplitViewController` is exactly what breaks differently: mounted
     /// before its view is laid out it collapses to a near-zero intrinsic size,
     /// and its own minimums fight a host that asks for less. So this mounts the
@@ -782,7 +831,8 @@ import AppKit
         let surface = AppSurfaceController(
             popoverController: popover,
             settings: AppSettings(defaults: isolatedDefaults),
-            groupsContent: { groups.contentController },
+            groupsContent: { groups.scenesContentController },
+            speakersContent: { groups.speakersContentController },
             settingsContent: { [self] in makeSettingsRoot() },
             frameAutosaveName: NSWindow.FrameAutosaveName(uniqueName("SurfaceTests")))
 
@@ -811,7 +861,7 @@ import AppKit
     /// geometry below stayed green through a build that shifted ~210pt in front
     /// of the owner. Both must hold. Measured on the REAL content; a stub
     /// screen has no sidebar to trigger any of it. Measured off the leading
-    /// tab's own view, which the controller hands over — the tabs are three
+    /// tab's own view, which the controller hands over — the tabs are
     /// separate items now, so there is no group picker to find by class name.
     @Test func theTabStripNeverMovesAcrossScreens() throws {
         let backend = MockBackend(fleet: .demoFleet, staggerDiscovery: false,
@@ -827,7 +877,8 @@ import AppKit
         let surface = AppSurfaceController(
             popoverController: popover,
             settings: AppSettings(defaults: isolatedDefaults),
-            groupsContent: { groups.contentController },
+            groupsContent: { groups.scenesContentController },
+            speakersContent: { groups.speakersContentController },
             settingsContent: { [self] in makeSettingsRoot() },
             frameAutosaveName: NSWindow.FrameAutosaveName(uniqueName("SurfaceTests")))
 
@@ -853,22 +904,22 @@ import AppKit
         // Mixer twice: the first layout pass of a freshly attached toolbar
         // settles the strip's width, so the SECOND visit is the reference.
         _ = try tabStripLeadingX()
-        surface.select(.groups)
+        surface.select(.speakers)
         surface.select(.mixer)
         let onMixer = try tabStripLeadingX()
 
-        surface.select(.groups)
+        surface.select(.speakers)
         #expect(try tabStripLeadingX() == onMixer,
-                "the Groups sidebar must not push the tab strip right")
+                "the Speakers sidebar must not push the tab strip right")
         surface.select(.settings)
         #expect(try tabStripLeadingX() == onMixer,
                 "nor may the Settings sidebar")
         surface.select(.mixer)
         #expect(try tabStripLeadingX() == onMixer, "and it comes back unchanged")
 
-        let groupsSplit = try #require(surface.test_groupsScreen?.content as? NSSplitViewController)
-        #expect(groupsSplit.splitViewItems[0].behavior != .sidebar,
-                "the Groups sidebar is a PLAIN split item — `.sidebar` behavior reserves the toolbar's leading region")
+        let speakersSplit = try #require(surface.test_speakersScreen?.content as? NSSplitViewController)
+        #expect(speakersSplit.splitViewItems[0].behavior != .sidebar,
+                "the Speakers sidebar is a PLAIN split item — `.sidebar` behavior reserves the toolbar's leading region")
         let settingsRoot = try #require(surface.test_settingsRoot)
         #expect(settingsRoot.test_sidebarSplitItem.behavior != .sidebar,
                 "and so is the Settings one")
@@ -882,12 +933,12 @@ import AppKit
         return found
     }
 
-    /// The Groups screen is a SPLIT: the speaker sidebar on the left, the
+    /// The Speakers screen is a SPLIT: the speaker sidebar on the left, the
     /// content pane on the right. Both halves must be mounted, laid out and
-    /// side by side at the surface's real Groups size — a screen showing only
-    /// the content has no way to change selection at all. Hand the surface the
-    /// content half alone, or drop the sidebar split item, and this fails.
-    @Test func theGroupsScreenShowsTheSidebarAndTheContentPane() throws {
+    /// side by side at the surface's real size — a screen showing only
+    /// the content has no way to change selection at all.
+    // Turns red when the surface is handed the speakers content half alone, or the sidebar split item is dropped.
+    @Test func theSpeakersScreenShowsTheSidebarAndTheContentPane() throws {
         let backend = MockBackend(fleet: .demoFleet, staggerDiscovery: false,
                                   emitsLevels: false, simulatesDropouts: false)
         backend.start()
@@ -910,31 +961,31 @@ import AppKit
         let surface = AppSurfaceController(
             popoverController: popover,
             settings: AppSettings(defaults: isolatedDefaults),
-            groupsContent: { groups.contentController },
+            groupsContent: { groups.scenesContentController },
+            speakersContent: { groups.speakersContentController },
             settingsContent: { [self] in makeSettingsRoot() },
             frameAutosaveName: NSWindow.FrameAutosaveName(uniqueName("SurfaceTests")))
 
         surface.show(anchorRect: nil)
-        // Reach Groups via the Settings screen, so the split is laid out after
-        // a swap.
+        // Reach Speakers via the Settings screen, so the split is laid out
+        // after a swap.
         surface.select(.settings)
         surface.shell.window?.contentView?.layoutSubtreeIfNeeded()
-        surface.select(.groups)
-        let screen = try #require(surface.test_groupsScreen)
+        surface.select(.speakers)
+        let screen = try #require(surface.test_speakersScreen)
         screen.view.layoutSubtreeIfNeeded()
 
         let split = try #require(screen.content as? NSSplitViewController,
-                                 "the Groups screen's content IS the split view controller")
+                                 "the Speakers screen's content IS the split view controller")
         #expect(split.splitViewItems.count == 2, "sidebar item + content item")
         #expect(split.splitViewItems.first?.isCollapsed == false,
                 "the sidebar item is not collapsed")
 
         let sidebar = groups.test_sidebar.view
-        // The auto-selected content pane is the card overview (direction C),
-        // not one group's editor.
-        let content = groups.test_overview.view
+        // With nothing selected the content pane is the Speakers page.
+        let content = groups.test_speakersPage.view
         #expect(sidebar.isDescendant(of: screen.view),
-                "the speaker sidebar is mounted in the Groups screen")
+                "the speaker sidebar is mounted in the Speakers screen")
         #expect(content.isDescendant(of: screen.view),
                 "the content pane is mounted beside the sidebar")
         #expect(!sidebar.isHiddenOrHasHiddenAncestor, "and it is not hidden")
@@ -949,6 +1000,53 @@ import AppKit
                 "the content pane gets real space (got \(contentBox))")
         #expect(contentBox.minX >= sidebarBox.maxX - 1,
                 "the content sits to the RIGHT of the sidebar — a real split, not a stack")
+    }
+
+    /// Scenes and Speakers are two screens over one `MixerWindowController`:
+    /// the Speakers tab mounts the split view (sidebar beside the speaker
+    /// pages), the Scenes tab the scenes host with no sidebar, and ⌘3 reaches
+    /// Speakers.
+    // Turns red when the key map or the mount table misses the Speakers case, or hands either tab the other's content.
+    @Test func theSpeakersTabMountsTheSplitAndTheScenesTabTheScenesHost() throws {
+        let backend = MockBackend(fleet: .demoFleet, staggerDiscovery: false,
+                                  emitsLevels: false, simulatesDropouts: false)
+        let groups = MixerWindowController(
+            groupController: GroupController(backend: backend,
+                                             store: GroupStore(directory: scratchDir),
+                                             loadPersisted: false),
+            settings: AppSettings(defaults: isolatedDefaults))
+        let popover = PopoverController(
+            appRouting: AppRoutingController(store: AppRouteStore(directory: scratchDir),
+                                             loadPersisted: false),
+            runningAppsProvider: { [] })
+        let surface = AppSurfaceController(
+            popoverController: popover,
+            settings: AppSettings(defaults: isolatedDefaults),
+            groupsContent: { groups.scenesContentController },
+            speakersContent: { groups.speakersContentController },
+            settingsContent: { [self] in makeSettingsRoot() },
+            frameAutosaveName: NSWindow.FrameAutosaveName(uniqueName("SurfaceTests")))
+        surface.show(anchorRect: nil)
+
+        let handler = try #require(surface.shell.keyEquivalentHandler)
+        let cmd3 = try #require(NSEvent.keyEvent(
+            with: .keyDown, location: .zero, modifierFlags: [.command], timestamp: 0,
+            windowNumber: 0, context: nil, characters: "3", charactersIgnoringModifiers: "3",
+            isARepeat: false, keyCode: 0))
+        #expect(handler(cmd3), "⌘3 is consumed")
+        #expect(surface.selectedScreen == .speakers)
+        let speakersScreen = try #require(surface.test_speakersScreen)
+        #expect(surface.test_hostedContentViewController === speakersScreen)
+        #expect(speakersScreen.content is NSSplitViewController,
+                "the Speakers tab mounts the sidebar split")
+
+        surface.select(.groups)
+        let scenesScreen = try #require(surface.test_groupsScreen)
+        #expect(surface.test_hostedContentViewController === scenesScreen)
+        #expect(scenesScreen.content === groups.scenesContentController,
+                "the Scenes tab mounts the scenes host")
+        #expect(!(scenesScreen.content is NSSplitViewController),
+                "and the scenes host has no sidebar")
     }
 
     // MARK: Visible-screen publishing (the Groups content's hidden-work gate)
@@ -1053,7 +1151,8 @@ import AppKit
         let surface = AppSurfaceController(
             popoverController: popover,
             settings: AppSettings(defaults: isolatedDefaults),
-            groupsContent: { groups.contentController },
+            groupsContent: { groups.scenesContentController },
+            speakersContent: { groups.speakersContentController },
             settingsContent: { [self] in makeSettingsRoot() },
             frameAutosaveName: NSWindow.FrameAutosaveName(uniqueName("SurfaceTests")))
         return (surface, groups, group.group.id)

@@ -58,6 +58,8 @@ import Testing
                                              loadPersisted: false),
             settings: AppSettings(defaults: makeDefaults()),
             excludedBundleIDs: { [] },
+            speakerLibrary: SpeakerLibraryController(store: SpeakerLibraryStore(directory: directory),
+                                                     loadPersisted: false),
             serverName: "TestMac",
             server: CompanionServer(),
             approvals: approvals,
@@ -66,6 +68,37 @@ import Testing
 
     private func approve(clientID: String, name: String, in coordinator: CompanionCoordinator) {
         coordinator.approvals.handleRequest(clientID: clientID, clientName: name, decide: { _ in })
+    }
+
+    /// Turns red if `CompanionCoordinator.noteSlot` reorders the popover's
+    /// precedence or stops calling a timed-out takeover a warning.
+    @Test func theNoteSlotFollowsThePopoversPrecedence() {
+        let all = CompanionCoordinator.noteSlot(captureFailure: "The tap died.", routingBlocked: true,
+                                                takeover: .takingOver, doublePath: true)
+        #expect(all?.text == "The tap died.")
+        #expect(all?.severity == "warning")
+
+        let blocked = CompanionCoordinator.noteSlot(captureFailure: nil, routingBlocked: true,
+                                                    takeover: .takingOver, doublePath: true)
+        #expect(blocked?.text == CompanionCoordinator.routingBlockedText)
+        #expect(blocked?.severity == "warning")
+
+        let takeover = CompanionCoordinator.noteSlot(captureFailure: nil, routingBlocked: false,
+                                                     takeover: .takingOver, doublePath: true)
+        #expect(takeover?.text == CompanionCoordinator.takeoverText(.takingOver))
+        #expect(takeover?.severity == "info")
+
+        let timedOut = CompanionCoordinator.noteSlot(captureFailure: nil, routingBlocked: false,
+                                                     takeover: .timedOut, doublePath: false)
+        #expect(timedOut?.severity == "warning")
+
+        let doublePath = CompanionCoordinator.noteSlot(captureFailure: nil, routingBlocked: false,
+                                                       takeover: nil, doublePath: true)
+        #expect(doublePath?.text == CompanionCoordinator.doublePathText)
+        #expect(doublePath?.severity == "info")
+
+        #expect(CompanionCoordinator.noteSlot(captureFailure: nil, routingBlocked: false,
+                                              takeover: nil, doublePath: false) == nil)
     }
 
     /// The wizard's iPhone panel names a phone only when exactly one is

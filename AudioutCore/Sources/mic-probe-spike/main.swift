@@ -3,10 +3,10 @@
 // mic-probe-spike — the hardware leg of the mic-probe sync calibration
 // (dev/notes/mic-probe-calibration-brief.md, roadmap 064 step 2).
 //
-// Plays the dual calibration sweeps (UP on the left channel, DOWN on the
-// right) out a chosen output device while recording the Mac's BUILT-IN
-// microphone, then runs the production matched filter on the capture and
-// prints both arrivals and their difference.
+// Plays the calibration probe's two lanes in turn (the left channel first,
+// the right `SyncProbe.Layout.laneSpacingSeconds` later) out a chosen output
+// device while recording the Mac's BUILT-IN microphone, then runs the
+// production analysis on the capture and prints the offset between them.
 //
 // It exists to answer two questions on real hardware:
 //  1. Does A2DP survive while the built-in mic records? (The unresolved
@@ -31,12 +31,11 @@ import ProbeKit
 // MARK: - CLI
 
 let usage = """
-usage: mic-probe-spike [--output <name-substring>] [--duration <s>] \
+usage: mic-probe-spike [--output <name-substring>] \
 [--gain <0..1>] [--lead-in <s>] [--keep <file.f32>] [--selftest]
 
   --output    play probes on the first output device whose name contains the
               substring (case-insensitive); default: the system default output
-  --duration  sweep length in seconds (default 1.0)
   --gain      probe amplitude 0..1 (default 0.4)
   --lead-in   ambient-noise seconds recorded before the probes (default 0.8)
   --keep      also write the mono Float32 capture to this path
@@ -44,7 +43,6 @@ usage: mic-probe-spike [--output <name-substring>] [--duration <s>] \
 """
 
 var outputMatch: String?
-var duration = 1.0
 var gain: Float = 0.4
 var leadIn = 0.8
 var keepPath: String?
@@ -59,7 +57,6 @@ while let arg = args.first {
     }
     switch arg {
     case "--output": outputMatch = value()
-    case "--duration": duration = Double(value()) ?? duration
     case "--gain": gain = Float(value()) ?? gain
     case "--lead-in": leadIn = Double(value()) ?? leadIn
     case "--keep": keepPath = value()
@@ -71,68 +68,46 @@ while let arg = args.first {
 
 // MARK: - Analysis (shared by selftest and the real run)
 
-struct ProbeAnalysis {
-    let up: SyncProbeCorrelator.Arrival
-    let down: SyncProbeCorrelator.Arrival
-    let deltaMs: Double
-}
-
 func analyze(recording: [Float], sampleRate: Double, leadInSeconds: Double) -> ProbeAnalysis? {
-    let upRef = SyncProbe.samples(.upSweep(sampleRate: sampleRate, duration: duration))
-    let downRef = SyncProbe.samples(.downSweep(sampleRate: sampleRate, duration: duration))
+    // The same call the app's MicProbeSession.analyze makes, including its
+    // weighted-then-plain fallback, so the tool is never stricter than the
+    // app it validates.
     let ambientCount = min(recording.count, Int(leadInSeconds * 0.75 * sampleRate))
-    let ambient = ambientCount > 0 ? Array(recording[0..<ambientCount]) : nil
-    let correlator = SyncProbeCorrelator(sampleRate: sampleRate)
-    // Same two-pass rule the app's MicProbeSession.analyze uses: the SNR
-    // weighting goes first, but a lead-in that misdescribes the sweep window
-    // (music draining through a sink, a passing noise) must not be able to
-    // refuse the run, so the plain matched filter decides when it finds
-    // nothing. A hardware tool that is stricter than the app it validates
-    // reports false negatives nobody can act on.
-    let measurement = ambient.flatMap {
-        correlator.relativeOffset(probeA: upRef, probeB: downRef,
-                                  recording: recording, ambientNoise: $0)
-    } ?? correlator.relativeOffset(probeA: upRef, probeB: downRef,
-                                   recording: recording, ambientNoise: nil)
-    guard let m = measurement else { return nil }
-    return ProbeAnalysis(up: m.arrivalA, down: m.arrivalB, deltaMs: m.offsetSeconds * 1000)
+    return try? ProbeAnalyzer(sampleRate: sampleRate)
+        .analyze(recording: recording, ambientEndSample: ambientCount)
 }
 
-func report(_ a: ProbeAnalysis, sampleRate: Double) {
-    func line(_ label: String, _ arr: SyncProbeCorrelator.Arrival) {
-        let ms = arr.sampleOffset / sampleRate * 1000
-        print(String(format: "  %@ arrival  %8.2f ms into capture   confidence %5.1fx",
-                     label, ms, arr.peakToSidelobe))
-    }
-    line("UP  (L)", a.up)
-    line("DOWN(R)", a.down)
-    print(String(format: "  Δ (down − up)  %+7.3f ms", a.deltaMs))
+func report(_ a: ProbeAnalysis) {
+    print(String(format: "  Δ (left − right, spacing removed)  %+7.3f ms", a.offsetMs))
+    print(String(format: "  confidence %5.1fx   peak margin %5.2fx", a.confidence, a.peakMargin))
 }
 
 // MARK: - Selftest
 
 if selftest {
     let rate = 44_100.0
-    let up = SyncProbe.samples(.upSweep(sampleRate: rate, duration: duration))
-    let down = SyncProbe.samples(.downSweep(sampleRate: rate, duration: duration))
-    let delayUp = Int(0.180 * rate), delayDown = Int(0.1875 * rate)
-    var scene = [Float](repeating: 0, count: Int((leadIn + 0.5 + duration) * rate))
+    let lane = SyncProbe.lane(sampleRate: rate)
+    let spacing = Int(SyncProbe.Layout.laneSpacingSeconds * rate)
+    // Left lane 7.5 ms late against its slot.
+    let delayLeft = Int(0.1875 * rate), delayRight = Int(0.180 * rate) + spacing
+    var scene = [Float](repeating: 0,
+                        count: Int((leadIn + 0.5 + SyncProbe.Layout.totalSeconds) * rate))
     var seed: UInt64 = 9
     for i in 0..<scene.count {
         seed = seed &* 6364136223846793005 &+ 1442695040888963407
         scene[i] = (Float(seed >> 40) / Float(1 << 24) - 0.5) * 0.1
     }
     let base = Int(leadIn * rate)
-    for (delay, probe) in [(delayUp, up), (delayDown, down)] {
-        for (i, s) in probe.enumerated() where base + delay + i < scene.count {
+    for delay in [delayLeft, delayRight] {
+        for (i, s) in lane.enumerated() where base + delay + i < scene.count {
             scene[base + delay + i] += 0.3 * s
         }
     }
     guard let a = analyze(recording: scene, sampleRate: rate, leadInSeconds: leadIn) else {
         print("SELFTEST FAIL: probes not found in synthetic scene"); exit(1)
     }
-    report(a, sampleRate: rate)
-    let pass = abs(a.deltaMs - 7.5) < 0.5
+    report(a)
+    let pass = abs(a.offsetMs - 7.5) < 0.5
     print(pass ? "SELFTEST PASS (expected Δ 7.5 ms)" : "SELFTEST FAIL (expected Δ 7.5 ms)")
     exit(pass ? 0 : 1)
 }
@@ -328,14 +303,18 @@ guard outputRate > 0 else {
     _ = capture.stop()
     exit(2)
 }
-var upOut = SyncProbe.samples(.upSweep(sampleRate: outputRate, duration: duration))
-var downOut = SyncProbe.samples(.downSweep(sampleRate: outputRate, duration: duration))
-for i in 0..<upOut.count { upOut[i] *= gain }
-for i in 0..<downOut.count { downOut[i] *= gain }
+let laneOut = SyncProbe.lane(sampleRate: outputRate).map { $0 * gain }
+let spacingOut = Int(SyncProbe.Layout.laneSpacingSeconds * outputRate)
+var leftOut = [Float](repeating: 0, count: Int(SyncProbe.Layout.totalSeconds * outputRate))
+var rightOut = leftOut
+for (i, s) in laneOut.enumerated() {
+    if i < leftOut.count { leftOut[i] = s }
+    if spacingOut + i < rightOut.count { rightOut[spacingOut + i] = s }
+}
 
 do {
     let player = try ProbePlayer(deviceID: outputID, rate: outputRate)
-    let played = player.playBlocking(left: upOut, right: downOut)
+    let played = player.playBlocking(left: leftOut, right: rightOut)
     Thread.sleep(forTimeInterval: 0.6)
     player.stop()
     if !played {
@@ -387,7 +366,7 @@ guard let analysis = analyze(recording: recording, sampleRate: captureRate,
     print("or check the probes were audible at all.")
     exit(1)
 }
-report(analysis, sampleRate: captureRate)
+report(analysis)
 print("Reminder: after a fresh Bluetooth connect, wait ~60 s before trusting a " +
       "measurement (the BT clock settles chaotically first — bt-spike-findings 2026-08-07).")
 exit(0)

@@ -17,17 +17,23 @@ private final class UnconstrainedWindow: NSWindow {
     override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect {
         frameRect
     }
+
+    /// The pixel density layout snaps to, whatever screen this Mac has: Auto
+    /// Layout reads it to place frames on whole points at 1 and half points at 2.
+    var forcedBackingScale: CGFloat?
+    override var backingScaleFactor: CGFloat { forcedBackingScale ?? super.backingScaleFactor }
 }
 
 /// A titled window carrying a real `NSToolbar`, parked off every screen. The
 /// toolbar still gets AppKit's own layout passes out there, so a test can order
 /// this in without anything reaching the screen.
 @MainActor
-private func makeParkedWindow(height: CGFloat = 400) -> NSWindow {
+private func makeParkedWindow(height: CGFloat = 400, backingScale: CGFloat? = nil) -> NSWindow {
     let window = UnconstrainedWindow(
         contentRect: NSRect(x: 0, y: 0, width: SurfaceLayout.width, height: height),
         styleMask: [.titled, .closable, .fullSizeContentView],
         backing: .buffered, defer: false)
+    window.forcedBackingScale = backingScale
     window.setFrameOrigin(NSPoint(x: -10_000, y: -10_000))
     return window
 }
@@ -50,9 +56,9 @@ private func makeParkedWindow(height: CGFloat = 400) -> NSWindow {
     /// A controller with its toolbar attached (attachment is what makes
     /// AppKit materialize the delegate's items), on a window that never
     /// orders in.
-    private func makeAttached() -> (SurfaceToolbarController, NSWindow) {
+    private func makeAttached(backingScale: CGFloat? = nil) -> (SurfaceToolbarController, NSWindow) {
         let controller = SurfaceToolbarController()
-        let window = makeParkedWindow()
+        let window = makeParkedWindow(backingScale: backingScale)
         controller.attach(to: window)
         return (controller, window)
     }
@@ -74,9 +80,10 @@ private func makeParkedWindow(height: CGFloat = 400) -> NSWindow {
         #expect(window.toolbarStyle == .unified, "D1: unified — the toolbar IS the one header strip")
     }
 
-    @Test func tabsCarryAllThreeScreensWithResolvedGlyphs() {
+    // Turns red when a `SurfaceScreen` case is added, dropped or reordered without its tab, or a tab's glyph stops resolving.
+    @Test func tabsCarryEveryScreenWithResolvedGlyphs() {
         let (controller, _) = makeAttached()
-        #expect(controller.test_tabAccessibilityLabels == ["Mixer", "Scenes", "Settings"])
+        #expect(controller.test_tabAccessibilityLabels == ["Mixer", "Scenes", "Speakers", "Settings"])
         #expect(controller.test_allTabImagesResolved,
                 "every tab resolved a system SF Symbol")
     }
@@ -90,7 +97,7 @@ private func makeParkedWindow(height: CGFloat = 400) -> NSWindow {
     /// Resolving HERE only proves this machine has the symbol; the 14.2 floor
     /// was checked against CoreGlyphs' `name_availability.plist` by hand
     /// (`waveform` and `waveform.path` are macOS 10.15, `waveform.circle`
-    /// 10.15, `hifispeaker.2` and `gearshape` 11.0). The runtime check below
+    /// 10.15, `hifispeaker.2`, `rectangle.3.group` and `gearshape` 11.0). The runtime check below
     /// still catches a typo, which is the failure that actually happens.
     @Test func noTabDrawsTheEqualizersGlyphAndNoTwoTabsShareOne() {
         let names = SurfaceScreen.allCases.map(\.symbolName)
@@ -133,8 +140,13 @@ private func makeParkedWindow(height: CGFloat = 400) -> NSWindow {
     /// The expanded tab really is wider on screen than a collapsed one, and
     /// only that one is. Real laid-out frames, not the constraint the reveal
     /// writes into: what fails review is a seat that did not grow.
+    ///
+    /// A tab's widths land on half points, which a 1x display cannot draw,
+    /// so a laid-out frame may sit one device pixel off its arithmetic.
+    // Turns red if the current tab stops growing by exactly its own name, or a collapsed tab stops being its own glyph's slot.
     @Test func theCurrentTabIsDrawnWiderThanTheOthers() {
         let (controller, window) = makeAttached()
+        let pixel = 1 / window.backingScaleFactor
         for selected in SurfaceScreen.allCases {
             controller.setSelectedScreen(selected)
             FoldAnimator.shared.test_settleNow()
@@ -145,20 +157,87 @@ private func makeParkedWindow(height: CGFloat = 400) -> NSWindow {
             }
             #expect(current.frame.width > SurfaceToolbarSeat.size.width,
                     Comment(rawValue: "\(selected.label) opened — it is \(current.frame.width) pt against a collapsed \(SurfaceToolbarSeat.size.width)"))
-            #expect(current.frame.width == SurfaceToolbarSeat.tabWidth(nameWidth: current.nameWidth),
+            #expect(abs(current.frame.width - SurfaceToolbarSeat.tabWidth(nameWidth: current.nameWidth,
+                                                                          glyphWidth: current.glyphWidth)) <= pixel,
                     Comment(rawValue: "and opened by exactly its own name's width"))
             for other in SurfaceScreen.allCases where other != selected {
                 guard let tab = controller.test_tabButton(other) else { continue }
-                #expect(tab.frame.width == SurfaceToolbarSeat.size.width,
+                #expect(abs(tab.frame.width - SurfaceToolbarSeat.slotWidth(glyphWidth: tab.glyphWidth)) <= pixel,
                         Comment(rawValue: "\(other.label) stayed collapsed at \(tab.frame.width) pt"))
             }
         }
     }
 
+    /// Every tab is padded from its INK, measured off what is drawn, never
+    /// from a symbol image's own box (which is 2 to 4 pt bigger than its ink,
+    /// by a different amount per symbol) or from the name label's frame
+    /// (which insets its text). Collapsed, the glyph's ink sits centred with
+    /// one `glyphPadding` either side; open, the same padding runs from the
+    /// highlight's edge to the glyph, from the glyph to the name's first
+    /// letter, and from its last letter to the far edge. The glyph keeps its
+    /// place whichever tab is open. Laid out at both pixel densities, because
+    /// a 1x display snaps every frame to whole points.
+    // Turns red if a tab glyph is laid out by its symbol image's box instead of its measured ink, the name by its label frame instead of its letters, or a glyph shifts as its tab opens.
+    // At 1x it also turns red if `SurfaceToolbarSeatButton` stops hiding a collapsed tab's name label and leaves it to the clip.
+    @Test(arguments: [CGFloat(1), 2])
+    func everyTabPadsItsGlyphAndNameEvenlyFromTheirInk(backingScale: CGFloat) throws {
+        let (controller, window) = makeAttached(backingScale: backingScale)
+        // Light, because macOS draws light text on dark up to half a point
+        // heavier on each side, and that is the OS's weight, not the layout's.
+        window.appearance = NSAppearance(named: .aqua)
+        let padding = SurfaceToolbarSeat.glyphPadding
+        // Half a point on a 2x display; a 1x display lays frames out on
+        // whole points, so there the slack is its one pixel.
+        let slack = max(0.5, 1 / window.backingScaleFactor)
+        var glyphLeadingEdges: [SurfaceScreen: [CGFloat]] = [:]
+        for selected in SurfaceScreen.allCases {
+            controller.setSelectedScreen(selected)
+            FoldAnimator.shared.test_settleNow()
+            window.layoutIfNeeded()
+            for screen in SurfaceScreen.allCases {
+                let tab = try #require(controller.test_tabButton(screen))
+                let glyph = try #require(tab.test_glyphInkRect)
+                let width = tab.bounds.width
+                #expect(glyph.width <= SurfaceToolbarSeat.glyphBox.width
+                            && glyph.height <= SurfaceToolbarSeat.glyphBox.height,
+                        Comment(rawValue: "\(screen.label)'s glyph ink, \(glyph.size), fits the common box"))
+                #expect(abs(glyph.midY - tab.bounds.midY) <= slack,
+                        Comment(rawValue: "\(screen.label)'s glyph ink is centred top to bottom — \(glyph.midY) against \(tab.bounds.midY)"))
+                let gaps: [CGFloat]
+                if screen == selected {
+                    let name = tab.test_nameInkRect
+                    gaps = [glyph.minX, name.minX - glyph.maxX, width - name.maxX]
+                    // The open seat's wash is ink across its whole width, so
+                    // it is lifted for one render; what is left is the glyph
+                    // and, right of it, the name.
+                    tab.isEngaged = false
+                    glyphLeadingEdges[screen, default: []].append(SurfaceToolbarSeat.inkRect(of: tab).minX)
+                    tab.isEngaged = true
+                } else {
+                    // An idle collapsed tab paints nothing but its glyph, so
+                    // its real pixels check where the hook says the ink is.
+                    let drawn = SurfaceToolbarSeat.inkRect(of: tab)
+                    #expect(abs(drawn.minX - glyph.minX) <= slack && abs(drawn.maxX - glyph.maxX) <= slack
+                                && abs(drawn.midY - glyph.midY) <= slack,
+                            Comment(rawValue: "\(screen.label)'s glyph is drawn at \(drawn), where its ink was measured to be, \(glyph)"))
+                    gaps = [glyph.minX, width - glyph.maxX]
+                    glyphLeadingEdges[screen, default: []].append(drawn.minX)
+                }
+                #expect(gaps.allSatisfy { abs($0 - padding) <= slack },
+                        Comment(rawValue: "with \(selected.label) open, \(screen.label)'s gaps from its ink are \(gaps) against \(padding) pt"))
+            }
+        }
+        for (screen, edges) in glyphLeadingEdges {
+            #expect((edges.max() ?? 0) - (edges.min() ?? 0) <= slack,
+                    Comment(rawValue: "\(screen.label)'s glyph stays put as tabs open and close — \(edges)"))
+        }
+    }
+
     /// Both items ask to stay visible, Pin never changes size, and the capsule
-    /// is exactly the three tabs plus its padding — one of them open.
+    /// is exactly the four tabs plus its padding — one of them open.
+    // Turns red if an item can be swept into the chevron, or the capsule's floor stops being the four tabs' own slots plus its padding.
     @Test func everyItemAsksToStayOutOfTheOverflowMenu() {
-        let (controller, _) = makeAttached()
+        let (controller, window) = makeAttached()
         for item in controller.toolbar.items where item.view != nil {
             #expect(item.visibilityPriority == .high,
                     Comment(rawValue: "\(item.itemIdentifier.rawValue) must not be sweepable into the chevron"))
@@ -169,12 +248,15 @@ private func makeParkedWindow(height: CGFloat = 400) -> NSWindow {
             Issue.record("Mixer has no seat button")
             return
         }
-        #expect(controller.test_capsuleFittingWidth
-                    == SurfaceToolbarSeat.capsuleWidth(nameWidth: mixer.nameWidth),
-                "the capsule is two collapsed tabs, the open one, and its padding")
+        #expect(abs((controller.test_capsuleFittingWidth ?? 0)
+                        - SurfaceToolbarSeat.capsuleWidth(nameWidth: mixer.nameWidth))
+                    <= 1 / window.backingScaleFactor,
+                "the capsule is the collapsed tabs, the open one, and its padding")
+        let slots = SurfaceScreen.allCases.compactMap { controller.test_tabButton($0) }
+            .map { SurfaceToolbarSeat.slotWidth(glyphWidth: $0.glyphWidth) }
         #expect(SurfaceToolbarSeat.capsuleSize.width
-                    == SurfaceToolbarSeat.size.width * 3 + SurfaceToolbarSeat.capsulePadding * 2,
-                "and with every tab collapsed it is exactly three of them plus that padding")
+                    == slots.reduce(SurfaceToolbarSeat.capsulePadding * 2, +),
+                "and with every tab collapsed it is exactly the four tabs' own slots plus that padding")
         #expect(SurfaceToolbarSeat.capsuleCornerRadius == SurfaceToolbarSeat.capsuleSize.height / 2,
                 "half the height, so the capsule reads as a pill and not a rounded box")
     }
@@ -187,25 +269,33 @@ private func makeParkedWindow(height: CGFloat = 400) -> NSWindow {
     ///
     /// Asserted with a name no translator could produce, so the result does not
     /// depend on how long "Einstellungen" happens to be.
+    // Turns red if a name past the ceiling widens its tab past the ceiling, or the widest strip no longer fits the 653 pt surface.
     @Test func theStripCannotOutgrowTheSurfaceInAnyLanguage() {
         #expect(SurfaceToolbarSeat.widestCapsuleWidth + SurfaceToolbarSeat.pinSize.width
                     < SurfaceLayout.width,
                 "the widest the capsule can ever be, plus Pin, still fits the fixed surface — \(SurfaceToolbarSeat.widestCapsuleWidth) + \(SurfaceToolbarSeat.pinSize.width) against \(SurfaceLayout.width)")
 
         let absurd = String(repeating: "Lautsprechergruppen ", count: 20)
-        let tab = SurfaceToolbarSeatButton(
-            frame: NSRect(origin: .zero, size: SurfaceToolbarSeat.size))
-        tab.configure(symbol: nil, label: absurd, toolTip: nil, isTab: true)
+        let tabs = SurfaceScreen.allCases.map { screen -> SurfaceToolbarSeatButton in
+            let tab = SurfaceToolbarSeatButton(
+                frame: NSRect(origin: .zero, size: SurfaceToolbarSeat.size))
+            tab.configure(symbol: SurfaceToolbarController.resolveSymbol(
+                              screen.symbolName, fallbacks: screen.fallbackSymbolNames,
+                              accessibilityDescription: screen.label),
+                          label: screen == .mixer ? absurd : "", toolTip: nil, isTab: true)
+            return tab
+        }
+        let tab = tabs[0]
         tab.setNameRevealed(true, animated: false)
         #expect(tab.nameWidth == SurfaceToolbarSeat.maxNameWidth,
                 "a name past the ceiling is clamped to it, and truncates rather than pushing")
-        #expect(tab.test_width == SurfaceToolbarSeat.tabWidth(nameWidth: SurfaceToolbarSeat.maxNameWidth),
+        #expect(tab.test_width == SurfaceToolbarSeat.tabWidth(nameWidth: SurfaceToolbarSeat.maxNameWidth,
+                                                              glyphWidth: tab.glyphWidth),
                 "so the seat opens to the ceiling and no further — \(tab.test_width) pt")
 
-        let capsule = SurfaceToolbarTabCapsule(tabs: [tab] + (0..<2).map { _ in
-            SurfaceToolbarSeatButton(frame: NSRect(origin: .zero, size: SurfaceToolbarSeat.size))
-        })
-        #expect(capsule.fittingSize.width == SurfaceToolbarSeat.widestCapsuleWidth,
+        let capsule = SurfaceToolbarTabCapsule(tabs: tabs)
+        // A view with no window lays out on whole points.
+        #expect(capsule.fittingSize.width <= SurfaceToolbarSeat.widestCapsuleWidth.rounded(.up),
                 "and the capsule around it stops at its widest — \(capsule.fittingSize.width) pt")
     }
 
@@ -299,6 +389,7 @@ private func makeParkedWindow(height: CGFloat = 400) -> NSWindow {
     /// SHAPE with the selection (measured live: Mixer gave circle + capsule(2),
     /// Groups three circles, Settings capsule(2) + circle). Here it is one
     /// drawn surface whose height, order and padding never change.
+    // Turns red if opening a tab widens the capsule by anything but its name and one padding, or moves its height, order or leading edge.
     @Test func onlyTheOpenNameResizesTheCapsuleAndNothingElseReflows() {
         let (controller, window) = makeAttached()
         guard let capsule = controller.test_tabCapsule else {
@@ -313,8 +404,8 @@ private func makeParkedWindow(height: CGFloat = 400) -> NSWindow {
             FoldAnimator.shared.test_settleNow()
             window.layoutIfNeeded()
             guard let open = controller.test_tabButton(screen) else { continue }
-            #expect(capsule.fittingSize.width
-                        == SurfaceToolbarSeat.capsuleWidth(nameWidth: open.nameWidth),
+            #expect(abs(capsule.fittingSize.width - SurfaceToolbarSeat.capsuleWidth(nameWidth: open.nameWidth))
+                        <= 1 / window.backingScaleFactor,
                     Comment(rawValue: "with \(screen.label) open the capsule is exactly that name wider — \(capsule.fittingSize.width) pt"))
             heights.insert(capsule.frame.height)
             origins.insert(capsule.frame.minX)
@@ -323,7 +414,11 @@ private func makeParkedWindow(height: CGFloat = 400) -> NSWindow {
                     Comment(rawValue: "and the tabs keep their order with \(screen.label) open — \(order)"))
         }
         #expect(heights.count == 1, "the capsule's height never changes — a reveal is horizontal — \(heights)")
-        #expect(origins.count == 1, "and it stays anchored to the same edge of the strip — \(origins)")
+        // macOS 27 holds the item in a glass container (`NSToolbarPlatterView`)
+        // whose trailing edge it keeps on a whole point, so a capsule whose
+        // width ends in .5 sits half a point (one device pixel) further right.
+        #expect((origins.max() ?? 0) - (origins.min() ?? 0) <= 1 / window.backingScaleFactor,
+                "and it stays anchored to the same edge of the strip, to the device pixel — \(origins)")
         #expect(capsule.fittingSize.height == SurfaceToolbarSeat.capsuleSize.height)
     }
 
@@ -335,6 +430,7 @@ private func makeParkedWindow(height: CGFloat = 400) -> NSWindow {
     ///
     /// Travel runs on `FoldAnimator`, the app's one reveal clock, so this is
     /// the same synchronous-terminal contract every other clip in the app has.
+    // Turns red if Reduce Motion stops settling both tabs' widths within the caller's own turn.
     @Test func reduceMotionOpensTheNameWithNoTravel() {
         defer {
             FoldAnimator.shared.test_reduceMotionOverride = nil
@@ -350,9 +446,10 @@ private func makeParkedWindow(height: CGFloat = 400) -> NSWindow {
             Issue.record("the tabs have no seat buttons")
             return
         }
-        #expect(groups.test_width == SurfaceToolbarSeat.tabWidth(nameWidth: groups.nameWidth),
+        #expect(groups.test_width == SurfaceToolbarSeat.tabWidth(nameWidth: groups.nameWidth,
+                                                                 glyphWidth: groups.glyphWidth),
                 "Groups is fully open already — \(groups.test_width) pt")
-        #expect(mixer.test_width == SurfaceToolbarSeat.size.width,
+        #expect(mixer.test_width == SurfaceToolbarSeat.slotWidth(glyphWidth: mixer.glyphWidth),
                 "and Mixer is fully closed already — \(mixer.test_width) pt")
         #expect(!FoldAnimator.shared.isFolding, "nothing is left travelling")
     }
@@ -361,6 +458,7 @@ private func makeParkedWindow(height: CGFloat = 400) -> NSWindow {
     /// closed width when the click returns and reaches the open one only once
     /// the clock has run. Sampled off the seat's live width, so a version that
     /// only asked for an animation would fail here.
+    // Turns red if a tab jumps to its open width instead of travelling there on the reveal clock.
     @Test func withoutReduceMotionTheNameTravelsOpen() {
         defer {
             FoldAnimator.shared.test_reduceMotionOverride = nil
@@ -375,7 +473,8 @@ private func makeParkedWindow(height: CGFloat = 400) -> NSWindow {
             Issue.record("Settings has no seat button")
             return
         }
-        let open = SurfaceToolbarSeat.tabWidth(nameWidth: settings.nameWidth)
+        let open = SurfaceToolbarSeat.tabWidth(nameWidth: settings.nameWidth,
+                                               glyphWidth: settings.glyphWidth)
         #expect(settings.test_width < open,
                 "the seat has not jumped to its open width — \(settings.test_width) of \(open) pt")
         #expect(FoldAnimator.shared.isFolding, "it is travelling there")
@@ -383,7 +482,11 @@ private func makeParkedWindow(height: CGFloat = 400) -> NSWindow {
         FoldAnimator.shared.test_settleNow()
 
         #expect(settings.test_width == open, "and arrives")
-        #expect(controller.test_tabButton(.mixer)?.test_width == SurfaceToolbarSeat.size.width,
+        guard let mixer = controller.test_tabButton(.mixer) else {
+            Issue.record("Mixer has no seat button")
+            return
+        }
+        #expect(mixer.test_width == SurfaceToolbarSeat.slotWidth(glyphWidth: mixer.glyphWidth),
                 "with Mixer closed again in the same travel")
     }
 
@@ -478,7 +581,7 @@ private func makeParkedWindow(height: CGFloat = 400) -> NSWindow {
         #expect(hover < engaged, "the current screen outweighs the pointer")
         #expect(engaged < pressed, "and a press outweighs both, wherever it lands")
         // The three weights are the mixer's own (`rowHoverWashAlpha`,
-        // `rowSelectionWashAlpha`, `mutePillFillAlpha`). Reading each back
+        // `rowSelectionWashAlpha`, `engagedFillAlpha`). Reading each back
         // here would only restate the `return` that produced it; what carries
         // information is the ORDER above, and that a rest seat draws nothing.
     }
@@ -738,6 +841,7 @@ private func makeParkedWindow(height: CGFloat = 400) -> NSWindow {
     /// between them, and the ends past the outer tabs. Three separate seats
     /// would leave the seams and the ends empty, which is exactly what the
     /// rejected version looked like.
+    // Turns red if the capsule stops painting one even wash from end to end, as separate seats per tab would.
     @Test func theCapsuleIsOneUnbrokenSurfaceBehindAllThreeTabs() {
         let capsule = makeCapsule()
         let midHeight = SurfaceToolbarSeat.capsuleSize.height / 2
@@ -752,7 +856,7 @@ private func makeParkedWindow(height: CGFloat = 400) -> NSWindow {
             ("the Groups/Settings seam", NSPoint(x: seam + SurfaceToolbarSeat.size.width, y: midHeight)),
             ("Settings", tabProbe(2)),
             ("the right end, past Settings",
-             NSPoint(x: SurfaceToolbarSeat.capsuleSize.width - 2.5, y: midHeight)),
+             NSPoint(x: capsule.bounds.width - 2.5, y: midHeight)),
         ]
         for appearanceName in [NSAppearance.Name.aqua, .darkAqua] {
             guard let rep = render(capsule, appearanceName: appearanceName) else {
@@ -797,9 +901,9 @@ private func makeParkedWindow(height: CGFloat = 400) -> NSWindow {
             let capsule = makeCapsule(engaged: .groups, hovered: .settings)
             guard let rep = render(capsule, appearanceName: appearanceName),
                   let ground = groundColor(appearanceName),
-                  let idle = color(rep, atPoint: tabProbe(0), in: capsule.bounds),
-                  let selected = color(rep, atPoint: tabProbe(1), in: capsule.bounds),
-                  let hovered = color(rep, atPoint: tabProbe(2), in: capsule.bounds),
+                  let idle = color(rep, atPoint: tabProbe(SurfaceScreen.mixer.rawValue), in: capsule.bounds),
+                  let selected = color(rep, atPoint: tabProbe(SurfaceScreen.groups.rawValue), in: capsule.bounds),
+                  let hovered = color(rep, atPoint: tabProbe(SurfaceScreen.settings.rawValue), in: capsule.bounds),
                   let idleOnStrip = composite(idle, over: ground),
                   let selectedOnStrip = composite(selected, over: ground),
                   let hoveredOnStrip = composite(hovered, over: ground) else {

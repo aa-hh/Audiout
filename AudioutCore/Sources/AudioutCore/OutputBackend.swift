@@ -410,13 +410,26 @@ public protocol OutputBackend: AnyObject {
     ///
     /// Required contract: a still-desired `.failed` id gets a fresh attempt;
     /// an id the backend doesn't currently desire, or one already `.connected`,
-    /// is a no-op. Other non-connected states are CONFORMER LATITUDE:
-    /// `NativeBackend` re-kicks any still-desired non-`.connected` id (a retry
+    /// is a no-op. `NativeBackend` also re-drives, without membership, a
+    /// per-app route target that waits for a password (the per-app counterpart
+    /// of its Bluetooth arm); `MockBackend` does not. Other non-connected
+    /// states are CONFORMER LATITUDE: `NativeBackend` re-kicks any
+    /// still-desired non-`.connected` id (a retry
     /// mid-`.reconnecting` restates `.connecting` — the user pressed the
     /// button, so the attempt marker wins), while `MockBackend` acts only on
     /// `.failed` and no-ops otherwise (scripted tests want no surprise
     /// attempts). Don't tighten either direction without checking both.
     func retryOutput(_ id: String)
+
+    /// Store `password` as speaker `id`'s AirPlay password, then call
+    /// `completion` on the main thread; the caller retries the speaker from it,
+    /// so the retry reads the new password. `source` is `"mac"` or `"phone"` and
+    /// only feeds analytics.
+    func submitAirPlayPassword(_ password: String, for id: String, source: String,
+                               completion: @escaping @Sendable () -> Void)
+
+    /// Delete speaker `id`'s stored AirPlay password.
+    func forgetAirPlayPassword(for id: String)
 
     /// Set the two master gain stages, both on the UI's 0–100 scale: what reaches
     /// a device is `Main × Group × Device`, multiplied before the dB/curve mapping.
@@ -451,6 +464,11 @@ public protocol OutputBackend: AnyObject {
 public extension OutputBackend {
     /// Backends with no post-`stop()` teardown to await inherit this no-op.
     func stopAndWait(timeout: Duration) async {}
+
+    /// Only ``NativeBackend`` feeds a password to a receiver.
+    func submitAirPlayPassword(_ password: String, for id: String, source: String,
+                               completion: @escaping @Sendable () -> Void) { completion() }
+    func forgetAirPlayPassword(for id: String) {}
 
     /// Backends with no real streaming sessions (the mock) have nothing to
     /// disconnect on sleep and no capture gate/watchdog to drive, so they inherit
@@ -518,6 +536,13 @@ public protocol MeteringControlling: AnyObject {
     /// leave it `false` again — a closed popover has nobody to render a meter for,
     /// so there's no reason to keep spending a per-buffer RMS pass on it.
     func setMeteringActive(_ active: Bool)
+
+    /// Keep per-device `.level` flowing while the popover is closed, for a host
+    /// that only needs to know whether sound is coming out (the app's Touch Bar
+    /// play/pause glyph). Unlike ``setMeteringActive(_:)`` it starts no
+    /// metering-only per-app tap: those exist only for the popover's app rows.
+    /// Independent of the popover gate; levels flow while either is on.
+    func setDeviceLevelsWanted(_ wanted: Bool)
 }
 
 /// The optional per-app routing capability (T6/T7). A backend that can stream a
@@ -701,7 +726,7 @@ public func makeBackend(
             AirPlayEngine.setLogFile(path: logs.appendingPathComponent("engine.log").path)
         }
         let engine = AirPlayEngine(
-            config: EngineConfig(startBufferMs: startBufferMs))
+            config: EngineConfig(startBufferMs: startBufferMs, installSeed: AppSettings().engineInstallSeed))
         // Bundle ID → full process-object set, supplied by the caller
         // (`AppDelegate` passes an `NSRunningApplication`-backed resolver; other
         // callers get the "nothing resolves" default). Shared by BOTH the per-app

@@ -703,6 +703,24 @@ public actor AirPlayEngine {
         // port > 0 => appeared/updated; port < 0 => disappeared.
         let port: Int32 = appearing ? Int32(descriptor.port) : -1
 
+        if appearing {
+            // The key the vendored device callback passes to cfg_gettsec: RAOP
+            // names are "<deviceid>@<name>" and raop.c keys on the part after '@'.
+            let key: Substring
+            if descriptor.kind == .raop, let at = descriptor.name.firstIndex(of: "@") {
+                key = descriptor.name[descriptor.name.index(after: at)...]
+            } else {
+                key = Substring(descriptor.name)
+            }
+            String(key).withCString { k in
+                if let pw = descriptor.password {
+                    pw.withCString { conffile_set_device_password(k, $0) }
+                } else {
+                    conffile_set_device_password(k, nil)
+                }
+            }
+        }
+
         descriptor.name.withCString { name in
             descriptor.hostname.withCString { host in
                 descriptor.address.withCString { addr in
@@ -713,6 +731,16 @@ public actor AirPlayEngine {
                         _ = airplayengine_feed_device(name, host, family, addr, port, kv)
                     }
                 }
+            }
+        }
+
+        // The pairing key lives in the app's store; the device holds whatever the
+        // latest feed carried (a value replaces, nil clears).
+        if appearing, let id = descriptor.parsedID, let device = outputs_device_get(id.rawValue) {
+            let held = device.pointee.auth_key.map { String(cString: $0) }
+            if held != descriptor.authKey {
+                free(device.pointee.auth_key)
+                device.pointee.auth_key = descriptor.authKey.map { strdupC($0) }
             }
         }
     }
@@ -916,6 +944,37 @@ public actor AirPlayEngine {
     /// dispatcher drops it. Primitive for `NativeBackend.removeOutput`.
     public func removeOutput(_ id: OutputID) async throws {
         try await unbind(id, serialize: true)
+    }
+
+    /// Run `pair-setup` with the code the receiver is showing. Returns the pairing
+    /// key to store and feed back as `DeviceDescriptor.authKey`. Throws
+    /// `.passwordRequired` when the receiver refuses the code (a back-off or
+    /// max-tries answer reads the same, the vendored handler only logs them), and
+    /// `.sessionFailed` when no key was earned.
+    public func authorize(_ id: OutputID, pin: String) async throws -> String {
+        try requireStarted()
+        guard knownOutputs[id] != nil else { throw AirPlayEngineError.unknownOutput(id) }
+
+        let terminal = try await startOp(id: id) { device, cbId in
+            pin.withCString { outputs_device_authorize(device, $0, cbId) }
+        }
+        switch terminal {
+        case .passwordRequired:
+            throw AirPlayEngineError.passwordRequired
+        case .stopped:
+            let read: () -> String? = {
+                guard let device = outputs_device_get(id.rawValue) else { return nil }
+                return device.pointee.auth_key.map { String(cString: $0) }
+            }
+            let key: String?
+            if issueOverride != nil { key = read() }
+            else if let t = engineThreadHolder.current { key = (try? await t.run(read)) ?? nil }
+            else { key = nil }
+            guard let key else { throw AirPlayEngineError.sessionFailed }
+            return key
+        default:
+            throw AirPlayEngineError.sessionFailed
+        }
     }
 
     private func unbind(_ id: OutputID, serialize: Bool) async throws {

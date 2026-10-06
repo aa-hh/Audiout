@@ -222,20 +222,22 @@ extension SerializedSharedState {
     /// which wear one mute language — and a THIRD consumer is a design
     /// decision, not a refactor, so it fails here first.
     ///
-    /// `DeviceRowView+TestSupport.swift` is the same consumer, not a new one:
-    /// the read-only hooks that compare the drawn colour live there since the
-    /// row's test scaffolding was split out of the shipping file.
+    /// Both buttons take their image from `RowAccessorySymbol.mute(engaged:in:)`,
+    /// so that file is the one place the hue is named.
     @Test func theMutedHueOnlyDressesTheTwoMuteButtons() throws {
-        try expectTokenIsFencedTo("Tokens.Color.muted",
-                                  ["DeviceRowView.swift", "DeviceRowView+TestSupport.swift",
-                                   "MainOutRowView.swift"])
+        try expectTokenIsFencedTo("Tokens.Color.muted", ["RowAccessorySymbol.swift"])
     }
 
-    /// `Tokens.Color.equalizer` is fenced the same way, to its one consumer:
-    /// the device row's engaged Equalizer door.
-    @Test func theEqualizerHueOnlyDressesTheEqualizerDoor() throws {
+    /// `Tokens.Color.equalizer` is fenced the same way. `RowAccessorySymbol`
+    /// inks the door and the heading icon on both pages; `EQEditorView` inks
+    /// the moved stretch of each EQ slider; `EQResponseCurveView` draws the
+    /// Advanced scope's shaped trace and band gridlines; a fourth file is a
+    /// design decision. Turns red if the literal appears in any other source
+    /// file, or disappears from one of these three.
+    @Test func theEqualizerHueIsFencedToTheDoorTheHeadingAndTheSliderFills() throws {
         try expectTokenIsFencedTo("Tokens.Color.equalizer",
-                                  ["DeviceRowView.swift", "DeviceRowView+TestSupport.swift"])
+                                  ["RowAccessorySymbol.swift", "EQEditorView.swift",
+                                   "EQResponseCurveView.swift"])
     }
 
     private func expectTokenIsFencedTo(_ token: String, _ expected: Set<String>,

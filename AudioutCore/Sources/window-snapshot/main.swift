@@ -500,6 +500,178 @@ func makeSnapshotDefaults() -> UserDefaults {
 }
 
 @MainActor
+func loadSpeakerSnapshotSymbols() -> Bool {
+    guard let path = ProcessInfo.processInfo.environment["AUDIOUT_SNAPSHOT_SYMBOL_BUNDLE"],
+          let bundle = Bundle(path: path) else {
+        print("  FAIL  AUDIOUT_SNAPSHOT_SYMBOL_BUNDLE must name the compiled native symbol bundle")
+        renderFailed = true
+        return false
+    }
+    for name in RowAccessorySymbol.allNames {
+        guard let image = bundle.image(forResource: name), image.setName(NSImage.Name(name)),
+              RowAccessorySymbol.rawImage(named: name) != nil else {
+            print("  FAIL  native snapshot symbol missing: \(name)")
+            renderFailed = true
+            return false
+        }
+    }
+    return true
+}
+
+/// Land the screen swap `surface.select` just started. The swap dissolves the
+/// mounted content in on `FoldAnimator`'s display-link clock, and that clock
+/// stalls in this process (no window of ours is on screen), so the content
+/// view stayed at the opacity 0 the swap set and every `mixer-*` frame
+/// rendered as bare chassis (2026-10-06). Run the fold to its end state the
+/// way the headless tests do, then refuse the capture if the content still is
+/// not opaque: a blank golden must fail the run, not land in `dev/notes/`.
+@MainActor
+func settleScreenSwap(_ surface: AppSurfaceController, label: String) {
+    FoldAnimator.shared.test_settleNow()
+    if (surface.shell.window?.contentView?.layer?.opacity ?? 0) < 0.999 {
+        print("  FAIL  \(label) screen swap did not settle")
+        renderFailed = true
+    }
+}
+
+private final class SpeakerSnapshotDefaults: UserDefaults, @unchecked Sendable {
+    private let lock = NSLock()
+    private var values: [String: Any] = [:]
+    override func object(forKey key: String) -> Any? { lock.withLock { values[key] } }
+    override func set(_ value: Any?, forKey key: String) { lock.withLock { values[key] = value } }
+    override func removeObject(forKey key: String) { _ = lock.withLock { values.removeValue(forKey: key) } }
+}
+
+@MainActor
+func speakerManagementFixture(empty: Bool = false) ->
+    (GroupController, AppRoutingController, SpeakerLibraryController, AppSettings, DeviceIconController, [Device]) {
+    let directory = tempDir()
+    let settings = AppSettings(defaults: SpeakerSnapshotDefaults())
+    let local = Device(id: "mac", name: "MacBook Pro Speakers", kind: .localMac,
+                       isAvailable: true, isLocalDevice: true)
+    let airplay = Device(id: "airplay", name: "Move 2", kind: .sonos, volume: 50)
+    let cast = Device(id: "cast", name: "TV", kind: .cast, isAvailable: false,
+                      volume: 50, connectionState: .connected)
+    let bluetooth = Device(id: "bt-offline", name: "Sonos Move", kind: .bluetooth,
+                           isAvailable: false, volume: 50)
+    let hidden = Device(id: "bt-hidden", name: "Onkyo TX-8220", kind: .bluetooth, volume: 50)
+    let remembered = Device(id: "remembered-network", name: "Bedroom", kind: .homePod, isAvailable: false)
+    // Hidden unless playing, and playing: the sidebar's one caption row.
+    let hiddenPlaying = Device(id: "bt-hidden-playing", name: "Beosound A1", kind: .bluetooth,
+                               volume: 50, connectionState: .connected)
+    // Known to the library, seen by the Mac never again, in two scenes: the
+    // Speakers page's Forget row.
+    let lost = Device(id: "lost-den", name: "Den", kind: .sonos, isAvailable: false)
+    let legacyID = "legacy-scene-member-42"
+    let devices = empty ? [local] : [local, airplay, cast, bluetooth, hidden, hiddenPlaying]
+    let backend = MockBackend(fleet: devices, staggerDiscovery: false,
+                              emitsLevels: false, simulatesDropouts: false)
+    let groups = GroupController(backend: backend, store: GroupStore(directory: directory),
+        routingStore: RoutingStore(directory: directory), settings: settings, loadPersisted: false)
+    let routes = AppRoutingController(store: AppRouteStore(directory: directory), loadPersisted: false)
+    let library = SpeakerLibraryController(store: SpeakerLibraryStore(directory: directory),
+        legacyHiddenStore: HiddenSpeakersStore(directory: directory), loadPersisted: false)
+    let icons = DeviceIconController(store: DeviceIconStore(directory: directory), loadPersisted: false)
+    groups.updateDevices(devices)
+    if !empty {
+        do {
+            try groups.saveGroup(Group(id: "kitchen", name: "Kitchen",
+                memberIDs: ["airplay", "cast", "bt-offline", legacyID, "lost-den"],
+                memberVolumes: ["airplay": 50, "cast": 50]))
+            try groups.saveGroup(Group(id: "living", name: "Living Room",
+                memberIDs: ["airplay", "remembered-network", "lost-den"], memberVolumes: ["airplay": 50]))
+        } catch {
+            print("  FAIL  speaker fixture scene save: \(error)")
+            renderFailed = true
+        }
+        library.update(liveDevices: devices + [remembered, lost], groups: groups.groups,
+                       confirmedUsedIDs: ["remembered-network"])
+        library.setVisibility(.always, for: "bt-offline")
+        library.setVisibility(.always, for: "remembered-network")
+        library.setVisibility(.always, for: legacyID)
+        library.setVisibility(.hideWhenNotInUse, for: "bt-hidden")
+        library.setVisibility(.hideWhenNotInUse, for: "bt-hidden-playing")
+        _ = groups.setDeviceSelected("cast", true)
+        _ = groups.setDeviceSelected("bt-hidden-playing", true)
+    }
+    library.update(liveDevices: devices, groups: groups.groups,
+        confirmedUsedIDs: empty ? [] : ["cast"],
+        currentUse: SpeakerCurrentUse(mainAudioMemberIDs: groups.selectedDeviceIDs))
+    return (groups, routes, library, settings, icons, devices)
+}
+
+@MainActor
+func snapshotSpeakerManagement(appearanceName: NSAppearance.Name, outDir: URL) {
+    NSApp.appearance = NSAppearance(named: appearanceName)
+    for variant in ["fleet", "denied", "empty"] {
+        let (groups, routes, library, settings, icons, fixtureDevices) = speakerManagementFixture(empty: variant == "empty")
+        let devices = variant == "denied" ? fixtureDevices.filter { $0.id != "bt-offline" } : fixtureDevices
+        groups.updateDevices(devices)
+        library.update(liveDevices: devices, groups: groups.groups,
+            currentUse: SpeakerCurrentUse(mainAudioMemberIDs: groups.selectedDeviceIDs))
+        let window = MixerWindowController(groupController: groups, deviceIconController: icons,
+            appRouting: routes, btHardwareVolumeStore: BTHardwareVolumeStore(directory: tempDir()),
+            settings: settings, speakerLibrary: library)
+        let popover = PopoverController(appRouting: routes, runningAppsProvider: { [] }, speakerLibrary: library)
+        popover.deviceIconController = icons
+        popover.bluetoothPermissionProvider = { variant == "denied" ? .denied : .granted }
+        popover.configure(groupController: groups)
+        popover.update(devices: devices)
+        window.update(devices: devices)
+        library.onChange = { [weak popover, weak window] in
+            popover?.refreshSpeakerPresentation()
+            window?.refreshSpeakerPresentation()
+        }
+        if variant == "denied" {
+            window.setSpeakerBluetoothAccess(SpeakerBluetoothAccessPresentation(status: .denied, priming: false))
+        }
+        let surface = AppSurfaceController(popoverController: popover, settings: settings,
+            groupsContent: { window.scenesContentController },
+            speakersContent: { window.speakersContentController },
+            settingsContent: { SettingsRootViewController(sections: []) },
+            frameAutosaveName: "SpeakerManagementSnapshotSurface")
+        popover.onManageSpeakers = {
+            surface.select(.speakers)
+            window.select(.speakersOverview)
+        }
+        let presenting: (SurfaceScreen) -> (NSRect?) -> Void = { screen in { anchor in
+            surface.show(anchorRect: anchor)
+            surface.select(screen)
+            settleScreenSwap(surface, label: "speaker")
+        } }
+        let present = presenting(.speakers)
+        let presentScenes = presenting(.groups)
+        if variant == "fleet" {
+            let presentMixer: (NSRect?) -> Void = { anchor in
+                surface.show(anchorRect: anchor)
+                surface.select(.mixer)
+                settleScreenSwap(surface, label: "Mixer")
+            }
+            snapshotControlPanel(surface.shell, label: "mixer", appearanceName: appearanceName,
+                                 outDir: outDir, present: presentMixer)
+        }
+        present(nil)
+        window.select(.speakersOverview)
+        let overviewLabel = variant == "fleet" ? "speakers" : "speakers-\(variant)"
+        snapshotControlPanel(surface.shell, label: overviewLabel, appearanceName: appearanceName,
+                             outDir: outDir, present: present)
+        if variant == "fleet" {
+            window.select(.group(id: "kitchen"))
+            snapshotControlPanel(surface.shell, label: "scene-editor", appearanceName: appearanceName,
+                                 outDir: outDir, present: presentScenes)
+            window.select(.groupsOverview)
+            snapshotControlPanel(surface.shell, label: "scene-cards", appearanceName: appearanceName,
+                                 outDir: outDir, present: presentScenes)
+            window.select(.device(id: "remembered-network"))
+            snapshotControlPanel(surface.shell, label: "remembered-network", appearanceName: appearanceName,
+                                 outDir: outDir, present: present)
+        }
+        groups.flushPendingRoutingSave()
+        surface.performClose()
+    }
+}
+
+@MainActor
 func run() -> Int32 {
     // Never show a real window on the developer's screen while this
     // headless tool runs (`HeadlessRuntime` in AudioutCore) — set BEFORE
@@ -522,6 +694,13 @@ func run() -> Int32 {
     }
     try? FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true)
     print("Rendering mixer-window snapshots to: \(outDir.path)")
+    if ProcessInfo.processInfo.environment["AIRPLAY_SNAPSHOT_MODE"] == "speaker-management" {
+        guard loadSpeakerSnapshotSymbols() else { return 1 }
+        snapshotSpeakerManagement(appearanceName: .aqua, outDir: outDir)
+        snapshotSpeakerManagement(appearanceName: .darkAqua, outDir: outDir)
+        print("Done.")
+        return renderFailed ? 1 : 0
+    }
 
     for appearanceName in [NSAppearance.Name.aqua, .darkAqua] {
         // App-level appearance too, not just per-window: on Darwin 27,
@@ -571,20 +750,29 @@ func run() -> Int32 {
         let surface = AppSurfaceController(
             popoverController: surfacePopover,
             settings: surfaceSettings,
-            groupsContent: { windowController.contentController },
+            groupsContent: { windowController.scenesContentController },
+            speakersContent: { windowController.speakersContentController },
             settingsContent: {
                 // Lazily built on first .settings selection — never reached
-                // in this render (only Groups is ever selected).
+                // in this render (only Scenes and Speakers are selected).
                 SettingsRootViewController(sections: [])
             },
             frameAutosaveName: "WindowSnapshotSurface")
         // `show` mounts + fronts (a no-op re-front once already shown);
-        // `select` is a no-op once Groups is already the selected screen —
-        // so calling this before every capture just guarantees the surface
-        // is showing Groups, without re-running the mount/resize dance.
+        // `select` is a no-op once that screen is already selected —
+        // so calling one of these before every capture just guarantees the
+        // surface is showing Scenes (or Speakers, for a speaker page), without
+        // re-running the mount/resize dance. `settleScreenSwap` then lands the
+        // dissolve `select` starts (see it for why the clock never does).
         let presentGroups: (NSRect?) -> Void = { anchor in
             surface.show(anchorRect: anchor)
             surface.select(.groups)
+            settleScreenSwap(surface, label: "Groups")
+        }
+        let presentSpeakers: (NSRect?) -> Void = { anchor in
+            surface.show(anchorRect: anchor)
+            surface.select(.speakers)
+            settleScreenSwap(surface, label: "Speakers")
         }
 
         // 1. Default state: no groups — the card overview's own zero-groups
@@ -627,7 +815,7 @@ func run() -> Int32 {
             windowController.test_detail.test_setOverlayVisible(true)
             drain()
             snapshotControlPanel(surface.shell, label: "4-device-detail", appearanceName: appearanceName,
-                                outDir: outDir, present: presentGroups)
+                                outDir: outDir, present: presentSpeakers)
 
             // 4b. The same pane with Advanced open — the scope lives in the
             // fold, so this is the only render that shows it. Put back
@@ -637,7 +825,7 @@ func run() -> Int32 {
             drain()
             snapshotControlPanel(surface.shell, label: "4b-device-detail-eq-open",
                                 appearanceName: appearanceName,
-                                outDir: outDir, present: presentGroups)
+                                outDir: outDir, present: presentSpeakers)
             windowController.test_detail.test_eqEditor.test_fireAdvancedClick()
             drain()
 
@@ -681,7 +869,7 @@ func run() -> Int32 {
             // beak-backed bubble (live-review D1) actually draws on the
             // unpinned bubble.
             snapshotControlPanel(surface.shell, label: "5-panel-chrome",
-                                appearanceName: appearanceName, outDir: outDir, present: presentGroups)
+                                appearanceName: appearanceName, outDir: outDir, present: presentSpeakers)
 
             // 8. Groups overview (direction C): the card field the sidebar's
             // pinned Groups row opens. Two more groups are saved so the grid

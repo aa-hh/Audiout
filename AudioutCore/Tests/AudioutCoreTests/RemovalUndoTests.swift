@@ -45,6 +45,20 @@ import Testing
         #expect(!row.test_removalUndoOffered, "and it goes the moment the host stops offering it")
     }
 
+    // Turns red when the row hides a host-raised offer, or draws the status caption on top of it, on an unavailable row.
+    @Test func hostRaisedOfferSurvivesAnUnavailableRow() {
+        let device = Device(id: "undo-off", name: "Kitchen", kind: .homePod,
+                            isAvailable: false, connectionState: .off)
+        let row = makeBusRow(device)
+        row.apply(device, selected: false, removalUndoOffered: true, unavailableStatus: "Unavailable")
+        #expect(row.test_removalUndoOffered)
+        #expect(row.test_unavailableStatusText == nil)
+
+        row.apply(device, selected: false, removalUndoOffered: false, unavailableStatus: "Unavailable")
+        #expect(!row.test_removalUndoOffered)
+        #expect(row.test_unavailableStatusText == "Unavailable")
+    }
+
     @Test func undoButtonSpeaksWhatItUndoes() {
         let row = makeBusRow(makeDevice())
         row.apply(makeDevice(), selected: false, removalUndoOffered: true)

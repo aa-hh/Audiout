@@ -25,6 +25,266 @@ import AppKit
 @MainActor
 @Suite struct DeviceDetailViewTests {
 
+    // Rendering remembered records as live devices would expose invented Equalizer and AirPlay capability controls.
+    @Test func rememberedDetailKeepsSceneRelationsAndSharedVisibility() throws {
+        let controller = makeController()
+        let bt = makeDevice(id: "bt", name: "Saved speaker", kind: .bluetooth)
+        let group = Group(id: "g", name: "Scene", memberIDs: ["bt"], memberVolumes: [:])
+        try controller.saveGroup(group)
+        let library = SpeakerLibraryController(loadPersisted: false)
+        library.update(liveDevices: [bt], groups: [group])
+        library.update(liveDevices: [], groups: [group])
+        let detail = DeviceDetailViewController(groupController: controller,
+            settings: AppSettings(defaults: isolation.isolatedDefaults))
+        detail.speakerLibrary = library
+        detail.cantBeFoundIDs = ["bt"]
+        detail.loadViewIfNeeded()
+        detail.show(record: try #require(library.record(for: "bt")))
+        #expect(detail.test_subtitleText == "Bluetooth Speaker \u{00B7} Can\u{2019}t be found")
+        #expect(detail.test_groupRowTitles == ["Scene"])
+        #expect(!detail.test_eqSectionShown)
+        var eqWrites = 0
+        detail.onSetEQ = { _, _, _ in eqWrites += 1 }
+        detail.test_eqEditor.test_dragBass(to: 3)
+        detail.test_fireResetClick()
+        #expect(eqWrites == 0)
+        #expect(!detail.test_resetShown)
+        detail.test_changeVisibility(.always)
+        #expect(library.visibility(for: "bt") == .always)
+        #expect(detail.test_visibilityTitle == "Always")
+        #expect(controller.activeGroupID == nil)
+        let local = makeDevice(id: "mac", kind: .localMac)
+        library.update(liveDevices: [local], groups: [group])
+        detail.show(record: try #require(library.record(for: "mac")))
+        #expect(!detail.test_visibilityEnabled)
+    }
+
+    /// A library pane holding a ready Sonos, an away Bluetooth speaker, a
+    /// remembered speaker the Mac can't find (in one scene) and This Mac.
+    private func makeLibraryPane() throws -> (DeviceDetailViewController, SpeakerLibraryController) {
+        let controller = makeController()
+        let group = Group(id: "g", name: "Scene", memberIDs: ["study"], memberVolumes: [:])
+        try controller.saveGroup(group)
+        let ready = makeDevice(id: "move", name: "Move 2", kind: .sonos)
+        let away = makeDevice(id: "bedroom", name: "Bedroom", kind: .bluetooth, isAvailable: false)
+        let study = makeDevice(id: "study", name: "Study")
+        let mac = makeDevice(id: "mac", name: "MacBook", kind: .localMac)
+        let library = SpeakerLibraryController(loadPersisted: false)
+        library.update(liveDevices: [ready, away, study, mac], groups: [group])
+        library.update(liveDevices: [ready, away, mac], groups: [group])
+        let detail = DeviceDetailViewController(groupController: controller,
+            settings: AppSettings(defaults: isolation.isolatedDefaults))
+        detail.speakerLibrary = library
+        detail.loadViewIfNeeded()
+        return (detail, library)
+    }
+
+    // Dropping the can't-be-found branch of the caption, or its glyph, or showing "Can't be found" for a speaker outside the host's list, turns it red.
+    @Test func theCaptionReadsKindAndStatusThisMacOrCantBeFound() throws {
+        let (detail, library) = try makeLibraryPane()
+        detail.show(record: try #require(library.record(for: "move")))
+        #expect(detail.test_subtitleText == "Sonos \u{00B7} \(SpeakerPresentationStatus.available.text)")
+        #expect(!detail.test_subtitleGlyphShown)
+        detail.show(record: try #require(library.record(for: "bedroom")))
+        #expect(detail.test_subtitleText == "Bluetooth Speaker \u{00B7} Not connected")
+        detail.show(record: try #require(library.record(for: "study")))
+        #expect(detail.test_subtitleText == "AirPlay Speaker \u{00B7} Unavailable")
+        #expect(!detail.test_subtitleGlyphShown)
+        detail.cantBeFoundIDs = ["study"]
+        detail.show(record: try #require(library.record(for: "study")))
+        #expect(detail.test_subtitleText == "AirPlay Speaker \u{00B7} Can\u{2019}t be found")
+        #expect(detail.test_subtitleGlyphShown)
+        detail.show(record: try #require(library.record(for: "mac")))
+        #expect(detail.test_subtitleText == "This Mac")
+        #expect(!detail.test_subtitleGlyphShown)
+    }
+
+    // Showing the editor for a speaker the Mac can't find, skipping its stored tone, losing Forget, or offering Forget before the host's list holds the speaker turns it red.
+    @Test func aSpeakerThatCantBeFoundShowsItsStoredToneAndForget() throws {
+        let (detail, library) = try makeLibraryPane()
+        var reads: [String] = []
+        detail.storedDeviceEQ = { id in
+            reads.append(id)
+            return DeviceEQ(bassDB: 2)
+        }
+        var forgotten: [String] = []
+        detail.onForget = { forgotten.append($0) }
+        detail.show(record: try #require(library.record(for: "study")))
+        #expect(!detail.test_eqSectionShown)
+        #expect(detail.test_eqHeadingSpokenValue == "Bass 2 dB")
+        #expect(detail.test_keptNoteText == "Changes will be applied when the speaker next connects.")
+        #expect(!detail.test_forgetButtonShown, "the list has not named it yet")
+        detail.test_clickForget()
+        #expect(forgotten.isEmpty)
+
+        reads.removeAll()
+        detail.cantBeFoundIDs = ["study"]
+        detail.show(record: try #require(library.record(for: "study")))
+        #expect(!detail.test_eqSectionShown)
+        #expect(detail.test_eqHeadingSpokenValue == "Bass 2 dB")
+        #expect(detail.test_eqMarkIsEngaged)
+        #expect(!detail.test_resetShown)
+        #expect(detail.test_keptNoteText == "Changes will be applied when the speaker next connects.")
+        #expect(detail.test_forgetButtonShown)
+        #expect(detail.test_forgetButtonTitle == "Forget \u{201C}Study\u{201D}\u{2026}")
+        #expect(reads == ["study"], "read once per show")
+        detail.test_clickForget()
+        #expect(forgotten == ["study"])
+
+        detail.storedDeviceEQ = { _ in nil }
+        detail.show(record: try #require(library.record(for: "study")))
+        #expect(detail.test_eqHeadingSpokenValue == "Flat")
+        #expect(!detail.test_eqMarkIsEngaged)
+        #expect(detail.test_keptNoteText == nil, "a flat stored tone has nothing to keep")
+
+        reads.removeAll()
+        detail.storedDeviceEQ = { id in reads.append(id); return nil }
+        detail.show(record: try #require(library.record(for: "move")))
+        #expect(!detail.test_forgetButtonShown)
+        #expect(reads.isEmpty, "a speaker the backend knows reads its tone from the snapshot")
+    }
+
+    // Pinning the caption to one value, or offering the row on This Mac, turns it red.
+    @Test func showInMixerCaptionFollowsTheValueAndLeavesThisMac() throws {
+        let (detail, library) = try makeLibraryPane()
+        detail.show(record: try #require(library.record(for: "move")))
+        #expect(detail.test_showInMixerCaption == "Shown while your Mac can reach it.")
+        detail.test_changeVisibility(.always)
+        #expect(detail.test_showInMixerCaption == "Shown even when your Mac can\u{2019}t reach it.")
+        detail.test_changeVisibility(.hideWhenNotInUse)
+        #expect(detail.test_showInMixerCaption == "Shown only while it\u{2019}s in use.")
+        detail.show(record: try #require(library.record(for: "mac")))
+        #expect(!detail.test_showInMixerRowShown)
+    }
+
+    // Hiding the editor for an away speaker, or changing its note, turns it red.
+    @Test func anAwaySpeakerKeepsItsEditorAndItsNote() {
+        let detail = DeviceDetailViewController(groupController: makeController(),
+                                            settings: AppSettings(defaults: isolation.isolatedDefaults))
+        detail.show(device: makeDevice(id: "bedroom", name: "Living Room HomePod Pair", isAvailable: false))
+        _ = detail.view
+        detail.view.setFrameSize(NSSize(width: SurfaceLayout.contentPaneWidth,
+                                        height: AppSurfaceController.minimumContentSize.height))
+        detail.view.layoutSubtreeIfNeeded()
+        #expect(detail.test_eqSectionShown)
+        #expect(detail.test_eqEditor.test_bypassNoteText
+                == "Changes will be applied when the speaker next connects.")
+        var writes = 0
+        detail.onSetEQ = { _, _, _ in writes += 1 }
+        detail.test_eqEditor.test_dragBass(to: 2)
+        #expect(writes == 1, "an away speaker's tone is stored for when it is back")
+    }
+
+    // Reordering the summary's parts or dropping the singular band word turns it red.
+    @Test func theSummaryNamesWhatIsShaped() {
+        var bands = Array(repeating: 0.0, count: DeviceEQ.bandCount)
+        bands[0] = 2
+        #expect(EqualizerMarkView.summary(DeviceEQ(bandGainsDB: bands)) == "1 band set")
+        bands[4] = -1.5
+        #expect(EqualizerMarkView.summary(DeviceEQ(bandGainsDB: bands)) == "2 bands set")
+        #expect(EqualizerMarkView.summary(DeviceEQ(trebleDB: -2, balance: -0.3))
+                == "Treble \u{2212}2 dB, Balance L 30%")
+    }
+
+    // Hiding the icon for a flat tone, inking it for a flat one, or dropping the spoken summary turns it red.
+    @Test func theHeadingIconIsAlwaysShownAndInkedOnlyForAShapedTone() {
+        let detail = makeLoadedPane(device: makeDevice(id: "office"))
+        #expect(detail.test_eqMarkShown)
+        #expect(!detail.test_eqMarkIsEngaged)
+        #expect(detail.test_eqMarkShapedSymbolName == RowAccessorySymbol.equalizerRest)
+        #expect(detail.test_eqHeadingSpokenValue == "Flat")
+        #expect(!detail.test_resetShown)
+
+        var shaped = makeDevice(id: "office")
+        shaped.eq = DeviceEQ(bassDB: 3, loudness: true)
+        detail.refresh(device: shaped)
+        #expect(detail.test_eqMarkShown)
+        #expect(detail.test_eqMarkIsEngaged)
+        #expect(detail.test_eqMarkShapedSymbolName == RowAccessorySymbol.equalizerEngaged)
+        #expect(detail.test_eqMarkLastFlipEffect == .none, "a snapshot never animates the icon")
+        #expect(detail.test_eqMarkLastAnnouncement == nil, "a snapshot never speaks")
+        #expect(detail.test_eqHeadingSpokenValue == "Bass 3 dB, Loudness on")
+        #expect(detail.test_resetShown)
+
+        detail.onSetEQ = { _, _, _ in }
+        detail.test_fireResetClick()
+        #expect(detail.test_eqMarkShown)
+        #expect(!detail.test_eqMarkIsEngaged)
+        #expect(detail.test_eqMarkShapedSymbolName == RowAccessorySymbol.equalizerRest)
+        #expect(detail.test_eqHeadingSpokenValue == "Flat")
+        #expect(!detail.test_resetShown)
+
+        detail.show(device: makeDevice(id: "local", name: "This Mac", kind: .localMac))
+        #expect(!detail.test_eqMarkShown)
+    }
+
+    // Animating a scrub's second crossing, skipping the grow going shaped, growing under Reduce Motion, or dropping the announcement turns it red.
+    @Test func onlyTheUsersGestureAnimatesTheHeadingIconOncePerGesture() {
+        let detail = makeLoadedPane(device: makeDevice(id: "office"))
+        detail.onSetEQ = { _, _, _ in }
+        detail.test_eqMarkReduceMotionOverride = false
+        let editor = detail.test_eqEditor
+        editor.test_pointerGestureOverride = false
+        editor.test_committedGestureOverride = false
+
+        editor.test_dragBass(to: 3)
+        #expect(detail.test_eqMarkLastFlipEffect == .crossFadeAndScale)
+        #expect(detail.test_eqMarkLastAnnouncement == "Equalizer shaped")
+
+        editor.test_dragBass(to: 0)
+        #expect(detail.test_eqMarkLastFlipEffect == .none, "one effect per gesture")
+        editor.test_dragBass(to: 3)
+        #expect(detail.test_eqMarkLastFlipEffect == .none, "one effect per gesture")
+
+        editor.test_committedGestureOverride = true
+        editor.test_dragBass(to: 3)
+        editor.test_committedGestureOverride = false
+        editor.test_dragBass(to: 0)
+        #expect(detail.test_eqMarkLastFlipEffect == .crossFadeOnly)
+        #expect(detail.test_eqMarkLastAnnouncement == "Equalizer flat")
+
+        // Commit at 0 to end that gesture before the Reduce Motion step.
+        editor.test_committedGestureOverride = true
+        editor.test_dragBass(to: 0)
+        detail.test_eqMarkReduceMotionOverride = true
+        editor.test_dragBass(to: 3)
+        #expect(detail.test_eqMarkLastFlipEffect == .crossFadeOnly, "no grow under Reduce Motion")
+
+        detail.test_fireResetClick()
+        #expect(detail.test_eqMarkLastFlipEffect == .crossFadeOnly)
+        #expect(detail.test_eqMarkLastAnnouncement == "Equalizer flat")
+    }
+
+    // Moving `refreshEQTitleRow(userCaused: true)` back after `onSetEQ` in either EQ delegate method turns it red.
+    @Test func aCommittedFlipAnimatesAndSpeaksWhenTheAppRepaintsThePageAtOnce() {
+        let base = makeDevice(id: "office")
+        let detail = makeLoadedPane(device: base)
+        detail.test_eqMarkReduceMotionOverride = false
+        // The real app repaints this page inside a committed `onSetEQ`. The
+        // icon's last-effect hook resets on every refresh, so it is read as
+        // the repaint arrives, before the repaint's own refresh clears it.
+        var effectsAtRepaint: [EqualizerMarkView.FlipEffect] = []
+        detail.onSetEQ = { [unowned detail] eq, _, committed in
+            guard committed else { return }
+            effectsAtRepaint.append(detail.test_eqMarkLastFlipEffect)
+            var echoed = base
+            echoed.eq = eq
+            detail.refresh(device: echoed)
+        }
+        let editor = detail.test_eqEditor
+        editor.test_pointerGestureOverride = false
+        editor.test_committedGestureOverride = true
+
+        editor.test_dragBass(to: 3)
+        #expect(detail.test_eqMarkIsEngaged)
+        #expect(detail.test_eqMarkLastAnnouncement == "Equalizer shaped")
+
+        detail.test_fireResetClick()
+        #expect(!detail.test_eqMarkIsEngaged)
+        #expect(detail.test_eqMarkLastAnnouncement == "Equalizer flat")
+        #expect(effectsAtRepaint == [.crossFadeAndScale, .crossFadeOnly])
+    }
+
     private let isolation = TestIsolation(owner: "DeviceDetailViewTests")
 
     private func tempDirectory() -> URL {
@@ -39,7 +299,9 @@ import AppKit
     /// never the backend, so an un-started, fleet-less backend is enough.
     private func makeController() -> GroupController {
         let backend = MockBackend(fleet: [], staggerDiscovery: false, emitsLevels: false, simulatesDropouts: false)
-        return GroupController(backend: backend, store: GroupStore(directory: tempDirectory()), loadPersisted: false)
+        return GroupController(backend: backend, store: GroupStore(directory: tempDirectory()),
+                               routingStore: RoutingStore(directory: isolation.scratchDir),
+                               settings: AppSettings(defaults: isolation.isolatedDefaults), loadPersisted: false)
     }
 
     private func makeDevice(
@@ -67,115 +329,77 @@ import AppKit
         #expect(detail.test_shownDeviceID == nil)
     }
 
+    // A refresh that keeps the first snapshot's caption turns it red.
     @Test func refreshUpdatesFieldsForTheSameDevice() {
         let detail = DeviceDetailViewController(groupController: makeController(),
                                             settings: AppSettings(defaults: isolation.isolatedDefaults))
         detail.show(device: makeDevice(isAvailable: true))
-        #expect(detail.test_metadataStrings["status"] == "Ready")
+        #expect(detail.test_subtitleText == "AirPlay Speaker \u{00B7} \(SpeakerPresentationStatus.available.text)")
 
         detail.refresh(device: makeDevice(isAvailable: false))
-        #expect(detail.test_metadataStrings["status"] == "Not on Wi-Fi")
+        #expect(detail.test_subtitleText == "AirPlay Speaker \u{00B7} Unavailable")
         #expect(detail.test_shownDeviceID == "d1")
     }
 
-    // MARK: Metadata form — status wording
+    // MARK: The outlined list — the Password row
 
-    @Test func statusTextOff() {
+    // Showing the row without `hasStoredPassword`, or "Forget" not firing `onForgetPassword` with the id, turns it red.
+    @Test func passwordRowShowsOnlyWithAStoredPasswordAndForgetReportsTheID() {
         let detail = DeviceDetailViewController(groupController: makeController(),
                                             settings: AppSettings(defaults: isolation.isolatedDefaults))
-        detail.show(device: makeDevice(isAvailable: true, connectionState: .off))
-        #expect(detail.test_metadataStrings["status"] == "Ready",
-                "a reachable idle speaker is something you can use, not something broken")
+        detail.show(device: makeDevice())
+        #expect(detail.test_passwordCaption == nil)
+
+        var device = makeDevice()
+        device.hasStoredPassword = true
+        detail.show(device: device)
+        #expect(detail.test_passwordCaption == "Saved")
+
+        var forgotten: [String] = []
+        detail.onForgetPassword = { forgotten.append($0) }
+        detail.test_tapForgetPassword()
+        #expect(forgotten == ["d1"])
     }
 
-    @Test func statusTextOffAndUnreachable() {
+    // Turns red if `refreshUI` stops titling the row "Pairing" for a code receiver, or keeps that title for a password one.
+    @Test func passwordRowReadsPairingForACodeReceiver() {
         let detail = DeviceDetailViewController(groupController: makeController(),
                                             settings: AppSettings(defaults: isolation.isolatedDefaults))
-        detail.show(device: makeDevice(isAvailable: false, connectionState: .off))
-        #expect(detail.test_metadataStrings["status"] == "Not on Wi-Fi",
-                "Status folds availability in — it is the only row that reports it")
+        var code = makeDevice()
+        code.airPlayAccess = .onScreenCode
+        code.hasStoredPassword = true
+        detail.show(device: code)
+        #expect(detail.test_passwordCaption == "Saved")
+        #expect(detail.test_passwordRowTitle == "Pairing")
+
+        var password = makeDevice()
+        password.airPlayAccess = .password
+        password.hasStoredPassword = true
+        detail.show(device: password)
+        #expect(detail.test_passwordRowTitle == "Password")
     }
 
-    @Test func statusTextConnecting() {
-        let detail = DeviceDetailViewController(groupController: makeController(),
-                                            settings: AppSettings(defaults: isolation.isolatedDefaults))
-        detail.show(device: makeDevice(connectionState: .connecting))
-        #expect(detail.test_metadataStrings["status"] == "Connecting…")
-    }
+    // MARK: The caption — kind
 
-    @Test func statusTextConnectingIgnoresAvailability() {
-        let detail = DeviceDetailViewController(groupController: makeController(),
-                                            settings: AppSettings(defaults: isolation.isolatedDefaults))
-        detail.show(device: makeDevice(isAvailable: false, connectionState: .connecting))
-        #expect(detail.test_metadataStrings["status"] == "Connecting…",
-                "availability is consulted only in the idle arm")
-    }
-
-    @Test func statusTextReconnecting() {
-        let detail = DeviceDetailViewController(groupController: makeController(),
-                                            settings: AppSettings(defaults: isolation.isolatedDefaults))
-        detail.show(device: makeDevice(connectionState: .reconnecting))
-        #expect(detail.test_metadataStrings["status"] == "Reconnecting…")
-    }
-
-    @Test func statusTextConnected() {
-        let detail = DeviceDetailViewController(groupController: makeController(),
-                                            settings: AppSettings(defaults: isolation.isolatedDefaults))
-        detail.show(device: makeDevice(connectionState: .connected))
-        #expect(detail.test_metadataStrings["status"] == "Connected")
-    }
-
-    @Test func statusTextFailed() {
-        let detail = DeviceDetailViewController(groupController: makeController(),
-                                            settings: AppSettings(defaults: isolation.isolatedDefaults))
-        detail.show(device: makeDevice(connectionState: .failed(.init(cause: .notResponding))))
-        #expect(detail.test_metadataStrings["status"] == "Couldn't connect",
-                       "matches DeviceRowView's existing failed vocabulary")
-    }
-
-    // MARK: About list — the AirPlay row
-
-    @Test func airPlayRowReadsAirPlay2OrAirPlay1() {
-        let detail = DeviceDetailViewController(groupController: makeController(),
-                                            settings: AppSettings(defaults: isolation.isolatedDefaults))
-        detail.show(device: makeDevice(kind: .generic, supportsAirPlay2: true))
-        #expect(detail.test_metadataStrings["airplay"] == "AirPlay 2")
-
-        detail.show(device: makeDevice(kind: .airportExpress, supportsAirPlay2: false))
-        #expect(detail.test_metadataStrings["airplay"] == "AirPlay 1: sync not exact",
-                "says what AirPlay 1 costs, not just its version number")
-    }
-
-    @Test func airPlayRowIsHiddenForBluetoothAndThisMac() {
-        let detail = DeviceDetailViewController(groupController: makeController(),
-                                            settings: AppSettings(defaults: isolation.isolatedDefaults))
-        detail.show(device: makeDevice(kind: .bluetooth, supportsAirPlay2: false))
-        #expect(detail.test_metadataStrings["airplay"] == nil,
-                "a Bluetooth speaker is not an AirPlay receiver at all")
-
-        detail.show(device: makeDevice(kind: .localMac))
-        #expect(detail.test_metadataStrings["airplay"] == nil,
-                "This Mac is where the audio comes FROM")
-    }
-
-    // MARK: About list — kind
-
+    // Swapping two words in `kindText(for:)` turns it red.
     @Test func kindTextForEveryKind() {
         let detail = DeviceDetailViewController(groupController: makeController(),
                                             settings: AppSettings(defaults: isolation.isolatedDefaults))
         let expectations: [(Device.Kind, String)] = [
-            (.localMac, "This Mac"),
             (.homePod, "HomePod"),
             (.appleTV, "Apple TV"),
             (.airportExpress, "AirPort Express"),
             (.sonos, "Sonos"),
             (.generic, "AirPlay Speaker"),
             (.bluetooth, "Bluetooth Speaker"),
+            (.cast, "Cast Speaker"),
         ]
         for (kind, expected) in expectations {
             detail.show(device: makeDevice(kind: kind))
-            #expect(detail.test_metadataStrings["kind"] == expected, "kind: \(kind)")
+            #expect(detail.test_subtitleText.hasPrefix(expected + " \u{00B7} "), "kind: \(kind)")
         }
+        detail.show(device: makeDevice(kind: .localMac))
+        #expect(detail.test_subtitleText == "This Mac")
     }
 
     // MARK: "Control speaker volume" (Bluetooth only)
@@ -262,14 +486,6 @@ import AppKit
     }
 
     // MARK: The "Groups" membership section — rows, order, empty state
-
-    @Test func groupsSectionIsTitledGroups() {
-        let detail = DeviceDetailViewController(groupController: makeController(),
-                                            settings: AppSettings(defaults: isolation.isolatedDefaults))
-        _ = detail.view
-        detail.show(device: makeDevice(id: "office"))
-        #expect(detail.test_groupsSectionTitleText == "Scenes")
-    }
 
     @Test func groupRowsListEverySavedGroupContainingTheDeviceInSidebarOrder() throws {
         let controller = makeController()
@@ -363,6 +579,7 @@ import AppKit
         var reported: [String] = []
         detail.onSelectGroup = { reported.append($0) }
 
+        #expect(detail.test_sceneLinkTitles == ["Kitchen", "Whole House"])
         detail.test_selectGroupRow(at: 1)
         #expect(reported == ["g2"], "the row's id, not its position in groupController.groups")
 
@@ -384,24 +601,6 @@ import AppKit
         #expect(reported.isEmpty, "there is nothing to open")
     }
 
-    @Test func theGroupsTitleSitsBetweenTheEqualizerCardAndTheGroupsList() throws {
-        let detail = try laidOutPaneWithOneGroup()
-
-        let card = detail.test_eqSectionFrame
-        let title = detail.test_groupsSectionTitleFrame
-        let section = detail.test_groupsSectionFrame
-
-        // The pane's own view is NOT flipped, so "below" reads as a SMALLER y.
-        // Half-point tolerance: auto layout snaps frames onto a rounding grid
-        // whose pitch varies BETWEEN RUNS of the same binary
-        // (`AudioutWindowUI/AGENTS.md`), and this pane's insets are half
-        // points. Never assert absolute widths here for the same reason.
-        #expect(title.maxY <= card.minY + 0.5,
-                "the title sits below the Equalizer card's bottom edge")
-        #expect(section.maxY <= title.minY + 0.5,
-                "…and above the Groups list it titles")
-    }
-
     @Test func theEqualizerCardInsetsTheEditorByCardContentInsetNotVerticalPadding() throws {
         let detail = try laidOutPaneWithOneGroup()
 
@@ -416,19 +615,6 @@ import AppKit
                 "the card's top breathes cardContentInset above the editor's first row, not the tighter verticalPadding used by bare row lists")
         #expect(abs(editor.minY - card.minY - GroupsPaneLayout.cardContentInset) < 0.5,
                 "…and the same inset below it")
-    }
-
-    @Test func theAboutTitleSitsBetweenTheGroupsListAndTheAboutList() throws {
-        let detail = try laidOutPaneWithOneGroup()
-
-        let groups = detail.test_groupsSectionFrame
-        let title = detail.test_aboutSectionTitleFrame
-        let about = detail.test_aboutSectionFrame
-
-        #expect(title.maxY <= groups.minY + 0.5,
-                "the title sits below the Groups list")
-        #expect(about.maxY <= title.minY + 0.5,
-                "…and above the About list it titles")
     }
 
     @Test func aGroupRowsNameStretchesToTheChevronAndTruncatesRatherThanRunningUnderIt() throws {
@@ -469,6 +655,34 @@ import AppKit
             #expect(titles[row].maxX <= chevrons[row].minX - gap + 0.5,
                     Comment(rawValue: "the \(name) row's title stops a gap short of the chevron " +
                     "rather than drawing under it"))
+        }
+    }
+
+    // Laying the scene links side by side again, or letting one run past the list's box or under the "Scenes" title, turns it red.
+    @Test func sixSceneLinksStackOnePerLineInsideTheList() throws {
+        let controller = makeController()
+        for n in 1...6 {
+            try controller.saveGroup(Group(id: "g\(n)", name: "Scene \(n)",
+                                           memberIDs: ["office"], memberVolumes: ["office": 50]))
+        }
+        let detail = DeviceDetailViewController(groupController: controller,
+                                            settings: AppSettings(defaults: isolation.isolatedDefaults))
+        detail.show(device: makeDevice(id: "office"))
+        _ = detail.view
+        detail.view.setFrameSize(AppSurfaceController.minimumContentSize)
+        detail.view.layoutSubtreeIfNeeded()
+
+        let frames = detail.test_groupRowButtonFrames
+        #expect(frames.count == 6)
+        let list = detail.test_listSectionFrame.insetBy(dx: -0.5, dy: -0.5)
+        let title = detail.test_scenesTitleFrame
+        for frame in frames {
+            #expect(list.contains(frame), "every link sits inside the list's box")
+            #expect(frame.minX >= title.maxX, "no link runs under the \"Scenes\" title")
+        }
+        let sorted = frames.sorted { $0.minY < $1.minY }
+        for (upper, lower) in zip(sorted, sorted.dropFirst()) {
+            #expect(upper.maxY <= lower.minY + 0.5, "the links stack one per line, never overlapping")
         }
     }
 
@@ -627,9 +841,7 @@ import AppKit
     @Test func equalizerSectionIsShownOnASpeaker() {
         let detail = makeLoadedPane(device: makeDevice())
         #expect(detail.test_eqSectionShown)
-        #expect(detail.test_slotTitles == ["Equalizer", "Scenes", "About"])
-        #expect(detail.test_cardFrames.count == 1,
-                "the Equalizer is the page's one instrument, so its one box (a `.well`, not `.card`)")
+        #expect(detail.test_slotTitles == ["Equalizer"])
     }
 
     // MARK: The Equalizer section's title
@@ -655,18 +867,16 @@ import AppKit
                 "the Equalizer card's own content sits below its title")
     }
 
-    /// One box per page (the Equalizer, a `.well`), and identity/Groups/About
-    /// are bare: a box is earned by holding a different instrument, never by
-    /// length. The titles are bare pane text, the same idiom as the group
-    /// editor's "Speakers" label.
-    @Test func onlyTheEqualizerIsACard() {
+    /// A speaker carries two boxes: the Equalizer's `.well` and the outlined
+    /// list's `.card`. This Mac keeps the list alone.
+    // Adding a third box, or dropping the list's card, turns it red.
+    @Test func aSpeakerHasExactlyTheWellAndTheListCard() {
         let detail = makeLoadedPane(device: makeDevice())
-        #expect(detail.test_cardFrames.count == 1)
+        #expect(detail.test_cardFrames.count == 2)
 
         detail.show(device: makeDevice(id: "local", name: "This Mac", kind: .localMac))
-        #expect(detail.test_cardFrames.count == 0,
-                "This Mac has no instrument, so it has no card at all")
-        #expect(detail.test_slotTitles == ["Scenes", "About"])
+        #expect(detail.test_cardFrames.count == 1, "This Mac has no instrument, so only the list")
+        #expect(detail.test_slotTitles.isEmpty)
     }
 
     /// The Main Audio page carries the same instrument in the same recess.
@@ -677,6 +887,24 @@ import AppKit
             settings: AppSettings(defaults: isolation.isolatedDefaults))
         page.loadViewIfNeeded()
         #expect(page.test_eqSectionIsRecessed)
+    }
+
+    // Dropping the Main Audio heading's icon state or its spoken summary turns it red.
+    @Test func theMainAudioHeadingIsInkedAndSpokenLikeTheSpeakerPages() {
+        let page = MainOutDetailViewController(
+            settings: AppSettings(defaults: isolation.isolatedDefaults))
+        page.loadViewIfNeeded()
+        #expect(!page.test_eqMarkIsEngaged)
+        #expect(page.test_eqMarkShapedSymbolName == RowAccessorySymbol.equalizerRest)
+        #expect(page.test_eqHeadingSpokenValue == "Flat")
+        page.show(eq: DeviceEQ(bassDB: 3, loudness: true))
+        #expect(page.test_eqMarkIsEngaged)
+        #expect(page.test_eqMarkShapedSymbolName == RowAccessorySymbol.equalizerEngaged)
+        #expect(page.test_eqMarkLastFlipEffect == .none, "a snapshot never animates the icon")
+        #expect(page.test_eqHeadingSpokenValue == "Bass 3 dB, Loudness on")
+        page.show(eq: .flat)
+        #expect(!page.test_eqMarkIsEngaged)
+        #expect(page.test_eqHeadingSpokenValue == "Flat")
     }
 
     /// Proves `settings:` actually threads from the host's `init` down to the
@@ -749,25 +977,6 @@ import AppKit
         #expect(abs(reset.maxX - detail.test_eqEditorFrame.maxX) <= 0.5)
     }
 
-    /// The editor's own rendered model IS the source of truth for enablement.
-    @Test func resetEnablementTracksTheTone() {
-        let detail = makeLoadedPane(device: makeDevice(id: "office"))
-        #expect(detail.test_resetEnabled == false, "a flat device has nothing to reset")
-
-        var shaped = makeDevice(id: "office")
-        shaped.eq = DeviceEQ(bassDB: 3)
-        detail.refresh(device: shaped)
-        #expect(detail.test_resetEnabled == true)
-
-        var reported: [(DeviceEQ, String, Bool)] = []
-        detail.onSetEQ = { eq, id, committed in reported.append((eq, id, committed)) }
-        detail.test_fireResetClick()
-        #expect(detail.test_resetEnabled == false)
-        #expect(reported.last?.0 == .flat)
-        #expect(reported.last?.1 == "office")
-        #expect(reported.last?.2 == true)
-    }
-
     /// This Mac has no send to tune, so the Reset button hides with the slot.
     @Test func resetIsHiddenOnThisMac() {
         let detail = makeLoadedPane(device: makeDevice(id: "local", name: "This Mac", kind: .localMac))
@@ -803,59 +1012,39 @@ import AppKit
         return detail
     }
 
-    /// The scroll document's laid-out height — what collapses when the
-    /// "Groups" title has no top pin, since everything below it (down to the
-    /// About list that ties the column's bottom) hangs off that pin.
+    /// The scroll document's laid-out height — what collapses when the list
+    /// has no top pin, since the list ties the column's bottom.
     private func documentHeight(_ detail: DeviceDetailViewController) -> CGFloat {
         let scroll = detail.view.subviews.compactMap { $0 as? NSScrollView }.first
         return scroll?.documentView?.frame.height ?? 0
     }
 
-    @Test func aPaneShownBeforeItIsMountedStillTiesTheColumnToTheAboutList() {
+    // Leaving the list without a top pin, or pinning it under the header instead of the Equalizer well, on a speaker shown before its pane loads turns it red.
+    @Test func aSpeakerPaneShownBeforeItIsMountedPutsTheListUnderTheEqualizer() {
         let detail = makeShownThenLoadedPane(device: makeDevice())
 
-        #expect(detail.test_activeGroupsTitlePinCount == 1,
-                Comment(rawValue: "the \"Groups\" title must have exactly one top pin from the moment " +
-                "the view loads — with none the column's height goes ambiguous"))
+        #expect(detail.test_eqSectionShown)
         // The pane's own view is NOT flipped, so "below" is a SMALLER y.
-        #expect(detail.test_groupsSectionTitleFrame.maxY <= detail.test_eqSectionFrame.minY + 0.5,
-                "the title sits under the Equalizer card, what precedes it on a speaker")
+        #expect(detail.test_listSectionFrame.maxY <= detail.test_eqSectionFrame.minY + 0.5,
+                "the list sits under the Equalizer well, what precedes it on a speaker")
 
         let slots = detail.test_headerSectionFrame.height + detail.test_eqSectionFrame.height
-            + detail.test_groupsSectionFrame.height + detail.test_aboutSectionFrame.height
+            + detail.test_listSectionFrame.height
         #expect(documentHeight(detail) > slots,
                 "the document holds the whole stack — a collapsed one is shorter than its own slots")
     }
 
-    @Test func aThisMacPaneShownBeforeItIsMountedPutsGroupsDirectlyUnderTheHeader() {
+    // Leaving the list without a top pin when the pane is shown before it loads turns it red.
+    @Test func aThisMacPaneShownBeforeItIsMountedPutsTheListDirectlyUnderTheHeader() {
         let detail = makeShownThenLoadedPane(
             device: makeDevice(id: "local", name: "This Mac", kind: .localMac))
 
-        #expect(detail.test_activeGroupsTitlePinCount == 1)
         #expect(!detail.test_eqSectionShown)
-        #expect(detail.test_groupsSectionTitleFrame.maxY <= detail.test_headerSectionFrame.minY + 0.5,
-                "with the Equalizer gone, Groups closes up under the identity band")
+        #expect(detail.test_listSectionFrame.maxY <= detail.test_headerSectionFrame.minY + 0.5,
+                "with the Equalizer gone, the list closes up under the identity band")
 
-        let slots = detail.test_headerSectionFrame.height + detail.test_groupsSectionFrame.height
-            + detail.test_aboutSectionFrame.height
+        let slots = detail.test_headerSectionFrame.height + detail.test_listSectionFrame.height
         #expect(documentHeight(detail) > slots)
-    }
-
-    @Test func theGroupsTitlePinFollowsTheDeviceInBothDirections() {
-        let detail = makeShownThenLoadedPane(device: makeDevice())
-        #expect(detail.test_groupsSectionTitleFrame.maxY <= detail.test_eqSectionFrame.minY + 0.5)
-
-        detail.show(device: makeDevice(id: "local", name: "This Mac", kind: .localMac))
-        detail.view.layoutSubtreeIfNeeded()
-        #expect(detail.test_activeGroupsTitlePinCount == 1)
-        #expect(detail.test_groupsSectionTitleFrame.maxY
-                <= detail.test_headerSectionFrame.minY + 0.5)
-
-        detail.show(device: makeDevice())
-        detail.view.layoutSubtreeIfNeeded()
-        #expect(detail.test_activeGroupsTitlePinCount == 1)
-        #expect(detail.test_groupsSectionTitleFrame.maxY <= detail.test_eqSectionFrame.minY + 0.5,
-                "Mac → speaker puts the Equalizer card back above the Groups title")
     }
 
     // MARK: The in-flight scrub cache
@@ -919,20 +1108,16 @@ import AppKit
 
     // MARK: The facts are copyable (P3-3)
 
-    /// The page exists to state facts about a speaker; a fact you cannot copy
-    /// is a fact you have to retype. The name and all three About values are
-    /// selectable — still labels, never editable.
-    @Test func theDeviceNameAndAboutValuesAreSelectable() throws {
+    /// A name you cannot copy is a name you have to retype. Still a label,
+    /// never editable.
+    // Making the name label unselectable turns it red.
+    @Test func theDeviceNameIsSelectable() throws {
         let detail = makeLoadedPane(device: makeDevice(id: "office", name: "Office"))
-        let fields = detail.view.descendantTextFields()
-
-        for text in ["Office", "Ready", "AirPlay Speaker", "AirPlay 2"] {
-            let matches = fields.filter { $0.stringValue == text }
-            #expect(!matches.isEmpty, "expected a field carrying \"\(text)\"")
-            for field in matches {
-                #expect(field.isSelectable, "\"\(text)\" must be selectable")
-                #expect(!field.isEditable, "…and still a label, not an editable field")
-            }
+        let matches = detail.view.descendantTextFields().filter { $0.stringValue == "Office" }
+        #expect(!matches.isEmpty)
+        for field in matches {
+            #expect(field.isSelectable)
+            #expect(!field.isEditable, "…and still a label, not an editable field")
         }
     }
 

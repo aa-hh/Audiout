@@ -20,7 +20,7 @@
 # Config (git config, NOT a committed file or a shell export — see the
 # audiout.remoteHost note in AudioutCore/AGENTS.md for why):
 #   git config --local audiout.remoteHost 'user@host.local'
-#   git config --local audiout.testPrefer permits # local (default) | remote | cpu | permits
+#   git config --local audiout.testPrefer remote  # local (default) | remote | cpu | permits
 #   git config --local audiout.testRemoteBias 40  # cpu mode only
 #
 # What each testPrefer value means:
@@ -570,10 +570,10 @@ remote_fetch() {
 # uncapped beside it, so "3 permits" never described what the machine was
 # actually running.
 #
-# Rulings (owner's call, 2026-09-10): no mule wait, 600s local ceiling then
+# Rulings (owner's call, 2026-09-10): no mule wait, 1800s local ceiling then
 # uncapped, sweep-on-acquire.
 #   - no mule wait: remote_run's exit 98 keeps falling straight back to local.
-#   - 600s local ceiling then uncapped: waiting forever would let one wedged
+#   - 1800s local ceiling then uncapped: waiting forever would let one wedged
 #     worktree block every commit on the machine; refusing would fail a commit
 #     for a reason its author cannot see. Degrading is the only option that
 #     leaves the machine usable.
@@ -654,6 +654,24 @@ capacity_sweep() {
     done
 }
 
+# While capacity_acquire waits, a mule permit can free up before a local one.
+# A caller that can run its job on the mule sets capacity_mule_retry to a
+# function name; once a minute, if the mule reports a free permit, that function
+# runs. On a result it trusts it exits the script itself; otherwise it returns
+# and the wait goes on. Once the job has actually run on the mule and failed
+# (remote_status set), checking stops: that failure is re-confirmed here, as
+# every remote failure is. A mule that filled up again or did not answer is
+# checked again a minute later.
+capacity_try_mule() {
+    [ -n "${capacity_mule_retry:-}" ] && remote_configured || return 0
+    _tm_free=$(remote_mule_free_count || true)
+    [ -n "$_tm_free" ] && [ "$_tm_free" -gt 0 ] || return 0
+    echo "  capacity: a mule permit freed up — sending this job there." >&2
+    remote_status=""
+    "$capacity_mule_retry" || true
+    [ -z "$remote_status" ] || capacity_mule_retry=""
+}
+
 # capacity_acquire [label] — take one permit, or proceed uncapped after the
 # ceiling. NEVER returns non-zero: a caller that cannot get a permit still has
 # work to do, and refusing would turn machine load into a build failure.
@@ -669,7 +687,7 @@ capacity_acquire() {
     fi
     _ca_base=$(capacity_lock_base)
     _ca_slots=$(capacity_slots)
-    _ca_ceiling=${AUDIOUT_CAPACITY_TIMEOUT:-600}
+    _ca_ceiling=${AUDIOUT_CAPACITY_TIMEOUT:-1800}
     capacity_sweep
     _ca_waited=0
     _ca_announced=0
@@ -702,6 +720,7 @@ capacity_acquire() {
         # Re-sweep on the same minute tick as the progress line: a permit that
         # went stale WHILE we waited is the common case in a long wait.
         if [ $((_ca_waited % 60)) -eq 0 ]; then
+            capacity_try_mule
             capacity_sweep
             echo "  capacity: still waiting (${_ca_waited}s of ${_ca_ceiling}s)" >&2
         fi

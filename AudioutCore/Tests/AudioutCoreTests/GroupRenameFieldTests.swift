@@ -53,17 +53,17 @@ import AppKit
                                                memberVolumes: [:]).group
         let window = MixerWindowController(groupController: controller,
                                            settings: AppSettings(defaults: isolatedDefaults))
-        window.setHostVisible(true)
+        window.setVisibleTab(.scenes)
         window.update(devices: devices)
         window.test_select(.group(id: group.id))
         // The fixed frame's floor; only the width matters here.
-        window.contentController.view.setFrameSize(AppSurfaceController.minimumContentSize)
+        window.scenesContentController.view.setFrameSize(AppSurfaceController.minimumContentSize)
         settle(window)
         return (window, controller, group)
     }
 
     private func settle(_ window: MixerWindowController) {
-        window.contentController.view.layoutSubtreeIfNeeded()
+        window.scenesContentController.view.layoutSubtreeIfNeeded()
     }
 
     // MARK: It is still a real text field, only skinned
@@ -183,6 +183,26 @@ import AppKit
         #expect(field.width > 140, "…but it did grow to use the room it has")
     }
 
+    // Turns red when the name-and-badge stack hugs its views at or above the rename field's width preference (240), which squeezes the field towards the badge's width while a scene plays.
+    @Test func thePlayingBadgeNeverNarrowsALongName() throws {
+        let (window, controller, group) = try makeWindow()
+        window.test_editor.test_commitRenameViaReturn(
+            "A very very long group name that could never fit in this header band")
+        settle(window)
+        let badgeHidden = window.test_editor.test_titleFieldFrame.width
+
+        controller.activateGroup(id: group.id)
+        window.test_editor.show(groupID: group.id, devices: (0..<4).map {
+            Device(id: "d\($0)", name: "Device \($0)", kind: .generic, isAvailable: true)
+        })
+        settle(window)
+        #expect(window.test_editor.test_playingBadgeVisible)
+        let badgeShown = window.test_editor.test_titleFieldFrame.width
+        #expect(badgeShown > 140, "the field must not fall to its floor while the badge shows")
+        #expect(abs(badgeShown - badgeHidden) <= 0.5,
+                "the badge sits under the field and takes none of its width")
+    }
+
     @Test func aLongNameNeverWidensThePane() throws {
         let (window, _, _) = try makeWindow()
         settle(window)
@@ -287,14 +307,13 @@ import AppKit
         }
         fieldEditor.string = "Kitch"
 
-        // A real change elsewhere in the snapshot, so the pane's gate opens and
-        // `render` genuinely runs — this is not a test of the gate.
+        // A real change pushed through the host, so the library and the pane's gate both see it and `render` genuinely runs — this is not a test of the gate.
         let renamed = (0..<4).map {
             Device(id: "d\($0)", name: $0 == 1 ? "Device 1 (renamed)" : "Device \($0)",
                    kind: .generic, isAvailable: true)
         }
         let before = editor.test_renderCount
-        editor.show(groupID: group.id, devices: renamed)
+        window.update(devices: renamed)
 
         #expect(editor.test_renderCount == before + 1, "the pane really did repaint")
         #expect(fieldEditor.string == "Kitch",
@@ -308,12 +327,13 @@ import AppKit
     ///
     /// CONVERSION NOTE: same early-return compromise as
     /// `escapeThroughTheRealFieldEditorReverts` — see its note.
-    @Test func escapeLandsKeyboardFocusOnTheSidebarList() throws {
+    // Turns red when `GroupEditorViewController.cancelRename` stops making the Back control first responder.
+    @Test func escapeLandsKeyboardFocusOnTheBackControl() throws {
         let (window, _, _) = try makeWindow()
         let editor = window.test_editor
         let host = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 600),
                             styleMask: [.titled, .resizable], backing: .buffered, defer: true)
-        host.contentView = window.contentController.view
+        host.contentView = window.scenesContentController.view
         host.contentView?.layoutSubtreeIfNeeded()
         guard host.makeFirstResponder(editor.test_titleField),
               let fieldEditor = editor.test_titleField.currentEditor() as? NSTextView else {
@@ -322,8 +342,8 @@ import AppKit
 
         fieldEditor.doCommand(by: #selector(NSResponder.cancelOperation(_:)))
 
-        #expect(window.test_sidebar.test_isOutlineViewFirstResponder,
-                "focus lands on the sidebar's row list — the one control present whatever pane shows")
+        #expect(host.firstResponder === editor.test_backButton,
+                "focus lands on the editor's Back control, its way out to the scene cards")
         #expect(host.firstResponder !== host,
                 "…and never on the window itself, which is the dead-Tab state")
     }

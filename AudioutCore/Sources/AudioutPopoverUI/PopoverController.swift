@@ -33,13 +33,8 @@ public struct RunningAppInfo: Equatable {
 /// actions route back through `onAdd`/`onRemove` closures so
 /// `PopoverController` stays the only thing that talks to the controllers.
 ///
-/// Two users, ONE construction so the popover has a single "add a thing to
-/// this list" affordance: Applications ("+" opens the running-app picker, "−"
-/// removes the selected row) and Output Devices ("+" fronts the add MENU, "−"
-/// fronts the hide menu — 2026-09-15, replacing the add-only strip: a device
-/// still leaves the LIST by going away; "−" only hides it from display).
-/// Segment metrics are identical either way, so the two "+" glyphs sit on the
-/// same left edge at the same size.
+/// One user, the Applications card: "+" opens the running-app picker, "−"
+/// removes the selected row.
 final class CardFooterView: NSView {
 
     enum Segment: Int { case add = 0, remove = 1 }
@@ -163,7 +158,8 @@ public final class PopoverController: NSObject {
     /// because it was never a redirect target, or because a route exists but
     /// hasn't started producing audio yet (e.g. still connecting). See
     /// `DeviceRowView.apply`'s `liveAppNames` doc for the precedence rule this
-    /// feeds into.
+    /// feeds into. The Mac never appears here; ``liveAppNames(for:)`` stands
+    /// its "This Mac" routes in instead, since local playback has no connect phase.
     private var liveRoutedAppNames: [String: [String]] = [:]
 
     /// Bundle IDs of routed apps whose process is currently NOT running (T4).
@@ -188,11 +184,22 @@ public final class PopoverController: NSObject {
     /// they don't depend on whatever's actually running.
     let runningAppsProvider: () -> [RunningAppInfo]
 
-    /// The user's hidden-speakers list (display-only: never selection, groups
-    /// or routing). `deviceSections()` drops a hidden UNSELECTED device; a
-    /// hidden device that is selected — a saved scene can select one — still
-    /// renders, so nothing ever plays from an invisible row.
-    private let hiddenSpeakers: HiddenSpeakersController
+    let speakerLibrary: SpeakerLibraryController
+    private let ownsSpeakerLibrary: Bool
+    let speakerRecovery: SpeakerRecoveryController
+    private var updatingSpeakerSnapshot = false
+    private var speakerRecoveryPublicationPending = false
+
+    /// The app supplies its existing permission reader and deliberate access action.
+    public var bluetoothPermissionProvider: (() -> PermissionStatus)?
+    public var onBluetoothAccess: (() -> Void)?
+    public var onManageSpeakers: (() -> Void)?
+    /// The menu's "Speaker settings…" asks the host to open that speaker's detail on the Speakers screen.
+    public var onOpenSpeakerSettings: ((String) -> Void)?
+    public var onSpeakerRecoveryChanged: (() -> Void)?
+    public var speakerRecoveryIDs: Set<String> {
+        speakerRecovery.retainedDeviceIDs.union(btConnectAttemptIDs)
+    }
 
     /// Collapse-default policy (PLAN §B, T-5): defaults are recomputed on EVERY
     /// popover OPEN and manual toggles during that open are transient — they are
@@ -265,12 +272,7 @@ public final class PopoverController: NSObject {
     /// ID with no live local stream, so the popover needs no destination knowledge.
     public var onSetLocalPlaybackVolume: ((_ volume: Int, _ bundleID: String) -> Void)?
 
-    /// Called when the user picks "Pair a Bluetooth speaker…" from the Output
-    /// DEVICES header's "+" menu (BT-UI, device-tier decision 3: never-paired
-    /// speakers get NO rows — pairing is a one-tap Settings trip). The app
-    /// wires this to open `SystemSettingsPane.bluetooth`; the fresh row then
-    /// auto-appears on return via the enumerator refresh. `nil` = the menu
-    /// item still renders but taps into nothing (tests wire a spy).
+    /// Opens the existing macOS Bluetooth pairing destination.
     public var onPairBluetoothSpeaker: (() -> Void)?
 
     /// When macOS last used each Bluetooth pairing, keyed by device id — the
@@ -471,10 +473,11 @@ public final class PopoverController: NSObject {
     /// The wizard's stimulus tempo (BPM), driven by the estimator's stage.
     /// Wired to `setBTWizardTickTempo`.
     public var onBTWizardTempo: ((_ bpm: Double) -> Void)?
-    /// Stage the mic-probe calibration sweeps on the live wizard feed
+    /// Stage the mic-probe calibration lanes on the live wizard feed
     /// (roadmap 064). Wired to `stageBTMicProbe`; nil (mock/dev backends)
     /// means no probe and the run stays purely by-ear.
-    public var onStageBTMicProbe: ((_ onStarted: @escaping () -> Void,
+    public var onStageBTMicProbe: ((_ levelStepDB: @escaping () -> Int,
+                                    _ onStarted: @escaping (_ pipelineDelaySeconds: TimeInterval) -> Void,
                                     _ onFinished: @escaping () -> Void) -> Void)?
     /// The mic permission answer, asked from the wizard's Start (the system
     /// prompt when it is still undecided). Overridden in tests so no suite
@@ -538,8 +541,8 @@ public final class PopoverController: NSObject {
     var btWizardMicProbe: MicProbeSession?
     /// Bumped on every live preview push. The probe result is only trusted if
     /// the preview it was measured under is STILL the one applied — an answer
-    /// (or a reference swap) mid-probe moves the sink under the sweep, and a
-    /// measurement across that splice would be about two different timelines.
+    /// mid-probe moves the sink under the sweep, and a measurement across that
+    /// splice would be about two different timelines.
     var btWizardPreviewGeneration = 0
     /// The preview value in force when the probe's sweeps started — the
     /// measured Δ corrects THIS value into the proposal.
@@ -620,20 +623,21 @@ public final class PopoverController: NSObject {
     /// mirror of `openDiagnosisIDs`, rebuilt by `reconcileDiagnosisPanels`.
     var diagnosisPanelsByID: [String: ConnectionDiagnosisView] = [:]
 
-    /// Bluetooth devices the user explicitly asked to connect from the "+" menu
-    /// during THIS popover session — listed while the attempt is in flight and
-    /// while its outcome is still on screen, then dropped on close.
-    ///
-    /// This is why the listing predicate does NOT simply take any device whose
-    /// `connectionState != .off`. `.failed` is STICKY and clears only on an
-    /// availability edge or a full disappearance, and a paired Bluetooth device
-    /// reaches neither: macOS keeps pairing records forever. A failed attempt — an
-    /// off speaker, a deleted pairing's `.notPaired`, `.unauthorized` with no
-    /// Bluetooth grant — would mint a row that never leaves, and one carrying no
-    /// diagnosis panel either (that intent is pruned for anything failing
-    /// `wantsAudio`), so the user could neither understand it nor dismiss it.
-    /// Session-scoped instead: the outcome is visible while you are looking at
-    /// it, and the list is clean again on the next open.
+    /// The AirPlay password sheet while it is up, and the speaker it asks for.
+    /// Opened only by a user act (the diagnosis panel's button, the row's link,
+    /// a join of a password speaker, or a join of a code speaker reaching its
+    /// wait through `codeJoinClickedIDs`), never by a background reconnect.
+    var passwordSheet: SpeakerPasswordSheetViewController?
+    var passwordSheetDeviceID: String?
+    /// Set on Connect, cleared by the next failure edge for that speaker, so a
+    /// failure that happened before the submit never reads as its answer.
+    var passwordSheetSubmitted = false
+    /// Speakers whose join the user clicked in this popover and that show a
+    /// code. Consumed by the first `.awaitingPassword` edge, dropped by any
+    /// `.connected`, `.failed` or `.off` edge for that speaker and by Cancel.
+    var codeJoinClickedIDs: Set<String> = []
+
+    /// Name-click Bluetooth attempts retain their outcome until the surface closes.
     var btConnectAttemptIDs: Set<String> = []
 
     // MARK: Energize (Warm Signal v4.1 item 9 — source-switch "press-play")
@@ -685,12 +689,17 @@ public final class PopoverController: NSObject {
     var switchOfferDeviceID: String?
     private var switchOfferTimer: Timer?
 
-    /// Cast fixed-volume (feed-gain) receivers whose fader is currently
-    /// holding the pending "not yet gold" tone, keyed by device id — HOST
-    /// state, mirroring the removal-undo idiom above. Each id's own timer
-    /// self-expires it after the measured stream lag.
-    var castVolumePendingIDs: Set<String> = []
-    var castVolumePendingTimers: [String: Timer] = [:]
+    /// What a Cast receiver is still holding as not yet audible: a volume or
+    /// mute gesture (fader thumb glow) or a sync-offset edit (drawer value
+    /// field glow). Both reach the speaker through its feed, so both land
+    /// after the same measured stream lag.
+    enum CastPendingHold: String { case volume, trim }
+
+    /// Cast receivers currently holding a pending glow, per hold, keyed by
+    /// device id — HOST state, mirroring the removal-undo idiom above. Each
+    /// id's own timer self-expires it after the measured stream lag.
+    var castPendingIDs: [CastPendingHold: Set<String>] = [:]
+    var castPendingTimers: [CastPendingHold: [String: Timer]] = [:]
 
     /// The Applications card's `AppRowView`s, keyed by bundle id (stable identity —
     /// `AppRoute.bundleID`). Populated by `rebuild()` in `appRoutes` order (T-8,
@@ -717,13 +726,7 @@ public final class PopoverController: NSObject {
     /// the retired "+ Add application…" row as the card's add affordance).
     let applicationsFooter = CardFooterView(label: "Add or remove application")
 
-    /// The Output Devices card's footer row: the "+" that fronts
-    /// `makeOutputDevicesPlusMenu()` and the "−" that fronts
-    /// `makeOutputDevicesMinusMenu()` (2026-09-15 — hide a shown speaker).
-    /// Lives at the BOTTOM of the card, below every subsection (the owner's
-    /// call, 2026-08-08 — a list-management control belongs under the list,
-    /// not in the column-title header row).
-    let devicesFooter = CardFooterView(label: "Add, save or hide speakers")
+    weak var pairBluetoothButton: NSButton?
 
     /// Whether the LAST `rebuild()` mounted the Applications card's "No apps
     /// routed…" empty-state placeholder (V11).
@@ -814,31 +817,15 @@ public final class PopoverController: NSObject {
     /// successful selection change.
     public var test_lastRefusalReason: String?
 
-    /// - Parameters:
-    ///   - appRouting: backs the Applications card's collapse default (T-5) and
-    ///     the running-app picker (T-7). Defaulted so existing call sites
-    ///     (AppDelegate, popover-harness, popover-snapshot, tests) compile
-    ///     unchanged; tests inject one over a temp store. The default does NOT
-    ///     load persistence, for the same reason `hiddenSpeakers` below does
-    ///     not: a bare `PopoverController()` must never read the machine's real
-    ///     `app-routes.json`. It used to, and a developer's own saved route
-    ///     tinted the Applications card gold in a suite that had seeded none —
-    ///     a failure that reproduced only on a machine that had used the app.
-    ///   - runningAppsProvider: supplies the "+ Add application…" picker's
-    ///     candidate list (T-7). Defaults to `NSWorkspace.shared
-    ///     .runningApplications` filtered to `.regular`-activation-policy apps
-    ///     with a non-nil bundle id; tests inject a fixed list.
-    ///   - hiddenSpeakers: backs the devices footer's "−" (hide a shown
-    ///     speaker) and the "+" menu's "Hidden speakers" section. The default
-    ///     deliberately does NOT load persistence — the many bare
-    ///     `PopoverController()` call sites (tests, harnesses) must never read
-    ///     the machine's real hidden list; the app injects a persisted one.
     public init(appRouting: AppRoutingController = AppRoutingController(loadPersisted: false),
                 runningAppsProvider: @escaping () -> [RunningAppInfo] = PopoverController.defaultRunningAppsProvider,
-                hiddenSpeakers: HiddenSpeakersController = HiddenSpeakersController(loadPersisted: false)) {
+                speakerLibrary: SpeakerLibraryController? = nil,
+                speakerRecovery: SpeakerRecoveryController = SpeakerRecoveryController()) {
         self.appRouting = appRouting
         self.runningAppsProvider = runningAppsProvider
-        self.hiddenSpeakers = hiddenSpeakers
+        self.ownsSpeakerLibrary = speakerLibrary == nil
+        self.speakerLibrary = speakerLibrary ?? SpeakerLibraryController(loadPersisted: false)
+        self.speakerRecovery = speakerRecovery
         super.init()
         panel.controller = self
         mainOutRow.delegate = self
@@ -847,8 +834,23 @@ public final class PopoverController: NSObject {
             self.presentAddApplicationPicker(relativeTo: self.applicationsFooter)
         }
         applicationsFooter.onRemove = { [weak self] in self?.removeSelectedApp() }
-        devicesFooter.onAdd = { [weak self] in self?.presentOutputDevicesPlusMenu() }
-        devicesFooter.onRemove = { [weak self] in self?.presentOutputDevicesMinusMenu() }
+        speakerRecovery.onChange = { [weak self] in
+            guard let self else { return }
+            if self.updatingSpeakerSnapshot {
+                self.speakerRecoveryPublicationPending = true
+                return
+            }
+            self.onSpeakerRecoveryChanged?()
+            self.refreshSpeakerPresentation()
+        }
+        speakerRecovery.onRediscovered = { [weak self] id in
+            guard let self, self.groupController?.isMainOutMember(id) == true,
+                  let device = self.devicesByID[id] else { return }
+            switch device.connectionState {
+            case .connecting, .reconnecting, .connected, .awaitingPassword: return
+            case .off, .failed: self.groupController?.requestReconnect(for: id)
+            }
+        }
         rebuild()
     }
 
@@ -909,6 +911,12 @@ public final class PopoverController: NSObject {
     /// Push the latest device snapshot and repaint. Re-derives active-group state
     /// (defensive under a group target) and repaints mounted rows in place.
     public func update(devices: [Device]) {
+        defer {
+            if speakerRecoveryPublicationPending {
+                speakerRecoveryPublicationPending = false
+                onSpeakerRecoveryChanged?()
+            }
+        }
         let previousDevices = devicesByID
         devicesByID = Dictionary(uniqueKeysWithValues: devices.map { ($0.id, $0) })
         // The raw discovery stream (visibility-independent): the launch splash's
@@ -942,6 +950,10 @@ public final class PopoverController: NSObject {
         liveRoutedAppNames = liveRoutedAppNames.filter { devicesByID[$0.key] != nil }
         handleConnectionTransitions(devices)
         groupController?.syncActiveGroupToSelection()
+        updatingSpeakerSnapshot = true
+        speakerRecovery.update(liveDevices: devices)
+        updatingSpeakerSnapshot = false
+        refreshOwnedSpeakerLibrary()
 
         // Device-lifecycle → per-app routes (T-8, PLAN decision 7 — silent
         // fallback), NARROWED by R5 to the one case that genuinely loses the
@@ -1034,8 +1046,9 @@ public final class PopoverController: NSObject {
             // event. Headers are structure too: a COLLAPSED subsection contributes
             // no rows to the compare, but its header must still appear the moment
             // its type gains a first device, and go when the last one does — and
-            // Bluetooth's header is ALWAYS expected (`rendersHeader`), never only
-            // when it has rows.
+            // a header with no rows stays expected while it has something to
+            // say (`rendersHeader`): Bluetooth's while Bluetooth access is off,
+            // AirPlay's while there is a search state to show.
             //
             // Both reads walk the whole fleet and rebuild the section list, and
             // nothing outside this gate consumes them — a hidden surface used to
@@ -1181,6 +1194,11 @@ public final class PopoverController: NSObject {
 
     /// The exact banner copy from PLAN-RELIABILITY Wave 2.
     static let localFallbackBannerText = "Speakers unreachable. Playing on your Mac. Will resume automatically."
+
+    /// The password sheet's answer to a refused password; the phone shows its own copy.
+    static let passwordRejectedText = "That password didn't work. Check it and try again."
+    /// The code sheet's answer to a refused code; the phone shows its own copy.
+    static let codeRejectedText = "That code didn't work. Check the screen and try again."
 
     /// Whether the generalized silence watchdog (R11) has fallen back to local
     /// playback because zero desired devices stayed connected. Drives the banner;
@@ -1791,6 +1809,7 @@ public final class PopoverController: NSObject {
     // MARK: Build
 
     public func rebuild() {
+        refreshOwnedSpeakerLibrary()
         test_rebuildCount += 1
         // Any rebuild satisfies a deferred one (D4) — including `rebuildForOpen()`
         // and the delegate paths, which reach here too.
@@ -1865,47 +1884,16 @@ public final class PopoverController: NSObject {
         panel.addRow(mainOutRow)
         refreshMainOutRow()
 
-        // 2. Selected Devices card — split into Current Device + AirPlay. ALWAYS
-        // present now (V2): with an empty fleet the card still builds, and the
-        // always-rendered Bluetooth subsection's own Connect affordance is the
-        // card's empty-state message — no separate placeholder row (a "Looking
-        // for devices…" line above an actionable Connect button said two
-        // contradictory things at once; removed 2026-08-08).
+        // Mixer rows use shared presentation records; routing remains live-only.
         let sections = deviceSections()
         renderedSubsectionTitles = []
         renderedBluetoothOrder = []
-        renderedBTConnectShown = false
         renderedSpeakerSearchText = nil
-        bluetoothConnectButton = nil
-        // Combined header row: "Output Speakers" title on the left. The
-        // membership "Selected" column MOVED to the left spine
-        // (v4 §Call-1), so this card no longer heads a membership column — but
-        // its device rows' trailing dropdown column, once left empty, now
-        // fills the FEED composite (v4.1 item 3), so the header names it
-        // "Source" (renamed from "Feed", 2026-08-28 — the column carries
-        // `DeviceRowView.updateFeedText`/`feedStack`; the internal FEED
-        // vocabulary stays). The header row carries NO accessory: the "+"
-        // that fronts the add MENU is the card's bottom footer strip now
-        // (`devicesFooter`, added after every subsection below).
-        // The FEED pills are LEFT-ALIGNED in their slot, so the "Source"
-        // title left-aligns on the same leading anchor the pills use
-        // (`feedColumnLeadingFromTrailing`) — centered over the whole reserved
-        // column it floated ~46 pt right of a single pill.
-        //
-        // The "Offset" column legend (renamed from "Sync", 2026-08-28) rides
-        // this SAME header line — moved up from the subsection header lines
-        // when the This Mac subsection was dissolved, and printed exactly
-        // once. Same has-rows gate as before, now card-wide: only when a row
-        // carrying the sync chip (`showsSyncControls`: the Mac's own row, or
-        // a listed Bluetooth row) actually renders under it — chrome must
-        // never name absent content. Gated on the SECTIONS, not on collapse
-        // (a collapsed subsection still has its rows, exactly as a collapsed
-        // card keeps its own column titles). Left-aligns in its own column
-        // on `offsetTitleLeadingFromTrailing`, matching how "Source"
-        // left-aligns above, over the SYNC chip it names.
+        pairBluetoothButton = nil
+        // Column titles retain the existing trailing grid anchors.
         let showsOffsetTitle = sections.contains {
-            ($0.title == Self.thisMacSubsectionTitle
-                || $0.title == Self.bluetoothSubsectionTitle) && !$0.devices.isEmpty
+            $0.title == Self.bluetoothSubsectionTitle && !$0.devices.isEmpty
+                || $0.title == Self.thisMacSubsectionTitle && $0.devices.contains(where: \.isLocalDevice)
         }
         renderedOffsetColumnTitle = showsOffsetTitle
         panel.beginCard(header: Self.outputDevicesCardTitle, trailingTitle: "Source",
@@ -1916,6 +1904,8 @@ public final class PopoverController: NSObject {
                         secondTrailingTitleLeadingFromTrailing:
                             PopoverColumnGrid.offsetTitleLeadingFromTrailing,
                         secondTrailingTitleToolTip: showsOffsetTitle ? Self.offsetColumnHelp : nil,
+                        leadingActionTitle: "Manage speakers…",
+                        onLeadingAction: { [weak self] in self?.onManageSpeakers?() },
                         collapsible: true,
                         collapsed: collapsedState(for: Self.outputDevicesCardTitle, default: false),
                         // The one card whose list can outgrow the surface (roadmap
@@ -1953,35 +1943,19 @@ public final class PopoverController: NSObject {
                 panel.addRow(makeDeviceRow(device, indented: false))
             }
         }
-        // A subsection is HIDDEN entirely when it has no rows to show — never
-        // an empty grouping label — except Bluetooth, whose header always
-        // renders (BT-LIST): its empty body IS content, the Connect
-        // affordance (`rendersHeader`). A COLLAPSED one keeps its header and
-        // renders no rows. Subsection headers carry no column titles — the
-        // "Offset" legend lives on the card header line above (printed once).
-        // `rendersHeader` is also `update(devices:)`'s structural-compare
-        // filter, so what renders and what is expected can't drift — This Mac
-        // answers false there (pinned row, never a grouping header).
+        // Empty sections appear only when they contain a permission or discovery message.
         for section in sections where rendersHeader(section) {
             let collapsed = addSubsection(section.title)
             guard !collapsed else { continue }
             addSubsectionRows(section)
         }
-        // The "+" footer belongs to the CARD, not to any one subsection, so it
-        // is added after ALL of them (AirPlay / Cast / Bluetooth) — last
-        // thing in the card body, and hidden with it when the card collapses.
-        // `endSubsection()` is what keeps it out of the last subsection's clip,
-        // where collapsing Bluetooth would take the strip with it. A sync drawer
-        // opens via `insertRow` directly under ITS device row, so it can never
-        // land below this strip.
+        // Pairing stays outside the Bluetooth collapse body.
         panel.endSubsection()
-        // The "−" pops a menu of the shown speakers; with none to offer (only
-        // the Mac's row, or nothing) the segment disables like the
-        // Applications "−" does with no selection.
-        devicesFooter.isRemoveEnabled = sections.contains {
-            $0.title != Self.thisMacSubsectionTitle && !$0.devices.isEmpty
+        if let unknown = sections.first(where: { $0.title == Self.unknownSpeakersSectionTitle }) {
+            for device in unknown.devices { panel.addRow(makeDeviceRow(device, indented: false)) }
         }
-        panel.addRow(devicesFooter)
+        let pairRow = makePairBluetoothRow()
+        panel.addRow(pairRow)
         // Set each row's rail extent + feed the continuous rail overlay: the
         // spine runs Main Audio → the LOWEST SELECTED node; rows below it render
         // BARE (no rail) — spec v4 §Call-1. Runs even with no devices (the overlay
@@ -2021,7 +1995,7 @@ public final class PopoverController: NSObject {
         // show a single non-interactive placeholder BEFORE the ± footer.
         applicationsPlaceholderShown = false
         if renderedRoutes.isEmpty {
-            panel.addRow(makePlaceholderRow(text: Self.applicationsEmptyPlaceholderText))
+            panel.addRow(CardMessageRow(message: Self.applicationsEmptyPlaceholderText))
             applicationsPlaceholderShown = true
         }
         applicationsFooter.isRemoveEnabled = selectedAppBundleID != nil
@@ -2081,6 +2055,9 @@ public final class PopoverController: NSObject {
     static let airPlaySubsectionTitle = "AirPlay Speakers"
     static let bluetoothSubsectionTitle = "Bluetooth Speakers"
     static let castSubsectionTitle = "Cast Speakers"
+    /// Grouping key only, like "This Mac": speakers with no library metadata
+    /// ("Missing speaker") sit after the Bluetooth rows under no heading.
+    static let unknownSpeakersSectionTitle = "Unknown speakers"
 
     /// One device-type subsection and the rows it would render, the Bluetooth
     /// connected-only filter already applied.
@@ -2089,19 +2066,12 @@ public final class PopoverController: NSObject {
         let devices: [Device]
     }
 
-    /// Bluetooth renders its header even with nothing listed — its empty
-    /// state IS content (the Connect affordance). AirPlay does the same while a
-    /// search state is active: the state line needs the "AirPlay Speakers"
-    /// grouping label above it to say WHAT was not found. The rest stay
-    /// hidden-when-empty — and This Mac NEVER renders one (2026-08-28: its row
-    /// is pinned directly under the card header, no subsection). This answer
-    /// is shared by `rebuild()`'s section loop and `update(devices:)`'s
-    /// structural compare; splitting them made every backend event read as a
-    /// structural change and rebuild the whole panel.
+    /// Collapse and structure comparisons share the same empty-section policy.
     private func rendersHeader(_ section: DeviceSection) -> Bool {
-        if section.title == Self.thisMacSubsectionTitle { return false }
+        if section.title == Self.thisMacSubsectionTitle
+            || section.title == Self.unknownSpeakersSectionTitle { return false }
         if !section.devices.isEmpty { return true }
-        if section.title == Self.bluetoothSubsectionTitle { return true }
+        if section.title == Self.bluetoothSubsectionTitle { return bluetoothAccessExplanation != nil }
         return section.title == Self.airPlaySubsectionTitle && speakerSearchState() != nil
     }
 
@@ -2140,6 +2110,10 @@ public final class PopoverController: NSObject {
     /// to tell. Cast counts too: a browsed receiver means the network is
     /// visibly working, so "no speakers found" would be a lie.
     private func speakerSearchState() -> SpeakerSearchState? {
+        let hasLiveNetworkSpeaker = devicesByID.values.contains {
+            $0.kind.isDiscoveredOverLocalNetwork && ($0.isAvailable || $0.connectionState == .connected)
+        }
+        if hasLiveNetworkSpeaker { return nil }
         let sections = deviceSections()
         let hasNetworkSpeaker = sections.contains {
             ($0.title == Self.airPlaySubsectionTitle || $0.title == Self.castSubsectionTitle)
@@ -2165,6 +2139,9 @@ public final class PopoverController: NSObject {
     }
 
     func cancelSpeakerSearchGrace() {
+        let recoveryWillPublish = !speakerRecovery.states.isEmpty
+        speakerRecovery.cancelAll()
+        if !recoveryWillPublish { onSpeakerRecoveryChanged?() }
         speakerSearchGraceTimer?.invalidate()
         speakerSearchGraceTimer = nil
     }
@@ -2191,11 +2168,8 @@ public final class PopoverController: NSObject {
     static let speakerPermissionDeniedHintText =
         "Allow Local Network for Audiout in System Settings \u{203A} Privacy & Security."
 
-    /// The AirPlay subsection's empty body, built the same way the Bluetooth
-    /// Connect row is: a wrapper on the name column whose CONTENT is the empty
-    /// state. Secondary, never tertiary — this is live state text explaining why
-    /// the list is empty, and dimming the explanation of the dimming reads as
-    /// broken (folder rule).
+    /// The AirPlay subsection's empty body: a `CardMessageRow`, with a spinner
+    /// while the search runs.
     private func makeSpeakerSearchStateRow(_ state: SpeakerSearchState) -> NSView {
         let message: String
         let hint: String?
@@ -2211,98 +2185,63 @@ public final class PopoverController: NSObject {
             hint = Self.speakerPermissionDeniedHintText
         }
         renderedSpeakerSearchText = message
-
-        let label = NSTextField(labelWithString: message)
-        label.translatesAutoresizingMaskIntoConstraints = false
-        label.font = Tokens.Font.menuItem
-        label.textColor = Tokens.Color.secondaryLabel
-        label.lineBreakMode = .byTruncatingTail
-        label.maximumNumberOfLines = 1
-
-        let wrapper = NSView()
-        wrapper.translatesAutoresizingMaskIntoConstraints = false
-        wrapper.addSubview(label)
-        let nameColumnLeading = PopoverColumnGrid.nameColumnLeading
-        let trailingInset = -PopoverColumnGrid.leadingInset
-        var constraints: [NSLayoutConstraint] = [
-            label.leadingAnchor.constraint(equalTo: wrapper.leadingAnchor, constant: nameColumnLeading),
-            label.trailingAnchor.constraint(lessThanOrEqualTo: wrapper.trailingAnchor,
-                                            constant: trailingInset),
-        ]
-
-        if let hint {
-            // Two stacked labels: the wrapper GROWS to fit rather than being
-            // pinned to `rowHeight`, or the hint would be clipped out of a row
-            // sized for one line.
-            let hintLabel = NSTextField(wrappingLabelWithString: hint)
-            hintLabel.translatesAutoresizingMaskIntoConstraints = false
-            hintLabel.font = Tokens.Font.captionMedium
-            hintLabel.textColor = Tokens.Color.secondaryLabel
-            hintLabel.isSelectable = false
-            hintLabel.preferredMaxLayoutWidth =
-                SurfaceLayout.width - nameColumnLeading - PopoverColumnGrid.leadingInset
-            wrapper.addSubview(hintLabel)
-            constraints += [
-                label.topAnchor.constraint(equalTo: wrapper.topAnchor, constant: 8),
-                hintLabel.topAnchor.constraint(equalTo: label.bottomAnchor, constant: 2),
-                hintLabel.leadingAnchor.constraint(equalTo: label.leadingAnchor),
-                hintLabel.trailingAnchor.constraint(lessThanOrEqualTo: wrapper.trailingAnchor,
-                                                    constant: trailingInset),
-                hintLabel.bottomAnchor.constraint(equalTo: wrapper.bottomAnchor, constant: -8),
-            ]
-        } else {
-            // One line: a spinner beside it, so "looking" is visibly a process
-            // and not a stuck string. Reduce Motion gets the words alone.
-            constraints += [
-                wrapper.heightAnchor.constraint(equalToConstant: DeviceRowView.rowHeight),
-                label.centerYAnchor.constraint(equalTo: wrapper.centerYAnchor),
-            ]
-            if !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
-                let spinner = NSProgressIndicator()
-                spinner.translatesAutoresizingMaskIntoConstraints = false
-                spinner.style = .spinning
-                spinner.controlSize = .small
-                spinner.isIndeterminate = true
-                wrapper.addSubview(spinner)
-                spinner.startAnimation(nil)
-                constraints += [
-                    spinner.leadingAnchor.constraint(equalTo: label.trailingAnchor, constant: 8),
-                    spinner.centerYAnchor.constraint(equalTo: wrapper.centerYAnchor),
-                ]
-            }
-        }
-        NSLayoutConstraint.activate(constraints)
-        return wrapper
+        return CardMessageRow(message: message, hint: hint, showsSpinner: state == .searching)
     }
 
-    /// The four subsections in RENDER order — the one place the order and the
-    /// BT-LIST connected-only filter are expressed, so the rail's render order
-    /// can never drift from the rows' (the terminus would land on the wrong
-    /// row).
-    /// Whether `device` is dropped from the list by the user's hidden set.
-    /// The Mac's own row is never hideable, and a SELECTED device always
-    /// renders regardless (a saved scene can select a hidden speaker — the
-    /// row must be visible while it plays; the footer "−" menu disables
-    /// selected speakers so the direct path can't get here).
-    private func isHiddenFromList(_ device: Device) -> Bool {
-        !device.isLocalDevice
-            && hiddenSpeakers.isHidden(device.id)
-            && !(groupController?.isSpeakerSelected(device.id) ?? false)
+    private var currentSpeakerUse: SpeakerCurrentUse {
+        let mainIDs: Set<String>
+        if let controller = groupController {
+            switch controller.mainOut {
+            case .selectedDevices: mainIDs = controller.selectedDeviceIDs
+            case .group(let id): mainIDs = Set(controller.groups.first { $0.id == id }?.memberIDs ?? [])
+            }
+        } else { mainIDs = [] }
+        return SpeakerCurrentUse(mainAudioMemberIDs: mainIDs,
+                                 appRouteDestinations: appRouting.appRoutes.map(\.destination),
+                                 liveFeedIDs: Set(liveRoutedAppNames.filter { !$0.value.isEmpty }.keys),
+                                 recoveryIDs: speakerRecoveryIDs)
+    }
+
+    private func refreshOwnedSpeakerLibrary() {
+        guard ownsSpeakerLibrary else { return }
+        let confirmed = Set(devicesByID.values.compactMap { device in
+            (device.connectionState == .connected && groupController?.isMainOutMember(device.id) == true)
+                || !(liveRoutedAppNames[device.id] ?? []).isEmpty ? device.id : nil
+        })
+        speakerLibrary.update(liveDevices: Array(devicesByID.values),
+                              groups: groupController?.groups ?? [], confirmedUsedIDs: confirmed,
+                              currentUse: currentSpeakerUse)
+    }
+
+    /// The host calls this after shared preferences or permission status change.
+    /// Mid-drag it records the debt instead of rebuilding, as `groupsDidChange()`
+    /// does: a rebuild would detach the slider the mouse is tracking.
+    public func refreshSpeakerPresentation() {
+        refreshOwnedSpeakerLibrary()
+        guard isEffectivelyShown else { return }
+        guard !isSliderDragLive else {
+            structuralRebuildDeferred = true
+            return
+        }
+        rebuild()
+        panel.panelContentDidChangeHeight(animated: true)
     }
 
     func deviceSections() -> [DeviceSection] {
-        let visible = orderedDevices().filter {
-            (!$0.isBluetooth || isBluetoothRowListed($0)) && !isHiddenFromList($0)
-        }
+        refreshOwnedSpeakerLibrary()
+        let inUse = currentSpeakerUse.deviceIDs(groups: groupController?.groups ?? [])
+        let visible = speakerLibrary.records.filter { $0.isVisibleInMixer || inUse.contains($0.id) }
+            .map(\.renderingDevice).sorted { ($0.name, $0.id) < ($1.name, $1.id) }
         return [
             DeviceSection(title: Self.thisMacSubsectionTitle,
                           devices: visible.filter(\.isLocalDevice)),
             DeviceSection(title: Self.airPlaySubsectionTitle,
-                          devices: visible.filter { !$0.isLocalDevice && !$0.isBluetooth && !$0.isCast }),
-            DeviceSection(title: Self.castSubsectionTitle,
-                          devices: visible.filter(\.isCast)),
-            DeviceSection(title: Self.bluetoothSubsectionTitle,
-                          devices: orderedBluetoothDevices(in: visible)),
+                          devices: visible.filter { !$0.isLocalDevice && !$0.isBluetooth && !$0.isCast
+                              && speakerLibrary.record(for: $0.id)?.kind != nil }),
+            DeviceSection(title: Self.castSubsectionTitle, devices: visible.filter(\.isCast)),
+            DeviceSection(title: Self.bluetoothSubsectionTitle, devices: orderedBluetoothDevices(in: visible)),
+            DeviceSection(title: Self.unknownSpeakersSectionTitle,
+                          devices: visible.filter { speakerLibrary.record(for: $0.id)?.kind == nil }),
         ]
     }
 
@@ -2328,10 +2267,6 @@ public final class PopoverController: NSObject {
     /// (`test_bluetoothRowOrder`). Empty when the subsection is hidden.
     var renderedBluetoothOrder: [String] = []
 
-    /// Whether the LAST `rebuild()` mounted the Bluetooth empty-state Connect
-    /// row (BT-LIST) — `test_bluetoothConnectRowShown()`.
-    var renderedBTConnectShown = false
-
     /// Whether the LAST `rebuild()` printed the card header's "Offset" column
     /// title — `test_offsetColumnTitleShown()`. Recorded rather than derived
     /// because the title is a RENDER decision (it must never name a column with
@@ -2340,10 +2275,6 @@ public final class PopoverController: NSObject {
     /// decision moved the legend off the subsection header lines: it prints on
     /// the card header, exactly once.
     var renderedOffsetColumnTitle = false
-
-    /// The mounted Bluetooth empty-state Connect button, for
-    /// `test_fireBluetoothConnectClick()` to drive real target/action dispatch.
-    weak var bluetoothConnectButton: NSButton?
 
     /// `panel.addSubsectionHeader` + the rendered-titles record, so the test
     /// surface can never drift from what was actually mounted. Returns whether
@@ -2362,23 +2293,14 @@ public final class PopoverController: NSObject {
         return collapsed
     }
 
-    /// Build one subsection's rows into the panel — the Bluetooth empty state's
-    /// Connect affordance (BT-LIST) or one `DeviceRowView` per member. Shared by
-    /// `rebuild()` and the EXPAND half of `toggleSubsection`, so a section built
-    /// by a toggle can never differ from the same section built by a rebuild.
+    /// Rebuild and subsection expansion mount the same rows and explanations.
     private func addSubsectionRows(_ section: DeviceSection) {
         if section.title == Self.bluetoothSubsectionTitle {
             renderedBluetoothOrder = section.devices.map(\.id)
-            if section.devices.isEmpty {
-                panel.addRow(makeBluetoothConnectRow())
-                renderedBTConnectShown = true
-                return
+            if let explanation = bluetoothAccessExplanation {
+                panel.addRow(makeBluetoothAccessRow(explanation))
             }
         }
-        // The AirPlay section's empty body is its own content too (P1-1): the
-        // searching / nothing-found / permission-denied line, the exact shape of
-        // the Bluetooth branch above. Scoped to AirPlay by copy AND by its own
-        // header, so it can never contradict the Bluetooth Connect affordance.
         if section.title == Self.airPlaySubsectionTitle, section.devices.isEmpty,
            let state = speakerSearchState() {
             panel.addRow(makeSpeakerSearchStateRow(state))
@@ -2446,8 +2368,6 @@ public final class PopoverController: NSObject {
         }
         if section.title == Self.bluetoothSubsectionTitle {
             renderedBluetoothOrder = []
-            renderedBTConnectShown = false
-            bluetoothConnectButton = nil
         }
     }
 
@@ -2461,10 +2381,7 @@ public final class PopoverController: NSObject {
         return devices.filter(\.isBluetooth).sorted { byBTRecency($0, $1, lastUsed: lastUsed) }
     }
 
-    /// The Bluetooth recency comparator, shared by the subsection's row order
-    /// and the "+" menu's unlisted-pairings Connect section (BT-LIST): a device
-    /// with no known `lastUsed` sorts below every dated one; name (then id)
-    /// breaks ties deterministically.
+    /// Undated Bluetooth devices follow dated ones; name and ID break ties.
     private func byBTRecency(_ a: Device, _ b: Device, lastUsed: [String: Date]) -> Bool {
         let ua = lastUsed[a.id] ?? .distantPast
         let ub = lastUsed[b.id] ?? .distantPast
@@ -2632,7 +2549,9 @@ public final class PopoverController: NSObject {
                          // derived-identity case the whole bus (origin included)
                          // keeps full emphasis, the dropdown title carrying the
                          // group identity.
-                         busOriginDimmed: devicesCardDivergence() != nil)
+                         busOriginDimmed: devicesCardDivergence() != nil,
+                         saveSceneEnabled: canSaveCurrentSetup,
+                         onSaveScene: { [weak self] in self?.saveCurrentSetup() })
         refreshCardHeaderLiveness()
     }
 
@@ -2656,9 +2575,9 @@ public final class PopoverController: NSObject {
         }()
         let anyDeviceSounding = deviceRowsByID.keys.contains { id in
             guard let device = devicesByID[id] else { return false }
-            if !(liveRoutedAppNames[id] ?? []).isEmpty { return true }
+            if !liveAppNames(for: device).isEmpty { return true }
             guard let controller, controller.isMainOutMember(id) else { return false }
-            guard case .connected = device.connectionState else { return false }
+            guard drawsConnected(device, controller: controller) else { return false }
             return !(device.isMuted || controller.isMuted(id)) && !controller.isMainOutMuted
         }
         let anyRouteSounding = appRouting.appRoutes.contains { route in
@@ -2868,11 +2787,11 @@ public final class PopoverController: NSObject {
         switchOfferDeviceID = nil
     }
 
-    /// Raise (or re-arm) the Cast feed-gain pending fill on `id`'s fader after
-    /// a volume/mute gesture, for the measured stream lag. A continuous drag
-    /// re-arms the timer on every tick, so `refreshDeviceRows()` only runs on
-    /// the id's FIRST insertion, not every re-arm.
-    private func raiseCastVolumePending(for id: String) {
+    /// Raise (or re-arm) a Cast pending glow on `id` after a gesture, for the
+    /// measured stream lag. A continuous drag or held stepper re-arms the
+    /// timer on every tick, so the repaint only runs on the id's FIRST
+    /// insertion, not every re-arm.
+    func raiseCastPending(_ hold: CastPendingHold, for id: String) {
         guard let device = devicesByID[id], device.isCast,
               let lag = device.castVolumeLagSeconds,
               device.connectionState == .connected else {
@@ -2880,30 +2799,45 @@ public final class PopoverController: NSObject {
             if let d = devicesByID[id], d.isCast {
                 Telemetry.log(.cast, "cast_pending_refused", [
                     "device": id,
+                    "hold": hold.rawValue,
                     "lag": d.castVolumeLagSeconds.map(String.init) ?? "nil",
                     "state": String(describing: d.connectionState),
                 ])
             }
             return
         }
-        Telemetry.log(.cast, "cast_pending_raised", ["device": id, "lag": String(lag)])
-        castVolumePendingTimers[id]?.invalidate()
-        castVolumePendingTimers[id] = Timer.scheduledTimer(withTimeInterval: TimeInterval(max(1, lag)),
-                                                            repeats: false) { [weak self] _ in
-            self?.expireCastVolumePending(for: id)
+        Telemetry.log(.cast, "cast_pending_raised",
+                      ["device": id, "hold": hold.rawValue, "lag": String(lag)])
+        castPendingTimers[hold, default: [:]][id]?.invalidate()
+        castPendingTimers[hold, default: [:]][id] = Timer.scheduledTimer(
+            withTimeInterval: TimeInterval(max(1, lag)), repeats: false) { [weak self] _ in
+            self?.expireCastPending(hold, for: id)
         }
-        if castVolumePendingIDs.insert(id).inserted {
-            refreshDeviceRows()
+        if castPendingIDs[hold, default: []].insert(id).inserted {
+            repaintCastPending(hold, for: id)
         }
     }
 
-    /// The timer's end of the pending fill: drop it, then repaint so the
-    /// fader returns to gold.
-    func expireCastVolumePending(for id: String) {
-        castVolumePendingIDs.remove(id)
-        castVolumePendingTimers[id]?.invalidate()
-        castVolumePendingTimers[id] = nil
-        refreshDeviceRows()
+    /// The timer's end of a pending glow: drop it, then repaint so the
+    /// control settles.
+    func expireCastPending(_ hold: CastPendingHold, for id: String) {
+        castPendingIDs[hold]?.remove(id)
+        castPendingTimers[hold]?[id]?.invalidate()
+        castPendingTimers[hold]?[id] = nil
+        repaintCastPending(hold, for: id)
+    }
+
+    /// The volume glow lives on the row's fader; the trim glow lives in the
+    /// sync drawer, which `refreshDeviceRows()` never reaches.
+    private func repaintCastPending(_ hold: CastPendingHold, for id: String) {
+        switch hold {
+        case .volume:
+            refreshDeviceRows()
+        case .trim:
+            if mountedSyncDrawerID == id, let device = devicesByID[id] {
+                pushSyncDrawerState(device)
+            }
+        }
     }
 
     /// Live Reduce Motion value, overridable for headless determinism.
@@ -2931,7 +2865,7 @@ public final class PopoverController: NSObject {
         for id in memberIDs {
             switch devicesByID[id]?.connectionState {
             case .connected:                 return .connected
-            case .connecting, .reconnecting: anyConnecting = true
+            case .connecting, .reconnecting, .awaitingPassword: anyConnecting = true
             default:                         break
             }
         }
@@ -3011,6 +2945,9 @@ public final class PopoverController: NSObject {
                                  // Cast rows — chip and drawer, no wizard.
                                  showsSyncControls: isTrimmable(device))
         view.delegate = self
+        view.additionalContextMenuItemsProvider = { [weak self] row in
+            self?.speakerVisibilityMenuItems(for: row.device.id) ?? []
+        }
         applySelectionState(to: view, device: device)
         deviceRowsByID[device.id] = view
         return view
@@ -3046,7 +2983,30 @@ public final class PopoverController: NSObject {
     /// Whether an app route currently redirects to this device — the canonical
     /// `isRedirectTarget` source (backs `controllable` and the Q4 retry path).
     private func isRedirectTarget(_ id: String) -> Bool {
-        !appRouting.routedAppNames(for: id, groupTargets: groupRouteTargets()).isEmpty
+        !appRouting.routedAppNames(for: id, isLocalDevice: devicesByID[id]?.isLocalDevice ?? false,
+                                   groupTargets: groupRouteTargets()).isEmpty
+    }
+
+    /// Whether `device` draws as connected. The Mac has no connection to make,
+    /// so its snapshot can sit at `.off` while it carries audio — in the main
+    /// mix (the default Mac-only setup the rail already draws as connected) or
+    /// for an app sent to "This Mac" — and then draws the ring and status dot
+    /// any speaker in that position draws. One answer for the row and the
+    /// Devices card header, so the two cannot disagree.
+    private func drawsConnected(_ device: Device, controller: GroupController) -> Bool {
+        if case .connected = device.connectionState { return true }
+        return device.isLocalDevice && device.isAvailable && device.connectionState == .off
+            && (controller.isMainOutMember(device.id) || !liveAppNames(for: device).isEmpty)
+    }
+
+    /// The apps confirmed playing on `device`. An AirPlay or Bluetooth target
+    /// learns this from the backend once its stream is up; the Mac has no
+    /// connect phase to wait through — a "This Mac" app renders locally the
+    /// moment it is picked — so its routes count as live, which gives its row
+    /// the same connected ring, gold dot and primary-text pills any target gets.
+    private func liveAppNames(for device: Device) -> [String] {
+        guard device.isLocalDevice else { return liveRoutedAppNames[device.id] ?? [] }
+        return appRouting.routedAppNames(for: device.id, isLocalDevice: true)
     }
 
     /// The Devices card's genuinely-DIVERGING dormant state (spec §4.7 FINAL
@@ -3109,20 +3069,35 @@ public final class PopoverController: NSObject {
     private func membershipHintShouldShow(sections: [DeviceSection]) -> Bool {
         guard membershipHintShownProvider?() == true else { return false }
         guard devicesCardNoteText() == nil else { return false }
-        return sections.contains { $0.title != Self.thisMacSubsectionTitle && !$0.devices.isEmpty }
+        return sections.contains {
+            $0.title != Self.thisMacSubsectionTitle && $0.title != Self.unknownSpeakersSectionTitle
+                && !$0.devices.isEmpty
+        }
     }
 
     /// In-place device-section repaint that escalates to a full `rebuild()` when
-    /// the Devices card's dormancy note must appear/disappear/rename (a card-note
-    /// change is structural — only `rebuild()` mounts/unmounts it). Everything
-    /// else stays the cheap `refreshDeviceRows()` + `refreshMainOutRow()` path.
+    /// the rendered speaker set changed, or the Devices card's dormancy note or
+    /// first-run hint must appear, disappear or change (only `rebuild()` mounts
+    /// and unmounts them). Mid-drag the rebuild is recorded as owed instead.
+    /// Everything else stays the cheap `refreshDeviceRows()` +
+    /// `refreshMainOutRow()` path, which also re-applies selection to the rows of
+    /// remembered speakers the backend no longer lists.
     func refreshDeviceRowsReconcilingCardNote() {
-        if devicesCardNoteText() != renderedDevicesCardNote
-            || membershipHintShouldShow(sections: deviceSections()) != renderedMembershipHint {
+        refreshOwnedSpeakerLibrary()
+        let structureChanged = Set(renderedDeviceOrder().map(\.id)) != Set(deviceRowsByID.keys)
+        let noteChanged = devicesCardNoteText() != renderedDevicesCardNote
+            || membershipHintShouldShow(sections: deviceSections()) != renderedMembershipHint
+        if !isSliderDragLive && (structureChanged || noteChanged) {
             rebuild()
             panel.panelContentDidChangeHeight(animated: true)
         } else {
+            if structureChanged || noteChanged { structuralRebuildDeferred = true }
             refreshDeviceRows()
+            for (id, row) in deviceRowsByID where devicesByID[id] == nil {
+                if let record = speakerLibrary.record(for: id) {
+                    applySelectionState(to: row, device: record.renderingDevice)
+                }
+            }
             refreshMainOutRow()
         }
     }
@@ -3137,8 +3112,28 @@ public final class PopoverController: NSObject {
         return controller.groups.first { $0.id == id }?.name
     }
 
+    private func unavailablePresentation(for id: String) -> (status: String?, help: String?, canRecover: Bool) {
+        guard let record = speakerLibrary.record(for: id), !record.isAvailable else { return (nil, nil, false) }
+        if record.kind == .bluetooth, record.liveDevice == nil {
+            switch bluetoothPermissionProvider?() {
+            case .granted:
+                return ("Not paired", "Pair this speaker in Bluetooth settings.", true)
+            case .denied:
+                return ("Bluetooth access denied", "Allow Bluetooth access in System Settings to reconnect this speaker.", true)
+            default:
+                return ("Bluetooth access needed", "Allow Bluetooth access to find this paired speaker.", true)
+            }
+        }
+        if let state = speakerRecovery.state(for: id), state != .found {
+            return (state.text, state.help, true)
+        }
+        return (record.status.text, record.secondaryText,
+                record.kind != nil && !record.isLocalDevice)
+    }
+
     /// Push the current membership + local-block state into a device row.
     func applySelectionState(to row: DeviceRowView, device: Device) {
+        row.equalizerActionAvailable = devicesByID[device.id] != nil
         // Dormant de-emphasis (spec §4.7 FINAL, S5): dim ONLY rows that fall
         // OUTSIDE a genuinely-diverging group target — via node TINT, never
         // alpha (DeviceRowView.apply handles that split; the checkbox stays at
@@ -3146,6 +3141,10 @@ public final class PopoverController: NSObject {
         // INSIDE the active target render at full emphasis. A FAILED member is
         // additionally exempted inside `DeviceRowView.updateBus` (failure
         // outranks configuration, R2).
+        let unavailable = unavailablePresentation(for: device.id)
+        let identity = speakerLibrary.record(for: device.id)
+        row.toolTip = identity?.secondaryText
+        row.setAccessibilityHelp(identity?.secondaryText == nil ? nil : identity?.accessibilityIdentity)
         let divergence = devicesCardDivergence()
         let dimmed = divergence.map { !$0.targetMemberIDs.contains(device.id) } ?? false
         guard let controller = groupController else {
@@ -3153,8 +3152,9 @@ public final class PopoverController: NSObject {
             row.apply(device, selected: false, controllable: false,
                       selectionDimmed: dimmed,
                       routedAppNames: appRouting.routedAppNames(for: device.id,
+                                                              isLocalDevice: device.isLocalDevice,
                                                               groupTargets: groupRouteTargets()),
-                      liveAppNames: liveRoutedAppNames[device.id] ?? [],
+                      liveAppNames: liveAppNames(for: device),
                       appRouteGroupNames: appRouteGroupNames(),
                       mainOutTargetsGroupName: activeMainOutGroupName,
                       energizePending: energizePendingIDs.contains(device.id),
@@ -3165,14 +3165,20 @@ public final class PopoverController: NSObject {
                       alignmentSource: btOffsetSourceProvider?(device.id),
                       movedSinceLastTimeMs: btMovedNoticeMsByID[device.id],
                       syncDrawerExpanded: expandedSyncDeviceID == device.id,
-                      isEQShaped: deviceEQIsShaped?(device.id) ?? false)
+                      isEQShaped: deviceEQIsShaped?(device.id) ?? false,
+                      unavailableStatus: unavailable.status,
+                      unavailableHelp: unavailable.help,
+                      nameRecoveryEnabled: unavailable.canRecover,
+                      liveVolumeAvailable: devicesByID[device.id] != nil)
             return
         }
         let selected = controller.isSpeakerSelected(device.id)
-        // Row mute is VOLUME-BASED in `GroupController` (Q4 — `explicitMute`
-        // in memberState; the backend `Device.isMuted` flag is never driven by
-        // the popover's mute path), so overlay the controller's mute truth
-        // onto the snapshot before the row renders (S3): without this the
+        // Except for the Mac, row mute is VOLUME-BASED in `GroupController`
+        // (Q4 — `explicitMute` in memberState), so overlay the controller's
+        // mute truth onto the snapshot before the row renders (S3). The Mac's
+        // mute is the system hardware mute (`backend.setMuted`, read back on
+        // each `updateDevices` push), so both sides agree and the OR changes
+        // nothing there. Without this the
         // engaged pill / dark armed dot / MUTED token would all silently
         // revert on the first model repaint after a mute click.
         var device = device
@@ -3188,6 +3194,9 @@ public final class PopoverController: NSObject {
         // showing the moment an AirPlay device joins.
         if device.isLocalDevice, controller.localRowDrivesMain {
             device.volume = controller.mainOutMasterVolume
+        }
+        if drawsConnected(device, controller: controller) {
+            device.connectionState = .connected
         }
         // T-UI-ALLOW: the Phase-1 local-mix block is gone — the Mac row's
         // select-ability gate went with it (T-GROUPCTL / Q5, synced local sink),
@@ -3210,8 +3219,9 @@ public final class PopoverController: NSObject {
                   controllable: controller.isMainOutMember(device.id) || isRedirectTarget(device.id),
                   selectionDimmed: dimmed,
                   routedAppNames: appRouting.routedAppNames(for: device.id,
+                                                              isLocalDevice: device.isLocalDevice,
                                                               groupTargets: groupRouteTargets()),
-                  liveAppNames: liveRoutedAppNames[device.id] ?? [],
+                  liveAppNames: liveAppNames(for: device),
                   appRouteGroupNames: appRouteGroupNames(),
                   masterMuted: controller.isMainOutMuted,
                   inActiveTarget: inActiveTarget,
@@ -3231,14 +3241,18 @@ public final class PopoverController: NSObject {
                   switchOfferOffered: switchOfferDeviceID == device.id && !selected,
                   // A stale id (device no longer Cast/lagged) renders nothing;
                   // its own timer self-expires it — no pruning machinery needed.
-                  volumePendingApply: castVolumePendingIDs.contains(device.id)
+                  volumePendingApply: castPendingIDs[.volume]?.contains(device.id) == true
                       && device.castVolumeLagSeconds != nil
                       && device.connectionState == .connected,
                   isEQShaped: deviceEQIsShaped?(device.id) ?? false,
                   // The Mac's row draws as a rail member while the engine is
                   // falling back to it, so the wire shows where audio actually
                   // comes out. Nothing about the selection changes.
-                  localFallbackOutput: localFallbackActive && device.isLocalDevice)
+                  localFallbackOutput: localFallbackActive && device.isLocalDevice,
+                  unavailableStatus: unavailable.status,
+                  unavailableHelp: unavailable.help,
+                  nameRecoveryEnabled: unavailable.canRecover,
+                  liveVolumeAvailable: devicesByID[device.id] != nil)
     }
 
     /// A trimmable row's current Sync trim: the session cache first (the
@@ -3309,244 +3323,80 @@ public final class PopoverController: NSObject {
     /// down. T14's apply path is what puts a number in here.
     var btMovedNoticeMsByID: [String: Double] = [:]
 
-    // MARK: Output Devices "+" menu (BT-UI / BT-LIST)
-
-    /// Build the "+" affordance's menu FRESH per presentation — two items
-    /// dispatching through real `NSMenuItem` target/action (tests drive them
-    /// via `NSMenu.performActionForItem(at:)`, never a bypass seam):
-    /// "Save Selected Speakers as scene" (enabled iff `canSaveCurrentSetup`),
-    /// "Pair a Bluetooth speaker…" (device-tier decision 3 — never-paired
-    /// speakers get NO rows; pairing is a one-tap Settings trip), and — the
-    /// BT-LIST connected-only list's history surface — one "Connect '<name>'"
-    /// item per paired-but-unlisted Bluetooth device.
-    func makeOutputDevicesPlusMenu() -> NSMenu {
-        let menu = NSMenu(title: "Add")
-        menu.autoenablesItems = false
-        let save = NSMenuItem(title: "Save Selected Speakers as scene",
-                              action: #selector(plusMenuSaveGroup(_:)), keyEquivalent: "")
-        save.target = self
-        save.isEnabled = canSaveCurrentSetup
-        menu.addItem(save)
-        let pair = NSMenuItem(title: "Pair a Bluetooth speaker…",
-                              action: #selector(plusMenuPairBluetooth(_:)), keyEquivalent: "")
-        pair.target = self
-        menu.addItem(pair)
-        // Connect items for the pairing HISTORY the list no longer shows (BT-LIST):
-        // every known-but-unlisted BT device, most recent first — the same
-        // membership-free reconnect a greyed row's click fires, so the attempt
-        // surfaces as a live `.connecting` row and resolves to connected or failed.
-        let lastUsed = btLastUsedProvider?() ?? [:]
-        let unlisted = devicesByID.values
-            .filter { $0.isBluetooth && !isBluetoothRowListed($0) && !hiddenSpeakers.isHidden($0.id) }
-            .sorted { byBTRecency($0, $1, lastUsed: lastUsed) }
-        if !unlisted.isEmpty {
-            menu.addItem(.separator())
-            let header = NSMenuItem(title: "Bluetooth pairings", action: nil, keyEquivalent: "")
-            header.isEnabled = false
-            menu.addItem(header)
-            for device in unlisted {
-                let item = NSMenuItem(title: "Connect '\(device.name)'",
-                                      action: #selector(menuConnectBluetoothDevice(_:)), keyEquivalent: "")
-                item.target = self
-                item.representedObject = device.id
-                menu.addItem(item)
-            }
-        }
-        // The way back for the footer "−": every hidden speaker still in the
-        // discovery snapshot, one "Show" item each. A hidden speaker not
-        // currently discovered has no row to restore, so it isn't offered —
-        // its id stays in the store and it reappears here when it's back on
-        // the network. A hidden BT pairing lands here (as "Show"), never in
-        // the "Bluetooth pairings" connect list above, so one device never
-        // gets two items.
-        let hidden = devicesByID.values
-            .filter { !$0.isLocalDevice && hiddenSpeakers.isHidden($0.id) }
-            .sorted { ($0.name, $0.id) < ($1.name, $1.id) }
-        if !hidden.isEmpty {
-            menu.addItem(.separator())
-            let header = NSMenuItem(title: "Hidden speakers", action: nil, keyEquivalent: "")
-            header.isEnabled = false
-            menu.addItem(header)
-            for device in hidden {
-                let item = NSMenuItem(title: "Show '\(device.name)'",
-                                      action: #selector(menuShowSpeaker(_:)), keyEquivalent: "")
-                item.target = self
-                item.representedObject = device.id
-                menu.addItem(item)
-            }
-        }
-        return menu
-    }
-
-    /// Build the "−" affordance's menu FRESH per presentation: one "Hide"
-    /// item per shown non-Mac speaker, in the list's own rendered order. A
-    /// speaker that is currently SELECTED (playing in the broadcast) is
-    /// disabled — deselect first, then hide (owner's call, 2026-09-15) — so
-    /// hiding can never take a playing speaker off screen.
-    func makeOutputDevicesMinusMenu() -> NSMenu {
-        let menu = NSMenu(title: "Hide")
-        menu.autoenablesItems = false
-        let shown = deviceSections()
-            .filter { $0.title != Self.thisMacSubsectionTitle }
-            .flatMap(\.devices)
-        for device in shown {
-            let selected = groupController?.isSpeakerSelected(device.id) ?? false
-            let item = NSMenuItem(title: "Hide '\(device.name)'",
-                                  action: #selector(menuHideSpeaker(_:)), keyEquivalent: "")
+    private func speakerVisibilityMenuItems(for id: String) -> [NSMenuItem] {
+        guard let record = speakerLibrary.record(for: id), !record.isLocalDevice else { return [] }
+        let choices = SpeakerMixerVisibility.allCases.enumerated().map { index, value in
+            let item = NSMenuItem(title: value.label, action: #selector(changeSpeakerVisibility(_:)), keyEquivalent: "")
             item.target = self
-            item.representedObject = device.id
-            item.isEnabled = !selected
-            if selected { item.toolTip = "Playing now — turn it off first to hide it." }
-            menu.addItem(item)
+            item.representedObject = id
+            item.tag = index
+            item.state = record.visibility == value ? .on : .off
+            return item
         }
-        return menu
+        let settings = NSMenuItem(title: "Speaker settings…", action: #selector(openSpeakerSettings(_:)), keyEquivalent: "")
+        settings.target = self
+        settings.representedObject = id
+        return [NSMenuItem.sectionHeader(title: "Show in Mixer")] + choices + [NSMenuItem.separator(), settings]
     }
 
-    @objc private func menuHideSpeaker(_ sender: NSMenuItem) {
-        guard let id = sender.representedObject as? String,
-              let device = devicesByID[id], !device.isLocalDevice,
-              !(groupController?.isSpeakerSelected(id) ?? false) else { return }
-        hiddenSpeakers.hide(deviceID: id)
-        Analytics.capture("mixer:speaker_hidden", ["kind": device.kind.rawValue])
-        rebuild()
-        panel.panelContentDidChangeHeight(animated: true)
-    }
-
-    @objc private func menuShowSpeaker(_ sender: NSMenuItem) {
-        guard let id = sender.representedObject as? String,
-              hiddenSpeakers.isHidden(id) else { return }
-        hiddenSpeakers.show(deviceID: id)
-        Analytics.capture("mixer:speaker_shown", ["kind": devicesByID[id]?.kind.rawValue ?? "unknown"])
-        rebuild()
-        panel.panelContentDidChangeHeight(animated: true)
-    }
-
-    @objc private func plusMenuSaveGroup(_ sender: Any?) { saveCurrentSetup() }
-    @objc private func plusMenuPairBluetooth(_ sender: Any?) { onPairBluetoothSpeaker?() }
-    @objc private func menuConnectBluetoothDevice(_ sender: NSMenuItem) {
+    @objc private func changeSpeakerVisibility(_ sender: NSMenuItem) {
         guard let id = sender.representedObject as? String else { return }
-        // List the row BEFORE the attempt so the outcome has somewhere to land.
-        btConnectAttemptIDs.insert(id)
-        groupController?.requestReconnect(for: id)
-        rebuild()
-        panel.panelContentDidChangeHeight(animated: true)
+        guard SpeakerMixerVisibility.allCases.indices.contains(sender.tag) else { return }
+        let visibility = SpeakerMixerVisibility.allCases[sender.tag]
+        guard speakerLibrary.setVisibility(visibility, for: id) else { return }
+        if speakerLibrary.onChange == nil { refreshSpeakerPresentation() }
     }
 
-    /// The footer "+"'s click: pop the menu off the footer strip, the same way
-    /// the Applications "+" pops its picker. The actual on-screen pop is gated
-    /// on `HeadlessRuntime.isActive` (house rule — a blocking `popUp` under
-    /// `swift test` would also hang the runner); headless callers assert via
-    /// `test_outputDevicesPlusMenu()` instead.
-    private func presentOutputDevicesPlusMenu() {
-        guard !HeadlessRuntime.isActive else { return }
-        makeOutputDevicesPlusMenu().popUp(
-            positioning: nil, at: NSPoint(x: 0, y: devicesFooter.bounds.height), in: devicesFooter)
+    @objc private func openSpeakerSettings(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String, speakerLibrary.record(for: id) != nil else { return }
+        Analytics.capture("speaker:settings_opened", ["door": "mixer_menu"])
+        onOpenSpeakerSettings?(id)
     }
 
-    /// The footer "−"'s click: same pop as the "+", headless-gated the same
-    /// way; headless callers assert via `test_outputDevicesMinusMenu()`.
-    func presentOutputDevicesMinusMenu() {
-        guard !HeadlessRuntime.isActive else { return }
-        makeOutputDevicesMinusMenu().popUp(
-            positioning: nil, at: NSPoint(x: 0, y: devicesFooter.bounds.height), in: devicesFooter)
-    }
 
-    /// A non-interactive placeholder body row (V2 Devices empty state / V11
-    /// Applications empty state; copy carried by both to the §5.9 spec text
-    /// under V9): `text` in a tertiary-label, row-height view whose label
-    /// leading edge aligns with the name column (past the icon).
-    private func makePlaceholderRow(text: String) -> NSView {
-        let label = NSTextField(labelWithString: text)
-        label.translatesAutoresizingMaskIntoConstraints = false
-        label.font = Tokens.Font.menuItem
-        label.textColor = Tokens.Color.inkTertiary
-        label.lineBreakMode = .byTruncatingTail
-        label.maximumNumberOfLines = 1
-        let wrapper = NSView()
-        wrapper.translatesAutoresizingMaskIntoConstraints = false
-        wrapper.addSubview(label)
-        let nameColumnLeading = PopoverColumnGrid.nameColumnLeading
-        NSLayoutConstraint.activate([
-            wrapper.heightAnchor.constraint(equalToConstant: DeviceRowView.rowHeight),
-            label.leadingAnchor.constraint(equalTo: wrapper.leadingAnchor, constant: nameColumnLeading),
-            label.trailingAnchor.constraint(lessThanOrEqualTo: wrapper.trailingAnchor,
-                                            constant: -PopoverColumnGrid.leadingInset),
-            label.centerYAnchor.constraint(equalTo: wrapper.centerYAnchor),
-        ])
-        return wrapper
-    }
-
-    /// The Bluetooth subsection's empty state (BT-LIST): pairing/connecting is
-    /// Apple-owned, so the affordance is the Settings trip — the fresh row then
-    /// arrives through the ordinary connected-only listing.
-    ///
-    /// The row names the ACTION only: the "Bluetooth Speakers" header directly
-    /// above it already names the kind, so the word on both lines would make an
-    /// empty section say the same thing twice. VoiceOver hears the full phrase
-    /// through `accessibilityLabel` — a button announced on its own has no
-    /// header to lean on. The header itself stays: it is the collapse key, it
-    /// is the shape the AirPlay empty state uses too, and dropping it would
-    /// only push "Bluetooth" back down into this row.
-    ///
-    /// A LINK, never a push button: a bordered pill is the only chrome-drawn
-    /// control in a card of borderless rows, which lets an ABSENCE — a section
-    /// with nothing in it — pull more eye than the live speakers above it.
-    /// Borderless at `menuItem`/secondary puts it in the same voice as
-    /// `makePlaceholderRow`'s "no apps" line, one step quieter than a device
-    /// name, while staying a real `NSButton` (same action, same focus ring, same
-    /// `test_fireBluetoothConnectClick`). Deliberately NOT accent-tinted: gold is
-    /// spoken for here — it means "in the mix" — and a gold link in a device list
-    /// would claim a membership it doesn't have.
-    ///
-    /// Leading edge sits on `firstElementLeading(indented: false)` (38.5), the
-    /// same x a device row's ICON starts at — not `nameColumnLeading` (73.5),
-    /// which is where the NAME starts, one column further in. With no device
-    /// rows present under the subsection title to compare against, the deeper
-    /// anchor would read as an indent nested inside another indent; the "+"
-    /// sits exactly where a device icon would instead.
-    private func makeBluetoothConnectRow() -> NSView {
-        let button = PointingHandButton(title: "Connect a speaker",
-                                        target: self, action: #selector(bluetoothConnectRowClicked(_:)))
-        button.setAccessibilityLabel("Connect a Bluetooth speaker")
+    private func makePairBluetoothRow() -> NSView {
+        let button = PointingHandButton(title: "Pair Bluetooth speaker…",
+                                       target: self, action: #selector(pairBluetoothClicked(_:)))
+        button.setAccessibilityLabel(button.title)
         button.translatesAutoresizingMaskIntoConstraints = false
         button.bezelStyle = .accessoryBar
         button.isBordered = false
         button.controlSize = .small
-        // A leading "+" glyph so the row reads as an ACTION rather than a
-        // greyed-out placeholder line. `contentTintColor` reliably tints a
-        // button's template IMAGE (the comment below covers why the TITLE takes
-        // a different route), so the glyph carries the same neutral secondary
-        // tone the title does. Filled (`plus.circle.fill`) rather than outlined,
-        // for a simpler, more inviting mark.
-        button.image = NSImage(systemSymbolName: "plus.circle.fill", accessibilityDescription: nil)
+        button.image = NSImage(systemSymbolName: "plus", accessibilityDescription: nil)
+        button.image?.isTemplate = true
         button.imagePosition = .imageLeading
-        button.contentTintColor = Tokens.Color.secondaryLabel
-        // The title's colour is set through `attributedTitle`, not
-        // `contentTintColor` — that property reliably tints a button's template
-        // IMAGE, but its effect on a title varies by bezel style. The dynamic
-        // token resolves per appearance at draw time (the same way the FEED
-        // pills' attributed colours do), so a live light/dark switch follows.
-        // The TITLE reads at full `label` while the GLYPH stays `secondaryLabel`
-        // — the weight difference between the two carries the row's appeal,
-        // instead of a bordered pill.
-        button.attributedTitle = NSAttributedString(
-            string: button.title,
-            attributes: [.font: Tokens.Font.menuItem,
-                         .foregroundColor: Tokens.Color.label])
-        bluetoothConnectButton = button
+        button.contentTintColor = Tokens.Color.label2
+        button.attributedTitle = NSAttributedString(string: button.title,
+            attributes: [.font: Tokens.Font.menuItem, .foregroundColor: Tokens.Color.label2])
+        pairBluetoothButton = button
         let wrapper = NSView()
         wrapper.translatesAutoresizingMaskIntoConstraints = false
         wrapper.addSubview(button)
-        let leading = PopoverColumnGrid.firstElementLeading(indented: false)
         NSLayoutConstraint.activate([
             wrapper.heightAnchor.constraint(equalToConstant: DeviceRowView.rowHeight),
-            button.leadingAnchor.constraint(equalTo: wrapper.leadingAnchor, constant: leading),
+            button.leadingAnchor.constraint(equalTo: wrapper.leadingAnchor,
+                                             constant: PopoverColumnGrid.firstElementLeading(indented: false)),
             button.centerYAnchor.constraint(equalTo: wrapper.centerYAnchor),
         ])
         return wrapper
     }
 
-    @objc private func bluetoothConnectRowClicked(_ sender: Any?) { onPairBluetoothSpeaker?() }
+    @objc private func pairBluetoothClicked(_ sender: Any?) { onPairBluetoothSpeaker?() }
+
+    private var bluetoothAccessExplanation: String? {
+        guard let status = bluetoothPermissionProvider?(), status != .granted else { return nil }
+        return status == .denied ? "Allow Bluetooth access to see paired speakers."
+            : "Bluetooth access is needed to see paired speakers."
+    }
+
+    private func makeBluetoothAccessRow(_ explanation: String) -> NSView {
+        CardMessageRow(message: explanation, action: .init(
+            title: bluetoothPermissionProvider?() == .denied
+                ? "Open Bluetooth privacy…" : "Allow Bluetooth access…",
+            target: self, selector: #selector(bluetoothAccessClicked(_:))))
+    }
+
+    @objc private func bluetoothAccessClicked(_ sender: Any?) { onBluetoothAccess?() }
 
     // MARK: Connection failures + diagnosis panels (brief §7.3)
     //
@@ -3585,6 +3435,7 @@ public final class PopoverController: NSObject {
                 // what keeps a mid-episode dismissal honored — a still-`.failed`
                 // re-report breaks here, so the panel never pops back.
                 guard !previous.isFailedState else { break }
+                codeJoinClickedIDs.remove(device.id)
                 // Only a speaker the user asked for is worth an event —
                 // selected, a redirect target, or a member of the playing
                 // group. The backend fails every speaker it can see, wanted or
@@ -3604,9 +3455,24 @@ public final class PopoverController: NSObject {
                 // over any prior dismissal, so clear the dismissal record before
                 // (re)opening. This is what re-surfaces the panel on a
                 // "Try again → fails again" (`.failed → .connecting → .failed`).
-                dismissedDiagnosisIDs.remove(device.id)
-                openDiagnosisIDs.insert(device.id)
+                if device.id != passwordSheetDeviceID {
+                    dismissedDiagnosisIDs.remove(device.id)
+                    openDiagnosisIDs.insert(device.id)
+                }
+                if device.id == passwordSheetDeviceID, passwordSheetSubmitted,
+                   case .failed(let failure) = current {
+                    passwordSheetSubmitted = false
+                    switch failure.cause {
+                    case .codeRequired: passwordSheet?.showResult(Self.codeRejectedText)
+                    case .authRequired: passwordSheet?.showResult(Self.passwordRejectedText)
+                    default: passwordSheet?.showResult(failure.headline)
+                    }
+                }
             case .connected, .off:
+                codeJoinClickedIDs.remove(device.id)
+                if current == .connected && device.id == passwordSheetDeviceID {
+                    dismissPasswordSheet()
+                }
                 // Same gate as the failure above, for the same reason: a
                 // speaker nobody asked for is the backend's business.
                 if current == .connected && previous != .connected && !device.isLocalDevice
@@ -3617,6 +3483,20 @@ public final class PopoverController: NSObject {
                 // and the dismissal record so a future failure re-expands afresh.
                 openDiagnosisIDs.remove(device.id)
                 dismissedDiagnosisIDs.remove(device.id)
+            case .awaitingPassword:
+                // A password wait ends any failure episode: the row's link is
+                // the door, so no panel.
+                openDiagnosisIDs.remove(device.id)
+                dismissedDiagnosisIDs.remove(device.id)
+                // A code speaker the user just clicked opens its sheet once,
+                // as the wait begins; a repeat report is not a new wait. A
+                // hidden popover cannot present the sheet, and a retained one
+                // would refuse every later link click, so a hidden wait spends
+                // the click and the row's link opens the sheet later.
+                if previous != .awaitingPassword, codeJoinClickedIDs.remove(device.id) != nil,
+                   isEffectivelyShown {
+                    presentPasswordSheet(for: device.id)
+                }
             case .connecting, .reconnecting:
                 // In-flight: leave any open panel alone (a retry keeps its
                 // context on screen until the attempt resolves). Deliberately
@@ -3660,23 +3540,6 @@ public final class PopoverController: NSObject {
         (groupController?.isSpeakerSelected(id) ?? false) || isRedirectTarget(id)
     }
 
-    /// BT-LIST (connected-only): a Bluetooth row renders iff the device can carry
-    /// audio right now, the user explicitly asked to connect it while the popover
-    /// has been open (`btConnectAttemptIDs`, cleared on close — scoped that way
-    /// rather than to "state != .off", because `.failed` is sticky and never
-    /// clears for a paired device, so a failed attempt would mint a permanent
-    /// unexplained row), or the user still
-    /// intends audio on it (Selected Devices, app-redirect, or the active Main Out
-    /// group — `isMainOutMember`, the group-aware read `wantsAudio` lacks). The
-    /// paired-but-idle history macOS keeps forever stays off screen — the "+"
-    /// menu's Connect items are its surface.
-    private func isBluetoothRowListed(_ device: Device) -> Bool {
-        device.isAvailable
-            || btConnectAttemptIDs.contains(device.id)
-            || wantsAudio(device.id)
-            || (groupController?.isMainOutMember(device.id) ?? false)
-    }
-
     /// Make the mounted panel views match `openDiagnosisIDs`: tear down panels
     /// that should be closed (or whose device/row vanished), refresh the failure
     /// copy on ones staying up (the diagnosis-replacement path), and mount
@@ -3707,6 +3570,7 @@ public final class PopoverController: NSObject {
         view.onRetry = { [weak self] in self?.retryConnection(for: id) }
         view.onCopyDetails = { [weak self] in self?.copyDiagnosisDetails(for: id) }
         view.onDismiss = { [weak self] in self?.dismissDiagnosisPanel(for: id) }
+        view.onEnterPassword = { [weak self] in self?.presentPasswordSheet(for: id) }
         diagnosisPanelsByID[id] = view
         panel.insertRow(view, after: row, animated: animated)
     }
@@ -3739,6 +3603,60 @@ public final class PopoverController: NSObject {
         Analytics.capture("connection:retry_clicked")
         let result = groupController?.retryConnection(for: id) ?? .ok
         handleSelection(result, deviceID: id)
+        if result.refusalReason == nil, showsCode(id) { codeJoinClickedIDs.insert(id) }
+    }
+
+    /// Whether `id` is a receiver that shows a code on its screen once and keeps
+    /// the pairing. An every-time code receiver takes no code (`.codeEveryTimeUnsupported`).
+    private func showsCode(_ id: String) -> Bool {
+        devicesByID[id]?.airPlayAccess == .onScreenCode
+    }
+
+    /// Ask for `id`'s AirPlay password or on-screen code. Connect goes through
+    /// `GroupController.submitAirPlayPassword`: a password is stored and the
+    /// speaker retried; a code speaker's digits go to `engine.authorize` and only
+    /// the pairing key that earns is stored. The sheet stays up until the
+    /// speaker connects (dismiss) or fails again (`showResult`), both read off
+    /// the connection edges in `handleConnectionTransitions`. While the sheet
+    /// is up its speaker's diagnosis panel does not open; Cancel on a
+    /// still-failed speaker opens it.
+    func presentPasswordSheet(for id: String) {
+        guard passwordSheet == nil, devicesByID[id]?.airPlayAccess != .onScreenCodeEveryTime else { return }
+        let isCode = showsCode(id)
+        Analytics.capture("airplay:code_prompt_shown", ["kind": isCode ? "onScreenCode" : "password"])
+        let sheet = SpeakerPasswordSheetViewController(deviceName: devicesByID[id]?.name ?? "",
+                                                       kind: isCode ? .onScreenCode : .password)
+        sheet.onSubmit = { [weak self] text in
+            guard let self else { return }
+            self.passwordSheetSubmitted = true
+            self.groupController?.submitAirPlayPassword(text, for: id, source: "mac")
+        }
+        sheet.onCancel = { [weak self] in
+            guard let self else { return }
+            self.dismissPasswordSheet()
+            if case .failed = self.devicesByID[id]?.connectionState {
+                self.dismissedDiagnosisIDs.remove(id)
+                self.openDiagnosisIDs.insert(id)
+                self.reconcileDiagnosisPanels(animated: true)
+            }
+        }
+        passwordSheet = sheet
+        passwordSheetDeviceID = id
+        passwordSheetSubmitted = false
+        // Headless runs (host never shown) keep the reference and drive the
+        // sheet through its test hooks.
+        if let host = panel.viewIfLoaded?.window, host.isVisible {
+            panel.presentAsSheet(sheet)
+        }
+    }
+
+    private func dismissPasswordSheet() {
+        let sheet = passwordSheet
+        if let id = passwordSheetDeviceID { codeJoinClickedIDs.remove(id) }
+        passwordSheet = nil
+        passwordSheetDeviceID = nil
+        passwordSheetSubmitted = false
+        if sheet?.presentingViewController != nil { sheet?.dismiss(nil) }
     }
 
     /// "Copy details": the raw evidence when the diagnosis captured any, else
@@ -3774,7 +3692,7 @@ extension PopoverController: DeviceRowView.Delegate {
         noteSliderGesture()
         groupController?.setMemberVolume(volume, for: id)
         refreshMainOutRow()
-        raiseCastVolumePending(for: id)
+        raiseCastPending(.volume, for: id)
     }
 
     public func deviceRow(_ row: DeviceRowView, didToggleMute muted: Bool, for id: String) {
@@ -3784,7 +3702,7 @@ extension PopoverController: DeviceRowView.Delegate {
         // refresh those glyphs live.
         refreshDeviceRows()
         refreshMainOutRow()
-        raiseCastVolumePending(for: id)
+        raiseCastPending(.volume, for: id)
     }
 
     public func deviceRow(_ row: DeviceRowView, didToggleEnabled on: Bool, for id: String) {
@@ -3828,6 +3746,13 @@ extension PopoverController: DeviceRowView.Delegate {
             clearSwitchOffer()
         }
         handleSelection(result, deviceID: id)
+        if on, result.refusalReason == nil, let device = devicesByID[id],
+           device.airPlayAccess == .password, !device.hasStoredPassword {
+            presentPasswordSheet(for: id)
+        }
+        if on, result.refusalReason == nil, showsCode(id) {
+            codeJoinClickedIDs.insert(id)
+        }
     }
 
     /// "Play here": the clicked speaker replaces the whole selection
@@ -3844,6 +3769,12 @@ extension PopoverController: DeviceRowView.Delegate {
         handleSelection(result, deviceID: id)
     }
 
+    /// The row's "Enter Password…" link, or a click on a selected row waiting
+    /// for its password.
+    public func deviceRowDidRequestPasswordEntry(_ row: DeviceRowView) {
+        presentPasswordSheet(for: row.device.id)
+    }
+
     /// The user clicked the transient offer: put the membership back through
     /// the checkbox's OWN delegate path, so there is no second re-add
     /// implementation that could diverge from a plain re-check. The membership
@@ -3854,14 +3785,33 @@ extension PopoverController: DeviceRowView.Delegate {
         deviceRow(row, didToggleEnabled: true, for: id)
     }
 
-    /// A greyed Bluetooth row's click (BT-UI "click connects"): a
-    /// membership-FREE reconnect kick — `requestReconnect` goes straight to
+    /// An unavailable row's name click (`DeviceRowView.canRecoverByName`).
+    /// A Bluetooth speaker the backend still lists gets a membership-FREE
+    /// reconnect kick: `requestReconnect` goes straight to
     /// `OutputBackend.retryOutput`, never editing selection (selecting a
-    /// greyed row separately means "play when up" and stays the node/checkbox's
-    /// job, exactly like AirPlay rows).
+    /// greyed row separately means "play when up" and stays the
+    /// node/checkbox's job), and only that kick counts as
+    /// `mixer:reconnect_requested`. A Bluetooth speaker the backend no longer
+    /// lists opens pairing, or Bluetooth access while it is not granted. An
+    /// AirPlay or Cast speaker is looked for on the network instead.
     public func deviceRowDidRequestReconnect(_ row: DeviceRowView) {
-        Analytics.capture("mixer:reconnect_requested")
-        groupController?.requestReconnect(for: row.device.id)
+        let id = row.device.id
+        guard let record = speakerLibrary.record(for: id) else { return }
+        if record.kind == .bluetooth {
+            if devicesByID[id] != nil {
+                btConnectAttemptIDs.insert(id)
+                groupController?.requestReconnect(for: id)
+                Analytics.capture("mixer:reconnect_requested")
+                onSpeakerRecoveryChanged?()
+                refreshSpeakerPresentation()
+            } else if bluetoothPermissionProvider?() == .granted {
+                onPairBluetoothSpeaker?()
+            } else {
+                onBluetoothAccess?()
+            }
+        } else if record.kind != nil {
+            speakerRecovery.lookForSpeaker(id: id)
+        }
     }
 
     /// The row's SYNC value chip (T6's only sync delegate method): the chip is
@@ -3882,6 +3832,7 @@ extension PopoverController: DeviceRowView.Delegate {
     /// "Equalizer…" menu item (which the row ICON also pops). Both are deep
     /// links, nothing more: the Mixer edits no tone.
     public func deviceRowDidRequestEqualizer(_ row: DeviceRowView, fromButton: Bool) {
+        guard devicesByID[row.device.id] != nil else { return }
         Analytics.capture("eq:opened", ["door": fromButton ? "row_button" : "menu"])
         onOpenEqualizer?(row.device.id)
     }

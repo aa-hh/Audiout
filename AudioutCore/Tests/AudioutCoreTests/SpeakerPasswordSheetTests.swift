@@ -3,6 +3,7 @@
 import Testing
 import AppKit
 @testable import AudioutPopoverUI
+import AudioutSharedUI
 
 /// The AirPlay password sheet, driven headless through its `test_` hooks: the
 /// controller is never presented, so nothing reaches the screen.
@@ -14,7 +15,7 @@ import AppKit
         let sheet = SpeakerPasswordSheetViewController(deviceName: "Kitchen")
         var submitted: [String] = []
         sheet.onSubmit = { submitted.append($0) }
-        #expect(sheet.test_resultText == nil)
+        #expect(sheet.test_resultText == "")
 
         sheet.test_setPasswordText("   ")
         sheet.test_tapConnect()
@@ -53,7 +54,7 @@ import AppKit
         for i in 1...4 { #expect(boxLabels.contains("digit \(i) of 4")) }
 
         sheet.test_tapConnect()
-        #expect(sheet.test_resultText == "Enter the code on the screen.")
+        #expect(sheet.test_resultText == "Enter all 4 digits shown on “Kitchen”.")
     }
 
     // Turns red if the fourth digit stops submitting or focus stops advancing.
@@ -102,7 +103,7 @@ import AppKit
         #expect(sheet.test_focusedBoxIndex == 1)
 
         sheet.test_tapConnect()
-        #expect(sheet.test_resultText == "Enter the code on the screen.")
+        #expect(sheet.test_resultText == "Enter all 4 digits shown on “Kitchen”.")
         #expect(submitted.isEmpty)
     }
 
@@ -132,6 +133,25 @@ import AppKit
         #expect(sheet.test_focusedBoxIndex == 0)
         #expect(sheet.test_connectButton.isEnabled)
         #expect(sheet.test_resultText == "That code didn't work. Check the screen and try again.")
+    }
+
+    // Turns red if the result line is hidden until a submit again, which makes the sheet grow when "Connecting…" appears.
+    @Test func resultLineHoldsItsSpaceBeforeAnySubmit() {
+        for kind in [SpeakerPasswordSheetViewController.CredentialKind.password, .onScreenCode] {
+            let sheet = SpeakerPasswordSheetViewController(deviceName: "Kitchen", kind: kind)
+            #expect(sheet.test_resultText == "")
+        }
+    }
+
+    // Turns red if `showResult` stops colouring the refusal with `Tokens.Color.failure` or "Connecting…" turns red too.
+    @Test func onlyTheRefusalIsRed() {
+        let sheet = SpeakerPasswordSheetViewController(deviceName: "Kitchen", kind: .onScreenCode)
+        sheet.test_typeIntoBox(0, "1234")
+        #expect(sheet.test_resultTextColor == Tokens.Color.label2)
+        sheet.showResult("That code didn't work. Check the screen and try again.")
+        #expect(sheet.test_resultTextColor == Tokens.Color.failure)
+        sheet.test_typeIntoBox(0, "1234")
+        #expect(sheet.test_resultTextColor == Tokens.Color.label2)
     }
 
     static func textFields(in view: NSView) -> [NSTextField] {

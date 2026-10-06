@@ -6,7 +6,7 @@ import AudioutSharedUI
 /// The sheet that asks for a speaker's AirPlay password, or for the code a
 /// receiver shows on its screen (`CredentialKind`). Same shape as
 /// `LicenseSheetViewController` (Settings): a 320-pt stack, one field, a result
-/// line that appears only after a submit, Cancel (Escape) and a gold Connect
+/// line whose space is kept empty until a submit, Cancel (Escape) and a gold Connect
 /// (Return). The code kind shows four one-digit boxes in place of the field,
 /// and the fourth digit submits by itself.
 ///
@@ -24,7 +24,9 @@ public final class SpeakerPasswordSheetViewController: NSViewController, NSTextF
 
     // The phone shows its own copy of these; `CompanionCopyTripwireTests` holds the two in step.
     static let emptyPasswordText = "Enter the speaker's password."
-    static let emptyCodeText = "Enter the code on the screen."
+    nonisolated static func emptyCodeText(deviceName: String) -> String {
+        "Enter all 4 digits shown on “\(deviceName)”."
+    }
     static let connectingText = "Connecting…"
     nonisolated static func headingText(deviceName: String) -> String {
         headingText(deviceName: deviceName, kind: .password)
@@ -81,18 +83,20 @@ public final class SpeakerPasswordSheetViewController: NSViewController, NSTextF
         } else {
             for (i, box) in codeBoxes.enumerated() {
                 box.alignment = .center
-                // 22 pt is this row's own size, not a shared voice.
-                box.font = .monospacedDigitSystemFont(ofSize: 22, weight: .medium)
+                // 24 pt is this row's own size, not a shared voice.
+                box.font = .monospacedDigitSystemFont(ofSize: 24, weight: .medium)
                 box.usesSingleLineMode = true
                 box.delegate = self
                 box.translatesAutoresizingMaskIntoConstraints = false
                 box.setAccessibilityLabel("digit \(i + 1) of 4")
                 entryConstraints += [
-                    box.widthAnchor.constraint(equalToConstant: 44),
-                    box.heightAnchor.constraint(equalToConstant: 40),
+                    box.widthAnchor.constraint(equalToConstant: 52),
+                    box.heightAnchor.constraint(equalToConstant: 48),
                 ]
             }
-            let row = NSStackView(views: codeBoxes)
+            // The center gravity area keeps the boxes centred across the full-width row.
+            let row = NSStackView()
+            row.setViews(codeBoxes, in: .center)
             row.orientation = .horizontal
             row.spacing = 8
             row.translatesAutoresizingMaskIntoConstraints = false
@@ -105,7 +109,11 @@ public final class SpeakerPasswordSheetViewController: NSViewController, NSTextF
         resultLine.font = Tokens.Font.caption
         resultLine.textColor = Tokens.Color.label2
         resultLine.preferredMaxLayoutWidth = Self.sheetContentWidth
-        resultLine.isHidden = true
+        // Empty until a submit, but always one line tall, so "Connecting…" never grows the sheet.
+        let lineFont = resultLine.font ?? Tokens.Font.caption
+        resultLine.heightAnchor.constraint(
+            greaterThanOrEqualToConstant: ceil(lineFont.ascender - lineFont.descender + lineFont.leading)
+        ).isActive = true
 
         cancelButton.title = "Cancel"
         cancelButton.bezelStyle = .rounded
@@ -132,6 +140,11 @@ public final class SpeakerPasswordSheetViewController: NSViewController, NSTextF
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 12
+        if kind == .onScreenCode {
+            stack.setCustomSpacing(8, after: entry)
+            stack.setCustomSpacing(20, after: resultLine)
+            entryConstraints.append(entry.widthAnchor.constraint(equalTo: stack.widthAnchor))
+        }
         stack.translatesAutoresizingMaskIntoConstraints = false
 
         let container = NSView()
@@ -212,7 +225,7 @@ public final class SpeakerPasswordSheetViewController: NSViewController, NSTextF
         if kind == .onScreenCode {
             let code = codeBoxes.map(\.stringValue).joined()
             guard code.count == codeBoxes.count else {
-                show(result: Self.emptyCodeText)
+                show(result: Self.emptyCodeText(deviceName: deviceName))
                 return
             }
             codeBoxes.forEach { $0.isEnabled = false }
@@ -223,7 +236,7 @@ public final class SpeakerPasswordSheetViewController: NSViewController, NSTextF
         }
         let text = passwordField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else {
-            show(result: kind == .password ? Self.emptyPasswordText : Self.emptyCodeText)
+            show(result: kind == .password ? Self.emptyPasswordText : Self.emptyCodeText(deviceName: deviceName))
             return
         }
         passwordField.isEnabled = false
@@ -238,7 +251,7 @@ public final class SpeakerPasswordSheetViewController: NSViewController, NSTextF
         _ = view
         passwordField.isEnabled = true
         connectButton.isEnabled = true
-        show(result: text)
+        show(result: text, refused: true)
         if kind == .onScreenCode {
             codeBoxes.forEach {
                 $0.stringValue = ""
@@ -249,9 +262,14 @@ public final class SpeakerPasswordSheetViewController: NSViewController, NSTextF
         }
     }
 
-    private func show(result: String) {
+    /// Only the host's refusal is red; "Connecting…" and the empty-submit lines stay secondary ink.
+    private func show(result: String, refused: Bool = false) {
         resultLine.stringValue = result
-        resultLine.isHidden = false
+        resultLine.textColor = refused ? Tokens.Color.failure : Tokens.Color.label2
+        NSAccessibility.post(element: view, notification: .announcementRequested, userInfo: [
+            .announcement: result,
+            .priority: NSAccessibilityPriorityLevel.high.rawValue,
+        ])
     }
 
     // MARK: Test-support hooks
@@ -274,10 +292,16 @@ public final class SpeakerPasswordSheetViewController: NSViewController, NSTextF
         cancelTapped()
     }
 
-    /// The result line's text, or `nil` while it is hidden.
+    /// The result line's text; empty before any submit.
     public var test_resultText: String? {
         _ = view
-        return resultLine.isHidden ? nil : resultLine.stringValue
+        return resultLine.stringValue
+    }
+
+    /// The result line's text colour.
+    public var test_resultTextColor: NSColor? {
+        _ = view
+        return resultLine.textColor
     }
 
     /// The Connect button, for enablement assertions.

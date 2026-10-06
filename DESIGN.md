@@ -901,9 +901,11 @@ every time", and no sheet opens for it. Joining a password speaker with nothing 
 the diagnosis panel's "Enter Password…" button, raises a sheet on the panel
 (`SpeakerPasswordSheetViewController`): a one-line heading in `bodyEmphasized`, a stock secure
 field, then Cancel and a gold `ProminentButton` Connect, right-aligned. A
-caption-size result line appears only once Connect is pressed: "Connecting…",
-then the reason if the attempt fails ("That password didn't work. Check it and
-try again." for a refused password). A connect dismisses the sheet. The row
+caption-size result line keeps one empty line of space from the start, so the
+sheet never grows when Connect fills it: "Connecting…" in `label2`, then the
+reason if the attempt fails ("That password didn't work. Check it and try
+again." for a refused password) in `failure` red. VoiceOver announces each new
+result line. A connect dismisses the sheet. The row
 shows no diagnosis panel while its sheet is up; Cancel with the speaker still
 failed opens the panel. A speaker waiting for its password or code draws the
 connecting ring and a caption-size `TextLinkButton` reading
@@ -911,11 +913,12 @@ connecting ring and a caption-size `TextLinkButton` reading
 here offers), which, like a click on the selected row, raises the sheet; red is
 reserved for a refused password or code. A code receiver gets the sheet's code
 variant: the heading "Enter the code shown on “<name>”", then four stock
-one-digit boxes (44×40 pt, 8 pt apart, centred 22 pt medium monospaced
-digits, no placeholder) that take digits only. Focus moves on as each digit
+one-digit boxes (52×48 pt, 8 pt apart, the row centred in the 320 pt sheet,
+24 pt medium monospaced digits, no placeholder; 12 pt from the heading, 8 pt
+above the result line, 20 pt between it and the buttons) that take digits only. Focus moves on as each digit
 lands, Delete on an empty box steps back to the one before, a pasted string
 spreads across the boxes, and the fourth digit connects by itself. Connect
-stays for keyboard users and shows "Enter the code on the screen." for fewer
+stays for keyboard users and shows "Enter all 4 digits shown on “<name>”." for fewer
 than four digits; a refused code ("That code didn't work. Check the screen
 and try again.") clears the boxes and returns focus to the first. VoiceOver
 reads the row as "AirPlay code" and each box as "digit N of 4". It opens by itself when a join the user

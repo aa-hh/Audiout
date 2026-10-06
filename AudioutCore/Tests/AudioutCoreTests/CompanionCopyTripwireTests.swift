@@ -60,4 +60,12 @@ import Testing
         #expect(SpeakerPasswordSheetViewController.headingText(deviceName: "Kitchen") == "Enter the password for “Kitchen”",
                 "\(note)")
     }
+
+    /// Turns red if either note the coordinator sends the phone stops matching
+    /// the popover's own copy of it.
+    @MainActor
+    @Test func theCoordinatorsNoteCopyStillSaysWhatThePopoverSays() {
+        #expect(CompanionCoordinator.routingBlockedText == PopoverController.routingBlockedNeedsDefaultText)
+        #expect(CompanionCoordinator.doublePathText == PopoverController.systemAirPlayNoteText)
+    }
 }

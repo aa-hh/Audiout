@@ -16,9 +16,10 @@ import AudioutSharedUI
 /// already-persisted group.
 ///
 /// Layout, top to bottom (HEADER PARITY with `DeviceDetailViewController` —
-/// design feedback 2026-07-18: groups and devices share the identical
-/// large-icon header, the only difference being that a group's TITLE is
-/// editable and a device's is not; every shared number lives in
+/// design feedback 2026-07-18: groups and devices share the large-icon
+/// header's band height and vertical centring; a group's TITLE is editable
+/// and a device's is not, and the device page starts its icon at a smaller
+/// inset than this pane's by design; every shared number lives in
 /// ``GroupsPaneLayout``):
 /// - a HEADER SECTION holding the large (``DeviceIconWellView/size``pt) group
 ///   icon and the group's name SIDE BY SIDE (design review 2026-07-25 — they
@@ -114,6 +115,10 @@ public final class GroupEditorViewController: NSViewController {
     /// The group's identity light, mounted behind the well.
     private let iconGlow = GroupIdentityGlowView()
     private let nameField = NSTextField(string: "")
+    /// The rename field over the "Playing" marker, as one block centred on
+    /// the icon well. A hidden marker drops out of the stack, so the name
+    /// alone is centred while nothing plays.
+    private let headerTextStack = NSStackView()
     private let membershipStack = RailRepaintingStackView()
     /// THIS PAGE'S ONE INSTRUMENT, so it is the one `.card` here — a `raised`
     /// fill with a `containerEdge` edge behind the Speakers checklist, plus
@@ -229,8 +234,9 @@ public final class GroupEditorViewController: NSViewController {
     /// by the same amount, whenever the band's margin changes — that keeps the
     /// 8 pt of clearance below the band constant while giving the band more
     /// air above it. HEADER PARITY IS GEOMETRIC (`GroupsHeaderParityTests`
-    /// asserts the two panes' real laid-out title frames), so the column must
-    /// not move relative to the device detail pane's — moving both constants
+    /// asserts the panes share the header band height and the vertical
+    /// centring of the text block), so the column must not move vertically
+    /// relative to the device detail pane's — moving both constants
     /// together keeps the column pinned to the shared `columnTopInset`, it
     /// just shifts that shared value too.
     private static let topBandTopInset: CGFloat = 12
@@ -434,7 +440,14 @@ public final class GroupEditorViewController: NSViewController {
         }
         // Identity is bare; the checklist is the page's one card.
         headerWell.style = .bare
-        for v in [iconGlow, iconWell, nameField, playingBadge, speakersLabel, membershipStack] {
+        headerTextStack.orientation = .vertical
+        headerTextStack.alignment = .leading
+        headerTextStack.spacing = 2
+        headerTextStack.setViews([nameField, playingBadge], in: .leading)
+        // Below the rename field's 240 width preference, so the shown badge
+        // never pulls the field towards its own width.
+        headerTextStack.setHuggingPriority(NSLayoutConstraint.Priority(230), for: .horizontal)
+        for v in [iconGlow, iconWell, headerTextStack, speakersLabel, membershipStack] {
             v.translatesAutoresizingMaskIntoConstraints = false
             column.addSubview(v)
         }
@@ -563,9 +576,10 @@ public final class GroupEditorViewController: NSViewController {
             // HEADER, SIDE BY SIDE (design review 2026-07-25): icon BESIDE the
             // name, not above it — 30 pt of reclaimed height on a pane that was
             // overflowing its own window. Header parity with
-            // `DeviceDetailViewController` is geometric: both panes read the
-            // same `GroupsPaneLayout` numbers, so switching sidebar selection
-            // never shifts the header (it used to jump ~22.5 pt sideways).
+            // `DeviceDetailViewController` is the shared band height and
+            // vertical centring, both read from `GroupsPaneLayout`. The icon's
+            // x differs by design: this pane keeps `contentLeadingInset` for
+            // its rail, while the device page starts its icon further left.
             iconWell.topAnchor.constraint(equalTo: column.topAnchor,
                                           constant: GroupsPaneLayout.headerPadding),
             iconWell.leadingAnchor.constraint(equalTo: column.leadingAnchor,
@@ -576,9 +590,9 @@ public final class GroupEditorViewController: NSViewController {
             iconGlow.widthAnchor.constraint(equalToConstant: Self.iconGlowSide),
             iconGlow.heightAnchor.constraint(equalToConstant: Self.iconGlowSide),
 
-            nameField.leadingAnchor.constraint(equalTo: iconWell.trailingAnchor,
-                                               constant: GroupsPaneLayout.iconToTitleGap),
-            nameField.centerYAnchor.constraint(equalTo: iconWell.centerYAnchor),
+            headerTextStack.leadingAnchor.constraint(equalTo: iconWell.trailingAnchor,
+                                                     constant: GroupsPaneLayout.iconToTitleGap),
+            headerTextStack.centerYAnchor.constraint(equalTo: iconWell.centerYAnchor),
             nameField.heightAnchor.constraint(equalToConstant: PopoverColumnGrid.titleFieldHeight),
             // REQUIRED floor: an editable text field has no intrinsic width, so
             // without this auto layout is free to collapse it to zero (it
@@ -586,12 +600,6 @@ public final class GroupEditorViewController: NSViewController {
             nameField.widthAnchor.constraint(greaterThanOrEqualToConstant: Self.titleFieldMinWidth),
             titleWidth,
             titleCap,
-
-            // The "Playing" marker tucks UNDER the name, inside the header
-            // band's own padding — it hangs off the field, never off the
-            // section's bottom, so the band's pinned height can't follow it.
-            playingBadge.leadingAnchor.constraint(equalTo: nameField.leadingAnchor),
-            playingBadge.topAnchor.constraint(equalTo: nameField.bottomAnchor, constant: 4),
 
             // Sits BETWEEN the two sections, on bare pane — the gap below the
             // header section's bottom border, above the list section's top.
@@ -1605,9 +1613,10 @@ public final class GroupEditorViewController: NSViewController {
         return nameField.bounds.width
     }
 
-    /// HEADER PARITY hooks — the three numbers that must match
-    /// `DeviceDetailViewController`'s identically-named hooks, so switching
-    /// sidebar selection never shifts the header (`GroupsHeaderParityTests`).
+    /// HEADER PARITY hooks — compared with `DeviceDetailViewController`'s
+    /// identically-named hooks by `GroupsHeaderParityTests`, which require the
+    /// same header band height and the same vertical centring; the icon's x
+    /// differs from the device page's by design.
 
     /// The icon well's laid-out frame in the pane's own coordinates.
     public var test_headerIconFrame: NSRect {
@@ -1627,6 +1636,13 @@ public final class GroupEditorViewController: NSViewController {
     public var test_headerSectionFrame: NSRect {
         view.layoutSubtreeIfNeeded()
         return headerWell.convert(headerWell.bounds, to: view)
+    }
+
+    /// The name-and-marker block's laid-out frame in the pane's own
+    /// coordinates.
+    public var test_headerTextBlockFrame: NSRect {
+        view.layoutSubtreeIfNeeded()
+        return headerTextStack.convert(headerTextStack.bounds, to: view)
     }
 
     /// T5: the number of rows currently fed to the checklist's recessed

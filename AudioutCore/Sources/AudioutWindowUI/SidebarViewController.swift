@@ -1651,7 +1651,7 @@ extension SidebarViewController: NSOutlineViewDelegate {
     /// Only "Hidden unless in use" folds: it alone gets the stock hover
     /// Show/Hide control. The first group never folds, so a speaker the
     /// Mixer lists can't vanish from here.
-    public func outlineView(_ outlineView: NSOutlineView, shouldShowOutlineCell item: Any) -> Bool {
+    public func outlineView(_ outlineView: NSOutlineView, shouldShowOutlineCellForItem item: Any) -> Bool {
         isHiddenHeader(item)
     }
 

@@ -53,9 +53,11 @@ public enum RowAccessorySymbol {
     public static let muteRest = "custom.speaker.square"
     /// Mute engaged — the same outline square with the slash added.
     public static let muteEngaged = "custom.speaker.slash.square"
-    /// The Equalizer door on a flat curve — the outline square.
+    /// The outline square — the Equalizer door in both states (rest ink flat,
+    /// green shaped) and the heading icon on a flat curve.
     public static let equalizerRest = "custom.slider.horizontal.2.square"
-    /// The Equalizer door on a shaped curve — the filled square.
+    /// The filled square — the Equalizer heading icon's shaped state only,
+    /// never drawn on the door.
     public static let equalizerEngaged = "custom.slider.horizontal.2.square.fill"
 
     /// Every name above, for the load test that guards the catalogue.
@@ -96,9 +98,18 @@ public enum RowAccessorySymbol {
     public static let pointSize: CGFloat = 20
     /// See ``pointSize``.
     public static let weight: NSFont.Weight = .light
+    /// The Equalizer heading icon's point size: the door's 20 pt scaled by the
+    /// heading font over the body font, 20 × 16/13 = 24.6, rounded to the
+    /// nearest whole point.
+    public static let headingPointSize: CGFloat = 25
+    /// The distance, in points, from the left edge of a ``headingPointSize``
+    /// box in which the symbol image is centred unscaled to the left edge of
+    /// the drawn square. Measured from the compiled symbol by
+    /// `RowAccessorySymbolTests`.
+    public static let headingMarkSquareInset: CGFloat = 1.0
 
     /// The raw symbol image, or `nil` when the catalogue did not make it into
-    /// the bundle. Callers use ``image(named:ink:)``; this is separate so
+    /// the bundle. Callers use ``image(named:ink:pointSize:)``; this is separate so
     /// the load test can prove the resource resolves without also asserting a
     /// rendering configuration.
     /// Test seam: the suite runs with no `.app`, so `NSImage(named:)` has no
@@ -128,7 +139,8 @@ public enum RowAccessorySymbol {
     /// symbol configuration cannot do this: every colour-carrying
     /// configuration is a palette or hierarchical one, and both paint the
     /// erased marks instead of cutting them (see the type's doc comment).
-    public static func image(named name: String, ink: NSColor) -> NSImage? {
+    public static func image(named name: String, ink: NSColor,
+                             pointSize: CGFloat = RowAccessorySymbol.pointSize) -> NSImage? {
         guard let symbol = rawImage(named: name)?.withSymbolConfiguration(
             NSImage.SymbolConfiguration(pointSize: pointSize, weight: weight))
         else { return nil }

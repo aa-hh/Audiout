@@ -311,6 +311,7 @@ public final class SpeakersPageViewController: NSViewController {
         // The scene editor's outlined membership list.
         listWell.style = .card
         listWell.contentLeadingInset = ListRowView.leadingInset
+        listWell.contentTrailingInset = ListRowView.trailingInset
         listWell.translatesAutoresizingMaskIntoConstraints = false
         listStack.translatesAutoresizingMaskIntoConstraints = false
         listStack.orientation = .vertical

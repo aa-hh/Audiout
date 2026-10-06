@@ -11,12 +11,15 @@ import AppKit
 /// HEADER PARITY + the elastic content column (design review 2026-07-25).
 ///
 /// The Groups window swaps its whole content pane when the sidebar selection
-/// moves between a group and a device. If the icon well, the title, or the
-/// header band land differently in the two panes, that swap reads as the window
-/// twitching — which is exactly what happened when the two controllers carried
-/// hand-copied literals and drifted ~22.5 pt apart. Both panes now read
-/// `GroupsPaneLayout`; these tests assert the REAL laid-out frames still match,
-/// so a future edit to one pane can't quietly desync the other.
+/// moves between a group and a device. If the header band height or the text
+/// block's vertical centring differ between the two panes, that swap reads as
+/// the window twitching — which is exactly what happened when the two
+/// controllers carried hand-copied literals and drifted ~22.5 pt apart. Both
+/// panes now read `GroupsPaneLayout`; these tests assert the REAL laid-out
+/// frames still share the band height and the vertical centring, so a future
+/// edit to one pane can't quietly desync the other. The icon's x differs by
+/// design: the speaker and Main Audio pages start it at
+/// `railFreeContentLeadingInset`, the scene editor at `contentLeadingInset`.
 ///
 /// The elastic-column half guards the other half of the same design: the
 /// sections stretch with the pane (they used to hug ~277 pt of intrinsic
@@ -111,34 +114,28 @@ import AppKit
         pane.isFlipped ? y - pane.bounds.minY : pane.bounds.maxY - y
     }
 
-    // Turns red when either pane moves its icon well, title or header band relative to its own top-leading corner.
+    // Turns red when either pane changes its icon well's size, moves its text block off the icon's centre line, or moves its header band.
     @Test func bothPanesPutTheIconWellAndTitleAtTheSameGeometry() throws {
         let (window, _, _, group) = try makeWindow()
 
         window.test_select(.group(id: group.id))
         settle(window)
         let editorIcon = window.test_editor.test_headerIconFrame
-        let editorTitle = window.test_editor.test_headerTitleAlignmentFrame
+        let editorTextBlock = window.test_editor.test_headerTextBlockFrame
         let editorHeader = window.test_editor.test_headerSectionFrame
-        let editorTitleFromTop = distanceFromTop(editorTitle.midY, in: window.test_editor.view)
+        let editorTextFromTop = distanceFromTop(editorTextBlock.midY, in: window.test_editor.view)
 
         window.test_select(.device(id: "d0"))
         settle(window)
         let detailIcon = window.test_detail.test_headerIconFrame
-        let detailTitle = window.test_detail.test_headerTitleAlignmentFrame
+        let detailTextBlock = window.test_detail.test_headerTextBlockFrame
         let detailHeader = window.test_detail.test_headerSectionFrame
-        let detailTitleFromTop = distanceFromTop(detailTitle.midY, in: window.test_detail.view)
+        let detailTextFromTop = distanceFromTop(detailTextBlock.midY, in: window.test_detail.view)
 
-        #expect(abs(editorIcon.minX - detailIcon.minX) <= 0.01,
-                Comment(rawValue: "the icon well must start at the same x in both panes — a difference here " +
-                "is a visible sideways jump when the sidebar selection changes"))
         #expect(abs(editorIcon.width - detailIcon.width) <= 0.01)
         #expect(abs(editorIcon.height - detailIcon.height) <= 0.01)
-        #expect(abs(editorTitle.minX - detailTitle.minX) <= 0.01,
-                Comment(rawValue: "the title's leading edge (its ALIGNMENT rect — what auto layout pins) must " +
-                "match, even though one is an editable field and the other a plain label"))
-        #expect(abs(editorTitleFromTop - detailTitleFromTop) <= 0.01 + halfPointSlack(),
-                "both titles are vertically centred on the icon well beside them")
+        #expect(abs(editorTextFromTop - detailTextFromTop) <= 0.01 + halfPointSlack(),
+                "both text blocks are vertically centred on the icon well beside them")
         #expect(abs(editorHeader.height - detailHeader.height) <= 0.01,
                 "identical header BAND height, so the content below starts at the same y")
         #expect(abs(editorHeader.minX - detailHeader.minX) <= 0.01)
@@ -177,20 +174,41 @@ import AppKit
         settle(window)
         let detailInset = window.test_detail.test_headerIconFrame.minX
             - window.test_detail.test_headerSectionFrame.minX
+        window.test_select(.mainOut)
+        settle(window)
+        let mainInset = window.test_mainOutDetail.test_headerIconFrame.minX
+            - window.test_mainOutDetail.test_headerSectionFrame.minX
 
         let slack = 0.01 + halfPointSlack()
         #expect(abs(editorInset - GroupsPaneLayout.contentLeadingInset) <= slack,
                 "the icon starts past the rail gutter the editor reserves")
-        #expect(abs(detailInset - GroupsPaneLayout.contentLeadingInset) <= slack,
-                Comment(rawValue: "the detail pane reserves the same lane even though it draws no rail — " +
-                "alignment is worth more than reclaiming it"))
+        #expect(abs(detailInset - GroupsPaneLayout.railFreeContentLeadingInset) <= slack,
+                "the speaker page starts its icon where its Equalizer heading starts")
+        #expect(abs(mainInset - GroupsPaneLayout.railFreeContentLeadingInset) <= slack,
+                "the Main Audio page starts its icon where its Equalizer heading starts")
     }
 
-    /// The HEADER is pinned across both panes (above), but the speaker page's
-    /// list below it carries its own row inset, tighter than the header's
-    /// spine-gutter reserve. The two insets must stay genuinely different.
-    // Moving the list rows onto the header's inset, or off the list row's own, turns it red.
-    @Test func detailListRowsSitTighterThanTheHeader() throws {
+    // Pinning either page's Equalizer heading row back to the inset itself, without subtracting the symbol's bearing, turns it red.
+    @Test func theEqualizerHeadingsDrawnSquareSitsOnThePagesInset() throws {
+        let (window, _, _, _) = try makeWindow()
+        window.test_select(.device(id: "d0"))
+        settle(window)
+        let detailInset = window.test_detail.test_eqMarkSquareFrame.minX
+            - window.test_detail.test_headerSectionFrame.minX
+        window.test_select(.mainOut)
+        settle(window)
+        let mainInset = window.test_mainOutDetail.test_eqMarkSquareFrame.minX
+            - window.test_mainOutDetail.test_headerSectionFrame.minX
+
+        let slack = 0.01 + halfPointSlack()
+        #expect(abs(detailInset - GroupsPaneLayout.railFreeContentLeadingInset) <= slack,
+                "the speaker page's drawn square starts at \(detailInset), not on its inset")
+        #expect(abs(mainInset - GroupsPaneLayout.railFreeContentLeadingInset) <= slack,
+                "the Main Audio page's drawn square starts at \(mainInset), not on its inset")
+    }
+
+    // Moving the list rows off ListRowView.leadingInset, or the header icon off railFreeContentLeadingInset, turns it red.
+    @Test func detailListRowsStartOnThePagesOwnInset() throws {
         let (window, _, _, _) = try makeWindow()
         window.test_select(.device(id: "d0"))
         settle(window)
@@ -201,9 +219,9 @@ import AppKit
 
         #expect(abs(rowInset - ListRowView.leadingInset) <= 0.01 + halfPointSlack(),
                 "the list's rows start at their own inset, where the list's dividers start")
-        #expect(headerInset - rowInset > 1,
-                Comment(rawValue: "the rows must sit tighter than the header, which stays pinned to the " +
-                "editor's for cross-pane alignment"))
+        #expect(abs(headerInset - GroupsPaneLayout.railFreeContentLeadingInset) <= 0.01 + halfPointSlack())
+        #expect(abs(rowInset - headerInset) <= 0.01 + halfPointSlack(),
+                "list text lines up with the page's icon and headings")
     }
 
     // MARK: The elastic column
@@ -344,6 +362,7 @@ import AppKit
         let mainIcon = window.test_mainOutDetail.test_headerIconFrame
         let mainTitle = window.test_mainOutDetail.test_headerTitleAlignmentFrame
         let mainHeader = window.test_mainOutDetail.test_headerSectionFrame
+        let mainTitleBlock = window.test_mainOutDetail.test_headerTextBlockFrame
 
         let slack = 0.01 + halfPointSlack()
         #expect(abs(detailIcon.minX - mainIcon.minX) <= slack,
@@ -356,6 +375,8 @@ import AppKit
                 "identical header BAND height, so the content below starts at the same y")
         #expect(abs(detailHeader.minX - mainHeader.minX) <= 0.01)
         #expect(abs(detailHeader.width - mainHeader.width) <= 0.01)
+        #expect(abs(mainTitleBlock.midY - mainIcon.midY) <= slack,
+                "the Main Audio name is centred on its icon well")
     }
 
     @Test func mainAudioIconWellIsNotEditable() throws {

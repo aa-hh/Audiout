@@ -44,7 +44,9 @@ public protocol EQEditorViewDelegate: AnyObject {
 /// toggle, so every host's editor remembers the same state across launches.
 ///
 /// **Stock AppKit only, and almost no surface of its own.** Every control here
-/// is an un-subclassed `NSSlider`, `NSButton` or `NSTextField`, and every
+/// is a stock `NSSlider`, `NSButton` or `NSTextField`, the sliders wearing a
+/// drawing-only cell (``EQGainFillCell``) that adds the green stretch between
+/// 0 dB and the knob and changes nothing else, and every
 /// colour is a semantic ``Tokens`` value. The editor draws nothing except that
 /// one hairline: the host's `GroupedSectionView` is the well it sits in, and
 /// the other custom-drawn element is the ``EQResponseCurveView`` scope, which
@@ -245,6 +247,8 @@ public final class EQEditorView: NSView {
         // AppKit shape for a rest-at-centre control (docs/SPEC.md, "Balance").
         // `allowsTickMarkValuesOnly` stays OFF — the tick marks where centre
         // IS, it does not quantise the control to it.
+        balanceSlider.cell = EQGainFillCell()
+        balanceSlider.redrawOnAccessibilityDisplayChange()
         balanceSlider.translatesAutoresizingMaskIntoConstraints = false
         balanceSlider.minValue = DeviceEQ.balanceRange.lowerBound
         balanceSlider.maxValue = DeviceEQ.balanceRange.upperBound
@@ -278,6 +282,8 @@ public final class EQEditorView: NSView {
     }
 
     private func configureGainSlider(_ slider: NSSlider, action: Selector, label: String) {
+        slider.cell = EQGainFillCell()
+        slider.redrawOnAccessibilityDisplayChange()
         slider.translatesAutoresizingMaskIntoConstraints = false
         slider.minValue = DeviceEQ.gainRangeDB.lowerBound
         slider.maxValue = DeviceEQ.gainRangeDB.upperBound
@@ -483,6 +489,8 @@ public final class EQEditorView: NSView {
 
     private func bandColumn(index: Int, title: String) -> NSView {
         let slider = NSSlider()
+        slider.cell = EQGainFillCell()
+        slider.redrawOnAccessibilityDisplayChange()
         slider.translatesAutoresizingMaskIntoConstraints = false
         slider.isVertical = true
         slider.minValue = DeviceEQ.gainRangeDB.lowerBound
@@ -913,6 +921,17 @@ public final class EQEditorView: NSView {
         fire(bandSliders[index], value: db)
     }
 
+    /// The 13 sliders: bass, treble, balance, then the ten bands.
+    var test_sliders: [NSSlider] { [bassSlider, trebleSlider, balanceSlider] + bandSliders }
+
+    /// The green stretch `slider` would paint, nil when its cell is not an
+    /// ``EQGainFillCell``.
+    func test_fillRect(of slider: NSSlider) -> NSRect? {
+        guard let cell = slider.cell as? EQGainFillCell else { return nil }
+        return cell.test_fillRect(inBar: cell.barRect(flipped: slider.isFlipped),
+                                  flipped: slider.isFlipped)
+    }
+
     public func test_fireLoudnessClick() { loudnessCheckbox.performClick(nil) }
     public func test_fireAdvancedClick() { advancedDisclosure.performClick(nil) }
     public func test_fireAdvancedTitleClick() { advancedTitle.performClick(nil) }
@@ -942,5 +961,53 @@ private final class ContainerEdgeView: NSView {
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
         needsDisplay = true
+    }
+}
+
+/// Drawing-only skin for the EQ sliders: the stock bar and knob, plus a green
+/// stretch from where the knob sits at 0 dB to the knob so a moved control
+/// reads without reading the number. Overrides only `drawBar(inside:flipped:)`; tracking,
+/// knob and tick stay stock.
+final class EQGainFillCell: NSSliderCell {
+
+    // razor: the neutral point is where the stock knob's centre sits at
+    // value 0, from the stock mapping measured on macOS 27 at 1x and 2x:
+    // knob origin = bar start + fraction × (bar length − knob length),
+    // rounded to whole points, a flipped vertical bar counting from its
+    // bottom. The bar's midpoint is not it: an odd travel puts the knob
+    // 0.5 pt off. An AppKit that maps differently turns
+    // `knobCentreAtZeroMeetsTheFillEdge` red; the upgrade is reading
+    // `knobRect` at 0 from a scratch copy of the cell.
+    private func fillRect(inBar rect: NSRect, flipped: Bool) -> NSRect {
+        let knob = knobRect(flipped: flipped)
+        let fraction = CGFloat((0 - minValue) / (maxValue - minValue))
+        if isVertical {
+            let along = flipped ? 1 - fraction : fraction
+            let neutral = (rect.minY + along * (rect.height - knob.height)).rounded()
+                + knob.height / 2
+            let low = min(neutral, knob.midY)
+            return NSRect(x: rect.minX, y: low, width: rect.width,
+                          height: max(neutral, knob.midY) - low)
+        }
+        let neutral = (rect.minX + fraction * (rect.width - knob.width)).rounded() + knob.width / 2
+        let low = min(neutral, knob.midX)
+        return NSRect(x: low, y: rect.minY, width: max(neutral, knob.midX) - low,
+                      height: rect.height)
+    }
+
+    override func drawBar(inside rect: NSRect, flipped: Bool) {
+        super.drawBar(inside: rect, flipped: flipped)
+        let fill = fillRect(inBar: rect, flipped: flipped)
+        guard (isVertical ? fill.height : fill.width) > 0 else { return }
+        NSGraphicsContext.current?.saveGraphicsState()
+        let radius = min(rect.width, rect.height) / 2
+        NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius).addClip()
+        Tokens.Color.equalizer.setFill()
+        fill.fill()
+        NSGraphicsContext.current?.restoreGraphicsState()
+    }
+
+    func test_fillRect(inBar rect: NSRect, flipped: Bool) -> NSRect {
+        fillRect(inBar: rect, flipped: flipped)
     }
 }

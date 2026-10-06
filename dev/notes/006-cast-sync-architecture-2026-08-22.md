@@ -162,6 +162,8 @@ touching the others.
 
 **Room-delay policy — high-water mark, settle-gated, never chase:**
 
+2026-10-04, amended 2026-10-06: superseded for Cast. A settle now moves a receiver's term both ways past `raiseThresholdMs`. A settle and a settled receiver's tracking take the trimmed mean of their leads (the lowest and highest fifth dropped). A settled receiver's feed is read up to 100 ppm fast or slow so its play-out keeps pace with the room, and its share follows the last 60 leads plus their median hold only in steps over 20 ms. The Cast feed line replays a grow of up to 100 ms behind its crossfade. See `CastRoomDelay.swift`.
+
 | Event | Action | Who hears what |
 |---|---|---|
 | Cast selected | `castTermMs := remembered steady lead for this id, else 5500` (session memory; no persistence v1) **before** LAUNCH; Cast feed attached at LOAD with gain 0 (zeros in the feed, not receiver volume). | Others take their one hit now (§5). Cast silent ~3 s launch + ~10 s settle. |

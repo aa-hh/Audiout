@@ -590,7 +590,7 @@ import CoreAudio
                 == Double(slow + NativeBackend.btReferenceHeadroomMs - BTSyncedSink.defaultBTOnlyBufferMs))
     }
 
-    /// Hysteresis, the Cast term's rule applied to Bluetooth: a re-measurement
+    /// Hysteresis: a re-measurement
     /// that comes in LOWER leaves the room delay where it is (a move is one
     /// gap for the whole house), and only the speaker leaving the selection
     /// retires the term and takes the AirPlay line away. Turns red if the

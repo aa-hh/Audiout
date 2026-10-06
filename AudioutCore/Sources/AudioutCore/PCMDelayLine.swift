@@ -68,14 +68,19 @@ final class PCMDelayLine {
     /// evaluates a transcendental.
     private let fadeGains: UnsafeMutablePointer<Float>
 
-    /// How much of a shrink's crossfade is still to run, and how far behind the
-    /// live read position the faded-out side sits. Both IOProc-owned: only
+    /// How much of a change's crossfade is still to run, and how far behind the
+    /// live read position the faded-out side sits: behind for a shrink, ahead
+    /// (negative) for a crossfaded grow. Both IOProc-owned: only
     /// ``adoptPendingDelay(blockFrames:)`` and ``mixShrinkCrossfade(into:readingFrom:frameCount:)``
     /// touch them, and both run on the IOProc.
     private var fadeRemaining = 0
     private var fadeBackFrames = 0
 
-    init(capacityFrames: Int) {
+    /// The largest grow replayed behind the crossfade instead of zero-filled.
+    private let crossfadedGrowMaxFrames: Int
+
+    init(capacityFrames: Int, crossfadedGrowMaxFrames: Int = 0) {
+        self.crossfadedGrowMaxFrames = crossfadedGrowMaxFrames
         var capacity = 1
         while capacity < max(2, capacityFrames) { capacity <<= 1 }
         self.capacityFrames = capacity
@@ -160,10 +165,12 @@ final class PCMDelayLine {
     /// the ring can actually hold alongside this block, and — when it GREW —
     /// silence the stretch of history the move newly exposes.
     ///
-    /// That zero-fill is the whole reason growing is not just an assignment:
-    /// the frames now under the read position are old audio from before the
-    /// change, and replaying them would be an audible jump backwards. Silence
-    /// is the honest thing to emit while the line fills at the new depth.
+    /// That zero-fill covers a grow past ``crossfadedGrowMaxFrames``, or one
+    /// reaching past what the line has written: replaying that much old audio
+    /// would be an audible jump backwards, so the line emits silence while it
+    /// fills at the new depth. A smaller grow over written history replays it
+    /// behind the crossfade by design, a short repeat in place of a gap with
+    /// hard edges.
     /// Shrinking instead jumps forward onto audio the line has already got —
     /// a plain skip, which ``mixShrinkCrossfade(into:readingFrom:frameCount:)``
     /// then hides.
@@ -175,8 +182,9 @@ final class PCMDelayLine {
         // this block's own write is what reclaims it. Hence the ceiling.
         let effective = max(0, min(requested, capacityFrames - blockFrames))
         guard effective != applied else { return applied }
-        if effective > applied {
-            let write = writeFrame.pointee
+        let write = writeFrame.pointee
+        let replays = effective - applied <= crossfadedGrowMaxFrames && write >= effective
+        if effective > applied, !replays {
             zeroRing(fromFrame: write &- effective, frameCount: effective - applied)
             // Nothing to fade INTO: the newly exposed stretch is silence by
             // design, and a fade still in flight would be reading history the
@@ -192,7 +200,8 @@ final class PCMDelayLine {
 
     /// Fade the audio the line WOULD have gone on emitting into the audio a
     /// shrink jumped to. Without it the join is a bare cut between two
-    /// uncorrelated stretches of the same music, which clicks.
+    /// uncorrelated stretches of the same music, which clicks. It also hides a
+    /// crossfaded grow, whose jump is backwards onto written history.
     ///
     /// Equal-power (`cos² + sin² = 1`) for ``BTDelayLine/mixFadeStep(into:)``'s
     /// reason: a linear pair sums to a 3 dB dip in the middle, audible as a
@@ -202,11 +211,13 @@ final class PCMDelayLine {
     /// both positions advance one frame per output frame — so a fade that
     /// spans several blocks needs no stored anchor, only the two counters.
     ///
-    /// razor: a second shrink arriving mid-fade restarts the fade instead of
+    /// razor: a second change arriving mid-fade restarts the fade instead of
     /// folding the in-flight mix into the new one (``BTDelayLine`` does fold,
-    /// in `requestShift`). The room-delay controller re-settles over ten
-    /// seconds, so two shrinks inside 5 ms is not a sequence it can produce;
-    /// if one ever does, capture the mixed output the way that method does.
+    /// in `requestShift`). The Cast line's delay moves whenever its share or
+    /// the room moves: a settle, a tracking push, a by-ear dial change, or a
+    /// room change from any output. Two of those inside one ~5 ms fade are rare
+    /// and the fade usually ends inside one audio block; if it is ever heard,
+    /// capture the mixed output the way that method does.
     private func mixShrinkCrossfade(
         into dst: UnsafeMutableRawPointer, readingFrom startFrame: Int, frameCount: Int
     ) {

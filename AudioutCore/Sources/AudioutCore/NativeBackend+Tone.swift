@@ -666,6 +666,13 @@ extension NativeBackend {
                         enable: !castIDs.isEmpty, records: records, levels: levels)
                 }
             }
+            // A receiver that is the only output (the Mac included) plays from
+            // its first byte. Queued behind the transition above, so a new
+            // session already exists when the flag reaches the manager.
+            let alone = castIDs.count == 1 && ids.count == 1 && !macSelected
+            self.captureControlQueue.async { [weak self] in
+                for id in castIDs { self?.castOutputManager?.setCastPlaysAlone(alone, forDeviceID: id) }
+            }
 
             // The selection just moved, so the set of devices the plan carries
             // moved with it — and, for a deselected speaker with no session and
@@ -936,46 +943,132 @@ extension NativeBackend {
     }
 
     /// CAST-SYNC: recompute which Cast receivers contribute a room-delay term
-    /// — every SELECTED one whose session has not failed. Returns whether `R`
-    /// moved. On `stateQueue`; the only writer of the policy's receiver set.
+    /// — every SELECTED one whose session has not failed — and apply each
+    /// one's stored by-ear offset as its advance. A deselected receiver's
+    /// pending offset settle and pending feed-gate open are dropped. Returns
+    /// whether `R` moved. On `stateQueue`; with `stop()`'s reset, the only
+    /// writer of the policy's receiver set.
     @discardableResult
     func updateCastRoomDelayLocked() -> Bool {   // on stateQueue
+        let before = castRoomDelay.termMs
+        for (id, work) in pendingCastOffsetSettles where !castSelectedIDs.contains(id) {
+            work.cancel()
+            pendingCastOffsetSettles[id] = nil
+        }
+        for (id, work) in pendingCastFeedGateOpens where !castSelectedIDs.contains(id) {
+            work.cancel()
+            pendingCastFeedGateOpens[id] = nil
+        }
+        let offsets = castOffsetLock.withLock { castOffsetsByID }
         let contributing = castSelectedIDs.filter { id in
             if case .failed = known[id]?.connectionState { return false }
             return true
         }
-        return castRoomDelay.setReceivers(contributing)
+        for id in contributing {
+            castRoomDelay.setAdvanceMs(-Int(offsets[id] ?? 0), forID: id)
+        }
+        castRoomDelay.setReceivers(contributing)
+        return castRoomDelay.termMs != before
     }
 
     /// CAST-SYNC (brief §4): one lead measurement the session manager judged
-    /// trustworthy. Most change nothing — the policy only speaks up when a
-    /// receiver settles. On `stateQueue`.
-    func applyCastLeadSample(_ id: String, _ leadMs: Int) {   // on stateQueue
-        guard let settlement = castRoomDelay.ingest(leadMs: leadMs, forID: id) else { return }
-        Telemetry.log(.cast, "cast_lead_settled", [
-            "device": id,
-            "lead_ms": String(settlement.leadMs),
-            "refused": settlement.refused ? "1" : "0",
-            "term_ms": _castTermMs.map(String.init) ?? "nil",
-        ])
-        guard settlement.termMoved else {
-            // The term stayed put, so the ROOM did not move — but this
-            // receiver's share of it just did, and it is the only output that
-            // needs telling. Pushing the whole room fan-out here would
-            // re-anchor every Bluetooth and local sink for a change none of
-            // them can see.
-            pushCastFeedDelaysLocked()
-            return
+    /// trustworthy, with the room-delay share its feed held back when it was
+    /// taken. A settle or a tracked move changes a delay; only a settle holds
+    /// its gate back. Every sample decides the receiver's feed gate, and every
+    /// sample with a hold that neither settles nor moves a share goes into its
+    /// speed window. On `stateQueue`.
+    func applyCastLeadSample(_ id: String, _ leadMs: Int, _ feedDelayMs: Int, _ holdMs: Int?, _ generation: Int) {   // on stateQueue
+        let settlement = castRoomDelay.ingest(leadMs: leadMs, holdMs: holdMs, forID: id)
+        if let settlement {
+            if settlement.tracked {
+                if settlement.termMoved {
+                    roomDelayChangedLocked(cause: "cast_lead_tracked")
+                } else {
+                    pushCastFeedDelaysLocked()
+                }
+                Telemetry.log(.cast, "cast_lead_tracked", [
+                    "device": id,
+                    "lead_ms": String(settlement.leadMs),
+                    "window_samples": String(CastRoomDelay.trackingWindowSamples),
+                    "hold_ms": String(castRoomDelay.holdMs(forID: id)),
+                    "old_share_ms": String(feedDelayMs),
+                    "new_share_ms": String(Swift.max(0, roomDelayLocked() - settlement.leadMs - castRoomDelay.holdMs(forID: id))),
+                    "term_moved": settlement.termMoved ? "1" : "0",
+                    "term_ms": _castTermMs.map(String.init) ?? "nil",
+                ])
+            } else {
+                Telemetry.log(.cast, "cast_lead_settled", [
+                    "device": id,
+                    "lead_ms": String(settlement.leadMs),
+                    "hold_ms": String(castRoomDelay.holdMs(forID: id)),
+                    "refused": settlement.refused ? "1" : "0",
+                    "term_ms": _castTermMs.map(String.init) ?? "nil",
+                ])
+                // A refused receiver is out of the room, so its feed goes back to the server's clock.
+                if settlement.refused { castOutputManager?.setCastRatePpm(0, forDeviceID: id) }
+                if settlement.termMoved {
+                    roomDelayChangedLocked(cause: "cast_lead")
+                } else {
+                    // The term stayed put, so the ROOM did not move — but this
+                    // receiver's share of it just did, and it is the only output
+                    // that needs telling. Pushing the whole room fan-out here would
+                    // re-anchor every Bluetooth and local sink for a change none of
+                    // them can see.
+                    pushCastFeedDelaysLocked()
+                }
+                pendingCastFeedGateOpens.removeValue(forKey: id)?.cancel()
+                // The gate acts on audio as the Mac renders it, so the only
+                // old-share audio it must keep shut is what is still queued in the
+                // ring at this settle: the Mac's hold. A share that moved past the
+                // band keeps the gate shut until that has drained.
+                let hold = castRoomDelay.holdMs(forID: id)
+                if let settled = castRoomDelay.settledLeadMs(forID: id),
+                   abs(Swift.max(0, roomDelayLocked() - settled - hold) - feedDelayMs)
+                       > CastRoomDelay.feedGateBandMs {
+                    let work = DispatchWorkItem { [weak self] in
+                        guard let self else { return }
+                        self.pendingCastFeedGateOpens[id] = nil
+                        self.castOutputManager?.setCastFeedGate(open: true, forDeviceID: id, generation: generation)
+                    }
+                    pendingCastFeedGateOpens[id] = work
+                    delayClock(Double(hold) / 1000, stateQueue, work)
+                }
+            }
         }
-        roomDelayChangedLocked(cause: "cast_lead")
+        // What the listener hears from this receiver: its lead, the Mac's hold
+        // in front of it, and the share its feed was delayed by. The user's
+        // trim is left out; it covers the output stage the lead cannot see.
+        castOutputManager?.setCastFeedGate(
+            open: pendingCastFeedGateOpens[id] == nil && castRoomDelay.feedGateOpen(
+                forID: id,
+                playOutMs: leadMs + (holdMs ?? CastFeedRing.macHoldMs) + feedDelayMs,
+                roomMs: roomDelayLocked()),
+            forDeviceID: id, generation: generation)
+        // Speed matching: what the listener hears against the room plus the
+        // by-ear trim; a share the floor at 0 swallowed still counts, so the
+        // rate can take it back.
+        if settlement == nil, let holdMs {
+            let trimMs = Int(castOffsetLock.withLock { castOffsetsByID[id] ?? 0 })
+            let errorMs = leadMs + holdMs + Swift.max(0, feedDelayMs + trimMs) - roomDelayLocked() - trimMs
+            if let match = castRoomDelay.speedMatch(errorMs: errorMs, forID: id) {
+                castOutputManager?.setCastRatePpm(match.ppm, forDeviceID: id)
+                Telemetry.log(.cast, "cast_speed_match", [
+                    "device": id,
+                    "ppm": String(format: "%.0f", match.ppm),
+                    "error_ms": String(match.errorMs),
+                ])
+            }
+        }
     }
 
     /// CAST-SYNC: hand every settled receiver the part of the room delay it
     /// does not already produce by itself. On `stateQueue`.
     ///
-    /// Called on BOTH edges that can change a receiver's share: the room delay
-    /// moving, and a receiver settling. The second one is easy to miss — a
-    /// receiver that settles BELOW the current term leaves `R` alone, so
+    /// Called on every edge that can change a receiver's share: the room delay
+    /// moving, a receiver settling, and a settled receiver's tracked move. The
+    /// settle is easy to miss — a receiver that settles below the room without
+    /// moving it (a second, faster receiver, or one within `raiseThresholdMs`
+    /// of its term) leaves `R` alone, so
     /// nothing about the room changed, but that receiver's own share just went
     /// UP by the difference. Live 2026-08-29: a reselect restored a remembered
     /// term of 5916 ms while the receiver settled at 5462, and with this
@@ -983,24 +1076,25 @@ extension NativeBackend {
     /// ran that much ahead of everything else, which is plainly audible.
     private func pushCastFeedDelaysLocked() {   // on stateQueue
         // The per-receiver Cast feed lines are the fourth leg of this fan-out.
-        // Each receiver's feed is held back by `room − settledLeadMs`, the part
-        // of the room delay it does not already produce by itself. For the
-        // furthest-behind receiver — the one that SET the term — that remainder
-        // is a few tens of ms; for a SECOND, faster receiver it is seconds, and
-        // it is the whole reason this leg exists.
+        // Each receiver's feed is held back by `room − settledLeadMs − hold`,
+        // with `hold` its measured Mac hold: the part of the room delay it does
+        // not already produce by itself. For the furthest-behind receiver — the
+        // one that SET the term — that remainder is about 0 when it raised the
+        // term; for a SECOND, faster receiver it is seconds, and it is the
+        // whole reason this leg exists.
         //
-        // Three receivers are deliberately skipped, and in every case the point
-        // is that no delay line gets allocated: one still settling has no
-        // trustworthy lead to subtract, one refused for exceeding `R_max` plays
-        // unsynced by policy, and one whose remainder is zero already meets the
-        // room. `setCastRoomDelayMs` hops to the manager's own queue, so this
-        // stays a plain call from `stateQueue`.
+        // Two receivers are deliberately skipped: one still settling has no
+        // trustworthy lead to subtract, and one refused for exceeding `R_max`
+        // plays unsynced by policy. `setCastRoomDelayMs` hops to the manager's
+        // own queue, so this stays a plain call from `stateQueue`.
         let room = roomDelayLocked()
         let refusedIDs = castRoomDelay.refusedIDs
         for id in castSelectedIDs where !refusedIDs.contains(id) {
             guard let settled = castRoomDelay.settledLeadMs(forID: id) else { continue }
-            let remainder = room - settled
-            guard remainder > 0 else { continue }
+            // The Mac's hold is in the room (see `_castTermMs`) but already in
+            // front of this receiver, so it is not part of its share. A 0 is
+            // still pushed; it shrinks the line the first request built.
+            let remainder = Swift.max(0, room - settled - castRoomDelay.holdMs(forID: id))
             castOutputManager?.setCastRoomDelayMs(remainder, forDeviceID: id)
         }
     }

@@ -178,6 +178,52 @@ import Testing
         #expect(afterChange[0] == lastBeforeChange + 1)
     }
 
+    /// A grow within the line's crossfaded-grow limit steps back onto history
+    /// it already wrote, behind the shrink's 5 ms crossfade; a grow past the
+    /// limit, or one reaching back before the first frame written, still
+    /// inserts silence.
+    /// Turns red if a grow within `crossfadedGrowMaxFrames` zero-fills instead of replaying behind the crossfade, a larger grow stops inserting silence, or a grow replays a stretch the line never wrote.
+    @Test func aSmallGrowReplaysBehindTheCrossfadeAndALargeOneStillInsertsSilence() {
+        let line = PCMDelayLine(capacityFrames: 4096, crossfadedGrowMaxFrames: 500)
+        line.setDelayFrames(500)
+        var lastBeforeChange: Int16 = 0
+        for block in 0..<20 {
+            var pcm = ramp(fromFrame: block * 512, frames: 512)
+            line.exchange(&pcm)
+            lastBeforeChange = frameValues(pcm).last!
+        }
+        #expect(lastBeforeChange == 9740)  // 20 × 512 written, 500 frames behind
+
+        line.setDelayFrames(700)
+        var pcm = ramp(fromFrame: 20 * 512, frames: 512)
+        line.exchange(&pcm)
+        let values = frameValues(pcm)
+        #expect(line.delayFrames == 700)
+        // The first frame out is still the old position's next frame, and past
+        // the crossfade the output runs 200 frames further back.
+        #expect(values[0] == lastBeforeChange + 1)
+        #expect(values[220] == lastBeforeChange + 21)
+
+        line.setDelayFrames(1700)
+        var afterLargeGrow: [Int16] = []
+        for block in 21..<25 {
+            var pcm = ramp(fromFrame: block * 512, frames: 512)
+            line.exchange(&pcm)
+            afterLargeGrow += frameValues(pcm)
+        }
+        #expect(afterLargeGrow[0..<1000].allSatisfy { $0 == 0 })
+        #expect(afterLargeGrow[1000] == values.last! + 1)
+        #expect(afterLargeGrow[1000] == 10_053)
+
+        let fresh = PCMDelayLine(capacityFrames: 4096, crossfadedGrowMaxFrames: 500)
+        fresh.setDelayFrames(300)
+        var first = ramp(fromFrame: 0, frames: 512)
+        fresh.exchange(&first)
+        let firstValues = frameValues(first)
+        #expect(firstValues[0..<300].allSatisfy { $0 == 0 })
+        #expect(firstValues[300] == 1)
+    }
+
     /// The fade itself, on a signal built so its shape is readable: the old
     /// read position sits in silence and the new one in a steady tone, so the
     /// output IS the fade-in curve.

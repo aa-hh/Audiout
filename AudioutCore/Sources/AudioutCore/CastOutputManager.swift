@@ -36,7 +36,12 @@ protocol CastOutputControlling: AnyObject, Sendable {
     /// live this receiver is playing, at most one a second. Only samples the
     /// receiver was PLAYING for and answered promptly enough to believe are
     /// reported; the room-delay policy on the other end assumes as much.
-    var onLeadSample: (@Sendable (_ deviceID: String, _ leadMs: Int) -> Void)? { get set }
+    /// `feedDelayMs` is the room-delay share this leg's feed was holding back
+    /// when the sample was taken, the user's trim excluded. `generation` names
+    /// the session attempt that took it, for ``setCastFeedGate(open:forDeviceID:generation:)``.
+    /// `holdMs` is the Mac's hold for this sample, `ageMs − delayLineMs` of the
+    /// last render, `nil` before a render took real frames.
+    var onLeadSample: (@Sendable (_ deviceID: String, _ leadMs: Int, _ feedDelayMs: Int, _ holdMs: Int?, _ generation: Int) -> Void)? { get set }
     /// The capture fan-out slot: every whole-system buffer written here is
     /// copied into each desired receiver's feed ring.
     var feed: PCMSink { get }
@@ -47,8 +52,8 @@ protocol CastOutputControlling: AnyObject, Sendable {
 
     /// CAST-SYNC: hold this receiver's feed back by `ms`, so a Cast leg that
     /// plays closer to live than the room's slowest output still lands with it
-    /// (sync architecture brief §4: the `R − settledLead` term of `D_cast`,
-    /// whose trim is ``setCastUserOffsetMs(_:forDeviceID:)``).
+    /// (sync architecture brief §4: the room delay less the settled lead less
+    /// the Mac's measured hold, whose trim is ``setCastUserOffsetMs(_:forDeviceID:)``).
     ///
     /// **Lengthen only.** `0` is the floor: shortening below the receiver's own
     /// lead would need frames the wall clock has not produced yet.
@@ -60,6 +65,21 @@ protocol CastOutputControlling: AnyObject, Sendable {
     /// few hundred for a TV. The sum with the room delay is clamped at 0.
     func setCastUserOffsetMs(_ ms: Int, forDeviceID id: String)
 
+    /// Whether this receiver now plays with the room. Until it does, its feed
+    /// is silent, unless it plays alone. A new session starts closed. A call
+    /// whose `generation` is not the session's current attempt is dropped.
+    func setCastFeedGate(open: Bool, forDeviceID id: String, generation: Int)
+
+    /// Whether this receiver is the only output selected, so there is nothing
+    /// for its feed to fall out of step with and it plays from the first byte.
+    func setCastPlaysAlone(_ alone: Bool, forDeviceID id: String)
+
+    /// CAST-SYNC speed matching: read this receiver's feed `ppm` parts per
+    /// million faster than the server's wall clock (negative: slower), so its
+    /// play-out keeps pace with the room with no share push. The server's byte
+    /// rate never changes. An id with no session is ignored.
+    func setCastRatePpm(_ ppm: Double, forDeviceID id: String)
+
     /// What one leg's feed is actually doing, for the room-delay controller and
     /// for a live test. `nil` for an id with no session.
     func castFeedStats(forDevice id: String) -> CastFeedStats?
@@ -70,6 +90,9 @@ extension CastOutputControlling {
     /// compiles unchanged; ``CastOutputManager`` provides the real ones.
     func setCastRoomDelayMs(_ ms: Int, forDeviceID id: String) {}
     func setCastUserOffsetMs(_ ms: Int, forDeviceID id: String) {}
+    func setCastFeedGate(open: Bool, forDeviceID id: String, generation: Int) {}
+    func setCastPlaysAlone(_ alone: Bool, forDeviceID id: String) {}
+    func setCastRatePpm(_ ppm: Double, forDeviceID id: String) {}
     func castFeedStats(forDevice id: String) -> CastFeedStats? { nil }
 }
 
@@ -82,15 +105,9 @@ struct CastFeedStats: Sendable, Equatable {
     /// ``CastFeedRing/reset()`` needs no separate bookkeeping — the backlog it
     /// discards simply stops counting here.
     let achievedDelayMs: Int
-    /// Whole producer blocks the ring refused, for lock contention or for want
-    /// of room. Live audio that never reached the receiver.
+    /// Whole producer blocks the ring refused, for want of room or at a
+    /// hand-off between producers. Live audio that never reached the receiver.
     let droppedBlocks: Int
-    /// The share of ``droppedBlocks`` refused because the lock was busy rather
-    /// than because the ring was full. The two mean opposite things: lock-busy
-    /// says the consumer (or a stats read) held the ring while the IOProc had
-    /// audio to hand over, and ring-full says the consumer stopped draining.
-    /// Diagnosing a stutter without this split is guesswork.
-    let droppedLockBusy: Int
     /// Frames the consumer had to invent because the ring was short. The 1 s
     /// prime each GET renders from a just-emptied ring lands here too — that
     /// one is the silent join gap, by design.
@@ -152,25 +169,49 @@ struct CastFeedTiming: Sendable, Equatable {
 /// One Cast receiver's feed: the 2-second hand-off between the capture IOProc
 /// (producer) and the HTTP server's pacing timer (consumer).
 ///
-/// The producer never blocks. It also never allocated, until a feed delay line
-/// was put in front of it: ``PCMDelayLine/exchange(_:)-> Data`` takes a copy per
-/// block, on the IOProc, whenever a line is live — a failed `try()` or a block
-/// that does not fit is dropped whole, because a late buffer is worse than a
-/// missing one on a stream the receiver is already 5.5 s behind. The consumer
-/// zero-fills whatever is missing, so a starved ring plays silence rather than
-/// stalling the socket.
+/// Producers try ``producerLock`` and drop a block rather than wait for it;
+/// the consumer never waits on a producer. The producer also never allocated,
+/// until a feed delay line was put in front of it:
+/// ``PCMDelayLine/exchange(_:)-> Data`` takes a copy per block, on the IOProc,
+/// whenever a line is live — a block that does not fit is dropped whole,
+/// because a late buffer is worse than a missing one on a stream the receiver
+/// is already 5.5 s behind. The consumer zero-fills
+/// whatever is missing, so a starved ring plays silence rather than stalling
+/// the socket. The producer never takes the ring's lock; it hands over through
+/// counter words, as `BTFrameRing` does.
 ///
 /// The consumer also carries this receiver's volume when the receiver's own
 /// volume is `fixed` (see ``CastOutputManager/pushLevel(_:_:)``): a scalar
 /// gain applied on the way out, ramped so a fader drag does not step.
 ///
 /// CAST-SYNC: and in front of all of it, this leg's own ``PCMDelayLine``,
-/// built on the first non-zero ``setDelayMs(_:)``. Delaying by inserting zeros
+/// built at the first ``setDelayMs(_:)``, zero included. A grow of up to
+/// ``CastRoomDelay/feedGateBandMs`` replays captured audio behind the line's
+/// crossfade; a larger one inserts zeros. Delaying by inserting zeros
 /// AHEAD of the ring is cadence-preserving, so the ring fills at exactly the
 /// rate it did before and the server's wall-clock pacing never notices.
 /// **Nothing here may hold the feed instead** — the receiver drains into
 /// BUFFERING, `secondsSent` freezes while `currentTime` runs on, and the lead
 /// measurement the room-delay controller reads is poisoned.
+///
+/// CAST-SYNC speed matching: a nonzero ``setRatePpm(_:)`` reads the ring
+/// through ``FractionalResampler`` a few ppm fast or slow, so a receiver's
+/// play-out keeps pace with the room while the server still serves exactly its
+/// wall clock's bytes. A rate above 1 never takes the ring below its standing
+/// queue; that render runs at 1. A ring never given a nonzero rate renders the
+/// plain copy, byte for byte. Once a ring has resampled it stays on the
+/// resampler until its next ``reset()`` or refill, each of which restarts the
+/// resampler with nothing stored; at rate 0 the resampler holds its last
+/// fractional phase, so the cubic's top-octave dip (up to 4.6 dB at 16 kHz near
+/// half a frame) holds steady instead of passing. A resampled render's timing
+/// stamp sits up to 3 frames (0.07 ms) late: it uses the read position before
+/// the pull, while the first rendered frame comes from the resampler's stored
+/// frames, so age and hold read up to 0.07 ms short. razor: the cubic dips the
+/// top octave (about 0.7 dB at 10 kHz, 4.6 dB at 16 kHz) while its phase passes
+/// half a frame, about once a second at 20 ppm; the synced Mac sink runs the
+/// same resampler. Switching back to the plain copy mid-stream would skip 1-2
+/// frames, so a ring that has resampled keeps resampling. A windowed-sinc
+/// resampler is the upgrade that removes the dip.
 ///
 /// `razor:` ceiling — one scalar gain with a linear ramp. Mute-click
 /// suppression or a dB mapping belongs here, in the ramp target, not at the
@@ -189,30 +230,69 @@ final class CastFeedRing: CastPCMSource, @unchecked Sendable {
     /// inside [0, 1] lands within 882 frames and none of them zipper.
     private static let gainRampFrames = 882
 
+    /// The audio a session's ring keeps queued in front of the receiver.
+    /// razor: 80 ms sits above the 37 ms spread in capture-to-push plus the
+    /// 20 ms pacing tick, and covers 6 lost producer blocks. Raise it if
+    /// underruns appear after a refill has ended.
+    static let standingQueueMs = 80
+
+    /// How much later than its lead a Cast receiver plays the audio the Mac
+    /// captured: the standing queue plus what reaches it before the ring.
+    /// razor: the 35 ms is about 21 ms median capture-to-push plus pacing
+    /// phase, plus about 13 ms of queue above target between renders,
+    /// measured 2026-10-04. Its error is the queue's jitter.
+    static let macHoldMs = standingQueueMs + 35
+
     private let storage: UnsafeMutablePointer<Int16>
     private let lock = NSLock()
-    private var readFrame = 0
-    private var availableFrames = 0
     private var currentGain: Float = 1
     private var targetGain: Float = 1
-    /// Lock-guarded, and `nil` until a non-zero delay is asked for.
+    /// What ``render(frames:nowNanos:)`` keeps queued; 0 holds nothing back.
+    private let standingQueueFrames: Int
+    /// Lock-guarded. While set, a standing-queue ring takes nothing and waits
+    /// until it holds the standing queue plus the frames asked for.
+    private var refilling = true
+    /// Lock-guarded. Closed, the output gain ramps to 0 while ``targetGain``
+    /// keeps the level.
+    private var feedGateOpen = true
+    /// Lock-guarded, and `nil` until the first delay request, zero included.
     private var delayLine: PCMDelayLine?
-    /// Producer-owned: incremented only by ``push(_:pts:nowNanos:)``, which cannot take the
-    /// lock on the path that matters (a failed `try()` IS one of the drops).
-    /// How many times the producer re-tries the ring's lock before it gives up
-    /// and drops the block. Small: the holder is only ever a memcpy away from
-    /// releasing, and an IOProc must not spin on a thread it does not control.
-    static let lockRetries = 64
-
+    /// How much faster than the server's wall clock the render reads captured
+    /// frames, in ppm; negative reads slower.
+    private var ratePpm: Double = 0
+    /// Whether renders go through ``resampler``. Set by the first render that
+    /// takes frames at a nonzero rate; cleared by ``reset()`` and by the render
+    /// that ends a refill.
+    private var resampling = false
+    /// Touched only by `render` and `reset()`, under `lock`, on the server's
+    /// queue.
+    private let resampler = FractionalResampler(channelCount: 2)
+    /// Serialises producers against each other, never against the consumer:
+    /// ``CastFanOut`` reaches ``push(_:pts:nowNanos:)`` from the capture
+    /// callback, the wizard pacing queue and the leveled-app fallback clock.
+    /// Timing keeps them apart (`NativeCaptureCoordinator.deliver`), so a
+    /// `try()` fails only at a hand-off between them; a failed try drops one
+    /// block instead of making the real-time callback wait.
+    private let producerLock = NSLock()
+    /// Producer-owned words, written only by ``push(_:pts:nowNanos:)`` and read
+    /// behind a barrier: frames pushed, stamps written and blocks accepted.
+    private let pushedFramesWord: UnsafeMutablePointer<Int>
+    private let stampsWrittenWord: UnsafeMutablePointer<Int>
+    private let writesWord: UnsafeMutablePointer<Int>
+    /// Producer-owned: blocks refused for want of room or at a producer hand-off.
+    /// A hand-off drop also bumps it after a failed `try()`, without the lock,
+    /// so two drops at the same instant can lose one count; telemetry only.
     private let droppedBlocksWord: UnsafeMutablePointer<Int>
-    private let droppedLockBusyWord: UnsafeMutablePointer<Int>
+    /// Frames the consumer has taken or skipped. Written only under the lock;
+    /// the producer reads it behind a barrier.
+    private let consumedFramesWord: UnsafeMutablePointer<Int>
+    /// ``delayLine``, unretained, for the producer: published once, after it.
+    private let delayLineWord: UnsafeMutablePointer<UnsafeMutableRawPointer?>
     private var underrunFrames = 0                          // lock-guarded (consumer)
     private var feedResets = 0                              // lock-guarded
-    /// Magnitude of the loudest sample in the last rendered block, and the
-    /// count of blocks the producer got in. Both lock-guarded; the peak is the
-    /// consumer's, the count the producer's.
+    /// Magnitude of the loudest sample in the last rendered block.
+    /// Lock-guarded.
     private var lastRenderPeak: Int32 = 0
-    private var writes = 0
     /// What an all-zero block reports, matching the AirPlay leg's floor.
     private static let floorDBFS: Double = -120
 
@@ -241,20 +321,26 @@ final class CastFeedRing: CastPCMSource, @unchecked Sendable {
     private static let stampCapacity = 1024
     private let stamps: UnsafeMutablePointer<Stamp>
     // All lock-guarded.
-    private var pushedFrames = 0
-    private var takenFrameIndex = 0
     private var renderedFramesSinceReset = 0
-    private var stampsWritten = 0
     private var stampCursor = 0
     private var lastRender: RenderStamp?
 
-    init() {
+    init(standingQueueMs: Int = 0) {
+        standingQueueFrames = standingQueueMs * Self.sampleRate / 1000
         storage = UnsafeMutablePointer<Int16>.allocate(capacity: Self.capacityFrames * 2)
         storage.initialize(repeating: 0, count: Self.capacityFrames * 2)
+        pushedFramesWord = UnsafeMutablePointer<Int>.allocate(capacity: 1)
+        pushedFramesWord.initialize(to: 0)
+        stampsWrittenWord = UnsafeMutablePointer<Int>.allocate(capacity: 1)
+        stampsWrittenWord.initialize(to: 0)
+        writesWord = UnsafeMutablePointer<Int>.allocate(capacity: 1)
+        writesWord.initialize(to: 0)
         droppedBlocksWord = UnsafeMutablePointer<Int>.allocate(capacity: 1)
         droppedBlocksWord.initialize(to: 0)
-        droppedLockBusyWord = UnsafeMutablePointer<Int>.allocate(capacity: 1)
-        droppedLockBusyWord.initialize(to: 0)
+        consumedFramesWord = UnsafeMutablePointer<Int>.allocate(capacity: 1)
+        consumedFramesWord.initialize(to: 0)
+        delayLineWord = UnsafeMutablePointer<UnsafeMutableRawPointer?>.allocate(capacity: 1)
+        delayLineWord.initialize(to: nil)
         stamps = UnsafeMutablePointer<Stamp>.allocate(capacity: Self.stampCapacity)
         stamps.initialize(repeating: Stamp(startFrame: 0, livePtsNanos: 0, pushedAtNanos: 0,
                                            delayFramesAtPush: 0, framesAheadAtPush: 0),
@@ -264,8 +350,12 @@ final class CastFeedRing: CastPCMSource, @unchecked Sendable {
     deinit {
         storage.deinitialize(count: Self.capacityFrames * 2)
         storage.deallocate()
+        pushedFramesWord.deallocate()
+        stampsWrittenWord.deallocate()
+        writesWord.deallocate()
         droppedBlocksWord.deallocate()
-        droppedLockBusyWord.deallocate()
+        consumedFramesWord.deallocate()
+        delayLineWord.deallocate()
         stamps.deinitialize(count: Self.stampCapacity)
         stamps.deallocate()
     }
@@ -276,7 +366,8 @@ final class CastFeedRing: CastPCMSource, @unchecked Sendable {
         return SyncTiming.monotonicNanos(now)
     }
 
-    /// Producer side (capture IOProc). Interleaved S16LE stereo, 4 bytes/frame.
+    /// Producer side: the three callers named at ``producerLock``. Interleaved
+    /// S16LE stereo, 4 bytes/frame.
     func push(_ pcm: Data) {
         push(pcm, pts: timespec(tv_sec: 0, tv_nsec: 0), nowNanos: Self.monotonicNowNanos())
     }
@@ -286,35 +377,21 @@ final class CastFeedRing: CastPCMSource, @unchecked Sendable {
     func push(_ pcm: Data, pts: timespec, nowNanos: Int64) {
         let frames = pcm.count / 4
         guard frames > 0 else { return }
-        // Retry before giving up. The consumer's critical section is a memcpy
-        // and the once-a-second stats read is shorter still, so a handful of
-        // attempts covers essentially every collision — and the alternative is
-        // not "a late block", it is 11 ms of audio deleted from the timeline
-        // for good. Live 2026-08-29: at roughly one lost block every five
-        // seconds the feed cushion drained 226 ms in 100 s and the stutter
-        // came back a few minutes in.
-        //
-        // Bounded on purpose: this is the capture IOProc, so it must never
-        // wait on a thread it does not control. Exhausting the retries drops
-        // the block exactly as before.
-        var acquired = lock.try()
-        var attempt = 0
-        while !acquired, attempt < Self.lockRetries {
-            attempt += 1
-            acquired = lock.try()
-        }
-        guard acquired else {
-            droppedLockBusyWord.pointee &+= 1
-            countDroppedBlock()
-            return
-        }
-        defer { lock.unlock() }
-        // The line runs before the room check: its clock is the producer's, so
-        // a block the ring then has no space for still has to go through it,
-        // or the delay walks.
-        let block = delayLine?.exchange(pcm) ?? pcm
-        guard availableFrames + frames <= Self.capacityFrames else { countDroppedBlock(); return }
-        let writeFrame = (readFrame + availableFrames) % Self.capacityFrames
+        guard producerLock.try() else { countDroppedBlock(); return }
+        defer { producerLock.unlock() }
+        OSMemoryBarrier()                       // acquire: the line and the consumer's progress
+        let line = delayLineWord.pointee.map { Unmanaged<PCMDelayLine>.fromOpaque($0).takeUnretainedValue() }
+        // Every block that gets the producer lock goes through the line, before
+        // the room check: its clock is the producer's, so a block the ring then
+        // has no space for still has to go through it, or the delay walks. A
+        // block dropped at a failed `try()` (a producer hand-off) skips it,
+        // which costs one block of delay until the next refill.
+        let block = line?.exchange(pcm) ?? pcm
+        let pushed = pushedFramesWord.pointee
+        OSMemoryBarrier()
+        let queued = pushed - consumedFramesWord.pointee
+        guard queued + frames <= Self.capacityFrames else { countDroppedBlock(); return }
+        let writeFrame = pushed % Self.capacityFrames
         let firstRun = min(frames, Self.capacityFrames - writeFrame)
         block.withUnsafeBytes { raw in
             guard let base = raw.baseAddress else { return }
@@ -323,16 +400,25 @@ final class CastFeedRing: CastPCMSource, @unchecked Sendable {
                 memcpy(storage, base + firstRun * 4, (frames - firstRun) * 4)
             }
         }
+        let stampsWritten = stampsWrittenWord.pointee
         stamps[stampsWritten & (Self.stampCapacity - 1)] = Stamp(
-            startFrame: pushedFrames,
+            startFrame: pushed,
             livePtsNanos: SyncTiming.monotonicNanos(pts),
             pushedAtNanos: nowNanos,
-            delayFramesAtPush: delayLine?.delayFrames ?? 0,
-            framesAheadAtPush: availableFrames)
-        stampsWritten += 1
-        pushedFrames += frames
-        availableFrames += frames
-        writes &+= 1
+            delayFramesAtPush: line?.delayFrames ?? 0,
+            framesAheadAtPush: queued)
+        OSMemoryBarrier()                       // release: the frames and the stamp before the counters
+        stampsWrittenWord.pointee = stampsWritten + 1
+        OSMemoryBarrier()
+        pushedFramesWord.pointee = pushed + frames
+        writesWord.pointee &+= 1
+    }
+
+    /// Frames pushed and not yet consumed. Under the lock, so the consumed
+    /// count is the consumer's own and only the pushed count can be newer.
+    private func queuedFramesLocked() -> Int {
+        OSMemoryBarrier()                       // acquire: see the producer's word
+        return pushedFramesWord.pointee - consumedFramesWord.pointee
     }
 
     private func countDroppedBlock() {
@@ -343,44 +429,50 @@ final class CastFeedRing: CastPCMSource, @unchecked Sendable {
     /// Hold this leg's feed back by `ms` — the room delay plus the user's trim,
     /// already summed and clamped by ``CastOutputManager``. Control thread.
     ///
-    /// The line is built on the first non-zero ask and kept afterwards, so a
-    /// later `0` is a shrink through the crossfade rather than a teardown. With
-    /// no Cast device selected there is no ring at all, so there is no line
-    /// either — the bypass is structural, not a zero delay.
+    /// The line is built at the first ask, zero included, so a later small
+    /// grow has captured audio to replay, and kept afterwards, so a later `0`
+    /// is a shrink through the crossfade rather than a teardown. A grow of up
+    /// to ``CastRoomDelay/feedGateBandMs`` replays behind the crossfade; a
+    /// larger one inserts zeros. With no Cast device selected there is no ring
+    /// at all, so there is no line either — the bypass is structural, not a
+    /// zero delay.
     func setDelayMs(_ ms: Int) {
         let frames = max(0, ms) * Self.sampleRate / 1000
         if let existing = lock.withLock({ delayLine }) {
             existing.setDelayFrames(frames)
             return
         }
-        guard frames > 0 else { return }
-        // Allocated off the lock: 2 MB is not something to make the capture
-        // IOProc's `try()` wait on. Callers are serialised on the manager's
-        // queue, so there is no second builder to race.
-        let line = PCMDelayLine(capacityFrames: Self.delayCapacityFrames)
+        // Allocated outside `lock`, so a render never waits on the 2 MB
+        // allocation. Callers are serialised on the manager's queue, so there
+        // is no second builder to race.
+        let line = PCMDelayLine(
+            capacityFrames: Self.delayCapacityFrames,
+            crossfadedGrowMaxFrames: CastRoomDelay.feedGateBandMs * Self.sampleRate / 1000)
         line.setDelayFrames(frames)
         lock.withLock { delayLine = line }
+        OSMemoryBarrier()                       // release: the line before the producer's word
+        delayLineWord.pointee = Unmanaged.passUnretained(line).toOpaque()
     }
 
-    /// Whether this leg has built a delay line at all. The bypass this pins is
-    /// structural: an untouched feed, and every feed while no Cast device is
+    /// Whether this leg has built a delay line at all: the first delay request
+    /// builds one, zero included. The bypass this pins is structural: a feed
+    /// never asked for a delay, and every feed while no Cast device is
     /// selected, has no line to run.
     var test_hasDelayLine: Bool { lock.withLock { delayLine != nil } }
 
     /// What this leg is doing, for the room-delay controller and a live test.
     var stats: CastFeedStats {
-        OSMemoryBarrier()                       // acquire: see the producer's word
+        OSMemoryBarrier()                       // acquire: see the producer's words
         let dropped = droppedBlocksWord.pointee
-        let lockBusy = droppedLockBusyWord.pointee
+        let writes = writesWord.pointee
         lock.lock()
         defer { lock.unlock() }
         // The APPLIED delay, not the requested one: with the IOProc stopped the
         // line has adopted nothing and this leg is holding nothing back.
-        let heldFrames = (delayLine?.delayFrames ?? 0) + availableFrames
+        let heldFrames = (delayLine?.delayFrames ?? 0) + queuedFramesLocked()
         return CastFeedStats(
             achievedDelayMs: heldFrames * 1000 / Self.sampleRate,
             droppedBlocks: dropped,
-            droppedLockBusy: lockBusy,
             underrunFrames: underrunFrames,
             feedResets: feedResets,
             peakDBFS: lastRenderPeak > 0
@@ -410,14 +502,14 @@ final class CastFeedRing: CastPCMSource, @unchecked Sendable {
         }
         return CastFeedTiming(
             delayLineMs: (delayLine?.delayFrames ?? 0) * 1000 / Self.sampleRate,
-            queuedMs: availableFrames * 1000 / Self.sampleRate,
+            queuedMs: queuedFramesLocked() * 1000 / Self.sampleRate,
             renderedFramesSinceReset: renderedFramesSinceReset,
             lastRender: last)
     }
 
     /// How much audio is queued right now. The server's pacing clock waits on
     /// this before it starts, so it never paces against an empty ring.
-    var bufferedFrames: Int? { lock.withLock { availableFrames } }
+    var bufferedFrames: Int? { lock.withLock { queuedFramesLocked() } }
 
     /// Consumer side (the server's pacing timer). Always exactly `frames * 4`
     /// bytes; anything the ring is short of is silence.
@@ -431,16 +523,66 @@ final class CastFeedRing: CastPCMSource, @unchecked Sendable {
         guard frames > 0 else { return Data() }
         var out = Data(count: frames * 4)
         lock.lock()
-        let taken = min(frames, availableFrames)
-        if taken > 0 {
+        // The producer publishes stamps before frames, so loading in the
+        // opposite order sees a stamp for every frame it sees.
+        let pushed = pushedFramesWord.pointee
+        OSMemoryBarrier()                       // acquire: the frames and stamps behind it
+        let stampsWritten = stampsWrittenWord.pointee
+        var consumed = consumedFramesWord.pointee
+        var available = pushed - consumed
+        if standingQueueFrames > 0, refilling,
+           available >= standingQueueFrames + frames {
+            // The refill ends: the oldest audio goes, so the standing queue is
+            // what stays behind the frames served now.
+            let excess = available - standingQueueFrames - frames
+            consumed += excess
+            available -= excess
+            refilling = false
+            resampler.reset()
+            resampling = false
+        }
+        let takes = !(standingQueueFrames > 0 && refilling)
+        if takes, ratePpm != 0 { resampling = true }
+        var pulled = 0
+        var written = 0
+        if takes, resampling {
+            var ratio = 1 + ratePpm * 1e-6
+            if ratio > 1,
+               available - (Int((Double(frames) * ratio).rounded(.up)) + 3) < standingQueueFrames {
+                ratio = 1
+            }
+            var samples = [Float](repeating: 0, count: frames * 2)
+            var index = consumed
+            written = samples.withUnsafeMutableBufferPointer { buffer in
+                resampler.render(into: buffer, outFrameOffset: 0, outFrames: frames, ratio: ratio) { frame in
+                    guard index < pushed else { return false }
+                    let source = storage + (index % Self.capacityFrames) * 2
+                    frame[0] = Float(source[0])
+                    frame[1] = Float(source[1])
+                    index += 1
+                    return true
+                }
+            }
+            pulled = index - consumed
+            out.withUnsafeMutableBytes { raw in
+                let samplesOut = raw.bindMemory(to: Int16.self)
+                for sample in 0..<(written * 2) {
+                    samplesOut[sample] = Int16(max(-32_768, min(32_767, samples[sample].rounded())))
+                }
+            }
+        } else if takes {
+            pulled = min(frames, available)
+            written = pulled
+        }
+        if pulled > 0 {
             // Forward only, bounded by the blocks queued ahead.
             stampCursor = max(stampCursor, stampsWritten - Self.stampCapacity)
             while stampCursor + 1 < stampsWritten,
-                  stamps[(stampCursor + 1) & (Self.stampCapacity - 1)].startFrame <= takenFrameIndex {
+                  stamps[(stampCursor + 1) & (Self.stampCapacity - 1)].startFrame <= consumed {
                 stampCursor += 1
             }
             let stamp = stamps[stampCursor & (Self.stampCapacity - 1)]
-            let offset = takenFrameIndex - stamp.startFrame
+            let offset = consumed - stamp.startFrame
             let rate = Int64(Self.sampleRate)
             lastRender = RenderStamp(
                 renderAtNanos: nowNanos,
@@ -450,27 +592,43 @@ final class CastFeedRing: CastPCMSource, @unchecked Sendable {
                 pushedAtNanos: stamp.pushedAtNanos,
                 delayFramesAtPush: stamp.delayFramesAtPush,
                 framesAhead: stamp.framesAheadAtPush + offset)
-            takenFrameIndex += taken
-            let firstRun = min(taken, Self.capacityFrames - readFrame)
-            out.withUnsafeMutableBytes { raw in
-                guard let base = raw.baseAddress else { return }
-                memcpy(base, storage + readFrame * 2, firstRun * 4)
-                if taken > firstRun {
-                    memcpy(base + firstRun * 4, storage, (taken - firstRun) * 4)
+            if !resampling {
+                let readFrame = consumed % Self.capacityFrames
+                let firstRun = min(pulled, Self.capacityFrames - readFrame)
+                out.withUnsafeMutableBytes { raw in
+                    guard let base = raw.baseAddress else { return }
+                    memcpy(base, storage + readFrame * 2, firstRun * 4)
+                    if pulled > firstRun {
+                        memcpy(base + firstRun * 4, storage, (pulled - firstRun) * 4)
+                    }
                 }
             }
-            readFrame = (readFrame + taken) % Self.capacityFrames
-            availableFrames -= taken
+            consumed += pulled
         }
-        underrunFrames += frames - taken
+        if standingQueueFrames > 0, !refilling, written < frames { refilling = true }
+        underrunFrames += frames - written
         renderedFramesSinceReset += frames
-        // Unity on both ends is the whole attenuation-receiver path: the
-        // memcpy above is all it costs.
-        if currentGain != 1 || targetGain != 1 { applyGainLocked(&out, frames: frames) }
+        let gain = currentGain
+        let target = feedGateOpen ? targetGain : 0
+        OSMemoryBarrier()                       // release: done reading before the producer reuses the space
+        consumedFramesWord.pointee = consumed
+        lock.unlock()
+        // The gain loop and the peak scan run over every sample, so they run
+        // off the lock the producer is waiting to take.
+        // Unity on both ends is the whole attenuation-receiver path: for a
+        // plain-copy ring the memcpy above is all it costs; a resampling ring
+        // runs the resampler and the float conversion under `lock` instead.
+        var finalGain = gain
+        if gain != 1 || target != 1 {
+            finalGain = Self.applyGain(&out, frames: frames, from: gain, to: target)
+        }
         // After the gain, over the bytes the server is about to serve: a leg
         // held at gain 0 is silence the underrun count cannot see.
-        lastRenderPeak = Self.peakMagnitude(out)
-        lock.unlock()
+        let peak = Self.peakMagnitude(out)
+        lock.withLock {
+            currentGain = finalGain
+            lastRenderPeak = peak
+        }
         return out
     }
 
@@ -503,12 +661,40 @@ final class CastFeedRing: CastPCMSource, @unchecked Sendable {
         return Double(targetGain)
     }
 
-    /// Called with the lock held, on the server's consumer queue. Gain is in
+    /// Open, the output carries the level; closed, it ramps to silence while
+    /// the level is kept. Taken under the lock, like ``setTargetGain(_:)``.
+    func setFeedGate(open: Bool) {
+        lock.withLock { feedGateOpen = open }
+    }
+
+    /// Positive reads the captured audio faster, so the receiver plays earlier
+    /// as the ring's queue shrinks; negative slower. The bytes served per
+    /// second never change.
+    func setRatePpm(_ ppm: Double) {
+        lock.withLock { ratePpm = ppm }
+    }
+
+    var test_feedGateOpen: Bool { lock.withLock { feedGateOpen } }
+    var test_ratePpm: Double { lock.withLock { ratePpm } }
+
+    func test_withLockHeld(_ body: () -> Void) {
+        lock.lock()
+        body()
+        lock.unlock()
+    }
+
+    func test_withProducerLockHeld(_ body: () -> Void) {
+        producerLock.lock()
+        body()
+        producerLock.unlock()
+    }
+
+    /// Ramps `out` from `gain` towards `target` and returns where the ramp
+    /// ended. Runs off the lock and touches nothing but `out`. Gain is in
     /// [0, 1] so scaling down can never overflow; the clamp is defensive.
-    private func applyGainLocked(_ out: inout Data, frames: Int) {
+    private static func applyGain(_ out: inout Data, frames: Int, from gain: Float, to target: Float) -> Float {
         let step = 1 / Float(Self.gainRampFrames)
-        var gain = currentGain
-        let target = targetGain
+        var gain = gain
         out.withUnsafeMutableBytes { raw in
             let samples = raw.bindMemory(to: Int16.self)
             for frame in 0..<frames {
@@ -524,7 +710,7 @@ final class CastFeedRing: CastPCMSource, @unchecked Sendable {
                 }
             }
         }
-        currentGain = gain
+        return gain
     }
 
     /// Drop the backlog. Called the moment the receiver's GET arrives, so what
@@ -538,19 +724,30 @@ final class CastFeedRing: CastPCMSource, @unchecked Sendable {
     @discardableResult
     func reset() -> Int {
         lock.lock()
-        let discardedFrames = availableFrames
-        readFrame = 0
-        availableFrames = 0
+        let pushed = pushedFramesWord.pointee
+        OSMemoryBarrier()                       // acquire: in the producer's order, as `render` loads
+        let stampsWritten = stampsWrittenWord.pointee
+        let discardedFrames = pushed - consumedFramesWord.pointee
         feedResets += 1
         // The first post-reset render must map to the first post-reset push,
         // never to discarded audio.
-        takenFrameIndex = pushedFrames
+        consumedFramesWord.pointee = pushed
         renderedFramesSinceReset = 0
         stampCursor = max(0, stampsWritten - 1)
+        // A push that landed between the two loads left stamps starting past
+        // `pushed`; a cursor on one would make the next render's offset negative.
+        while stampCursor > max(0, stampsWritten - Self.stampCapacity),
+              stamps[stampCursor & (Self.stampCapacity - 1)].startFrame > pushed {
+            stampCursor -= 1
+        }
         lastRender = nil
         // A fresh GET starts at the level the user asked for, not partway
-        // through the ramp the previous one was left in.
-        currentGain = targetGain
+        // through the ramp the previous one was left in; silent while the
+        // gate is closed. A standing-queue ring refills before it plays.
+        refilling = true
+        currentGain = feedGateOpen ? targetGain : 0
+        resampler.reset()
+        resampling = false
         lock.unlock()
         return discardedFrames * 1000 / Self.sampleRate
     }
@@ -586,7 +783,8 @@ final class CastFanOut: PCMSink, @unchecked Sendable {
 
     func write(pcm: Data, pts: timespec) {
         // Called from the capture IOProc: never block, and never hold the lock
-        // across the pushes.
+        // across the pushes. Each push tries its ring's producer lock and drops
+        // the block rather than wait.
         guard lock.try() else {
             droppedWritesWord.pointee &+= 1
             OSMemoryBarrier()                   // release: publish before a reader's acquire
@@ -641,7 +839,7 @@ final class CastOutputManager: CastOutputControlling, @unchecked Sendable {
     private let stateLock = NSLock()
     private var _onStateChange: (@Sendable (String, CastSessionState) -> Void)?
     private var _onVolumeLagChange: (@Sendable (String, Int?) -> Void)?
-    private var _onLeadSample: (@Sendable (String, Int) -> Void)?
+    private var _onLeadSample: (@Sendable (String, Int, Int, Int?, Int) -> Void)?
 
     /// Queue-confined.
     private var sessions: [String: Session] = [:]
@@ -677,7 +875,7 @@ final class CastOutputManager: CastOutputControlling, @unchecked Sendable {
         set { stateLock.withLock { _onVolumeLagChange = newValue } }
     }
 
-    var onLeadSample: (@Sendable (String, Int) -> Void)? {
+    var onLeadSample: (@Sendable (String, Int, Int, Int?, Int) -> Void)? {
         get { stateLock.withLock { _onLeadSample } }
         set { stateLock.withLock { _onLeadSample = newValue } }
     }
@@ -687,7 +885,7 @@ final class CastOutputManager: CastOutputControlling, @unchecked Sendable {
     /// One receiver's whole session. Queue-confined.
     private final class Session {
         let record: CastDeviceRecord
-        let ring = CastFeedRing()
+        let ring = CastFeedRing(standingQueueMs: CastFeedRing.standingQueueMs)
         var channel: CastChannel?
         var client: CastClient?
         var server: CastLiveAudioServer?
@@ -707,6 +905,12 @@ final class CastOutputManager: CastOutputControlling, @unchecked Sendable {
         /// sum is what reaches the feed.
         var roomDelayMs = 0
         var userOffsetMs = 0
+        /// The ring's gate is `playsAlone || feedGateOpen`. `startRecipe`
+        /// clears `feedGateOpen` only; `appliedGateOpen` is what the ring was
+        /// last told, `nil` before the first decision.
+        var feedGateOpen = false
+        var playsAlone = false
+        var appliedGateOpen: Bool?
         var playDeadline: DispatchWorkItem?
         var statusPoll: DispatchSourceTimer?
         var wasPlaying = false
@@ -797,8 +1001,46 @@ final class CastOutputManager: CastOutputControlling, @unchecked Sendable {
         }
     }
 
+    func setCastFeedGate(open: Bool, forDeviceID id: String, generation: Int) {
+        queue.async { [weak self] in
+            guard let self, let session = self.live(id, generation) else { return }
+            // A lead sample from an earlier attempt can land after a retry or
+            // reselect; only a PLAYING session's own samples may open the gate.
+            if open, !session.wasPlaying { return }
+            session.feedGateOpen = open
+            self.applyGate(session)
+        }
+    }
+
+    func setCastPlaysAlone(_ alone: Bool, forDeviceID id: String) {
+        queue.async { [weak self] in
+            guard let self, let session = self.sessions[id] else { return }
+            session.playsAlone = alone
+            self.applyGate(session)
+        }
+    }
+
+    func setCastRatePpm(_ ppm: Double, forDeviceID id: String) {
+        queue.async { [weak self] in
+            guard let self, let session = self.sessions[id] else { return }
+            session.ring.setRatePpm(ppm)
+        }
+    }
+
     func castFeedStats(forDevice id: String) -> CastFeedStats? {
         queue.sync { sessions[id]?.ring.stats }
+    }
+
+    /// Tell the ring whether its feed plays, only when that changed.
+    private func applyGate(_ session: Session) {
+        let open = session.playsAlone || session.feedGateOpen
+        guard session.appliedGateOpen != open else { return }
+        session.appliedGateOpen = open
+        session.ring.setFeedGate(open: open)
+        Telemetry.log(.cast, "cast_feed_gate", [
+            "device": session.record.id,
+            "open": open ? "1" : "0",
+        ])
     }
 
     /// `D_cast + trim`, clamped at the floor: this leg can only be lengthened,
@@ -829,6 +1071,9 @@ final class CastOutputManager: CastOutputControlling, @unchecked Sendable {
     // MARK: - The recipe (on queue)
 
     private func startRecipe(_ session: Session) {
+        // Every (re)start plays from a receiver whose lead is not known yet.
+        session.feedGateOpen = false
+        applyGate(session)
         session.generation += 1
         let generation = session.generation
         let id = session.record.id
@@ -1110,15 +1355,14 @@ final class CastOutputManager: CastOutputControlling, @unchecked Sendable {
             "rtt_ms": String(roundTripMs),
             "kept": kept ? "1" : "0",
             "dropped_blocks": String(feed.droppedBlocks),
-            "dropped_lock_busy": String(feed.droppedLockBusy),
             "underrun_frames": String(feed.underrunFrames),
             "peak_dbfs": String(format: "%.1f", feed.peakDBFS),
             "writes": String(feed.writes),
             "achieved_delay_ms": String(feed.achievedDelayMs),
         ])
+        // Same direct read as `stats` above, for the same reason.
+        let timing = session.ring.timing
         if AudioDiag.isEnabled {
-            // Same direct read as `stats` above, for the same reason.
-            let timing = session.ring.timing
             let last = timing.lastRender
             func ms(_ value: Double?) -> String { value.map { String(format: "%.1f", $0) } ?? "nil" }
             Telemetry.log(.cast, "cast_stage_timing", [
@@ -1138,7 +1382,9 @@ final class CastOutputManager: CastOutputControlling, @unchecked Sendable {
             ])
         }
         guard kept else { return }
-        onLeadSample?(id, leadMs)
+        onLeadSample?(id, leadMs, session.roomDelayMs,
+                      timing.lastRender.map { Int(($0.ageMs - $0.delayLineMs).rounded()) },
+                      session.generation)
     }
 
     // MARK: - Volume (on queue)
@@ -1297,6 +1543,11 @@ final class CastOutputManager: CastOutputControlling, @unchecked Sendable {
     /// gain a `fixed` receiver's level landed in.
     func test_ring(forDevice id: String) -> CastFeedRing? {
         queue.sync { sessions[id]?.ring }
+    }
+
+    /// The current attempt number of one device's session.
+    func test_generation(forDevice id: String) -> Int? {
+        queue.sync { sessions[id]?.generation }
     }
 
     // MARK: - Helpers (on queue)

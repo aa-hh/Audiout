@@ -51,16 +51,17 @@ import Testing
     @Test func aFeedNeverAskedForADelayHasNoLine() {
         let ring = CastFeedRing()
         #expect(ring.test_hasDelayLine == false)
-        // A zero ask must not build one either: with no Cast device selected
-        // there is no ring at all, and an undelayed leg is today's byte path.
+        // A zero ask builds the line, so a later small grow has captured
+        // audio to replay, and a line at 0 is still the byte path.
+        // Turns red if a zero request stops building the line, or a line at zero changes a byte.
         ring.setDelayMs(0)
-        #expect(ring.test_hasDelayLine == false)
+        #expect(ring.test_hasDelayLine == true)
 
         let block = tone(frames: 882)
         ring.push(block)
         #expect(ring.render(frames: 882) == block)
         #expect(ring.stats == CastFeedStats(
-            achievedDelayMs: 0, droppedBlocks: 0, droppedLockBusy: 0,
+            achievedDelayMs: 0, droppedBlocks: 0,
             underrunFrames: 0, feedResets: 0,
             peakDBFS: dbfs(amplitude: 1000), writes: 1))
     }
@@ -94,6 +95,34 @@ import Testing
         #expect(rendered.count == 264_600)
         #expect(rendered[0..<220_500].allSatisfy { $0 == 0 })
         #expect(rendered[220_500...].allSatisfy { $0 == 1000 })
+    }
+
+    /// A share grow of up to `feedGateBandMs` replays audio the line already
+    /// captured behind the crossfade; a larger one inserts its zeros.
+    /// Turns red if `CastFeedRing` builds its line without the `feedGateBandMs` crossfaded-grow limit, so a 50 ms share grow inserts silence, or a 150 ms one stops inserting it.
+    @Test func aShareGrowInsideTheGateBandReplaysAndALargerOneInsertsSilence() {
+        let ring = CastFeedRing()
+        ring.setDelayMs(1000)
+        for _ in 0..<100 {
+            ring.push(tone(frames: 882))
+            _ = ring.render(frames: 882)
+        }
+
+        ring.setDelayMs(1050)
+        var small: [Int16] = []
+        for _ in 0..<10 {
+            ring.push(tone(frames: 882))
+            small += frameValues(ring.render(frames: 882))
+        }
+        #expect(!small.contains(0))
+
+        ring.setDelayMs(1200)
+        var large: [Int16] = []
+        for _ in 0..<20 {
+            ring.push(tone(frames: 882))
+            large += frameValues(ring.render(frames: 882))
+        }
+        #expect(large.filter { $0 == 0 }.count == 6_615)
     }
 
     // MARK: - The reset()-on-GET reconciliation
@@ -134,6 +163,80 @@ import Testing
         #expect(stats.peakDBFS == silentDBFS, "an invented block is silence, and reads as silence")
     }
 
+    /// 512 frames of a running ramp: frame k of the stream carries k, on both
+    /// channels, so a lost, repeated or misplaced frame shows in the values.
+    private static func ramp(block: Int) -> Data {
+        var out = Data(count: 512 * 4)
+        out.withUnsafeMutableBytes { raw in
+            let samples = raw.bindMemory(to: Int16.self)
+            for frame in 0..<512 {
+                let value = Int16(truncatingIfNeeded: block * 512 + frame)
+                samples[frame * 2] = value
+                samples[frame * 2 + 1] = value
+            }
+        }
+        return out
+    }
+
+    /// A consumer holding the ring's lock for the producer's whole run costs
+    /// it nothing, and a producer and consumer on two threads carry the ramp
+    /// through about 3.7 wraps of the ring intact.
+    /// Turns red if `push` takes the consumer lock again, or the counters mis-address a wrap.
+    @Test func theProducerNeverWaitsOnTheConsumerLockAndCarriesTheRampAcrossWraps() {
+        let ring = CastFeedRing()
+        let firstRun = 160
+        let done = DispatchSemaphore(value: 0)
+        var finished = DispatchTimeoutResult.timedOut
+        ring.test_withLockHeld {
+            // Own threads, not the global queue: a loaded suite can leave a
+            // global-queue block unstarted past the 5 s, which reads as a wait.
+            Thread {
+                for block in 0..<firstRun { ring.push(Self.ramp(block: block)) }
+                done.signal()
+            }.start()
+            finished = done.wait(timeout: .now() + 5)
+        }
+        #expect(finished == .success)
+        #expect(ring.stats.droppedBlocks == 0)
+        #expect(ring.stats.writes == firstRun)
+        let first = frameValues(ring.render(frames: firstRun * 512))
+        #expect(first == (0..<(firstRun * 512)).map { Int16(truncatingIfNeeded: $0) })
+
+        let secondRun = 640
+        Thread {
+            for block in firstRun..<(firstRun + secondRun) {
+                while (ring.bufferedFrames ?? 0) > 44_100 { usleep(200) }
+                ring.push(Self.ramp(block: block))
+            }
+        }.start()
+        var second: [Int16] = []
+        let deadline = Date().addingTimeInterval(10)
+        while second.count < secondRun * 512, Date() < deadline {
+            let n = ring.bufferedFrames ?? 0
+            if n > 0 { second += frameValues(ring.render(frames: n)) }
+        }
+        #expect(second == ((firstRun * 512)..<((firstRun + secondRun) * 512)).map { Int16(truncatingIfNeeded: $0) })
+        #expect(ring.stats.droppedBlocks == 0)
+    }
+
+    /// Turns red if `push` stops counting the block its failed
+    /// `producerLock.try()` throws away, writes it anyway, or a later push
+    /// stops landing.
+    @Test func aPushRefusedByTheProducerLockIsCountedAndWritesNothing() {
+        let ring = CastFeedRing()
+        let block = tone(frames: 882)
+        ring.test_withProducerLockHeld {
+            DispatchQueue.global().sync { ring.push(block) }
+        }
+        #expect(ring.stats.droppedBlocks == 1)
+        #expect(ring.stats.writes == 0)
+        #expect((ring.bufferedFrames ?? 0) == 0)
+
+        ring.push(block)
+        #expect(ring.stats.droppedBlocks == 1)
+        #expect(ring.stats.writes == 1)
+    }
+
     // MARK: - Was there SOUND in what the server served?
 
     /// The counters cannot answer it. `underrunFrames` only sees frames the
@@ -172,6 +275,93 @@ import Testing
 
     @Test func aFeedNobodyPushedToCountsNoArrivals() {
         #expect(CastFeedRing().stats.writes == 0)
+    }
+
+    // MARK: - The standing queue
+
+    /// A fresh GET's ring refills before it plays, the render that ends the
+    /// refill trims the backlog to the standing queue, and a short render
+    /// starts the refill again.
+    /// Turns red if `render` takes audio while refilling, trims the backlog to anything but the standing queue, or keeps taking after a short render.
+    @Test func aStandingQueueRefillsBeforeItPlaysAndTrimsToItsDepth() {
+        let ring = CastFeedRing(standingQueueMs: 80)
+        ring.reset()
+        ring.push(tone(frames: 882))
+        // The prime: refilling, so it takes nothing and the block stays queued.
+        #expect(ring.render(frames: 44_100).allSatisfy { $0 == 0 })
+        #expect(ring.stats.underrunFrames == 44_100)
+        #expect(ring.bufferedFrames == 882)
+
+        // About 520 ms queued: the oldest audio goes, and exactly the standing
+        // queue stays behind the block served.
+        for _ in 0..<25 { ring.push(tone(frames: 882)) }
+        #expect(frameValues(ring.render(frames: 882)).allSatisfy { $0 == 1000 })
+        #expect(ring.timing.queuedMs == 80)
+
+        // Asked for more than is queued: the real head, a silent tail, and the
+        // next render refills instead of playing the one block that arrives.
+        let short = frameValues(ring.render(frames: 4_410))
+        #expect(short[..<3_528].allSatisfy { $0 == 1000 })
+        #expect(short[3_528...].allSatisfy { $0 == 0 })
+        ring.push(tone(frames: 882))
+        #expect(ring.render(frames: 882).allSatisfy { $0 == 0 })
+    }
+
+    /// The live shape: a 512-frame tap block against an 882-frame pacing tick
+    /// for 60 s, after 1 s of renders with nothing pushed, with one block lost
+    /// every 10 s. Each loss shortens the standing queue instead of reaching
+    /// the receiver as a gap.
+    /// Turns red if `render` stops holding the standing queue: at `standingQueueMs` 0 each skipped push adds about 512 underrun frames.
+    @Test func aStandingQueueAbsorbsALostBlockEveryTenSeconds() throws {
+        let ring = CastFeedRing(standingQueueMs: 80)
+        for _ in 0..<50 { _ = ring.render(frames: 882) }
+
+        let block = tone(frames: 512)
+        let end = 60 * 44_100
+        var nextPush = 0
+        var nextRender = 0
+        var nextSkip = 10 * 44_100
+        var underrunAtFirstAudio: Int?
+        while nextPush < end || nextRender < end {
+            if nextPush <= nextRender, nextPush < end {
+                if nextPush >= nextSkip { nextSkip += 10 * 44_100 } else { ring.push(block) }
+                nextPush += 512
+            } else {
+                let out = ring.render(frames: 882)
+                if underrunAtFirstAudio == nil, out.contains(where: { $0 != 0 }) {
+                    underrunAtFirstAudio = ring.stats.underrunFrames
+                }
+                nextRender += 882
+            }
+        }
+        let atFirstAudio = try #require(underrunAtFirstAudio, "the refill never ended")
+        #expect(ring.stats.underrunFrames == atFirstAudio)
+    }
+
+    // MARK: - The feed gate
+
+    /// A closed gate holds the leg silent without touching its level, opening
+    /// it fades in through the level ramp, and a GET while it is closed starts
+    /// silent.
+    /// Turns red if the gate stops zeroing the output, opens with a step instead of the ramp, or `reset()` restarts a closed leg at its level.
+    @Test func aClosedFeedGateServesSilenceAndOpensThroughTheRamp() {
+        let ring = CastFeedRing()
+        ring.setTargetGain(0.5)
+        ring.setFeedGate(open: false)
+        for _ in 0..<3 { ring.push(tone(frames: 882)) }
+        _ = ring.render(frames: 882)                    // the ramp down
+        #expect(ring.render(frames: 882).allSatisfy { $0 == 0 })
+        #expect(ring.gainTarget == 0.5, "the gate never rewrites the level")
+
+        ring.setFeedGate(open: true)
+        let opening = frameValues(ring.render(frames: 882))
+        #expect(zip(opening, opening.dropFirst()).allSatisfy { $0 <= $1 }, "never decreasing")
+        #expect(opening.last == 500)
+
+        ring.setFeedGate(open: false)
+        ring.reset()
+        ring.push(tone(frames: 882))
+        #expect(ring.render(frames: 882).allSatisfy { $0 == 0 })
     }
 
     // MARK: - Where the time goes
@@ -248,6 +438,63 @@ import Testing
         #expect(ring.stats.writes == 1)
     }
 
+    // MARK: - The feed rate
+
+    /// At 100 ppm a render of 882 frames reads 882.0882 captured frames, the
+    /// fraction carried from one render to the next.
+    /// Turns red if the rate stops reaching the render, the resampler restarts at each render (about 2,000 frames off), or a render rounds the rate to whole frames instead of carrying the fraction (90 frames off).
+    @Test func aFeedRateConsumesItsShareOfCapturedFramesExactlyOverALongRun() {
+        let ring = CastFeedRing()
+        ring.setRatePpm(100)
+        for _ in 0..<50 { ring.push(tone(frames: 882)) }
+        for _ in 0..<1_000 {
+            ring.push(tone(frames: 882))
+            _ = ring.render(frames: 882)
+        }
+        #expect(ring.bufferedFrames == 44_010)
+        #expect(ring.stats.underrunFrames == 0)
+    }
+
+    /// A rate of 0 is the plain copy whether or not it was ever set, and a GET
+    /// takes a ring that once had a rate back to it.
+    /// Turns red if a rate of 0 sends the feed through the resampler (its primed frames leave a 2-frame silent tail), or `reset()` leaves a ring that once had a rate on the resampler.
+    @Test func aFeedRateOfZeroIsTheByteForBytePathAndAGETReturnsToIt() {
+        let untouched = CastFeedRing()
+        let zero = CastFeedRing()
+        zero.setRatePpm(0)
+        for ring in [untouched, zero] {
+            for block in 0..<3 { ring.push(Self.ramp(block: block)) }
+        }
+        let first = Self.ramp(block: 0) + Self.ramp(block: 1) + Self.ramp(block: 2)
+        #expect(untouched.render(frames: 1_536) == first)
+        #expect(zero.render(frames: 1_536) == first)
+        #expect(zero.stats.underrunFrames == 0)
+
+        let regot = CastFeedRing()
+        regot.setRatePpm(50)
+        for block in 0..<3 { regot.push(Self.ramp(block: block)) }
+        _ = regot.render(frames: 882)
+        regot.reset()
+        regot.setRatePpm(0)
+        for block in 3..<6 { regot.push(Self.ramp(block: block)) }
+        #expect(regot.render(frames: 1_536) == Self.ramp(block: 3) + Self.ramp(block: 4) + Self.ramp(block: 5))
+    }
+
+    /// A faster rate that would read the ring below its standing queue runs
+    /// at 1 instead, so the queue holds and nothing underruns past the refill.
+    /// Turns red if a rate above 1 is applied when it would take the ring below its standing queue (3,262 left), or the rate is ignored (3,528 left).
+    @Test func aFasterFeedRateNeverTakesTheStandingQueue() {
+        let ring = CastFeedRing(standingQueueMs: 80)
+        ring.setRatePpm(100)
+        ring.reset()
+        for _ in 0..<3_005 {
+            ring.push(tone(frames: 882))
+            _ = ring.render(frames: 882)
+        }
+        #expect(ring.stats.underrunFrames == 3_528)
+        #expect(ring.bufferedFrames == 3_526)
+    }
+
     // MARK: - The controller's and the user's terms compose
 
     @Test func roomDelayAndUserOffsetComposeAndClampAtTheFloor() {
@@ -275,15 +522,18 @@ import Testing
         #expect(appliedDelayMs(manager) == 0)
 
         #expect(manager.castFeedStats(forDevice: "nobody") == nil)
+
+        // Turns red if `setCastRatePpm` stops reaching the session's own ring.
+        manager.setCastRatePpm(40, forDeviceID: "dev1")
+        #expect(manager.test_ring(forDevice: "dev1")?.test_ratePpm == 40)
     }
 
     /// One block through the fan-out so the line adopts the pending value, then
-    /// the ring drained so what comes back is the line's delay on its own.
+    /// the line's applied delay on its own, without the queued audio.
     /// Both reads are `queue`-synchronous, so they also flush the setters.
     private func appliedDelayMs(_ manager: CastOutputManager) -> Int? {
         _ = manager.castFeedStats(forDevice: "dev1")
         manager.feed.write(pcm: tone(frames: 882), pts: timespec(tv_sec: 0, tv_nsec: 0))
-        _ = manager.test_ring(forDevice: "dev1")?.render(frames: 88_200)
-        return manager.castFeedStats(forDevice: "dev1")?.achievedDelayMs
+        return manager.test_ring(forDevice: "dev1")?.timing.delayLineMs
     }
 }

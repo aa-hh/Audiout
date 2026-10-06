@@ -676,7 +676,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// the AirPlay start buffer cannot be fed early enough to meet it, so the
     /// room waits for the speaker instead (owner's call, 2026-09-26:
     /// delay-to-worst across every transport). A high-water mark while it
-    /// stands, like the Cast term: a latency that comes back DOWN leaves it
+    /// stands: a latency that comes back DOWN leaves it
     /// where it is, because every move of `R` is one gap for the whole house.
     /// Derived by ``updateBTRoomTermLocked()``; on `stateQueue`.
     var btRoomTermMs: Int?
@@ -729,6 +729,14 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// absence inert after a reappear/vanish cycle.
     var castAbsenceFlips: [String: Int] = [:]
     var castAbsenceGeneration = 0
+    /// Per Cast id, the pending room move for a by-ear offset change, on
+    /// `stateQueue`; a newer change cancels and replaces it.
+    var pendingCastOffsetSettles: [String: DispatchWorkItem] = [:]
+    /// Per Cast id, the feed-gate open held back by the receiver's Mac hold
+    /// after a settle that moved its share by more than
+    /// ``CastRoomDelay/feedGateBandMs``, on `stateQueue`. While one is pending
+    /// the gate stays shut; a newer settle, a deselect or `stop()` cancels it.
+    var pendingCastFeedGateOpens: [String: DispatchWorkItem] = [:]
     /// Whether the capture fan-out's Cast slot is attached
     /// (`captureControlQueue`), so an already-armed selection change never
     /// re-attaches it.
@@ -1585,8 +1593,8 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     }
 
     /// Runs the backed-off retries (`.processNotYetAudible`, rebind recovery,
-    /// whole-system capture) and the companion audition's preparation, lease and
-    /// stop deadlines. Only the tests pass anything but ``dispatchDelayClock``:
+    /// whole-system capture), the companion audition's preparation, lease and
+    /// stop deadlines, the Cast offset's room-move settle, and a Cast feed gate's held-back open. Only the tests pass anything but ``dispatchDelayClock``:
     /// on the wall clock, a loaded test run let a 0.05 s backoff burn every
     /// rebind attempt before the test's next step, and a 4 s stop deadline
     /// expire mid-restoration.
@@ -2176,8 +2184,8 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             castOutputManager.onVolumeLagChange = { [weak self] id, lag in
                 self?.stateQueue.async { self?.applyCastVolumeLag(id, lag) }
             }
-            castOutputManager.onLeadSample = { [weak self] id, leadMs in
-                self?.stateQueue.async { self?.applyCastLeadSample(id, leadMs) }
+            castOutputManager.onLeadSample = { [weak self] id, leadMs, feedDelayMs, holdMs, generation in
+                self?.stateQueue.async { self?.applyCastLeadSample(id, leadMs, feedDelayMs, holdMs, generation) }
             }
         }
 
@@ -2641,6 +2649,10 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             self.pendingSyncedLocalSettle?.cancel()
             self.pendingSyncedLocalSettle = nil
             self.syncedLocalCoalescedCount = 0
+            for work in self.pendingCastOffsetSettles.values { work.cancel() }
+            self.pendingCastOffsetSettles.removeAll()
+            for work in self.pendingCastFeedGateOpens.values { work.cancel() }
+            self.pendingCastFeedGateOpens.removeAll()
             // The horizon is per-session: a later start() must not inherit a
             // pre-stop transition and arm the re-sync off it.
             self.syncedLocalTransitionTimes.removeAll()
@@ -4068,13 +4080,19 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// playing (ms), or `nil` when no Cast device is contributing a term — the
     /// `max` reduction's absent operand, and the reason every delay above
     /// reduces to today's number by construction rather than by a flag.
-    var _castTermMs: Int? { castRoomDelay.termMs }
+    /// The Mac's own hold in front of every receiver (``CastFeedRing/macHoldMs``)
+    /// is added here, because a receiver's lead does not include it. The policy
+    /// term is the lead adjusted to that fallback hold, so adding it back
+    /// yields the play-out.
+    var _castTermMs: Int? { castRoomDelay.termMs.map { $0 + CastFeedRing.macHoldMs } }
 
-    /// The room-delay policy (brief §4): the settle gate, the high-water mark
-    /// and the `R_max` refusal, kept pure so it can be replayed offline
+    /// The room-delay policy (brief §4): the settle gate, a term that follows
+    /// each settle, tracking of a settled receiver and the `R_max` refusal, kept pure so it can be replayed offline
     /// against recorded lead samples. Confined to `stateQueue`; the only
-    /// writers are ``updateCastRoomDelayLocked()`` (the receiver set moved)
-    /// and ``applyCastLeadSample(_:_:)`` (a receiver measured itself).
+    /// writers are ``updateCastRoomDelayLocked()`` (the receiver set moved,
+    /// and each receiver's advance), ``applyCastLeadSample(_:_:_:_:_:)`` (a
+    /// receiver measured itself) and ``fireCastOffsetSettleLocked(_:)`` (a
+    /// by-ear offset settled into that receiver's advance).
     var castRoomDelay = CastRoomDelay()
 
     /// Seed the initial value without triggering an apply (`makeBackend` only —

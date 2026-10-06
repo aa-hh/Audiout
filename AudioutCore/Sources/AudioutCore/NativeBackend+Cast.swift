@@ -118,6 +118,13 @@ public protocol CastSyncOffsetControlling: AnyObject {
 
 extension NativeBackend: CastSyncOffsetControlling {
 
+    /// How long a by-ear offset has to stay still before the room follows it.
+    /// razor: 0.5 s is the synced-local settle's window; it is longer than the
+    /// drawer's 0.4 s hold-to-repeat delay and the roughly 330 ms between
+    /// deliberate clicks, so one drag moves the room once. Lower it only
+    /// together with the drawer's repeat delay.
+    static let castOffsetSettleSeconds: Double = 0.5
+
     public func castUserOffsetMs(forDevice id: String) -> Double {
         castOffsetLock.withLock { castOffsetsByID[id] ?? 0 }
     }
@@ -134,6 +141,7 @@ extension NativeBackend: CastSyncOffsetControlling {
         }
         do { try castOffsetStore?.save(all) } catch { StoreRecovery.noteWriteFailure(error) }
         pushCastUserOffset(value, forDevice: id)
+        scheduleCastOffsetSettle(forDevice: id)
     }
 
     public func clearCastUserOffset(forDevice id: String) {
@@ -143,17 +151,44 @@ extension NativeBackend: CastSyncOffsetControlling {
         }
         do { try castOffsetStore?.save(all) } catch { StoreRecovery.noteWriteFailure(error) }
         pushCastUserOffset(0, forDevice: id)
+        scheduleCastOffsetSettle(forDevice: id)
     }
 
     /// The one write onto the live feed. The session manager owns the per-device
     /// delay line and applies `max(0, roomDelay + userOffset)`, so this term is
     /// stored beside the controller's automatic one rather than competing with
-    /// it — writing the offset never disturbs the room delay, and vice versa.
+    /// it — a negative offset past the receiver's own share raises the room
+    /// once it has been still for ``castOffsetSettleSeconds``.
     /// An id with no session is ignored there (the `setLevel` posture), which is
     /// why an unarmed receiver needs no guard here and picks its value up from
     /// the arm instead.
     private func pushCastUserOffset(_ ms: Double, forDevice id: String) {
         castOutputManager?.setCastUserOffsetMs(Int(ms), forDeviceID: id)
+    }
+
+    /// Re-arm this receiver's room-move settle: a newer offset change cancels
+    /// the pending one. Called on the main thread, so it hops onto
+    /// `stateQueue` asynchronously and never with `stateQueue.sync`.
+    private func scheduleCastOffsetSettle(forDevice id: String) {
+        stateQueue.async { [weak self] in
+            guard let self else { return }
+            self.pendingCastOffsetSettles.removeValue(forKey: id)?.cancel()
+            let work = DispatchWorkItem { [weak self] in self?.fireCastOffsetSettleLocked(id) }
+            self.pendingCastOffsetSettles[id] = work
+            self.delayClock(Self.castOffsetSettleSeconds, self.stateQueue, work)
+        }
+    }
+
+    /// The offset has been still for ``castOffsetSettleSeconds``: apply its
+    /// latest value as the receiver's advance, and move the room only if the
+    /// room actually moved.
+    private func fireCastOffsetSettleLocked(_ id: String) {   // on stateQueue
+        pendingCastOffsetSettles[id] = nil
+        let offset = castOffsetLock.withLock { castOffsetsByID[id] ?? 0 }
+        let before = roomDelayLocked()
+        if castRoomDelay.setAdvanceMs(-Int(offset), forID: id), roomDelayLocked() != before {
+            roomDelayChangedLocked(cause: "cast_user_offset")
+        }
     }
 
     /// Re-push every armed receiver's stored offset — the Cast twin of the

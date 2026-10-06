@@ -1611,8 +1611,8 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     //
     // Replaces the old single whole-system RMS fanned identically to every device.
     // Three real sources now feed the meters, all through the same `BackendEvent`
-    // channel, all popover-scoped (gated on `meteringActive`, flipped by
-    // `setMeteringActive`):
+    // channel, all gated on `levelsFlowing` (the popover's `setMeteringActive`
+    // or the Touch Bar's `setDeviceLevelsWanted`):
     //   - Per-device `.level` = MAX(the whole-system-tap RMS iff the device is a
     //     Selected Device + unmuted, the loudest PRE-volume SOURCE level among the
     //     apps `.device`-routed to it). A device fed by both shows the larger
@@ -1624,11 +1624,19 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     //       `.currentDevice` -> `localPlaybackEngine.onAppLevel` (pre-volume, raw)
     //       `.noRedirect`    -> `meteringCapture` (a dedicated `.unmuted` tap)
 
-    /// Whether a meter is currently being shown (popover open). Gates every
-    /// `.level`/`.appLevel` emission and the metering-only tap lifecycle;
-    /// forwarded to `captureCoordinator`/`routeMixer`/`localPlaybackEngine` (each
-    /// gates its own RMS pass on it). Confined to `stateQueue`.
+    /// Whether a meter is currently being shown (popover open). Gates the
+    /// metering-only tap lifecycle, and with ``deviceLevelsWanted`` every
+    /// `.level`/`.appLevel` emission (see ``levelsFlowing``). Confined to `stateQueue`.
     var meteringActive = false
+
+    /// `setDeviceLevelsWanted`: the app's Touch Bar wants `.level` while the
+    /// popover is closed. Starts no metering-only tap. Confined to `stateQueue`.
+    var deviceLevelsWanted = false
+
+    /// Either reason to compute RMS and emit levels; forwarded to
+    /// `captureCoordinator`/`routeMixer`/`leveledInjector`/`localPlaybackEngine`
+    /// (each gates its own RMS pass on it). On `stateQueue`.
+    var levelsFlowing: Bool { meteringActive || deviceLevelsWanted }
 
     /// The most recent whole-system-tap RMS (stream_id 0) — a device's system
     /// contribution when it is a Selected Device (unmuted). On `stateQueue`.
@@ -2810,6 +2818,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // Metering (T3): a later start() re-decides from a clean slate — no
             // stale system/stream RMS, metering off, no metering-only targets.
             self.meteringActive = false
+            self.deviceLevelsWanted = false
             self.latestSystemRMS = 0
             self.latestAppLevel.removeAll()
             self.lastExcludedBundleIDs.removeAll()
@@ -4025,6 +4034,19 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
 
     public var startBufferMs: Int {
         stateQueue.sync { _startBufferMs }
+    }
+
+    /// How long, in milliseconds, sound takes to reach the room when a slow
+    /// output (a Cast receiver, a high-latency Bluetooth speaker) has pushed the
+    /// room delay past the normal start buffer; `nil` when nothing is slow.
+    /// The Touch Bar pulses its play button for this long after a start or stop.
+    /// Answers on `stateQueue`, never blocking the caller: a main-thread
+    /// `stateQueue.sync` freezes the app while coreaudiod is slow.
+    public func slowOutputDelayMs(_ reply: @escaping @Sendable (Int?) -> Void) {
+        stateQueue.async {
+            let room = self.roomDelayLocked()
+            reply(room > self._startBufferMs ? room : nil)
+        }
     }
 
     /// `R` — the room delay (ms): the longest intrinsic delay any active

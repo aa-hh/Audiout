@@ -5263,6 +5263,66 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         #expect(!(capture.meteringActive), "stop() must leave metering inactive")
     }
 
+    /// The Touch Bar pulses its play button for `slowOutputDelayMs` after a
+    /// start or stop. Turns red if a room with nothing slow reports a delay (the
+    /// button would pulse on every play with plain AirPlay), or if a slow
+    /// output's raised room delay stops being reported (no pulse for Cast).
+    @Test func slowOutputDelayOnlyWhenAnOutputRaisesTheRoomDelay() async {
+        let (backend, _, _) = makeBackend()
+        let read = { await withCheckedContinuation { c in backend.slowOutputDelayMs { c.resume(returning: $0) } } }
+        #expect(await read() == nil)
+        backend.stateQueue.sync { backend.btRoomTermMs = 5500 }
+        #expect(await read() == 5500)
+    }
+
+    /// The Touch Bar's play/pause glyph reads `.level`, and the popover gate
+    /// keeps `.level` off whenever the popover is closed, which is nearly always
+    /// while someone uses the Touch Bar. `setDeviceLevelsWanted(true)` must keep
+    /// the per-device level flowing with the popover closed, and must NOT start
+    /// a metering-only per-app tap, which only the popover's app rows need.
+    /// Turns red if a closed popover again silences `.level` for the Touch Bar
+    /// (the glyph sticks on play while music plays), or if the Touch Bar's
+    /// request starts per-app metering taps for the whole session.
+    @Test func deviceLevelsFlowWithPopoverClosedWhenWanted() async {
+        let registry = TapRegistry()
+        let metering = registeringPerAppCapture(muteBehavior: .unmuted, bundleIDs: ["com.plain"], into: registry)
+        let (backend, engine, discovery) = makeBackend(injectedMeteringCapture: metering)
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:56", name: "Touch Bar Glyph")
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+        backend.setOutputSet([device.id])
+        await pollUntil { backend.devices.first { $0.id == device.id }?.isSelected == true }
+        backend.updateAppRoutes([AppRoute(bundleID: "com.plain", displayName: "Plain")])
+
+        let (levels, task) = subscribeLevels(backend); defer { task.cancel() }
+        try? await Task.sleep(nanoseconds: 20_000_000)
+
+        (backend as MeteringControlling).setDeviceLevelsWanted(true)
+        // Keep delivering, as the real tap does: `noteSystemRMS` drops a sample
+        // that meets the drain holding its lock.
+        await pollUntil {
+            capture.fireLevelIfActive(0.4)
+            return (levels.lastDeviceLevel(device.id) ?? 0) > 0
+        }
+        #expect(abs((levels.lastDeviceLevel(device.id) ?? 0) - 0.4) <= 0.001,
+                "with the popover closed, the Touch Bar's request must keep .level flowing")
+        try? await Task.sleep(nanoseconds: 50_000_000)   // a wrongly started tap would land by now
+        if case .idle = metering.state(for: "com.plain") {} else {
+            Issue.record("the Touch Bar's request must not start a metering-only per-app tap")
+        }
+
+        // Withdrawing it with the popover still closed switches the RMS work off.
+        (backend as MeteringControlling).setDeviceLevelsWanted(false)
+        await pollUntil { !capture.meteringActive }
+        #expect(!capture.meteringActive, "levels must stop once nobody wants them")
+    }
+
     /// D3: a burst of rapid capture-buffer RMS callbacks (far above the ~25 Hz
     /// display cadence) must be coalesced per device — not fanned out 1:1 as
     /// `.level` events — while still guaranteeing the burst's final value lands

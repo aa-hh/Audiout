@@ -383,7 +383,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// The app's device model, kept as a pure function of backend events. Keyed
     /// by `Device.id`. T-U2 reads this to build rows; for now it just backs the
     /// placeholder master-volume value the status symbol tracks.
-    private var devicesByID: [String: Device] = [:]
+    private var devicesByID: [String: Device] = [:] {
+        // The Touch Bar play button pulses while any speaker is still starting
+        // (a Cast receiver loading). The bar drops repeats of the same value.
+        didSet {
+            if hasTouchBar {
+                touchBarFullBar.setAwaitingPlayback(devicesByID.values.hasDeviceStillConnecting)
+            }
+        }
+    }
 
     /// The live per-device CONFIRMED per-app streaming map (`BackendEvent
     /// .routedApps`), mirroring `PopoverController`'s own `liveRoutedAppNames`
@@ -488,6 +496,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// whole bar means every control on it is one we drive.
     private lazy var touchBarFullBar: TouchBarFullBar = {
         let bar = TouchBarFullBar()
+        bar.slowOutputDelay = { [weak self] reply in
+            guard let native = self?.backend as? NativeBackend else { return reply(nil) }
+            native.slowOutputDelayMs { ms in
+                DispatchQueue.main.async { reply(ms.map { TimeInterval($0) / 1000 }) }
+            }
+        }
+        bar.onPresentedChange = { [weak self] presented in
+            (self?.backend as? MeteringControlling)?.setDeviceLevelsWanted(presented)
+        }
         bar.onVolumeStep = { [weak self] up in
             guard let self else { return }
             // Same step feel as the volume keys — one shared definition, so the

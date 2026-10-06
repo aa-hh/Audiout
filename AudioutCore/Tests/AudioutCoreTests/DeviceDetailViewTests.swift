@@ -37,6 +37,7 @@ import AppKit
         let detail = DeviceDetailViewController(groupController: controller,
             settings: AppSettings(defaults: isolation.isolatedDefaults))
         detail.speakerLibrary = library
+        detail.cantBeFoundIDs = ["bt"]
         detail.loadViewIfNeeded()
         detail.show(record: try #require(library.record(for: "bt")))
         #expect(detail.test_subtitleText == "Bluetooth Speaker \u{00B7} Can\u{2019}t be found")
@@ -78,7 +79,7 @@ import AppKit
         return (detail, library)
     }
 
-    // Dropping the can't-be-found branch of the caption, or its failure glyph, turns it red.
+    // Dropping the can't-be-found branch of the caption, or its glyph, or showing "Can't be found" for a speaker outside the host's list, turns it red.
     @Test func theCaptionReadsKindAndStatusThisMacOrCantBeFound() throws {
         let (detail, library) = try makeLibraryPane()
         detail.show(record: try #require(library.record(for: "move")))
@@ -87,6 +88,10 @@ import AppKit
         detail.show(record: try #require(library.record(for: "bedroom")))
         #expect(detail.test_subtitleText == "Bluetooth Speaker \u{00B7} Not connected")
         detail.show(record: try #require(library.record(for: "study")))
+        #expect(detail.test_subtitleText == "AirPlay Speaker \u{00B7} Unavailable")
+        #expect(!detail.test_subtitleGlyphShown)
+        detail.cantBeFoundIDs = ["study"]
+        detail.show(record: try #require(library.record(for: "study")))
         #expect(detail.test_subtitleText == "AirPlay Speaker \u{00B7} Can\u{2019}t be found")
         #expect(detail.test_subtitleGlyphShown)
         detail.show(record: try #require(library.record(for: "mac")))
@@ -94,7 +99,7 @@ import AppKit
         #expect(!detail.test_subtitleGlyphShown)
     }
 
-    // Showing the editor for a speaker the Mac can't find, skipping its stored tone, or losing Forget turns it red.
+    // Showing the editor for a speaker the Mac can't find, skipping its stored tone, losing Forget, or offering Forget before the host's list holds the speaker turns it red.
     @Test func aSpeakerThatCantBeFoundShowsItsStoredToneAndForget() throws {
         let (detail, library) = try makeLibraryPane()
         var reads: [String] = []
@@ -102,17 +107,27 @@ import AppKit
             reads.append(id)
             return DeviceEQ(bassDB: 2)
         }
+        var forgotten: [String] = []
+        detail.onForget = { forgotten.append($0) }
+        detail.show(record: try #require(library.record(for: "study")))
+        #expect(!detail.test_eqSectionShown)
+        #expect(detail.test_eqHeadingSpokenValue == "Bass 2 dB")
+        #expect(detail.test_keptNoteText == "Changes will be applied when the speaker next connects.")
+        #expect(!detail.test_forgetButtonShown, "the list has not named it yet")
+        detail.test_clickForget()
+        #expect(forgotten.isEmpty)
+
+        reads.removeAll()
+        detail.cantBeFoundIDs = ["study"]
         detail.show(record: try #require(library.record(for: "study")))
         #expect(!detail.test_eqSectionShown)
         #expect(detail.test_eqHeadingSpokenValue == "Bass 2 dB")
         #expect(detail.test_eqMarkIsEngaged)
         #expect(!detail.test_resetShown)
-        #expect(detail.test_keptNoteText == "Changes will be applied when the speaker is found again.")
+        #expect(detail.test_keptNoteText == "Changes will be applied when the speaker next connects.")
         #expect(detail.test_forgetButtonShown)
         #expect(detail.test_forgetButtonTitle == "Forget \u{201C}Study\u{201D}\u{2026}")
         #expect(reads == ["study"], "read once per show")
-        var forgotten: [String] = []
-        detail.onForget = { forgotten.append($0) }
         detail.test_clickForget()
         #expect(forgotten == ["study"])
 
@@ -133,11 +148,11 @@ import AppKit
     @Test func showInMixerCaptionFollowsTheValueAndLeavesThisMac() throws {
         let (detail, library) = try makeLibraryPane()
         detail.show(record: try #require(library.record(for: "move")))
-        #expect(detail.test_showInMixerCaption == "Listed while it\u{2019}s on the network.")
+        #expect(detail.test_showInMixerCaption == "Shown while your Mac can reach it.")
         detail.test_changeVisibility(.always)
-        #expect(detail.test_showInMixerCaption == "Listed even while it\u{2019}s unavailable.")
+        #expect(detail.test_showInMixerCaption == "Shown even when your Mac can\u{2019}t reach it.")
         detail.test_changeVisibility(.hideWhenNotInUse)
-        #expect(detail.test_showInMixerCaption == "Listed only while it plays.")
+        #expect(detail.test_showInMixerCaption == "Shown only while it\u{2019}s in use.")
         detail.show(record: try #require(library.record(for: "mac")))
         #expect(!detail.test_showInMixerRowShown)
     }
@@ -153,7 +168,7 @@ import AppKit
         detail.view.layoutSubtreeIfNeeded()
         #expect(detail.test_eqSectionShown)
         #expect(detail.test_eqEditor.test_bypassNoteText
-                == "Changes will be applied when the speaker is back.")
+                == "Changes will be applied when the speaker next connects.")
         var writes = 0
         detail.onSetEQ = { _, _, _ in writes += 1 }
         detail.test_eqEditor.test_dragBass(to: 2)

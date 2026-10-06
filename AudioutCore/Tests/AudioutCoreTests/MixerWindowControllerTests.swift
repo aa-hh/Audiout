@@ -43,10 +43,10 @@ import AppKit
         #expect(window.test_isShowingSpeakersPage)
         #expect(window.test_sidebar.test_clickContextMenuItem("Hide from Mixer", for: .device(id: "bt")))
         #expect(library.visibility(for: "bt") == .hideWhenNotInUse)
-        #expect(window.test_sidebar.test_deviceRowIDs(inGroupTitled: "Hidden unless playing") == ["bt"])
+        #expect(window.test_sidebar.test_deviceRowIDs(inGroupTitled: "Hidden unless in use") == ["bt"])
         window.select(.device(id: "bt"))
         #expect(window.test_isShowingDetail)
-        #expect(window.test_detail.test_subtitleText == "Bluetooth Speaker · Can\u{2019}t be found")
+        #expect(window.test_detail.test_subtitleText == "Bluetooth Speaker · Not connected")
         #expect(window.test_pendingSelection == nil)
         let count = window.test_sidebarReloadCount
         library.setVisibility(.always, for: "bt")
@@ -231,27 +231,48 @@ import AppKit
         #expect(window.test_sidebar.test_deviceRowCount == 2, "showing Speakers catches the sidebar up")
     }
 
-    // Turns red when the Speakers page rebuilds for a Bluetooth access or search change while its tab is hidden, or misses either once the tab shows.
+    // Turns red when the Speakers page rebuilds for a Bluetooth access change while its tab is hidden, misses it once the tab shows, the controller stops handing the search's can't-be-found list to the page, the sidebar or the speaker page, or a Bluetooth access change repaints only the Overview so the sidebar keeps its old list.
     @Test func aHiddenSpeakersPageStoresItsStateAndCatchesUpWhenShown() throws {
         let controller = GroupController(backend: MockBackend(fleet: []), store: GroupStore(directory: scratchDir),
             routingStore: RoutingStore(directory: scratchDir),
             settings: AppSettings(defaults: isolatedDefaults), loadPersisted: false)
         try controller.saveGroup(Group(id: "porch", name: "Porch", memberIDs: ["live", "den"], memberVolumes: [:]))
         let library = SpeakerLibraryController(loadPersisted: false)
-        library.update(liveDevices: [Device(id: "live", name: "Live", kind: .sonos)], groups: controller.groups)
+        let live = Device(id: "live", name: "Live", kind: .sonos)
+        library.update(liveDevices: [live, Device(id: "headset", name: "Headset", kind: .bluetooth)],
+                       groups: controller.groups, confirmedUsedIDs: ["headset"])
+        library.update(liveDevices: [live], groups: controller.groups)
         let window = MixerWindowController(groupController: controller,
             settings: AppSettings(defaults: isolatedDefaults), speakerLibrary: library)
         window.setVisibleTab(.scenes)
         let page = window.test_speakersPage
         let before = page.test_rowTitles
 
+        var pending: [() -> Void] = []
+        let search = SpeakerSearch(library: library, schedule: { _, fire in pending.append(fire) })
+        var bluetoothGranted = false
+        search.isBluetoothAccessGranted = { bluetoothGranted }
+        // Filled before it hears the list, so the counts event never fires into another suite's sink.
+        search.pageDidAppear()
+        while !pending.isEmpty { pending.removeFirst()() }
+        search.libraryDidChange()
+        window.speakerSearch = search
         window.setSpeakerBluetoothAccess(SpeakerBluetoothAccessPresentation(status: .unknown, priming: false))
-        window.setSpeakerSearchDone(true)
         #expect(page.test_rowTitles == before, "a hidden page only stores what it is told")
 
         window.setVisibleTab(.speakers)
-        #expect(page.test_rowTitles == ["Bluetooth access is off", "1 speaker can\u{2019}t be found",
+        #expect(page.test_rowTitles == ["1 speaker can\u{2019}t be found", "Bluetooth access is off",
                                         "Pair Bluetooth speaker\u{2026}"])
+        #expect(window.test_sidebar.test_contextMenuItems(for: .device(id: "den"))
+                    .contains("Forget \u{201C}Missing speaker\u{201D}\u{2026}"))
+        window.select(.device(id: "den"))
+        #expect(window.test_detail.test_subtitleText == "Can\u{2019}t be found")
+
+        let forgetHeadset = "Forget \u{201C}Headset\u{201D}\u{2026}"
+        #expect(!window.test_sidebar.test_contextMenuItems(for: .device(id: "headset")).contains(forgetHeadset))
+        bluetoothGranted = true
+        window.setSpeakerBluetoothAccess(SpeakerBluetoothAccessPresentation(status: .granted, priming: false))
+        #expect(window.test_sidebar.test_contextMenuItems(for: .device(id: "headset")).contains(forgetHeadset))
     }
 
     // MARK: Sidebar structure (the fleet, beside the Speakers page)
@@ -259,7 +280,7 @@ import AppKit
     // Turns red when the sidebar regains a scenes row or the split stops starting on the Speakers page.
     @Test func sidebarIsTheFleetBesideTheSpeakersPage() async throws {
         let (window, _, _) = try await makeWindow()
-        #expect(window.test_sidebar.test_sectionTitles == ["System Audio", "Speakers", "In the Mixer"],
+        #expect(window.test_sidebar.test_sectionTitles == ["System Audio", "Speakers", "Shown in Mixer"],
                 "scenes live on their own screen; the speakers sit in their visibility group")
         #expect(window.test_isShowingSpeakersPage, "with nothing selected the split shows the Speakers page")
         #expect(window.test_sidebar.test_deviceRowCount == 7)
@@ -283,7 +304,7 @@ import AppKit
         _ = try makeGroup1(controller)
         window.update(devices: backend.devices)
         #expect(!sidebarItem.isCollapsed, "a refresh restores a collapsed sidebar")
-        #expect(window.test_sidebar.test_sectionTitles == ["System Audio", "Speakers", "In the Mixer"],
+        #expect(window.test_sidebar.test_sectionTitles == ["System Audio", "Speakers", "Shown in Mixer"],
                 "and it still lists every section")
     }
 
@@ -323,7 +344,7 @@ import AppKit
         let saved = try makeGroup1(controller)
         window.update(devices: backend.devices)
 
-        #expect(window.test_sidebar.test_sectionTitles == ["System Audio", "Speakers", "In the Mixer"])
+        #expect(window.test_sidebar.test_sectionTitles == ["System Audio", "Speakers", "Shown in Mixer"])
         #expect(window.test_overview.test_cardGroupIDs == [saved.id])
         #expect(!(window.test_overview.test_isShowingEmptyCanvas))
         #expect(window.test_overview.test_chipCount(forCard: saved.id) == saved.memberIDs.count,
@@ -442,7 +463,7 @@ import AppKit
         #expect(window.test_isShowingScenesOverview, "⌘[ leaves the editor")
     }
 
-    // Turns red when a deep link to the Speakers plate stops showing the Speakers page or stops lighting its row.
+    // Turns red when a deep link to the Overview plate stops showing the Overview or stops lighting its row.
     @Test func selectingTheSpeakersPlateShowsTheSpeakersPage() async throws {
         let (window, _, _) = try await makeWindow()
         window.select(.device(id: "office"))
@@ -549,7 +570,7 @@ import AppKit
                 "an icon override IS the rendered sidebar icon, so a same-id/name/kind/isAvailable change must still reload")
     }
 
-    // Turns red when the sidebar's reload gate reads availability from discovery instead of the presentation record, so a Main Audio member whose discovery entry lapsed keeps a stale dot when it connects or drops.
+    // Turns red when the sidebar's reload gate reads availability from discovery instead of the presentation record, so a Main Audio member whose discovery entry lapsed keeps a stale spoken state when it connects or drops.
     @Test func sidebarRepaintsAConnectedSpeakerWhoseDiscoveryLapsed() throws {
         let controller = GroupController(backend: MockBackend(fleet: []), store: GroupStore(directory: scratchDir),
             routingStore: RoutingStore(directory: scratchDir), settings: AppSettings(defaults: isolatedDefaults),
@@ -562,13 +583,14 @@ import AppKit
             settings: AppSettings(defaults: isolatedDefaults), speakerLibrary: library)
         window.test_isVisibleOverride = true
         window.update(devices: [cast])
-        #expect(window.test_sidebar.test_dotState(id: "cast") == .away)
-        let steps: [(ConnectionState, SidebarPresenceDotView.State)] = [(.connected, .found), (.off, .away)]
-        for (state, dot) in steps {
+        let spoken = { window.test_sidebar.test_deviceCell(id: "cast")?.nameLabel.accessibilityLabel() }
+        #expect(spoken() == "Cast, unavailable")
+        let steps: [(ConnectionState, String)] = [(.connected, "Cast"), (.off, "Cast, unavailable")]
+        for (state, label) in steps {
             cast.connectionState = state
             library.update(liveDevices: [cast], groups: [], currentUse: use)
             window.update(devices: [cast])
-            #expect(window.test_sidebar.test_dotState(id: "cast") == dot, "\(state)")
+            #expect(spoken() == label, "\(state)")
         }
     }
 
@@ -1301,7 +1323,7 @@ import AppKit
         #expect(requests == 1, "the scene link asks the surface for the Scenes tab")
     }
 
-    // Turns red when the sidebar stops putting This Mac first or sinks unavailable speakers instead of keeping each in its alphabetical place.
+    // Turns red when the sidebar stops putting This Mac first, or stops listing the reachable speakers by name before the unreachable ones.
     @Test func sidebarIsAlphabeticalWithinItsGroupWithTheMacFirst() async throws {
         let (window, _, backend) = try await makeWindow()
         let devices = backend.devices.map { device -> Device in
@@ -1314,10 +1336,10 @@ import AppKit
         }
         window.update(devices: devices)
 
-        // MacBook Pro Speakers; then Bedroom HomePod, Living Room TV, Mixer,
-        // Move 2, Office, Sonos Move — the two asleep ones keep their places.
-        #expect(window.test_sidebar.test_deviceRowIDs(inGroupTitled: "In the Mixer")
-                == ["local-mac", "homepod-bed", "appletv-lr", "airport-mixer", "sonos-move-2", "office", "sonos-move"])
+        // MacBook Pro Speakers; then Bedroom HomePod, Mixer, Move 2, Sonos
+        // Move; then, under the divider, the two asleep ones: Living Room TV, Office.
+        #expect(window.test_sidebar.test_deviceRowIDs(inGroupTitled: "Shown in Mixer")
+                == ["local-mac", "homepod-bed", "airport-mixer", "sonos-move-2", "sonos-move", "appletv-lr", "office"])
     }
 
     /// `select(_:)` is the deep-link/cross-link entry point (the detail pane's
@@ -1445,18 +1467,46 @@ import AppKit
 
         let den = window.test_makeForgetAlert(ids: ["den"])
         #expect(den.messageText == "Forget \u{201C}Den\u{201D}?")
-        #expect(den.informativeText == "It will be removed from 2 scenes.")
+        #expect(den.informativeText == "It will be removed from 2 scenes. If it turns up again, it comes back to "
+                + "the speaker list, but not to those scenes.")
         #expect(den.buttons.map(\.title) == ["Forget", "Cancel"])
         #expect(den.buttons[0].hasDestructiveAction)
         #expect(den.buttons[1].keyEquivalent == "\r", "Return is Cancel on a destructive sheet")
 
         let attic = window.test_makeForgetAlert(ids: ["attic"])
-        #expect(attic.informativeText == "It will be removed from 1 scene.")
+        #expect(attic.informativeText == "It will be removed from 1 scene. If it turns up again, it comes back to "
+                + "the speaker list, but not to that scene.")
 
         let both = window.test_makeForgetAlert(ids: ["den", "attic"])
         #expect(both.messageText == "Can\u{2019}t forget 2 speakers")
         #expect(both.informativeText == "Delete \u{201C}Porch\u{201D} first: it has no other speaker.")
         #expect(both.buttons.map(\.title) == ["OK"])
+    }
+
+    // Turns red when the Forget confirm for several speakers stops naming them in the sidebar's order, names one with no saved details, stops counting the rest, or drops the sentence about a speaker coming back.
+    @Test func forgetAlertNamesUpToTwoSpeakersAndCountsTheRest() throws {
+        let controller = GroupController(backend: MockBackend(fleet: []), store: GroupStore(directory: scratchDir),
+            routingStore: RoutingStore(directory: scratchDir),
+            settings: AppSettings(defaults: isolatedDefaults), loadPersisted: false)
+        let live = Device(id: "live", name: "Live", kind: .sonos)
+        // The fourth speaker has no saved details: it exists only as a member of Porch, beside a live speaker.
+        try controller.saveGroup(Group(id: "porch", name: "Porch", memberIDs: ["live", "ghost"], memberVolumes: [:]))
+        let named = [Device(id: "c", name: "C", kind: .homePod), Device(id: "a", name: "A", kind: .sonos),
+                     Device(id: "b", name: "B", kind: .bluetooth)]
+        let library = SpeakerLibraryController(loadPersisted: false)
+        library.update(liveDevices: [live] + named, groups: controller.groups, confirmedUsedIDs: ["a", "b", "c"])
+        library.update(liveDevices: [live], groups: controller.groups)
+        let window = MixerWindowController(groupController: controller,
+            settings: AppSettings(defaults: isolatedDefaults), speakerLibrary: library)
+
+        let all = window.test_makeForgetAlert(ids: ["a", "b", "c", "ghost"])
+        #expect(all.messageText == "Forget 4 speakers?")
+        #expect(all.informativeText == "\u{201C}A\u{201D}, \u{201C}B\u{201D} and 2 more will be removed from 1 scene. "
+                + "If one turns up again, it comes back to the speaker list, but not to that scene.")
+
+        let three = window.test_makeForgetAlert(ids: ["a", "b", "c"])
+        #expect(three.informativeText == "\u{201C}A\u{201D}, \u{201C}B\u{201D} and \u{201C}C\u{201D} aren\u{2019}t "
+                + "in any scene. If one turns up again, it comes back to the speaker list.")
     }
 
     // Turns red when confirming Forget leaves the speaker's record or a scene membership behind, or leaves its page showing once it is gone.

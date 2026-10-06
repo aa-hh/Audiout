@@ -15,8 +15,8 @@ import AudioutSharedUI
 /// (`GroupEditorViewController`, pushed in place when a card is opened).
 /// `speakersContentController` is an `NSSplitViewController` whose sidebar
 /// item is a source-list `NSOutlineView` (`SidebarViewController`, the speaker
-/// list) and whose content item is a second host swapped between the Speakers
-/// page (`SpeakersPageViewController`, the sidebar's "Speakers" plate), a
+/// list) and whose content item is a second host swapped between the Overview
+/// (`SpeakersPageViewController`, the sidebar's "Overview" plate), a
 /// speaker's page (`DeviceDetailViewController`) and the whole-mix
 /// `MainOutDetailViewController` (the sidebar's "Main Audio" row). It owns NO
 /// window: the app's `AppSurfaceController` hosts the roots and tells this
@@ -421,19 +421,24 @@ public final class MixerWindowController {
     /// The Speakers page, for the app's Bluetooth access and Pair wiring.
     public var speakersPage: SpeakersPageViewController { speakersPageViewController }
 
-    /// The Speakers page's Bluetooth access row (`nil` hides it). Stored at
-    /// once, painted only while the Speakers tab is on screen;
-    /// `setVisibleTab(_:)` catches a hidden page up.
-    public func setSpeakerBluetoothAccess(_ access: SpeakerBluetoothAccessPresentation?) {
-        speakersPageViewController.setBluetoothAccess(access)
-        reloadSpeakersPageIfShown()
+    /// The app's search: which kinds the Overview may count yet, whether the
+    /// sidebar splits at its dividers, and the only speakers Forget reaches.
+    /// Handed to the Overview and painted like the access row.
+    public var speakerSearch: SpeakerSearch? {
+        didSet {
+            speakersPageViewController.search = speakerSearch
+            reloadSpeakersPageIfShown()
+        }
     }
 
-    /// Whether the app's `SpeakerSearch` has finished, for the Speakers page's
-    /// caption and lost-speaker row. Stored and painted like the access row.
-    public func setSpeakerSearchDone(_ done: Bool) {
-        speakersPageViewController.isSearchDone = done
-        reloadSpeakersPageIfShown()
+    /// The Speakers page's Bluetooth access row (`nil` hides it). Stored at
+    /// once, painted only while the Speakers tab is on screen;
+    /// `setVisibleTab(_:)` catches a hidden page up. The sidebar and speaker
+    /// page repaint too: access decides whether remembered Bluetooth
+    /// speakers are on the search's can't-be-found list.
+    public func setSpeakerBluetoothAccess(_ access: SpeakerBluetoothAccessPresentation?) {
+        speakersPageViewController.setBluetoothAccess(access)
+        refreshSpeakerPresentation()
     }
 
     private func reloadSpeakersPageIfShown() {
@@ -511,6 +516,7 @@ public final class MixerWindowController {
             return
         }
         shownDetailDeviceID = deviceID
+        detailViewController.cantBeFoundIDs = speakerSearch?.cantBeFoundIDs ?? []
         detailViewController.show(record: record)
         swapSpeakers(to: detailViewController)
     }
@@ -554,11 +560,13 @@ public final class MixerWindowController {
 
     // MARK: Forget
 
-    /// Ask before forgetting `ids` (every door hands only speakers the Mac
-    /// can't find). Refuses outright when forgetting would leave a scene with
-    /// no speaker: deleting that scene is the user's call, and deleting a
-    /// scene can move audio, so this flow never does it.
+    /// Ask before forgetting those of `ids` the search lists as can't be
+    /// found; nothing else is ever forgotten. Refuses outright when
+    /// forgetting would leave a scene with no speaker: deleting that scene is
+    /// the user's call, and deleting a scene can move audio, so this flow
+    /// never does it.
     private func requestForget(ids: Set<String>) {
+        let ids = ids.intersection(speakerSearch?.cantBeFoundIDs ?? [])
         guard !ids.isEmpty else { return }
         guard let window = splitViewController.view.window, !HeadlessRuntime.isActive else {
             // No confirmation means no forget; `test_confirmForget(ids:)` is
@@ -618,11 +626,31 @@ public final class MixerWindowController {
             return alert
         }
         alert.messageText = name.map { "Forget \u{201C}\($0)\u{201D}?" } ?? "Forget \(ids.count) speakers?"
-        let subject = name == nil ? "They" : "It"
-        switch affectedScenes(for: ids).count {
-        case 0: alert.informativeText = name == nil ? "They aren\u{2019}t in any scene." : "It isn\u{2019}t in any scene."
-        case 1: alert.informativeText = "\(subject) will be removed from 1 scene."
-        case let m: alert.informativeText = "\(subject) will be removed from \(m) scenes."
+        let m = affectedScenes(for: ids).count
+        let scenes = m == 1 ? "1 scene" : "\(m) scenes"
+        let comesBack = "comes back to the speaker list" + (m == 0 ? "." : ", but not to \(m == 1 ? "that scene" : "those scenes").")
+        if name != nil {
+            let removal = m == 0 ? "It isn\u{2019}t in any scene." : "It will be removed from \(scenes)."
+            alert.informativeText = "\(removal) If it turns up again, it \(comesBack)"
+        } else {
+            // The sidebar's order: Shown in Mixer, then Hidden unless in use, each by name.
+            let named = speakerLibrary.records.filter { ids.contains($0.id) && $0.metadataIsKnown }.sorted {
+                let aHidden = $0.visibility == .hideWhenNotInUse, bHidden = $1.visibility == .hideWhenNotInUse
+                if aHidden != bHidden { return bHidden }
+                let comparison = $0.displayName.localizedStandardCompare($1.displayName)
+                return comparison == .orderedSame ? $0.id < $1.id : comparison == .orderedAscending
+            }.map { "\u{201C}\($0.displayName)\u{201D}" }
+            let parts: [String]
+            if named.count == ids.count, ids.count <= 3 {
+                parts = named
+            } else {
+                let shown = named.prefix(2)
+                parts = shown.isEmpty ? [] : shown + ["\(ids.count - shown.count) more"]
+            }
+            let subject = parts.isEmpty ? "They"
+                : parts.dropLast().joined(separator: ", ") + " and " + parts[parts.count - 1]
+            let removal = m == 0 ? " aren\u{2019}t in any scene." : " will be removed from \(scenes)."
+            alert.informativeText = "\(subject)\(removal) If one turns up again, it \(comesBack)"
         }
         alert.addButton(withTitle: "Forget")
         alert.addButton(withTitle: "Cancel")
@@ -650,12 +678,12 @@ public final class MixerWindowController {
         refreshAll()
     }
 
-    /// Where "Manage speakers…" lands: This Mac's page, else the first speaker
-    /// in the sidebar's order, else the Speakers page.
+    /// Where "Manage speakers…" lands: This Mac's page, else the first
+    /// speaker, alphabetical, Shown in Mixer before Hidden unless in use,
+    /// else the Speakers page.
     public var firstSpeakerSelection: SidebarSelection {
         let records = speakerLibrary.records
         if let mac = records.first(where: \.isLocalDevice) { return .device(id: mac.id) }
-        // The sidebar's order: alphabetical, the "In the Mixer" group first.
         let byName = records.sorted {
             let comparison = $0.displayName.localizedStandardCompare($1.displayName)
             return comparison == .orderedSame ? $0.id < $1.id : comparison == .orderedAscending
@@ -796,6 +824,7 @@ public final class MixerWindowController {
             // Re-render the detail pane from the fresher snapshot; if the shown
             // speaker has since disappeared, fall back to the Speakers page.
             if let id = shownDetailDeviceID, let record = speakerLibrary.record(for: id) {
+                detailViewController.cantBeFoundIDs = speakerSearch?.cantBeFoundIDs ?? []
                 detailViewController.refresh(record: record)
             } else {
                 showDefaultSpeakersContent()
@@ -820,7 +849,9 @@ public final class MixerWindowController {
     private func refreshSidebar() {
         let devices = orderedDevices()
         lastSidebarProjection = sidebarProjection(devices: devices)
-        sidebarViewController.reload(devices: devices, presentationRecords: speakerLibrary.records)
+        sidebarViewController.reload(devices: devices, presentationRecords: speakerLibrary.records,
+                                     cantBeFoundIDs: speakerSearch?.cantBeFoundIDs ?? [],
+                                     splitsUnreachable: speakerSearch?.isEveryKindKnown ?? true)
         test_sidebarReloadCount += 1
     }
 
@@ -836,14 +867,16 @@ public final class MixerWindowController {
         let projection = sidebarProjection(devices: devices)
         guard projection != lastSidebarProjection else { return }
         lastSidebarProjection = projection
-        sidebarViewController.reload(devices: devices, presentationRecords: speakerLibrary.records)
+        sidebarViewController.reload(devices: devices, presentationRecords: speakerLibrary.records,
+                                     cantBeFoundIDs: speakerSearch?.cantBeFoundIDs ?? [],
+                                     splitsUnreachable: speakerSearch?.isEveryKindKnown ?? true)
         test_sidebarReloadCount += 1
     }
 
     /// What the sidebar's cells render (`SidebarViewController`'s
     /// device/group row cell), read from the presentation records the cells
     /// read, so a connection that keeps a speaker available after its
-    /// discovery entry lapsed still repaints its dot and dimming. Named as one
+    /// discovery entry lapsed still moves and repaints its row. Named as one
     /// Equatable value so a reload can be gated on it changing rather than on
     /// the raw model arrays changing.
     private struct SidebarProjection: Equatable {
@@ -855,15 +888,17 @@ public final class MixerWindowController {
             let iconSymbolName: String
             let visibility: SpeakerMixerVisibility?
             let isInUse: Bool
-            let isFound: Bool
+            let isCantBeFound: Bool
         }
         let devices: [DeviceCell]
+        let splitsUnreachable: Bool
     }
 
     private var lastSidebarProjection: SidebarProjection?
 
     private func sidebarProjection(devices: [Device]) -> SidebarProjection {
-        SidebarProjection(
+        let cantBeFoundIDs = speakerSearch?.cantBeFoundIDs ?? []
+        return SidebarProjection(
             devices: devices.map {
                 let record = speakerLibrary.record(for: $0.id)
                 return SidebarProjection.DeviceCell(id: $0.id, name: $0.name, kind: $0.kind,
@@ -871,8 +906,9 @@ public final class MixerWindowController {
                              iconSymbolName: deviceIconController.symbolName(for: $0),
                              visibility: record?.visibility,
                              isInUse: record?.isInUse ?? false,
-                             isFound: record.map { r in r.liveDevice != nil } ?? true)
-            })
+                             isCantBeFound: cantBeFoundIDs.contains($0.id))
+            },
+            splitsUnreachable: speakerSearch?.isEveryKindKnown ?? true)
     }
 
     /// Available speakers first, then the unavailable ones, alphabetical

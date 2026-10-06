@@ -95,8 +95,8 @@ func run() -> Int32 {
     //        (saved scenes are cards on the Scenes screen).
     print("\n[1] Baseline sidebar (zero groups)")
     checks.expectEqual(window.test_sidebar.test_sectionTitles,
-                       ["System Audio", "Speakers", "In the Mixer"],
-                       "'System Audio', the Speakers plate and 'In the Mixer' — scenes left the sidebar")
+                       ["System Audio", "Speakers", "Shown in Mixer"],
+                       "'System Audio', 'Speakers' and 'Shown in Mixer' — scenes left the sidebar")
     checks.expect(window.test_isShowingSpeakersPage,
                   "with nothing selected the sidebar's content is the Speakers page")
     checks.expectEqual(window.test_sidebar.test_deviceRowCount, 7,

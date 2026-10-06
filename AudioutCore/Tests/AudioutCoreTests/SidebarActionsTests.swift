@@ -4,11 +4,12 @@ import Testing
 import Foundation
 import AppKit
 @testable import AudioutCore
+import AudioutSharedUI
 @testable import AudioutWindowUI
 
 /// The speaker sidebar: its two groups (the Mixer visibility setting), the
-/// presence dot, the row context menu, drag between groups, the fold, and
-/// Cmd-N. The menu acts on the CLICKED row rather than the selected one, so
+/// reachable-first order with its divider, the row context menu,
+/// Command-Delete, drag between groups, the fold, and Cmd-N. The menu acts on the CLICKED row rather than the selected one, so
 /// the clicked-vs-selected arbitration is what several of these pin down.
 ///
 /// The sidebar is built on its own here (no window, no split view, no
@@ -31,17 +32,16 @@ import AppKit
         #expect(sidebar.currentSelection == .speakersOverview)
     }
 
-    // Turns red when the Speakers row goes back to a grey header cell, loses its chevron or spoken label, gains a playing marker, or stops re-reporting a repeated click.
+    // Turns red when the Overview row goes back to a grey header cell, loses its chevron or its "Speakers overview" spoken label, or stops re-reporting a repeated click.
     @Test func speakersRowIsAPlateThatReopens() throws {
         let sidebar = SidebarViewController()
         sidebar.loadViewIfNeeded()
         sidebar.reload(devices: [])
         #expect(sidebar.test_speakersRowIsPlate)
         let cell = try #require(sidebar.test_speakersRowCell)
-        #expect(cell.textField?.stringValue == "Speakers")
+        #expect(cell.nameLabel.stringValue == "Overview")
         #expect(cell.disclosureView.isHidden == false)
-        #expect(cell.activeMarkerView.isHidden == true)
-        #expect(cell.textField?.accessibilityLabel() == "Speakers, manage speakers")
+        #expect(cell.nameLabel.accessibilityLabel() == "Speakers overview")
         var selections: [SidebarSelection?] = []
         sidebar.onSelect = { selections.append($0) }
         sidebar.test_select(.speakersOverview)
@@ -49,28 +49,33 @@ import AppKit
         #expect(selections == [.speakersOverview, .speakersOverview])
     }
 
-    // Turns red when the caption returns to every speaker row, leaves the hidden speaker that is playing, or the captioned row loses its 40 pt height.
+    // Turns red when the caption returns to every speaker row, leaves the hidden speaker in use, or the captioned row stops being 12 pt taller than the others.
     @Test func onlyAHiddenSpeakerInUseCarriesTheCaption() throws {
         let (sidebar, _) = makeFleetSidebar()
         let cell = try #require(sidebar.test_deviceCell(id: "onkyo"))
         let name = try #require(cell.textField)
         let caption = cell.statusLabel
-        #expect(sidebar.test_rowCaption(id: "onkyo") == "In the Mixer while it plays")
-        #expect(sidebar.test_rowHeight(id: "onkyo") == 40)
+        let captionedHeight = sidebar.test_standardRowHeight + 12
+        #expect(sidebar.test_rowCaption(id: "onkyo") == "Shown while in use")
+        #expect(sidebar.test_rowHeight(id: "onkyo") == captionedHeight)
         #expect(!name.convert(name.bounds, to: cell).intersects(caption.convert(caption.bounds, to: cell)))
         for id in ["mac", "alpha", "kitchen", "study", "zeta", "den"] {
             #expect(sidebar.test_rowCaption(id: id) == nil, "\(id) shows no caption")
-            #expect(sidebar.test_rowHeight(id: id) != 40, "\(id) stays one line")
+            #expect(sidebar.test_rowHeight(id: id) != captionedHeight, "\(id) stays one line")
         }
     }
 
     // MARK: Fleet fixture
 
-    /// This Mac, two found speakers, one away, one lost in a scene, and two
-    /// hidden speakers of which one (Bluetooth, connected) is playing.
-    private func makeFleetLibrary() -> SpeakerLibraryController {
-        let library = SpeakerLibraryController(loadPersisted: false)
-        let fleet = [
+    /// The fleet's one scene, which keeps the lost "study" known.
+    private static var fleetScene: Group {
+        Group(id: "g", name: "Evening", memberIDs: ["study"], memberVolumes: [:])
+    }
+
+    /// This Mac, two found speakers, one away, and two hidden speakers of
+    /// which one (Bluetooth, connected) is in use.
+    private static var fleet: [Device] {
+        [
             Device(id: "zeta", name: "Zeta", kind: .generic),
             Device(id: "mac", name: "MacBook Pro Speakers", kind: .localMac, isLocalDevice: true),
             Device(id: "kitchen", name: "Kitchen", kind: .sonos, isAvailable: false),
@@ -78,60 +83,158 @@ import AppKit
             Device(id: "alpha", name: "Alpha", kind: .homePod),
             Device(id: "den", name: "Den", kind: .generic),
         ]
-        let scene = Group(id: "g", name: "Evening", memberIDs: ["study"], memberVolumes: [:])
-        library.update(liveDevices: fleet + [Device(id: "study", name: "Study", kind: .generic)], groups: [scene])
+    }
+
+    /// The fleet, plus "study", seen once and then gone, in a scene.
+    private func makeFleetLibrary() -> SpeakerLibraryController {
+        let library = SpeakerLibraryController(loadPersisted: false)
+        library.update(liveDevices: Self.fleet + [Device(id: "study", name: "Study", kind: .generic)],
+                       groups: [Self.fleetScene])
         library.setVisibility(.hideWhenNotInUse, for: ["den", "onkyo"])
-        library.update(liveDevices: fleet, groups: [scene])
+        library.update(liveDevices: Self.fleet, groups: [Self.fleetScene])
         return library
     }
 
-    private func reload(_ sidebar: SidebarViewController, from library: SpeakerLibraryController) {
+    private func reload(_ sidebar: SidebarViewController, from library: SpeakerLibraryController,
+                        cantBeFoundIDs: Set<String> = [], splitsUnreachable: Bool = true) {
         sidebar.reload(devices: library.records.map(\.renderingDevice),
-                       presentationRecords: library.records)
+                       presentationRecords: library.records,
+                       cantBeFoundIDs: cantBeFoundIDs, splitsUnreachable: splitsUnreachable)
     }
 
     /// The fleet sidebar, laid out tall enough that every row has a cell.
-    private func makeFleetSidebar() -> (SidebarViewController, SpeakerLibraryController) {
+    private func makeFleetSidebar(cantBeFoundIDs: Set<String> = [], splitsUnreachable: Bool = true)
+        -> (SidebarViewController, SpeakerLibraryController) {
         let library = makeFleetLibrary()
         let sidebar = SidebarViewController()
         sidebar.loadViewIfNeeded()
-        reload(sidebar, from: library)
+        reload(sidebar, from: library, cantBeFoundIDs: cantBeFoundIDs, splitsUnreachable: splitsUnreachable)
         sidebar.onSetVisibility = { [weak sidebar] ids, visibility in
             library.setVisibility(visibility, for: ids)
-            if let sidebar { self.reload(sidebar, from: library) }
+            if let sidebar {
+                self.reload(sidebar, from: library, cantBeFoundIDs: cantBeFoundIDs,
+                            splitsUnreachable: splitsUnreachable)
+            }
         }
         sidebar.view.frame = NSRect(x: 0, y: 0, width: 210, height: 800)
         sidebar.view.layoutSubtreeIfNeeded()
         return (sidebar, library)
     }
 
-    // MARK: Groups, order, dot
+    // MARK: Groups, order, reachability
 
-    // Turns red when the sidebar falls back to the library's available-first order, sorts This Mac alphabetically, moves a lost speaker to the bottom, or files a hidden speaker under In the Mixer.
+    // Turns red when the split runs from the first frame (before every kind is known), stops putting This Mac and the reachable speakers above the divider, or files a hidden speaker under Shown in Mixer.
     @Test func speakersSplitIntoTheTwoGroupsAlphabeticallyWithThisMacFirst() {
-        let (sidebar, _) = makeFleetSidebar()
-        #expect(sidebar.test_sectionTitles == ["System Audio", "Speakers", "In the Mixer", "Hidden unless playing"])
-        #expect(sidebar.test_deviceRowIDs(inGroupTitled: "In the Mixer") == ["mac", "alpha", "kitchen", "study", "zeta"])
-        #expect(sidebar.test_deviceRowIDs(inGroupTitled: "Hidden unless playing") == ["den", "onkyo"])
+        let (sidebar, library) = makeFleetSidebar(splitsUnreachable: false)
+        #expect(sidebar.test_sectionTitles == ["System Audio", "Speakers", "Shown in Mixer", "Hidden unless in use"])
+        #expect(sidebar.test_groupRows(inGroupTitled: "Shown in Mixer") == ["mac", "alpha", "kitchen", "study", "zeta"])
+
+        reload(sidebar, from: library)
+        #expect(sidebar.test_groupRows(inGroupTitled: "Shown in Mixer")
+                == ["mac", "alpha", "zeta", "2 unavailable", "kitchen", "study"])
+        #expect(sidebar.test_groupRows(inGroupTitled: "Hidden unless in use") == ["den", "onkyo"])
     }
 
-    // Turns red when the dot follows routing (a connected speaker drawn as anything but found), follows availability alone (a lost speaker drawn as away), or the spoken label stops carrying the dot's state.
-    @Test func theDotShowsPresenceForEachRecordShape() throws {
+    // Turns red when an unreachable row stops saying so, a speaker outside the can't-be-found list speaks as can't be found, or the hidden speaker in use loses its spoken suffix.
+    @Test func eachRowSpeaksItsReachability() throws {
+        let (sidebar, library) = makeFleetSidebar()
+        let spoken = { (id: String) in sidebar.test_deviceCell(id: id)?.nameLabel.accessibilityLabel() }
+        #expect(spoken("study") == "Study, unavailable")
+        #expect(spoken("kitchen") == "Kitchen, unavailable")
+        #expect(spoken("onkyo") == "Onkyo, shown in the Mixer while in use")
+        #expect(spoken("alpha") == "Alpha")
+
+        reload(sidebar, from: library, cantBeFoundIDs: ["study"])
+        #expect(spoken("study") == "Study, can\u{2019}t be found")
+    }
+
+    // Turns red when a reload falls back to reloadData and keeps only the first selected row, or stops moving a speaker that becomes unreachable under the divider.
+    @Test func aMultipleSelectionSurvivesARowMovingUnderTheDivider() {
+        let (sidebar, library) = makeFleetSidebar()
+        sidebar.test_selectDevices(["alpha", "zeta"])
+        let zetaGone = Self.fleet.map { device -> Device in
+            var device = device
+            if device.id == "zeta" { device.isAvailable = false }
+            return device
+        }
+        library.update(liveDevices: zetaGone, groups: [Self.fleetScene])
+        reload(sidebar, from: library)
+        #expect(sidebar.test_selectedDeviceIDs == ["alpha", "zeta"])
+        #expect(sidebar.test_groupRows(inGroupTitled: "Shown in Mixer")
+                == ["mac", "alpha", "3 unavailable", "kitchen", "study", "zeta"])
+    }
+
+    // Turns red when viewDidDisappear stops clearing the pointer hold, so a sidebar left with the pointer on it holds every later reload until the pointer crosses it again.
+    @Test func leavingTheWindowWithThePointerOnTheListReleasesTheHold() {
+        let sidebar = makeSidebar()
+        sidebar.test_pointerEntersList()
+        sidebar.viewDidDisappear()
+        sidebar.reload(devices: [makeDevice(id: "office", name: "Office"),
+                                 makeDevice(id: "kitchen", name: "Kitchen"),
+                                 makeDevice(id: "patio", name: "Patio"),
+                                 makeDevice(id: "attic", name: "Attic")])
+        #expect(sidebar.test_groupRows(inGroupTitled: "Shown in Mixer") == ["attic", "kitchen", "office", "patio"])
+    }
+
+    // Turns red when the selection filter keeps a header or divider a click proposes (or clears the selection there), keeps the divider in a range, or pulls the Overview plate into one.
+    @Test func theDividerAndThePlatesStayOutOfSelections() {
         let (sidebar, _) = makeFleetSidebar()
-        #expect(sidebar.test_dotState(id: "alpha") == .found)
-        #expect(sidebar.test_dotState(id: "kitchen") == .away)
-        #expect(sidebar.test_dotState(id: "onkyo") == .found)
-        #expect(sidebar.test_dotState(id: "study") == .lost)
-        let lost = try #require(sidebar.test_deviceCell(id: "study"))
-        #expect(lost.textField?.accessibilityLabel() == "Study, can\u{2019}t be found")
-        let playing = try #require(sidebar.test_deviceCell(id: "onkyo"))
-        #expect(playing.textField?.accessibilityLabel() == "Onkyo, in the Mixer while it plays")
+        sidebar.test_selectDevices(["alpha"])
+        for key in ["System Audio", "Speakers", "Shown in Mixer", "2 unavailable", "Hidden unless in use"] {
+            #expect(sidebar.test_filteredSelection(ofRowKeys: [key]) == ["alpha"], "a click on \(key) changes nothing")
+        }
+        #expect(sidebar.test_filteredSelection(ofRowKeys: ["alpha", "2 unavailable", "kitchen"]) == ["alpha", "kitchen"])
+        #expect(sidebar.test_filteredSelection(ofRowKeys: ["Overview", "alpha"]) == ["alpha"])
+    }
+
+    // Turns red when the selection filter lets an arrow key land on a header or divider (reporting nil, which resets the page to Overview) or stops it there instead of moving on to the next row it may select.
+    @Test func arrowKeysStepOverHeadersAndDividers() {
+        let (sidebar, _) = makeFleetSidebar()
+        var reported: [SidebarSelection?] = []
+        sidebar.onSelect = { reported.append($0) }
+
+        sidebar.select(.device(id: "zeta"), notify: false)
+        sidebar.test_pressArrow(down: true)
+        #expect(sidebar.currentSelection == .device(id: "kitchen"), "down from the last reachable speaker skips the divider")
+
+        sidebar.select(.device(id: "study"), notify: false)
+        sidebar.test_pressArrow(down: true)
+        #expect(sidebar.currentSelection == .device(id: "den"), "down across the Hidden header")
+
+        sidebar.select(.device(id: "mac"), notify: false)
+        sidebar.test_pressArrow(down: false)
+        #expect(sidebar.currentSelection == .speakersOverview, "up across the Shown in Mixer header")
+        sidebar.test_pressArrow(down: false)
+        #expect(sidebar.currentSelection == .mainOut, "up across the Speakers title")
+        sidebar.test_pressArrow(down: false)
+        #expect(sidebar.currentSelection == .mainOut, "the System Audio title above stays out of reach")
+
+        #expect(reported == [.device(id: "kitchen"), .device(id: "den"), .speakersOverview, .mainOut])
+    }
+
+    // Turns red when applySelectionInks leaves any of the name, icon, caption or chevron on its resting ink under either pill, or keeps a pill ink once the row is deselected.
+    @Test func everyInkInASelectedRowFollowsThePill() throws {
+        let (sidebar, _) = makeFleetSidebar()
+        let resting: [NSColor?] = [Tokens.Color.label, Tokens.Color.label, Tokens.Color.labelCool, Tokens.Color.labelCool2]
+        for target in [SidebarSelection.device(id: "onkyo"), .speakersOverview] {
+            sidebar.select(target, notify: false)
+            let rowView = try #require(sidebar.test_rowView(for: target))
+            let cell = try #require(rowView.view(atColumn: 0) as? IconLabelCellView)
+            let inks = { [cell.nameLabel.textColor, cell.imageView?.contentTintColor,
+                          cell.statusLabel.textColor, cell.disclosureView.contentTintColor] }
+            rowView.isEmphasized = true
+            #expect(inks() == Array(repeating: NSColor.alternateSelectedControlTextColor, count: 4), "\(target) focused pill")
+            rowView.isEmphasized = false
+            #expect(inks() == Array(repeating: Tokens.Color.label, count: 4), "\(target) grey pill")
+            sidebar.select(.groupsOverview, notify: false)
+            #expect(inks() == resting, "\(target) deselected")
+        }
     }
 
     // Turns red when the hidden group's header is built with no rows under it, or a reload re-expands a group the user folded.
     @Test func theHiddenGroupAppearsOnlyWithRowsAndItsFoldSurvivesAReload() {
         let sidebar = makeSidebar()
-        #expect(sidebar.test_sectionTitles == ["System Audio", "Speakers", "In the Mixer"])
+        #expect(sidebar.test_sectionTitles == ["System Audio", "Speakers", "Shown in Mixer"])
 
         let (fleet, library) = makeFleetSidebar()
         #expect(!fleet.test_hiddenGroupCollapsed)
@@ -153,7 +256,8 @@ import AppKit
                       case .header(let title) = node.payload else { return nil }
                 return (title, delegate.outlineView?(outlineView, shouldShowOutlineCellForItem: node))
             })
-        #expect(answers == ["System Audio": false, "In the Mixer": false, SidebarViewController.hiddenTitle: true])
+        #expect(answers == ["System Audio": false, "Speakers": false, "Shown in Mixer": false,
+                            SidebarViewController.hiddenTitle: true])
     }
 
     // MARK: Drag between groups
@@ -161,11 +265,11 @@ import AppKit
     // Turns red when a drop onto a speaker's own group is accepted, This Mac can be dragged into hiding, or a drop reports the wrong visibility.
     @Test func dropOntoTheOtherHeaderReportsItsVisibility() {
         let (sidebar, _) = makeFleetSidebar()
-        #expect(sidebar.test_dropTarget(ids: ["den"], ontoHeaderTitled: "In the Mixer") == .whenAvailable)
-        #expect(sidebar.test_dropTarget(ids: ["alpha"], ontoHeaderTitled: "Hidden unless playing") == .hideWhenNotInUse)
-        #expect(sidebar.test_dropTarget(ids: ["alpha"], ontoHeaderTitled: "In the Mixer") == nil)
-        #expect(sidebar.test_dropTarget(ids: ["den"], ontoHeaderTitled: "Hidden unless playing") == nil)
-        #expect(sidebar.test_dropTarget(ids: ["mac"], ontoHeaderTitled: "Hidden unless playing") == nil)
+        #expect(sidebar.test_dropTarget(ids: ["den"], ontoHeaderTitled: "Shown in Mixer") == .whenAvailable)
+        #expect(sidebar.test_dropTarget(ids: ["alpha"], ontoHeaderTitled: "Hidden unless in use") == .hideWhenNotInUse)
+        #expect(sidebar.test_dropTarget(ids: ["alpha"], ontoHeaderTitled: "Shown in Mixer") == nil)
+        #expect(sidebar.test_dropTarget(ids: ["den"], ontoHeaderTitled: "Hidden unless in use") == nil)
+        #expect(sidebar.test_dropTarget(ids: ["mac"], ontoHeaderTitled: "Hidden unless in use") == nil)
     }
 
     private func makeDevice(id: String, name: String) -> Device {
@@ -188,7 +292,7 @@ import AppKit
     @Test func speakerRowMenuMatchesItsGroup() {
         let (sidebar, _) = makeFleetSidebar()
         #expect(sidebar.test_contextMenuItems(for: .device(id: "alpha"))
-                == ["Hide from Mixer", "Keep in Mixer when unavailable", "", "Speaker settings…"])
+                == ["Hide from Mixer", "Show even when unavailable", "", "Speaker settings…"])
         #expect(sidebar.test_contextMenuItems(for: .device(id: "den"))
                 == ["Show in Mixer", "", "Speaker settings…"])
         #expect(sidebar.test_contextMenuItems(for: .device(id: "mac")) == ["Speaker settings…"])
@@ -205,14 +309,14 @@ import AppKit
         reload(sidebar, from: library)
         sidebar.test_selectDevices(["alpha", "zeta"])
         #expect(sidebar.test_contextMenuItems(for: .device(id: "zeta"))
-                == ["Hide 2 speakers from Mixer", "Keep in Mixer when unavailable"])
-        #expect(sidebar.test_contextMenuItemState("Keep in Mixer when unavailable", for: .device(id: "zeta")) == .mixed)
+                == ["Hide 2 speakers from Mixer", "Show even when unavailable"])
+        #expect(sidebar.test_contextMenuItemState("Show even when unavailable", for: .device(id: "zeta")) == .mixed)
     }
 
     // Turns red when Keep stops toggling between Always and When available, or its checkmark stops reading the speaker's setting.
     @Test func keepInMixerTogglesAlwaysThroughOnSetVisibility() {
         let (sidebar, library) = makeFleetSidebar()
-        let keep = "Keep in Mixer when unavailable"
+        let keep = "Show even when unavailable"
         #expect(sidebar.test_contextMenuItemState(keep, for: .device(id: "alpha")) == .off)
         sidebar.test_clickContextMenuItem(keep, for: .device(id: "alpha"))
         #expect(library.visibility(for: "alpha") == .always)
@@ -221,19 +325,38 @@ import AppKit
         #expect(library.visibility(for: "alpha") == .whenAvailable)
     }
 
-    // Turns red when Forget is offered for a speaker the Mac can see, or reports a found speaker's id.
+    // Turns red when Forget is offered for a speaker outside the can't-be-found list (one not seen yet in the first seconds, or one the Mac can see), or reports a found speaker's id.
     @Test func forgetIsOfferedOnlyForLostSpeakersAndReportsOnlyThem() {
-        let (sidebar, _) = makeFleetSidebar()
+        let (sidebar, library) = makeFleetSidebar()
         var forgotten: [Set<String>] = []
         sidebar.onForget = { forgotten.append($0) }
         #expect(sidebar.test_contextMenuItems(for: .device(id: "study"))
-                == ["Hide from Mixer", "Keep in Mixer when unavailable", "", "Speaker settings…",
+                == ["Hide from Mixer", "Show even when unavailable", "", "Speaker settings…"])
+
+        reload(sidebar, from: library, cantBeFoundIDs: ["study"])
+        #expect(sidebar.test_contextMenuItems(for: .device(id: "study"))
+                == ["Hide from Mixer", "Show even when unavailable", "", "Speaker settings…",
                     "", "Forget \u{201C}Study\u{201D}…"])
         #expect(!sidebar.test_contextMenuItems(for: .device(id: "kitchen")).contains { $0.hasPrefix("Forget") })
 
         sidebar.test_selectDevices(["kitchen", "study"])
         #expect(sidebar.test_clickContextMenuItem("Forget \u{201C}Study\u{201D}…", for: .device(id: "kitchen")))
         #expect(forgotten == [["study"]])
+    }
+
+    // Turns red when Command-Delete stops reaching the sidebar from the outline view, or forgets a selected speaker outside the can't-be-found list.
+    @Test func commandDeleteForgetsOnlyTheSelectedSpeakersThatCantBeFound() {
+        let (sidebar, _) = makeFleetSidebar(cantBeFoundIDs: ["study"])
+        var forgotten: [Set<String>] = []
+        sidebar.onForget = { forgotten.append($0) }
+
+        sidebar.test_selectDevices(["alpha", "study"])
+        sidebar.test_pressCommandDelete()
+        #expect(forgotten == [["study"]])
+
+        sidebar.test_selectDevices(["alpha"])
+        sidebar.test_pressCommandDelete()
+        #expect(forgotten == [["study"]], "a reachable speaker alone is never forgotten")
     }
 
     // Turns red when Speaker settings… stops selecting the speaker's row and reporting it.
@@ -255,7 +378,7 @@ import AppKit
         let sidebar = makeSidebar()
         // Section headers and the plate carry no identity to act on.
         #expect(sidebar.test_contextMenuItems(forRowTitled: "System Audio").isEmpty)
-        #expect(sidebar.test_contextMenuItems(forRowTitled: "In the Mixer").isEmpty)
+        #expect(sidebar.test_contextMenuItems(forRowTitled: "Shown in Mixer").isEmpty)
         #expect(sidebar.test_contextMenuItems(for: .speakersOverview).isEmpty)
     }
 

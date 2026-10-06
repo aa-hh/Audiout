@@ -1100,7 +1100,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.popoverController.refreshSpeakerPresentation()
             self.mixerWindowController?.refreshSpeakerPresentation()
         }
-        speakerSearch.onDone = { [weak self] in self?.mixerWindowController?.setSpeakerSearchDone(true) }
+        speakerSearch.onChange = { [weak self] in self?.mixerWindowController?.refreshSpeakerPresentation() }
+        speakerSearch.isBluetoothAccessGranted = { [weak self] in
+            self?.permissionProviders.bluetoothReader.currentStatus() == .granted
+        }
+        speakerSearch.isLocalNetworkDenied = { [weak self] in
+            self?.permissionAuditModel?.localNetworkStatus == .denied
+        }
         popoverController.onSpeakerRecoveryChanged = { [weak self] in
             self?.updateSpeakerLibrary()
         }
@@ -2054,6 +2060,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self else { return }
             let unmet = await model.auditRequiredPermissions()
             self.isAuditingRequiredPermissions = false
+            // The audit re-read Local Network; the Speakers screens show it.
+            self.mixerWindowController?.refreshSpeakerPresentation()
             // Re-check onboarding isn't already open — the audit's awaits give a
             // window for another trigger (or the user) to have opened it since.
             guard !unmet.isEmpty, self.onboardingWindowController == nil else { return }
@@ -2419,7 +2427,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.requestSpeakerBluetoothAccess()
         }
         controller.speakersPage.onPairBluetooth = Self.openBluetoothPairing
-        controller.setSpeakerSearchDone(speakerSearch.isDone)
+        controller.speakersPage.onLocalNetworkAccess = {
+            if NSWorkspace.shared.open(SystemSettingsPane.localNetwork.url) {
+                Analytics.capture("speaker:privacy_settings_opened", ["access": "local_network"])
+            }
+        }
+        controller.speakerSearch = speakerSearch
         // A speaker the Mac can't find has no backend entry to ask, so its
         // saved tone is read from the same store the backend writes.
         controller.storedDeviceEQ = { id in (try? DeviceEQStore().load())?.devices[id] }

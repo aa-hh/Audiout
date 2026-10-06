@@ -16,10 +16,10 @@ import AudioutSharedUI
 ///
 /// - IDENTITY — the (``DeviceIconWellView/size``pt) icon and the speaker's
 ///   name side by side in a BARE band, with one caption line under the name:
-///   kind and status ("Sonos · Ready"), "This Mac", or the failure glyph and
-///   "Can’t be found" for a remembered speaker the Mac cannot see. The icon
-///   resolves through an injected `DeviceIconController` + `Device.Kind
-///   .symbolName` fallback, and clicking the well presents
+///   kind and status ("Sonos · Ready"), "This Mac", or a question-mark glyph and
+///   "Can’t be found" for a remembered speaker on the host's can't-be-found
+///   list. The icon resolves through an injected `DeviceIconController` +
+///   `Device.Kind.symbolName` fallback, and clicking the well presents
 ///   `IconPickerViewController` as an anchored popover. The name is a PLAIN
 ///   label — a device's name is not renameable;
 /// - "Equalizer" — a title row (the Equalizer icon, then the label; Reset
@@ -66,7 +66,7 @@ public final class DeviceDetailViewController: NSViewController {
     private let nameLabel = NSTextField(labelWithString: "")
     /// The one caption line under the name: kind and status.
     private let subtitleLabel = NSTextField(labelWithString: "")
-    /// The failure glyph leading the caption of a speaker that can't be found.
+    /// The question-mark glyph leading the caption of a speaker that can't be found.
     private let subtitleGlyph = NSImageView()
     private let subtitleStack = NSStackView()
     /// The name over its caption, as one block centred on the icon well.
@@ -118,8 +118,9 @@ public final class DeviceDetailViewController: NSViewController {
 
     /// The list sits one section-gap below whatever precedes it, and WHICH
     /// slot that is depends on the speaker — the Equalizer well, the Bluetooth
-    /// slot, the Forget button of a speaker that can't be found, or the
-    /// identity band on This Mac. All four pins are built once and
+    /// slot, the Forget button of a speaker that can't be found, the kept note
+    /// or title row of a remembered speaker that isn't on the list yet, or the
+    /// identity band on This Mac. All six pins are built once and
     /// `applyPerDeviceSectionVisibility()` activates exactly one; rebuilding a
     /// constraint per refresh would leak one every time. Optional because
     /// `show(device:)` is legitimately called before the view is loaded.
@@ -127,6 +128,8 @@ public final class DeviceDetailViewController: NSViewController {
     private var listBelowBTVolume: NSLayoutConstraint?
     private var listBelowForget: NSLayoutConstraint?
     private var listBelowHeader: NSLayoutConstraint?
+    private var listBelowKeptNote: NSLayoutConstraint?
+    private var listBelowTitleRow: NSLayoutConstraint?
     /// The Forget button hangs an action band below the kept note when the
     /// note shows, and below the title row when it doesn't.
     private var forgetBelowKeptNote: NSLayoutConstraint?
@@ -144,6 +147,10 @@ public final class DeviceDetailViewController: NSViewController {
     private var shownDevice: Device?
     private var shownRecord: SpeakerPresentationRecord?
     public var speakerLibrary: SpeakerLibraryController?
+    /// The ids the host has waited long enough on to call "can't be found".
+    /// Set before `show`/`refresh`. Forget is offered only for these; a
+    /// remembered speaker outside the list is merely unavailable.
+    public var cantBeFoundIDs: Set<String> = []
     public var onVisibilityChange: (() -> Void)?
     private let visibilityPopup = NSPopUpButton()
 
@@ -222,12 +229,12 @@ public final class DeviceDetailViewController: NSViewController {
         nameLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         subtitleLabel.font = Tokens.Font.caption
-        subtitleLabel.textColor = Tokens.Color.label2
+        subtitleLabel.textColor = Tokens.Color.labelCool
         subtitleLabel.lineBreakMode = .byTruncatingTail
         subtitleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        // The Mixer failure pill's glyph.
-        subtitleGlyph.image = DeviceIcon.image("exclamationmark.triangle", pointSize: 11)
-        subtitleGlyph.contentTintColor = Tokens.Color.failure
+        subtitleLabel.redrawOnAccessibilityDisplayChange()
+        subtitleGlyph.image = DeviceIcon.image("questionmark.circle", pointSize: 11)
+        subtitleGlyph.contentTintColor = Tokens.Color.labelCool2
         subtitleGlyph.setAccessibilityElement(false)
         subtitleStack.translatesAutoresizingMaskIntoConstraints = false
         subtitleStack.orientation = .horizontal
@@ -281,7 +288,7 @@ public final class DeviceDetailViewController: NSViewController {
         btVolumeCheckbox.action = #selector(btVolumeToggled(_:))
         btVolumeHintLabel.translatesAutoresizingMaskIntoConstraints = false
         btVolumeHintLabel.font = Tokens.Font.caption
-        btVolumeHintLabel.textColor = Tokens.Color.label2
+        btVolumeHintLabel.textColor = Tokens.Color.labelCool
         btVolumeHintLabel.lineBreakMode = .byTruncatingTail
 
         // Volume keeps the scene editor's label voice; the Equalizer title
@@ -390,7 +397,7 @@ public final class DeviceDetailViewController: NSViewController {
             equalTo: document.trailingAnchor, constant: -GroupsPaneLayout.columnTrailingInset)
         columnFill.priority = .defaultHigh
 
-        // The list's four possible top pins and the Forget button's two, built
+        // The list's six possible top pins and the Forget button's two, built
         // once (see the properties). None goes in the array below —
         // `applyPerDeviceSectionVisibility()` and `refreshEQTitleRow()` pick.
         listBelowEQWell = listStack.topAnchor.constraint(
@@ -401,6 +408,10 @@ public final class DeviceDetailViewController: NSViewController {
             equalTo: forgetButton.bottomAnchor, constant: GroupsPaneLayout.sectionGap)
         listBelowHeader = listStack.topAnchor.constraint(
             equalTo: headerWell.bottomAnchor, constant: GroupsPaneLayout.sectionGap)
+        listBelowKeptNote = listStack.topAnchor.constraint(
+            equalTo: keptNoteLabel.bottomAnchor, constant: GroupsPaneLayout.sectionGap)
+        listBelowTitleRow = listStack.topAnchor.constraint(
+            equalTo: eqTitleRow.bottomAnchor, constant: GroupsPaneLayout.sectionGap)
         forgetBelowKeptNote = forgetButton.topAnchor.constraint(
             equalTo: keptNoteLabel.bottomAnchor, constant: GroupsPaneLayout.actionBandGap)
         forgetBelowTitleRow = forgetButton.topAnchor.constraint(
@@ -535,7 +546,7 @@ public final class DeviceDetailViewController: NSViewController {
             btVolumeWell.bottomAnchor.constraint(equalTo: btVolumeHintLabel.bottomAnchor,
                                                  constant: GroupedSectionView.verticalPadding),
 
-            // The outlined list. Its TOP is one of the four alternative pins
+            // The outlined list. Its TOP is one of the six alternative pins
             // built above. The rows carry their own insets, so the list spans
             // the column.
             listStack.leadingAnchor.constraint(equalTo: column.leadingAnchor),
@@ -622,6 +633,12 @@ public final class DeviceDetailViewController: NSViewController {
         shownDevice != nil && shownRecord != nil && shownRecord?.liveDevice == nil && !isThisMac
     }
 
+    /// A remembered speaker the host has waited long enough on to call "can't
+    /// be found". Any other remembered speaker is merely unavailable.
+    private var isCantBeFound: Bool {
+        isLost && shownDevice.map { cantBeFoundIDs.contains($0.id) } == true
+    }
+
     private func refreshUI() {
         guard let device = shownDevice else {
             applyPerDeviceSectionVisibility()
@@ -635,7 +652,7 @@ public final class DeviceDetailViewController: NSViewController {
         visibilityPopup.selectItem(withTitle: visibility.label)
         visibilityPopup.isEnabled = speakerLibrary != nil && shownRecord?.isLocalDevice != true
         showInMixerRow.caption = Self.visibilityCaption(visibility)
-        keptNoteLabel.stringValue = "Changes will be applied when the speaker is found again."
+        keptNoteLabel.stringValue = "Changes will be applied when the speaker next connects."
         forgetButton.title = "Forget \u{201C}\(device.name)\u{201D}…"
         rebuildGroupRows()
         refreshIcon()
@@ -656,7 +673,7 @@ public final class DeviceDetailViewController: NSViewController {
         // waits for it to come back.
         let bypassNote: String?
         if let record = shownRecord, !record.isAvailable {
-            bypassNote = "Changes will be applied when the speaker is back."
+            bypassNote = "Changes will be applied when the speaker next connects."
         } else {
             bypassNote = device.eqBypassReason.map(EQEditorView.bypassNoteText)
         }
@@ -664,21 +681,38 @@ public final class DeviceDetailViewController: NSViewController {
         refreshEQTitleRow()
     }
 
-    /// The caption under the name: "This Mac", "<kind> · <status>", or the
-    /// failure glyph and "Can’t be found".
+    /// The caption under the name: "This Mac", the question-mark glyph and
+    /// "Can’t be found" for a speaker on the host's list, or "<kind> ·
+    /// <status>" with a ready or connected status in the Speakers green.
     private func refreshSubtitle(for device: Device) {
         let text: String
+        var statusRange: NSRange?
         if isThisMac {
             text = "This Mac"
-        } else if isLost {
+        } else if isCantBeFound {
             text = shownRecord?.kind.map { "\(Self.kindText(for: $0)) · Can\u{2019}t be found" }
                 ?? "Can\u{2019}t be found"
+        } else if let record = shownRecord, record.kind == nil {
+            text = record.status.text
         } else {
-            text = [Self.kindText(for: shownRecord?.kind ?? device.kind), shownRecord?.status.text]
-                .compactMap { $0 }.joined(separator: " · ")
+            let kind = Self.kindText(for: shownRecord?.kind ?? device.kind)
+            if let status = shownRecord?.status {
+                let lead = "\(kind) · "
+                text = lead + status.text
+                if status == .available || status == .connected {
+                    statusRange = NSRange(location: lead.utf16.count, length: status.text.utf16.count)
+                }
+            } else {
+                text = kind
+            }
         }
-        subtitleLabel.stringValue = text
-        subtitleGlyph.isHidden = !isLost
+        let caption = NSMutableAttributedString(string: text, attributes: [
+            .font: Tokens.Font.caption, .foregroundColor: Tokens.Color.labelCool])
+        if let statusRange {
+            caption.addAttribute(.foregroundColor, value: Tokens.Color.speakersAccent, range: statusRange)
+        }
+        subtitleLabel.attributedStringValue = caption
+        subtitleGlyph.isHidden = !isCantBeFound
     }
 
     /// The tone the title row describes: what the editor renders, or for a
@@ -706,6 +740,10 @@ public final class DeviceDetailViewController: NSViewController {
         forgetBelowKeptNote?.isActive = false
         forgetBelowTitleRow?.isActive = false
         (keptNoteLabel.isHidden ? forgetBelowTitleRow : forgetBelowKeptNote)?.isActive = true
+        if isLost && !isCantBeFound && !keptNoteLabel.isHidden {
+            listBelowTitleRow?.isActive = false
+            listBelowKeptNote?.isActive = true
+        }
     }
 
     /// "Flat", or what is shaped, in the editor's own readout words.
@@ -724,9 +762,9 @@ public final class DeviceDetailViewController: NSViewController {
     /// One sentence saying what the Show in Mixer value does.
     private static func visibilityCaption(_ visibility: SpeakerMixerVisibility) -> String {
         switch visibility {
-        case .whenAvailable: return "Listed while it\u{2019}s on the network."
-        case .always: return "Listed even while it\u{2019}s unavailable."
-        case .hideWhenNotInUse: return "Listed only while it plays."
+        case .whenAvailable: return "Shown while your Mac can reach it."
+        case .always: return "Shown even when your Mac can\u{2019}t reach it."
+        case .hideWhenNotInUse: return "Shown only while it\u{2019}s in use."
         }
     }
 
@@ -745,7 +783,7 @@ public final class DeviceDetailViewController: NSViewController {
         eqWell.isHidden = !showsEQ
         eqEditor.isHidden = !showsEQ
         if !isLost { keptNoteLabel.isHidden = true }
-        forgetButton.isHidden = !isLost
+        forgetButton.isHidden = !isCantBeFound
         if !hasSpeaker { eqResetButton.isHidden = true }
 
         // The "Volume" slot is Bluetooth-only, and needs a store to read and
@@ -769,7 +807,8 @@ public final class DeviceDetailViewController: NSViewController {
         passwordRow.isHidden = shownDevice?.hasStoredPassword != true
         listWell.rows = listStack.arrangedSubviews.filter { !$0.isHidden }
 
-        for pin in [listBelowEQWell, listBelowBTVolume, listBelowForget, listBelowHeader] {
+        for pin in [listBelowEQWell, listBelowBTVolume, listBelowForget, listBelowHeader,
+                    listBelowKeptNote, listBelowTitleRow] {
             pin?.isActive = false
         }
         let listPin: NSLayoutConstraint?
@@ -778,7 +817,7 @@ public final class DeviceDetailViewController: NSViewController {
         } else if showsEQ {
             listPin = listBelowEQWell
         } else if isLost {
-            listPin = listBelowForget
+            listPin = isCantBeFound ? listBelowForget : listBelowTitleRow
         } else {
             listPin = listBelowHeader
         }
@@ -795,7 +834,7 @@ public final class DeviceDetailViewController: NSViewController {
     }
 
     @objc private func forgetTapped(_ sender: NSButton) {
-        guard isLost, let id = shownDevice?.id else { return }
+        guard isCantBeFound, let id = shownDevice?.id else { return }
         onForget?(id)
     }
 
@@ -945,7 +984,7 @@ public final class DeviceDetailViewController: NSViewController {
         chevron.translatesAutoresizingMaskIntoConstraints = false
         let chevronImage = DeviceIcon.image("chevron.right")
         chevron.image = chevronImage
-        chevron.contentTintColor = Tokens.Color.label2
+        chevron.contentTintColor = Tokens.Color.labelCool2
         cell.chevronReserve = (chevronImage?.size.width ?? 0) + Self.groupRowChevronGap
         button.addSubview(chevron)
         NSLayoutConstraint.activate([
@@ -964,7 +1003,7 @@ public final class DeviceDetailViewController: NSViewController {
     private func makeNoGroupsRow() -> NSView {
         let label = NSTextField(labelWithString: Self.noGroupsRowText)
         label.translatesAutoresizingMaskIntoConstraints = false
-        label.textColor = Tokens.Color.label2
+        label.textColor = Tokens.Color.labelCool
         label.lineBreakMode = .byTruncatingTail
         label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         return label
@@ -1053,7 +1092,7 @@ public final class DeviceDetailViewController: NSViewController {
     /// What the identity band's caption reads.
     public var test_subtitleText: String { subtitleLabel.stringValue }
 
-    /// Whether the failure glyph leads the caption.
+    /// Whether the question-mark glyph leads the caption.
     public var test_subtitleGlyphShown: Bool { !subtitleGlyph.isHidden }
 
     /// The shown device's membership as ONE comma-joined string ("None" when it

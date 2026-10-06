@@ -1037,7 +1037,9 @@ mounts through the panel's `insertRow` / `removeRow`, one per row.
 
 **Dismissing.** Every dismissible Mixer notice closes with the diagnosis
 card's ✕ (`NSButton.noticeDismissButton`, `AudioutPopoverUI`): `xmark` at 12 pt bold in `label2`, a hit area of at least 24 × 24
-pt, and Escape as its key. The thank-you card is the exception and keeps its
+pt. Only the diagnosis card's ✕ answers Escape; the alignment note's does not,
+so Escape keeps the surface's order (thank-you card, then the Scenes editor,
+then the bubble closes). The thank-you card is the exception and keeps its
 **Close** text button.
 
 ### Text Link

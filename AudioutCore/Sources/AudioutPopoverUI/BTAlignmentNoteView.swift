@@ -52,7 +52,7 @@ final class BTAlignmentNoteView: NSView {
     private let sentenceButton = NSButton()
     private let copyLabel = PassThroughLabel(labelWithString: "")
     private lazy var hideButton = NSButton.noticeDismissButton(
-        target: self, action: #selector(hideClicked(_:)))
+        target: self, action: #selector(hideClicked(_:)), closesOnEscape: false)
     private var copyWidthConstraint: NSLayoutConstraint?
     private let deviceName: String
 
@@ -212,4 +212,5 @@ final class BTAlignmentNoteView: NSView {
     var test_copyText: String { copyLabel.attributedStringValue.string }
     func test_clickAlign() { sentenceButton.performClick(nil) }
     func test_clickHide() { hideButton.performClick(nil) }
+    var test_hideKeyEquivalent: String { hideButton.keyEquivalent }
 }

@@ -278,9 +278,12 @@ extension NSButton {
 
     /// The ✕ that closes a dismissible Mixer notice (the diagnosis card, the
     /// alignment note): borderless `.accessoryBar`, the `xmark` glyph at 12 pt
-    /// bold in `label2`, a hit area of at least 24×24 pt (P1-6), and Escape as
-    /// its key equivalent so the notice closes without a click.
-    static func noticeDismissButton(target: AnyObject, action: Selector) -> NSButton {
+    /// bold in `label2`, and a hit area of at least 24×24 pt (P1-6). Escape is
+    /// its key equivalent only when `closesOnEscape`: the alignment note passes
+    /// false so Escape keeps `AppSurfaceController`'s order (thank-you card,
+    /// then the Scenes editor, then the surface closes).
+    static func noticeDismissButton(target: AnyObject, action: Selector,
+                                    closesOnEscape: Bool = true) -> NSButton {
         let button = NSButton()
         button.translatesAutoresizingMaskIntoConstraints = false
         button.bezelStyle = .accessoryBar
@@ -290,7 +293,7 @@ extension NSButton {
         button.contentTintColor = Tokens.Color.label2
         button.target = target
         button.action = action
-        button.keyEquivalent = "\u{1b}"
+        if closesOnEscape { button.keyEquivalent = "\u{1b}" }
         button.image = NSImage(systemSymbolName: "xmark", accessibilityDescription: "Dismiss")?
             .withSymbolConfiguration(.init(pointSize: 12, weight: .bold))
         button.setAccessibilityLabel("Dismiss")

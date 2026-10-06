@@ -2157,8 +2157,15 @@ extension NativeBackend {
                 cause = .unknown
             }
             // A password demand nobody answered yet is a wait, not a failure.
-            let awaitsPassword = Self.awaitsPassword(cause, fedPassword: self.fedCredential(deviceID))
+            let fedCredential = self.fedCredential(deviceID)
+            let awaitsPassword = Self.awaitsPassword(cause, fedPassword: fedCredential)
             if !awaitsPassword {
+                // The sender drops its own copy of the key when an
+                // encrypted SETUP times out (airplay.c `start_failure`),
+                // reported as a plain failure. Forget the fed key so the
+                // next feed sends the stored one again; the Keychain
+                // keeps it, since the receiver did not refuse it.
+                self.fedDescriptors[deviceID]?.authKey = nil
                 Telemetry.fail(.airplay, "airplay:connect_failed",
                                local: ["device": deviceID, "op": op, "stream": "\(stream)", "error": "\(error)"],
                                shared: ["cause": "\(cause)"])

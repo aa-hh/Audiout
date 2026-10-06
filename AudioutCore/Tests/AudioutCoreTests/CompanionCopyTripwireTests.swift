@@ -59,7 +59,7 @@ import Testing
                 "\(note)")
         #expect(SpeakerPasswordSheetViewController.headingText(deviceName: "Kitchen") == "Enter the password for “Kitchen”",
                 "\(note)")
-        #expect(SpeakerPasswordSheetViewController.emptyCodeText == "Enter the code on the screen.", "\(note)")
+        #expect(SpeakerPasswordSheetViewController.emptyCodeText(deviceName: "Kitchen") == "Enter all 4 digits shown on “Kitchen”.", "\(note)")
         #expect(PopoverController.codeRejectedText == "That code didn't work. Check the screen and try again.",
                 "\(note)")
         #expect(SpeakerPasswordSheetViewController.headingText(deviceName: "Kitchen", kind: .onScreenCode)

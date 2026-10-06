@@ -3612,8 +3612,10 @@ public final class PopoverController: NSObject {
         devicesByID[id]?.airPlayAccess == .onScreenCode
     }
 
-    /// Ask for `id`'s AirPlay password. Connect stores it and retries through
-    /// `GroupController.submitAirPlayPassword`; the sheet stays up until the
+    /// Ask for `id`'s AirPlay password or on-screen code. Connect goes through
+    /// `GroupController.submitAirPlayPassword`: a password is stored and the
+    /// speaker retried; a code speaker's digits go to `engine.authorize` and only
+    /// the pairing key that earns is stored. The sheet stays up until the
     /// speaker connects (dismiss) or fails again (`showResult`), both read off
     /// the connection edges in `handleConnectionTransitions`. While the sheet
     /// is up its speaker's diagnosis panel does not open; Cancel on a

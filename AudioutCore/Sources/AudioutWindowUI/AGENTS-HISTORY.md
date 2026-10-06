@@ -298,3 +298,4 @@ backend.
 - 2026-10-04 (owner's call, Alec): The scene editor's name and "Playing" badge sit in one block centred on the header icon, so the name moves up when a scene starts playing, by design.
 - 2026-10-05: The sidebar's presence dot gave way to order: in each group the speakers the Mac can reach come first, then an "N unavailable" divider row and the rest in cool greys, and an update moves, inserts and removes rows instead of reloading the list, so rows keep their identity and a selection survives.
 - 2026-10-05: Green (`Tokens.Color.speakersAccent`) became the Speakers tab's colour for a reachable speaker and the tab's one add action, and the Speakers tab's secondary inks moved from the warm `label2`/`label3` to the cool `labelCool`/`labelCool2`, the equalizer's inks excepted.
+- 2026-10-07: Scenes became a sidebar split beside the scene page; the card grid and editor push were removed, and membership nodes no longer carry a rail.

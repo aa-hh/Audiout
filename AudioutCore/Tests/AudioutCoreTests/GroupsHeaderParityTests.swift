@@ -8,24 +8,8 @@ import AppKit
 @testable import AudioutSharedUI
 @testable import AudioutWindowUI
 
-/// HEADER PARITY + the elastic content column (design review 2026-07-25).
-///
-/// The Groups window swaps its whole content pane when the sidebar selection
-/// moves between a group and a device. If the header band height or the text
-/// block's vertical centring differ between the two panes, that swap reads as
-/// the window twitching — which is exactly what happened when the two
-/// controllers carried hand-copied literals and drifted ~22.5 pt apart. Both
-/// panes now read `GroupsPaneLayout`; these tests assert the REAL laid-out
-/// frames still share the band height and the vertical centring, so a future
-/// edit to one pane can't quietly desync the other. The icon's x differs by
-/// design: the speaker and Main Audio pages start it at
-/// `railFreeContentLeadingInset`, the scene editor at `contentLeadingInset`.
-///
-/// The elastic-column half guards the other half of the same design: the
-/// sections stretch with the pane (they used to hug ~277 pt of intrinsic
-/// content and leave a dead strip), and the two anchoring traps that stretch
-/// exposed — the rail overlay and the delete button both had to move from the
-/// container to the column.
+/// Scene, speaker and Main Audio pages share the header geometry and content inset.
+/// The elastic column and delete action stay aligned as the pane grows.
 @MainActor
 @Suite final class GroupsHeaderParityTests: IsolatedSuite {
 
@@ -132,6 +116,8 @@ import AppKit
         let detailHeader = window.test_detail.test_headerSectionFrame
         let detailTextFromTop = distanceFromTop(detailTextBlock.midY, in: window.test_detail.view)
 
+        let slack = 0.01 + halfPointSlack()
+        #expect(abs(editorIcon.minX - detailIcon.minX) <= slack)
         #expect(abs(editorIcon.width - detailIcon.width) <= 0.01)
         #expect(abs(editorIcon.height - detailIcon.height) <= 0.01)
         #expect(abs(editorTextFromTop - detailTextFromTop) <= 0.01 + halfPointSlack(),
@@ -143,6 +129,7 @@ import AppKit
         #expect(abs(editorHeader.width - detailHeader.width) <= 1.0)
     }
 
+    // Moving the name-and-caption block off the icon centre or changing the title gap turns it red.
     @Test func headerBandIsTheDerivedSideBySideHeight() throws {
         let (window, _, _, group) = try makeWindow()
         window.test_select(.group(id: group.id))
@@ -160,8 +147,8 @@ import AppKit
         let title = window.test_editor.test_headerTitleAlignmentFrame
         #expect(abs(title.minX - (icon.maxX + GroupsPaneLayout.iconToTitleGap)) <= 0.01,
                 "the title sits BESIDE the icon, one gap away")
-        #expect(abs(title.midY - icon.midY) <= 0.01,
-                "…vertically centred on it, not baselined off its bottom")
+        #expect(abs(window.test_editor.test_headerTextBlockFrame.midY - icon.midY) <= 0.01,
+                "the name-and-caption block is centred on the icon")
     }
 
     @Test func headerContentStartsAtTheSharedContentInset() throws {
@@ -180,8 +167,8 @@ import AppKit
             - window.test_mainOutDetail.test_headerSectionFrame.minX
 
         let slack = 0.01 + halfPointSlack()
-        #expect(abs(editorInset - GroupsPaneLayout.contentLeadingInset) <= slack,
-                "the icon starts past the rail gutter the editor reserves")
+        #expect(abs(editorInset - GroupsPaneLayout.railFreeContentLeadingInset) <= slack,
+                "the scene page shares the other pages' inset")
         #expect(abs(detailInset - GroupsPaneLayout.railFreeContentLeadingInset) <= slack,
                 "the speaker page starts its icon where its Equalizer heading starts")
         #expect(abs(mainInset - GroupsPaneLayout.railFreeContentLeadingInset) <= slack,
@@ -282,19 +269,6 @@ import AppKit
 
     // MARK: The two anchoring traps the elastic column exposed
 
-    @Test func everyNodeStillLandsOnTheOverlaysGutterLineAfterTheColumnMovedIn() throws {
-        let (window, _, _, group) = try makeWindow()
-        window.test_select(.group(id: group.id))
-        settle(window)
-
-        // The overlay is pinned to the COLUMN. Pinned to the container (as it
-        // was) the spine and the nodes separate by exactly `columnInset`.
-        for id in window.test_editor.test_candidateDeviceIDs {
-            let x = try #require(window.test_editor.test_nodeCenterXInOverlaySpace(for: id))
-            #expect(abs(x - PopoverColumnGrid.railGutterCenterX) <= 0.01,
-                    "\(id)'s node must sit exactly on the drawn spine")
-        }
-    }
 
     @Test func deleteButtonLinesUpWithTheContentAboveIt() throws {
         let (window, _, _, group) = try makeWindow()
@@ -307,53 +281,17 @@ import AppKit
                 "container it drifts one margin to the left of the whole form"))
     }
 
-    // MARK: The editor's top action band
+    // MARK: The scene form's top inset
 
-    /// The two controls that LEAVE the editor share one band above the form
-    /// (owner's call, 2026-09-03): "‹ Groups" on the left, the Done/Save
-    /// primary on the right, the same height so they read as a matched
-    /// secondary/primary pair rather than a caption beside a button.
-    @Test func theWayBackAndThePrimaryShareOneBandAtTheTopOfTheForm() throws {
+
+    // Moving the scene form away from the shared top inset turns it red.
+    @Test func theFormStartsAtTheSharedTopInset() throws {
         let (window, _, _, group) = try makeWindow()
         window.test_select(.group(id: group.id))
         settle(window)
         let editor = window.test_editor
-        let back = editor.test_backControlFrame
-        let primary = editor.test_doneButtonFrame
-        let header = editor.test_headerSectionFrame
-
-        #expect(abs(back.height - primary.height) <= 0.01,
-                "the way back is sized to the primary, not to a caption")
-        #expect(abs(back.minY - primary.minY) <= 0.01, "…and sits on its band")
-        #expect(abs(primary.maxX - header.maxX) <= 0.01,
-                "the primary closes the form's trailing edge — the TOP RIGHT of the pane")
-        #expect(abs(back.minX - header.minX) <= 0.01,
-                "…and the way back opens its leading edge")
-        #expect(back.maxX < primary.minX, "the two never overlap")
-    }
-
-    /// The band rides inside the header section's own (bare, undrawn) top
-    /// padding rather than pushing the form down — which is what keeps the
-    /// parity assertions above honest with the device pane, whose column has
-    /// no band above it at all.
-    @Test func theTopBandClearsTheIdentityCardWithoutMovingIt() throws {
-        let (window, _, _, group) = try makeWindow()
-        window.test_select(.group(id: group.id))
-        settle(window)
-        let editor = window.test_editor
-
-        // The pane's own coordinates are NOT flipped (the scroll DOCUMENT is),
-        // so "above" is a larger y. A bare `>` here once passed on a 0.5 pt
-        // gap — assert the real minimum clearance instead so a future change
-        // that spends the gap down to nothing fails loudly.
-        let clearance = editor.test_backControlFrame.minY - editor.test_headerIconFrame.maxY
-        #expect(clearance >= 8,
-                Comment(rawValue: "the band needs at least 8 pt of clearance above the " +
-                "identity card's icon, not just any gap"))
         #expect(abs(editor.test_headerSectionFrame.maxY
-                    - (editor.view.frame.height - GroupsPaneLayout.columnTopInset)) <= 0.5,
-                Comment(rawValue: "the form still starts at the inset both detail panes use — a band " +
-                "that pushed it down would make every sidebar swap twitch"))
+                    - (editor.view.frame.height - GroupsPaneLayout.columnTopInset)) <= 0.5)
     }
 
     // MARK: The detail pane: the Equalizer's well and the outlined list

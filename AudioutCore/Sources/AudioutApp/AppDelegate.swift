@@ -1435,11 +1435,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // The Scenes and Speakers content skips its rebuild while hidden (B8) and has no
         // window of its own to ask about visibility any more, so the surface
         // tells it which screen the user is looking at.
-        // Escape in a group's editor steps back to the overview; the next
-        // Escape closes the surface.
-        surface.groupsCancelHandler = { [weak self] in
-            self?.mixerWindowController?.dismissEditor() ?? false
-        }
         // The screen published before this one; `nil` means the window was closed.
         var previousScreen: SurfaceScreen?
         surface.onVisibleScreenChange = { [weak self] screen in
@@ -2415,7 +2410,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let selecting { mixerWindowController?.select(selecting) }
     }
 
-    /// The Scenes screen's content: the scene cards and editor.
+    /// The Scenes sidebar beside the scene page or empty page.
     @MainActor
     private func groupsScreenContent() -> NSViewController {
         builtMixerWindowController().scenesContentController

@@ -144,10 +144,9 @@ public final class AppSurfaceController {
 
     public private(set) var selectedScreen: SurfaceScreen = .mixer
 
-    /// Asked when Escape reaches the surface while the Scenes screen is
-    /// showing. Return `true` when the screen stepped back a level (the app
-    /// wires `MixerWindowController.dismissEditor()`); `false` lets the press
-    /// close the surface.
+    /// Asked when Escape reaches the surface while the Scenes screen shows.
+    /// A screen may consume the key by returning `true`; `false` lets the
+    /// surface close.
     public var groupsCancelHandler: (() -> Bool)?
 
     /// The one frame's content size for THIS open session — measured on every

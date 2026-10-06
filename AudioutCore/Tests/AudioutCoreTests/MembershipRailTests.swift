@@ -7,14 +7,8 @@ import AppKit
 @testable import AudioutSharedUI
 @testable import AudioutWindowUI
 
-/// Warm Signal v4 §Call-1 applied to the Groups window's membership checklist
-/// (T6): `MembershipRowView` wears the rail/node language on the WARM pane (the
-/// group editor) and stays a plain stock checkbox row on the SYSTEM sheet ("New
-/// Group") — the owner's Q6 call, because `ember` measures ~2.34–2.48:1 on the
-/// sheet's white and the node would be near-invisible there.
-///
-/// These are structural/geometric assertions against real laid-out frames — no
-/// audio, no window, no synthesized clicks.
+/// The scene page uses membership nodes; the creation sheet keeps stock checkboxes.
+/// These checks use laid-out views without showing windows or moving audio.
 @MainActor
 @Suite final class MembershipRailTests: IsolatedSuite {
 
@@ -162,7 +156,6 @@ import AppKit
             #expect(!row.test_hasBusNodeView, "no node view is even mounted")
             #expect(!row.test_hasInvisibleCheckboxSkin,
                     "the sheet keeps the STOCK checkbox drawing")
-            #expect(row.railNode == nil, "it contributes no stop to any rail")
             #expect(row.test_nodeCenterX == nil)
         }
     }
@@ -254,7 +247,7 @@ import AppKit
         #expect(reported == nil)
     }
 
-    // MARK: The editor's pane-level rail
+    // MARK: The scene page's membership rows
 
     /// A group editor showing `Downstairs` (members: `office`, `mixer`) over a
     /// five-device candidate list, laid out at a realistic pane size.
@@ -282,167 +275,38 @@ import AppKit
         return (editor, controller, devices)
     }
 
+    // Removing membership state from the row node turns it red.
     @Test func editorRowsCarryNodesMatchingMembership() throws {
         let (editor, _, _) = try makeEditor()
-        #expect(editor.test_candidateDeviceIDs == ["a", "office", "c", "mixer", "e"])
-        #expect(editor.test_railNodes
-                == [.nonMember, .member, .nonMember, .member, .nonMember])
-    }
-
-    @Test func editorSignalEndsAtTheLowestCheckedRowInAFullBandChannel() throws {
-        let (editor, _, _) = try makeEditor()
-        let plan = try #require(editor.test_railPlan())
-        // Every candidate row is a stop …
-        #expect(plan.stops.count == 5, "every candidate row contributes a node")
-        // … while the wire ends at `mixer` (index 3, the lowest member); `echo`
-        // below it draws its node and no line.
-        #expect(plan.signalTerminusIndex == 3)
-        #expect(plan.stops[3].node == .member)
-    }
-
-    @Test func checkingALowerRowExtendsTheSignalDownToIt() throws {
-        let (editor, _, _) = try makeEditor()
-        let before = try #require(editor.test_railPlan())
-        editor.test_setMembership(true, for: "e")
-        let after = try #require(editor.test_railPlan())
-        #expect(after.signalTerminusIndex == 4,
-                "selecting the bottom row runs the signal down to reach it")
-        #expect(editor.test_railNodes.last == .member)
-        #expect(after.stops.count == before.stops.count,
-                "the node set never changed — only how far the wire runs through it")
-    }
-
-    @Test func editorRailPlanResolvesFromTheIconWellOrigin() throws {
-        let (editor, _, _) = try makeEditor()
-        let plan = try #require(editor.test_railPlan(), "the rail resolves from live frames")
-
-        guard case let .ring(centerY, ringCenterX, ringRadius) = plan.origin else {
-            Issue.record("the origin hooks into the group's icon well, not a header dot")
-            return
+        let nodes = try editor.test_candidateDeviceIDs.map { id in
+            try #require(editor.test_membershipRow(for: id) as? MembershipRowView).test_busNode
         }
-        // The hook is back on the ICON WELL. It hooked the TITLE while the
-        // header stacked icon-over-name; now that the header is SIDE BY SIDE
-        // the two share one horizontal band, so hooking the icon hooks the
-        // name's line too — and the well is a fixed 64 pt tile rather than a
-        // field whose width changes with the name it holds. The protocol is
-        // ring-shaped because the popover's origin is a ring, so a rounded-rect
-        // tile reports its inscribed circle and only the left edge is drawn to.
-        #expect(abs(ringRadius - DeviceIconWellView.size / 2) <= 0.01)
-        // Tolerance is half a POINT, not 0.01: the plan resolves from LIVE
-        // frames, and AppKit pixel-aligns them — a view tree that has never
-        // been in a window resolves at integral alignment while one whose
-        // process has touched a 2x-scale window context lands on half-point
-        // boundaries. Under the full suite (shared process, AppKit suites run
-        // first) the well's converted X came out exactly 0.5 off the isolated
-        // value and Guard 4 refused unrelated commits (2026-08-07); ±0.5 still
-        // pins "the hook lands on the well's LEFT edge at the content inset".
-        #expect(abs((ringCenterX - ringRadius)
-                    - PopoverColumnGrid.firstElementLeading(indented: false)) <= 0.5,
-                Comment(rawValue: "the hook lands on the well's LEFT edge, at the content inset — " +
-                "measured in the OVERLAY's space, which is pinned to the column, not the pane"))
-        #expect(centerY > plan.railTopY, "the rail drops below the well's centre")
-
-        // Five stops — every candidate row, member or not, sits on the channel.
-        // Nothing cuts the rail short: this pane has no collapsible sections.
-        #expect(plan.stops.count == 5)
-        #expect(plan.stops.map(\.node)
-                == [.nonMember, .member, .nonMember, .member, .nonMember])
-        #expect(plan.terminusDotY == nil, "no collapsible section cuts the spine here")
-        #expect(!plan.dormant, "membership has no dormant-divergent concept")
+        #expect(nodes == [.nonMember, .member, .nonMember, .member, .nonMember])
     }
 
-    @Test func stopsRunTopToBottomInCandidateOrder() throws {
-        let (editor, _, _) = try makeEditor()
-        let plan = try #require(editor.test_railPlan())
-        // Non-flipped coordinates: earlier candidates sit HIGHER (greater y).
-        let ys = plan.stops.map(\.y)
-        #expect(ys == ys.sorted(by: >), "stops are ordered down the pane")
-        #expect(ys[0] < plan.railTopY, "every stop hangs below the origin hook")
-    }
 
-    /// In the editor the line follows the group's active state (owner's
-    /// ruling, 2026-10-04): an inactive group's hook, segments and terminus are
-    /// `ember`, matching its member discs; the active group's are gold. The
-    /// Mixer's always-gold line is `RingRailToneLockTests`' job.
-    @Test func theEditorLineIsGoldOnlyWhileTheGroupIsActive() throws {
+
+
+
+
+
+    // Tying membership node gold to scene activation turns it red.
+    @Test func everyMembershipNodeIsArmedWithoutPlayback() throws {
         let (editor, controller, devices) = try makeEditor()
-        func expectWire(_ tone: NSColor, _ label: String) throws {
-            let plan = try #require(editor.test_railPlan())
-            let runs = BusRailOverlayView().wireRuns(for: plan)
-            let ink = tone.usingColorSpace(.sRGB)
-            #expect(!runs.isEmpty, "\(label): the rail draws")
-            #expect(runs.allSatisfy { $0.color.usingColorSpace(.sRGB) == ink },
-                    "\(label): every run wears one tone")
+        func expectArmed() throws {
+            for id in editor.test_candidateDeviceIDs {
+                let row = try #require(editor.test_membershipRow(for: id) as? MembershipRowView)
+                #expect(row.test_nodeArmed)
+            }
         }
-        try expectWire(Tokens.Color.ember, "inactive group")
-
+        try expectArmed()
         let group = try #require(controller.groups.first)
         controller.activateGroup(id: group.id)
         editor.show(groupID: group.id, devices: devices)
-        editor.view.layoutSubtreeIfNeeded()
-        try expectWire(Tokens.Color.gold, "active group")
+        try expectArmed()
     }
 
-    /// Mark `ids` as being in the backend's current output set — the echo that
-    /// says "audio is going here right now".
-    private func routed(_ devices: [Device], _ ids: Set<String>) -> [Device] {
-        devices.map { device in
-            var copy = device
-            copy.isSelected = ids.contains(device.id)
-            return copy
-        }
-    }
 
-    @Test func activeGroupDrivesTheNodeToneToo() throws {
-        // Gold means LIVE, and for a member disc "live" is the ROUTED truth,
-        // per row: an inactive group's editor arms nothing at all, and the
-        // active group's arms the rows the backend is actually sending to.
-        let (editor, controller, devices) = try makeEditor()
-        for id in editor.test_candidateDeviceIDs {
-            #expect(editor.test_isRailArmed(for: id) == false,
-                    "an inactive group's \(id) node renders idle (ember), never gold")
-        }
-
-        let group = try #require(controller.groups.first)
-        controller.activateGroup(id: group.id)
-        editor.show(groupID: group.id, devices: routed(devices, ["office", "mixer"]))
-        for id in ["office", "mixer"] {
-            #expect(editor.test_isRailArmed(for: id) == true,
-                    "\(id) is a member AND routed, so its node goes gold")
-        }
-        for id in ["a", "c", "e"] {
-            #expect(editor.test_isRailArmed(for: id) == false,
-                    "\(id) is receiving nothing, so it stays idle even in the active group")
-        }
-    }
-
-    /// The lie this fixed: a saved member the backend is NOT sending to filled
-    /// gold, claiming audio that wasn't moving. Saving membership is a pure
-    /// model op — it never re-routes — so a checked, unrouted row reads idle.
-    @Test func aSavedMemberThatIsNotRoutedReadsIdle() throws {
-        let (editor, controller, devices) = try makeEditor()
-        let group = try #require(controller.groups.first)
-        controller.activateGroup(id: group.id)
-        editor.show(groupID: group.id, devices: routed(devices, ["mixer"]))
-
-        #expect(editor.test_checkedDeviceIDs.contains("office"), "office is still a saved member")
-        #expect(editor.test_isRailArmed(for: "office") == false,
-                "…but nothing is being sent to it, so its node must not claim gold")
-        #expect(editor.test_isRailArmed(for: "mixer") == true)
-    }
-
-    /// The mirror case: a speaker still receiving the feed while no longer
-    /// saved into the group reads armed, hollow — still live, no longer a member.
-    @Test func aRoutedNonMemberReadsArmed() throws {
-        let (editor, controller, devices) = try makeEditor()
-        let group = try #require(controller.groups.first)
-        controller.activateGroup(id: group.id)
-        editor.show(groupID: group.id, devices: routed(devices, ["a"]))
-
-        #expect(!editor.test_checkedDeviceIDs.contains("a"), "a is not a member")
-        #expect(editor.test_isRailArmed(for: "a") == true,
-                "it is still receiving the feed, and gold means exactly that")
-    }
 
     @Test func aRowClickInTheEditorPersistsLikeACheckboxClick() throws {
         let (editor, controller, _) = try makeEditor()
@@ -464,97 +328,46 @@ import AppKit
         #expect(!editor.test_rowNodePreviewsClick(for: "a"))
     }
 
-    // MARK: "Playing now" + the reassurance line
+    // Dropping the hover wash or drawing it on a pinned row turns it red.
+    @Test func hoverWashRequiresAnEnabledRow() throws {
+        let row = makeRow(.warmPane, checked: true)
+        row.frame = NSRect(x: 0, y: 0, width: 300, height: 32)
+        row.layoutSubtreeIfNeeded()
+        func sampledAlpha() throws -> CGFloat {
+            let rep = try #require(NSBitmapImageRep(
+                bitmapDataPlanes: nil, pixelsWide: 300, pixelsHigh: 32,
+                bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0))
+            NSGraphicsContext.saveGraphicsState()
+            defer { NSGraphicsContext.restoreGraphicsState() }
+            NSGraphicsContext.current = try #require(NSGraphicsContext(bitmapImageRep: rep))
+            NSColor.clear.setFill()
+            row.bounds.fill(using: .copy)
+            row.draw(row.bounds)
+            return try #require(rep.colorAt(x: 280, y: 16)).alphaComponent
+        }
+        #expect(try sampledAlpha() == 0)
+        row.test_setHovered(true)
+        #expect(try sampledAlpha() > 0.05)
+        row.setCheckboxEnabled(false, tooltip: "A scene needs at least one speaker.")
+        #expect(try sampledAlpha() == 0)
+    }
 
-    // Turns red when the active editor stops saying what is playing is untouched.
-    @Test func everyEditorSaysEditsAreSavedAndOnlyTheActiveOneSaysPlayingNow() throws {
+    // MARK: The reassurance line
+
+    // Adding playback-dependent text to the reassurance line turns it red.
+    @Test func theReassuranceLineNeverMentionsPlayback() throws {
         let (editor, controller, devices) = try makeEditor()
-        #expect(!editor.test_playingBadgeVisible,
-                "an inactive group is not playing, so it must not claim to be")
-        #expect(editor.test_reassuranceVisible)
         #expect(editor.test_reassuranceText == "Changes are saved as you go.")
-
         let group = try #require(controller.groups.first)
         controller.activateGroup(id: group.id)
         editor.show(groupID: group.id, devices: devices)
-
-        #expect(editor.test_playingBadgeVisible)
-        #expect(editor.test_reassuranceVisible)
-        #expect(editor.test_reassuranceText
-                == "Changes are saved as you go. They don\u{2019}t change what\u{2019}s playing now.")
+        #expect(editor.test_reassuranceText == "Changes are saved as you go.")
     }
 
-    @Test func thePrimaryLeavesTheEditorTheWayGroupsDoes() throws {
-        let (editor, _, _) = try makeEditor()
-        var backs = 0
-        editor.onBack = { backs += 1 }
-        #expect(editor.test_doneButtonTitle == "Done")
 
-        editor.test_done()
 
-        #expect(backs == 1)
-    }
 
-    @Test func theWayBackKeepsItsShortcutAndItsVoiceOverName() throws {
-        let (editor, _, _) = try makeEditor()
-        #expect(editor.test_backControlAccessibilityLabel == "Back to Scenes",
-                "the button says \"Scenes\"; VoiceOver says where it goes")
-        #expect(editor.test_backControlToolTip == "Back to Scenes (\u{2318}[)",
-                "the one place the shortcut is printed — this screen has no menu bar")
-        #expect(editor.test_backControlAcceptsFocus, "Tab must reach the way out")
-    }
-
-    @Test func theActiveMarkersNeverMoveTheHeaderBand() throws {
-        // The badge joins the name in one block centred on the icon well, so
-        // activating a group may move the name, but the block stays centred
-        // and the icon and the band stay put.
-        let (editor, controller, devices) = try makeEditor()
-        let icon = editor.test_headerIconFrame
-        let header = editor.test_headerSectionFrame
-
-        let group = try #require(controller.groups.first)
-        controller.activateGroup(id: group.id)
-        editor.show(groupID: group.id, devices: devices)
-        editor.view.layoutSubtreeIfNeeded()
-
-        #expect(abs(editor.test_headerSectionFrame.height - header.height) <= 0.01)
-        #expect(abs(editor.test_headerIconFrame.minY - icon.minY) <= 0.01)
-        #expect(abs(editor.test_headerIconFrame.minX - icon.minX) <= 0.01)
-        #expect(abs(editor.test_headerTextBlockFrame.midY - editor.test_headerIconFrame.midY) <= 0.01)
-    }
-
-    /// At a seven-device fleet the pane has no spare points: the shipping
-    /// budget is met exactly. So the two active-group markers have to cost ZERO
-    /// content height — the badge inside the header band, the reassurance line
-    /// inside the delete button's bottom margin. Measured on the SCROLL
-    /// DOCUMENT since roadmap 039: the pane's own fitting height is capped by
-    /// the scroll view, so only the document still reports what the content
-    /// costs.
-    @Test func theActiveGroupsMarkersAddNoHeightToTheEditorPane() throws {
-        let devices = (0..<7).map { makeDevice(id: "d\($0)", name: "Device \($0)") }
-        let controller = GroupController(backend: MockBackend(fleet: []),
-                                         store: GroupStore(directory: tempDirectory()),
-                                         routingStore: RoutingStore(directory: scratchDir),
-                                         settings: AppSettings(defaults: isolatedDefaults),
-                                         loadPersisted: false)
-        let group = try controller.createGroup(name: "Downstairs", memberIDs: ["d0"],
-                                               memberVolumes: [:]).group
-        let editor = GroupEditorViewController(groupController: controller)
-        editor.loadView()
-        editor.show(groupID: group.id, devices: devices)
-        editor.view.frame = NSRect(x: 0, y: 0, width: 520, height: 460)
-        editor.view.layoutSubtreeIfNeeded()
-        let idle = editor.test_scrollDocumentHeight
-
-        controller.activateGroup(id: group.id)
-        editor.show(groupID: group.id, devices: devices)
-        editor.view.layoutSubtreeIfNeeded()
-
-        #expect(editor.test_playingBadgeVisible && editor.test_reassuranceVisible)
-        #expect(abs(editor.test_scrollDocumentHeight - idle) <= 0.01,
-                Comment(rawValue: "the active editor needs \(editor.test_scrollDocumentHeight)pt against " +
-                "\(idle)pt idle — the markers must ride inside space the pane already spends"))
-    }
 
     @Test func pinnedSoleMemberExplanationReachesVoiceOver() {
         // The tooltip alone is not reliably announced; the "why is this
@@ -564,19 +377,6 @@ import AppKit
         #expect(row.test_checkboxAccessibilityHelp == "A group needs at least one device.")
     }
 
-    /// The one geometry invariant that can break silently: `BusRailOverlayView`
-    /// draws the spine at the literal `railGutterCenterX` in ITS coordinate
-    /// space, while each row places its node at that x from the ROW's leading
-    /// edge. If the two leading edges ever stop coinciding, the nodes float off
-    /// the line and nothing else in the suite notices.
-    @Test func everyNodeCentreLandsOnTheOverlaysGutterLine() throws {
-        let (editor, _, _) = try makeEditor()
-        for id in editor.test_candidateDeviceIDs {
-            let x = try #require(editor.test_nodeCenterXInOverlaySpace(for: id))
-            #expect(abs(x - PopoverColumnGrid.railGutterCenterX) <= 0.01,
-                    "\(id)'s node must sit exactly on the drawn spine")
-        }
-    }
 
     @Test func nodeClearsTheIconColumn() {
         // The gutter reserve must keep the node — at the widest it ever draws,

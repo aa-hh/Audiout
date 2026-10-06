@@ -71,7 +71,7 @@ public final class DeviceDetailViewController: NSViewController {
     private let subtitleStack = NSStackView()
     /// The identity band: the icon well, then the name over its caption.
     private lazy var header = PageHeaderView(iconWell: iconWell, title: nameLabel,
-                                             caption: subtitleStack, leadingInset: .railFree)
+                                             caption: subtitleStack)
     /// The page's instrument, wrapping the shared editor — a `.well`
     /// (recessed), not a `.card`, so it still reads sunk where `raised`
     /// flattens to the pane's own ground in light (2026-09-04). Every box on

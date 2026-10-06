@@ -4,59 +4,18 @@ import AppKit
 import AudioutCore
 import AudioutSharedUI
 
-/// A single device row in a **membership checklist** — the group-creation
-/// sheet's device list and the group editor's membership pane (design revamp:
-/// the Groups window becomes CONFIGURATION-ONLY, so this row only ever edits
-/// *membership*, never routing/activation). Composition is stock AppKit: a
-/// checkbox `NSButton`, the device's SF Symbol in an `NSImageView` tinted
-/// identity-neutral like the sidebar's `makeIconLabel`, and an `NSTextField`
-/// name label.
-///
-/// Deliberately NOT `DeviceRowView` (`../AudioutSharedUI/DeviceRowView.swift`):
-/// that row's primary control is "Selected Speakers" / live routing membership
-/// and it carries a volume slider + mute button + connection-status badge —
-/// all routing/activation concerns this window must never expose (activation
-/// lives in the popover only, per the revamp). This row's checkbox means
-/// "is a member of THIS group", an unrelated set from `GroupController`'s
-/// Selected Devices.
-///
-/// **Visibility policy lives in the hosts, not here.** An unavailable device
-/// still renders and is still checkable/uncheckable — a host only includes an
-/// unavailable device in its list at all when it is already a member (so the
-/// user can see and remove it), never to offer joining an unreachable device.
+/// A speaker's membership control, glyph and name on the scene page or creation sheet.
+/// The page draws a node over the real checkbox; the sheet uses the stock checkbox.
+/// Hosts decide which speakers appear, including unavailable saved members.
 public final class MembershipRowView: NSView {
 
-    /// Which host surface this row is drawn on — the one input that decides
-    /// whether it wears the Warm Signal v4 rail/node language or stays a plain
-    /// stock checkbox row (owner's call, Q6 2026-07-25).
-    ///
-    /// The row has exactly TWO hosts and they are visually different surfaces:
-    /// the Groups editor is the app's own themed pane, while "Add scene" is a
-    /// standard AppKit sheet on the system's own white/grey. `ember` measures
-    /// ~2.34–2.48:1 on that white — the gold node would be near-invisible
-    /// there — so the rail is pane-only and the sheet keeps plain stock rows.
-    /// Do NOT warm the Apple sheet, and do NOT introduce a second, darker
-    /// gold to make the node survive on white.
+    /// The scene page uses the app's node; the system sheet keeps its stock control
+    /// because the node's edge cannot meet contrast on the sheet's white ground.
     public enum Surface: Equatable {
-        /// The Groups window's group editor: invisible checkbox cell + a gold
-        /// `MembershipBusView` node, threaded by the pane-level rail overlay.
+        /// The scene page: an invisible checkbox cell under a membership node.
         case warmPane
         /// The stock "Add scene" sheet: an ordinary AppKit checkbox row.
         case systemSheet
-    }
-
-    /// Whether this row's rail node renders ARMED (gold — the group is the
-    /// active Main Out, audio flows through these members) or idle (`ember` —
-    /// pure configuration, nothing moving). Gold means LIVE everywhere in
-    /// Audiout, so an editor showing an inactive group must not fill its
-    /// member discs gold. Host-set; `.systemSheet` rows have no node and ignore
-    /// it.
-    public var railArmed: Bool = true {
-        didSet {
-            guard railArmed != oldValue else { return }
-            applyInk()
-            updateBus()
-        }
     }
 
     /// Fired whenever the user toggles the row's checkbox.
@@ -220,11 +179,6 @@ public final class MembershipRowView: NSView {
     /// starts at `firstElementLeading`, which reserves that gutter plus
     /// `busNodeClearance` of clear space so the node never crowds the glyph.
     ///
-    /// The row's leading edge must line up with the rail overlay's leading edge:
-    /// `BusRailOverlayView` draws the spine at the literal `railGutterCenterX`
-    /// in its OWN coordinate space, so the host is responsible for pinning the
-    /// two to the same x (`GroupEditorViewController`, asserted by
-    /// `test_nodeCenterXInOverlaySpace`).
     private func buildWarmPaneLeadingColumns() {
         busView.translatesAutoresizingMaskIntoConstraints = false
         // Added BELOW the checkbox in z-order is not required — the bus view
@@ -263,10 +217,7 @@ public final class MembershipRowView: NSView {
     /// Still fully interactive: an unavailable device stays
     /// checkable/uncheckable so an existing member can be removed offline.
     ///
-    /// Warm on the warm pane means the audio is genuinely reaching this member
-    /// — the group is armed AND the device is in it (C5). Everything else is
-    /// cool. The system sheet's branch takes the neutral ink ladder — label,
-    /// label2, label3 — with no temperature split.
+    /// Page names and glyphs use warm ink when available; unavailable speakers use cool ink.
     private var isAvailable: Bool { presentation?.isAvailable ?? device.isAvailable }
 
     private func applyInk() {
@@ -278,9 +229,8 @@ public final class MembershipRowView: NSView {
                 unavailableLabel.textColor = Tokens.Color.labelCool2
                 return
             }
-            let live = railArmed && checked
-            nameLabel.textColor = live ? Tokens.Color.label : Tokens.Color.labelCool
-            iconView.contentTintColor = live ? Tokens.Color.label2 : Tokens.Color.labelCool2
+            nameLabel.textColor = Tokens.Color.label
+            iconView.contentTintColor = Tokens.Color.label2
             unavailableLabel.textColor = Tokens.Color.labelCool2
         case .systemSheet:
             nameLabel.textColor = isAvailable ? Tokens.Color.label : Tokens.Color.label3
@@ -289,22 +239,13 @@ public final class MembershipRowView: NSView {
         }
     }
 
-    /// Re-derive the drawn node from the current membership state. The node
-    /// vocabulary here is deliberately BINARY — filled gold `.member` when
-    /// checked, hollow `.nonMember` when not — because this checklist edits
-    /// *membership*, which has no connection/energize states to report (the
-    /// popover's `DeviceRowView` owns those). In particular the pinned sole
-    /// member (`setCheckboxEnabled(false)`) still renders `.member`: it IS a
-    /// member, and `.blocked`'s greyed hollow node would wrongly read as "not
-    /// in this group". No-op on `.systemSheet`, which mounts no node at all.
+    /// A checked speaker draws a gold member node, an unchecked speaker a hollow node.
+    /// The pinned sole member keeps its filled node; the sheet mounts no node.
     private func updateBus() {
         guard surface == .warmPane else { return }
-        // The node dims with the rest of the row — fill only: an unavailable
-        // member keeps its seat and rim on the rail and goes grey where it
-        // would be gold, so it still reads as "in this group, not playing".
         busView.apply(node: checked ? .member : .nonMember,
                       dimmed: !isAvailable,
-                      armed: railArmed)
+                      armed: true)
     }
 
     // MARK: Model
@@ -390,10 +331,9 @@ public final class MembershipRowView: NSView {
     /// sole member's "why is this disabled" explanation must be announced too).
     public var test_checkboxAccessibilityHelp: String? { checkbox.accessibilityHelp() }
 
-    /// Whether this row's node renders in the armed (gold) tone; always the
-    /// host-set ``railArmed`` value, read back through the drawn node itself.
-    public var test_railArmed: Bool {
-        surface == .warmPane ? busView.test_armed : railArmed
+    /// Whether the drawn node uses its armed membership tone.
+    public var test_nodeArmed: Bool {
+        surface == .warmPane ? busView.test_armed : true
     }
 
     // MARK: The glyph tile (warm pane only)
@@ -415,6 +355,9 @@ public final class MembershipRowView: NSView {
     public override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
         guard surface == .warmPane else { return }
+        if hoverTracker.isHovered && checkbox.isEnabled {
+            PopoverColumnGrid.fillRowWash(in: bounds, alpha: PopoverColumnGrid.rowHoverWashAlpha)
+        }
         let tile = NSRect(x: iconView.frame.midX - Self.glyphTileSide / 2,
                           y: iconView.frame.midY - Self.glyphTileSide / 2,
                           width: Self.glyphTileSide,
@@ -503,6 +446,7 @@ public final class MembershipRowView: NSView {
     private func applyHoverToNode() {
         guard surface == .warmPane else { return }
         busView.setHovered(rowHovered && checkbox.isEnabled)
+        needsDisplay = true
     }
 
     // MARK: Actions
@@ -594,17 +538,4 @@ public final class MembershipRowView: NSView {
     /// The checkbox's own VoiceOver label (the membership verb), asserted
     /// unchanged across the surface split.
     public var test_checkboxAccessibilityLabel: String? { checkbox.accessibilityLabel() }
-}
-
-// MARK: - Continuous rail contribution (Warm Signal v4 §Call-1)
-
-/// The warm pane's rail is drawn ONCE at pane level (`BusRailOverlayView`), not
-/// per row: the row contributes its node kind and the frame the node is centred
-/// on. A `.systemSheet` row reports `nil`, so the same type can sit in an
-/// overlay's `deviceRows` and contribute nothing.
-extension MembershipRowView: RailNodeProviding {
-    public var railNode: MembershipBusView.Node? { test_busNode }
-    public var railDeviceID: String? { device.id }
-    public var railNodeView: NSView { self }
-    public var railNodeBounds: NSRect { bounds }
 }

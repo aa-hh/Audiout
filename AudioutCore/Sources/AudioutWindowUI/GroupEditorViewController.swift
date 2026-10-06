@@ -4,68 +4,11 @@ import AppKit
 import AudioutCore
 import AudioutSharedUI
 
-/// The group editor pane (design revamp: the Groups window is
-/// CONFIGURATION-ONLY — renaming, membership, and "Delete scene…" live here,
-/// but activation/routing never do; that stays in the popover only). This is
-/// the absorbed T-U3: the in-menu editable field is impossible (menu item
-/// views get no keyboard events — `dev/notes/p1-menu-brief.md` §3), so a real
-/// `NSTextField` works fine HERE, in a normal window.
-///
-/// EDIT-ONLY: this view controller never creates a group. Creation moved to a
-/// standard macOS sheet (a parallel task); this editor only ever shows an
-/// already-persisted group.
-///
-/// Layout, top to bottom (HEADER PARITY with `DeviceDetailViewController` —
-/// design feedback 2026-07-18: groups and devices share the large-icon
-/// header's band height and vertical centring; a group's TITLE is editable
-/// and a device's is not, and the device page starts its icon at a smaller
-/// inset than this pane's by design; every shared number lives in
-/// ``GroupsPaneLayout``):
-/// - a HEADER SECTION holding the large (``DeviceIconWellView/size``pt) group
-///   icon and the group's name SIDE BY SIDE (design review 2026-07-25 — they
-///   used to stack, which cost 30 pt of a pane that was overflowing its own
-///   window); clicking the icon opens the icon picker. The well carries
-///   ``GroupIdentityGlowView`` behind it, the same magenta light this group's
-///   overview card shows;
-/// - the name itself is an inline rename field: a real `NSTextField` wearing
-///   the ``WarmNameFieldCell`` skin (filled, bordered, trailing pencil), which
-///   commits on Return/focus loss, reverts on Escape, and restores the previous
-///   name when emptied — a Finder rename in a box;
-/// - a "Speakers" list of `MembershipRowView` rows, one per candidate device
-///   (per HIG — checkboxes for membership, not switches), in a second section;
-/// - a "Delete scene…" `NSButton`, with the line that says edits save
-///   themselves beside it.
-///
-/// The two controls that LEAVE the pane share one band above all of that: the
-/// quiet "‹ Groups" button on the left and the primary Done/Save on the right.
-///
-/// Edits write straight through the injected `GroupController`
-/// (`saveGroup`/`deleteGroup`): renaming and membership toggles call
-/// `saveGroup`; the delete button calls `deleteGroup`. The parent window is
-/// notified via `onDidEditGroup` / `onDidDeleteGroup` so it can refresh the
-/// sidebar labels + toolbar presets.
-///
-/// The header icon shows `group.iconSymbolName` (resolved through
-/// `DeviceIcon.resolve`, so a stale override still renders the default rather
-/// than a blank glyph). Picking a symbol (or "use default") persists instantly
-/// through `saveGroup`, exactly like a rename — this window never gates a
-/// group edit behind a separate "Save" step. The primary button says so: it
-/// reads "Done" until the name field holds text that has not been committed
-/// yet, which is the pane's ONE uncommitted state.
+/// A scene page with an icon well and identity glow, editable name and speaker count.
+/// Below the header, a Speakers heading introduces one card of membership rows.
+/// The Delete band sits beside the saved-as-you-go note; edits write through GroupController.
+/// The page provides no exit controls.
 public final class GroupEditorViewController: NSViewController {
-
-    /// The continuous membership-rail spine, drawn ONCE for the whole pane on
-    /// top of everything else so it reads unbroken where it crosses the header
-    /// band and the "Speakers" label's row. Non-interactive.
-    ///
-    /// ANCHORING TRAP: its leading edge is pinned to the COLUMN's, and the
-    /// membership rows' leading edges are pinned there too — that alignment is
-    /// load-bearing: `BusRailOverlayView` draws the spine at the literal
-    /// `PopoverColumnGrid.railGutterCenterX` in its own coordinate space, while
-    /// each row places its node at that same x from the ROW's leading edge. Move
-    /// one without the other and the nodes float off the line by exactly the
-    /// difference (`test_nodeCenterXInOverlaySpace` is the guard).
-    private let railOverlay = BusRailOverlayView()
 
     private let groupController: GroupController
 
@@ -78,50 +21,25 @@ public final class GroupEditorViewController: NSViewController {
     /// Called after a rename or membership change persisted (refresh sidebar +
     /// toolbar labels in place).
     public var onDidEditGroup: (() -> Void)?
-    /// Called after the group was deleted (pop back to the mixer).
+    /// Called after deletion so the host selects another scene or the empty page.
     public var onDidDeleteGroup: (() -> Void)?
-    /// Called when the user leaves this editor for the group overview — the
-    /// "‹ Groups" band, Escape, or ⌘[. The host owns the pane swap; this pane
-    /// only reports the request (direction C's in-pane push).
-    public var onBack: (() -> Void)?
-
     /// The group currently being edited, nil before `show`.
     public private(set) var editingGroupID: String?
 
-    /// Whether the edited group is the active Main Out group. Gold means LIVE
-    /// everywhere in Audiout, so an inactive group's editor renders its whole
-    /// spine — hook, wire, AND member discs — in the quiet `ember` idle tone.
-    ///
-    /// The hook and wire follow THIS flag (`railHookAnchor`). The member discs
-    /// go one step further and follow the ROUTED truth PER ROW
-    /// (``railArmed(for:memberSet:isActiveGroup:)``): saving a speaker into
-    /// the active group does not start sending to it, so a row that is checked
-    /// but not in the backend's output set fills ember, not gold.
-    private var isActiveGroup = false
-
-    /// The "‹ Groups" control at the top of the scrolled document — the way
-    /// back to the card overview this editor was pushed from. It rides on the
-    /// scroll view roadmap 039 gave the pane: before that there was not a
-    /// single spare point of height to put it in.
-    ///
-    /// A stock `NSButton` the same height as the primary beside it, so the two
-    /// read as a matched secondary/primary pair on one band (owner's call,
-    /// 2026-09-03). The quiet `.accessoryBar` bezel is what keeps it SECONDARY
-    /// next to the primary's `.rounded` one; being a real control, the focus
-    /// ring, Space, the pressed state and `accessibilityPerformPress()` are
-    /// AppKit's.
-    private let backButton = BackButton()
     private let iconWell = DeviceIconWellView()
     /// The group's identity light, mounted behind the well.
     private let iconGlow = GroupIdentityGlowView()
     private let nameField = NSTextField(string: "")
-    /// The header band: the icon well, then the rename field over the
-    /// "Playing" marker as one block centred on the well. A hidden marker
-    /// drops out of the stack, so the name alone is centred while nothing
-    /// plays. The rail climbs out of the list and lands on the well.
-    private lazy var header = PageHeaderView(iconWell: iconWell, title: nameField,
-                                             caption: playingBadge, leadingInset: .rail)
-    private let membershipStack = RailRepaintingStackView()
+    private let countLabel: RollingCountLabel = {
+        let label = RollingCountLabel(labelWithString: "")
+        label.font = Tokens.Font.captionDigits
+        label.textColor = Tokens.Color.labelCool
+        label.lineBreakMode = .byTruncatingTail
+        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        return label
+    }()
+    private lazy var header = PageHeaderView(iconWell: iconWell, title: nameField, caption: countLabel)
+    private let membershipStack = WellRepaintingStackView()
     /// THIS PAGE'S ONE INSTRUMENT, so it is the one `.card` here — a `raised`
     /// fill with a `containerEdge` edge behind the Speakers checklist, plus
     /// the inter-row rules in the same tone. Sits BEHIND `membershipStack` in
@@ -131,60 +49,14 @@ public final class GroupEditorViewController: NSViewController {
     /// to sample the real drawn fill/divider colours.
     private let membershipWell = GroupedSectionView()
     private let deleteButton = NSButton()
-    /// The pane's PRIMARY action, at the TOP RIGHT of the form, level with the
-    /// "‹ Groups" control it pairs with (owner's call, 2026-09-03). It carries
-    /// two titles: "Done" whenever the editor holds nothing uncommitted —
-    /// which is almost always, since membership, the icon and a committed
-    /// rename each write through immediately — and "Save" while the name field
-    /// holds text that has not been committed yet (``hasPendingRename``).
-    /// Pressing it on "Save" commits that rename first and then leaves,
-    /// exactly as Done does, so no typed name is ever abandoned. No Return key
-    /// equivalent — Return belongs to the rename field.
-    private let doneButton = NSButton()
-
     /// The pane's scroll view (roadmap 039) — see the note in ``loadView()``.
     /// Held so the `test_*` seams can measure the document without walking the
     /// view tree.
     private var scrollView: NSScrollView?
 
-    /// The header's "Playing" marker, shown ONLY while the edited group is
-    /// the active Main Out — the SAME glyph + wording the sidebar's
-    /// `IconLabelCellView` already uses, so one state has one name. It lives
-    /// UNDER the rename field, inside the header band: the band's height is
-    /// pinned to the icon well (`GroupsHeaderParityTests`), so nothing here may
-    /// grow it, and the trailing space beside the field belongs to a name that
-    /// can be long.
-    ///
-    /// HIDDEN AT DECLARATION, never in `loadView`: `showEditor(for:)` calls
-    /// ``show(groupID:devices:)`` BEFORE this controller's view is first
-    /// embedded, so `loadView` can run afterwards and would wipe the state
-    /// `show` just decided (the same ordering trap `WarmNameFieldCell`'s swap
-    /// carries below).
-    private let playingBadge: NSStackView = {
-        let stack = NSStackView()
-        stack.isHidden = true
-        return stack
-    }()
-
-    /// The line that says edits are saved as they are made — nothing on this
-    /// pane waits for a button — and points to Speakers for Mixer visibility.
-    /// An ACTIVE group's, where "Playing" is on screen while membership is
-    /// being edited, also says that edits do not touch what is playing
-    /// (``show(groupID:devices:)``).
-    ///
-    /// HEIGHT BUDGET: it sits BESIDE "Delete scene…", centred on it, with no
-    /// bottom pin, so it rides inside the button's existing bottom margin and
-    /// costs the pane ZERO fitting height. At a seven-device fleet the pane has
-    /// no spare points at all — a new band above the button would overflow it
-    /// (`MembershipRailTests`).
-    ///
-    /// Configured at declaration for the same `loadView`-after-`show`
-    /// ordering reason as ``playingBadge``.
     private let reassuranceLabel: NSTextField = {
         let label = NSTextField(wrappingLabelWithString: GroupEditorViewController.savedAsYouGo)
         label.font = Tokens.Font.caption
-        // `Tokens.Color.label2`: text colours are frozen in this pane
-        // (`AGENTS.md`) — the gold in this pair tints the badge's GLYPH only.
         label.textColor = Tokens.Color.label2
         label.isSelectable = false
         label.maximumNumberOfLines = 0
@@ -208,39 +80,10 @@ public final class GroupEditorViewController: NSViewController {
     private static let titleFieldMinWidth: CGFloat = 140
 
     private static let savedAsYouGo = "Changes are saved as you go."
-    private static let savedAsYouGoActive =
-        "Changes are saved as you go. They don\u{2019}t change what\u{2019}s playing now."
 
-    /// The primary's resting title. Every edit on this pane autosaves, so
-    /// there is normally nothing outstanding to save and the button only has
-    /// to say how to leave.
-    private static let doneTitle = "Done"
-    /// …and the title it takes while the name field holds an uncommitted
-    /// rename, which is the ONE thing on this pane that is not saved yet.
-    private static let saveTitle = "Save"
-
-    /// The top action band's inset from the document's top. The band holds the
-    /// two controls that leave this pane, and it needs its own margin from the
-    /// toolbar chrome above it (owner's call, 2026-09-03) while still clearing
-    /// the icon well below by at least `topBandControlGap`-worth of room —
-    /// the back button overlaps the icon well horizontally, so if the band
-    /// drops low enough the icon tile draws on top of it. There is no room to
-    /// buy that clearance from this constant alone: raising `topBandTopInset`
-    /// on its own eats straight into the gap and lands the tile on the button.
-    /// So this constant and `GroupsPaneLayout.columnTopInset` move TOGETHER,
-    /// by the same amount, whenever the band's margin changes — that keeps the
-    /// 8 pt of clearance below the band constant while giving the band more
-    /// air above it. HEADER PARITY IS GEOMETRIC (`GroupsHeaderParityTests`
-    /// asserts the panes share the header band height and the vertical
-    /// centring of the text block), so the column must not move vertically
-    /// relative to the device detail pane's — moving both constants
-    /// together keeps the column pinned to the shared `columnTopInset`, it
-    /// just shifts that shared value too.
-    private static let topBandTopInset: CGFloat = 12
-    /// Smallest gap between the two controls on that band before the back
-    /// control has to give way.
-    private static let topBandControlGap: CGFloat = 8
-
+    private static func speakerCount(_ n: Int) -> String {
+        n == 1 ? "1 speaker" : "\(n) speakers"
+    }
     /// The rename field's live width, recomputed from the name it holds
     /// (an editable field has no intrinsic width to hug with, so the hug is
     /// measured by hand). Optional, not required, so the "never wider than its
@@ -283,11 +126,6 @@ public final class GroupEditorViewController: NSViewController {
     public required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     public override func loadView() {
-        // This pane's well is where the membership rail's origin hook lands, so
-        // it wears the ring (gold when active, ember when idle) that the spine
-        // terminates into. The device detail pane's well is NOT a rail origin
-        // and keeps its neutral resting edge.
-        iconWell.isRailOrigin = true
         iconWell.setAccessibilityLabel("Edit scene icon")
         iconWell.onClick = { [weak self] in
             guard let self else { return }
@@ -341,12 +179,12 @@ public final class GroupEditorViewController: NSViewController {
         nameField.addTrackingArea(tracking)
         nameFieldTracking = tracking
 
-        buildPlayingBadge()
         reassuranceLabel.translatesAutoresizingMaskIntoConstraints = false
 
         let speakersLabel = NSTextField(labelWithString: "Speakers")
         speakersLabel.translatesAutoresizingMaskIntoConstraints = false
         speakersLabel.textColor = Tokens.Color.label2
+        speakersLabel.setAccessibilityHeading()
 
         membershipStack.translatesAutoresizingMaskIntoConstraints = false
         membershipStack.orientation = .vertical
@@ -360,63 +198,12 @@ public final class GroupEditorViewController: NSViewController {
         deleteButton.action = #selector(deleteTapped(_:))
         deleteButton.hasDestructiveAction = true
 
-        doneButton.translatesAutoresizingMaskIntoConstraints = false
-        doneButton.title = Self.doneTitle
-        doneButton.setAccessibilityLabel(Self.doneTitle)
-        doneButton.bezelStyle = .rounded
-        doneButton.target = self
-        doneButton.action = #selector(doneTapped(_:))
-
-        // A host that re-invalidates the rail on every layout pass, so the spine
-        // always reflects the CURRENT row frames (rebuild, resize, pane swap)
-        // with no cached geometry.
-        //
-        // TWO hooks, deliberately, and neither replaces the other (2026-08-06 —
-        // the popover's rail drew displaced by exactly the gap between them):
-        // the CONTAINER's `layout()` fires on window resize / pane swap but NOT
-        // when only descendants re-lay out inside an unchanged container frame
-        // (a checklist row growing or a mid-animation reflow); the membership
-        // STACK's fires for its own relayouts but — unlike the popover's card
-        // stack, which is pinned to its container's four edges and so covers
-        // both cases alone — this stack floats inside the elastic form column,
-        // so its `layout()` is not guaranteed to run on every container
-        // resize. The popover could DELETE its container hook; here both stay.
-        backButton.translatesAutoresizingMaskIntoConstraints = false
-        backButton.title = "Scenes"
-        backButton.image = NSImage(systemSymbolName: "chevron.left", accessibilityDescription: nil)?
-            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 11, weight: .semibold))
-        backButton.image?.isTemplate = true
-        backButton.imagePosition = .imageLeading
-        // QUIET, but still a real bezel: `.accessoryBar` draws a light capsule
-        // that reads as a control at rest without competing with the primary's
-        // `.rounded` push bezel beside it (checked in both appearances).
-        backButton.bezelStyle = .accessoryBar
-        backButton.target = self
-        backButton.action = #selector(backTapped(_:))
-        // The button says "Scenes"; VoiceOver says where it goes.
-        backButton.setAccessibilityLabel("Back to Scenes")
-        // The one place the shortcut is printed: the screen has no menu bar
-        // to list it (see `RailRepaintingView.performKeyEquivalent`).
-        backButton.toolTip = "Back to Scenes (\u{2318}[)"
-
-        // An inactive group's line is ember, like its member discs; only the
-        // active group's goes gold (owner's ruling, 2026-10-04 — the Mixer's
-        // line stays gold in every state).
-        railOverlay.unarmedLineTone = Tokens.Color.ember
-        let container = RailRepaintingView()
-        container.railOverlay = railOverlay
+        let container = WellRepaintingView()
         container.membershipWell = membershipWell
-        // Escape and ⌘[ are the band's keyboard equivalents. Both have to live
-        // on a VIEW: key equivalents are dispatched down the view tree, and
-        // `cancelOperation` up the responder chain from whatever is focused —
-        // an `NSViewController` override would be called by neither.
-        container.onBack = { [weak self] in self?.onBack?() }
-        membershipStack.railOverlay = railOverlay
         membershipStack.membershipWell = membershipWell
         // The form column: symmetric margins off the pane, ELASTIC up to
         // `GroupsPaneLayout.contentMaxWidth`. Everything hangs off this
-        // column's edges rather than the container's, so both sections and the
-        // rail move together.
+        // column's edges rather than the container's.
         let column = NSView()
         column.translatesAutoresizingMaskIntoConstraints = false
 
@@ -428,9 +215,10 @@ public final class GroupEditorViewController: NSViewController {
         // The section spans the column's full width (rail gutter included), so
         // its dividers inset by the same gutter reserve every child uses.
         membershipWell.translatesAutoresizingMaskIntoConstraints = false
+        membershipWell.radiusOverride = Tokens.Layout.Radius.row
         membershipWell.contentLeadingInset = GroupsPaneLayout.contentLeadingInset
         column.addSubview(membershipWell)
-        // Below the rename field's 240 width preference, so the shown badge
+        // Below the rename field's 240 width preference, so the count caption
         // never pulls the field towards its own width.
         header.textStack.setHuggingPriority(NSLayoutConstraint.Priority(230), for: .horizontal)
         // The identity light sits behind the well it belongs to.
@@ -448,19 +236,11 @@ public final class GroupEditorViewController: NSViewController {
         // warm surface, and a FLIPPED document so the form starts at the TOP
         // rather than bottom-gravitating.
         //
-        // Everything the container used to host lives in the DOCUMENT now,
-        // including the rail overlay, whose anchoring traps below are unchanged
-        // — they just read document space rather than container space.
         let document = FlippedView()
         document.translatesAutoresizingMaskIntoConstraints = false
-        for v in [backButton, doneButton, column, deleteButton, reassuranceLabel] {
+        for v in [column, deleteButton, reassuranceLabel] {
             document.addSubview(v)
         }
-        // Added LAST so the spine composites ON TOP of the header and the rows
-        // it passes; non-interactive, so nothing beneath it loses a click.
-        railOverlay.translatesAutoresizingMaskIntoConstraints = false
-        document.addSubview(railOverlay)
-
         let scrollView = NSScrollView()
         scrollView.translatesAutoresizingMaskIntoConstraints = false
         scrollView.documentView = document
@@ -516,31 +296,6 @@ public final class GroupEditorViewController: NSViewController {
             // content needs — vertical scrolling only, never horizontal.
             document.widthAnchor.constraint(equalTo: scrollView.widthAnchor),
 
-            // THE TOP ACTION BAND. It tops the DOCUMENT, not the pane's
-            // safe-area guide — the clip view already sits below the title-bar
-            // chrome, so the document itself is the correct top reference here.
-            // It scrolls WITH the form rather than pinning to the clip view:
-            // the form is short enough to scroll only on a large fleet, and a
-            // floating band would have to solve its own backdrop against the
-            // rows passing under it.
-            //
-            // Both controls hang off the COLUMN's edges, so they line up with
-            // the two sections below them rather than with the pane.
-            backButton.topAnchor.constraint(equalTo: document.topAnchor,
-                                            constant: Self.topBandTopInset),
-            backButton.leadingAnchor.constraint(equalTo: column.leadingAnchor),
-            // SAME SIZE as the primary (owner's call, 2026-09-03) — read off
-            // the primary's own control metrics rather than a copied number,
-            // so a future bezel or control-size change moves both together.
-            backButton.heightAnchor.constraint(equalTo: doneButton.heightAnchor),
-            backButton.trailingAnchor.constraint(lessThanOrEqualTo: doneButton.leadingAnchor,
-                                                 constant: -Self.topBandControlGap),
-
-            doneButton.topAnchor.constraint(equalTo: backButton.topAnchor),
-            doneButton.trailingAnchor.constraint(equalTo: column.trailingAnchor),
-
-            // The column keeps the SHARED top inset the two detail panes use,
-            // independently of the band above it (see `topBandTopInset`).
             column.topAnchor.constraint(equalTo: document.topAnchor,
                                         constant: GroupsPaneLayout.columnTopInset),
             // SYMMETRIC margins (design review 2026-07-25). The column used to
@@ -558,10 +313,8 @@ public final class GroupEditorViewController: NSViewController {
             // name, not above it — 30 pt of reclaimed height on a pane that was
             // overflowing its own window. Header parity with
             // `DeviceDetailViewController` is the shared band height and
-            // vertical centring, both read from `GroupsPaneLayout`. The icon's
-            // x differs by design: this pane keeps `contentLeadingInset` for
-            // its rail, while the device page starts its icon further left.
-            // The band spans the column's full width so the rail lands INSIDE it.
+            // vertical centring, both read from `GroupsPaneLayout`. The icon
+            // shares the other pages' content inset.
             header.leadingAnchor.constraint(equalTo: column.leadingAnchor),
             header.trailingAnchor.constraint(equalTo: column.trailingAnchor),
             header.topAnchor.constraint(equalTo: column.topAnchor),
@@ -583,7 +336,7 @@ public final class GroupEditorViewController: NSViewController {
             speakersLabel.topAnchor.constraint(equalTo: header.bottomAnchor,
                                                constant: GroupsPaneLayout.sectionGap),
             speakersLabel.leadingAnchor.constraint(equalTo: column.leadingAnchor,
-                                                   constant: GroupsPaneLayout.contentLeadingInset),
+                                                   constant: GroupsPaneLayout.railFreeContentLeadingInset),
 
             // The ROWS, uniquely, start at the column's own leading edge: each
             // row applies `contentLeadingInset` internally to its icon and
@@ -604,10 +357,8 @@ public final class GroupEditorViewController: NSViewController {
                 equalTo: column.trailingAnchor, constant: -GroupsPaneLayout.contentTrailingInset),
             membershipStack.bottomAnchor.constraint(equalTo: column.bottomAnchor),
 
-            // The list section. Spans the column's FULL width, gutter included,
-            // so the rail's nodes sit inside it (design review 2026-07-25 —
-            // holding the spine outside left it reading as a detached stripe).
-            // Padded off the stack's top/bottom so rows breathe.
+            // The membership card spans the column, with its nodes inside.
+            // Padding separates the first and last rows from the card's edge.
             membershipWell.leadingAnchor.constraint(equalTo: column.leadingAnchor),
             membershipWell.trailingAnchor.constraint(equalTo: column.trailingAnchor),
             membershipWell.topAnchor.constraint(equalTo: membershipStack.topAnchor,
@@ -621,7 +372,7 @@ public final class GroupEditorViewController: NSViewController {
             // column took its own margin the button drifted 14 pt left of
             // everything it belongs under.
             deleteButton.leadingAnchor.constraint(equalTo: column.leadingAnchor,
-                                                  constant: GroupsPaneLayout.contentLeadingInset),
+                                                  constant: GroupsPaneLayout.railFreeContentLeadingInset),
             // The grouped-list container extends `verticalPadding` BELOW the
             // last row, so the VISIBLE gap between its bottom border and the
             // button is `actionBandGap` — wider than the gap between sections,
@@ -651,48 +402,9 @@ public final class GroupEditorViewController: NSViewController {
             reassuranceLabel.centerYAnchor.constraint(equalTo: deleteButton.centerYAnchor),
             reassuranceTrailing,
 
-            // ANCHORING TRAP: the overlay's LEADING edge must coincide with the
-            // rows' leading edge (the column's), not the container's — the
-            // overlay draws the spine at the literal `railGutterCenterX` in its
-            // own space while each row places its node at that x from its own
-            // leading edge, so a mismatch floats every node off the line by
-            // exactly the difference.
-            railOverlay.topAnchor.constraint(equalTo: document.topAnchor),
-            railOverlay.leadingAnchor.constraint(equalTo: column.leadingAnchor),
-            railOverlay.trailingAnchor.constraint(equalTo: column.trailingAnchor),
-            railOverlay.bottomAnchor.constraint(equalTo: document.bottomAnchor),
         ])
 
         view = container
-    }
-
-    /// Build the header's "Playing" marker: the sidebar's exact symbol and
-    /// wording (`IconLabelCellView`), so the same state can't acquire a second
-    /// name. `Tokens.Color.gold` is an INSTRUMENT — it keeps its authored value
-    /// in every theme, and it tints the GLYPH only; the caption stays
-    /// `Tokens.Color.label2` under this pane's frozen-text-colors rule.
-    private func buildPlayingBadge() {
-        let glyph = NSImageView()
-        glyph.translatesAutoresizingMaskIntoConstraints = false
-        glyph.image = NSImage(systemSymbolName: "speaker.wave.2.fill",
-                              accessibilityDescription: "Playing")?
-            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 11, weight: .semibold))
-        glyph.image?.isTemplate = true
-        glyph.contentTintColor = Tokens.Color.gold
-        // The caption beside it already speaks the words — an AX element here
-        // would announce them twice.
-        glyph.setAccessibilityElement(false)
-
-        let caption = NSTextField(labelWithString: "Playing")
-        caption.translatesAutoresizingMaskIntoConstraints = false
-        caption.font = Tokens.Font.caption
-        caption.textColor = Tokens.Color.label2
-
-        playingBadge.translatesAutoresizingMaskIntoConstraints = false
-        playingBadge.orientation = .horizontal
-        playingBadge.alignment = .centerY
-        playingBadge.spacing = 4
-        playingBadge.setViews([glyph, caption], in: .leading)
     }
 
     // MARK: Model
@@ -716,7 +428,8 @@ public final class GroupEditorViewController: NSViewController {
             records = library.records
         }
         presentationByID = Dictionary(uniqueKeysWithValues: records.map { ($0.id, $0) })
-        let devices = records.map(\.renderingDevice)
+        let renderedDevices = records.map(\.renderingDevice)
+        let devices = renderedDevices.filter(\.isLocalDevice) + renderedDevices.filter { !$0.isLocalDevice }
         guard let group = groupController.groups.first(where: { $0.id == groupID }) else { return }
         guard editorProjection(for: group, devices: devices) != lastRenderedProjection else {
             // Nothing to repaint, but a later membership toggle
@@ -755,27 +468,14 @@ public final class GroupEditorViewController: NSViewController {
             updateNameFieldWidth()
         }
         refreshIconWell(group: group)
-        // Warm Signal §5.3: the ACTIVE Main Out group's icon well carries the
-        // thin gold ring (drawing-only; pure model state from
-        // `GroupController.activeGroupID`, never audio-driven — §3.3).
-        // VoiceOver equivalent: the well's accessibilityValue mirrors the
-        // ring so the state isn't color-only, using the same "Playing"
-        // words as the visible badge below.
-        let isActive = groupController.activeGroupID == group.id
-        isActiveGroup = isActive
-        iconWell.isActiveGroup = isActive
-        iconWell.setAccessibilityValue(isActive ? "Playing" : "")
-        // The ring is colour alone; these two say it in words — the badge
-        // states that this group IS playing; the line says edits save as made
-        // and, for the active group, that they do not touch what is playing.
-        // Both states point to Speakers for Mixer visibility.
-        playingBadge.isHidden = !isActive
-        reassuranceLabel.stringValue = isActive ? Self.savedAsYouGoActive : Self.savedAsYouGo
-        // The origin hook's tone follows the same active-group truth the well's
-        // gold ring does (`railHookAnchor`), so repaint the rail with it.
-        railOverlay.needsDisplay = true
+        let count = Self.speakerCount(group.memberIDs.count)
+        if switchedGroup {
+            countLabel.test_settleNow()
+            countLabel.stringValue = count
+        } else {
+            countLabel.roll(to: count)
+        }
         rebuildCandidates(memberSet: Set(group.memberIDs))
-        refreshPrimaryTitle()
         lastRenderedProjection = editorProjection(for: group, devices: devices)
         test_renderCount += 1
     }
@@ -792,13 +492,11 @@ public final class GroupEditorViewController: NSViewController {
             let isAvailable: Bool
             let symbolName: String
             let isMember: Bool
-            let railArmed: Bool
             let status: SpeakerPresentationStatus?
         }
         let groupID: String
         let groupName: String
         let iconSymbolName: String
-        let isActive: Bool
         let rows: [Row]
     }
 
@@ -807,7 +505,6 @@ public final class GroupEditorViewController: NSViewController {
 
     private func editorProjection(for group: Group, devices: [Device]) -> EditorProjection {
         let memberSet = Set(group.memberIDs)
-        let isActive = groupController.activeGroupID == group.id
         // Every device is a candidate, unavailable ones included (owner's
         // call, 2026-08-28) — same rule as `rebuildCandidates(memberSet:)` and
         // the creation sheet. Rows for unavailable devices render dimmed.
@@ -817,7 +514,6 @@ public final class GroupEditorViewController: NSViewController {
             groupName: group.name,
             iconSymbolName: DeviceIcon.resolve(group.iconSymbolName,
                                                default: Group.defaultIconSymbolName),
-            isActive: isActive,
             rows: candidates.map { device in
                 EditorProjection.Row(
                     id: device.id,
@@ -826,27 +522,8 @@ public final class GroupEditorViewController: NSViewController {
                     symbolName: deviceIconController?.symbolName(for: device)
                         ?? device.kind.symbolName,
                     isMember: memberSet.contains(device.id),
-                    railArmed: railArmed(for: device, memberSet: memberSet,
-                                         isActiveGroup: isActive),
                     status: presentationByID[device.id]?.status)
             })
-    }
-
-    /// Whether this row's node renders ARMED — "this speaker is receiving the
-    /// Main Out feed right now", per row rather than per pane.
-    ///
-    /// Gold means LIVE, so the truth has to be the ROUTED one: for an
-    /// AirPlay/Bluetooth/Cast row that is the backend's own echo
-    /// (`Device.isSelected` — in the current output set), and for the Mac's
-    /// local sink it is saved Main-Out membership, which for the ACTIVE group
-    /// is exactly `memberSet` (`GroupController.isMainOutMember(_:)`). An
-    /// inactive group's editor is never armed at all. Editing membership does
-    /// not re-route (`saveGroup` is a pure model op), which is why a checked
-    /// row can legitimately read idle: saved, not live.
-    private func railArmed(for device: Device, memberSet: Set<String>,
-                           isActiveGroup: Bool) -> Bool {
-        guard isActiveGroup else { return false }
-        return device.isLocalDevice ? memberSet.contains(device.id) : device.isSelected
     }
 
     /// Refresh the header icon's image from `group.iconSymbolName`, resolved
@@ -885,8 +562,6 @@ public final class GroupEditorViewController: NSViewController {
                       checked: memberSet.contains(device.id),
                       iconSymbolName: deviceIconController?.symbolName(for: device))
             row.applyPresentation(presentationByID[device.id])
-            row.railArmed = railArmed(for: device, memberSet: memberSet,
-                                      isActiveGroup: isActiveGroup)
             // `apply` re-enables the checkbox but doesn't know about the sole-
             // member pin, so a formerly-pinned row that gained company here
             // (still `apply`'s job, not this loop's) kept its stale "A group
@@ -899,7 +574,6 @@ public final class GroupEditorViewController: NSViewController {
         // job), so the pinning has to run AFTER it, exactly as in `buildRows`.
         pinSoleMember(memberSet: memberSet)
         membershipWell.rows = candidateDevices.compactMap { rowsByID[$0.id] }
-        updateRail()
     }
 
     /// Pin the sole remaining member: a group needs at least one device, so
@@ -922,8 +596,6 @@ public final class GroupEditorViewController: NSViewController {
                 iconSymbolName: deviceIconController?.symbolName(for: device),
                 surface: .warmPane)
             row.applyPresentation(presentationByID[device.id])
-            row.railArmed = railArmed(for: device, memberSet: memberSet,
-                                      isActiveGroup: isActiveGroup)
             row.onToggle = { [weak self] deviceID, isChecked in
                 self?.membershipToggled(deviceID: deviceID, isChecked: isChecked)
             }
@@ -941,49 +613,12 @@ public final class GroupEditorViewController: NSViewController {
         // between whatever's actually in the stack now (a rebuild can add or
         // drop rows — an unchecked unavailable device disappears).
         membershipWell.rows = candidateDevices.compactMap { rowsByID[$0.id] }
-        updateRail()
-    }
-
-    /// Re-point the pane-level rail at the current rows (Warm Signal v4 §Call-1):
-    /// the channel runs from the group icon well down the WHOLE candidate list,
-    /// detouring around every unchecked row wherever it sits, while the signal
-    /// line inside it reaches only as far as the LOWEST CHECKED row — so the
-    /// GOLD's length reads as "how far down this group reaches." The overlay
-    /// derives both ends from the rows' node kinds, so this only has to hand it
-    /// the current rows. Called after every rebuild — which is also after every
-    /// membership toggle, so the signal's end follows the checkboxes.
-    private func updateRail() {
-        let rows = candidateDevices.compactMap { rowsByID[$0.id] }
-        railOverlay.mainOutRow = self
-        railOverlay.deviceRows = rows
-        railOverlay.needsDisplay = true
     }
 
     // MARK: Actions
 
     @objc private func nameCommitted(_ sender: NSTextField) {
         commitRename()
-    }
-
-    /// Whether the name field holds text that differs from the group's saved
-    /// name. This is the editor's ONE genuinely uncommitted state: a
-    /// membership toggle, an icon pick and a committed rename each write
-    /// through to the store the moment they happen, so nothing else here can
-    /// ever be "unsaved". Trimmed, because ``commitRename()`` trims too — a
-    /// name padded with spaces is not a different name.
-    private var hasPendingRename: Bool {
-        guard let group = editingGroup else { return false }
-        return nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) != group.name
-    }
-
-    /// Re-title the primary from ``hasPendingRename``, carrying the visible
-    /// title into the accessibility label so VoiceOver never announces the
-    /// other one.
-    private func refreshPrimaryTitle() {
-        let title = hasPendingRename ? Self.saveTitle : Self.doneTitle
-        guard doneButton.title != title else { return }
-        doneButton.title = title
-        doneButton.setAccessibilityLabel(title)
     }
 
     /// The group being edited, or `nil` before `show` / after a delete.
@@ -993,8 +628,7 @@ public final class GroupEditorViewController: NSViewController {
     }
 
     /// Commit the field's current text as the group's name — driven by Return
-    /// (the field's action), by focus loss (`controlTextDidEndEditing`) and by
-    /// the primary button while it reads "Save".
+    /// (the field's action) and by focus loss (`controlTextDidEndEditing`).
     ///
     /// EMPTIED: an all-whitespace name is refused, and the field is put BACK to
     /// the group's real name. It used to be refused silently, leaving a blank
@@ -1027,7 +661,6 @@ public final class GroupEditorViewController: NSViewController {
         Analytics.capture("scene:renamed")
         nameField.stringValue = trimmed
         updateNameFieldWidth()
-        refreshPrimaryTitle()
         onDidEditGroup?()
         return true
     }
@@ -1095,7 +728,6 @@ public final class GroupEditorViewController: NSViewController {
         guard let group = editingGroup else { return }
         if nameField.stringValue != group.name { nameField.stringValue = group.name }
         updateNameFieldWidth()
-        refreshPrimaryTitle()
     }
 
     /// ESCAPE: discard the in-progress edit and hand focus back, exactly like a
@@ -1105,13 +737,12 @@ public final class GroupEditorViewController: NSViewController {
     ///
     /// Focus goes SOMEWHERE REAL. It used to go to `makeFirstResponder(nil)`,
     /// which is the exact dead-Tab state A11Y-GROUPS fixed: the window becomes
-    /// its own first responder and Tab has nothing to advance from. It lands
-    /// on the Back control, the way out of this editor; the sidebar it used to
-    /// land on lives on the Speakers screen, not beside the editor.
+    /// its own first responder and Tab has nothing to advance from. Focus
+    /// lands on the editable icon well.
     private func cancelRename() {
         nameField.abortEditing()
         restoreNameField()
-        view.window?.makeFirstResponder(backButton)
+        view.window?.makeFirstResponder(iconWell)
     }
 
     /// Re-measure the rename field around its current text. An editable
@@ -1178,6 +809,7 @@ public final class GroupEditorViewController: NSViewController {
         Analytics.capture("scene:membership_changed", ["added": isChecked ? "true" : "false"])
         // Rebuild: an unchecked unavailable device drops out of the list.
         rebuildCandidates(memberSet: Set(group.memberIDs))
+        countLabel.roll(to: Self.speakerCount(group.memberIDs.count))
         onDidEditGroup?()
     }
 
@@ -1218,7 +850,7 @@ public final class GroupEditorViewController: NSViewController {
     }
 
     /// Put keyboard focus in the rename field with its text selected — the
-    /// sidebar's "Rename…" / double-click path, after the host has shown this
+    /// sidebar's "Rename…" / Return path, after the host has shown this
     /// editor. First-focus select-all comes from the existing delegate.
     public func focusRenameField() {
         view.window?.makeFirstResponder(nameField)
@@ -1228,18 +860,6 @@ public final class GroupEditorViewController: NSViewController {
     /// the sidebar's context-menu "Delete scene…" path.
     public func requestDelete() {
         deleteTapped(deleteButton)
-    }
-
-    @objc private func doneTapped(_ sender: NSButton) {
-        // While it reads "Save" there is a typed name waiting: commit it FIRST,
-        // then leave by the same door Done uses. A refusal (the name is taken,
-        // or the save threw) keeps the editor open on the explanation.
-        if hasPendingRename, !commitRename() { return }
-        onBack?()
-    }
-
-    @objc private func backTapped(_ sender: NSButton) {
-        onBack?()
     }
 
     @objc private func deleteTapped(_ sender: NSButton) {
@@ -1288,6 +908,15 @@ public final class GroupEditorViewController: NSViewController {
 
     // MARK: Test-support hooks
 
+    var test_iconWell: NSView { iconWell }
+    var test_captionText: String { countLabel.stringValue }
+    var test_captionIsRolling: Bool { countLabel.test_isRolling }
+    var test_countReduceMotionOverride: Bool? {
+        get { countLabel.test_reduceMotionOverride }
+        set { countLabel.test_reduceMotionOverride = newValue }
+    }
+    func test_settleCount() { countLabel.test_settleNow() }
+
     /// Membership row ids currently checked, in candidate order.
     public var test_checkedDeviceIDs: [String] {
         candidateDevices.map(\.id).filter { rowsByID[$0]?.test_isChecked == true }
@@ -1320,15 +949,6 @@ public final class GroupEditorViewController: NSViewController {
         nameField.stringValue = newName
         updateNameFieldWidth()
         _ = nameField.target?.perform(nameField.action, with: nameField)
-    }
-
-    /// Simulate TYPING `text` into the rename field WITHOUT committing it —
-    /// drives the real `controlTextDidChange` delegate path, which is what the
-    /// primary's title tracks.
-    public func test_typeIntoNameField(_ text: String) {
-        nameField.stringValue = text
-        controlTextDidChange(Notification(name: NSControl.textDidChangeNotification,
-                                          object: nameField))
     }
 
     /// Simulate the rename field LOSING FOCUS with `newName` typed in it —
@@ -1378,8 +998,6 @@ public final class GroupEditorViewController: NSViewController {
     /// The rename field itself, so a test can drive real AppKit editing (a
     /// window + `makeFirstResponder`) instead of a stand-in.
     public var test_titleField: NSTextField { nameField }
-    /// The Back control (the band's "‹ Scenes" button, wired to `onBack`).
-    public var test_backButton: NSButton { backButton }
 
     /// Simulate ticking/unticking a membership row for a device.
     public func test_setMembership(_ member: Bool, for deviceID: String) {
@@ -1416,10 +1034,6 @@ public final class GroupEditorViewController: NSViewController {
         pickIcon(name)
     }
 
-    /// Whether the header's gold "Playing" marker is on screen — true for
-    /// the active Main Out group's editor only.
-    public var test_playingBadgeVisible: Bool { !playingBadge.isHidden }
-
     /// Whether the reassurance line beside the delete row is on screen.
     public var test_reassuranceVisible: Bool { !reassuranceLabel.isHidden }
 
@@ -1448,44 +1062,6 @@ public final class GroupEditorViewController: NSViewController {
     /// editor is edit-only).
     public func test_presentationText(for id: String) -> String? { rowsByID[id]?.test_presentationText }
     public var test_deleteButtonVisible: Bool { !deleteButton.isHidden }
-
-    /// The primary button's title — "Done" at rest, "Save" while the name
-    /// field holds an uncommitted rename.
-    public var test_doneButtonTitle: String { doneButton.title }
-
-    /// What VoiceOver announces for the primary, which must be the title on
-    /// screen and never the other one.
-    public var test_doneButtonAccessibilityLabel: String? {
-        doneButton.accessibilityLabel()
-    }
-
-    /// Click the primary — the real button action.
-    public func test_done() { doneButton.performClick(nil) }
-
-    /// The primary's laid-out frame in the pane's own coordinates: it tops the
-    /// form on the right, level with the way back.
-    public var test_doneButtonFrame: NSRect {
-        view.layoutSubtreeIfNeeded()
-        return doneButton.convert(doneButton.bounds, to: view)
-    }
-
-    /// The "‹ Groups" control's laid-out frame in the pane's own coordinates —
-    /// same height as the primary, at the other end of the same band.
-    public var test_backControlFrame: NSRect {
-        view.layoutSubtreeIfNeeded()
-        return backButton.convert(backButton.bounds, to: view)
-    }
-
-    /// What VoiceOver calls the way back.
-    public var test_backControlAccessibilityLabel: String? {
-        backButton.accessibilityLabel()
-    }
-
-    /// The way back's tooltip — the one place ⌘[ is printed.
-    public var test_backControlToolTip: String? { backButton.toolTip }
-
-    /// Whether the way back can take keyboard focus, so Tab reaches it.
-    public var test_backControlAcceptsFocus: Bool { backButton.acceptsFirstResponder }
 
     /// The delete button's laid-out frame in the pane's own coordinates — it
     /// must line up with the content above it (anchoring trap: it used to hang
@@ -1545,35 +1121,6 @@ public final class GroupEditorViewController: NSViewController {
         rowsByID[deviceID]
     }
 
-    /// The rail geometry the overlay would draw from its CURRENT live frames.
-    public func test_railPlan() -> RailPlan? {
-        view.layoutSubtreeIfNeeded()
-        return railOverlay.test_resolvePlan()
-    }
-
-    /// Whether a row's rail node renders armed (gold) vs idle (ember) — must
-    /// follow the SAME active-group truth as the icon well's ring and the
-    /// rail hook, or the pane claims liveness it doesn't have.
-    public func test_isRailArmed(for deviceID: String) -> Bool? {
-        rowsByID[deviceID]?.test_railArmed
-    }
-
-    /// Each candidate row's drawn node, in candidate order.
-    public var test_railNodes: [MembershipBusView.Node?] {
-        candidateDevices.compactMap { rowsByID[$0.id] }.map(\.railNode)
-    }
-
-    /// Where a row's node centre lands in the RAIL OVERLAY's own coordinate
-    /// space. The overlay draws the spine at the literal
-    /// `PopoverColumnGrid.railGutterCenterX` in that space, so this MUST equal
-    /// it — the one invariant that silently breaks if the row's leading edge and
-    /// the overlay's leading edge ever stop coinciding.
-    public func test_nodeCenterXInOverlaySpace(for deviceID: String) -> CGFloat? {
-        guard let row = rowsByID[deviceID], let centerX = row.test_nodeCenterX else { return nil }
-        view.layoutSubtreeIfNeeded()
-        return railOverlay.convert(NSPoint(x: centerX, y: 0), from: row).x
-    }
-
     /// The rename field's laid-out width — measured around the name it holds
     /// (``updateNameFieldWidth()``), clamped between its required floor and its
     /// section's edge.
@@ -1619,22 +1166,6 @@ public final class GroupEditorViewController: NSViewController {
         return wellIndex < stackIndex
     }
 
-    /// Click "‹ Groups" — the real button action, not `onBack` behind its back.
-    public func test_goBack() { backButton.performClick(nil) }
-
-    /// Press ⌘[ in the editor — a real `NSEvent` through the real
-    /// `performKeyEquivalent` chain (`test_performCmdN`'s shape). True when the
-    /// pane claimed it.
-    @discardableResult
-    public func test_performBackKeyEquivalent() -> Bool {
-        guard let event = NSEvent.keyEvent(with: .keyDown, location: .zero,
-                                           modifierFlags: .command, timestamp: 0,
-                                           windowNumber: 0, context: nil,
-                                           characters: "[", charactersIgnoringModifiers: "[",
-                                           isARepeat: false, keyCode: 33) else { return false }
-        return view.performKeyEquivalent(with: event)
-    }
-
     /// True while the pane is wrapped in the scroll view roadmap 039 gave it
     /// (`../AGENTS.md`) — the same seam `DeviceDetailViewController` carries.
     public var test_hasScrollView: Bool { scrollView != nil }
@@ -1650,134 +1181,23 @@ public final class GroupEditorViewController: NSViewController {
     }
 }
 
-// MARK: - Continuous rail origin hook (Warm Signal v4 §Call-1)
-
-extension GroupEditorViewController: RailHookProviding {
-    /// The group's ICON WELL is this pane's origin — the analogue of the
-    /// popover's Main Audio ring: the rail curves out of the group tile's left
-    /// edge and drops into the gutter, so the members visibly hang off the
-    /// group they belong to.
-    ///
-    /// It briefly hooked the TITLE instead (design review 2026-07-25, when the
-    /// icon sat ABOVE the name and the climb from the list past the whole
-    /// header read badly). The header is now SIDE BY SIDE: icon and name share
-    /// one horizontal band, so hooking the icon hooks the name's line too, and
-    /// the hook goes back to the well — a fixed 48 pt tile whose leading edge
-    /// sits on the content inset, rather than a field whose width changes with
-    /// the name it holds.
-    ///
-    /// The well is a rounded-rect tile rather than a circle, so the "ring"
-    /// reported here is its inscribed circle; only `ringCenterX - ringRadius`
-    /// (the left edge) and `centerY` are ever drawn to. `armed` follows the
-    /// SAME active-group truth as the well's §5.3 gold ring, so the line is
-    /// gold while active and ember otherwise (`unarmedLineTone`).
-    public func railHookAnchor(in view: NSView)
-        -> (centerY: CGFloat, ringCenterX: CGFloat, ringRadius: CGFloat, armed: Bool)? {
-        guard isViewLoaded, iconWell.superview != nil else { return nil }
-        iconWell.layoutSubtreeIfNeeded()
-        let center = iconWell.convert(
-            NSPoint(x: iconWell.bounds.midX, y: iconWell.bounds.midY), to: view)
-        return (center.y, center.x, DeviceIconWellView.size / 2, iconWell.isActiveGroup)
-    }
-
-    /// No-op: this pane's origin is the group's rounded-rect ICON WELL, not a
-    /// stroked ring, so there is no circumference to bloom. The Groups screen
-    /// also never mounts the connect pulse's firing conditions today — if it
-    /// ever grows one, the well's §5.3 gold ring is where the acknowledgment
-    /// would live.
-    public func receiveRailPulse() {}
-}
-
-/// The editor pane's container: re-invalidates the rail overlay AND the
-/// membership well (T5) on every layout pass so both track the current row
-/// frames with no cached geometry. Both
-/// draw from settled frames, so `cacheDisplay` snapshots stay deterministic.
-private final class RailRepaintingView: NSView {
-    weak var railOverlay: BusRailOverlayView?
-    weak var membershipWell: GroupedSectionView?
-
-    /// Leaves this editor for the group overview. Set at build time.
-    var onBack: (() -> Void)?
-
-    override func layout() {
-        super.layout()
-        railOverlay?.needsDisplay = true
-        membershipWell?.needsDisplay = true
-    }
-
-    /// ⌘[ — the standard macOS "back" key equivalent. Dispatched DOWN the view
-    /// tree (the window asks its content view, which asks each subview), not
-    /// along the responder chain, so it has to be a view; `SidebarContainerView`
-    /// catches Cmd-N the same way.
-    ///
-    /// razor: view-local, like Cmd-N. The Groups screen is hosted in the
-    /// menu-bar surface and has no menu bar of its own, so this works while
-    /// the editor is in the key window and nowhere else; only the back band's
-    /// tooltip prints the shortcut. Upgrade path: a real "Back" item in the
-    /// app's main menu.
-    override func performKeyEquivalent(with event: NSEvent) -> Bool {
-        if event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,
-           event.charactersIgnoringModifiers == "[",
-           let onBack {
-            onBack()
-            return true
-        }
-        return super.performKeyEquivalent(with: event)
-    }
-
-    /// ESCAPE. Safe to claim unconditionally: a rename in progress consumes
-    /// Escape first, in the field editor's own
-    /// `control(_:textView:doCommandBy:)` (it reverts the name), so this only
-    /// ever fires when nothing is being edited.
-    override func cancelOperation(_ sender: Any?) {
-        guard let onBack else { return super.cancelOperation(sender) }
-        onBack()
-    }
-}
-
-// MARK: - Back control
-
-/// The "‹ Groups" control above the identity card. A stock `NSButton`, so the
-/// focus ring, the pressed state, `accessibilityPerformPress()` and
-/// VoiceOver's button role are AppKit's rather than hand-rolled.
-///
-/// The one override is `keyDown`: RETURN activates it while it is focused,
-/// which AppKit reserves for a window's default button. Safe here because the
-/// editor HAS no default button — Return belongs to the rename field, which
-/// consumes it while editing. Space is claimed in the same branch, so it
-/// works whether or not Full Keyboard Access is on.
-private final class BackButton: NSButton {
-
-    /// Focusable whether or not Full Keyboard Access is on, which is where an
-    /// `NSButton` normally takes its answer from. The pane's Tab order has to
-    /// reach the way out.
-    override var acceptsFirstResponder: Bool { true }
-
-    override func keyDown(with event: NSEvent) {
-        let isReturn = event.keyCode == 36 || event.keyCode == 76
-        if isReturn || event.charactersIgnoringModifiers == " " {
-            performClick(nil)
-            return
-        }
-        super.keyDown(with: event)
-    }
-}
-
-/// The checklist stack, carrying the SAME re-invalidation for relayouts that
-/// never reach the container's `layout()` — a row growing inside an unchanged
-/// container frame (see the two-hooks note in `loadView`; the popover's
-/// `RailStackView` is the precedent). Dirtying from `layout()` cannot loop:
-/// `needsDisplay` does not invalidate layout.
-final class RailRepaintingStackView: NSStackView {
-    weak var railOverlay: BusRailOverlayView?
+/// Repaints the membership card when the page lays out.
+private final class WellRepaintingView: NSView {
     weak var membershipWell: GroupedSectionView?
     override func layout() {
         super.layout()
-        railOverlay?.needsDisplay = true
         membershipWell?.needsDisplay = true
     }
 }
 
+/// Repaints the membership card when its rows lay out.
+final class WellRepaintingStackView: NSStackView {
+    weak var membershipWell: GroupedSectionView?
+    override func layout() {
+        super.layout()
+        membershipWell?.needsDisplay = true
+    }
+}
 
 // MARK: - NSTextFieldDelegate
 
@@ -1789,11 +1209,9 @@ extension GroupEditorViewController: NSTextFieldDelegate {
     }
 
     /// The field grows with the name as it's typed (see
-    /// ``updateNameFieldWidth()``), up to its section's edge, and the primary
-    /// starts offering to Save the moment the text stops matching the group.
+    /// ``updateNameFieldWidth()``), up to its section's edge.
     public func controlTextDidChange(_ obj: Notification) {
         updateNameFieldWidth()
-        refreshPrimaryTitle()
     }
 
     /// Commit the rename when the field loses focus, not just on Return.

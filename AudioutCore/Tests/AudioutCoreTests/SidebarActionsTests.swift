@@ -226,7 +226,7 @@ import AudioutSharedUI
             #expect(inks() == Array(repeating: NSColor.alternateSelectedControlTextColor, count: 4), "\(target) focused pill")
             rowView.isEmphasized = false
             #expect(inks() == Array(repeating: Tokens.Color.label, count: 4), "\(target) grey pill")
-            sidebar.select(.groupsOverview, notify: false)
+            sidebar.select(.device(id: "no-such-row"), notify: false)
             #expect(inks() == resting, "\(target) deselected")
         }
     }
@@ -534,7 +534,7 @@ import AudioutSharedUI
     }
 
     // Double-click-to-rename left this file with the group rows (direction C):
-    // rename lives on the overview's cards now, covered by
-    // `GroupsOverviewViewControllerTests`. A speaker row's first click already
+    // rename lives on the Scenes sidebar, covered by
+    // `ScenesSidebarViewControllerTests`. A speaker row's first click already
     // opens its detail pane, so the sidebar keeps no `doubleAction` at all.
 }

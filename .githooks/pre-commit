@@ -185,9 +185,9 @@ fi
 # workflow) for every pull request and again in the merge queue.
 #
 # A commit runs only the suites that plausibly cover its staged Swift, derived
-# by guard-test-scope.sh (which fails closed to the full suite whenever it
-# cannot map a file); AUDIOUT_FULL_SUITE=1 forces the full run (owner's call,
-# 2026-09-04). A too-narrow filter costs at most one fix cycle when the
+# by guard-test-scope.sh; a commit none of whose files map to a test only
+# compiles (owner's call, 2026-10-06). AUDIOUT_FULL_SUITE=1 forces the full run
+# (owner's call, 2026-09-04). A too-narrow filter costs at most one fix cycle when the
 # pull request's full run catches it.
 #
 # Scope: only runs when staged files include AudioutCore Swift source/test
@@ -243,6 +243,9 @@ if [ -n "$staged_swift" ] && command -v swift >/dev/null 2>&1; then
     if [ "$scope" = "FULL" ]; then
         echo "  Guard 4: AudioutCore Swift changed — running full suite" >&2
         echo "  (scripts/run-tests.sh) before commit. ~70s warm; --no-verify to skip." >&2
+    elif [ "$scope" = "BUILD" ]; then
+        echo "  Guard 4: no test covers the staged Swift by name — compile check only;" >&2
+        echo "  the pull request's full run tests it. (AUDIOUT_FULL_SUITE=1 to run it now.)" >&2
     else
         echo "  Guard 4: AudioutCore Swift changed — running the suites covering it:" >&2
         echo "    $scope" >&2
@@ -267,7 +270,14 @@ if [ -n "$staged_swift" ] && command -v swift >/dev/null 2>&1; then
     # No runner found (a branch older than run-tests.sh) => full suite inline,
     # unchanged from before.
     run_guard4() {
-        if [ -z "$run_suite" ]; then
+        if [ "$scope" = "BUILD" ]; then
+            # build.sh sits beside whichever run-tests.sh was found.
+            if [ -n "$run_suite" ] && [ -x "${run_suite%/*}/build.sh" ]; then
+                $nogit "${run_suite%/*}/build.sh" >&2
+            else
+                ( cd "$repo_root/AudioutCore" && $nogit swift build >&2 )
+            fi
+        elif [ -z "$run_suite" ]; then
             ( cd "$repo_root/AudioutCore" \
                 && $nogit swift test --parallel >&2 )
         elif [ "$scope" = "FULL" ]; then
@@ -285,6 +295,8 @@ if [ -n "$staged_swift" ] && command -v swift >/dev/null 2>&1; then
     fi
     if [ "$scope" = "FULL" ]; then
         echo "  Guard 4: full suite passed." >&2
+    elif [ "$scope" = "BUILD" ]; then
+        echo "  Guard 4: compile check passed." >&2
     else
         echo "  Guard 4: the suites covering this change passed." >&2
     fi

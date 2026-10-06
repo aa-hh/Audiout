@@ -179,8 +179,7 @@ let package = Package(
         // gates before it counts (its height over the nearest rival lag, and
         // its score against the lags right around it), votes four sub-bands,
         // and lets each speaker own its own peak inside a shared search window.
-        .package(url: "https://github.com/aa-hh/audiout-shared.git",
-                 from: "0.19.0"),
+        .package(path: "/Users/alechenderson/Projects/audiout-shared/worktrees/wizard-probe-glide-mac/audiout-shared"),
         // Sparkle 2 (MIT) — in-app updates for the paid, notarised build only.
         // Scoped to the `AudioutApp` executable target so no library, test or
         // harness target ever links it.
@@ -261,7 +260,8 @@ let package = Package(
             // field's SETTLED state, shader generated from the shared numbers.
             dependencies: ["AudioutCore", "AudioutSharedUI",
                            "AudioutWindowUI", "AudioutSettingsUI",
-                           .product(name: "AudioutField", package: "audiout-shared")],
+                           .product(name: "AudioutField", package: "audiout-shared"),
+                           .product(name: "ProbeKit", package: "audiout-shared")],
             swiftSettings: [.unsafeFlags(swiftClangImporterFlags)]
         ),
         // The pure-AppKit mixer window (SPEC §9 "Full window"): a

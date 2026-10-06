@@ -1,15 +1,6 @@
 {
-  "originHash" : "a76a6f11c18c0aa3525a3ea8af2fb4474a58d60b5e2f35058bc016a1efd67827",
+  "originHash" : "bb5799e08b25d1d0d143aba8fb2cd04f31af2ad69b4ad66c3694752ef0ba2652",
   "pins" : [
-    {
-      "identity" : "audiout-shared",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/aa-hh/audiout-shared.git",
-      "state" : {
-        "revision" : "cc29e529d92d30bae4b7dd6a59247495062db11e",
-        "version" : "0.19.0"
-      }
-    },
     {
       "identity" : "posthog-ios",
       "kind" : "remoteSourceControl",

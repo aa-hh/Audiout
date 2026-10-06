@@ -350,9 +350,9 @@ extension PopoverController {
     }
 
     /// Run one mic-probe measurement under the wizard run just started
-    /// (roadmap 064): the wizard feed plays the dual sweeps in place of the
-    /// first ticks, the built-in mic records them, and the resulting Δ —
-    /// corrected onto the preview in force when the sweeps started — arrives
+    /// (roadmap 064): the wizard feed plays the probe's two lanes in turn in
+    /// place of the first ticks, the built-in mic records them, and the
+    /// resulting Δ — corrected onto the preview in force when the probe started — arrives
     /// as the run's proposal to confirm by ear. A failure is not silent any
     /// more: the listening screen is on the user's screen, so every path that
     /// does not reach a proposal ends the listen and the questions begin.
@@ -376,15 +376,16 @@ extension PopoverController {
         var appliedMsAtSweep = 0.0
         let probe = makeMicProbe()
         btWizardMicProbe = probe
-        probe.start(stage: { onStarted, onFinished in
-            stageProbe({
+        probe.start(stage: { levelStepDB, onStarted, onFinished in
+            stageProbe(levelStepDB, { pipelineDelaySeconds in
                 DispatchQueue.main.async { [weak self] in
                     guard let self else { return }
                     generationAtSweep = self.btWizardPreviewGeneration
                     appliedMsAtSweep = self.btWizardLastPreviewMs
+                    self.btWizardSession?.probeDidStart(pipelineDelaySeconds: pipelineDelaySeconds)
                     // Marking the ambient boundary a hop late is safe: air
                     // always lags the feed, never leads it.
-                    onStarted()
+                    onStarted(pipelineDelaySeconds)
                 }
             }, onFinished)
         }, completion: { [weak self] result in
@@ -496,13 +497,12 @@ extension PopoverController {
         refreshDeviceRows()
     }
 
-    /// The picker's answer: engage the new reference, release the old, and let
-    /// the session restart. The answers so far were given against a DIFFERENT
-    /// speaker, so they are not evidence about this one — the session drops
-    /// them rather than folding them in.
+    /// The picker's answer: engage the new reference and release the old. Only
+    /// on the intro: once a run has started the reference is locked (owner,
+    /// 2026-10-06), so the backend's participant hold never has to follow a swap.
     private func setBTWizardReference(_ id: String) {
-        guard let session = btWizardSession, let device = devicesByID[id],
-              session.reference?.id != id else { return }
+        guard let session = btWizardSession, case .intro = session.screen,
+              let device = devicesByID[id], session.reference?.id != id else { return }
         let previous = btWizardEngagedReferenceID
         btWizardEngagedReferenceID = nil
         engageBTWizardReference(id)
@@ -511,13 +511,6 @@ extension PopoverController {
         }
         session.setReference(.init(id: id, name: device.name,
                                    isBluetooth: device.isBluetooth))
-        // The session restarts the questions but never re-fires the tick, so
-        // the backend still has the OLD reference on its participant hold —
-        // which would leave the new one silent. Re-push while the run is live.
-        if case .question = session.screen, let target = btWizardDeviceID,
-           devicesByID[target]?.isLocalDevice == false {
-            pushBTWizardTick(true, target: target)
-        }
         refreshDeviceRows()
     }
 

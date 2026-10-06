@@ -651,13 +651,13 @@ public final class BTSpeakerTiming: @unchecked Sendable {
 /// under it.
 struct CompanionAlignmentRun {
     enum Phase {
-        /// The sweeps are in the feed.
+        /// The probe is in the feed.
         case probe
-        /// The sweeps are silent and the room is back, but the run's record is
+        /// The probe is silent and the room is back, but the run's record is
         /// still standing because the phone is still recording its own tail,
         /// transforming it, and has not reported yet. The AUDIO stands down
         /// long before the RUN does, and a
-        /// measurement that arrives here still needs this record's stagger and
+        /// measurement that arrives here still needs this record's
         /// suspended trim.
         case awaitingReport
         /// A by-ear fine-tune session, whose metronome is running.
@@ -670,10 +670,6 @@ struct CompanionAlignmentRun {
     /// The Bluetooth device being measured or tuned (its Core Audio UID).
     let targetUID: String
     var phase: Phase
-    /// How far apart the staging put the two sweeps, in ms — subtracted from
-    /// the phone's raw reported offset before any trim arithmetic. `0` when
-    /// the sweeps played together.
-    let staggerMs: Double
     /// The user's trim, put aside for the run's duration and restored when it
     /// ends without a measurement. A probe SUSPENDS the trim (pushes 0 to the
     /// sink) so the sweeps are judged without it, exactly as the Mac's own
@@ -686,12 +682,12 @@ struct CompanionAlignmentRun {
 }
 
 /// What the Mac did with a phone's reported measurement, which is more than the
-/// phone can work out for itself: the phone knows the raw offset it heard, not
-/// the stagger that was baked into the staging nor where clamping and flooring
-/// left the stored latency.
+/// phone can work out for itself: the phone knows the offset it heard, not
+/// where clamping and flooring left the stored latency.
 public enum CompanionAlignmentApplyResult: Equatable {
-    /// `measuredMs` is the phone's raw report with the staging's stagger taken
-    /// back out — signed, positive meaning the target sounded late.
+    /// `measuredMs` is the phone's report as applied (ProbeKit has already
+    /// removed the probe's lane spacing) — signed, positive meaning the
+    /// target sounded late.
     /// `correctedMs` is how far the stored latency actually moved, which is `0`
     /// when the clamp or the floor left it where it was.
     case applied(measuredMs: Double, correctedMs: Double)

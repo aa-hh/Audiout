@@ -384,12 +384,16 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     /// dropped when the wizard injector is swapped.
     private var micProbeStarted: (() -> Void)?
     private var micProbeFinished: (() -> Void)?
-    /// Which Bluetooth device UID owns each staged sweep window, indexed by
-    /// the window number ``AlignmentTickInjector`` reports (0 = DOWN,
-    /// 1 = UP); `nil` at an index means no Bluetooth sink owns that window
-    /// (a Mac reference hears the DOWN sweep through the engine lane).
-    /// Non-empty ONLY for a companion run — the Mac's own wizard stages both
-    /// sweeps at once and needs no per-device routing. Pacer-queue confined.
+    /// Asked once at arm time for the probe's level step (0, 6 or 12 dB);
+    /// nil means 0. Only the Mac's own wizard sets it — its mic is listening.
+    private var micProbeLevelStep: (() -> Int)?
+    /// Which Bluetooth device UID owns each staged probe window, indexed by
+    /// the window number ``AlignmentTickInjector`` reports (0 = target,
+    /// 1 = reference); `nil` at an index means no Bluetooth sink owns that
+    /// window (a Mac reference hears its lane through the engine fan-out).
+    /// Non-empty ONLY for a routed companion run — the Mac's own wizard puts
+    /// each lane on its own fan-out and needs no per-device routing.
+    /// Pacer-queue confined.
     private var companionProbeWindowUIDs: [String?] = []
     /// A companion run owns this probe, so its completion must NOT hand over
     /// to the by-ear tick grid — the phone decides what happens next.
@@ -1378,6 +1382,7 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             self.pacerQueue.async { [weak self] in
                 self?.micProbeStarted = nil
                 self?.micProbeFinished = nil
+                self?.micProbeLevelStep = nil
                 self?.companionProbeWindowUIDs = []
                 self?.companionProbeActive = false
             }
@@ -1398,14 +1403,14 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     /// Inert when no wizard injector is live.
     ///
     /// When a mic probe is staged (roadmap 064), the SAME arm moment starts the
-    /// probe sweeps INSTEAD, and the tick grid arms automatically the moment the
-    /// sweeps finish — one gate, two payloads, so the backend's release gate
+    /// probe INSTEAD, and the tick grid arms automatically the moment the
+    /// probe finishes — one gate, two payloads, so the backend's release gate
     /// needs no probe awareness at all.
     public func armWizardTicks() {
         pacerQueue.async { [weak self] in
             guard let self, let injector = self.currentWizardInjector() else { return }
             if injector.probeStaged, !injector.test_probeArmed {
-                injector.armProbe()
+                injector.armProbe(levelStepDB: self.micProbeLevelStep?() ?? 0)
                 let started = self.micProbeStarted
                 self.micProbeStarted = nil
                 if let started { DispatchQueue.global(qos: .userInitiated).async(execute: started) }
@@ -1415,29 +1420,32 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         }
     }
 
-    /// Stage the one-shot calibration sweeps on the live wizard injector
+    /// Stage the one-shot calibration probe on the live wizard injector
     /// (roadmap 064). Call AFTER ``setAlignTickMode(_:)`` has entered `.wizard`.
-    /// `onStarted` fires when the arm gate opens and the sweeps begin rendering
-    /// into the feed; `onFinished` when the last sweep frame has been rendered
-    /// (air arrival lags by the sinks' pipeline delay). Both fire off-queue,
-    /// at most once; a run torn down early fires neither — callers recover by
-    /// timeout. A probe that stages after the gate has already opened starts
-    /// immediately instead of being dropped, and the tick grid re-arms after
-    /// the sweeps as usual.
-    public func stageWizardMicProbe(onStarted: @escaping () -> Void,
+    /// `levelStepDB` is asked once, when the probe arms, for the level step
+    /// the room needs. `onStarted` fires when the arm gate opens and the probe
+    /// begins rendering into the feed; `onFinished` when its last frame has
+    /// been rendered (air arrival lags by the sinks' pipeline delay). Both
+    /// fire off-queue, at most once; a run torn down early fires neither —
+    /// callers recover by timeout. A probe that stages after the gate has
+    /// already opened starts immediately instead of being dropped, and the
+    /// tick grid re-arms after the probe as usual.
+    public func stageWizardMicProbe(levelStepDB: @escaping () -> Int,
+                                    onStarted: @escaping () -> Void,
                                     onFinished: @escaping () -> Void) {
         pacerQueue.async { [weak self] in
             guard let self, let injector = self.currentWizardInjector() else { return }
             injector.stageProbe()
+            self.micProbeLevelStep = levelStepDB
             if injector.test_isArmed {
                 // The gate already opened and armed the by-ear ticks before this
                 // probe finished staging (cold mic start can take seconds). Undo
-                // that arm and start the sweeps right now instead of dropping
-                // them — the completion handoff below (`emitWizardBlock`) arms
-                // the tick grid again a clean interval after the sweeps, exactly
+                // that arm and start the probe right now instead of dropping
+                // it — the completion handoff below (`emitWizardBlock`) arms
+                // the tick grid again a clean interval after the probe, exactly
                 // as the normal stage-before-arm path does.
                 injector.disarmTicks()
-                injector.armProbe()
+                injector.armProbe(levelStepDB: self.micProbeLevelStep?() ?? 0)
                 self.micProbeFinished = onFinished
                 let started = onStarted
                 DispatchQueue.global(qos: .userInitiated).async(execute: started)
@@ -1449,38 +1457,42 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         }
     }
 
-    /// Stage the calibration sweeps for a PHONE-driven run. Same feed, same
-    /// arm gate and same callbacks as ``stageWizardMicProbe(onStarted:onFinished:)``,
-    /// with two differences the companion run needs:
+    /// Stage the calibration probe for a PHONE-driven run. Same feed, same
+    /// arm gate and same callbacks as
+    /// ``stageWizardMicProbe(levelStepDB:onStarted:onFinished:)``, with the
+    /// differences the companion run needs:
     ///
-    /// - `staggered` lays the two sweeps a stagger apart instead of together,
-    ///   and `downWindowUID`/`upWindowUID` name the Bluetooth sink that is to
-    ///   HEAR each one. The fan-out then writes the sweep-carrying feed into
-    ///   that one sink's delay line and the sweep-free feed into every other,
-    ///   which is the only way to sequence two Bluetooth speakers: gating at
-    ///   the output with gain cannot do it, because each sink's delay line is
-    ///   exactly the unknown being measured. Either UID may be `nil` — a Mac
-    ///   reference hears the DOWN sweep through the engine lane instead.
-    /// - Completing the sweeps does NOT hand over to the by-ear tick grid.
+    /// - `routed` puts both lanes on the Bluetooth fan-out in windows 0 and 1,
+    ///   and `targetWindowUID`/`referenceWindowUID` name the Bluetooth sink
+    ///   that is to HEAR each one. The fan-out then writes the probe-carrying
+    ///   feed into that one sink's delay line and the probe-free feed into
+    ///   every other, which is the only way to sequence two Bluetooth
+    ///   speakers: gating at the output with gain cannot do it, because each
+    ///   sink's delay line is exactly the unknown being measured. Either UID
+    ///   may be `nil` — a Mac reference hears its lane through the engine
+    ///   fan-out instead.
+    /// - Completing the probe does NOT hand over to the by-ear tick grid.
     ///   The phone owns what happens next, and the Mac stands the run down on
     ///   its own a moment later.
     /// - The microphone is the phone's, at the listening position, so the
-    ///   engine lane plays at full amplitude. Its usual −6 dB pays for a Mac
-    ///   speaker inches from the Mac's own mic, which is not this run.
-    public func stageCompanionMicProbe(staggered: Bool,
+    ///   engine lane plays at full amplitude and at level step 0. Its usual
+    ///   scale pays for a Mac speaker inches from the Mac's own mic, which is
+    ///   not this run, and the Mac is not listening to the room.
+    public func stageCompanionMicProbe(routed: Bool,
                                        referenceOnEngine: Bool,
-                                       downWindowUID: String?,
-                                       upWindowUID: String?,
+                                       targetWindowUID: String?,
+                                       referenceWindowUID: String?,
                                        onStarted: @escaping () -> Void,
                                        onFinished: @escaping () -> Void) {
         pacerQueue.async { [weak self] in
             guard let self, let injector = self.currentWizardInjector() else { return }
             injector.stageProbe(
-                shape: staggered ? .staggered(referenceOnEngine: referenceOnEngine)
-                                 : .simultaneous,
+                shape: routed ? .routedWindows(referenceOnEngine: referenceOnEngine)
+                              : .perFanout,
                 engineLaneScale: 1)
-            self.companionProbeWindowUIDs = staggered ? [downWindowUID, upWindowUID] : []
+            self.companionProbeWindowUIDs = routed ? [targetWindowUID, referenceWindowUID] : []
             self.companionProbeActive = true
+            self.micProbeLevelStep = nil
             self.micProbeStarted = onStarted
             self.micProbeFinished = onFinished
         }

@@ -181,8 +181,8 @@ extension SerializedSharedState {
         func start() {}
         func stop() {}
         func setAlignTickMode(_ mode: AlignTickMode) { lock.withLock { _modes.append(mode) } }
-        func stageCompanionMicProbe(staggered: Bool, referenceOnEngine: Bool,
-                                    downWindowUID: String?, upWindowUID: String?,
+        func stageCompanionMicProbe(routed: Bool, referenceOnEngine: Bool,
+                                    targetWindowUID: String?, referenceWindowUID: String?,
                                     onStarted: @escaping () -> Void,
                                     onFinished: @escaping () -> Void) {
             lock.withLock { _stages += 1 }
@@ -814,9 +814,13 @@ extension SerializedSharedState {
         engine.releaseWrites()
         await SuiteWait.until { backend.startCompanionAlignmentProbe(targetID: self.btMove.id,
             referenceID: self.btFlip.id, onStarted: {}, onFinished: {}) == nil }
+        await SuiteWait.until { engine.writes.last { $0.0 == ap1.outputID }?.1 == -1.0 }
+        #expect(engine.writes.last { $0.0 == ap1.outputID }?.1 == -1.0,
+                "the phone's probe silences every speaker outside the pair")
+        backend.cancelCompanionAlignmentProbe(targetID: btMove.id)
+        await SuiteWait.until { engine.writes.last { $0.0 == ap1.outputID }?.1 != -1.0 }
         #expect(engine.writes.last { $0.0 == ap1.outputID }?.1 != -1.0,
                 "the final write uses the user's current level, after the old hold finishes")
-        backend.cancelCompanionAlignmentProbe(targetID: btMove.id)
         #expect(start.value != .some(nil), "the cancelled preparation cannot report success late")
     }
 

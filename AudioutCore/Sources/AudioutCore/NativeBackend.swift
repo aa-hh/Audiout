@@ -2652,6 +2652,12 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             self.btRoomTermMs = nil
             // CAST-OUT: same shape — reset the decisions here, enqueue the
             // teardown below so the FIFO's last Cast op is the disable.
+            // A receiver the wizard hold muted gets its level back before the
+            // Cast disable enqueued below, or it stays at 0 after quit.
+            if self.companionTickParticipants != nil {
+                self.companionTickParticipants = nil
+                for castID in self.castSelectedIDs { self.pushCastLevelLocked(castID) }
+            }
             self.castSelectedIDs = []
             self.castPlaying = []
             // CAST-SYNC: the room delay goes with them. Publishing the AirPlay
@@ -4016,7 +4022,22 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     func roomDelayLocked() -> Int {   // on stateQueue
         let today = (btSinkEnabled && !btComposition.usesPresentationReference)
             ? btReferenceBufferMs : _startBufferMs
-        return [_castTermMs, btRoomTermMs].compactMap { $0 }.reduce(today) { Swift.max($0, $1) }
+        return roomTermsLocked().compactMap { $0 }.reduce(today) { Swift.max($0, $1) }
+    }
+
+    /// The Cast and Bluetooth terms as they apply right now. While a wizard
+    /// or audition names its participants, a term counts only when a
+    /// participant brought it in: a selected Cast receiver held silent must
+    /// not stretch the two lanes being compared.
+    private func roomTermsLocked() -> [Int?] {   // on stateQueue
+        guard let participants = companionTickParticipants else { return [_castTermMs, btRoomTermMs] }
+        let cast = castSelectedIDs.contains(where: participants.contains) ? _castTermMs : nil
+        let (latencies, trims) = btTrimLock.withLock { (btLatencyMsByUID, btTrimsByUID) }
+        let candidate = Self.btOnlyReferenceMs(latencies: latencies, trims: trims,
+                                               uids: btSelectedUIDs.filter(participants.contains))
+        let bt = (btSinkEnabled && btComposition.usesPresentationReference && candidate > _startBufferMs)
+            ? candidate : nil
+        return [cast, bt]
     }
 
     /// The reference delay (ms) the Mac-local sink renders on (Wave-4 delay
@@ -4032,7 +4053,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// the Bluetooth term when the slowest Bluetooth speaker is.
     func btReferenceDelayMs() -> Int {
         stateQueue.sync {
-            [_castTermMs, btRoomTermMs].compactMap { $0 }.reduce(_startBufferMs) { Swift.max($0, $1) }
+            roomTermsLocked().compactMap { $0 }.reduce(_startBufferMs) { Swift.max($0, $1) }
         }
     }
 

@@ -47,21 +47,40 @@ import Testing
             return rate
         }
         func stop() -> [Float] { stopped = true; return scene }
+        func samplesSoFar() -> [Float] { scene }
     }
 
     /// A mic capture holding both probe lanes (`SyncProbe.lane`, drone and
     /// glide): the reference lane at `referenceDelay` samples, the Bluetooth
     /// lane at `targetDelay` — one lane spacing earlier, plus the skew under
     /// test. 8 kHz is enough: the glide's top partial is 1 800 Hz.
-    private func scene(rate: Double, targetDelay: Int, referenceDelay: Int) -> [Float] {
+    private func scene(rate: Double, targetDelay: Int, referenceDelay: Int,
+                       targetLevel: Float = 0.4) -> [Float] {
         let lane = SyncProbe.lane(sampleRate: rate)
         let length = max(targetDelay, referenceDelay) + lane.count + Int(rate * 0.5)
         var out = [Float](repeating: 0, count: length)
         for (i, v) in lane.enumerated() {
             out[referenceDelay + i] += 0.5 * v
-            out[targetDelay + i] += 0.4 * v
+            out[targetDelay + i] += targetLevel * v
         }
         return out
+    }
+
+    /// What a run reported, written from the session's queue and from main.
+    private final class Outcome: @unchecked Sendable {
+        private let lock = NSLock()
+        private var completed: MicProbeSession.Result??
+        private var lanes: [(lane: MicProbeSession.Lane, heard: Bool)] = []
+        private var feedEnd: (() -> Void)?
+        func complete(_ result: MicProbeSession.Result?) { lock.withLock { completed = .some(result) } }
+        func record(_ lane: MicProbeSession.Lane, _ heard: Bool) { lock.withLock { lanes.append((lane, heard)) } }
+        var isComplete: Bool { lock.withLock { completed != nil } }
+        var result: MicProbeSession.Result? { lock.withLock { completed ?? nil } }
+        var verdicts: [(lane: MicProbeSession.Lane, heard: Bool)] { lock.withLock { lanes } }
+        var onFinished: (() -> Void)? {
+            get { lock.withLock { feedEnd } }
+            set { lock.withLock { feedEnd = newValue } }
+        }
     }
 
     /// Where the target lane sits for a given skew, in samples.
@@ -80,7 +99,7 @@ import Testing
         let result: MicProbeSession.Result? = await withCheckedContinuation { cont in
             session.start(stage: { _, onStarted, onFinished in
                 onStarted(0)
-                DispatchQueue.global().asyncAfter(deadline: .now() + 0.02, execute: onFinished)
+                onFinished()
             }, completion: { cont.resume(returning: $0) })
         }
         guard let result else {
@@ -114,18 +133,21 @@ import Testing
     @Test func theRecordingWaitsTheReportedPipelineDelay() async {
         let recorder = FakeRecorder(rate: 24_000,
                                     scene: [Float](repeating: 0.01, count: 48_000))
-        let session = MicProbeSession(recorder: recorder, timeout: 5, pipelineTail: 0.05)
-        final class Box: @unchecked Sendable { var at: Date? }
-        let finishedAt = Box()
-        let _: MicProbeSession.Result? = await withCheckedContinuation { cont in
-            session.start(stage: { _, onStarted, onFinished in
-                onStarted(0.2) // real-time-ok: the session's tail wait is a real queue timer with no clock seam; 0.2 s against the 0.05 s margin is the least that still shows the reported delay was waited
-                finishedAt.at = Date()
-                onFinished()
-            }, completion: { cont.resume(returning: $0) })
+        let session = MicProbeSession(recorder: recorder, timeout: 60, pipelineTail: 0.05)
+        let clock = ManualDelayClock()
+        session.delayClock = clock.queueHoppingClock
+        let outcome = Outcome()
+        session.start(stage: { _, onStarted, onFinished in
+            onStarted(2)
+            onFinished()
+        }, completion: { outcome.complete($0) })
+        await SuiteWait.until("the timeout, both lane checks and the tail to be scheduled") {
+            clock.pendingCount == 4
         }
-        let waited = finishedAt.at.map { Date().timeIntervalSince($0) } ?? 0
-        #expect(waited >= 0.2, "the capture waits the reported 0.2 s: waited \(waited)")
+        clock.advance(by: MicProbeSession.pipelineTailMarginSeconds)
+        #expect(clock.pendingCount == 4, "the tail still waits out the reported 2 s")
+        clock.advance(by: 2)
+        await SuiteWait.until("the run to complete") { outcome.isComplete }
     }
 
     @Test func aRunWhoseProbeNeverPlaysTimesOutToNil() async {
@@ -133,12 +155,69 @@ import Testing
         // ever fires, and the capture holds nothing but room.
         let recorder = FakeRecorder(rate: 24_000,
                                     scene: [Float](repeating: 0.01, count: 48_000))
-        let session = MicProbeSession(recorder: recorder, timeout: 0.2, pipelineTail: 0.05)
-        let result: MicProbeSession.Result? = await withCheckedContinuation { cont in
-            session.start(stage: { _, _, _ in }, completion: { cont.resume(returning: $0) })
-        }
-        #expect(result == nil, "no probe in the air can never yield a number")
+        let session = MicProbeSession(recorder: recorder, timeout: 60, pipelineTail: 0.05)
+        let clock = ManualDelayClock()
+        session.delayClock = clock.queueHoppingClock
+        let outcome = Outcome()
+        session.start(stage: { _, _, _ in }, completion: { outcome.complete($0) })
+        await SuiteWait.until("the timeout to be scheduled") { clock.pendingCount == 1 }
+        clock.advance(by: 60)
+        await SuiteWait.until("the run to time out") { outcome.isComplete }
+        #expect(outcome.result == nil, "no probe in the air can never yield a number")
         #expect(recorder.stopped, "the mic is released even on the timeout path")
+    }
+
+    /// Plays a run on a manual clock: both lane checks come due while the mic
+    /// still records, then the feed ends and the tail finishes the run.
+    private func laneCheckedRun(_ recorder: FakeRecorder) async -> Outcome {
+        let session = MicProbeSession(recorder: recorder, timeout: 60)
+        let clock = ManualDelayClock()
+        session.delayClock = clock.queueHoppingClock
+        let outcome = Outcome()
+        session.onLaneVerdict = { outcome.record($0, $1) }
+        session.start(stage: { _, onStarted, onFinished in
+            outcome.onFinished = onFinished
+            onStarted(0)
+        }, completion: { outcome.complete($0) })
+        await SuiteWait.until("the timeout and both lane checks to be scheduled") {
+            clock.pendingCount == 3
+        }
+        clock.advance(by: 10)
+        await SuiteWait.until("both lanes to be checked") { outcome.verdicts.count == 2 }
+        outcome.onFinished?()
+        await SuiteWait.until("the tail to be scheduled") { clock.pendingCount == 2 }
+        clock.advance(by: 2)
+        await SuiteWait.until("the run to complete") { outcome.isComplete }
+        return outcome
+    }
+
+    /// Turns red if a lane check reads the wrong window, demands the wrong
+    /// confidence, or the mid-run check alters the final measurement.
+    @Test func bothLanesAreHeardMidRunAndTheMeasurementStands() async {
+        let recorder = FakeRecorder(
+            rate: 8_000,
+            scene: scene(rate: 8_000,
+                         targetDelay: targetDelay(referenceDelay: 41_600, rate: 8_000, skewSamples: 60),
+                         referenceDelay: 41_600))
+        let outcome = await laneCheckedRun(recorder)
+        #expect(outcome.verdicts.map(\.lane) == [.bluetooth, .engine])
+        #expect(outcome.verdicts.map(\.heard) == [true, true], "both lanes are in the capture")
+        #expect(outcome.result.map { abs($0.deltaMs - 7.5) < 0.2 } == true,
+                "the final reading is still +7.5 ms: got \(String(describing: outcome.result))")
+    }
+
+    /// Turns red if a silent lane is reported heard or a missing lane stops
+    /// being a refused measurement.
+    @Test func aMissingBluetoothLaneIsReportedMissedAndRefused() async {
+        let recorder = FakeRecorder(
+            rate: 8_000,
+            scene: scene(rate: 8_000,
+                         targetDelay: targetDelay(referenceDelay: 41_600, rate: 8_000, skewSamples: 60),
+                         referenceDelay: 41_600, targetLevel: 0))
+        let outcome = await laneCheckedRun(recorder)
+        #expect(outcome.verdicts.map(\.lane) == [.bluetooth, .engine])
+        #expect(outcome.verdicts.map(\.heard) == [false, true], "only the engine lane sounded")
+        #expect(outcome.isComplete && outcome.result == nil, "one lane is no measurement")
     }
 
     @Test func aRecorderThatCannotStartCompletesNil() async {
@@ -198,6 +277,28 @@ import Testing
             }, completion: { cont.resume(returning: $0) })
         }
         #expect(box.step == 12, "a −55 dBFS room asks for the +12 dB step")
+    }
+
+    /// The live read is the newest 0.1 s level minus the room the level step measured.
+    /// Turns red if `levelAboveRoomDB` stops subtracting the measured room level, or answers before the room was measured.
+    @Test func theLiveLevelReadSubtractsTheMeasuredRoom() async {
+        let recorder = FakeRecorder(rate: 8_000, scene: [], roomSlices: [-50, -70, -72])
+        let session = MicProbeSession(recorder: recorder, timeout: 60)
+        let clock = ManualDelayClock()
+        session.delayClock = clock.queueHoppingClock
+        let outcome = Outcome()
+        #expect(session.levelAboveRoomDB() == nil, "no room level before the level step ran")
+        // The room level is written inside the level step itself, so the read
+        // right after it needs no clock.
+        let above: Double? = await withCheckedContinuation { cont in
+            session.start(stage: { levelStepDB, _, _ in
+                _ = levelStepDB()
+                cont.resume(returning: session.levelAboveRoomDB())
+            }, completion: { outcome.complete($0) })
+        }
+        #expect(above != nil && abs(above! - 22) < 0.01, "newest −50 over the quietest −72 is 22 dB")
+        session.cancel()
+        await SuiteWait.until("the cancelled run to complete") { outcome.isComplete }
     }
 
     /// Music the wizard just silenced is still loud in the newest half second

@@ -410,8 +410,17 @@ public final class BTAlignmentWizardView: NSView {
         self.session = session
         super.init(frame: NSRect(x: 0, y: 0, width: Self.viewWidth, height: 0))
         buildChrome()
-        session.onScreenChange = { [weak self] screen in self?.render(screen) }
+        session.onScreenChange = { [weak self] screen in
+            self?.render(screen)
+            // Only arriving on listening (the first listen or a retry, which
+            // goes listening → listening) sends the lights home; a repaint of
+            // the same screen, such as a picker refresh, keeps their verdicts.
+            if case .listening = screen { self?.stage.resetListening(animated: true) }
+        }
         session.onProbeStarted = { [weak self] in self?.startProbeProgress() }
+        session.onProbeSpeakerChecked = { [weak self] speaker, heard in
+            self?.stage.setListeningPhase(heard ? .heard : .missed, for: speaker, animated: true)
+        }
         render(session.screen)
     }
 
@@ -1191,13 +1200,18 @@ public final class BTAlignmentWizardView: NSView {
         if session.probeStartedAt != nil { startProbeProgress() }
     }
 
+    /// The bar and the stage's speaker turns share this one clock.
     private func startProbeProgress() {
         guard probeProgress != nil, probeProgressTimer == nil,
               let total = session.probeListeningSeconds else { return }
         probeProgressTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30, repeats: true) { [weak self] _ in
             guard let self, let bar = self.probeProgress,
                   let started = self.session.probeStartedAt else { return }
-            bar.doubleValue = min(1, Date().timeIntervalSince(started) / total)
+            let elapsed = Date().timeIntervalSince(started)
+            bar.doubleValue = min(1, elapsed / total)
+            self.stage.setListeningTurn(self.session.probeSpeakerPlaying(at: elapsed),
+                                        levelAboveRoomDB: self.session.probeLevelAboveRoomDB?(),
+                                        now: CACurrentMediaTime())
         }
     }
 

@@ -120,6 +120,9 @@ public final class BTAlignmentWizardSession {
     /// How long this listen's microphone runs from the gate opening: lead,
     /// probe, and the wait for the slowest lane. Nil when `probeStartedAt` is.
     public private(set) var probeListeningSeconds: TimeInterval?
+    /// The room delay ``probeDidStart(pipelineDelaySeconds:)`` reported for
+    /// this listen; nil until then and again at each new listen.
+    public private(set) var probePipelineDelaySeconds: TimeInterval?
     /// Fired by ``probeDidStart(pipelineDelaySeconds:)`` — the listening screen's cue to start its
     /// progress bar.
     public var onProbeStarted: (() -> Void)?
@@ -128,10 +131,60 @@ public final class BTAlignmentWizardSession {
     /// playing.
     public func probeDidStart(pipelineDelaySeconds: TimeInterval) {
         probeStartedAt = Date()
+        probePipelineDelaySeconds = pipelineDelaySeconds
         probeListeningSeconds = MicProbeSession.probeLeadSeconds + SyncProbe.Layout.totalSeconds
             + MicProbeSession.listeningTailSeconds(pipelineDelaySeconds: pipelineDelaySeconds)
         onProbeStarted?()
     }
+
+    /// The two speakers of a listen, as the probe's lane checks name them.
+    public enum ProbeSpeaker: Hashable, Sendable { case target, reference }
+
+    /// Whether each speaker's probe sound was recognised during the current
+    /// listen. Advisory: the measurement never reads it. Empty again at each
+    /// new listen.
+    public private(set) var probeSpeakerVerdicts: [ProbeSpeaker: Bool] = [:]
+    /// Fired by ``probeLaneChecked(_:heard:)`` once per checked speaker.
+    public var onProbeSpeakerChecked: ((_ speaker: ProbeSpeaker, _ heard: Bool) -> Void)?
+
+    /// The host's report of one probe lane's check. Lanes are split by
+    /// transport, so the Bluetooth lane is the target's when the target is
+    /// Bluetooth and the reference's otherwise. The Bluetooth lane always
+    /// sounds first, so a Mac-target run hears its reference first.
+    public func probeLaneChecked(_ lane: MicProbeSession.Lane, heard: Bool) {
+        guard case .listening = screen, !ended else { return }
+        let speaker = speaker(for: lane)
+        probeSpeakerVerdicts[speaker] = heard
+        onProbeSpeakerChecked?(speaker, heard)
+    }
+
+    private func speaker(for lane: MicProbeSession.Lane) -> ProbeSpeaker {
+        switch lane {
+        case .bluetooth: targetIsBluetooth ? .target : .reference
+        case .engine: targetIsBluetooth ? .reference : .target
+        }
+    }
+
+    /// The speaker whose probe turn covers `elapsedSeconds` after the gate
+    /// opened, or nil between turns and before ``probeDidStart(pipelineDelaySeconds:)``.
+    /// This is the play schedule offset by the slowest lane's room delay, not a
+    /// heard event; the per-speaker verdicts in ``probeSpeakerVerdicts`` are
+    /// the heard events.
+    public func probeSpeakerPlaying(at elapsedSeconds: TimeInterval) -> ProbeSpeaker? {
+        guard let delay = probePipelineDelaySeconds else { return nil }
+        for lane in [MicProbeSession.Lane.bluetooth, .engine] {
+            let start = MicProbeSession.probeLeadSeconds
+                + MicProbeSession.laneIndex(lane) * SyncProbe.Layout.laneSpacingSeconds + delay
+            if elapsedSeconds >= start, elapsedSeconds < start + SyncProbe.Layout.laneSeconds {
+                return speaker(for: lane)
+            }
+        }
+        return nil
+    }
+
+    /// Host-assigned live read for the listening screen: how far the newest
+    /// mic level sits above the room, in dB. Nil when no probe is live.
+    public var probeLevelAboveRoomDB: (() -> Double?)?
 
     /// Asks the host to get the microphone ready — the system prompt when the
     /// permission is undecided — and answers whether the run may listen.
@@ -408,6 +461,8 @@ public final class BTAlignmentWizardSession {
     private func enterListening() {
         probeStartedAt = nil
         probeListeningSeconds = nil
+        probePipelineDelaySeconds = nil
+        probeSpeakerVerdicts = [:]
         applyPreviewTrim(baseValueMs, nil)
         micAttempts += 1
         transition(to: .listening(isRealignment: estimator.openingProposalStands))
@@ -427,6 +482,14 @@ public final class BTAlignmentWizardSession {
     /// judged by ear if rejected, never listened to a third time.
     public func endListening() {
         guard case .listening = screen, !ended else { return }
+        let missed = [ProbeSpeaker.target, .reference].filter { probeSpeakerVerdicts[$0] == false }
+        Telemetry.log(.localPlayback, "wizard_listen_failed", [
+            "uid": deviceID,
+            "attempt": String(micAttempts),
+            "missed": missed.isEmpty ? "none"
+                : missed.map { $0 == .target ? "target" : "reference" }.joined(separator: ","),
+            "checked": String(probeSpeakerVerdicts.count),
+        ])
         Analytics.capture("bt_sync:listening_ended", ["outcome": "failed", "attempt": String(micAttempts),
                                                       "probe_sound": SyncProbe.Layout.analyticsName])
         if micAttempts < Self.maxMicAttempts, let requestListening {

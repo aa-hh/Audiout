@@ -561,6 +561,37 @@ private func proposalValue(_ session: BTAlignmentWizardSession) -> Double? {
         session.cancel()
     }
 
+    /// Turns red if the turn windows stop following the lane layout, the room delay, the transport mapping, or the per-listen reset.
+    @Test func theTurnScheduleFollowsTheLaneLayoutAndTheRoomDelay() {
+        let recorder = Recorder()
+        let session = recorder.makeSession(targetIsBluetooth: true)
+        session.requestListening = { $0(true) }
+        session.start()
+        #expect(session.probeSpeakerPlaying(at: 3.0) == nil, "no schedule before the probe starts")
+        session.probeDidStart(pipelineDelaySeconds: 2)
+        #expect(session.probeSpeakerPlaying(at: 2.4) == nil)
+        #expect(session.probeSpeakerPlaying(at: 2.5) == .target)
+        #expect(session.probeSpeakerPlaying(at: 6.49) == .target)
+        #expect(session.probeSpeakerPlaying(at: 6.5) == nil)
+        #expect(session.probeSpeakerPlaying(at: 7.0) == .reference)
+        #expect(session.probeSpeakerPlaying(at: 10.99) == .reference)
+        #expect(session.probeSpeakerPlaying(at: 11.0) == nil)
+
+        session.offerMeasuredProposal(valueMs: 300)
+        session.rejectProposal()
+        #expect(session.probePipelineDelaySeconds == nil, "the next listen starts unscheduled")
+        #expect(session.probeSpeakerPlaying(at: 3.0) == nil)
+        session.cancel()
+
+        let macTarget = recorder.makeSession(targetIsBluetooth: false)
+        macTarget.requestListening = { $0(true) }
+        macTarget.start()
+        macTarget.probeDidStart(pipelineDelaySeconds: 2)
+        #expect(macTarget.probeSpeakerPlaying(at: 2.5) == .reference, "the Bluetooth lane is the reference's")
+        #expect(macTarget.probeSpeakerPlaying(at: 7.0) == .target)
+        macTarget.cancel()
+    }
+
     /// A host that cannot listen still gets the zero-click path — and the
     /// panel has to be able to tell that proposal apart from a measured one,
     /// which it could not while the flag outlived the rejection.

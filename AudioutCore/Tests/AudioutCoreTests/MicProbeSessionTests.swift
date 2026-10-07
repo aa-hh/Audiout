@@ -279,6 +279,22 @@ import Testing
         #expect(box.step == 12, "a −55 dBFS room asks for the +12 dB step")
     }
 
+    /// The live read is the newest 0.1 s level minus the room the level step measured.
+    /// Turns red if `levelAboveRoomDB` stops subtracting the measured room level, or answers before the room was measured.
+    @Test func theLiveLevelReadSubtractsTheMeasuredRoom() async {
+        let recorder = FakeRecorder(rate: 8_000, scene: [], roomSlices: [-50, -70, -72])
+        let session = MicProbeSession(recorder: recorder, timeout: 1, pipelineTail: 0.05)
+        #expect(session.levelAboveRoomDB() == nil, "no room level before the level step ran")
+        _ = await withCheckedContinuation { (cont: CheckedContinuation<MicProbeSession.Result?, Never>) in
+            session.start(stage: { levelStepDB, onStarted, onFinished in
+                _ = levelStepDB()
+                onStarted(0); onFinished()
+            }, completion: { cont.resume(returning: $0) })
+        }
+        let above = session.levelAboveRoomDB()
+        #expect(above != nil && abs(above! - 22) < 0.01, "newest −50 over the quietest −72 is 22 dB")
+    }
+
     /// Music the wizard just silenced is still loud in the newest half second
     /// while an older slice already hears the quiet room. Turns red if
     /// `MicProbeSession.start` reads the room from the newest slice alone (or

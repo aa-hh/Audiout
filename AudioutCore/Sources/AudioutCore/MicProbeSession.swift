@@ -390,7 +390,14 @@ public final class MicProbeSession {
     private var completion: ((Result?) -> Void)?
     /// What the level closure answered, for `mic_probe_finished`.
     private var levelStepDB: Int?
-    private var ambientDBFS: Double?
+    /// The room level the level step measured. Written by the stager's thread,
+    /// read by `finish` on `queue` and by `levelAboveRoomDB` from the main thread.
+    private let ambientLock = NSLock()
+    private var ambientStore: Double?
+    private var ambientDBFS: Double? {
+        get { ambientLock.withLock { ambientStore } }
+        set { ambientLock.withLock { ambientStore = newValue } }
+    }
     private var pipelineDelaySeconds: TimeInterval?
     /// The glide the lane checks search for, rendered on the first check.
     /// `queue` only.
@@ -429,7 +436,8 @@ public final class MicProbeSession {
                 // and a slice it no longer reaches is the room.
                 let rms = recorder.recentRMSdBFS(seconds: 0.5, slices: 3).min()
                 let step = Self.levelStepDB(ambientRMSdBFS: rms)
-                self?.queue.async { self?.levelStepDB = step; self?.ambientDBFS = rms }
+                self?.ambientDBFS = rms
+                self?.queue.async { self?.levelStepDB = step }
                 return step
             }, { [weak self] delay in
                 self?.queue.async {
@@ -469,8 +477,18 @@ public final class MicProbeSession {
         queue.async { self.finish(analyze: false) }
     }
 
+    /// How far the newest 0.1 s of mic sound sits above the room level measured
+    /// at the level step, in dB. Advisory: the listening screen polls it, the
+    /// measurement never reads it. `nil` until the room level exists or while the
+    /// recorder has no full 0.1 s yet.
+    public func levelAboveRoomDB() -> Double? {
+        guard let room = ambientDBFS,
+              let newest = recorder.recentRMSdBFS(seconds: 0.1, slices: 1).first else { return nil }
+        return newest - room
+    }
+
     /// Lanes start this many lane spacings after the probe's own start.
-    private static func laneIndex(_ lane: Lane) -> Double { lane == .bluetooth ? 0 : 1 }
+    static func laneIndex(_ lane: Lane) -> Double { lane == .bluetooth ? 0 : 1 }
 
     /// `queue` only. Searches the capture so far for one lane's glide, inside
     /// the stretch that lane can occupy: from the probe lead (less the same

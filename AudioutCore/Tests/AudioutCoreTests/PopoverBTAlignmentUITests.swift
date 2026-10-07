@@ -1307,8 +1307,11 @@ import AppKit
     /// A microphone that records nothing, so the probe completes with no
     /// result and no system prompt is ever raised.
     private final class SilentRecorder: MicProbeRecording {
+        let roomSlices: [Double]
+        init(roomSlices: [Double] = []) { self.roomSlices = roomSlices }
         func start() throws -> Double { 48_000 }
         func stop() -> [Float] { [] }
+        func recentRMSdBFS(seconds: Double, slices: Int) -> [Double] { Array(roomSlices.prefix(slices)) }
     }
 
     /// Wire a popover for a listening run: a probe stager that fires straight
@@ -1401,6 +1404,84 @@ import AppKit
         }
         #expect(popover.test_btWizardSession()?.probeSpeakerVerdicts == [.target: false, .reference: false],
                 "a silent mic misses both speakers")
+    }
+
+    /// Turns red if the host stops handing the session the probe's live level read.
+    @Test func theSessionReadsTheProbesLiveLevel() async {
+        let (popover, _) = makePopover()
+        armListening(popover, granted: true)
+        popover.makeMicProbe = {
+            MicProbeSession(recorder: SilentRecorder(roomSlices: [-40, -70, -70]), timeout: 60, pipelineTail: 0.05)
+        }
+        popover.onStageBTMicProbe = { levelStepDB, started, _ in _ = levelStepDB(); started(0) }
+        showNote(popover)
+        popover.startBTAlignmentWizard(deviceID: "bt-a:output", door: .drawer)
+        popover.test_btWizardView()?.test_clickButton(titled: "Start")
+        await SuiteWait.until("the live level read to answer") {
+            popover.test_btWizardSession()?.probeLevelAboveRoomDB?() != nil
+        }
+        let above = popover.test_btWizardSession()?.probeLevelAboveRoomDB?()
+        #expect(above != nil && abs(above! - 30) < 0.01, "newest −40 over the quietest −70 is 30 dB")
+    }
+
+    /// Turns red if the view stops forwarding a speaker's verdict to the stage.
+    @Test func theViewForwardsEachSpeakersVerdictToTheStage() async {
+        let (popover, _) = makePopover()
+        armListening(popover, granted: true)
+        let clock = ManualDelayClock()
+        popover.makeMicProbe = {
+            let probe = MicProbeSession(recorder: SilentRecorder(), timeout: 60, pipelineTail: 1.5)
+            probe.delayClock = clock.queueHoppingClock
+            return probe
+        }
+        popover.onStageBTMicProbe = { _, started, _ in started(0) }
+        showNote(popover)
+        popover.startBTAlignmentWizard(deviceID: "bt-a:output", door: .drawer)
+        popover.test_btWizardView()?.test_clickButton(titled: "Start")
+        await SuiteWait.until("the timeout and both lane checks to be scheduled") {
+            clock.pendingCount == 3
+        }
+        clock.advance(by: 10)
+        await SuiteWait.until("both lanes to reach the session") {
+            popover.test_btWizardSession()?.probeSpeakerVerdicts.count == 2
+        }
+        let phases = popover.test_btWizardView()?.test_stage.test_listeningPhases
+        #expect(phases?.target == .missed && phases?.reference == .missed,
+                "a silent mic misses both speakers, and the stage shows it")
+    }
+
+    /// Turns red if a repaint of the same listening screen (the host pushing a
+    /// new picker list on reconcile) sends the lights home again, as
+    /// `render` calling `resetListening` did.
+    @Test func aPickerRefreshDuringTheListenKeepsTheVerdicts() async {
+        let (popover, _) = makePopover()
+        armListening(popover, granted: true)
+        let clock = ManualDelayClock()
+        popover.makeMicProbe = {
+            let probe = MicProbeSession(recorder: SilentRecorder(), timeout: 60, pipelineTail: 1.5)
+            probe.delayClock = clock.queueHoppingClock
+            return probe
+        }
+        popover.onStageBTMicProbe = { _, started, _ in started(0) }
+        showNote(popover)
+        popover.startBTAlignmentWizard(deviceID: "bt-a:output", door: .drawer)
+        popover.test_btWizardView()?.test_clickButton(titled: "Start")
+        await SuiteWait.until("the timeout and both lane checks to be scheduled") {
+            clock.pendingCount == 3
+        }
+        clock.advance(by: 10)
+        await SuiteWait.until("both lanes to reach the session") {
+            popover.test_btWizardSession()?.probeSpeakerVerdicts.count == 2
+        }
+        guard let view = popover.test_btWizardView(),
+              case .listening = popover.test_btWizardSession()?.screen else {
+            Issue.record("the run should still be listening")
+            return
+        }
+        view.referenceOptions += [.init(id: "late-speaker", name: "Late Speaker")]
+        #expect(view.test_stage.test_listeningPhases.target == .missed
+                    && view.test_stage.test_listeningPhases.reference == .missed,
+                "a picker refresh repaints the screen but keeps both verdicts")
     }
 
     /// Defect this would catch: "Try again" re-entered listening but the host

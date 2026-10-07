@@ -76,7 +76,7 @@ closed-source iPhone app links the same code, and a repository of its own
 because SwiftPM cannot depend on a package inside a subdirectory of another
 repo. `AudioutCore` pins it by version.
 - [dev/](dev/AGENTS.md) — offline dev tooling, plus `dev/notes/`, the home for
-  research briefs and phase write-ups.
+  research briefs and phase write-ups, kept in the main checkout only (gitignored, never on GitHub).
 - [scripts/make-app.sh](scripts/make-app.sh) — wraps the executable into a real
   `.app` with a stable bundle id, signed with a Developer ID identity when one
   is present in the keychain (auto-detected, override with `CODESIGN_IDENTITY`),
@@ -94,7 +94,6 @@ repo. `AudioutCore` pins it by version.
   as failed unless you check its actual exit code, never a file-freshness
   heuristic.
 - [docs/SPEC.md](docs/SPEC.md) — the product spec. Code cites its sections ("SPEC.md §9").
-- `docs/plans/PLAN-*.md` — the phased execution plans and their resolved decisions.
 
 ## Rules (all targets)
 
@@ -120,7 +119,8 @@ repo. `AudioutCore` pins it by version.
   `AUDIOUT_COMPANION=on` still overrides it, which is how a dev build tests
   against a TestFlight phone.
 - **Read `dev/notes/` before a non-trivial phase** — briefs exist to de-risk work
-  before it starts.
+  before it starts. They live in the main checkout only, so a worktree reads them
+  at `~/Projects/AirPlay Controller/dev/notes/`.
 - **"Does this code exist anywhere?" needs more than `git grep`.**
   `git rev-list --all` and `git grep <branch>` cannot see unreachable commits or
   other worktrees' uncommitted work — a dropped stash once made a shipped feature
@@ -331,7 +331,9 @@ queues the PR to land on its own once both are green, which is why it waits for
 the owner's yes. The merge-approval hook asks on `gh pr merge` either way.
 
 **Do not work in the `main` checkout at all.** Merely *editing* it starts the
-accident, even if you never commit.
+accident, even if you never commit. The one exception is the gitignored internal
+docs (handoffs, `.scratch/`, `dev/notes/`, `docs/plans/`, `docs/notes/`): write
+those in the main checkout, because an ignored file in a worktree dies with it.
 
 **If you find uncommitted edits in the `main` checkout that are in your way:
 stop and ask.** Never `reset --hard` / `checkout --` / `stash` them away. They
@@ -437,7 +439,7 @@ This app must feel like a native macOS citizen, not a cross-platform port.
   dot, meter, bus control, fader skin, shell bubble fill) the design authority
   is `DESIGN.md` at the repo root once the 2026-09-03 migration lands it, and
   until then the iPhone companion's `DESIGN.md` (`aa-hh/audiout-remote`) plus
-  `dev/notes/design-migration-scoping/01-decisions.md`. `dev/notes/warm-signal-v3.md`
+  `docs/design-migration-decisions.md`. `docs/warm-signal-v3.md`
   is the historical spec, not the authority. Stock AppKit behavior, controls,
   and accessibility remain mandatory regardless: the design record governs
   paint, not interaction model.
@@ -456,7 +458,7 @@ This app must feel like a native macOS citizen, not a cross-platform port.
   2. All custom color lives in `Tokens` and nowhere else.
   3. Every `Tokens.Color` case ships light + dark + Increase Contrast variants
      with a documented contrast rationale.
-  4. Warm Signal spec (`dev/notes/warm-signal-v3.md`) governs the sanctioned
+  4. Warm Signal spec (`docs/warm-signal-v3.md`) governs the sanctioned
      custom pieces; Control Center is no longer the reference.
   5. SF Symbols, template-rendered, for every glyph.
   6. Respect Reduce Motion, Increase Contrast, Reduce Transparency.

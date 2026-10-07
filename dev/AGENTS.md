@@ -3,7 +3,7 @@
 ## Purpose
 
 Offline development tooling for working on the app without real AirPlay
-speakers, plus `dev/notes/`, the home for pre-implementation research briefs.
+speakers, plus `dev/notes/`, the home for pre-implementation research briefs (gitignored; it exists in the main checkout only).
 It ships nothing.
 
 ## Rules

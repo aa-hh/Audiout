@@ -172,7 +172,7 @@ The mule runs macOS 26.5 with only the Xcode 27 beta installed, so `remote_run` 
 ## Critical workflow rules
 
 - **`main` accepts nothing but the merge queue.** Never commit or merge into `main` locally (Guard 1 refuses a commit there) and never push to it; GitHub's ruleset refuses anything that does not come through the queue. Work in a worktree branch. Local `main` is a fast-forward mirror of `origin/main`, kept by `scripts/sync-main.sh` on a 2-minute launchd timer (`bash scripts/test-sync-main.sh` self-tests it); never commit on it (Guard 1 still refuses), and cut worktrees from `origin/main` after `git fetch`.
-- **Work in worktrees, not the `main` checkout.** Worktrees live in `.claude/worktrees/<slug>/`. Never edit files in the `main` checkout.
+- **Work in worktrees, not the `main` checkout.** Worktrees live in `.claude/worktrees/<slug>/`. Never edit files in the `main` checkout, except the gitignored internal docs (see "Internal docs stay off GitHub").
 - **Every worktree branch must have a GitHub counterpart.** When creating a worktree, immediately push the branch to origin:
   ```bash
   git fetch origin

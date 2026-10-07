@@ -31,4 +31,4 @@ Used by `/wayfinder`. The **map** is a file with one **child** file per ticket.
 
 ## Repo note
 
-`.scratch/` is gitignored and never reaches GitHub (the `tests` workflow fails a PR that tracks it). Ignored files exist only in the checkout that wrote them, so write tickets in the main checkout's `.scratch/` (`/Users/alechenderson/Projects/AirPlay Controller/.scratch/`), where every worktree and background agent can read them and pruning a worktree cannot delete them.
+`.scratch/` is gitignored and never reaches GitHub (the `tests` workflow fails a PR that tracks it). Ignored files exist only in the checkout that wrote them, so write tickets in the main checkout's `.scratch/` (`"$HOME/Projects/AirPlay Controller/.scratch/"`), where every worktree and background agent can read them and pruning a worktree cannot delete them.

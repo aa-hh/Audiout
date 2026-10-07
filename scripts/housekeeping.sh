@@ -122,6 +122,18 @@ for wt in "$worktrees_dir"/*/; do
         printf '%s\n' "$dirt" | sed 's/^/      /' >&2
         continue
     fi
+    # Internal docs are gitignored, so `status` never shows them and
+    # `git worktree remove` would delete them without a word.
+    # razor: covers the internal-doc folders and root-level handoff files; a
+    # handoff nested anywhere else goes unseen — add its pathspec if one turns up.
+    docs=$(git -C "$wt" ls-files --others --ignored --exclude-standard -- \
+        .scratch dev/notes docs/plans docs/notes PROGRESS.md docs-delta.md \
+        ':(glob,icase)*handoff*.md' ':(glob,icase)*handover*.md' 2>/dev/null || true)
+    if [ -n "$docs" ]; then
+        say "SKIP prune $(basename "$wt"): it holds gitignored internal docs; move them to the main checkout first:"
+        printf '%s\n' "$docs" | sed 's/^/      /' >&2
+        continue
+    fi
     merged=0
     git -C "$wt" merge-base --is-ancestor HEAD main 2>/dev/null && merged=1
     if [ "$merged" -eq 0 ]; then

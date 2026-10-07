@@ -436,8 +436,9 @@ final class AlignmentStageView: NSView {
 
     /// Where one speaker's light is in the mic probe: waiting for its turn,
     /// in its turn (the light follows the mic), checking (turn over, no
-    /// verdict yet), or answered heard or missed. Every value below is from
-    /// concept A (`dev/notes/wizard-ring-concepts-2026-10-07/concept-a-notes.md`).
+    /// verdict yet), or answered heard or missed. The values below come from
+    /// the wizard ring concept the owner picked ("concept A"), except the
+    /// full-growth and cap sizes, which the owner raised after a live test.
     enum ListeningPhase: Equatable { case waiting, turn, checking, heard, missed }
 
     private(set) var listeningPhases: (target: ListeningPhase, reference: ListeningPhase)
@@ -445,13 +446,31 @@ final class AlignmentStageView: NSView {
     /// The turn light's growth, 0…1, smoothed toward the mic's live level.
     private(set) var listeningGrowth: CGFloat = 0
     private var listeningGrowthUpdatedAt: CFTimeInterval?
+    /// Each light's shimmer as the running field draws it: it rises with its
+    /// target at once and falls on `listeningShimmerRelease`, advanced by the
+    /// display link, so a turn's end or a verdict fades the tremble out.
+    private var listeningShimmerDrawn: (target: Float, reference: Float) = (0, 0)
+    private var listeningShimmerUpdatedAt: CFTimeInterval?
 
     /// A light at rest on the listening screen (concept A `D_WAIT`).
     private static let listeningRestingDiameter: CGFloat = 84
-    /// A light at full growth during its turn (concept A `D_PEAK`).
-    private static let listeningFullDiameter: CGFloat = 116
-    /// No light is ever drawn wider than this (concept A `D_MAX`).
-    private static let listeningCapDiameter: CGFloat = 120
+    /// A light at full growth during its turn. Concept A's `D_PEAK` was
+    /// 116 pt; the owner raised it to 126 pt after a live test.
+    private static let listeningFullDiameter: CGFloat = 126
+    /// No light is ever drawn wider than this. Concept A's `D_MAX` was 120 pt;
+    /// raised to 130 pt with the full size. The drawn edge sits at 0.798 of
+    /// the halo radius vertically (`SettledLightLayer.reach` edge 0.894 over
+    /// `squash` 1.12), so at a 65 pt radius it reaches 51.9 pt from the wire:
+    /// on the 132 pt plate with the wire at 66 pt that leaves ~14 pt clear of
+    /// the top and bottom edges.
+    private static let listeningCapDiameter: CGFloat = 130
+    /// Growth at which a turn light starts to shimmer: the ring's own curl
+    /// strengthens and quickens from here (`SettledLightLayer.Light.listening`)
+    /// to its full shimmer at full growth, smoothstep between.
+    private static let listeningShimmerStartGrowth: CGFloat = 0.6
+    /// The shimmer's fall time constant once its light stops listening: the
+    /// breath release's 0.3 s settle.
+    private static let listeningShimmerRelease: CFTimeInterval = 0.3
     /// A heard or missed light (concept A `D_SEAT`).
     private static let listeningSeatDiameter: CGFloat = 72
     /// A heard light sits this far from the centre, target left (concept A `SEAT`).
@@ -485,6 +504,23 @@ final class AlignmentStageView: NSView {
     static func listeningGrowth(levelAboveRoomDB dB: Double) -> CGFloat {
         let fraction = (dB - listeningGrowthFloorDB) / (listeningGrowthFullDB - listeningGrowthFloorDB)
         return CGFloat(Swift.min(Swift.max(fraction, 0), 1))
+    }
+
+    /// How hard a light is listening, 0…1: none below 0.6 growth, full at
+    /// full growth, smoothstep between.
+    static func listeningShimmer(growth: CGFloat) -> Float {
+        let t = Swift.min(Swift.max((growth - listeningShimmerStartGrowth)
+                                    / (1 - listeningShimmerStartGrowth), 0), 1)
+        return Float(t * t * (3 - 2 * t))
+    }
+
+    /// One step of the drawn shimmer: straight up to a higher target (the
+    /// growth is already smoothed), an exponential fall toward a lower one.
+    static func smoothedShimmer(from shimmer: Float, toward target: Float,
+                                dt: CFTimeInterval) -> Float {
+        guard target < shimmer else { return target }
+        guard dt > 0 else { return shimmer }
+        return shimmer + (target - shimmer) * Float(1 - exp(-dt / listeningShimmerRelease))
     }
 
     /// One step of the growth's exponential approach: quick while the level
@@ -656,6 +692,8 @@ final class AlignmentStageView: NSView {
         if newRung != previousRung {
             listeningPhases = (.waiting, .waiting)
             listeningGrowth = 0
+            listeningShimmerDrawn = (0, 0)
+            listeningShimmerUpdatedAt = nil
             listeningGrowthUpdatedAt = nil
         }
 
@@ -1834,7 +1872,7 @@ final class AlignmentStageView: NSView {
     /// Measuring, each light breathes by its own listening phase: a turn
     /// light is the mic's and a missed one is still; a heard one breathes
     /// slower and deeper beside the centre; a waiting or checking one keeps
-    /// the rung's quick breath, its swell held under the 120 pt cap.
+    /// the rung's quick breath, its swell held under the 130 pt cap.
     private func reconcileBreathing() {
         let look = Self.look(for: rung)
         let motionAllowed = !reduceMotion && !HeadlessRuntime.isActive && window != nil
@@ -2056,7 +2094,20 @@ final class AlignmentStageView: NSView {
     }
 
     @objc private func settledLightsTick(_ link: CADisplayLink) {
-        settledLights?.render(lights: currentLights(), now: link.targetTimestamp)
+        let now = link.targetTimestamp
+        let dt = listeningShimmerUpdatedAt.map { now - $0 } ?? 0
+        listeningShimmerDrawn = (
+            Self.smoothedShimmer(from: listeningShimmerDrawn.target,
+                                 toward: listeningShimmerTarget(listeningPhases.target), dt: dt),
+            Self.smoothedShimmer(from: listeningShimmerDrawn.reference,
+                                 toward: listeningShimmerTarget(listeningPhases.reference), dt: dt))
+        listeningShimmerUpdatedAt = now
+        settledLights?.render(lights: currentLights(), now: now)
+    }
+
+    /// Only a turn light under motion shimmers, by its growth.
+    private func listeningShimmerTarget(_ phase: ListeningPhase) -> Float {
+        phase == .turn && !reduceMotion ? Self.listeningShimmer(growth: listeningGrowth) : 0
     }
 
     /// A frame at the clock's current value — for Reduce Motion, a resize
@@ -2070,19 +2121,26 @@ final class AlignmentStageView: NSView {
     /// presentation values, so an in-flight transition, the breathe scale and
     /// the swell all reach the field with no second script.
     private func currentLights() -> [SettledLightLayer.Light] {
-        func light(_ halo: LightCarrierLayer) -> SettledLightLayer.Light {
+        func light(_ halo: LightCarrierLayer, _ phase: ListeningPhase,
+                   _ drawn: Float) -> SettledLightLayer.Light {
             let p = (halo.presentation() as? LightCarrierLayer) ?? halo
             let scale = CGFloat(p.transform.m11)
-            // The 120 pt cap's backstop: whatever stacks on a light, it stays
-            // 18 pt clear of the plate's top and bottom edges.
+            // The running field draws the faded shimmer; a still (Reduce
+            // Motion, headless, paused) draws the target. The shimmer moves
+            // the crest inside the shader's `reach` mask, so the cap holds.
+            let listening = settledLightsLink == nil ? listeningShimmerTarget(phase) : drawn
+            // The 130 pt cap's backstop: whatever stacks on a light, it stays
+            // ~14 pt clear of the plate's top and bottom edges.
             return SettledLightLayer.Light(centre: p.position,
                                            radius: Swift.min(p.bounds.width / 2 * scale,
                                                              Self.listeningCapDiameter / 2),
                                            opacity: p.opacity,
                                            variant: Float(p.variant),
-                                           color: Self.shaderTint(p.borderColor))
+                                           color: Self.shaderTint(p.borderColor),
+                                           listening: listening)
         }
-        return [light(targetHalo), light(referenceHalo)]
+        return [light(targetHalo, listeningPhases.target, listeningShimmerDrawn.target),
+                light(referenceHalo, listeningPhases.reference, listeningShimmerDrawn.reference)]
     }
 
     static func shaderTint(_ color: CGColor?) -> SIMD3<Float> {
@@ -2149,6 +2207,11 @@ final class AlignmentStageView: NSView {
     }
     /// The turn light's smoothed growth, 0…1.
     var test_listeningGrowth: CGFloat { listeningGrowth }
+    /// Each light's shimmer as handed to the field this frame, 0…1.
+    var test_listeningShimmer: (target: Float, reference: Float) {
+        let lights = currentLights()
+        return (lights[0].listening, lights[1].listening)
+    }
     /// The x of every tick the ruler draws.
     var test_tickXs: [CGFloat] {
         var xs: [CGFloat] = []

@@ -474,12 +474,14 @@ import AudioutSharedUI
     /// holding its size while it waits for a verdict.
     @Test func aTurnGrowsItsLightWithTheLevelAboveTheRoom() {
         let stage = makeStage()
+        // Pinned: the CI runner has the system's Reduce Motion on.
+        stage.test_reduceMotionOverride = false
         stage.apply(.measuring(range: range), animated: false)
         stage.setListeningTurn(.target, levelAboveRoomDB: 24, now: 100)
         stage.setListeningTurn(.target, levelAboveRoomDB: 24, now: 101)
 
         #expect(stage.test_listeningPhases.target == .turn)
-        #expect(abs(stage.test_targetLight.halo.width - 116) < 0.5,
+        #expect(abs(stage.test_targetLight.halo.width - 126) < 0.5,
                 "+24 dB is full growth, got \(stage.test_targetLight.halo.width)")
         #expect(abs(stage.test_targetLight.opacity - 1) < 0.001)
         #expect(abs(stage.test_referenceLight.halo.width - 84) < 0.01,
@@ -492,11 +494,45 @@ import AudioutSharedUI
                 "checking holds what the turn ended on")
 
         let quiet = makeStage()
+        quiet.test_reduceMotionOverride = false
         quiet.apply(.measuring(range: range), animated: false)
         quiet.setListeningTurn(.reference, levelAboveRoomDB: 6, now: 100)
         quiet.setListeningTurn(.reference, levelAboveRoomDB: 6, now: 101)
         #expect(abs(quiet.test_referenceLight.halo.width - 84) < 0.01,
                 "+6 dB is the growth floor: the light holds its resting size")
+    }
+
+    /// Turns red if `currentLights()` stops handing a turn light at full
+    /// growth a shimmer of 1, hands one to a resting or heard light, lets
+    /// Reduce Motion shimmer, or `smoothedShimmer` stops fading a finished
+    /// turn's shimmer over 0.3 s (dropping it at once) or lags a rising one.
+    @Test func aTurnAtFullLevelShimmersAndOtherLightsDoNot() {
+        let stage = makeStage()
+        stage.test_reduceMotionOverride = false
+        stage.apply(.measuring(range: range), animated: false)
+        stage.setListeningPhase(.heard, for: .reference, animated: false)
+        stage.setListeningTurn(.target, levelAboveRoomDB: 24, now: 100)
+        stage.setListeningTurn(.target, levelAboveRoomDB: 24, now: 101)
+
+        #expect(abs(stage.test_listeningShimmer.target - 1) < 0.01,
+                "full growth shimmers fully, got \(stage.test_listeningShimmer.target)")
+        #expect(stage.test_listeningShimmer.reference == 0, "a heard light is still")
+
+        let resting = makeStage()
+        resting.test_reduceMotionOverride = false
+        resting.apply(.measuring(range: range), animated: false)
+        #expect(resting.test_listeningShimmer.target == 0
+                    && resting.test_listeningShimmer.reference == 0,
+                "a resting light is still")
+
+        stage.test_reduceMotionOverride = true
+        #expect(stage.test_listeningShimmer.target == 0, "Reduce Motion never shimmers")
+
+        let faded = AlignmentStageView.smoothedShimmer(from: 1, toward: 0, dt: 0.3)
+        #expect(abs(faded - Float(exp(-1.0))) < 0.001,
+                "one 0.3 s time constant after the turn, got \(faded)")
+        #expect(AlignmentStageView.smoothedShimmer(from: 0.2, toward: 0.9, dt: 0.01) == 0.9,
+                "a rising shimmer follows the already-smoothed growth at once")
     }
 
     /// Turns red if a heard verdict stops seating the light 40 pt left of the

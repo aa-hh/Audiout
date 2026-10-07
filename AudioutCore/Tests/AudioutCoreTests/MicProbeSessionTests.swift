@@ -283,16 +283,22 @@ import Testing
     /// Turns red if `levelAboveRoomDB` stops subtracting the measured room level, or answers before the room was measured.
     @Test func theLiveLevelReadSubtractsTheMeasuredRoom() async {
         let recorder = FakeRecorder(rate: 8_000, scene: [], roomSlices: [-50, -70, -72])
-        let session = MicProbeSession(recorder: recorder, timeout: 1, pipelineTail: 0.05)
+        let session = MicProbeSession(recorder: recorder, timeout: 60)
+        let clock = ManualDelayClock()
+        session.delayClock = clock.queueHoppingClock
+        let outcome = Outcome()
         #expect(session.levelAboveRoomDB() == nil, "no room level before the level step ran")
-        _ = await withCheckedContinuation { (cont: CheckedContinuation<MicProbeSession.Result?, Never>) in
-            session.start(stage: { levelStepDB, onStarted, onFinished in
+        // The room level is written inside the level step itself, so the read
+        // right after it needs no clock.
+        let above: Double? = await withCheckedContinuation { cont in
+            session.start(stage: { levelStepDB, _, _ in
                 _ = levelStepDB()
-                onStarted(0); onFinished()
-            }, completion: { cont.resume(returning: $0) })
+                cont.resume(returning: session.levelAboveRoomDB())
+            }, completion: { outcome.complete($0) })
         }
-        let above = session.levelAboveRoomDB()
         #expect(above != nil && abs(above! - 22) < 0.01, "newest −50 over the quietest −72 is 22 dB")
+        session.cancel()
+        await SuiteWait.until("the cancelled run to complete") { outcome.isComplete }
     }
 
     /// Music the wizard just silenced is still loud in the newest half second

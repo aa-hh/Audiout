@@ -849,8 +849,9 @@ public final class CompanionCoordinator {
                 }
                 let refusal = bt.startCompanionAlignmentProbe(
                     targetID: targetID, referenceID: referenceID,
-                    onStarted: { [weak self] in
-                        self?.sendProbeEvent(targetID: targetID, started: true)
+                    onStarted: { [weak self] roomDelaySeconds in
+                        self?.sendProbeEvent(targetID: targetID, started: true,
+                                             roomDelaySeconds: roomDelaySeconds)
                     },
                     onFinished: { [weak self] in
                         self?.sendProbeEvent(targetID: targetID, started: false)
@@ -1053,7 +1054,8 @@ public final class CompanionCoordinator {
 
     /// Address one of the run's two moments back to the phone that staged it,
     /// and to nobody else. Fired from the pacer's own thread, so it hops.
-    private nonisolated func sendProbeEvent(targetID: String, started: Bool) {
+    private nonisolated func sendProbeEvent(targetID: String, started: Bool,
+                                             roomDelaySeconds: TimeInterval? = nil) {
         DispatchQueue.main.async { [weak self] in
             // A probe event goes only to a CURRENT probe owner: an audition or
             // a later job on the same speaker is not this run's audience.
@@ -1065,7 +1067,8 @@ public final class CompanionCoordinator {
                 // The Mac runs one alignment at a time, so a by-ear sheet
                 // open on this same speaker has been superseded.
                 self.host?.alignmentRunStarted(deviceID: targetID)
-                self.server.sendAlignmentProbeStarted(deviceID: targetID, to: clientID)
+                self.server.sendAlignmentProbeStarted(
+                    deviceID: targetID, roomDelaySeconds: roomDelaySeconds, to: clientID)
             } else {
                 self.server.sendAlignmentProbeFinished(deviceID: targetID, to: clientID)
             }

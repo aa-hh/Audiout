@@ -166,12 +166,13 @@ private final class SpyEngine: EngineControlling, @unchecked Sendable {
     private var liveStreams: [UInt64: UInt32] = [:]
     /// The stream `id`'s live session is on, or `nil` if it has none.
     func liveStream(of id: OutputID) -> UInt32? { lock.withLock { liveStreams[id.rawValue] } }
-    /// One level row per LIVE stream, which is what the `stream_health` poll
-    /// reads. The real engine reports a row per stream it has written to; the
-    /// spy reports a row per live session, so a test can assert what that row
-    /// says about the speakers on it. Levels themselves are fixtures.
+    /// The level rows the `stream_health` poll reads. The real tracker keeps a
+    /// row for every stream it was ever written and never drops one, so the spy
+    /// reports each live session's stream plus every stream a whole-system add
+    /// asked for; a retired home stream keeps reporting, as in the live log of
+    /// 2026-10-07. Levels themselves are fixtures.
     nonisolated func streamLevelSnapshot() -> [StreamLevelSnapshot] {
-        let ids = Set(lock.withLock { Array(liveStreams.values) })
+        let ids = lock.withLock { Set(liveStreams.values).union(wholeSystemAdds.map(\.1)) }
         return ids.sorted().map {
             StreamLevelSnapshot(streamId: $0, peakDBFS: -6, silentSeconds: 0, writes: 1)
         }
@@ -12013,6 +12014,66 @@ extension SerializedSharedState {
         let row = try #require(homeRows().last)
         #expect(row.contains("\"devices\":\"\(device.id)\""),
                 "the row for a speaker's own whole-system stream must name that speaker")
+    }
+
+    /// `stream_health` reports the streams the app still assigns, not every
+    /// stream the engine's level tracker remembers: the tracker never forgets an
+    /// id, so a removed speaker's stream logged every 5 s with no devices and
+    /// frozen writes (live 2026-10-07).
+    /// The first expectation goes red if the loop logs every row the engine
+    /// reports. The second goes red if the skip keys on `added` instead of the
+    /// stream assignment, because a speaker whose session died while still
+    /// selected is out of `added` until it reconnects. The third goes red if
+    /// the `devices` field is filtered on `added` again.
+    @Test func streamHealthSkipsARetiredStreamButKeepsOneStillAssigned() async throws {
+        let (backend, engine, discovery) = makeBackend(watchdogScheduler: ManualWatchdogScheduler())
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        backend.start()
+        defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        let retired = ap2Device(id: "AA:BB:CC:DD:EE:A8", name: "Health Retired Speaker")
+        let kept = ap2Device(id: "AA:BB:CC:DD:EE:A9", name: "Health Kept Speaker")
+        for device in [retired, kept] {
+            _ = await collect(from: backend) { events in
+                events.contains {
+                    if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false }
+                }
+            } after: { discovery.fire(.appeared(device)) }
+        }
+
+        backend.setOutputSet([retired.id])
+        await pollUntil { (engine.liveStream(of: retired.outputID) ?? 0) >= SpyEngine.wholeSystemStreamIDBase }
+        let retiredHome = try #require(engine.liveStream(of: retired.outputID))
+        backend.setOutputSet([retired.id, kept.id])
+        await pollUntil { (engine.liveStream(of: kept.outputID) ?? 0) >= SpyEngine.wholeSystemStreamIDBase }
+        let keptHome = try #require(engine.liveStream(of: kept.outputID))
+        // Rows are logged in id order and the telemetry queue is FIFO, so once
+        // keptHome's row arrives a wrongly logged retiredHome row is already in the box.
+        try #require(retiredHome < keptHome, "precondition: the retired stream's row is logged first")
+
+        await pollUntil { capture.eqPlans.last?.streams.contains { $0.streamID == retiredHome } == true }
+        backend.setOutputSet([kept.id])
+        await pollUntil { capture.eqPlans.last?.streams.contains { $0.streamID == retiredHome } == false }
+
+        engine.pushState(kept.outputID, .failed)
+        await pollUntil { backend.devices.first { $0.id == kept.id }?.isAvailable == false }
+
+        let box = TelemetryLineBox()
+        Telemetry._installTestSink { box.append($0) }
+        defer { Telemetry._installTestSink(nil) }
+        backend.test_pollSchedulingSnapshotNow()
+
+        func rows(_ id: UInt32) -> [String] {
+            box.snapshot().filter {
+                $0.contains("\"evt\":\"stream_health\"") && $0.contains("\"stream\":\"\(id)\"")
+            }
+        }
+        await pollUntil { !rows(keptHome).isEmpty }
+        #expect(rows(retiredHome).isEmpty, "a deselected speaker's stream must not be logged again")
+        #expect(!rows(keptHome).isEmpty, "a speaker still selected keeps its stream's line while its session is down")
+        #expect(rows(keptHome).first?.contains(kept.id) == true, "the stalled stream names the speaker it belongs to")
     }
 
     /// Selecting a SECOND device while already capturing (captureRunning

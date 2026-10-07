@@ -238,6 +238,18 @@ import AppKit
                 "the effective state is off, whatever the persisted setting says")
     }
 
+    // Turns red if the Developer section is mounted regardless of
+    // `isDevBuild`, which would ship the licence-gate override in a release.
+    @Test func theDeveloperSectionIsMountedOnlyInADevBuild() {
+        let settings = AppSettings(defaults: isolatedDefaults)
+        let shipping = GeneralSettingsViewController(loginItem: FakeLoginItem(), settings: settings,
+                                                     environment: [:], isDevBuild: false)
+        #expect(!shipping.test_developerSectionIsMounted)
+        let dev = GeneralSettingsViewController(loginItem: FakeLoginItem(), settings: settings,
+                                                environment: [:], isDevBuild: true)
+        #expect(dev.test_developerSectionIsMounted)
+    }
+
     /// Defect this names: the invitation stays in the pane after the switch
     /// goes off, so a Mac that refuses phones goes on inviting one.
     @Test func theInvitationIsMountedOnlyWhileTheSwitchIsOn() throws {

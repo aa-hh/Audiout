@@ -93,6 +93,7 @@ public struct AppSettings {
         static let syncOffsetMs = "audio.syncOffsetMs"
         static let btKeepAliveMinutes = "audio.btKeepAliveMinutes"
         static let allowRemoteControl = "companion.allowRemoteControl"
+        static let licenseGatePresentation = "dev.licenseGatePresentation"
         static let surfacePinned = "surface.pinned"
         static let eqAdvancedExpanded = "eq.advancedExpanded"
         static let licenseKey = "license.key"
@@ -385,7 +386,9 @@ public struct AppSettings {
     /// that sit above it, which is what AppDelegate actually reads at launch.
     public var allowRemoteControl: Bool {
         get {
-            guard defaults.object(forKey: Keys.allowRemoteControl) != nil else { return true }
+            // A dev build listens on the network only once its owner flips
+            // the switch; the shipping default stays ON.
+            guard defaults.object(forKey: Keys.allowRemoteControl) != nil else { return !Self.isDevBuild }
             return defaults.bool(forKey: Keys.allowRemoteControl)
         }
         nonmutating set { defaults.set(newValue, forKey: Keys.allowRemoteControl) }
@@ -409,7 +412,30 @@ public struct AppSettings {
     /// approval; nothing else moves. `AUDIOUT_COMPANION=on` still wins over
     /// it, so a dev build can turn the whole feature back on to test against
     /// a TestFlight phone.
-    public static let remoteAppIsOffered = false
+    ///
+    /// A dev build (a bundle id like `com.audiout.Audiout.dev`) always offers
+    /// it, so the Settings switch decides there instead of the env var.
+    public static var remoteAppIsOffered: Bool { isDevBuild }
+
+    /// Dev builds only: the Settings › General › Developer "Licence gate"
+    /// popup. ``LicenseGatePresentation/resolved(environment:settings:isDevBuild:)``
+    /// reads it only when ``isDevBuild``; a shipping build never does.
+    public var licenseGatePresentation: LicenseGatePresentation {
+        get {
+            defaults.string(forKey: Keys.licenseGatePresentation)
+                .flatMap(LicenseGatePresentation.init(rawValue:)) ?? .auto
+        }
+        nonmutating set { defaults.set(newValue.rawValue, forKey: Keys.licenseGatePresentation) }
+    }
+
+    /// Whether this process is a dev build: the shipping id plus a suffix
+    /// (`.dev`, `.staging`, a fresh handover id). The shipping app and the
+    /// test runner never match.
+    public static var isDevBuild: Bool { isDevBundleID(Bundle.main.bundleIdentifier) }
+
+    static func isDevBundleID(_ id: String?) -> Bool {
+        id?.hasPrefix("com.audiout.Audiout.") ?? false
+    }
 
     /// What decided a ``resolvedAllowRemoteControlWithSource(explicit:environment:settings:)``
     /// call — carried alongside the resolved value so a caller that needs to

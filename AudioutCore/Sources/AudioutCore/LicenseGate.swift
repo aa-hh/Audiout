@@ -25,9 +25,9 @@ public enum LicenseGate {
 
     public static func shouldPresent(
         settings: AppSettings,
-        presentation: LicenseGatePresentation = .resolved()
+        presentation: LicenseGatePresentation? = nil
     ) -> Bool {
-        switch presentation {
+        switch presentation ?? .resolved(settings: settings) {
         case .forceShow: return true
         case .forceHide: return false
         case .auto:
@@ -97,7 +97,7 @@ public enum LicenseGate {
 /// `force` the gate is invisible in the whole dev loop — this is how the window
 /// itself gets iterated on; `skip` keeps a URL-carrying test build out of the
 /// way.
-public enum LicenseGatePresentation {
+public enum LicenseGatePresentation: String {
     case auto
     case forceShow
     case forceHide
@@ -105,20 +105,27 @@ public enum LicenseGatePresentation {
     public static let environmentVariableName = "AUDIOUT_LICENSE_GATE"
 
     /// Same posture as `SetupPresentation.resolved`: a dev knob, so an
-    /// unrecognized value warns once on stderr and falls back to `.auto`.
+    /// unrecognized value warns once on stderr and falls through.
+    ///
+    /// Priority: a recognised env var, then the Settings › General › Developer
+    /// popup (``AppSettings/licenseGatePresentation``) on a dev build only,
+    /// then `.auto`. A shipping build never reads the stored setting.
     public static func resolved(
-        environment: [String: String] = ProcessInfo.processInfo.environment
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        settings: AppSettings = AppSettings(),
+        isDevBuild: Bool = AppSettings.isDevBuild
     ) -> LicenseGatePresentation {
-        guard let raw = environment[environmentVariableName]?.lowercased() else { return .auto }
-        switch raw {
-        case "force", "show", "always", "on", "1":  return .forceShow
-        case "skip", "hide", "off", "never", "0":   return .forceHide
-        case "auto", "default":                     return .auto
-        default:
-            FileHandle.standardError.write(
-                Data("warning: unrecognized \(environmentVariableName) value \"\(raw)\" — using auto\n".utf8))
-            return .auto
+        if let raw = environment[environmentVariableName]?.lowercased() {
+            switch raw {
+            case "force", "show", "always", "on", "1":  return .forceShow
+            case "skip", "hide", "off", "never", "0":   return .forceHide
+            case "auto", "default":                     return .auto
+            default:
+                FileHandle.standardError.write(
+                    Data("warning: unrecognized \(environmentVariableName) value \"\(raw)\" — ignoring it\n".utf8))
+            }
         }
+        return isDevBuild ? settings.licenseGatePresentation : .auto
     }
 }
 

@@ -340,9 +340,7 @@ public final class AppSurfaceController {
             self?.select(screen)
             return true
         }
-        // Escape on the Scenes screen steps back one level first (a scene
-        // editor pops to the overview); anything else, Speakers included, and
-        // the next Escape, closes the surface.
+        // Escape closes Scenes unless its optional cancel handler consumes it.
         // On the Mixer, a showing thank-you card takes the first Escape.
         shell.cancelHandler = { [weak self] in
             guard let self else { return false }

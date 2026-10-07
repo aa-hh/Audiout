@@ -338,10 +338,8 @@ public final class GroupEditorViewController: NSViewController {
             speakersLabel.leadingAnchor.constraint(equalTo: column.leadingAnchor,
                                                    constant: GroupsPaneLayout.railFreeContentLeadingInset),
 
-            // The ROWS, uniquely, start at the column's own leading edge: each
-            // row applies `contentLeadingInset` internally to its icon and
-            // places its node in the gutter, so row icons still line up with
-            // the header content above them. They FILL the section's width
+            // Each row keeps its membership gutter separately from the header's
+            // shared inset. Rows FILL the section's width
             // (`buildRows` pins each row to the stack) so a row's trailing
             // annotation lands at the section's own inset edge instead of
             // wherever the widest device name happens to end.
@@ -1147,8 +1145,7 @@ public final class GroupEditorViewController: NSViewController {
 
     /// HEADER PARITY hooks — compared with `DeviceDetailViewController`'s
     /// identically-named hooks by `GroupsHeaderParityTests`, which require the
-    /// same header band height and the same vertical centring; the icon's x
-    /// differs from the device page's by design.
+    /// same header band height, vertical centring and horizontal inset.
 
     /// The icon well's laid-out frame in the pane's own coordinates.
     public var test_headerIconFrame: NSRect { header.frames(in: view).icon }

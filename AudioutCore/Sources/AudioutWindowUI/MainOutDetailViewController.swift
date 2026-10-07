@@ -308,8 +308,7 @@ public final class MainOutDetailViewController: NSViewController {
 
     /// HEADER PARITY hooks — identical bodies to the device pane's, so
     /// `GroupsHeaderParityTests` can compare the panes' real frames: the same
-    /// header band height and vertical centring as the scene editor, with the
-    /// icon's x differing from the editor's by design on this page.
+    /// header band height, vertical centring and horizontal inset as the scene editor.
 
     public var test_headerIconFrame: NSRect { header.frames(in: view).icon }
 

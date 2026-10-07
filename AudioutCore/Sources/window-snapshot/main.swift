@@ -766,8 +766,7 @@ func run() -> Int32 {
             surface.select(.speakers)
         }
 
-        // 1. Default state: no groups — the card overview's own zero-groups
-        //    canvas (direction C absorbed the separate empty pane into it).
+        // 1. No scenes: the separate empty page beside the Scenes sidebar.
         snapshotControlPanel(surface.shell, label: "1-default", appearanceName: appearanceName,
                             outDir: outDir, present: presentGroups)
 

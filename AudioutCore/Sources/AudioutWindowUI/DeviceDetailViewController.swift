@@ -1077,8 +1077,7 @@ public final class DeviceDetailViewController: NSViewController {
 
     /// HEADER PARITY hooks — compared with `GroupEditorViewController`'s
     /// identically-named hooks by `GroupsHeaderParityTests`, which require the
-    /// same header band height and the same vertical centring; the icon's x
-    /// differs from the editor's by design on this page.
+    /// same header band height, vertical centring and horizontal inset.
 
     /// The icon well's laid-out frame in the pane's own coordinates.
     public var test_headerIconFrame: NSRect { header.frames(in: view).icon }

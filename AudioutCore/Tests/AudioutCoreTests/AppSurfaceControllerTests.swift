@@ -946,7 +946,7 @@ import AppKit
                                               store: GroupStore(directory: scratchDir),
                                               loadPersisted: false)
         // A saved group over a fully-discovered fleet, so the screen mounts a
-        // POPULATED content pane (the card overview it auto-selects) — the
+        // POPULATED content pane — the
         // state the live regression was reported in.
         _ = try groupController.createGroup(name: "Group 1",
                                             memberIDs: ["sonos-move", "office"])

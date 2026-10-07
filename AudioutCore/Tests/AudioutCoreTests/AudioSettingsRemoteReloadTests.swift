@@ -3,6 +3,7 @@
 import Testing
 import Foundation
 import AppKit
+import AudioutSharedUI
 @testable import AudioutCore
 @testable import AudioutSettingsUI
 
@@ -57,16 +58,28 @@ import AppKit
 
     /// The hint line states the chosen value's consequence, so it is as stale
     /// as the slider until reconciled.
+    // Leaving connection-volume or Bluetooth-pause help stale after a settings reload turns this red.
     @Test func theConnectVolumeHintReloadsWithTheSlider() {
         let settings = AppSettings(defaults: isolatedDefaults)
         settings.connectVolume = 20
+        settings.btKeepAliveMinutes = 0
         let pane = makePane(settings: settings)
         let before = pane.test_connectVolumeHint
 
         settings.connectVolume = 95
+        settings.btKeepAliveMinutes = AppSettings.btKeepAliveMinuteOptions.first(where: { $0 > 0 }) ?? 0
         pane.reloadFromSettings()
 
         #expect(pane.test_connectVolumeHint != before, "the hint must not describe the old level")
+        func pauseHelp(in view: NSView) -> HelpButton? {
+            if let help = view as? HelpButton,
+               help.accessibilityLabel() == "Help for Keep Bluetooth speakers streaming during pauses" { return help }
+            return view.subviews.lazy.compactMap { pauseHelp(in: $0) }.first
+        }
+        let help = pauseHelp(in: pane.view)
+        #expect(help?.toolTip?.hasPrefix("During pauses up to ") == true)
+        #expect(help?.accessibilityHelp() == help?.toolTip)
+
     }
 
     @Test func aBufferWrittenElsewhereLandsOnTheNextReload() throws {

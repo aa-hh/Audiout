@@ -114,6 +114,11 @@ public final class SettingsRootViewController: NSSplitViewController {
         refreshReadouts()
     }
 
+    public override func viewWillDisappear() {
+        super.viewWillDisappear()
+        if isViewLoaded { SettingsPane.dismissHelp(in: view) }
+    }
+
     /// Trial days count down while the app runs, so every show re-reads them.
     public override func viewWillAppear() {
         super.viewWillAppear()
@@ -244,6 +249,7 @@ private final class SettingsPaneHostViewController: NSViewController {
         loadViewIfNeeded()
         guard currentChild !== child else { return }
         if let currentChild {
+            SettingsPane.dismissHelp(in: currentChild.view)
             currentChild.view.removeFromSuperview()
             currentChild.removeFromParent()
         }

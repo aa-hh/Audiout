@@ -648,6 +648,25 @@ key the server refused); Enter license… and Change… stay stock. The sidebar
 glyph and the License header glyph take `ring` in the states marked below and
 `labelCool` otherwise.
 
+Eight Settings explanations use stock help buttons immediately beside their
+row or page title: Touch Bar controls, anonymous usage statistics, iPhone
+control, connection volume, wake restore, Bluetooth pauses, Audio buffer and
+License. Hover shows a native tooltip; keyboard activation or a click opens
+a transient text popover. The same copy is exposed to VoiceOver. Changing a
+setting updates its help text and any open popover. License check-in help
+appears beside License only while a server and saved key exist. Launch at
+login, reconnect, Theme, Accent, the Remote invitation and Apps that stay on
+this Mac have plain titles without explanatory subtitles.
+The empty Apps that stay on this Mac card fits one 44 pt Add app row plus
+6 pt card padding above and below. Removing the last app returns it to that
+height.
+Status readouts, Allowed/Denied phone captions, launch-option and Login Items
+warnings, and buffer reconnect results remain visible. Advanced mounts its
+feedback row only while reconnecting or showing a result; clearing feedback
+removes that row and its divider. Its forced-launch-option warning remains
+visible. Removing a help anchor, switching panes, leaving Settings or
+collapsing Advanced dismisses its popover.
+
 | Section | Readout | Glyph |
 |---|---|---|
 | General | "Needs Login Items approval" | `ring` |
@@ -1299,8 +1318,12 @@ Overview and a speaker's page:
   rail-free 14 pt lane on both sides.
 
 A row built with `captionSpansRow` keeps its title and accessory on one line
-and runs the caption the full lane width beneath them (the Audio pane's
-connect-volume row).
+and runs the caption the full lane width beneath them.
+
+Titles truncate by default. The Audio connection-volume row opts into a
+two-line title at the existing font size. Its help button sits beside the
+title, and the help button, slider and value stay vertically centered against
+both title lines. The slider and value keep their existing widths.
 
 `isClickThrough` puts the whole row inside a borderless button, so the row is
 one target and the button does the speaking. Rows stack on a

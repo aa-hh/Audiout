@@ -49,7 +49,6 @@ public final class AppearanceSettingsViewController: NSViewController, SettingsR
     /// Radio order == this array — same single-source-of-truth idiom as `order`.
     private let accentOrder: [AccentStyle] = [.fullGold, .subtle]
     private var accentRadios: [NSButton] = []
-    private let accentHint = SettingsForm.hintLabel()
 
     public init(settings: AppSettings) {
         self.settings = settings
@@ -81,7 +80,6 @@ public final class AppearanceSettingsViewController: NSViewController, SettingsR
         tileRow.translatesAutoresizingMaskIntoConstraints = false
 
         let themeTitle = SettingsPane.makeSectionTitle("Theme")
-        let themeNote = SettingsPane.makeNote("Follow the system, or force light or dark.")
 
         let rule = RuleView(tone: .hairline)
         rule.translatesAutoresizingMaskIntoConstraints = false
@@ -94,7 +92,6 @@ public final class AppearanceSettingsViewController: NSViewController, SettingsR
         // there is no app-layer apply step to defer to); ``onAccentChanged``
         // then lets the app nudge open surfaces to repaint.
         let accentTitle = SettingsPane.makeSectionTitle("Accent")
-        let accentNote = SettingsPane.makeNote("How strongly meters, dots, and rings use the brand gold.")
 
         accentRadios = accentOrder.map { style in
             let radio = NSButton(radioButtonWithTitle: style.displayName,
@@ -114,28 +111,25 @@ public final class AppearanceSettingsViewController: NSViewController, SettingsR
         applyAccentSelection(settings.accentStyle)
 
         let page = SettingsForm.pageView(content: [
-            header, themeTitle, tileRow, themeNote, rule, accentTitle, accentNote, radioRow, accentHint,
+            header, themeTitle, tileRow, rule, accentTitle, radioRow,
         ])
         if let stack = page.subviews.first as? NSStackView {
             stack.setCustomSpacing(6, after: themeTitle)
-            stack.setCustomSpacing(8, after: tileRow)
-            stack.setCustomSpacing(14, after: themeNote)
+            stack.setCustomSpacing(14, after: tileRow)
             stack.setCustomSpacing(13, after: rule)
-            stack.setCustomSpacing(3, after: accentTitle)
-            stack.setCustomSpacing(9, after: accentNote)
+            stack.setCustomSpacing(9, after: accentTitle)
             stack.setCustomSpacing(8, after: radioRow)
         }
         view = page
     }
 
-    /// Reflect `style` in the radio group + the live hint line (no persistence,
+    /// Reflect `style` in the radio group (no persistence,
     /// no side effects — shared by `loadView` and the click path).
     private func applyAccentSelection(_ style: AccentStyle) {
         let index = accentOrder.firstIndex(of: style) ?? 0
         for (radioIndex, radio) in accentRadios.enumerated() {
             radio.state = radioIndex == index ? .on : .off
         }
-        accentHint.stringValue = style.hintLine
     }
 
     @objc private func accentTapped(_ sender: NSButton) {
@@ -232,11 +226,6 @@ public final class AppearanceSettingsViewController: NSViewController, SettingsR
         accentTapped(radio)
     }
 
-    /// The live hint line under the accent radios.
-    public var test_accentHint: String {
-        _ = view
-        return accentHint.stringValue
-    }
 }
 
 /// A theme-picker tile: a miniature window preview rendered *in* its target
@@ -563,14 +552,6 @@ private extension AccentStyle {
         }
     }
 
-    /// The live hint line for the current dial position — what this choice
-    /// actually does to the instruments, per §1.3's remap table.
-    var hintLine: String {
-        switch self {
-        case .fullGold: return "Meters, dots, and rings glow in the full brand gold."
-        case .subtle:   return "A quieter gold — softer meters, and no glow around the routing dot."
-        }
-    }
 }
 
 private extension Array {

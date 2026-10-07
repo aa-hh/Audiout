@@ -46,6 +46,131 @@ import AudioutSharedUI
         func openSystemSettingsLoginItems() { openLoginItemsCallCount += 1 }
     }
 
+    private func descendants(of view: NSView) -> [NSView] {
+        [view] + view.subviews.flatMap { descendants(of: $0) }
+    }
+
+    private func explanation(in view: NSView, subject: String) -> HelpButton? {
+        descendants(of: view).compactMap { $0 as? HelpButton }.first {
+            $0.accessibilityLabel() == "Help for \(subject)"
+        }
+    }
+
+    private func expectExplanation(_ text: String, subject: String, in view: NSView) {
+        let help = explanation(in: view, subject: subject)
+        #expect(help?.toolTip == text)
+        #expect(help?.accessibilityHelp() == text)
+        #expect(!descendants(of: view).contains {
+            ($0 as? NSTextField)?.stringValue == text
+        }, "explanations must not remain as inline subtitles")
+    }
+
+    // Adding removed help or omitting retained help turns it red.
+    @Test func settingsExplanationInventoryUsesActualHelpText() {
+        let settings = makeSettings()
+        settings.reconnectAtLaunch = false
+        settings.telemetryAsked = true
+        settings.telemetryOptIn = false
+        settings.connectVolume = 30
+        settings.btKeepAliveMinutes = 0
+        settings.accentStyle = .fullGold
+        let general = GeneralSettingsViewController(loginItem: FakeLoginItem(enabled: false), settings: settings)
+        expectExplanation("No usage data leaves this Mac.", subject: "Share anonymous usage statistics", in: general.view)
+        if descendants(of: general.view).contains(where: {
+            ($0 as? ListRowView)?.titleLabel.stringValue == "Use Audiout's Touch Bar controls"
+        }) {
+            expectExplanation("While Audiout is playing to speakers, the Touch Bar volume keys control the speakers instead of the Mac.", subject: "Use Audiout's Touch Bar controls", in: general.view)
+        }
+        let appearance = AppearanceSettingsViewController(settings: settings)
+        let latency = LatencySettingModel(optionsMs: AppSettings.startBufferOptionsMs, initialMs: 1000,
+                                         envOverrideMs: nil, isStreaming: { false }, apply: { _ in (0, 0) })
+        let wake = WakeAudioRestoreModel(minuteOptions: AppSettings.wakeRestoreMinuteOptions,
+                                        initialMinutes: 0, apply: { _ in })
+        let audio = AudioSettingsViewController(excluded: makeExcluded(), runningAppsProvider: { [] },
+                                               settings: settings, latency: latency, wakeRestore: wake)
+        let removedTitles: [(NSView, String)] = [
+            (general.view, "Launch at login"),
+            (general.view, "Reconnect last speakers when Audiout starts"),
+            (appearance.view, "Theme"), (appearance.view, "Accent"),
+            (audio.view, "Apps that stay on this Mac"),
+        ]
+        for (view, title) in removedTitles {
+            #expect(explanation(in: view, subject: title) == nil, "\(title) must have no help button")
+            #expect(descendants(of: view).contains { ($0 as? NSTextField)?.stringValue == title })
+        }
+        let removedInlineCopy = [
+            "Open Audiout automatically when you log in.",
+            "Audiout starts on this Mac's speakers only.",
+            "Next launch reconnects the speakers you last used.",
+            "Follow the system, or force light or dark.",
+            "How strongly meters, dots, and rings use the brand gold.",
+            "Meters, dots, and rings glow in the full brand gold.",
+            "A quieter gold — softer meters, and no glow around the routing dot.",
+            "Audio from these apps always plays on your Mac, never sent to speakers.",
+        ]
+        for view in [general.view, appearance.view, audio.view] {
+            #expect(!descendants(of: view).contains { candidate in
+                guard let label = candidate as? NSTextField else { return false }
+                return removedInlineCopy.contains(label.stringValue)
+            }, "removed help must not return as inline subtitles")
+        }
+        expectExplanation("Connects at 30% — a moderate, comfortable start. Each speaker's own slider takes over right after.", subject: "Volume when connecting a speaker", in: audio.view)
+        expectExplanation("Never — after waking, this Mac stays silent until the speakers reconnect.", subject: "Restore Mac audio if speakers don't reconnect", in: audio.view)
+        expectExplanation("Never — Bluetooth speakers go idle when audio stops, and can come back slightly out of sync when it resumes.", subject: "Keep Bluetooth speakers streaming during pauses", in: audio.view)
+        #expect(explanation(in: audio.view, subject: "Audio buffer")?.isHiddenOrHasHiddenAncestor == true)
+        audio.test_toggleAdvanced()
+        #expect(explanation(in: audio.view, subject: "Audio buffer")?.isHiddenOrHasHiddenAncestor == false)
+        let pauseControl = descendants(of: audio.view).compactMap { $0 as? NSPopUpButton }.first {
+            $0.accessibilityLabel() == "Keep Bluetooth speakers streaming during pauses"
+        }
+        if let index = AppSettings.btKeepAliveMinuteOptions.firstIndex(where: { $0 > 0 }) {
+            pauseControl?.selectItem(at: index)
+            if let pauseControl { _ = pauseControl.sendAction(pauseControl.action, to: pauseControl.target) }
+            #expect(explanation(in: audio.view, subject: "Keep Bluetooth speakers streaming during pauses")?.toolTip?.hasPrefix("During pauses up to ") == true)
+        }
+        let bufferHelp = explanation(in: audio.view, subject: "Audio buffer")
+        #expect(bufferHelp?.toolTip?.hasSuffix("— fastest response, safe for Wi-Fi speakers. Changing this reconnects your active speakers.") == true)
+        #expect(bufferHelp?.accessibilityHelp() == bufferHelp?.toolTip)
+        #expect(descendants(of: audio.view).compactMap { $0 as? ListRowView }.allSatisfy { $0.caption == nil })
+    }
+
+    // Restoring invitation help, leaving its row mounted while off, or showing License help without a key turns it red.
+    @Test func conditionalExplanationHelpFollowsVisibleContent() {
+        let settings = makePaidBuildSettings()
+        settings.allowRemoteControl = true
+        let remote = RemoteSettingsViewController(settings: settings, environment: [:], remoteAppIsOffered: true)
+        expectExplanation("Lets Audiout Remote on your iPhone control this Mac's speakers and measure their timing from the room.", subject: "Allow control from iPhone on this network", in: remote.view)
+        #expect(explanation(in: remote.view, subject: "Get Audiout Remote for iPhone") == nil)
+        #expect(!descendants(of: remote.view).contains {
+            ($0 as? NSTextField)?.stringValue == "Scan with your iPhone's camera, or open \(RemoteInviteView.pageAddress)."
+        })
+        #expect(remote.test_remoteInviteRowIsMounted)
+        #expect(remote.test_remoteInviteQRIsVisible)
+        #expect(descendants(of: remote.view).contains { ($0 as? NSButton)?.title == "Open \(RemoteInviteView.pageAddress)" })
+        remote.test_toggleAllowRemoteControl(false)
+        #expect(!remote.test_remoteInviteRowIsMounted)
+        #expect(!descendants(of: remote.view).contains { ($0 as? NSButton)?.title == "Open \(RemoteInviteView.pageAddress)" })
+        remote.test_toggleAllowRemoteControl(true)
+        #expect(remote.test_remoteInviteRowIsMounted)
+        #expect(descendants(of: remote.view).contains { ($0 as? NSButton)?.title == "Open \(RemoteInviteView.pageAddress)" })
+        #expect(explanation(in: remote.view, subject: "Get Audiout Remote for iPhone") == nil)
+        let license = LicenseSettingsViewController(settings: settings)
+        #expect(explanation(in: license.view, subject: "License")?.isHidden == true)
+        settings.licenseKey = "AUDT-AAAAA-BBBBB-CCCCC-DDDDD"
+        settings.licenseStatus = .active
+        license.viewWillAppear()
+        #expect(explanation(in: license.view, subject: "License")?.isHidden == false)
+        expectExplanation("Audiout checks in with the license server once per launch to spot a key shared across many machines. It sends your key, a random per-Mac id, and the app version. Nothing else.", subject: "License", in: license.view)
+        #expect(license.test_licenseStatusText?.isEmpty == false)
+        settings.licenseKey = ""
+        license.viewWillAppear()
+        #expect(explanation(in: license.view, subject: "License")?.isHidden == true)
+        let sourceSettings = makeSettings()
+        sourceSettings.licenseKey = "AUDT-AAAAA-BBBBB-CCCCC-DDDDD"
+        let sourceLicense = LicenseSettingsViewController(settings: sourceSettings)
+        #expect(explanation(in: sourceLicense.view, subject: "License")?.isHidden == true)
+    }
+
     private let isolation = TestIsolation(owner: "SettingsRootViewControllerTests")
 
     private func makeSettings() -> AppSettings {
@@ -508,6 +633,7 @@ import AudioutSharedUI
     /// The once-per-launch check-in is disclosed where it happens, and ONLY
     /// where it happens: no key means no check-in, so claiming one would be a
     /// lie in the other direction.
+    // Showing License help without a saved key, or failing to remove it with the key, turns this red.
     @Test func checkInDisclosureAppearsExactlyWhileAKeyIsStored() async {
         let transport = StubTransport()
         let license = LicenseSettingsViewController(settings: makePaidBuildSettings())

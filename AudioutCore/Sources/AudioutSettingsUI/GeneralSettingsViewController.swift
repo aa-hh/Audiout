@@ -28,7 +28,6 @@ public final class GeneralSettingsViewController: NSViewController, SettingsRead
     private let reconnectSwitch = NSSwitch()
     private let touchBarSwitch = NSSwitch()
     private let consentSwitch = NSSwitch()
-    private var reconnectRow: ListRowView?
     private var consentRow: ListRowView?
     private let loginApprovalButton = NSButton()
     private var loginApprovalRow: NSView?
@@ -102,7 +101,6 @@ public final class GeneralSettingsViewController: NSViewController, SettingsRead
         launchSwitch.setAccessibilityLabel("Launch at login")
         let launchRow = ListRowView(
             title: "Launch at login",
-            caption: "Open Audiout automatically when you log in.",
             accessory: launchSwitch)
 
         // `SMAppService.register()` can succeed into `.requiresApproval` —
@@ -119,17 +117,14 @@ public final class GeneralSettingsViewController: NSViewController, SettingsRead
 
         // Reconnect-at-launch (roadmap 050): the opt-in that lets
         // `GroupController.ensureDefaultSelection()` resume the persisted
-        // routing set instead of starting on this Mac's speakers only. Its
-        // caption is a live hint (spec §5.2), re-written on every toggle.
+        // routing set instead of starting on this Mac's speakers only.
         reconnectSwitch.target = self
         reconnectSwitch.action = #selector(reconnectToggled)
         reconnectSwitch.state = settings.reconnectAtLaunch ? .on : .off
         reconnectSwitch.setAccessibilityLabel("Reconnect last speakers when Audiout starts")
         let reconnectRow = ListRowView(
             title: "Reconnect last speakers when Audiout starts",
-            caption: Self.reconnectHintLine(settings.reconnectAtLaunch),
             accessory: reconnectSwitch)
-        self.reconnectRow = reconnectRow
 
         // Anonymous usage analytics — the toggle for what
         // `AppSettings.telemetryEnabled` gates. It shows what is happening now,
@@ -141,8 +136,8 @@ public final class GeneralSettingsViewController: NSViewController, SettingsRead
         consentSwitch.setAccessibilityLabel("Share anonymous usage statistics")
         let consentRow = ListRowView(
             title: "Share anonymous usage statistics",
-            caption: Self.consentHintLine(settings.telemetryEnabled),
-            accessory: consentSwitch)
+            accessory: consentSwitch,
+            helpText: Self.consentHintLine(settings.telemetryEnabled))
         self.consentRow = consentRow
 
         // Touch Bar opt-out — offered ONLY on a Mac that has one, since on
@@ -155,8 +150,8 @@ public final class GeneralSettingsViewController: NSViewController, SettingsRead
             touchBarSwitch.setAccessibilityLabel("Use Audiout's Touch Bar controls")
             rows.append(ListRowView(
                 title: "Use Audiout's Touch Bar controls",
-                caption: "While Audiout is playing to speakers, the Touch Bar volume keys control the speakers instead of the Mac.",
-                accessory: touchBarSwitch))
+                accessory: touchBarSwitch,
+                helpText: "While Audiout is playing to speakers, the Touch Bar volume keys control the speakers instead of the Mac."))
         }
         rows.append(consentRow)
         let card = SettingsPane.makeCard(rows: rows)
@@ -197,17 +192,9 @@ public final class GeneralSettingsViewController: NSViewController, SettingsRead
         view = page
     }
 
-    /// The reconnect-at-launch live hint: what the NEXT launch will do.
-    private static func reconnectHintLine(_ enabled: Bool) -> String {
-        enabled
-            ? "Next launch reconnects the speakers you last used."
-            : "Audiout starts on this Mac's speakers only."
-    }
-
     @objc private func reconnectToggled() {
         let enabled = reconnectSwitch.state == .on
         settings.reconnectAtLaunch = enabled
-        reconnectRow?.caption = Self.reconnectHintLine(enabled)
         Analytics.capture("settings:reconnect_at_launch_toggled", ["enabled": enabled ? "true" : "false"])
     }
 
@@ -223,7 +210,7 @@ public final class GeneralSettingsViewController: NSViewController, SettingsRead
         settings.telemetryOptIn = enabled
         settings.telemetryAsked = true
         Analytics.setConsent(enabled)
-        consentRow?.caption = Self.consentHintLine(enabled)
+        consentRow?.helpText = Self.consentHintLine(enabled)
     }
 
     @objc private func touchBarToggled() {
@@ -316,12 +303,6 @@ public final class GeneralSettingsViewController: NSViewController, SettingsRead
         _ = view
         reconnectSwitch.state = on ? .on : .off
         reconnectToggled()
-    }
-
-    /// The reconnect-at-launch live hint line (spec §5.2).
-    public var test_reconnectHint: String {
-        _ = view
-        return reconnectRow?.caption ?? ""
     }
 
     /// Whether the "allow Audiout in Login Items" explanation is on screen.

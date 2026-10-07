@@ -8,7 +8,7 @@ import AudioutSharedUI
 /// app works with no key at all. NO inline key field: entry is a deliberate
 /// act behind "Enter license…" (a sheet), the convention every respected
 /// optional-license app follows. The pane is one recessed well holding the
-/// status sentence and the two buttons, with the check-in disclosure under it.
+/// status sentence and the two buttons, with the check-in disclosure beside the page title.
 /// The app builds this section only when there is a licence server
 /// (``isAvailable``): a build from source has nothing to verify and nothing
 /// to sell.
@@ -19,7 +19,7 @@ public final class LicenseSettingsViewController: NSViewController, SettingsRead
     private let openURL: (URL) -> Void
     private let statusLabel = NSTextField(wrappingLabelWithString: "")
     private let checkAgainButton = NSButton()
-    private let checkInDisclosureHint = SettingsPane.makeNote(
+    private let checkInDisclosureHelp = HelpButton(subject: "License", text:
         "Audiout checks in with the license server once per launch to spot a key "
         + "shared across many machines. It sends your key, a random per-Mac id, and the "
         + "app version. Nothing else.")
@@ -120,7 +120,8 @@ public final class LicenseSettingsViewController: NSViewController, SettingsRead
 
     public override func loadView() {
         let (header, glyph) = SettingsPane.makeHeader(symbolName: "key", title: "License",
-                                                      caption: Self.readoutFirstLine(settings: settings))
+                                                      caption: Self.readoutFirstLine(settings: settings),
+                                                      helpButton: checkInDisclosureHelp)
         headerGlyph = glyph
         headerCaption = header.textStack.arrangedSubviews.last as? NSTextField
 
@@ -185,8 +186,7 @@ public final class LicenseSettingsViewController: NSViewController, SettingsRead
         ])
         self.well = well
 
-        let page = SettingsForm.pageView(content: [header, well, checkInDisclosureHint])
-        (page.subviews.first as? NSStackView)?.setCustomSpacing(8, after: well)
+        let page = SettingsForm.pageView(content: [header, well])
         view = page
 
         refreshLicenseStatus()
@@ -268,7 +268,9 @@ public final class LicenseSettingsViewController: NSViewController, SettingsRead
         // Disclosed exactly when a check-in can actually fire
         // (`LicenseCheckIn.checkInIfNeeded` guards on key + endpoint) — never
         // as a standing claim about a build that never phones home.
-        checkInDisclosureHint.isHidden = !(serverConfigured && !key.isEmpty)
+        let showsDisclosure = serverConfigured && !key.isEmpty
+        if !showsDisclosure { checkInDisclosureHelp.dismissHelp() }
+        checkInDisclosureHelp.isHidden = !showsDisclosure
 
         // "Enter license…" before a key of the user's own exists; "Change…"
         // once one is stored (the sheet then prefills it and offers Remove
@@ -455,6 +457,6 @@ public final class LicenseSettingsViewController: NSViewController, SettingsRead
     /// The check-in disclosure line, or `nil` while it is hidden.
     public var test_checkInDisclosureText: String? {
         _ = view
-        return checkInDisclosureHint.isHidden ? nil : checkInDisclosureHint.stringValue
+        return checkInDisclosureHelp.isHidden ? nil : checkInDisclosureHelp.toolTip
     }
 }

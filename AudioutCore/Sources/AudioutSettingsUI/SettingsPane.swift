@@ -12,7 +12,7 @@ enum SettingsPane {
     /// and an optional caption (the text stack's second view). Returns the
     /// glyph so a pane can re-tint it.
     static func makeHeader(symbolName: String, title: String,
-                           caption: String? = nil) -> (header: PageHeaderView, glyph: NSImageView) {
+                           caption: String? = nil, helpButton: HelpButton? = nil) -> (header: PageHeaderView, glyph: NSImageView) {
         let slot = NSView()
         let glyph = NSImageView()
         glyph.translatesAutoresizingMaskIntoConstraints = false
@@ -42,7 +42,7 @@ enum SettingsPane {
             label.textColor = Tokens.Color.labelCool
             return label
         }
-        let header = PageHeaderView(icon: slot, title: titleLabel, caption: captionLabel, leadingInset: .railFree)
+        let header = PageHeaderView(icon: slot, title: helpButton.map { makeTitle(titleLabel, helpButton: $0) } ?? titleLabel, caption: captionLabel, leadingInset: .railFree)
         return (header, glyph)
     }
 
@@ -113,6 +113,25 @@ enum SettingsPane {
         field.font = Tokens.Font.body
         field.textColor = Tokens.Color.label2
         return field
+    }
+
+    static func makeTitle(_ title: NSTextField, helpButton: HelpButton) -> NSStackView {
+        let remainingSpace = NSView()
+        remainingSpace.translatesAutoresizingMaskIntoConstraints = false
+        remainingSpace.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        let row = NSStackView(views: [title, helpButton, remainingSpace])
+        row.translatesAutoresizingMaskIntoConstraints = false
+        row.orientation = .horizontal
+        row.distribution = .fill
+        row.alignment = .centerY
+        row.spacing = 4
+        title.setContentHuggingPriority(.required, for: .horizontal)
+        return row
+    }
+
+    static func dismissHelp(in view: NSView) {
+        if let help = view as? HelpButton { help.dismissHelp() }
+        for child in view.subviews { dismissHelp(in: child) }
     }
 
     /// A wrapping note on the lane. The wrap width is set here: an unset one

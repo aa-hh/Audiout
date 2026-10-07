@@ -126,9 +126,9 @@ public final class RemoteSettingsViewController: NSViewController, SettingsReado
         remoteControlSwitch.setAccessibilityLabel("Allow control from iPhone on this network")
         let remoteControlRow = ListRowView(
             title: "Allow control from iPhone on this network",
-            caption: "Lets Audiout Remote on your iPhone control this Mac's speakers "
-                + "and measure their timing from the room.",
-            accessory: remoteControlSwitch)
+            accessory: remoteControlSwitch,
+            helpText: "Lets Audiout Remote on your iPhone control this Mac's speakers "
+                + "and measure their timing from the room.")
         self.remoteControlRow = remoteControlRow
 
         // Same idiom as the Audio pane's `AIRPLAY_START_BUFFER_MS` override
@@ -173,20 +173,12 @@ public final class RemoteSettingsViewController: NSViewController, SettingsReado
 
     /// "Get Audiout Remote for iPhone": the pane's own invitation, one row
     /// under the switch that enables it. The QR tile is the trailing
-    /// control and the address is a stock push button under the subtitle —
+    /// control and the address is a stock push button under the title —
     /// every link in Settings is a button, and the button routes through the
     /// injected ``openURL`` so a test never launches a browser.
     private func buildRemoteInviteRow() {
         let title = SettingsForm.label("Get Audiout Remote for iPhone")
         title.font = Tokens.Font.body
-
-        let subtitle = SettingsForm.label(
-            "Scan with your iPhone's camera, or open \(RemoteInviteView.pageAddress).")
-        subtitle.font = Tokens.Font.caption
-        subtitle.textColor = Tokens.Color.label2
-        subtitle.lineBreakMode = .byWordWrapping
-        subtitle.maximumNumberOfLines = 0
-        subtitle.preferredMaxLayoutWidth = SettingsPane.cardLaneWidth - RemoteInviteView.settingsTileSide - 16
 
         remoteInviteButton.title = "Open \(RemoteInviteView.pageAddress)"
         remoteInviteButton.bezelStyle = .rounded
@@ -201,7 +193,7 @@ public final class RemoteSettingsViewController: NSViewController, SettingsReado
         buttonRow.orientation = .horizontal
         buttonRow.alignment = .centerY
 
-        let text = NSStackView(views: [title, subtitle, buttonRow])
+        let text = NSStackView(views: [title, buttonRow])
         text.orientation = .vertical
         text.alignment = .leading
         text.spacing = 6
@@ -359,7 +351,7 @@ public final class RemoteSettingsViewController: NSViewController, SettingsReado
     }
 
     /// Whether the QR tile is on screen. It drops once a phone is remembered,
-    /// leaving the row its title, subtitle and button.
+    /// leaving the row its title and button.
     public var test_remoteInviteQRIsVisible: Bool {
         _ = view
         return remoteInviteTile.map { !$0.isHidden } ?? false

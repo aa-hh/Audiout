@@ -103,7 +103,7 @@ public final class AudioSettingsViewController: NSViewController, SettingsReadou
     /// Injectable so tests use a throwaway `UserDefaults` suite, never `.standard`.
     private let settings: AppSettings
 
-    // Connect-volume state. Each row's caption is its live hint.
+    // Connect-volume state. Each row's help describes its current value.
     private let connectVolumeSlider = NSSlider()
     private let connectVolumeValueLabel = NSTextField(labelWithString: "")
     private var connectVolumeRow: ListRowView?
@@ -135,6 +135,8 @@ public final class AudioSettingsViewController: NSViewController, SettingsReadou
     // Advanced › Audio buffer state (all nil/untouched when `latency` is nil).
     private let bufferPopup = NSPopUpButton()
     private var bufferRow: ListRowView?
+    private var advancedCard: (container: NSView, box: GroupedSectionView, stack: NSStackView)?
+    private var applyStatusRow: NSView?
     // Advanced is a disclosure, collapsed by default (roadmap 050): the buffer
     // is an expert control and doesn't deserve a standing row.
     private let advancedDisclosure = NSButton()
@@ -192,9 +194,9 @@ public final class AudioSettingsViewController: NSViewController, SettingsReadou
     public override func loadView() {
         let (header, _) = SettingsPane.makeHeader(symbolName: "speaker.wave.2", title: "Audio")
         let appsTitle = SettingsPane.makeSectionTitle("Apps that stay on this Mac")
-        let appsNote = SettingsPane.makeNote(
-            "Audio from these apps always plays on your Mac, never sent to speakers.")
         let apps = SettingsPane.makeCard(rows: [])
+        // The default stack leaves spare height below the borderless Add button.
+        apps.stack.setHuggingPriority(.defaultHigh, for: .vertical)
         appsCard = apps
 
         var settingRows: [NSView] = [makeConnectVolumeRow()]
@@ -202,7 +204,7 @@ public final class AudioSettingsViewController: NSViewController, SettingsReadou
         settingRows.append(makeBTKeepAliveRow())
         let settingsCard = SettingsPane.makeCard(rows: settingRows)
 
-        var content: [NSView] = [header, appsTitle, appsNote, apps.container, settingsCard.container]
+        var content: [NSView] = [header, appsTitle, apps.container, settingsCard.container]
         var advancedHeader: NSView?
         if latency != nil {
             let header = makeAdvancedHeader()
@@ -212,8 +214,7 @@ public final class AudioSettingsViewController: NSViewController, SettingsReadou
 
         let page = SettingsForm.pageView(content: content)
         let column = page.subviews.first as? NSStackView
-        column?.setCustomSpacing(3, after: appsTitle)
-        column?.setCustomSpacing(9, after: appsNote)
+        column?.setCustomSpacing(9, after: appsTitle)
         column?.setCustomSpacing(16, after: apps.container)
         if let advancedHeader {
             column?.setCustomSpacing(16, after: settingsCard.container)
@@ -231,8 +232,8 @@ public final class AudioSettingsViewController: NSViewController, SettingsReadou
         "\(msFormatter.string(from: NSNumber(value: percent)) ?? String(percent))%"
     }
 
-    /// The connect-volume row: title and slider on one line, the live hint
-    /// the full lane width beneath. Mounts unconditionally (a universal
+    /// The connect-volume row wraps its title beside the slider and readout.
+    /// Its help describes the current level. Mounts unconditionally (a universal
     /// preference; only the native backend acts on it, which is the shipping
     /// backend). The slider is bounded to
     /// ``AppSettings/minConnectVolume``…``AppSettings/maxConnectVolume`` so the UI
@@ -260,11 +261,10 @@ public final class AudioSettingsViewController: NSViewController, SettingsReadou
         control.spacing = 8
         control.translatesAutoresizingMaskIntoConstraints = false
 
-        // Live hint (spec §5.2): re-written on every drag, so the consequence
-        // of the chosen level is always spelled out.
+        // Help follows every drag so it describes the chosen level.
         let row = ListRowView(title: "Volume when connecting a speaker",
-                              caption: Self.connectVolumeHintLine(settings.connectVolume),
-                              accessory: control, captionSpansRow: true)
+                              accessory: control,
+                              helpText: Self.connectVolumeHintLine(settings.connectVolume), wrapsTitle: true)
         connectVolumeRow = row
         return row
     }
@@ -307,13 +307,13 @@ public final class AudioSettingsViewController: NSViewController, SettingsReadou
         let percent = settings.connectVolume
         connectVolumeSlider.integerValue = percent
         connectVolumeValueLabel.stringValue = Self.percentLabel(percent)
-        connectVolumeRow?.caption = Self.connectVolumeHintLine(percent)
+        connectVolumeRow?.helpText = Self.connectVolumeHintLine(percent)
 
         let keepAliveMinutes = settings.btKeepAliveMinutes
         if let index = AppSettings.btKeepAliveMinuteOptions.firstIndex(of: keepAliveMinutes) {
             btKeepAlivePopup.selectItem(at: index)
         }
-        btKeepAliveRow?.caption = Self.btKeepAliveHintLine(keepAliveMinutes)
+        btKeepAliveRow?.helpText = Self.btKeepAliveHintLine(keepAliveMinutes)
 
         // The buffer popup is disabled outright under an env override, and
         // then its one item is that override — nothing to reconcile.
@@ -323,13 +323,13 @@ public final class AudioSettingsViewController: NSViewController, SettingsReadou
         if let index = latency.optionsMs.firstIndex(of: ms) {
             bufferPopup.selectItem(at: index)
         }
-        bufferRow?.caption = Self.bufferHintLine(ms)
+        bufferRow?.helpText = Self.bufferHintLine(ms)
     }
 
     @objc private func connectVolumeChanged() {
         let percent = connectVolumeSlider.integerValue
         connectVolumeValueLabel.stringValue = Self.percentLabel(percent)
-        connectVolumeRow?.caption = Self.connectVolumeHintLine(percent)
+        connectVolumeRow?.helpText = Self.connectVolumeHintLine(percent)
         settings.connectVolume = percent
         onSettingChanged?()
     }
@@ -363,8 +363,8 @@ public final class AudioSettingsViewController: NSViewController, SettingsReadou
         wakeRestorePopup.setAccessibilityLabel("Restore Mac audio if speakers don't reconnect")
 
         let row = ListRowView(title: "Restore Mac audio if speakers don't reconnect",
-                              caption: Self.wakeRestoreHintLine(wakeRestore.initialMinutes),
-                              accessory: wakeRestorePopup)
+                              accessory: wakeRestorePopup,
+                              helpText: Self.wakeRestoreHintLine(wakeRestore.initialMinutes))
         wakeRestoreRow = row
         return row
     }
@@ -384,7 +384,7 @@ public final class AudioSettingsViewController: NSViewController, SettingsReadou
         let index = wakeRestorePopup.indexOfSelectedItem
         guard wakeRestore.minuteOptions.indices.contains(index) else { return }
         let minutes = wakeRestore.minuteOptions[index]
-        wakeRestoreRow?.caption = Self.wakeRestoreHintLine(minutes)
+        wakeRestoreRow?.helpText = Self.wakeRestoreHintLine(minutes)
         wakeRestore.apply(minutes)
     }
 
@@ -405,8 +405,8 @@ public final class AudioSettingsViewController: NSViewController, SettingsReadou
         btKeepAlivePopup.setAccessibilityLabel("Keep Bluetooth speakers streaming during pauses")
 
         let row = ListRowView(title: "Keep Bluetooth speakers streaming during pauses",
-                              caption: Self.btKeepAliveHintLine(settings.btKeepAliveMinutes),
-                              accessory: btKeepAlivePopup)
+                              accessory: btKeepAlivePopup,
+                              helpText: Self.btKeepAliveHintLine(settings.btKeepAliveMinutes))
         btKeepAliveRow = row
         return row
     }
@@ -425,7 +425,7 @@ public final class AudioSettingsViewController: NSViewController, SettingsReadou
         guard AppSettings.btKeepAliveMinuteOptions.indices.contains(index) else { return }
         let minutes = AppSettings.btKeepAliveMinuteOptions[index]
         settings.btKeepAliveMinutes = minutes
-        btKeepAliveRow?.caption = Self.btKeepAliveHintLine(minutes)
+        btKeepAliveRow?.helpText = Self.btKeepAliveHintLine(minutes)
     }
 
     // MARK: Advanced › Audio buffer (PLAN-LATENCY-SETTING.md)
@@ -484,6 +484,7 @@ public final class AudioSettingsViewController: NSViewController, SettingsReadou
         advancedContent.spacing = 0
         advancedContent.translatesAutoresizingMaskIntoConstraints = false
         let card = SettingsPane.makeCard(rows: makeAdvancedContentViews())
+        advancedCard = card
         advancedContent.addArrangedSubview(card.container)
         card.container.widthAnchor.constraint(equalTo: advancedContent.widthAnchor).isActive = true
 
@@ -515,6 +516,7 @@ public final class AudioSettingsViewController: NSViewController, SettingsReadou
     /// pane republishes its `preferredContentSize` from every tick
     /// (`foldAnimatorDidTick`) and once more at the end state.
     private func setAdvancedExpanded(_ expanded: Bool, animated: Bool) {
+        if !expanded { SettingsPane.dismissHelp(in: advancedContent) }
         advancedClip.setExpanded(expanded, animated: animated, follower: self) { [weak self] in
             self?.republishFittedHeight()
         }
@@ -563,14 +565,11 @@ public final class AudioSettingsViewController: NSViewController, SettingsReadou
         }
         bufferPopup.setAccessibilityLabel("Audio buffer")
 
-        // Live hint (spec §5.2 — the "`Buffer: 120 ms — safe for Wi-Fi
-        // speakers`" pattern itself) as the row's caption: re-written on every
-        // popup change, states the currently-applied value's consequence AND
-        // that changing it reconnects active speakers (V1: the popup applies
-        // immediately, there's no CTA to carry that warning instead).
+        // Help follows popup changes and states the reconnection cost before
+        // the selected value applies.
         let row = ListRowView(title: "Audio buffer",
-                              caption: Self.bufferHintLine(latency.envOverrideMs ?? latency.initialMs),
-                              accessory: bufferPopup)
+                              accessory: bufferPopup,
+                              helpText: Self.bufferHintLine(latency.envOverrideMs ?? latency.initialMs))
         bufferRow = row
         views.append(row)
 
@@ -592,9 +591,8 @@ public final class AudioSettingsViewController: NSViewController, SettingsReadou
             return views
         }
 
-        // Apply-in-progress feedback: spinner + status label, fixed height so
-        // the transition never resizes the window. No button — picking a
-        // popup option applies it directly (`bufferOptionChanged`).
+        // Mount feedback only while reconnecting or showing a result.
+        // Picking a popup option applies it directly.
         applySpinner.translatesAutoresizingMaskIntoConstraints = false
         applySpinner.style = .spinning
         applySpinner.controlSize = .small
@@ -616,7 +614,7 @@ public final class AudioSettingsViewController: NSViewController, SettingsReadou
             applyStatusLabel.leadingAnchor.constraint(equalTo: applySpinner.trailingAnchor, constant: 6),
             applyStatusLabel.centerYAnchor.constraint(equalTo: statusRow.centerYAnchor),
         ])
-        views.append(SettingsPane.makeLaneRow(statusRow))
+        applyStatusRow = SettingsPane.makeLaneRow(statusRow)
 
         return views
     }
@@ -650,7 +648,7 @@ public final class AudioSettingsViewController: NSViewController, SettingsReadou
         let index = bufferPopup.indexOfSelectedItem
         guard latency.optionsMs.indices.contains(index) else { return nil }
         let ms = latency.optionsMs[index]
-        bufferRow?.caption = Self.bufferHintLine(ms)
+        bufferRow?.helpText = Self.bufferHintLine(ms)
         clearTransientStatus()
         return ms == appliedMs ? nil : ms
     }
@@ -667,6 +665,7 @@ public final class AudioSettingsViewController: NSViewController, SettingsReadou
             applySpinner.startAnimation(nil)
             applyStatusLabel.stringValue = "Reconnecting speakers…"
             applyStatusLabel.isHidden = false
+            updateApplyStatusRow()
         }
 
         let result = await latency.apply(target)
@@ -686,11 +685,14 @@ public final class AudioSettingsViewController: NSViewController, SettingsReadou
                 : "Some speakers didn't reconnect. Reconnect them from the Mixer.")
             : "Applied"
         applyStatusLabel.isHidden = false
+        updateApplyStatusRow()
 
         // Transient confirmation: fades after a beat (cancelled by any newer
         // apply so a stale "reconnected" can't outlive a fresh one).
         let reset = DispatchWorkItem { [weak self] in
-            self?.applyStatusLabel.isHidden = true
+            guard let self else { return }
+            self.applyStatusLabel.isHidden = true
+            self.updateApplyStatusRow()
         }
         statusResetWorkItem = reset
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.5, execute: reset)
@@ -701,7 +703,21 @@ public final class AudioSettingsViewController: NSViewController, SettingsReadou
         statusResetWorkItem = nil
         if !isApplying {
             applyStatusLabel.isHidden = true
+            updateApplyStatusRow()
         }
+    }
+
+    private func updateApplyStatusRow() {
+        guard let row = applyStatusRow, let card = advancedCard else { return }
+        if !applyStatusLabel.isHidden, row.superview == nil {
+            card.stack.addArrangedSubview(row)
+            row.widthAnchor.constraint(equalTo: card.stack.widthAnchor).isActive = true
+        } else if applyStatusLabel.isHidden, row.superview != nil {
+            card.stack.removeArrangedSubview(row)
+            row.removeFromSuperview()
+        }
+        card.box.rows = card.stack.arrangedSubviews.filter { !$0.isHidden }
+        republishFittedHeight()
     }
 
     // MARK: List
@@ -918,7 +934,7 @@ public final class AudioSettingsViewController: NSViewController, SettingsReadou
     /// The connect-volume live hint line (W1, spec §5.2).
     public var test_connectVolumeHint: String {
         _ = view
-        return connectVolumeRow?.caption ?? ""
+        return connectVolumeRow?.helpText ?? ""
     }
 
     // MARK: Test-support hooks (Wake restore — B6b)
@@ -952,7 +968,7 @@ public final class AudioSettingsViewController: NSViewController, SettingsReadou
     /// The wake-restore live hint line (W1, spec §5.2).
     public var test_wakeRestoreHint: String {
         _ = view
-        return wakeRestoreRow?.caption ?? ""
+        return wakeRestoreRow?.helpText ?? ""
     }
 
     // MARK: Test-support hooks (Advanced › Audio buffer)
@@ -984,7 +1000,7 @@ public final class AudioSettingsViewController: NSViewController, SettingsReadou
     /// The audio-buffer live hint line (W1, spec §5.2).
     public var test_bufferHint: String {
         _ = view
-        return bufferRow?.caption ?? ""
+        return bufferRow?.helpText ?? ""
     }
 
     /// The option the popup is currently showing — what a reader would see,

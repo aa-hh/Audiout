@@ -22,8 +22,11 @@ public final class ListRowView: NSView {
     public let titleLabel = NSTextField(labelWithString: "")
     let captionLabel = NSTextField(wrappingLabelWithString: "")
     private let textStack = NSStackView()
+    private var titleStack: NSStackView?
+    private var helpButton: HelpButton?
     public private(set) var accessory: NSView?
     private let captionSpansRow: Bool
+    private let wrapsTitle: Bool
 
     /// A row that sits inside a button passes every click to it, so the whole
     /// row is one target; its labels then leave the speaking to the button.
@@ -42,6 +45,30 @@ public final class ListRowView: NSView {
         }
     }
 
+    public var helpText: String? {
+        get { helpButton?.text }
+        set {
+            if let newValue {
+                if let helpButton { helpButton.text = newValue }
+                else { installHelp(text: newValue) }
+            } else {
+                dismissHelp()
+                helpButton = nil
+                if let titleStack {
+                    textStack.removeArrangedSubview(titleStack)
+                    titleStack.removeFromSuperview()
+                    titleLabel.removeFromSuperview()
+                    self.titleStack = nil
+                    textStack.insertArrangedSubview(titleLabel, at: 0)
+                    titleLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
+                    titleLabel.toolTip = nil
+                }
+            }
+        }
+    }
+
+    public func dismissHelp() { helpButton?.dismissHelp() }
+
     /// A decorative 16 pt template glyph for the leading slot.
     public static func glyph(_ symbolName: String, tint: NSColor = Tokens.Color.label2) -> NSImageView {
         let view = NSImageView()
@@ -56,14 +83,20 @@ public final class ListRowView: NSView {
     /// the caption the full lane width beneath them, for a row whose
     /// accessory is too wide to leave the caption a readable column.
     public init(glyph: NSView? = nil, title: String, caption: String? = nil, accessory: NSView? = nil,
-                captionSpansRow: Bool = false) {
+                captionSpansRow: Bool = false, helpText: String? = nil, wrapsTitle: Bool = false) {
         self.captionSpansRow = captionSpansRow
+        self.wrapsTitle = wrapsTitle
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false
 
         titleLabel.font = Tokens.Font.body
         titleLabel.textColor = Tokens.Color.label
-        titleLabel.lineBreakMode = .byTruncatingTail
+        titleLabel.lineBreakMode = wrapsTitle ? .byWordWrapping : .byTruncatingTail
+        if wrapsTitle {
+            titleLabel.maximumNumberOfLines = 2
+            titleLabel.cell?.wraps = true
+            titleLabel.cell?.isScrollable = false
+        }
         titleLabel.stringValue = title
         titleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
@@ -82,6 +115,7 @@ public final class ListRowView: NSView {
         if !captionSpansRow { textStack.addArrangedSubview(captionLabel) }
         textStack.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         addSubview(textStack)
+        self.helpText = helpText
 
         var constraints: [NSLayoutConstraint]
         if captionSpansRow {
@@ -163,12 +197,45 @@ public final class ListRowView: NSView {
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
+    private func installHelp(text: String) {
+        let button = HelpButton(subject: titleLabel.stringValue, text: text)
+        textStack.removeArrangedSubview(titleLabel)
+        titleLabel.removeFromSuperview()
+        let spacer = NSView()
+        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        spacer.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        let titleStack = NSStackView(views: [titleLabel, button, spacer])
+        titleStack.orientation = .horizontal
+        titleStack.distribution = .fill
+        titleStack.alignment = .centerY
+        titleStack.spacing = 4
+        titleStack.translatesAutoresizingMaskIntoConstraints = false
+        titleStack.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        titleLabel.setContentHuggingPriority(.defaultHigh, for: .horizontal)
+        titleLabel.toolTip = titleLabel.stringValue
+        textStack.insertArrangedSubview(titleStack, at: 0)
+        titleStack.widthAnchor.constraint(equalTo: textStack.widthAnchor).isActive = true
+        self.titleStack = titleStack
+        helpButton = button
+    }
+
+    public override func viewDidHide() {
+        super.viewDidHide()
+        dismissHelp()
+    }
+
     public override func hitTest(_ point: NSPoint) -> NSView? {
         isClickThrough ? nil : super.hitTest(point)
     }
 
     public override func layout() {
         super.layout()
+        if wrapsTitle {
+            let width = titleLabel.frame.width
+            if width > 0, titleLabel.preferredMaxLayoutWidth != width {
+                titleLabel.preferredMaxLayoutWidth = width
+            }
+        }
         // A wrapping caption needs a width to compute its height against.
         let width = captionSpansRow ? captionLabel.frame.width : textStack.frame.width
         if width > 0, captionLabel.preferredMaxLayoutWidth != width {

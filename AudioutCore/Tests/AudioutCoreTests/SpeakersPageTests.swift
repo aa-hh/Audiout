@@ -163,14 +163,14 @@ extension SerializedSharedState {
         }
     }
 
-    // Reporting a found speaker to Forget, a row out of order, or a Pair, Bluetooth or Local Network row that fires nothing turns it red.
+    // Reporting a found speaker to Forget, titling a partial loss without its share of Unavailable, a row out of order, or a Pair, Bluetooth or Local Network row that fires nothing turns it red.
     @Test func forgetReportsExactlyTheLostIDsAndTheRowsFire() {
         let library = SpeakerLibraryController(loadPersisted: false)
         let mac = device("mac", kind: .localMac)
         library.update(liveDevices: [mac, device("kitchen"), device("attic", kind: .bluetooth),
                                      device("garage", kind: .bluetooth)], groups: [],
                        confirmedUsedIDs: ["attic", "garage"])
-        library.update(liveDevices: [mac, device("kitchen")], groups: [])
+        library.update(liveDevices: [mac, device("kitchen"), device("porch", available: false)], groups: [])
         let clock = Clock()
         let search = SpeakerSearch(library: library, schedule: clock.schedule)
         search.isLocalNetworkDenied = { true }
@@ -189,11 +189,11 @@ extension SerializedSharedState {
         page.onBluetoothAccess = { accessAsked += 1 }
         page.onLocalNetworkAccess = { networkAsked += 1 }
 
-        let lostRow = "2 speakers can\u{2019}t be found"
+        let lostRow = "2 of the 3 can\u{2019}t be found"
         #expect(page.test_rowTitles == [lostRow, "Local Network access is off", "Bluetooth access is off",
                                         "Pair Bluetooth speaker\u{2026}"])
         #expect(page.test_rowHelp(forRowTitled: lostRow)
-                == "They haven\u{2019}t appeared since Audiout opened. They aren\u{2019}t in any scene.")
+                == "2 of the 3 unavailable speakers haven\u{2019}t appeared since Audiout opened. They aren\u{2019}t in any scene.")
         page.test_clickRowButton(forRowTitled: lostRow)
         #expect(forgotten == [["attic", "garage"]])
         page.test_clickPairRow()

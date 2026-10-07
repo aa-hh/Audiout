@@ -253,7 +253,7 @@ import AppKit
         #expect(page.test_rowTitles == before, "a hidden page only stores what it is told")
 
         window.setVisibleTab(.speakers)
-        #expect(page.test_rowTitles == ["1 speaker can\u{2019}t be found", "Bluetooth access is off",
+        #expect(page.test_rowTitles == ["1 of the 2 can\u{2019}t be found", "Bluetooth access is off",
                                         "Pair Bluetooth speaker\u{2026}"])
         #expect(window.test_sidebar.test_contextMenuItems(for: .device(id: "den"))
                     .contains("Forget \u{201C}Missing speaker\u{201D}\u{2026}"))

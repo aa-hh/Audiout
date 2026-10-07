@@ -1078,12 +1078,13 @@ public protocol BTOutputControlling: AnyObject {
     /// Returns a refusal reason for the preconditions only this layer can
     /// answer (the target has no live Bluetooth sink; a run, fine-tune session
     /// or Mac wizard is already up), or `nil` once staged. `onStarted` fires
-    /// when the probe enters the feed, `onFinished` when its last frame
+    /// when the probe enters the feed with the room delay in seconds (how far
+    /// the air lags the feed), `onFinished` when its last frame
     /// does; a run torn down early fires neither, and the phone recovers by
     /// timeout. Nothing about the device's tuning changes until a measurement
     /// is reported back.
     func startCompanionAlignmentProbe(targetID: String, referenceID: String,
-                                      onStarted: @escaping () -> Void,
+                                      onStarted: @escaping (_ roomDelaySeconds: TimeInterval) -> Void,
                                       onFinished: @escaping () -> Void) -> String?
 
     /// Stand a run, fine-tune session or A/B demo for `targetID` down now —
@@ -1161,7 +1162,7 @@ extension BTOutputControlling {
     }
     public func btAlignmentReport(forDevice id: String) -> BTSpeakerTimingReport? { nil }
     public func startCompanionAlignmentProbe(targetID: String, referenceID: String,
-                                             onStarted: @escaping () -> Void,
+                                             onStarted: @escaping (_ roomDelaySeconds: TimeInterval) -> Void,
                                              onFinished: @escaping () -> Void) -> String? {
         "This Mac can't measure speaker timing right now. Reconnect the speaker and try again."
     }
@@ -1755,7 +1756,7 @@ extension NativeBackend: BTOutputControlling {
     }
 
     public func startCompanionAlignmentProbe(targetID: String, referenceID: String,
-                                             onStarted: @escaping () -> Void,
+                                             onStarted: @escaping (_ roomDelaySeconds: TimeInterval) -> Void,
                                              onFinished: @escaping () -> Void) -> String? {
         guard let coordinator = captureCoordinator else {
             return "This Mac can't measure speaker timing right now. Reconnect the speaker and try again."
@@ -1817,12 +1818,15 @@ extension NativeBackend: BTOutputControlling {
         // reference, the arm gate that waits for every sink to release, and
         // the re-anchor both edges do.
         setBTWizardTickActive(true, btTargetDeviceID: targetID, btReferenceDeviceID: referenceID)
+        // Read after the hold above (queued ahead of this on `stateQueue`), the
+        // way `stageBTMicProbe` reads it, so only the run's own speakers count.
+        let roomDelaySeconds = stateQueue.sync { Double(self.roomDelayLocked()) / 1000 }
         coordinator.stageCompanionMicProbe(
             routed: routed,
             referenceOnEngine: !referenceIsBluetooth,
             targetWindowUID: targetID,
             referenceWindowUID: referenceIsBluetooth ? referenceID : nil,
-            onStarted: onStarted,
+            onStarted: { onStarted(roomDelaySeconds) },
             onFinished: { [weak self] in
                 onFinished()
                 // The air lags the feed by the sinks' pipeline delay, so the

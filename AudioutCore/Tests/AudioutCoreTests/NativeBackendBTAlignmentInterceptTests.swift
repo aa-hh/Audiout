@@ -429,7 +429,7 @@ extension SerializedSharedState {
         await SuiteWait.until { start.value != nil }
         #expect(start.value == .some(nil))
         #expect(backend.startCompanionAlignmentProbe(targetID: btMove.id,
-            referenceID: btFlip.id, onStarted: {}, onFinished: {}) != nil)
+            referenceID: btFlip.id, onStarted: { _ in }, onFinished: {}) != nil)
 
         let stop = LockedBox<String??>(nil)
         backend.endCompanionAlignmentAudition(targetID: btMove.id) { stop.value = .some($0) }
@@ -573,14 +573,14 @@ extension SerializedSharedState {
         await SuiteWait.until { local.suppressions.contains(true) }
         #expect(first.value == nil && second.value == nil)
         #expect(backend.startCompanionAlignmentProbe(targetID: btMove.id,
-            referenceID: btFlip.id, onStarted: {}, onFinished: {}) != nil)
+            referenceID: btFlip.id, onStarted: { _ in }, onFinished: {}) != nil)
         let stop = LockedBox<String??>(nil)
         backend.endCompanionAlignmentAudition(targetID: btMove.id) { stop.value = .some($0) }
         await SuiteWait.until { first.value != nil && second.value != nil && local.suppressions.contains(false) }
         #expect(first.value.flatMap { $0 } != nil && second.value.flatMap { $0 } != nil)
         #expect(capture.modes.isEmpty, "the pacer never starts while preparation is pending")
         #expect(backend.startCompanionAlignmentProbe(targetID: btMove.id,
-            referenceID: btFlip.id, onStarted: {}, onFinished: {}) != nil,
+            referenceID: btFlip.id, onStarted: { _ in }, onFinished: {}) != nil,
             "cleaning retains the .tick reservation")
         local.release()
         await SuiteWait.until { stop.value != nil }
@@ -665,12 +665,12 @@ extension SerializedSharedState {
         #expect(second.value.flatMap { $0 } != nil)
         #expect(capture.modes.isEmpty, "a failed preparation never starts the pacer")
         #expect(backend.startCompanionAlignmentProbe(targetID: btMove.id,
-            referenceID: btFlip.id, onStarted: {}, onFinished: {}) != nil,
+            referenceID: btFlip.id, onStarted: { _ in }, onFinished: {}) != nil,
             "the reservation is held until cleanup finishes")
         engine.releaseWrites()
         local.release()   // the cleanup's own suppression callback
         await SuiteWait.until { backend.startCompanionAlignmentProbe(targetID: self.btMove.id,
-            referenceID: self.btFlip.id, onStarted: {}, onFinished: {}) == nil }
+            referenceID: self.btFlip.id, onStarted: { _ in }, onFinished: {}) == nil }
         #expect(first.value.flatMap { $0 } != nil && second.value.flatMap { $0 } != nil,
                 "each joined start is answered exactly once")
         backend.cancelCompanionAlignmentProbe(targetID: btMove.id)
@@ -720,7 +720,7 @@ extension SerializedSharedState {
         #expect(capture.modes.isEmpty, "a late acknowledgement cannot start clicks behind a refusal")
         engine.releaseWrites()
         await SuiteWait.until { backend.startCompanionAlignmentProbe(targetID: self.btMove.id,
-            referenceID: self.btFlip.id, onStarted: {}, onFinished: {}) == nil }
+            referenceID: self.btFlip.id, onStarted: { _ in }, onFinished: {}) == nil }
         backend.cancelCompanionAlignmentProbe(targetID: btMove.id)
     }
 
@@ -792,7 +792,7 @@ extension SerializedSharedState {
         #expect(start.value.flatMap { $0 }?.contains("Couldn't quiet") == true)
         await SuiteWait.until { engine.writes.last { $0.0 == ap1.outputID }?.1 != -1.0 }
         await SuiteWait.until { backend.startCompanionAlignmentProbe(targetID: self.btMove.id,
-            referenceID: self.btFlip.id, onStarted: {}, onFinished: {}) == nil }
+            referenceID: self.btFlip.id, onStarted: { _ in }, onFinished: {}) == nil }
         backend.cancelCompanionAlignmentProbe(targetID: btMove.id)
     }
 
@@ -826,11 +826,11 @@ extension SerializedSharedState {
         await SuiteWait.until { stop.value != nil }
         #expect(stop.value.flatMap { $0 }?.contains("took too long") == true)
         #expect(backend.startCompanionAlignmentProbe(targetID: btMove.id,
-            referenceID: btFlip.id, onStarted: {}, onFinished: {}) != nil,
+            referenceID: btFlip.id, onStarted: { _ in }, onFinished: {}) != nil,
             "the timeout may answer once but must keep the busy reservation")
         engine.releaseWrites()
         await SuiteWait.until { backend.startCompanionAlignmentProbe(targetID: self.btMove.id,
-            referenceID: self.btFlip.id, onStarted: {}, onFinished: {}) == nil }
+            referenceID: self.btFlip.id, onStarted: { _ in }, onFinished: {}) == nil }
         await SuiteWait.until { engine.writes.last { $0.0 == ap1.outputID }?.1 == -1.0 }
         #expect(engine.writes.last { $0.0 == ap1.outputID }?.1 == -1.0,
                 "the phone's probe silences every speaker outside the pair")
@@ -867,10 +867,10 @@ extension SerializedSharedState {
         await SuiteWait.until { replies.value.count == 1 }
         #expect(replies.value[0]?.contains(localName) == true)
         #expect(backend.startCompanionAlignmentProbe(targetID: btMove.id,
-            referenceID: btFlip.id, onStarted: {}, onFinished: {}) != nil)
+            referenceID: btFlip.id, onStarted: { _ in }, onFinished: {}) != nil)
         local.release()
         await SuiteWait.until { backend.startCompanionAlignmentProbe(targetID: self.btMove.id,
-            referenceID: self.btFlip.id, onStarted: {}, onFinished: {}) == nil }
+            referenceID: self.btFlip.id, onStarted: { _ in }, onFinished: {}) == nil }
         #expect(replies.value.count == 1, "a timed-out stop answers only once after real drain")
         backend.cancelCompanionAlignmentProbe(targetID: btMove.id)
     }
@@ -1085,7 +1085,7 @@ extension SerializedSharedState {
         #expect(stop.value == .some(nil),
                 "the restoration completed; the user's own failed edit is not its failure")
         await SuiteWait.until { backend.startCompanionAlignmentProbe(targetID: self.btMove.id,
-            referenceID: self.btFlip.id, onStarted: {}, onFinished: {}) == nil }
+            referenceID: self.btFlip.id, onStarted: { _ in }, onFinished: {}) == nil }
         backend.cancelCompanionAlignmentProbe(targetID: btMove.id)
     }
 
@@ -1143,12 +1143,12 @@ extension SerializedSharedState {
         #expect(stop.value.flatMap { $0 }?.contains("took too long") == true)
         #expect(released.value == 0, "a refused stop does not consume the lifetime signal")
         #expect(backend.startCompanionAlignmentProbe(targetID: btMove.id,
-            referenceID: btFlip.id, onStarted: {}, onFinished: {}) != nil)
+            referenceID: btFlip.id, onStarted: { _ in }, onFinished: {}) != nil)
 
         engine.releaseWrites()
         await SuiteWait.until { released.value == 1 }
         await SuiteWait.until { backend.startCompanionAlignmentProbe(targetID: self.btMove.id,
-            referenceID: self.btFlip.id, onStarted: {}, onFinished: {}) == nil }
+            referenceID: self.btFlip.id, onStarted: { _ in }, onFinished: {}) == nil }
         SuiteWait.settle(0.3)
         #expect(released.value == 1, "the lifetime signal fires exactly once")
         #expect(refusedReleased.value == 1)
@@ -1636,7 +1636,7 @@ extension SerializedSharedState {
 
         func measure(offsetMs: Double) -> CompanionAlignmentApplyResult {
             #expect(backend.startCompanionAlignmentProbe(
-                targetID: uid, referenceID: "local", onStarted: {}, onFinished: {}) == nil)
+                targetID: uid, referenceID: "local", onStarted: { _ in }, onFinished: {}) == nil)
             return backend.applyCompanionAlignmentMeasurement(
                 targetID: uid, offsetMs: offsetMs, confidence: 40)
         }
@@ -1940,6 +1940,30 @@ extension SerializedSharedState {
         let roomMs = backend.localSinkReferenceDelayMs()
         #expect(roomMs > 0, "positive control: a zero room delay reads the same in any unit")
         #expect(reported.value == Double(roomMs) / 1000)
+    }
+
+    /// The phone places each speaker's turn from the delay the companion probe's
+    /// started callback carries. Turns red if
+    /// `NativeBackend.startCompanionAlignmentProbe` hands `onStarted` no delay,
+    /// the delay in milliseconds, or anything but the room delay.
+    @Test func theCompanionProbeReportsTheRoomDelayInSeconds() {
+        let (backend, bt, sink, _) = makeBackend()
+        defer { backend.stop() }
+        backend.captureCoordinator = ProbeStagingCapture()
+        backend.start()
+        bt.fire([btMove])
+        waitFor { self.device(backend, self.btMove.id) != nil }
+        backend.setOutputSet([btMove.id])
+        waitFor { !sink.buffers.isEmpty }
+        let reported = LockedBox<TimeInterval?>(nil)
+        #expect(backend.startCompanionAlignmentProbe(
+            targetID: btMove.id, referenceID: "local",
+            onStarted: { reported.value = $0 }, onFinished: {}) == nil)
+        waitFor { reported.value != nil }
+        let roomMs = backend.localSinkReferenceDelayMs()
+        #expect(roomMs > 0, "positive control: a zero room delay reads the same in any unit")
+        #expect(reported.value == Double(roomMs) / 1000)
+        backend.cancelCompanionAlignmentProbe(targetID: btMove.id)
     }
 
     /// Keep writes the measurement BEFORE the reference comes down, so the new

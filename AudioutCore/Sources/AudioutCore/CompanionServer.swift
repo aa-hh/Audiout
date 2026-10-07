@@ -477,16 +477,20 @@ public final class CompanionServer: @unchecked Sendable {
     /// entered the feed — its cue to start recording. Addressed to exactly one
     /// client, like the icon pages and for the same reason: nobody else asked
     /// for this run and nobody else's microphone is in the room. A clientID
-    /// that is no longer promoted is a silent no-op.
-    public func sendAlignmentProbeStarted(deviceID: String, to clientID: UUID) {
+    /// that is no longer promoted is a silent no-op. `roomDelaySeconds` is how
+    /// far the air lags the feed; a non-finite value is sent as absent, since
+    /// `JSONEncoder` throws on NaN and infinity.
+    public func sendAlignmentProbeStarted(deviceID: String, roomDelaySeconds: TimeInterval? = nil,
+                                          to clientID: UUID) {
+        let delay = roomDelaySeconds.flatMap { $0.isFinite ? $0 : nil }
         queue.async { [weak self] in
             guard let self, let client = self.clients[clientID], client.isWelcomed else { return }
-            self.send(.alignmentProbeStarted(deviceID: deviceID), to: client)
+            self.send(.alignmentProbeStarted(deviceID: deviceID, roomDelaySeconds: delay), to: client)
         }
     }
 
     /// The matching "the last sweep frame is in the feed" moment — see
-    /// ``sendAlignmentProbeStarted(deviceID:to:)``. The air still lags it by
+    /// ``sendAlignmentProbeStarted(deviceID:roomDelaySeconds:to:)``. The air still lags it by
     /// the sinks' pipeline delay, which is the phone's to wait out.
     public func sendAlignmentProbeFinished(deviceID: String, to clientID: UUID) {
         queue.async { [weak self] in

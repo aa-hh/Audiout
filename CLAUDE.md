@@ -11,7 +11,7 @@ A native AppKit macOS app that sends system audio to multiple AirPlay 2 speakers
 | `AudioutCore/` | The whole app: Swift package with the core library, AppKit UI targets, and the shipping menu-bar executable |
 | `AirPlayEngine/` | Standalone Swift package: vendored AirPlay 2 C sender wrapped in a Swift actor. Separate package on purpose — licensing boundary, no app concepts inside |
 | _(external)_ `audiout-shared` | Two products: ProbeKit (the sync-probe DSP) and AudioutProtocol (the companion wire protocol), at https://github.com/aa-hh/audiout-shared. MIT, not GPL — the closed-source iPhone app links the same code, so it has one home outside both apps. Pinned by version in `AudioutCore/Package.swift` |
-| `dev/` | Offline dev tooling (fake speakers, dev scripts); `dev/notes/` holds research briefs |
+| `dev/` | Offline dev tooling (fake speakers, dev scripts); `dev/notes/` holds research briefs (local only, see below) |
 | `docs/SPEC.md` | Product spec — the source of truth for *what* to build |
 | `scripts/make-app.sh` | Wraps the executable into a signed `.app` bundle (required for TCC/process-tap) |
 | `scripts/make-staging.sh` | The staging environment: a standing `com.audiout.Audiout.staging` build pointed at the staging licence server |
@@ -22,6 +22,10 @@ A native AppKit macOS app that sends system audio to multiple AirPlay 2 speakers
 The iPhone companion now lives in its own private repository,
 `aa-hh/audiout-remote` — this repo no longer contains it. Build it from here
 with `scripts/ios.sh build --root <that checkout>`.
+
+## Internal docs stay off GitHub
+
+Handoffs (`HANDOFF*.md`, `HANDOVER*.md`), `.scratch/`, `dev/notes/`, `docs/plans/`, `docs/notes/`, `PROGRESS.md` and `docs-delta.md` are gitignored. They live on this Mac and never reach GitHub; the `tests` workflow fails any PR that leaves one tracked, `git add -f` included. Write them in the main checkout, not a worktree: an ignored file exists only in the checkout that wrote them and dies when its worktree is pruned. Only the main session writes there; a subagent cannot write outside its worktree, so it returns the text to the session that started it. Links to them from tracked files resolve locally only. `scripts/sync-main.sh` runs `scripts/restore-internal-docs.sh` after each update of the main checkout, which brings back the files the removal commit deleted there; run it by hand if they are missing.
 
 ## First steps in a fresh clone
 
@@ -168,7 +172,7 @@ The mule runs macOS 26.5 with only the Xcode 27 beta installed, so `remote_run` 
 ## Critical workflow rules
 
 - **`main` accepts nothing but the merge queue.** Never commit or merge into `main` locally (Guard 1 refuses a commit there) and never push to it; GitHub's ruleset refuses anything that does not come through the queue. Work in a worktree branch. Local `main` is a fast-forward mirror of `origin/main`, kept by `scripts/sync-main.sh` on a 2-minute launchd timer (`bash scripts/test-sync-main.sh` self-tests it); never commit on it (Guard 1 still refuses), and cut worktrees from `origin/main` after `git fetch`.
-- **Work in worktrees, not the `main` checkout.** Worktrees live in `.claude/worktrees/<slug>/`. Never edit files in the `main` checkout.
+- **Work in worktrees, not the `main` checkout.** Worktrees live in `.claude/worktrees/<slug>/`. Never edit files in the `main` checkout, except the gitignored internal docs (see "Internal docs stay off GitHub").
 - **Every worktree branch must have a GitHub counterpart.** When creating a worktree, immediately push the branch to origin:
   ```bash
   git fetch origin
@@ -223,7 +227,7 @@ When writing or modifying license-server code that integrates with Paddle:
 
 ### Issue tracker
 
-Local markdown under `.scratch/<feature-slug>/`: `spec.md` plus one file per ticket in `issues/`. See `docs/agents/issue-tracker.md`.
+Local markdown under the main checkout's `.scratch/<feature-slug>/` (gitignored): `spec.md` plus one file per ticket in `issues/`. See `docs/agents/issue-tracker.md`.
 
 ### Triage labels
 

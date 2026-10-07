@@ -99,17 +99,26 @@ final class LogStreamProcess: LogStreamSpawning, @unchecked Sendable {
         guard process == nil else { lock.unlock(); return }
 
         let proc = Process()
-        // Absolute path mandatory: `log` is a zsh builtin, a bare name via
-        // env lookup can resolve wrongly.
-        proc.executableURL = URL(fileURLWithPath: "/usr/bin/log")
+        // `log stream` only notices a dead parent when it next writes, and this
+        // filter almost never matches, so a crashed or force-quit app left it
+        // running for good under launchd. The shell forks a watcher blocked on
+        // stdin, a pipe only this app holds open, then execs `log` in place
+        // (same pid, so terminate() and terminationHandler are unchanged).
+        // Any app exit, kill -9 included, closes the pipe and the watcher
+        // kills `log`. Absolute path mandatory: `log` is a zsh builtin, a bare
+        // name via env lookup can resolve wrongly.
+        proc.executableURL = URL(fileURLWithPath: "/bin/sh")
         proc.arguments = [
-            "stream", "--style", "ndjson", "--predicate",
+            "-c", "exec 3<&0; p=$$; (read _ <&3; kill $p) >/dev/null 2>&1 & exec /usr/bin/log \"$@\" 3<&-",
+            "sh", "stream", "--style", "ndjson", "--predicate",
             "subsystem == \"com.apple.airplay\" AND category == \"APSNetworkClockPTP\""
         ]
         // No --level flag: the target line is Error level and the default
         // stream level includes it (verified).
 
         let pipe = Pipe()
+        let lifeline = Pipe()
+        proc.standardInput = lifeline
         proc.standardOutput = pipe
         proc.standardError = FileHandle.nullDevice
 
@@ -126,6 +135,8 @@ final class LogStreamProcess: LogStreamSpawning, @unchecked Sendable {
 
         proc.terminationHandler = { [weak self] p in
             pipe.fileHandleForReading.readabilityHandler = nil
+            // Releases the watcher if `log` died on its own.
+            try? lifeline.fileHandleForWriting.close()
             // Flush any trailing partial line.
             for line in buffer.flush() { onLine(line) }
             guard onceFlag.tryFire() else { return }
@@ -144,6 +155,7 @@ final class LogStreamProcess: LogStreamSpawning, @unchecked Sendable {
         } catch {
             lock.unlock()
             pipe.fileHandleForReading.readabilityHandler = nil
+            try? lifeline.fileHandleForWriting.close()
             throw error
         }
     }

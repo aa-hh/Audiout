@@ -4928,14 +4928,28 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         // `silent_s` is the field to read first. Device ids stay local.
         let dropped = self.engine.writeBacklogSnapshot().droppedWrites
         for level in self.engine.streamLevelSnapshot() {
+            // Only streams the app still assigns: stream 0, a per-app stream some
+            // device is bound to, or a speaker's own home stream, which outlives a
+            // session that dies under a still-wanted speaker. A stalled stream keeps
+            // its line with `writes` frozen; a removed speaker's stream stops here,
+            // and `eq_plan` already logged the removal.
+            // razor: the engine's level tracker keeps a few bytes per retired stream
+            // id until quit, because ids are never reused. Upgrade path: an engine
+            // call that forgets a stream id when the app retires it.
+            guard level.streamId == 0
+                || self.streamBindings.values.contains(level.streamId)
+                || self.wholeSystemStreamByDevice.values.contains(level.streamId)
+            else { continue }
             // Which speakers this stream actually serves: the per-app ids bound
             // to it PLUS the ids whose whole-system home it is. Before ticket 04
             // this read `streamBindings` alone, so under one-stream-per-speaker
             // every whole-system line named nobody and the log could not say
-            // which speaker a stream belonged to.
+            // which speaker a stream belonged to. Home-stream ids are listed
+            // whether or not the session is up, so a reconnecting speaker's
+            // stalled stream says whose it is.
             var deviceSet = Set(self.streamBindings.filter { $0.value == level.streamId }.keys)
             deviceSet.formUnion(self.wholeSystemStreamByDevice
-                .filter { $0.value == level.streamId && self.added.contains($0.key) }.keys)
+                .filter { $0.value == level.streamId }.keys)
             let devices = deviceSet.sorted()
             Telemetry.log(.airplay, "stream_health", [
                 "stream": "\(level.streamId)",

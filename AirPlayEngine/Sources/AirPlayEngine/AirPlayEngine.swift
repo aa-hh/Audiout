@@ -2715,8 +2715,9 @@ final class StreamLevelTracker: @unchecked Sendable {
     }
 
     /// Reports every stream written since the last call and resets each
-    /// window peak; the silence run and write count persist. A stream that
-    /// stopped being written drops out on the next call: a speaker's own
+    /// window peak; the silence run and write count persist while writes keep
+    /// coming. A stream that stopped being written drops out on the next call,
+    /// so both restart from zero if it is written again: a speaker's own
     /// stream is retired when it leaves, and an entry kept past that read as
     /// a stream still open with no speakers (live 2026-10-07).
     func snapshot(sampleRate: Int) -> [StreamLevelSnapshot] {

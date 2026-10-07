@@ -1481,7 +1481,7 @@ carries no state, so re-expanding restores the identical rail.
 
 ### QR Tile (invitations to Audiout Remote, Mac-only)
 `RemoteInviteView` (`AudioutSharedUI`) is one view hosted three times: the
-alignment wizard sheet's first page at 96 pt, Settings › General under the
+alignment wizard sheet's first page at 96 pt, Settings › Audiout Remote under the
 Allow switch at 72 pt, and the Setup window's iPhone card at 160 pt. It
 encodes `https://audiout.app/remote` and nothing else, generated with
 CoreImage's own QR filter at error-correction level M — a system framework,

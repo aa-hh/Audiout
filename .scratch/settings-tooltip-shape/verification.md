@@ -36,4 +36,10 @@ PR [320](https://github.com/aa-hh/Audiout/pull/320) was created before the full 
 - `bash scripts/build.sh` exited 0 and compiled on the second Mac (`integrated-build.log`). The staged diff against incoming main passes `git diff --cached --check MERGE_HEAD`; no unresolved index entries remain.
 - The user stopped native app control for this turn. No final native inspection of the integration was performed, and the running preview was left alone. Earlier native observations above apply to `3294c03`, before these review repairs and the Scenes integration.
 
-Round 2 will run on the pushed repair commit before merge. The owner has authorized merging after the required review and checks.
+Round 2 completed on submitted commit `7b888e46b222a58ab79fd708b9822582a558aa57`. Independent deep, rules, history and comments passes covered the actual submitted PR changes and relevant callers. The generated round-2 delta also contained unchanged incoming-main files; the coordinator corrected attribution using GitHub's actual PR diff. Whole source/test coverage and exclusions are recorded in `submitted-round2-review/`. Static research image data was not visually judged. Available Codex Astra/Sol models ran the passes; Luna independently scored the one documentation finding. No vendor-model execution is claimed.
+
+`scripts/review-branch.sh --continue` exited 0, posted the full round-2 comment on PR 320, and set `review` success on `7b888e46`: zero HIGH, zero MEDIUM, one LOW. The LOW finding was the stale QR Tile location in DESIGN; it is corrected to Audiout Remote by this documentation-only follow-up. Runtime sources remain the reviewed version. The script's unchanged non-Markdown status reuse applies to this follow-up.
+
+GitHub Tests run `37556354970` completed successfully on attempt 2. Shard 1 initially failed the unchanged `localDeviceMeterFollowsAppliedNotDesiredSyncedLocalState` test at its transient meter-reading assertion. That shard passed on an unchanged rerun; all other shards, engine tests and build checks passed on their first attempt. The reviewer traced no Settings dependency. The owner authorized planned roadmap item 095 in separate PR 321, whose timer repair is also separate from PR 320.
+
+The owner has authorized merging after the required review and checks. Final native inspection remains unverified as recorded above.

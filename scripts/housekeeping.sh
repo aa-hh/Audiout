@@ -27,6 +27,7 @@
 #   - no running process references the worktree path (catches an editor with
 #     the project open, a build, an indexer — "unless one's open")
 #   - `git status --porcelain` clean apart from the marker itself
+#   - no gitignored internal docs (handoffs, .scratch/, dev/notes/, ...)
 #   - HEAD is merged into main, OR identical to its pushed upstream — either
 #     way every commit survives the prune
 #   - the branch itself is deleted only when merged (`git branch -d`, never -D)
@@ -126,9 +127,11 @@ for wt in "$worktrees_dir"/*/; do
     # `git worktree remove` would delete them without a word.
     # razor: covers the internal-doc folders and root-level handoff files; a
     # handoff nested anywhere else goes unseen — add its pathspec if one turns up.
+# Snapshot PNGs under dev/notes/ are regenerated on demand, so they don't count.
     docs=$(git -C "$wt" ls-files --others --ignored --exclude-standard -- \
         .scratch dev/notes docs/plans docs/notes PROGRESS.md docs-delta.md \
-        ':(glob,icase)*handoff*.md' ':(glob,icase)*handover*.md' 2>/dev/null || true)
+        ':(glob,icase)*handoff*.md' ':(glob,icase)*handover*.md' \
+        ':(exclude,glob)dev/notes/*-snapshots/**' 2>/dev/null || true)
     if [ -n "$docs" ]; then
         say "SKIP prune $(basename "$wt"): it holds gitignored internal docs; move them to the main checkout first:"
         printf '%s\n' "$docs" | sed 's/^/      /' >&2

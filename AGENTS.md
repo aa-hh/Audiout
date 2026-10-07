@@ -194,8 +194,8 @@ repo. `AudioutCore` pins it by version.
   `scripts/housekeeping.sh` (invoked automatically by `scripts/run-tests.sh`
   and `scripts/make-app.sh` whenever a build starts) does two things: it
   removes any worktree whose root contains a `.prunable` marker — but only if
-  it is clean, unreferenced by any running process, and its HEAD is merged
-  into `main` or pushed — and it sweeps build caches machine-wide. What counts
+  it is clean, holds no gitignored internal docs, is unreferenced by any
+  running process, and its HEAD is merged into `main` or pushed — and it sweeps build caches machine-wide. What counts
   as a cache: every `.build` under any checkout (found by search, so the
   spike packages under `dev/` are included, not just the three top-level
   ones), plus Xcode's own `iOS DeviceSupport` and `DerivedData` directories,
@@ -334,6 +334,8 @@ the owner's yes. The merge-approval hook asks on `gh pr merge` either way.
 accident, even if you never commit. The one exception is the gitignored internal
 docs (handoffs, `.scratch/`, `dev/notes/`, `docs/plans/`, `docs/notes/`): write
 those in the main checkout, because an ignored file in a worktree dies with it.
+Only the main session writes there; a subagent cannot write outside its
+worktree, so it returns the text to the session that started it.
 
 **If you find uncommitted edits in the `main` checkout that are in your way:
 stop and ask.** Never `reset --hard` / `checkout --` / `stash` them away. They

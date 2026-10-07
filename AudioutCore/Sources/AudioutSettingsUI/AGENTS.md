@@ -16,7 +16,7 @@ The Settings content: General, Audiout Remote, Appearance, Audio and License as 
 - The pane host's root view is an opaque `WarmPanelView`; without it dark mode is illegible.
 - `selectSection(at:)` drives real sidebar selection, not a direct pane swap, so tests exercise it.
 - Call `paneView(at:)` on a fresh controller before any show, or the snapshot stretches.
-- The `settings-snapshot` goldens are not regenerated on macOS 27; never regenerate them.
+- `settings-snapshot` goldens are local-only (gitignored `dev/notes/`); not regenerated on macOS 27.
 - Controls stay stock. Gold is Buy Audiout and the sheet's Register; `ring` tints a glyph only while the user must act.
 - Theme tiles use absolute sRGB mirrors of the palette; live tokens would lie about appearance.
 - Long-form traps, dated decisions and the changelog: [AGENTS-HISTORY.md](AGENTS-HISTORY.md).

@@ -9,7 +9,7 @@
 // `dev/notes/popover-snapshots/` in BOTH light and dark appearances.
 //
 // T-9: the AppRoutingController is seeded with two routes BEFORE the panel is
-// built, so the committed PNGs show the EXPANDED Applications card (PLAN §B —
+// built, so the generated PNGs show the EXPANDED Applications card (PLAN §B —
 // expanded iff >=1 app is redirected): "Music" redirected to the "office"
 // AirPlay device (an active, non-dimmed slider) and "Safari" left on Current
 // Device (a dimmed slider) — Safari isn't in the injected `runningAppsProvider`

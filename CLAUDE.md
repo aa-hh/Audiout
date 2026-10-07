@@ -25,7 +25,7 @@ with `scripts/ios.sh build --root <that checkout>`.
 
 ## Internal docs stay off GitHub
 
-Handoffs (`HANDOFF*.md`, `HANDOVER*.md`), `.scratch/`, `dev/notes/`, `docs/plans/`, `docs/notes/`, `PROGRESS.md` and `docs-delta.md` are gitignored. They live on this Mac and never reach GitHub; the `tests` workflow fails any PR that leaves one tracked, `git add -f` included. Write them in the main checkout, not a worktree: an ignored file exists only in the checkout that wrote them and dies when its worktree is pruned. Links to them from tracked files resolve locally only. A checkout that had them deleted by merging the removal commit gets them back with `bash scripts/restore-internal-docs.sh`.
+Handoffs (`HANDOFF*.md`, `HANDOVER*.md`), `.scratch/`, `dev/notes/`, `docs/plans/`, `docs/notes/`, `PROGRESS.md` and `docs-delta.md` are gitignored. They live on this Mac and never reach GitHub; the `tests` workflow fails any PR that leaves one tracked, `git add -f` included. Write them in the main checkout, not a worktree: an ignored file exists only in the checkout that wrote them and dies when its worktree is pruned. Only the main session writes there; a subagent cannot write outside its worktree, so it returns the text to the session that started it. Links to them from tracked files resolve locally only. `scripts/sync-main.sh` runs `scripts/restore-internal-docs.sh` after each update of the main checkout, which brings back the files the removal commit deleted there; run it by hand if they are missing.
 
 ## First steps in a fresh clone
 

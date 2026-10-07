@@ -702,15 +702,17 @@ strip: "Available" in `captionEmphasized` / `speakersAccent` over four kind
 tiles (AirPlay, Bluetooth, Cast, This Mac), then Unavailable behind a 1 pt
 `containerEdge` rule. A tile is a 16 pt `labelCool2` glyph, its number in
 `Tokens.Font.headingDigits` and its label in `caption` / `labelCool`; a kind's
-number is `speakersAccent` above 0, Unavailable's is `label`, and both are
+number is `speakersAccent` above 0, Unavailable's is `labelCool`, and both are
 `labelCool2` at 0. This Mac counts as This Mac; any other speaker counts under
 its kind only while the Mac can reach it and as Unavailable otherwise, so
 Unavailable equals the rows under the sidebar's dividers. After the strip come
 one-line `ListRowView` rows, built once and only shown while true: "N speakers
-can't be found" with "Forget N speakers…", "Local Network access is off" with
+can't be found" (or "K of the N can't be found" when only some unavailable
+speakers are missing) with "Forget K speakers…", "Local Network access is off" with
 "Open Privacy Settings…", "Bluetooth access is off" with its action button, and
 "Pair Bluetooth speaker…" with a `speakersAccent` `plus.circle` and a
-`labelCool2` chevron, always last. Each row's longer sentence is its tooltip
+`labelCool2` `arrow.up.forward.app`, since it opens System Settings, always
+last. Each row's longer sentence is its tooltip
 and VoiceOver hint. Nothing on the tab uses `systemGreen`.
 
 `SpeakerSearch` decides when each number is known: This Mac once it is

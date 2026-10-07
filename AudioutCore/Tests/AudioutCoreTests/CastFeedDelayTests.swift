@@ -174,6 +174,80 @@ import Testing
         #expect(CastFeedRing().stats.writes == 0)
     }
 
+    // MARK: - Where the time goes
+
+    private func ts(_ nanos: Int64) -> timespec {
+        timespec(tv_sec: Int(nanos / 1_000_000_000), tv_nsec: Int(nanos % 1_000_000_000))
+    }
+
+    private func close(_ a: Double?, _ b: Double) -> Bool {
+        guard let a else { return false }
+        return abs(a - b) <= 0.01
+    }
+
+    /// Turns red if the ring stops stamping pushed blocks with their capture
+    /// pts and push time, or if `reset()` stops realigning the stamp cursor to
+    /// the first post-reset push.
+    @Test func eachRenderedFrameReadsBackItsCaptureAndPushTimes() {
+        let ms: Int64 = 1_000_000
+        let t0: Int64 = 1_000 * ms
+        let ring = CastFeedRing()
+        ring.setDelayMs(1000)
+        for k in 0..<60 {
+            let pts = t0 + Int64(k) * 20 * ms
+            ring.push(tone(frames: 882), pts: ts(pts), nowNanos: pts + 23 * ms)
+        }
+
+        _ = ring.render(frames: 441, nowNanos: t0 + 1207 * ms)
+        var timing = ring.timing
+        var last = timing.lastRender
+        #expect(close(last?.ioprocToPushMs, 23))
+        #expect(close(last?.delayLineMs, 1000))
+        #expect(close(last?.ringWaitMs, 1184))
+        #expect(close(last?.queueAheadMs, 0))
+        #expect(close(last?.pacingPhaseMs, 1184))
+        #expect(close(last?.ageMs, 2207))
+        #expect(timing.renderedFramesSinceReset == 441)
+
+        // Halfway into the first block: its frame 441 was captured 10 ms after
+        // the block's pts and had 10 ms queued ahead of it.
+        _ = ring.render(frames: 882, nowNanos: t0 + 1217 * ms)
+        last = ring.timing.lastRender
+        #expect(close(last?.ioprocToPushMs, 13))
+        #expect(close(last?.queueAheadMs, 10))
+        #expect(close(last?.ringWaitMs, 1194))
+
+        ring.reset()
+        let t1 = t0 + 5_000 * ms
+        ring.push(tone(frames: 882), pts: ts(t1), nowNanos: t1 + 5 * ms)
+        _ = ring.render(frames: 441, nowNanos: t1 + 30 * ms)
+        timing = ring.timing
+        last = timing.lastRender
+        #expect(close(last?.ioprocToPushMs, 5))
+        #expect(close(last?.ringWaitMs, 25))
+        #expect(timing.renderedFramesSinceReset == 441)
+        #expect(timing.delayLineMs == 1000)
+    }
+
+    /// Turns red if `CastFanOut.write` stops counting the writes its failed
+    /// `lock.try()` throws away.
+    @Test func aFanOutWriteRefusedByItsLockIsCounted() {
+        let ring = CastFeedRing()
+        let fanOut = CastFanOut()
+        fanOut.setRings([ring])
+        let block = tone(frames: 882)
+        let zero = timespec(tv_sec: 0, tv_nsec: 0)
+        fanOut.test_withLockHeld {
+            DispatchQueue.global().sync { fanOut.write(pcm: block, pts: zero) }
+        }
+        #expect(fanOut.droppedWrites == 1)
+        #expect(ring.stats.writes == 0)
+
+        fanOut.write(pcm: block, pts: zero)
+        #expect(fanOut.droppedWrites == 1)
+        #expect(ring.stats.writes == 1)
+    }
+
     // MARK: - The controller's and the user's terms compose
 
     @Test func roomDelayAndUserOffsetComposeAndClampAtTheFloor() {

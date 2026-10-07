@@ -47,13 +47,13 @@ Delete this file once the project is set up.
 | `/pr-review` skill | `.claude/skills/pr-review/` | generic attention list |
 | Issue tracker, triage, domain docs | `docs/agents/`, `.scratch/`, `CONTEXT.md`, `docs/adr/` | same |
 | Readability rubric | `docs/REVIEW-RUBRIC.md` | generic |
-| `impeccable` design skill + its 4 subagents | `.claude/skills/impeccable/`, `.claude/agents/impeccable-*.md` | same |
 
 **Left out on purpose** (Audiout- or Swift-specific): the capacity permit
 pool and second-Mac routing, the live-test slot, the suite cache and
 sharding, Guard 4's per-file test scoping, Guards 3/5/6/8/9/11 (Swift test
 isolation, XCTest, AirPlayEngine, shared-package leaks, headless windows, Swift
-test discipline), and housekeeping.
+test discipline), housekeeping, and the impeccable design skill (install it
+per project if a project has UI).
 
 ## Private-repo notes
 

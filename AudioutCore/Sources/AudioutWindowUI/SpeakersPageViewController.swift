@@ -237,7 +237,7 @@ public final class SpeakersPageViewController: NSViewController {
     /// The same opening as the speaker page: well, name, one caption, on the
     /// rail-free inset so the well lines up with the list's text below it.
     private lazy var header = PageHeaderView(icon: iconWell, title: titleLabel,
-                                             caption: captionField, leadingInset: .railFree)
+                                             caption: captionField)
     private let headerPlaceholder = CountPlaceholderView(size: NSSize(width: 14, height: 8), radius: 2.5)
     private let listWell = GroupedSectionView()
     private let listStack = NSStackView()

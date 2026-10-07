@@ -10,11 +10,14 @@ import Testing
 /// (persist + live `Tokens.accentStyle` remap + notification) and the Audio
 /// pane's **live hint lines** (the "`Buffer: 120 ms — safe for Wi-Fi
 /// speakers`" pattern — a hint re-writes on every value change). Headless like
-/// every other settings suite: structure and seams via `test_` hooks, never a
-/// real window.
+/// every other settings suite: structure and seams via `test_` hooks, with
+/// layout measured in an invisible borderless host.
 ///
 /// Nested into `SerializedSharedState`: `Tokens.accentStyle` is process-global
-/// (see the `deinit` below), and `OnboardingPermissionColorTests` mutates the
+/// (each test that moves the dial restores it with `defer` on the main actor,
+/// since a `deinit` runs on the test runner's thread and the setter's
+/// notification would repaint AppKit views there), and
+/// `OnboardingPermissionColorTests` mutates the
 /// same global — under swift-testing's in-process concurrency the two suites
 /// running at once produced real, reproducible failures (color comparisons
 /// racing a concurrent accent-style write), invisible under XCTest's
@@ -25,13 +28,6 @@ extension SerializedSharedState {
 @Suite final class SettingsAccentAndHintsTests: IsolatedSuite {
 
     private var settings: AppSettings { AppSettings(defaults: isolatedDefaults) }
-
-    deinit {
-        // `Tokens.accentStyle` is process-global on purpose (the live remap
-        // seam); restore the flagship default so no other test in this suite —
-        // or a later golden render in this process — inherits a dialed accent.
-        Tokens.accentStyle = .fullGold
-    }
 
     private func help(in view: NSView, subject: String) -> HelpButton? {
         if let button = view as? HelpButton, button.accessibilityLabel() == "Help for \(subject)" {
@@ -105,6 +101,7 @@ extension SerializedSharedState {
     }
 
     @Test func selectingAccentPersistsRemapsAndNotifies() {
+        defer { Tokens.accentStyle = .fullGold }
         let pane = makeAppearancePane()
         var notified: [AccentStyle] = []
         pane.onAccentChanged = { notified.append($0) }
@@ -130,6 +127,7 @@ extension SerializedSharedState {
     }
 
     @Test func subtleRemapsGoldAndKeepsAQuieterGlow() {
+        defer { Tokens.accentStyle = .fullGold }
         let fullGold = resolved(Tokens.Color.gold, appearanceName: .darkAqua)
         let fullGlow = resolved(Tokens.Color.glow, appearanceName: .darkAqua)
 
@@ -149,6 +147,7 @@ extension SerializedSharedState {
     }
 
     @Test func accentDialNeverRemapsFailureRimOrRing() {
+        defer { Tokens.accentStyle = .fullGold }
         let failure = resolved(Tokens.Color.failure, appearanceName: .darkAqua)
         let rim = resolved(Tokens.Color.rim, appearanceName: .darkAqua)
         let ring = resolved(Tokens.Color.ring, appearanceName: .darkAqua)
@@ -222,32 +221,52 @@ extension SerializedSharedState {
 
     // MARK: Audio pane — Advanced disclosure (roadmap 050)
 
-    @Test func advancedDisclosureStartsCollapsedAndRepublishesOnToggle() {
+    // Publishing a pane size or leaving the Advanced clip expanded after collapse turns this red.
+    @Test func advancedDisclosureLaysOutAndShrinksInsideAFixedHost() throws {
         let latency = LatencySettingModel(optionsMs: AppSettings.startBufferOptionsMs,
                                           initialMs: 1000,
                                           envOverrideMs: nil,
                                           isStreaming: { false },
                                           apply: { _ in (0, 0) })
         let pane = makeAudioPane(latency: latency)
-        _ = pane.view
-        pane.view.layoutSubtreeIfNeeded()
+        let window = NSWindow(
+            contentRect: NSRect(x: -10_000, y: -10_000, width: SettingsForm.contentWidth, height: 800),
+            styleMask: .borderless, backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        defer { window.close() }
+        let host = NSView(frame: NSRect(x: 0, y: 0, width: SettingsForm.contentWidth, height: 800))
+        window.contentView = host
+        host.addSubview(pane.view)
+        NSLayoutConstraint.activate([
+            pane.view.leadingAnchor.constraint(equalTo: host.leadingAnchor),
+            pane.view.trailingAnchor.constraint(equalTo: host.trailingAnchor),
+            pane.view.topAnchor.constraint(equalTo: host.topAnchor),
+            pane.view.bottomAnchor.constraint(lessThanOrEqualTo: host.bottomAnchor),
+        ])
+        let column = try #require(pane.view.subviews.first as? NSStackView)
+        let clip = try #require(column.arrangedSubviews.compactMap { $0 as? FoldingClipView }.first)
+        host.layoutSubtreeIfNeeded()
+        #expect(!window.isVisible)
         #expect(!pane.test_advancedExpanded, "Advanced must ship collapsed")
-        let collapsedHeight = pane.preferredContentSize.height
+        #expect(clip.frame.height == 0)
+        let collapsedHeight = column.frame.height
 
         pane.test_toggleAdvanced()
+        host.layoutSubtreeIfNeeded()
         #expect(pane.test_advancedExpanded)
-        #expect(pane.preferredContentSize.height > collapsedHeight,
-                "expanding must republish a taller preferredContentSize")
+        let card = try #require((clip.content as? NSStackView)?.arrangedSubviews.first)
+        #expect(card.frame.height > 0, "the Advanced card must occupy real layout space")
+        #expect(clip.frame.height >= card.frame.height)
+        #expect(column.frame.height > collapsedHeight)
 
-        let expandedHeight = pane.preferredContentSize.height
-        // Collapse via the TITLE, not the triangle — the word "Advanced" is a
-        // click target mirroring it.
         pane.test_tapAdvancedTitle()
+        host.layoutSubtreeIfNeeded()
         #expect(!pane.test_advancedExpanded)
-        // Not an exact == against the pre-toggle height: AppKit's rounding
-        // grid shifts layout by fractions of a point between passes.
-        #expect(pane.preferredContentSize.height < expandedHeight,
-                "collapsing must republish a shorter preferredContentSize")
+        #expect(clip.frame.height == 0)
+        #expect(abs(column.frame.height - collapsedHeight) < 1,
+                "collapse must give back the Advanced card's measured height")
+        #expect(pane.preferredContentSize == .zero, "the fixed Settings host consumes layout, never a published pane size")
+        #expect(!window.isVisible)
     }
 
     // MARK: General pane — reconnect-at-launch (roadmap 050)

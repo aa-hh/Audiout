@@ -25,3 +25,15 @@ Full keyboard traversal, VoiceOver reading, system contrast/motion settings and 
 - Native confirmation in Light and Dark: empty app card is compact; Add app opens its picker; full connection title wraps into two lines with centered slider/value/help; expanded Advanced has one idle buffer row and no divider. A mock buffer change mounted Reconnecting speakers feedback; after completion and dismissal the card returned to one row. The buffer was restored to 1,000 ms. Wrapped-title help opened with full text; Escape closed it and returned focus while Settings stayed visible. Appearance has plain Theme/Accent titles; General has plain login/reconnect titles.
 
 Native add/remove of saved exclusions was not performed; the isolated geometry test covers that lifecycle. Remote invitation and conditional License behavior are covered by headless tests. Full keyboard traversal, VoiceOver and system accessibility variants remain unverified. No physical audio was tested. No PR or submitted-PR review exists at this pre-submission checkpoint.
+
+## Submitted PR and review repairs
+
+PR [320](https://github.com/aa-hh/Audiout/pull/320) was created before the full review. Round 1 reviewed submitted commit `3294c03ac71ddaecc5a053a04912ce5793b0d3fc` and posted two HIGH findings plus one duplicate MEDIUM finding. The retained defects were stale buffer readouts before Audio first mounted and Audio publishing a pane size despite the fixed Settings host.
+
+- A remote failing run reproduced the defects: 21 tests in three suites, two failing tests and six failed assertions (`../settings-repair-red.log`). The repair reconciles the retained buffer before the unloaded-view guard, preserves it when controls first mount, and deletes Audio's obsolete size publisher. Invisible native geometry tests observe Advanced expansion and collapse.
+- Integrated incoming main commit `d8427c020fd43bc1679fc16735d35db1b75ea061`, preserving its Scenes behavior and the branch's shared Settings views. The scoped integration moves the existing rolling count label into SharedUI and uses the shared generic header. The source plan is `integration-work-order.md`.
+- Fresh combined command: `TASK_SETTINGS_FILTER=$(bash .githooks/guard-test-scope.sh)` followed by `AUDIOUT_TEST_NO_CACHE=1 bash scripts/run-tests.sh --filter "$TASK_SETTINGS_FILTER"`. Exit 0: 3,014 tests in 148 suites passed on `alechamilton@SUMUP-M9Y197RFVG.local` in 196.605 seconds (`integrated-tests.log`).
+- `bash scripts/build.sh` exited 0 and compiled on the second Mac (`integrated-build.log`). The staged diff against incoming main passes `git diff --cached --check MERGE_HEAD`; no unresolved index entries remain.
+- The user stopped native app control for this turn. No final native inspection of the integration was performed, and the running preview was left alone. Earlier native observations above apply to `3294c03`, before these review repairs and the Scenes integration.
+
+Round 2 will run on the pushed repair commit before merge. The owner has authorized merging after the required review and checks.

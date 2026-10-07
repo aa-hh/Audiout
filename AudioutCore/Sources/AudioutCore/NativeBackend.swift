@@ -499,7 +499,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// has a single producer, and a second run would replace the first's
     /// staging under it. `btTrimLock`.
     var companionAlignmentRun: CompanionAlignmentRun?
-    /// Nil outside an audition; otherwise only these two outputs keep their gain.
+    /// Nil outside an audition or a wizard run; otherwise only these two outputs keep their gain.
     /// All reads and writes are on stateQueue.
     var companionTickParticipants: Set<String>?
     /// Audio callbacks take only btTrimLock for this snapshot, never stateQueue.
@@ -2678,6 +2678,12 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             self.btRoomTermMs = nil
             // CAST-OUT: same shape — reset the decisions here, enqueue the
             // teardown below so the FIFO's last Cast op is the disable.
+            // A receiver the wizard hold muted gets its level back before the
+            // Cast disable enqueued below, or it stays at 0 after quit.
+            if self.companionTickParticipants != nil {
+                self.companionTickParticipants = nil
+                for castID in self.castSelectedIDs { self.pushCastLevelLocked(castID) }
+            }
             self.castSelectedIDs = []
             self.castPlaying = []
             // CAST-SYNC: the room delay goes with them. Publishing the AirPlay
@@ -3664,8 +3670,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                     // password as `.passwordRequired` itself (live 2026-10-04: a
                     // stuck shairport-sync read as a refused password). Because
                     // that is a guess, the stored password is
-                    // kept; only an engine `.passwordRequired` deletes it. PR 2's
-                    // authorize path is where the engine can say more.
+                    // kept; only an engine `.passwordRequired` deletes it.
                     // `nil` loops again; `failed: false` is a password wait,
                     // which is not a failure and logs none.
                     let outcome: (cause: ConnectionFailure.Cause, failed: Bool)? = stateQueue.sync {
@@ -3695,6 +3700,21 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                             }
                             return nil
                         }
+                        // A pairing key the receiver refused is spent: delete it
+                        // and loop once more with no key, so the receiver shows a
+                        // fresh code. Bounded: that attempt feeds no key.
+                        if (error as? AirPlayEngineError) == .passwordRequired,
+                           self.fedDescriptors[id]?.authKey != nil {
+                            // Synchronous on purpose: see `applyPasswordFailureLocked`.
+                            self.passwordStore.removePairingKey(for: id)
+                            self.rejectedPairingKeyIDs.insert(id)
+                            self.applyLocal(id) { $0.hasStoredPassword = false }
+                            self.failedGate.remove(id)
+                            if !self.failureEchoSeen.contains(id) {
+                                self.expectStaleFailure.insert(id)
+                            }
+                            return nil
+                        }
                         let access = self.known[id]?.airPlayAccess
                         let kind = self.lastDescriptors[id]?.kind
                         let cause: ConnectionFailure.Cause
@@ -3716,12 +3736,19 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                         if rejectedStored { self.passwordStore.removePassword(for: id) }
                         self.removeFromAddedLocked(id)
                         self.failedGate.insert(id)
-                        let keepAvailable = Self.waitsForPassword(cause, fedPassword: self.fedDescriptors[id]?.password)
+                        let fedCredential = self.fedCredential(id)
+                        // The sender drops its own copy of the key when an
+                        // encrypted SETUP times out (airplay.c `start_failure`),
+                        // reported as a plain failure. Forget the fed key so the
+                        // next feed sends the stored one again; the Keychain
+                        // keeps it, since the receiver did not refuse it.
+                        self.fedDescriptors[id]?.authKey = nil
+                        let keepAvailable = Self.waitsForPassword(cause, fedPassword: fedCredential)
                         self.applyLocal(id) {
                             $0.isSelected = false; $0.isAvailable = keepAvailable
                             if rejectedStored { $0.hasStoredPassword = false }
                         }
-                        if Self.awaitsPassword(cause, fedPassword: self.fedDescriptors[id]?.password) {
+                        if Self.awaitsPassword(cause, fedPassword: fedCredential) {
                             self.setConnectionState(.awaitingPassword, for: id)
                             return (cause, false)
                         }
@@ -3783,6 +3810,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// passes here once, so it also spends a typed password's one extra attempt.
     func descriptorToFeed(id: String) -> DeviceDescriptor? {
         let stored = passwordStore.password(for: id)
+        let storedKey = passwordStore.pairingKey(for: id)
         return stateQueue.sync {
             // A typed password beats the store, which may not hold it yet: the
             // one the catch handed this attempt first, then the mark. A password
@@ -3792,7 +3820,8 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             if self.passwordResubmitted[id] == password { self.passwordResubmitted[id] = nil }
             self.failureEchoSeen.remove(id)
             guard let last = self.lastDescriptors[id] else { return nil }
-            let current = Self.withPassword(last, password)
+            let key = self.rejectedPairingKeyIDs.contains(id) ? nil : storedKey
+            let current = Self.withCredentials(last, password: password, authKey: key)
             if let fed = self.fedDescriptors[id], Self.descriptorsEqual(fed, current) {
                 return nil // engine already has this exact descriptor
             }
@@ -3800,13 +3829,15 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         }
     }
 
-    /// `descriptor` carrying this speaker's stored password, if any. Both engine
-    /// feed sites compare and feed this, so a discovery re-feed never wipes the
-    /// engine's per-device password. Callers read the password off `stateQueue`:
-    /// a Keychain read can wait on an access prompt.
-    private static func withPassword(_ descriptor: DeviceDescriptor, _ password: String?) -> DeviceDescriptor {
+    /// `descriptor` carrying this speaker's stored password and pairing key, if
+    /// any. Both engine feed sites compare and feed this, so a discovery re-feed
+    /// never wipes the engine's per-device credentials. Callers read the store
+    /// off `stateQueue`: a Keychain read can wait on an access prompt.
+    private static func withCredentials(_ descriptor: DeviceDescriptor, password: String?,
+                                        authKey: String?) -> DeviceDescriptor {
         var copy = descriptor
         copy.password = password
+        copy.authKey = authKey
         return copy
     }
 
@@ -3821,7 +3852,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     static func descriptorsEqual(_ a: DeviceDescriptor, _ b: DeviceDescriptor) -> Bool {
         a.name == b.name && a.hostname == b.hostname && a.address == b.address
             && sameFamily(a.family, b.family) && a.port == b.port && a.txtRecord == b.txtRecord
-            && a.password == b.password
+            && a.password == b.password && a.authKey == b.authKey
     }
 
     /// `AddressFamily` isn't `Equatable` in the engine's public surface (and we
@@ -4069,7 +4100,22 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     func roomDelayLocked() -> Int {   // on stateQueue
         let today = (btSinkEnabled && !btComposition.usesPresentationReference)
             ? btReferenceBufferMs : _startBufferMs
-        return [_castTermMs, btRoomTermMs].compactMap { $0 }.reduce(today) { Swift.max($0, $1) }
+        return roomTermsLocked().compactMap { $0 }.reduce(today) { Swift.max($0, $1) }
+    }
+
+    /// The Cast and Bluetooth terms as they apply right now. While a wizard
+    /// or audition names its participants, a term counts only when a
+    /// participant brought it in: a selected Cast receiver held silent must
+    /// not stretch the two lanes being compared.
+    private func roomTermsLocked() -> [Int?] {   // on stateQueue
+        guard let participants = companionTickParticipants else { return [_castTermMs, btRoomTermMs] }
+        let cast = castSelectedIDs.contains(where: participants.contains) ? _castTermMs : nil
+        let (latencies, trims) = btTrimLock.withLock { (btLatencyMsByUID, btTrimsByUID) }
+        let candidate = Self.btOnlyReferenceMs(latencies: latencies, trims: trims,
+                                               uids: btSelectedUIDs.filter(participants.contains))
+        let bt = (btSinkEnabled && btComposition.usesPresentationReference && candidate > _startBufferMs)
+            ? candidate : nil
+        return [cast, bt]
     }
 
     /// The reference delay (ms) the Mac-local sink renders on (Wave-4 delay
@@ -4085,7 +4131,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// the Bluetooth term when the slowest Bluetooth speaker is.
     func btReferenceDelayMs() -> Int {
         stateQueue.sync {
-            [_castTermMs, btRoomTermMs].compactMap { $0 }.reduce(_startBufferMs) { Swift.max($0, $1) }
+            roomTermsLocked().compactMap { $0 }.reduce(_startBufferMs) { Swift.max($0, $1) }
         }
     }
 
@@ -4915,12 +4961,14 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         case .appeared(let discovered):
             // Read off `stateQueue`: a Keychain read can wait on an access prompt.
             let password = passwordStore.password(for: discovered.id)
-            feedEngineIfAvailable(discovered, password: password, appearing: true)
-            stateQueue.async { self.addOrUpdate(discovered, hasStoredPassword: password != nil) }
+            let key = passwordStore.pairingKey(for: discovered.id)
+            feedEngineIfAvailable(discovered, password: password, authKey: key, appearing: true)
+            stateQueue.async { self.addOrUpdate(discovered, hasStoredPassword: password != nil || key != nil) }
         case .updated(let discovered):
             let password = passwordStore.password(for: discovered.id)
+            let key = passwordStore.pairingKey(for: discovered.id)
             if discovered.isAvailable {
-                feedEngineIfAvailable(discovered, password: password, appearing: true)
+                feedEngineIfAvailable(discovered, password: password, authKey: key, appearing: true)
             } else {
                 // A reachable→unreachable transition (AP1 or AP2). In practice this
                 // is a sticky-AP2 device going OFFLINE: it lost its `_airplay._tcp`
@@ -4937,7 +4985,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 teardownEngineOutput(id: discovered.id)
                 removeEngineDiscovery(id: discovered.id)
             }
-            stateQueue.async { self.addOrUpdate(discovered, hasStoredPassword: password != nil) }
+            stateQueue.async { self.addOrUpdate(discovered, hasStoredPassword: password != nil || key != nil) }
         case .disappeared(let id, _):
             // Every receiver we surface — AP1 or AP2 — is now engine-fed and can be
             // `addOutput`-ed, so tear down unconditionally on disappear. Both calls
@@ -4977,15 +5025,19 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// converge path's `descriptorToFeed` can skip a redundant re-feed of the exact
     /// same descriptor (root cause 2). Only feeds when the descriptor is new or
     /// changed, so a repeated identical `.updated` doesn't re-add either.
-    private func feedEngineIfAvailable(_ discovered: DiscoveredDevice, password: String?, appearing: Bool) {
+    private func feedEngineIfAvailable(_ discovered: DiscoveredDevice, password: String?, authKey: String?,
+                                       appearing: Bool) {
         guard discovered.isAvailable else { return }
         let id = discovered.id
-        // A discovery re-feed never drops a password the engine holds: the store
-        // may not hold a just-typed one yet. Forget still clears it, because
-        // `descriptorToFeed` re-syncs the password before every add.
+        // A discovery re-feed never drops a password or pairing key the engine
+        // holds: the store may not hold a just-typed one yet. Forget still clears
+        // it, because `descriptorToFeed` re-syncs both before every add.
         let descriptor: DeviceDescriptor? = stateQueue.sync {
             let fed = self.fedDescriptors[id]
-            let descriptor = Self.withPassword(discovered.descriptor, password ?? fed?.password)
+            // A refused key stays off the device even while `fed` still holds it.
+            let key = self.rejectedPairingKeyIDs.contains(id) ? nil : (authKey ?? fed?.authKey)
+            let descriptor = Self.withCredentials(discovered.descriptor, password: password ?? fed?.password,
+                                                  authKey: key)
             if let fed, Self.descriptorsEqual(fed, descriptor) { return nil }
             return descriptor
         }
@@ -5341,6 +5393,16 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                     // attempt, so this report is not the receiver's answer to it.
                     // No park, no `.failed`, no password outcome, and the row
                     // stays available.
+                } else if state == .passwordRequired, self.fedDescriptors[id]?.authKey != nil,
+                          self.converging.contains(id), !self.rebindConverging.contains(id) {
+                    // A refused stored pairing key whose report beat the converge
+                    // catch: the catch loops once more with no key, so that
+                    // attempt owns the result. Spend the key here (the catch's
+                    // delete is then a no-op); no park, no `.failed`, no outcome.
+                    // Synchronous on purpose: see `applyPasswordFailureLocked`.
+                    self.passwordStore.removePairingKey(for: id)
+                    self.rejectedPairingKeyIDs.insert(id)
+                    device.hasStoredPassword = false
                 } else {
                     device.isAvailable = false
                     device.isSelected = false
@@ -5359,7 +5421,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                                 : (wasStreaming ? .droppedMidStream
                                     : Self.accessCause(device.airPlayAccess, kind: self.lastDescriptors[id]?.kind, passwordRequired: false))
                         self.applyPasswordFailureLocked(state: state, cause: cause, device: &device)
-                        if Self.awaitsPassword(cause, fedPassword: self.fedDescriptors[id]?.password) {
+                        if Self.awaitsPassword(cause, fedPassword: self.fedCredential(id)) {
                             // A password demand nobody answered yet is a wait, not a failure.
                             device.connectionState = .awaitingPassword
                         } else {
@@ -5393,7 +5455,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                                 : (wasConnected ? .droppedMidStream
                                     : Self.accessCause(device.airPlayAccess, kind: self.lastDescriptors[id]?.kind, passwordRequired: false))
                         self.applyPasswordFailureLocked(state: state, cause: cause, device: &device)
-                        if Self.awaitsPassword(cause, fedPassword: self.fedDescriptors[id]?.password) {
+                        if Self.awaitsPassword(cause, fedPassword: self.fedCredential(id)) {
                             device.connectionState = .awaitingPassword
                         } else {
                             device.connectionState = .failed(
@@ -5981,6 +6043,8 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
 
     /// The cause for an engine failure, read against what the receiver
     /// advertises. A password demand on an on-screen-code receiver is a code;
+    /// on an every-time code receiver it is unsupported, since the sender asks
+    /// that receiver for a fresh code on every start and no retry gets through;
     /// a failure the engine gives no reason for is the receiver's advertised
     /// demand when it has one, else `.unknown`. A password demand on a
     /// Home-only receiver is the Home restriction, since no password satisfies it.
@@ -5991,6 +6055,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         if passwordRequired {
             switch access {
             case .onScreenCode: return .codeRequired
+            case .onScreenCodeEveryTime: return .codeEveryTimeUnsupported
             case .homeMembersOnly: return .homeMembersOnly
             default: return .authRequired
             }
@@ -6002,19 +6067,26 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         }
     }
 
-    /// Whether a failure is a password or code demand that no password was
-    /// tried against yet. Such a speaker stays available; only a refused
-    /// password makes it unavailable (owner's ruling 2026-10-04).
+    /// Whether a failure is a password or code demand that no credential (a
+    /// password or a pairing key) was tried against yet. Such a speaker stays
+    /// available; only a refused credential makes it unavailable (owner's
+    /// ruling 2026-10-04).
     static func waitsForPassword(_ cause: ConnectionFailure.Cause, fedPassword: String?) -> Bool {
         (cause == .authRequired || cause == .codeRequired) && fedPassword == nil
     }
 
-    /// Whether a failure is a password demand that no password was tried
-    /// against yet, which parks the speaker in `.awaitingPassword` instead of
-    /// `.failed`. Keyed on the cause, like ``waitsForPassword``, so an `.open`
-    /// speaker that demands a password waits too. A code demand stays a failure.
+    /// Whether a failure is a password or code demand that no credential (a
+    /// password or a pairing key) was tried against yet, which parks the speaker
+    /// in `.awaitingPassword` instead of `.failed`. Keyed on the cause, like
+    /// ``waitsForPassword``, so an `.open` speaker that demands a password waits too.
     static func awaitsPassword(_ cause: ConnectionFailure.Cause, fedPassword: String?) -> Bool {
-        cause == .authRequired && fedPassword == nil
+        (cause == .authRequired || cause == .codeRequired) && fedPassword == nil
+    }
+
+    /// The credential last fed to the engine for `id`: its password, else its
+    /// pairing key. On `stateQueue`.
+    func fedCredential(_ id: String) -> String? {
+        fedDescriptors[id]?.password ?? fedDescriptors[id]?.authKey
     }
 
     /// Who submitted the password now being tried, per device id (`"mac"` or
@@ -6026,8 +6098,14 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// it), so a submit buys at most one extra attempt.
     private var passwordResubmitted: [String: String] = [:]
 
-    /// Runs `submitAirPlayPassword`'s Keychain writes one at a time, in submit order.
+    /// Runs `submitAirPlayPassword`'s Keychain writes (passwords and pairing
+    /// keys) one at a time, in the order enqueued.
     private let passwordWriteQueue = DispatchQueue(label: "NativeBackend.passwordWrites")
+
+    /// Forgets per id. A queued submit write whose captured count no longer
+    /// matches skips the store, so it cannot undo a Forget that ran after the
+    /// submit. On `stateQueue`.
+    private var forgetGeneration: [String: Int] = [:]
 
     /// The typed password the converge catch spent its mark on, for exactly
     /// the extra attempt it grants; `descriptorToFeed` consumes it.
@@ -6038,6 +6116,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// for each. On `stateQueue`.
     /// razor: a different failure report landing before the catch counts as the echo, so the real echo then parks; tag reports with their add to close it.
     private var expectStaleFailure: Set<String> = []
+
+    /// Ids whose stored pairing key the receiver refused since launch; feeding
+    /// skips the key until a new one is stored, so a Keychain delete that
+    /// failed cannot put the refused key back on every join. On `stateQueue`.
+    private var rejectedPairingKeyIDs: Set<String> = []
 
     /// Ids the failure arm has seen a failure report for since their last
     /// `descriptorToFeed`, so the catch knows the echo already landed.
@@ -6067,6 +6150,12 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// On `stateQueue`.
     private func applyPasswordFailureLocked(state: OutputState, cause: ConnectionFailure.Cause, device: inout Device) {
         let fedPassword = fedDescriptors[device.id]?.password
+        if state == .passwordRequired, fedDescriptors[device.id]?.authKey != nil {
+            // A pairing key the receiver refused is spent: delete it, like the password below.
+            passwordStore.removePairingKey(for: device.id)
+            rejectedPairingKeyIDs.insert(device.id)
+            device.hasStoredPassword = false
+        }
         if state == .passwordRequired, fedPassword != nil {
             // Deletes are exempt from the off-`stateQueue` Keychain rule (AGENTS-HISTORY.md,
             // 2026-10-04 AirPlay passwords): they target an item this app's own signature
@@ -6076,7 +6165,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             passwordStore.removePassword(for: device.id)
             device.hasStoredPassword = false
         }
-        if Self.waitsForPassword(cause, fedPassword: fedPassword) {
+        if Self.waitsForPassword(cause, fedPassword: fedCredential(device.id)) {
             device.isAvailable = true
         }
     }
@@ -6090,19 +6179,101 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         // Keychain write runs off `stateQueue`, and `completion` (the caller's
         // retry) runs on main after it, so the retry reads the new password.
         // Writes are enqueued on one serial queue from `stateQueue`, so two
-        // submits land in submit order; deletes are unchanged (synchronous on
-        // `stateQueue` at the refusal sites, the caller's thread in Forget), and
-        // a delete that runs after the mark is skipped only while a whole-system
-        // connect holds the slot.
+        // submits land in submit order; deletes are synchronous on `stateQueue`
+        // at the refusal sites and on the caller's thread in Forget, and a write
+        // queued before a Forget skips the store. A delete that runs after the
+        // mark is skipped only while a whole-system connect holds the slot.
         stateQueue.async {
+            switch self.known[id]?.airPlayAccess {
+            case .onScreenCode?:
+                self.submitCodeLocked(password, for: id, source: source, completion: completion)
+                return
+            case .onScreenCodeEveryTime?:
+                // No code carries an every-time receiver's join (`.codeEveryTimeUnsupported`),
+                // so nothing is tried and nothing retries.
+                Telemetry.log(.airplay, "every_time_code_ignored", ["device": id])
+                return
+            default: break
+            }
             self.passwordResubmitted[id] = password
             self.pendingPasswordOutcome[id] = source
             self.applyLocal(id) { $0.hasStoredPassword = true }
             let store = self.passwordStore
-            self.passwordWriteQueue.async {
-                store.setPassword(password, for: id)
+            let generation = self.forgetGeneration[id]
+            self.passwordWriteQueue.async { [weak self] in
+                if self?.stateQueue.sync(execute: { self?.forgetGeneration[id] }) == generation {
+                    store.setPassword(password, for: id)
+                }
                 DispatchQueue.main.async(execute: completion)
             }
+        }
+    }
+
+    /// The on-screen-code side of `submitAirPlayPassword`: pair with the typed
+    /// code through `engine.authorize`, store the key the first-time-only
+    /// receiver keeps (an every-time receiver never reaches this path), then run
+    /// `completion` (the caller's retry, which feeds the key). A refused code
+    /// fails the speaker as `.codeRequired` and never retries. On `stateQueue`.
+    private func submitCodeLocked(_ code: String, for id: String, source: String,
+                                  completion: @escaping @Sendable () -> Void) {
+        pendingPasswordOutcome[id] = source
+        guard let outputID = outputIDs[id] else {
+            enterFailure(id, cause: .unknown)
+            return
+        }
+        let storesKey = known[id]?.airPlayAccess == .onScreenCode
+        let engine = self.engine
+        let store = self.passwordStore
+        let writes = self.passwordWriteQueue
+        let generation = forgetGeneration[id]
+        // The dispatcher echoes the authorize op's terminal on the state stream
+        // after its completion (`.passwordRequired` for a refused code, `.stopped`
+        // for an accepted one); drop it as the converge catch drops its own, or
+        // it reopens the code wait or stops the retry. Armed before the call,
+        // since the echo can land before this task hops back to `stateQueue`.
+        expectStaleFailure.insert(id)
+        Task { [weak self] in
+            do {
+                let key = try await engine.authorize(outputID, pin: code)
+                // The password submits' write queue, so this write lands after
+                // theirs. A Forget since the submit skips it.
+                // razor: a Forget between the check and the write still loses; holding both under one lock would close it.
+                writes.async {
+                    let forgotten = self?.stateQueue.sync { self?.forgetGeneration[id] } != generation
+                    if storesKey, !forgotten {
+                        store.setPairingKey(key, for: id)
+                        self?.stateQueue.sync {
+                            self?.rejectedPairingKeyIDs.remove(id)
+                            self?.applyLocal(id) { $0.hasStoredPassword = true }
+                        }
+                    }
+                    DispatchQueue.main.async(execute: completion)
+                }
+            } catch {
+                let refused = (error as? AirPlayEngineError) == .passwordRequired
+                let cause: ConnectionFailure.Cause = refused ? .codeRequired : .unknown
+                // Same rule as the converge catch: a timeout or a stopped engine has no echo.
+                let echoes = (error as? AirPlayEngineError).map {
+                    $0 == .sessionFailed || $0 == .passwordRequired
+                } ?? false
+                self?.stateQueue.sync {
+                    if !echoes { self?.expectStaleFailure.remove(id) }
+                    if refused { self?.applyLocal(id) { $0.isAvailable = false } }
+                    self?.enterFailure(id, cause: cause, detail: String(describing: error))
+                }
+                Telemetry.fail(.airplay, "airplay:connect_failed",
+                               local: ["device": id, "detail": String(describing: error)],
+                               shared: ["cause": "\(cause)"])
+            }
+        }
+    }
+
+    /// `"onScreenCode"` for a speaker that shows a code, else `"password"`: the
+    /// `kind` property of the `airplay:code_*` events. On `stateQueue`.
+    private func credentialKindLocked(_ id: String) -> String {
+        switch known[id]?.airPlayAccess {
+        case .onScreenCode?, .onScreenCodeEveryTime?: return "onScreenCode"
+        default: return "password"
         }
     }
 
@@ -6113,24 +6284,32 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         let outcome: String
         switch newState {
         case .connected: outcome = "accepted"
-        case .failed(let failure): outcome = failure.cause == .authRequired ? "rejected" : "failed"
+        case .failed(let failure):
+            outcome = failure.cause == .authRequired || failure.cause == .codeRequired ? "rejected" : "failed"
         default: return
         }
         pendingPasswordOutcome[id] = nil
         Analytics.capture("airplay:code_submitted",
-                          ["kind": "password", "outcome": outcome, "source": source])
+                          ["kind": credentialKindLocked(id), "outcome": outcome, "source": source])
     }
 
     public func forgetAirPlayPassword(for id: String) {
+        // The deletes run on the caller's thread before returning, so the next
+        // `descriptorToFeed` cannot read what was forgotten. Deletes are exempt
+        // from the off-main Keychain rule: they never raise an access prompt.
+        stateQueue.async { self.forgetGeneration[id, default: 0] += 1 }
         passwordStore.removePassword(for: id)
+        passwordStore.removePairingKey(for: id)
         stateQueue.async {
             self.passwordResubmitted[id] = nil
             self.passwordForNextFeed[id] = nil
             self.expectStaleFailure.remove(id)
             self.failureEchoSeen.remove(id)
+            self.rejectedPairingKeyIDs.remove(id)
             self.applyLocal(id) { $0.hasStoredPassword = false }
+            // An id that has left `known` reports "password".
+            Analytics.capture("airplay:code_forgotten", ["kind": self.credentialKindLocked(id)])
         }
-        Analytics.capture("airplay:code_forgotten", ["kind": "password"])
     }
 
     /// Enter the resting `.failed` state (converge add-throw or an out-of-band

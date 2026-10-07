@@ -29,7 +29,7 @@ public enum KeepAliveKind: Equatable, Sendable {
 }
 
 /// The align-by-ear aid's tick source (BT-OFFSET-UI): a synthesized
-/// woodblock-style transient mixed INTO the whole-system capture's converted
+/// mallet-note transient mixed INTO the whole-system capture's converted
 /// PCM, post-capture, so every consumer of that one feed — the AirPlay engine,
 /// the synced-local sink, and every Bluetooth sink — renders the SAME tick
 /// through its own delay. That is what makes the alignment truthful: the user
@@ -47,15 +47,16 @@ public enum KeepAliveKind: Equatable, Sendable {
 /// search can reach) and only the blocks stage, by which point the estimate is
 /// inside ±24 ms, drops back to ``wizardBlocksBPM``.
 ///
-/// The tick is SYNTHESIZED (two decaying sine partials with a near-instant
-/// attack — a woodblock-shaped transient; the ear detects double-hits down to
-/// ~10–20 ms), never a bundled audio file. The wizard renders TWO timbres off
-/// one beat clock — a LOW knock for the engine/AirPlay + Mac fan-out and the
-/// familiar bright click for the Bluetooth fan-out — so the two sides of the
-/// judgement are told apart by colour, not only by order. Same onset instant
-/// either way; only the partials differ — and their LOUDNESS is matched
-/// (``brightLoudnessScale``), because equal digital amplitude is not equal
-/// loudness and the difference lands 1:1 in the stored millisecond value.
+/// The tick is SYNTHESIZED (a mallet note: a decaying fundamental plus two
+/// faster-decaying upper partials, with a 1 ms raised-cosine attack; the ear
+/// detects double-hits down to ~10–20 ms), never a bundled audio file. The
+/// wizard renders TWO notes off one beat clock — a lower note (440 Hz) for the
+/// engine/AirPlay + Mac fan-out and a higher note (660 Hz) for the Bluetooth
+/// fan-out — so the two sides of the judgement are told apart by pitch, not
+/// only by order. Same onset instant and same envelope either way; only the
+/// pitch differs — and their LOUDNESS is matched (``highTickLoudnessScale``),
+/// because equal digital amplitude is not equal loudness and the difference
+/// lands 1:1 in the stored millisecond value.
 ///
 /// **Measuring the stimulus bias** (`dev/notes/wizard-tick-stimulus-brief.md`
 /// §3): set `AUDIOUTER_DEBUG_TICK_SWAP=1` in the app's environment and the two
@@ -116,63 +117,36 @@ final class AlignmentTickInjector: @unchecked Sendable {
 
     // MARK: The two timbres
 
-    /// The bright click's partials — the metronome's own sound, and the
-    /// Bluetooth fan-out's side of the wizard's pair.
-    private static let brightPartialHz = (1_800.0, 2_900.0)
-    /// The low knock's partials — the engine feed (AirPlay + the Mac's own
-    /// synced-local sink). One octave under the bright click: far enough to
-    /// label the two sides by colour, close enough that they are still heard as
-    /// one stream and can be ORDERED (research brief §2).
-    private static let lowPartialHz = (900.0, 1_450.0)
+    /// The lower mallet note's fundamental — the engine feed (AirPlay + the
+    /// Mac's own synced-local sink).
+    private static let lowMalletHz = 440.0
+    /// The higher mallet note's fundamental — the Bluetooth fan-out's side of
+    /// the wizard's pair, the metronome's sound, and the note the phone's
+    /// by-ear session plays. A fifth above the lower note: far enough to label
+    /// the two sides by pitch, close enough that they are still heard as one
+    /// stream and can be ORDERED (research brief §2).
+    private static let highMalletHz = 660.0
 
-    /// What the BRIGHT click's amplitude is multiplied by so the two timbres are
-    /// equally LOUD rather than equally scaled — the one uncancelled bias in the
-    /// current stimulus (`dev/notes/wizard-tick-stimulus-brief.md` §3): the
-    /// bright click sits nearer the ear's most sensitive band, a louder event is
-    /// perceived as EARLIER, and the estimator has no counterbalanced condition
-    /// that could cancel it, so the whole psychometric fit shifts and the
-    /// displacement lands in the stored latency.
+    /// What the higher note's amplitude is multiplied by so the two notes are
+    /// equally LOUD rather than equally scaled: a louder event is perceived as
+    /// EARLIER, and the estimator has no counterbalanced condition that could
+    /// cancel it, so a loudness gap lands in the stored latency.
     ///
-    /// Method: A-weighting (IEC 61672 — the 40-phon equal-loudness contour's
-    /// standard closed form), applied per partial and summed in ENERGY at the
-    /// 0.7/0.3 mix ``renderTick(sampleRate:amplitude:partialHz:)`` uses.
-    /// Measured: A(900 Hz) = −0.35 dB, A(1 450) = +0.85, A(1 800) = +1.12,
-    /// A(2 900) = +1.24 — so the bright click is **+1.28 dB** louder at equal
-    /// amplitude, and the correction is a **×0.863** scale on it (a −1.28 dB
-    /// trim). The bright side is the one that MOVES because it moves DOWN:
-    /// lifting the low knock instead would push the mix toward the Int16 clamp
-    /// in ``render(into:from:tick:bed:replace:)`` for nothing.
-    ///
-    /// A-weighting deliberately UNDER-states the 2–4 kHz dip compared with a
-    /// full ISO 226 contour, so a residual is expected; it is what the
-    /// `AUDIOUTER_DEBUG_TICK_SWAP` swap test measures. The manual metronome
-    /// carries the same −1.28 dB (it plays the bright click) — inaudible on its
-    /// own, and the two sounds have to stay the same sound in both modes.
-    static let brightLoudnessScale =
-        (weightedEnergy(lowPartialHz) / weightedEnergy(brightPartialHz)).squareRoot()
+    /// −1.03 dB, from ISO 532-1 loudness matching of the two rendered notes
+    /// (`dev/notes/wizard-sync-tone-2026-10-06/shaped/TICK-OPTIONS.md`, the
+    /// 15 ms decay row). It replaces the earlier A-weighting estimate, which
+    /// is retired. The higher note is the one that moves because it moves
+    /// DOWN: lifting the lower note instead would push the mix toward the
+    /// Int16 clamp in ``render(into:from:tick:probe:bed:replace:)`` for
+    /// nothing. The manual metronome carries the same trim (it plays the
+    /// higher note), so the two sounds stay the same sound in both modes.
+    static let highTickLoudnessScale = 0.888
 
     /// Swap which fan-out gets which timbre — DEBUG ONLY, for the bias
     /// measurement described in this type's header. Read once at launch, the
     /// `AUDIOUTER_TCC_DIAG` idiom.
     private static let swapsWizardTimbres =
         ProcessInfo.processInfo.environment["AUDIOUTER_DEBUG_TICK_SWAP"] == "1"
-
-    /// A-weighting in dB at `hz` (IEC 61672 / ANSI S1.42), including the
-    /// +2.0 dB normalisation that puts 1 kHz at 0.
-    private static func aWeightingDB(_ hz: Double) -> Double {
-        let f2 = hz * hz
-        let response = (12_194 * 12_194 * f2 * f2)
-            / ((f2 + 20.6 * 20.6)
-               * ((f2 + 107.7 * 107.7) * (f2 + 737.9 * 737.9)).squareRoot()
-               * (f2 + 12_194 * 12_194))
-        return 20 * log10(response) + 2.0
-    }
-
-    /// One timbre's A-weighted energy, at the partial mix `renderTick` renders.
-    private static func weightedEnergy(_ partialHz: (Double, Double)) -> Double {
-        0.7 * 0.7 * pow(10, aWeightingDB(partialHz.0) / 10)
-            + 0.3 * 0.3 * pow(10, aWeightingDB(partialHz.1) / 10)
-    }
 
     /// One activation's shape. `.manual` is the row's metronome button
     /// (self-limits ~30 s, no preamble — the user clicked expecting a tick
@@ -244,10 +218,10 @@ final class AlignmentTickInjector: @unchecked Sendable {
     /// multiplied out on every block.
     private let endFrame: Int
     private let replacesProgram: Bool
-    /// The pre-rendered mono ticks, added to every channel: the bright click
-    /// (1.8 + 2.9 kHz) the metronome has always used, and the low knock
-    /// (0.9 + 1.45 kHz) the wizard gives the engine/Mac side.
-    private let brightTick: [Int32]
+    /// The pre-rendered mono ticks, added to every channel: the higher
+    /// mallet note (660 Hz) the metronome and the Bluetooth side play, and the
+    /// lower one (440 Hz) the wizard gives the engine/Mac side.
+    private let highTick: [Int32]
     private let lowTick: [Int32]
     /// Pre-rendered mono keep-alive loop (empty when the bed is disabled).
     private let bed: [Int32]
@@ -261,16 +235,16 @@ final class AlignmentTickInjector: @unchecked Sendable {
 
     // MARK: Mic-probe lanes (wizard only; pacer-queue confined like the grid)
 
-    /// The one-shot calibration sweeps (roadmap 064): DOWN sweep for the
-    /// engine/AirPlay/Mac fan-out, UP sweep for the Bluetooth fan-out — the
-    /// per-lane orthogonality that lets one mic recording tell the two sides
-    /// apart. Empty until ``stageProbe(amplitude:shape:)``.
+    /// The one-shot calibration lanes (roadmap 064): one `SyncProbe.lane`
+    /// per side, played in turn, so one mic recording tells the two sides
+    /// apart by when each arrives. Empty until
+    /// ``stageProbe(amplitude:shape:engineLaneScale:)``.
     private var probeEngineLanes: [ProbeLane] = []
     private var probeBTLanes: [ProbeLane] = []
-    /// The frame the sweeps are measured from; `-1` until ``armProbe()``. Each
-    /// lane sits at its own offset past this one instant, so a shape where the
-    /// sweeps overlap and one where they are seconds apart are the same code
-    /// path — and the shared origin is what the BeepBeep cancellation rests on.
+    /// The frame the lanes are measured from; `-1` until
+    /// ``armProbe(levelStepDB:)``. Each lane sits at its own offset past this
+    /// one instant, so both shapes are the same code path — and the shared
+    /// origin is what the BeepBeep cancellation rests on.
     private var probeEpochFrame = -1
     /// One-shot completion latch — ``takeProbeCompletion()``.
     private var probeCompletionTaken = false
@@ -293,37 +267,44 @@ final class AlignmentTickInjector: @unchecked Sendable {
             ? Int.max
             : config.maxTicks * self.beatFrames
 
-        // Equal LOUDNESS, not equal amplitude — see ``brightLoudnessScale``.
-        self.brightTick = Self.renderTick(sampleRate: sampleRate,
-                                          amplitude: amplitude * Self.brightLoudnessScale,
-                                          partialHz: Self.brightPartialHz)
+        // Equal LOUDNESS, not equal amplitude — see ``highTickLoudnessScale``.
+        self.highTick = Self.renderTick(sampleRate: sampleRate,
+                                        amplitude: amplitude * Self.highTickLoudnessScale,
+                                        fundamentalHz: Self.highMalletHz)
         self.lowTick = Self.renderTick(sampleRate: sampleRate, amplitude: amplitude,
-                                       partialHz: Self.lowPartialHz)
+                                       fundamentalHz: Self.lowMalletHz)
     }
 
-    /// Woodblock-ish transient: ~30 ms, two partials, exponential decay
-    /// (τ ≈ 6 ms), with a handful of attack samples ramped so the onset is
-    /// sharp but not a raw DC step. Both timbres come off this ONE envelope
-    /// family and the same frame count, so their onsets are sample-identical
-    /// and only the colour differs — `amplitude` is the caller's, and the
-    /// wizard's two variants pass DIFFERENT ones so the colours land equally
-    /// loud (``brightLoudnessScale``). Rise time is the dominant term in a
-    /// sound's perceived onset, so the envelope is the one thing the two sides
-    /// may never differ in.
+    /// A mallet note: 90 ms, the fundamental decaying with τ = 15 ms, its 4th
+    /// harmonic at half level with τ = 4 ms and its 10th at 0.06 with
+    /// τ = 1.5 ms, the first 1 ms raised on a half-cosine so the onset is sharp
+    /// but not a raw step. The buffer is normalised to its own peak, so
+    /// `amplitude` is the note's peak — the level the previous click played at.
+    /// Both notes come off this ONE envelope and the same frame count, so their
+    /// onsets are sample-identical and only the pitch differs; the wizard's two
+    /// variants pass DIFFERENT amplitudes so the notes land equally loud
+    /// (``highTickLoudnessScale``). Rise time is the dominant term in a sound's
+    /// perceived onset, so the envelope is the one thing the two sides may
+    /// never differ in.
     private static func renderTick(sampleRate: Double, amplitude: Double,
-                                   partialHz: (Double, Double)) -> [Int32] {
-        let frames = Int(sampleRate * 0.03)
-        let tau = 0.006
-        let attackFrames = 8
-        var rendered = [Int32](repeating: 0, count: frames)
+                                   fundamentalHz f0: Double) -> [Int32] {
+        let frames = Int(sampleRate * 0.09)
+        let attackFrames = max(1, Int((0.001 * sampleRate).rounded()))
+        var raw = [Double](repeating: 0, count: frames)
+        var peak = 0.0
         for f in 0..<frames {
             let t = Double(f) / sampleRate
-            let envelope = exp(-t / tau) * (f < attackFrames ? Double(f) / Double(attackFrames) : 1)
-            let partials = 0.7 * sin(2 * .pi * partialHz.0 * t)
-                + 0.3 * sin(2 * .pi * partialHz.1 * t)
-            rendered[f] = Int32((amplitude * envelope * partials * 32_767.0).rounded())
+            var v = 1.0 * exp(-t / 0.015) * sin(2 * .pi * f0 * t)
+                + 0.5 * exp(-t / 0.004) * sin(2 * .pi * 4 * f0 * t)
+                + 0.06 * exp(-t / 0.0015) * sin(2 * .pi * 10 * f0 * t)
+            if f < attackFrames {
+                v *= 0.5 - 0.5 * cos(.pi * Double(f) / Double(attackFrames))
+            }
+            raw[f] = v
+            peak = max(peak, abs(v))
         }
-        return rendered
+        let scale = peak > 0 ? amplitude * 32_767.0 / peak : 0
+        return raw.map { Int32(($0 * scale).rounded()) }
     }
 
     // MARK: Wizard run control (pacer-queue only)
@@ -331,7 +312,7 @@ final class AlignmentTickInjector: @unchecked Sendable {
     /// Start the beat grid here, with the FIRST tick one whole interval away —
     /// not at the top of the next rendered block. The arm point is wherever the
     /// gate happened to open, so a tick placed on it can land a few ms after the
-    /// previous run's last one, overlapping two 30 ms tick bodies into one
+    /// previous run's last one, overlapping two 90 ms tick bodies into one
     /// ambiguous smear. A full interval of silence first makes the opening tick
     /// a clean pair on every speaker. Called once per wizard run, after every
     /// participating sink has released. Idempotent: a second call would restart
@@ -343,9 +324,9 @@ final class AlignmentTickInjector: @unchecked Sendable {
 
     /// Undo an arm that landed before a late-staged mic probe could ride it.
     /// The gate opened and armed the tick grid before the probe finished
-    /// staging; the sweeps must not play under a running tick, so this clears
+    /// staging; the probe must not play under a running tick, so this clears
     /// the arm and the probe's own completion handoff calls `armTicks()` again
-    /// a clean interval after the sweeps — same as the normal stage-before-arm
+    /// a clean interval after the probe — same as the normal stage-before-arm
     /// path. Pacer-queue-only, like `armTicks()`.
     func disarmTicks() {
         tickEpochFrame = -1
@@ -375,132 +356,129 @@ final class AlignmentTickInjector: @unchecked Sendable {
 
     // MARK: Mic-probe run control (pacer-queue only)
 
-    /// How long each calibration sweep runs. One second buys 30–40 dB of
-    /// processing gain across the lane's band — see `SyncProbe`.
-    static let probeSweepSeconds = 1.0
-    /// Silence between the arm and the sweeps, so the probe never rides on the
+    /// Silence between the arm and the probe, so the probe never rides on the
     /// tail of whatever the gate interrupted.
     static let probeLeadSeconds = 0.5
-    /// How far the UP sweep sits behind the DOWN sweep in the staggered shape.
-    /// Comfortably longer than ``probeSweepSeconds``, so the two sweeps never
-    /// overlap and the fan-out's per-window routing switches owners in a gap
-    /// of silence rather than mid-sweep. The Mac subtracts this from the
-    /// phone's raw reported offset before any trim arithmetic; the phone
-    /// reports what it measured and knows nothing about it.
-    static let probeStaggerSeconds = 2.0
 
-    /// One staged sweep: its samples, where it sits past the probe epoch, and
+    /// One staged lane: its samples, where it sits past the probe epoch, and
     /// which staging window it belongs to.
     struct ProbeLane {
         let samples: [Int32]
         let offsetFrames: Int
         /// Handed back by ``mixWizardVariants(into:bedded:beddedNoProbe:)`` so
-        /// the Bluetooth fan-out can route the sweep-carrying block to the one
-        /// sink that owns this window. `0` is the DOWN window, `1` the UP one.
+        /// the Bluetooth fan-out can route the probe-carrying block to the one
+        /// sink that owns this window. `0` is the target window, `1` the
+        /// reference window.
         let window: Int
     }
 
-    /// What shape ``stageProbe(amplitude:shape:)`` lays the sweeps out in.
+    /// What shape ``stageProbe(amplitude:shape:engineLaneScale:)`` lays the
+    /// two lanes out in. Both shapes play the SAME lane (`SyncProbe.lane`) in
+    /// turn: the target first at the probe epoch, the reference
+    /// `SyncProbe.Layout.laneSpacingSeconds` later.
     enum ProbeShape: Equatable {
-        /// Both sweeps at the probe epoch, DOWN on the engine lane and UP on
-        /// the Bluetooth one — the Mac's own wizard run, where the two sides
-        /// are told apart by which fan-out carries them.
-        case simultaneous
-        /// DOWN at the epoch, UP ``probeStaggerSeconds`` later, BOTH on the
-        /// Bluetooth lane — the shape a run needs when more than one Bluetooth
-        /// speaker is audible, or the reference is itself Bluetooth. Which
-        /// speaker hears which sweep is then the fan-out's business (one sink
-        /// gets the sweep-carrying feed per window, everyone else the
-        /// sweep-free one), because output-time gain gating cannot do it: each
-        /// sink's delay line is exactly the unknown being measured.
+        /// Target lane on the Bluetooth fan-out, reference lane on the engine
+        /// fan-out — the Mac wizard's own run, where the two sides are told
+        /// apart by which fan-out carries them.
+        case perFanout
+        /// Both lanes on the Bluetooth fan-out, in windows 0 and 1 — the shape
+        /// a run needs when more than one Bluetooth speaker is audible, or the
+        /// reference is itself Bluetooth. Which speaker hears which lane is
+        /// then the fan-out's business (one sink gets the probe-carrying feed
+        /// per window, everyone else the probe-free one), because output-time
+        /// gain gating cannot do it: each sink's delay line is exactly the
+        /// unknown being measured.
         ///
-        /// `referenceOnEngine` puts the DOWN sweep on the engine lane as well,
-        /// for a run whose reference is the Mac's own output rather than a
-        /// Bluetooth speaker.
-        case staggered(referenceOnEngine: Bool)
+        /// `referenceOnEngine` puts the reference lane on the engine fan-out
+        /// as well, for a run whose reference is the Mac's own output rather
+        /// than a Bluetooth speaker.
+        case routedWindows(referenceOnEngine: Bool)
     }
 
-    /// Pre-render the calibration sweeps so a later ``armProbe()`` starts them
-    /// on the next block. Staging is separate from arming for the same reason
-    /// ticks' arm is: rendering is done off the hot path, and the arm gate
-    /// decides WHEN.
+    /// Pre-render the probe lanes so a later ``armProbe(levelStepDB:)`` starts
+    /// them on the next block. Staging is separate from arming for the same
+    /// reason ticks' arm is: rendering is done off the hot path, and the arm
+    /// gate decides WHEN.
     /// The engine/Mac lane plays QUIETER than the Bluetooth one. The mic is
     /// the Mac's own, so that speaker is inches away and the other is metres
     /// off: measured on the 2026-08-28 captures the Mac lane arrived 57 dB
     /// above the room's floor with the gate needing 14, and it is also the
-    /// sweep the user has their face next to. Spending that surplus on
+    /// lane the user has their face next to. Spending that surplus on
     /// loudness buys nothing and the probe is meant to be unobtrusive.
-    /// Raising the Bluetooth lane instead was tried and rejected — a
-    /// near-full-scale sweep is the "heavy static" complaint again.
     ///
     /// All of which holds only while the microphone is the Mac's own. A
     /// phone-driven run listens from the sofa instead, where the Mac's speaker
     /// has no head start to give away, so it passes `engineLaneScale: 1`.
     ///
     /// `shape` chooses between the two layouts — see ``ProbeShape``. The
-    /// default is the Mac wizard's own simultaneous pair.
+    /// default is the Mac wizard's own per-fan-out pair.
     func stageProbe(amplitude: Double = AlignmentTickInjector.probeAmplitude,
-                    shape: ProbeShape = .simultaneous,
+                    shape: ProbeShape = .perFanout,
                     engineLaneScale: Double = AlignmentTickInjector.probeEngineLaneScale) {
-        func samples(_ design: SyncProbe.SweepDesign, _ amplitude: Double) -> [Int32] {
+        let lane = SyncProbe.lane(sampleRate: sampleRate)
+        func samples(_ amplitude: Double) -> [Int32] {
             let scale = amplitude * 32_767.0
-            return SyncProbe.samples(design).map { Int32((Double($0) * scale).rounded()) }
+            return lane.map { Int32((Double($0) * scale).rounded()) }
         }
-        let downSweep = SyncProbe.SweepDesign.downSweep(sampleRate: sampleRate,
-                                                        duration: Self.probeSweepSeconds)
-        // The −6 dB belongs to the LANE, not to the sweep: it is there because
-        // the microphone is inches from the Mac's own speaker. The same DOWN
-        // sweep played through a Bluetooth speaker metres away needs the full
-        // amplitude every other Bluetooth lane gets.
-        let downNear = samples(downSweep, amplitude * engineLaneScale)
-        let downFar = samples(downSweep, amplitude)
-        let up = samples(.upSweep(sampleRate: sampleRate, duration: Self.probeSweepSeconds),
-                         amplitude)
+        // The engine lane's scale belongs to the LANE, not to the sound: it is
+        // there because the microphone is inches from the Mac's own speaker.
+        // The same lane played through a Bluetooth speaker metres away needs
+        // the full amplitude every other Bluetooth lane gets.
+        let near = samples(amplitude * engineLaneScale)
+        let far = samples(amplitude)
+        let spacing = Int(SyncProbe.Layout.laneSpacingSeconds * sampleRate)
         switch shape {
-        case .simultaneous:
-            probeEngineLanes = [ProbeLane(samples: downNear, offsetFrames: 0, window: 0)]
-            probeBTLanes = [ProbeLane(samples: up, offsetFrames: 0, window: 0)]
-        case .staggered(let referenceOnEngine):
-            let stagger = Int(Self.probeStaggerSeconds * sampleRate)
-            // The DOWN sweep is the reference's. A Bluetooth reference hears it
-            // through the Bluetooth lane's own window; a Mac one hears it
-            // through the engine lane, and the Bluetooth copy then reaches
-            // nobody — the fan-out hands every Bluetooth sink the sweep-free
+        case .perFanout:
+            probeEngineLanes = [ProbeLane(samples: near, offsetFrames: spacing, window: 1)]
+            probeBTLanes = [ProbeLane(samples: far, offsetFrames: 0, window: 0)]
+        case .routedWindows(let referenceOnEngine):
+            // The second lane is the reference's. A Bluetooth reference hears
+            // it through the Bluetooth fan-out's own window; a Mac one hears it
+            // through the engine fan-out, and the Bluetooth copy then reaches
+            // nobody — the fan-out hands every Bluetooth sink the probe-free
             // variant for a window no Bluetooth device owns.
             probeEngineLanes = referenceOnEngine
-                ? [ProbeLane(samples: downNear, offsetFrames: 0, window: 0)] : []
+                ? [ProbeLane(samples: near, offsetFrames: spacing, window: 1)] : []
             probeBTLanes = [
-                ProbeLane(samples: downFar, offsetFrames: 0, window: 0),
-                ProbeLane(samples: up, offsetFrames: stagger, window: 1),
+                ProbeLane(samples: far, offsetFrames: 0, window: 0),
+                ProbeLane(samples: far, offsetFrames: spacing, window: 1),
             ]
         }
     }
 
     /// How much quieter the engine/Mac probe lane plays than the Bluetooth
-    /// one — −6 dB. See ``stageProbe(amplitude:shape:engineLaneScale:)``.
-    static let probeEngineLaneScale = 0.5
+    /// one: ×0.25, so the Mac lane peaks near −27 dBFS against the Bluetooth
+    /// lane's −15 dBFS, the bench's real-level condition. See
+    /// ``stageProbe(amplitude:shape:engineLaneScale:)``.
+    static let probeEngineLaneScale = 0.25
 
-    /// The peak amplitude both sweeps play at. Set for the room, not for the
-    /// measurement: the correlator's confidence gate is a ratio of peak to
+    /// The peak amplitude the probe lanes play at. Set for the room, not for
+    /// the measurement: the correlator's confidence gate is a ratio of peak to
     /// sidelobe, so it holds far below the level someone in the room will sit
-    /// through, and a sweep loud enough to startle is the "heavy static"
+    /// through, and a probe loud enough to startle is the "heavy static"
     /// complaint again. Settled by ear on a real speaker; 0.25 is the fallback
     /// if the far lane comes back thin.
     static let probeAmplitude = 0.175
 
     var probeStaged: Bool { !probeBTLanes.isEmpty }
 
-    /// Start the sweeps ``probeLeadSeconds`` from here. Idempotent, like
-    /// ``armTicks()``. Inert until ``stageProbe(amplitude:shape:)`` has run.
-    func armProbe() {
+    /// The arm-time level lift (×1, ×2 or ×4) — set from the room the mic
+    /// heard during the lead-in. See ``armProbe(levelStepDB:)``.
+    private var probeLevelScale: Int32 = 1
+
+    /// Start the probe ``probeLeadSeconds`` from here, `levelStepDB` (0, 6 or
+    /// 12) louder than staged. Idempotent, like ``armTicks()``. Inert until
+    /// ``stageProbe(amplitude:shape:engineLaneScale:)`` has run.
+    func armProbe(levelStepDB: Int) {
         guard probeStaged, probeEpochFrame < 0 else { return }
+        probeLevelScale = levelStepDB >= 12 ? 4 : levelStepDB >= 6 ? 2 : 1
         probeEpochFrame = cursor + Int(Self.probeLeadSeconds * sampleRate)
     }
 
     private var probeArmed: Bool { probeEpochFrame >= 0 }
 
-    /// One past the last frame ANY staged lane occupies. The staggered shape's
-    /// lanes end at different instants, so completion is the LAST of them.
+    /// One past the last frame ANY staged lane occupies. The two lanes end
+    /// at different instants, so completion is the LAST of them.
     private var probeEndFrames: Int {
         (probeEngineLanes + probeBTLanes)
             .map { $0.offsetFrames + $0.samples.count }
@@ -511,7 +489,7 @@ final class AlignmentTickInjector: @unchecked Sendable {
         probeArmed && cursor >= probeEpochFrame + probeEndFrames
     }
 
-    /// True exactly once, on the first call after the staged sweeps have been
+    /// True exactly once, on the first call after the staged lanes have been
     /// fully rendered into the feed — the pacer's cue to arm the tick grid and
     /// tell the mic session the air will soon carry the last of the probe.
     func takeProbeCompletion() -> Bool {
@@ -590,22 +568,22 @@ final class AlignmentTickInjector: @unchecked Sendable {
     /// `endFrame` bound the additive path uses — that, and dropping the
     /// injector, are the two ways the music comes back.
     func mix(into pcm: inout Data) {
-        cursor += render(into: &pcm, from: cursor, tick: brightTick, probe: nil,
+        cursor += render(into: &pcm, from: cursor, tick: highTick, probe: nil,
                          bed: !bed.isEmpty, replace: replacesProgram)
     }
 
-    /// The wizard pacer's two-variant render. `pcm` comes back with the LOW
-    /// KNOCK and no bed — the Mac's own speakers never power-gate, so there is
+    /// The wizard pacer's two-variant render. `pcm` comes back with the LOWER
+    /// NOTE and no bed — the Mac's own speakers never power-gate, so there is
     /// nothing there for a keep-alive to hold awake and the run stays clean
     /// whatever ``Config/keepAliveKind`` is set to (live report, 2026-08-22:
     /// the noise bed reached the Mac as plain hiss). `bedded` carries the
-    /// BRIGHT CLICK plus the keep-alive, for the Bluetooth fan-out whose amps
+    /// HIGHER NOTE plus the keep-alive, for the Bluetooth fan-out whose amps
     /// it exists for.
     ///
     /// Two timbres, ONE beat grid: both renders read the same `start` and the
     /// same `tickEpochFrame`, so the onsets are sample-identical and the
     /// question stays "which side first", never "which side louder" — the
-    /// loudness half of that is ``brightLoudnessScale``. ONE cursor
+    /// loudness half of that is ``highTickLoudnessScale``. ONE cursor
     /// advance covers both, which keeps the pacer the single consumer of this
     /// injector's lock-free cursor.
     func mixWizardVariants(into pcm: inout Data, bedded: inout Data) {
@@ -614,17 +592,17 @@ final class AlignmentTickInjector: @unchecked Sendable {
     }
 
     /// The three-variant render. `pcm` and `bedded` are exactly as above;
-    /// `beddedNoProbe` is the Bluetooth variant with NO sweep in it, for the
+    /// `beddedNoProbe` is the Bluetooth variant with NO probe in it, for the
     /// sinks that do not own the window currently playing — produced only for
-    /// the staggered shape (``ProbeShape/staggered(referenceOnEngine:)``),
-    /// which is the only one that routes sweeps per device. Every other run
+    /// the routed shape (``ProbeShape/routedWindows(referenceOnEngine:)``),
+    /// which is the only one that routes lanes per device. Every other run
     /// leaves it empty and pays for nothing.
     ///
-    /// Returns the window whose sweep frames landed in `bedded` during this
-    /// block, or `nil` when no sweep did — the fan-out's cue for which sink
-    /// gets `bedded` and which get `beddedNoProbe`. At most one window can
-    /// appear in a block: the pacer's blocks are milliseconds and the two
-    /// staggered windows are a second of silence apart.
+    /// Returns the window whose probe frames landed in `bedded` during this
+    /// block, or `nil` when none did — the fan-out's cue for which sink gets
+    /// `bedded` and which get `beddedNoProbe`. At most one window can appear
+    /// in a block: the pacer's blocks are milliseconds and the two windows are
+    /// half a second of silence apart.
     @discardableResult
     func mixWizardVariants(into pcm: inout Data, bedded: inout Data,
                            beddedNoProbe: inout Data) -> Int? {
@@ -633,8 +611,8 @@ final class AlignmentTickInjector: @unchecked Sendable {
         // debug swap (see the type's header) a two-line hook rather than a
         // second render path. The loudness match travels WITH the timbre — it
         // is a property of the sound, not of the side playing it.
-        let engineTick = Self.swapsWizardTimbres ? brightTick : lowTick
-        let bluetoothTick = Self.swapsWizardTimbres ? lowTick : brightTick
+        let engineTick = Self.swapsWizardTimbres ? highTick : lowTick
+        let bluetoothTick = Self.swapsWizardTimbres ? lowTick : highTick
         // Rendered from the SAME source block, not from the finished tick-only
         // one: the two variants carry different ticks, so one cannot be built
         // by adding to the other.
@@ -656,11 +634,11 @@ final class AlignmentTickInjector: @unchecked Sendable {
         return probeArmed ? window(overlapping: start, frames: frames) : nil
     }
 
-    /// True once a staggered probe is staged — the shape whose sweeps are
-    /// routed per device, and the only one that needs the sweep-free variant.
+    /// True once a routed probe is staged — the shape whose lanes are routed
+    /// per device, and the only one that needs the probe-free variant.
     private var splitsProbeByWindow: Bool { probeBTLanes.count > 1 }
 
-    /// Which Bluetooth lane's sweep frames fall inside `[start, start+frames)`.
+    /// Which Bluetooth lane's probe frames fall inside `[start, start+frames)`.
     private func window(overlapping start: Int, frames: Int) -> Int? {
         for lane in probeBTLanes {
             let laneStart = probeEpochFrame + lane.offsetFrames
@@ -696,7 +674,7 @@ final class AlignmentTickInjector: @unchecked Sendable {
                     for lane in probeLanes {
                         let probeIndex = position - probeEpochFrame - lane.offsetFrames
                         if probeIndex >= 0, probeIndex < lane.samples.count {
-                            add += lane.samples[probeIndex]
+                            add += lane.samples[probeIndex] * probeLevelScale
                         }
                     }
                 }
@@ -719,14 +697,15 @@ final class AlignmentTickInjector: @unchecked Sendable {
     // MARK: Test seams (pure reads)
 
     var test_beatFrames: Int { beatFrames }
-    var test_tickFrameCount: Int { brightTick.count }
+    var test_tickFrameCount: Int { highTick.count }
     var test_maxTicks: Int { maxTicks }
     var test_isArmed: Bool { tickEpochFrame >= 0 }
     var test_bedFrameCount: Int { bed.count }
     var test_probeArmed: Bool { probeArmed }
     var test_probeEpochFrame: Int { probeEpochFrame }
-    /// Frames of sweep on the Bluetooth side's FIRST lane — the whole lane in
-    /// the simultaneous shape, the DOWN window in the staggered one.
+    var test_probeLevelScale: Int32 { probeLevelScale }
+    /// Frames of the Bluetooth side's FIRST lane — the target window in
+    /// either shape.
     var test_probeLaneFrames: Int { probeBTLanes.first?.samples.count ?? 0 }
     /// One past the last frame any staged lane occupies (see ``probeEndFrames``).
     var test_probeEndFrames: Int { probeEndFrames }

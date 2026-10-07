@@ -35,7 +35,9 @@ import AudioutSharedUI
 ///   one link per saved scene this speaker belongs to. A link NAVIGATES: it
 ///   reports out through ``onSelectGroup`` and the host opens that scene's
 ///   editor. Selecting is NOT activating. "Password" ("Saved" and a Forget
-///   button) joins them only while the backend has a password on file.
+///   button) joins them only while the backend has a password on file; for a
+///   receiver that shows a code the first time only the row reads "Pairing" and stands for the
+///   stored pairing key.
 ///
 /// The whole column SCROLLS (`../AGENTS.md`): the Equalizer's Advanced fold
 /// exceeds the screen's height budget, and the surface frame is FIXED for
@@ -71,7 +73,7 @@ public final class DeviceDetailViewController: NSViewController {
     private let subtitleStack = NSStackView()
     /// The identity band: the icon well, then the name over its caption.
     private lazy var header = PageHeaderView(icon: iconWell, title: nameLabel,
-                                             caption: subtitleStack, leadingInset: .railFree)
+                                             caption: subtitleStack)
     /// The page's instrument, wrapping the shared editor — a `.well`
     /// (recessed), not a `.card`, so it still reads sunk where `raised`
     /// flattens to the pane's own ground in light (2026-09-04). Every box on
@@ -97,7 +99,7 @@ public final class DeviceDetailViewController: NSViewController {
         caption: "The volume slider moves the speaker\u{2019}s own volume.",
         accessory: btVolumeCheckbox)
     /// The outlined list: "Control speaker volume", "Show in Mixer",
-    /// "Scenes" and "Password".
+    /// "Scenes" and "Password" (or "Pairing").
     private let listWell = GroupedSectionView()
     private let listStack = NSStackView()
     /// The scene links, stacked one per line on the "Scenes" row's trailing
@@ -707,6 +709,7 @@ public final class DeviceDetailViewController: NSViewController {
 
         showInMixerRow.isHidden = isThisMac
         passwordRow.isHidden = shownDevice?.hasStoredPassword != true
+        passwordRow.titleLabel.stringValue = shownDevice?.airPlayAccess == .onScreenCode ? "Pairing" : "Password"
         listWell.rows = listStack.arrangedSubviews.filter { !$0.isHidden }
 
         for pin in [listBelowEQWell, listBelowForget, listBelowHeader,
@@ -1077,8 +1080,7 @@ public final class DeviceDetailViewController: NSViewController {
 
     /// HEADER PARITY hooks — compared with `GroupEditorViewController`'s
     /// identically-named hooks by `GroupsHeaderParityTests`, which require the
-    /// same header band height and the same vertical centring; the icon's x
-    /// differs from the editor's by design on this page.
+    /// same header band height, vertical centring and horizontal inset.
 
     /// The icon well's laid-out frame in the pane's own coordinates.
     public var test_headerIconFrame: NSRect { header.frames(in: view).icon }
@@ -1187,6 +1189,8 @@ public final class DeviceDetailViewController: NSViewController {
     public var test_keptNoteText: String? { keptNoteLabel.isHidden ? nil : keptNoteLabel.stringValue }
     /// The Password row's caption, `nil` while the row is hidden.
     public var test_passwordCaption: String? { passwordRow.isHidden ? nil : passwordRow.caption }
+    /// The Password row's title ("Password" or "Pairing").
+    public var test_passwordRowTitle: String { passwordRow.titleLabel.stringValue }
     /// Invoke the Password row's "Forget" as a click would.
     public func test_tapForgetPassword() { forgetPasswordTapped() }
 

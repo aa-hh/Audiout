@@ -568,6 +568,8 @@ extension DeviceRowView {
     public var test_removalUndoAXLabel: String? { removalUndoButton.accessibilityLabel() }
     public var test_switchOfferOffered: Bool { switchOfferOffered && !switchOfferButton.isHidden }
     public var test_enterPasswordOffered: Bool { enterPasswordOffered && !enterPasswordButton.isHidden }
+    /// The waiting link's drawn title ("Enter Password…" or "Enter Code…").
+    public var test_enterPasswordLinkTitle: String { enterPasswordButton.attributedTitle.string }
     /// Drive "Enter Password…" through real AppKit action dispatch.
     public func test_clickEnterPassword() { enterPasswordButton.performClick(nil) }
 

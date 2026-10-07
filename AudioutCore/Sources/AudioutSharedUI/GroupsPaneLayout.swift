@@ -13,11 +13,8 @@ import AppKit
 /// carry hand-copied literals and drifted ~22.5 pt apart (design review
 /// 2026-07-25). Every shared number now lives HERE, once, and
 /// `GroupsHeaderParityTests` asserts the panes' real laid-out frames still
-/// share the band height and the vertical centring. The icon's x is NOT
-/// shared: the speaker and Main Audio pages start it at
-/// `railFreeContentLeadingInset`, lined up with their Equalizer heading, while
-/// the scene editor keeps `contentLeadingInset` for its rail, so the icon
-/// moves sideways on a switch between a scene and a speaker by design.
+/// share the band height and the vertical centring. Every page starts its
+/// icon at `railFreeContentLeadingInset`, lined up with its headings.
 ///
 /// What is deliberately NOT shared: the SKIN. A group's title is an editable
 /// field (filled, bordered, pencil); a device's is a bare label. That
@@ -37,11 +34,6 @@ public enum GroupsPaneLayout {
     /// Gap from the top of the content pane's SAFE AREA (the window is
     /// `.fullSizeContentView`, so the pane runs under the title bar) to the
     /// header section's top border.
-    ///
-    /// This also has to clear the group editor's top action band
-    /// (`GroupEditorViewController.topBandTopInset`), which overlaps the icon
-    /// well horizontally — it cannot be lowered without revisiting that
-    /// constant too.
     public static let columnTopInset: CGFloat = 28
 
     /// Caps the form column's width so the sections don't stretch
@@ -63,19 +55,11 @@ public enum GroupsPaneLayout {
     /// here, so there is nothing to gain by doing so.
     public static let contentMaxWidth: CGFloat = SurfaceLayout.contentPaneWidth - columnInset - columnTrailingInset
 
-    /// Where content STARTS inside the column: the group editor's left spine
-    /// gutter (Warm Signal v4 §Call-1), which the membership rail owns
-    /// exclusively. Derived from the popover's own grid so the two surfaces
-    /// can't drift.
-    ///
-    /// The scene editor's header and rail, and the Speakers page's header, use this.
+    /// Where a membership row's glyph starts and the card's dividers begin.
+    /// Derived from the popover's grid so the node and glyph spacing agree.
     public static let contentLeadingInset: CGFloat = PopoverColumnGrid.firstElementLeading(indented: false)
 
-    /// Where content starts inside a section that has NO rail running past it.
-    /// The speaker page and the Main Audio page start everything here, their
-    /// header icon included, so the icon lines up with the "Equalizer" heading;
-    /// the scene editor and the Speakers page start their header icon at
-    /// `contentLeadingInset` instead.
+    /// Where every page starts its header icon, headings and list text.
     public static let railFreeContentLeadingInset: CGFloat = PopoverColumnGrid.leadingInset
     /// Where content STOPS inside a section, measured from the section's
     /// trailing edge.

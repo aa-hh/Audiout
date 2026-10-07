@@ -320,9 +320,10 @@ public final class CompanionCommandDispatcher {
 
         case .reportAlignmentMeasurement(let targetID, let offsetMs, let confidence):
             // A measurement turns straight into a persisted latency, so the
-            // numbers are bounded here rather than trusted. `maxOffsetMs` is
-            // generous over any staggered run's own separation; a value past
-            // it is a peer bug or a hostile one, never a room.
+            // numbers are bounded here rather than trusted. The phone's
+            // offset arrives with the lane spacing already removed, so
+            // `maxOffsetMs` only has to be generous over a real room; a value
+            // past it is a peer bug or a hostile one, never a room.
             // Signed on purpose: the phone reports what its microphone heard,
             // and a speaker that arrives AHEAD of the reference is a real
             // result, not a bad one.

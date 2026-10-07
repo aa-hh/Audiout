@@ -430,15 +430,6 @@ import CoreAudio
         return (backend, engine, discovery, bt, sink, capture)
     }
 
-    /// The manual clock performs jobs on the caller's thread, and the hold and
-    /// settle bodies must run on `stateQueue`, so each job hops to the queue the
-    /// backend named.
-    fileprivate func queueHopping(_ manual: ManualDelayClock) -> NativeBackend.DelayClock {
-        { delaySeconds, queue, work in
-            manual.clock(delaySeconds, queue, DispatchWorkItem { queue.async(execute: work) })
-        }
-    }
-
     fileprivate func waitFor(timeout: TimeInterval? = nil,
                      sourceLocation: SourceLocation = #_sourceLocation,
                      _ cond: @escaping () -> Bool) {
@@ -1130,7 +1121,7 @@ import CoreAudio
     /// both gate on.
     @Test func selectingAvailableBTBreathesUntilTheSinkRenders() {
         let clock = ManualDelayClock()
-        let (backend, _, _, bt, sink, _) = makeBackend(delayClock: queueHopping(clock))
+        let (backend, _, _, bt, sink, _) = makeBackend(delayClock: clock.queueHoppingClock)
         defer { backend.stop() }
         backend.start()
         bt.fire([btMove])
@@ -1195,7 +1186,7 @@ import CoreAudio
     @Test func sinkThatNeverRendersDegradesToFailedWithinTheCap() {
         let clock = ManualDelayClock()
         let (backend, _, _, bt, _, _) = makeBackend(btRenderStartTimeout: 0.2,
-                                                    delayClock: queueHopping(clock),
+                                                    delayClock: clock.queueHoppingClock,
                                                     uptimeClock: clock.uptime)
         defer { backend.stop() }
         backend.start()
@@ -1225,7 +1216,7 @@ import CoreAudio
     @Test func speakerSelectedWithNothingPlayingLandsConnectedNotFailed() {
         let clock = ManualDelayClock()
         let (backend, _, _, bt, sink, _) = makeBackend(btRenderStartTimeout: 0.2,
-                                                       delayClock: queueHopping(clock),
+                                                       delayClock: clock.queueHoppingClock,
                                                        uptimeClock: clock.uptime)
         defer { backend.stop() }
         sink.anchoredUIDs = []            // a silent Mac: no sink ever anchors
@@ -1607,7 +1598,7 @@ import CoreAudio
         let perAppCapture = workingPerAppCapture(bundleIDs: ["com.foo"])
         let clock = ManualDelayClock()
         let (backend, _, _, bt, sink, _) = makeBackend(injectedPerAppCapture: perAppCapture,
-                                                       delayClock: queueHopping(clock))
+                                                       delayClock: clock.queueHoppingClock)
         defer { backend.stop() }
         backend.start()
         bt.fire([btMove])

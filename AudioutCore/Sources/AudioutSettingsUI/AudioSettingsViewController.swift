@@ -79,12 +79,12 @@ public struct WakeAudioRestoreModel {
 ///
 /// **Audio buffer (Advanced):** an `NSPopUpButton` of bare millisecond values
 /// (numeric by design — named presets with embedded delay text don't survive
-/// localization; the one localizable sentence is the caption). Changing the
+/// localization; the explanation lives in the live help). Changing the
 /// popup applies immediately (V1, PLAN-ONE-SURFACE-032.md — no CTA): while
 /// streaming, the apply tears down and re-establishes the live sessions (a
 /// ~3–5 s audible gap), so a spinner + "Reconnecting speakers…" replaces the
 /// idle state; when idle it applies silently. Either way, completion shows a
-/// transient confirmation, and the hint line says up front that changing the
+/// transient confirmation, and the live help says up front that changing the
 /// value reconnects active speakers. When `AIRPLAY_START_BUFFER_MS` overrode
 /// the setting at launch the control renders disabled with a note instead.
 @MainActor
@@ -143,9 +143,6 @@ public final class AudioSettingsViewController: NSViewController, SettingsReadou
     private let advancedContent = NSStackView()
     // The page's 8 pt spacing after the header is the gap above the card.
     private lazy var advancedClip = FoldingClipView(content: advancedContent)
-    // The page's column stack, kept because `republishFittedHeight()` measures
-    // IT rather than the root (see that method's trap note).
-    private weak var columnStack: NSStackView?
     // Apply-in-progress feedback for the buffer popup (V1: applies immediately,
     // no CTA — see `applyBuffer(_:)`).
     private let applySpinner = NSProgressIndicator()
@@ -220,7 +217,6 @@ public final class AudioSettingsViewController: NSViewController, SettingsReadou
             column?.setCustomSpacing(16, after: settingsCard.container)
             column?.setCustomSpacing(8, after: advancedHeader)
         }
-        columnStack = column
         view = page
         rebuildList()
     }
@@ -298,10 +294,11 @@ public final class AudioSettingsViewController: NSViewController, SettingsReadou
     /// be dragging a control on a screen that is only now appearing.
     public func reloadFromSettings() {
         defer { onReadoutChanged?() }
-        // Nothing to reconcile before the controls exist — and the load path
-        // reads `settings` itself, so an unloaded pane comes up current. This
-        // must NOT force the view: building a whole pane to answer a reconcile
-        // is the opposite of what the caller asked for.
+        if let latency, latency.envOverrideMs == nil {
+            appliedMs = settings.startBufferMs
+        }
+        // Reconcile the sidebar's source without constructing an unseen pane.
+        // Controls read the retained value when they are first built.
         guard isViewLoaded else { return }
 
         let percent = settings.connectVolume
@@ -318,8 +315,7 @@ public final class AudioSettingsViewController: NSViewController, SettingsReadou
         // The buffer popup is disabled outright under an env override, and
         // then its one item is that override — nothing to reconcile.
         guard let latency, latency.envOverrideMs == nil else { return }
-        let ms = settings.startBufferMs
-        appliedMs = ms
+        let ms = appliedMs
         if let index = latency.optionsMs.firstIndex(of: ms) {
             bufferPopup.selectItem(at: index)
         }
@@ -346,7 +342,7 @@ public final class AudioSettingsViewController: NSViewController, SettingsReadou
         }
     }
 
-    /// The wake-restore row, its caption the live hint. Applies immediately
+    /// The wake-restore row, its help describing the current choice. Applies immediately
     /// on change (persist + push to backend) — no CTA, since un-gating the
     /// Mac's own output on a future wake has no live-session cost now.
     private func makeWakeRestoreRow() -> ListRowView? {
@@ -390,7 +386,7 @@ public final class AudioSettingsViewController: NSViewController, SettingsReadou
 
     // MARK: Bluetooth keep-alive (roadmap 085 ticket 04)
 
-    /// The Bluetooth keep-alive row, its caption the live hint.
+    /// The Bluetooth keep-alive row, its help describing the current choice.
     /// Persist-only — the value lands on the next Bluetooth enable.
     private func makeBTKeepAliveRow() -> ListRowView {
         btKeepAlivePopup.translatesAutoresizingMaskIntoConstraints = false
@@ -512,33 +508,12 @@ public final class AudioSettingsViewController: NSViewController, SettingsReadou
                 && !HeadlessRuntime.isActive)
     }
 
-    /// The fold runs on `FoldAnimator`'s clock through `FoldingClipView`; this
-    /// pane republishes its `preferredContentSize` from every tick
-    /// (`foldAnimatorDidTick`) and once more at the end state.
+    /// Lay out the native clip on each fold tick and after its final state.
     private func setAdvancedExpanded(_ expanded: Bool, animated: Bool) {
         if !expanded { SettingsPane.dismissHelp(in: advancedContent) }
         advancedClip.setExpanded(expanded, animated: animated, follower: self) { [weak self] in
-            self?.republishFittedHeight()
+            self?.view.layoutSubtreeIfNeeded()
         }
-    }
-
-    /// Republish `preferredContentSize` from the COLUMN's fitting height, not
-    /// the root's — the host resizes via its KVO on `preferredContentSize`
-    /// (see the sizing-trap note on the root). Measuring the root is a trap
-    /// that only bites on SHRINK: `layoutSubtreeIfNeeded` on a windowless
-    /// top-level view installs a priority-501 height constraint pinning the
-    /// root to its current frame (probed 2026-08-12: `hcons=[501:h==424]` on
-    /// the root while the column solved to 214), and `fittingSize`'s pull-to-
-    /// zero at priority 50 loses to it — so the pane grows fine but keeps its
-    /// dead space forever after a disclosure collapse or list removal. The
-    /// column has no such lock; its fitting height + the standard insets IS
-    /// the pane's honest height.
-    private func republishFittedHeight() {
-        view.layoutSubtreeIfNeeded()
-        guard let columnStack else { return }
-        preferredContentSize = NSSize(
-            width: SettingsForm.contentWidth,
-            height: columnStack.fittingSize.height + SettingsForm.verticalPadding * 2)
     }
 
     /// The rows INSIDE the Advanced disclosure.
@@ -556,8 +531,7 @@ public final class AudioSettingsViewController: NSViewController, SettingsReadou
             for option in latency.optionsMs {
                 bufferPopup.addItem(withTitle: Self.msLabel(option))
             }
-            appliedMs = latency.initialMs
-            if let index = latency.optionsMs.firstIndex(of: latency.initialMs) {
+            if let index = latency.optionsMs.firstIndex(of: appliedMs) {
                 bufferPopup.selectItem(at: index)
             }
             bufferPopup.target = self
@@ -569,7 +543,7 @@ public final class AudioSettingsViewController: NSViewController, SettingsReadou
         // the selected value applies.
         let row = ListRowView(title: "Audio buffer",
                               accessory: bufferPopup,
-                              helpText: Self.bufferHintLine(latency.envOverrideMs ?? latency.initialMs))
+                              helpText: Self.bufferHintLine(latency.envOverrideMs ?? appliedMs))
         bufferRow = row
         views.append(row)
 
@@ -717,7 +691,7 @@ public final class AudioSettingsViewController: NSViewController, SettingsReadou
             row.removeFromSuperview()
         }
         card.box.rows = card.stack.arrangedSubviews.filter { !$0.isHidden }
-        republishFittedHeight()
+        view.layoutSubtreeIfNeeded()
     }
 
     // MARK: List
@@ -748,7 +722,7 @@ public final class AudioSettingsViewController: NSViewController, SettingsReadou
         }
         card.box.rows = card.stack.arrangedSubviews.filter { !$0.isHidden }
 
-        republishFittedHeight()
+        view.layoutSubtreeIfNeeded()
         onReadoutChanged?()
     }
 
@@ -1024,8 +998,8 @@ public final class AudioSettingsViewController: NSViewController, SettingsReadou
         return latency != nil && !advancedContent.isHidden
     }
 
-    /// Drive the disclosure triangle, running the same expand/collapse +
-    /// republish a click would, then settle the fold — the runloop time a
+    /// Drive the disclosure triangle through the same expand/collapse and
+    /// layout as a click, then settle the fold — the runloop time a
     /// headless test cannot spend (`FoldAnimator.test_settleNow`).
     public func test_toggleAdvanced() {
         _ = view
@@ -1044,8 +1018,6 @@ public final class AudioSettingsViewController: NSViewController, SettingsReadou
 }
 
 extension AudioSettingsViewController: FoldFollowing {
-    /// Per-tick follow: the pane's published size IS the clip's current
-    /// height, frame by frame — the surface applies it instantly during a
-    /// fold (`AppSurfaceController`, `FoldAnimator.shared.isFolding`).
-    public func foldAnimatorDidTick() { republishFittedHeight() }
+    /// Keep the pane laid out as the clip height changes.
+    public func foldAnimatorDidTick() { view.layoutSubtreeIfNeeded() }
 }

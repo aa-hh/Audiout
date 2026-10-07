@@ -70,6 +70,13 @@ public struct DeviceDescriptor: Sendable {
     /// Served to the vendored sender as its per-device config password; nil = none.
     public var password: String?
 
+    /// The HomeKit pairing key this sender earned from the receiver (the
+    /// `pair_setup_result` hex string `AirPlayEngine.authorize` returns). The feed
+    /// writes it to the vendored device's `auth_key` on every appearing feed, a
+    /// value replacing the one held and nil clearing it, so the receiver's pairing
+    /// lives in the app's store and nowhere else.
+    public var authKey: String?
+
     public init(
         name: String,
         hostname: String = "",
@@ -78,7 +85,8 @@ public struct DeviceDescriptor: Sendable {
         port: Int,
         kind: ServiceKind = .airplay,
         txtRecord: [String: String],
-        password: String? = nil
+        password: String? = nil,
+        authKey: String? = nil
     ) {
         self.name = name
         self.hostname = hostname
@@ -88,6 +96,7 @@ public struct DeviceDescriptor: Sendable {
         self.kind = kind
         self.txtRecord = txtRecord
         self.password = password
+        self.authKey = authKey
     }
 
     /// The device id parsed from the `deviceid` TXT key, if present/valid.

@@ -103,16 +103,29 @@ import AudioutSharedUI
                 "the buffer hint states the applied value, got \"\(pane.test_bufferHint)\"")
     }
 
-    /// The reconcile is for a pane that is on screen. One that has never been
-    /// loaded has no controls to move, and its load path reads `settings`
-    /// itself — so the call must be a silent no-op, never a forced view build.
-    @Test func reloadingAnUnloadedPaneDoesNotBuildIt() {
+    // Reconciling only loaded controls or resetting the applied buffer on first mount turns this red.
+    @Test func reloadingAnUnloadedPaneDoesNotBuildIt() throws {
         let settings = AppSettings(defaults: isolatedDefaults)
-        let pane = makePane(settings: settings)
+        settings.startBufferMs = 1000
+        let pane = makePane(settings: settings, initialMs: 1500)
+        let provider: any SettingsReadoutProviding = pane
+        #expect(provider.readoutLines == ["No apps stay on this Mac", "Buffer 1500 ms"],
+                "before a reload the readout reports the backend's initial buffer")
+        let chosenIndex = try #require(AppSettings.startBufferOptionsMs.firstIndex { $0 != 1000 && $0 != 1500 })
+        let chosen = AppSettings.startBufferOptionsMs[chosenIndex]
+        settings.startBufferMs = chosen
 
         pane.reloadFromSettings()
 
         #expect(!pane.isViewLoaded, "a reconcile must not construct the pane it was asked to refresh")
+        #expect(provider.readoutLines == ["No apps stay on this Mac", "Buffer \(chosen) ms"])
+
+        let titles = pane.test_latencyOptionTitles
+        #expect(pane.test_bufferSelectedTitle == titles[chosenIndex])
+        #expect(pane.test_bufferHint.contains(titles[chosenIndex]),
+                "the first-mounted help must describe the reconciled buffer")
+        #expect(provider.readoutLines == ["No apps stay on this Mac", "Buffer \(chosen) ms"],
+                "constructing the popup must not reset the sidebar value")
     }
 
     /// Under an env override the popup carries the override as its one item and

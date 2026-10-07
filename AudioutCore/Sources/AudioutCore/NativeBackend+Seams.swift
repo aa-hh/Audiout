@@ -42,6 +42,9 @@ protocol EngineControlling: Sendable {
     /// third stream. Default is the historical stop-then-re-add pair.
     func rebindOutput(_ id: OutputID, toStreamId streamId: UInt32) async throws
     func removeOutput(_ id: OutputID) async throws
+    /// Run pair-setup with the code `id`'s receiver shows and return the pairing
+    /// key it earns (see ``AirPlayEngine/AirPlayEngine/authorize(_:pin:)``).
+    func authorize(_ id: OutputID, pin: String) async throws -> String
     /// Re-anchor `id`'s receiver timeline in place via RTSP FLUSH, WITHOUT tearing
     /// down the session (F-REANCHOR — see ``AirPlayEngine/AirPlayEngine/flushOutput(_:)``).
     /// Returns `true` only if a flush was ACTUALLY issued; `false` means the vendored
@@ -128,6 +131,12 @@ extension EngineControlling {
     /// behavior, because every caller falls back to the plain add path on `nil`.
     func boundStreamId(for id: OutputID) async -> UInt32? { nil }
 
+    /// Default: no pairing earned, so a conformer that predates on-screen codes
+    /// compiles unchanged. ``EngineAdapter`` overrides this with the real call.
+    func authorize(_ id: OutputID, pin: String) async throws -> String {
+        throw AirPlayEngineError.sessionFailed
+    }
+
     /// Default: the historical stop-then-re-add pair (T7). The tolerated
     /// `removeOutput` throw matches the old inline `.rebind` op — the device may
     /// not currently be added, and a no-op teardown is fine; only the add half
@@ -197,6 +206,9 @@ struct EngineAdapter: EngineControlling {
         try await engine.rebindOutput(id, toStreamId: streamId)
     }
     func removeOutput(_ id: OutputID) async throws { try await engine.removeOutput(id) }
+    func authorize(_ id: OutputID, pin: String) async throws -> String {
+        try await engine.authorize(id, pin: pin)
+    }
     func flushOutput(_ id: OutputID) async throws -> Bool { try await engine.flushOutput(id) }
     func setVolume(_ id: OutputID, _ volume: Double) async throws { try await engine.setVolume(id, volume) }
     func setStartBufferMs(_ ms: Int) async { await engine.setStartBufferMs(ms) }
@@ -307,22 +319,25 @@ public protocol CaptureControlling: AnyObject, Sendable {
     /// Same default-no-op posture as ``armWizardTicks()``.
     func setWizardTempo(bpm: Double)
 
-    /// Stage the mic-probe calibration sweeps on the live wizard feed
+    /// Stage the mic-probe calibration lanes on the live wizard feed
     /// (roadmap 064): the arm gate then starts them in place of the first
-    /// tick. Default no-op; ``NativeCaptureCoordinator`` provides the real one.
-    func stageWizardMicProbe(onStarted: @escaping () -> Void,
+    /// tick, at the level step `levelStepDB` answers when asked at arm time.
+    /// Default no-op; ``NativeCaptureCoordinator`` provides the real one.
+    func stageWizardMicProbe(levelStepDB: @escaping () -> Int,
+                             onStarted: @escaping () -> Void,
                              onFinished: @escaping () -> Void)
 
-    /// Stage the calibration sweeps for a PHONE-driven run: same feed and arm
-    /// gate as ``stageWizardMicProbe(onStarted:onFinished:)``, but optionally
-    /// staggered across two Bluetooth speakers (`downWindowUID`/`upWindowUID`
-    /// name which sink hears which sweep), and never handing over to the
-    /// by-ear tick grid when it completes. Default no-op;
-    /// ``NativeCaptureCoordinator`` provides the real one.
-    func stageCompanionMicProbe(staggered: Bool,
+    /// Stage the calibration lanes for a PHONE-driven run: same feed and arm
+    /// gate as ``stageWizardMicProbe(levelStepDB:onStarted:onFinished:)``, but
+    /// optionally routed across two Bluetooth speakers
+    /// (`targetWindowUID`/`referenceWindowUID` name which sink hears which
+    /// lane), and never handing over to the by-ear tick grid when it
+    /// completes. Default no-op; ``NativeCaptureCoordinator`` provides the
+    /// real one.
+    func stageCompanionMicProbe(routed: Bool,
                                 referenceOnEngine: Bool,
-                                downWindowUID: String?,
-                                upWindowUID: String?,
+                                targetWindowUID: String?,
+                                referenceWindowUID: String?,
                                 onStarted: @escaping () -> Void,
                                 onFinished: @escaping () -> Void)
 
@@ -415,13 +430,14 @@ extension CaptureControlling {
     func armWizardTicks() {}
     func setWizardTempo(bpm: Double) {}
     /// Default no-op (roadmap 064 mic probe), same posture.
-    func stageWizardMicProbe(onStarted: @escaping () -> Void,
+    func stageWizardMicProbe(levelStepDB: @escaping () -> Int,
+                             onStarted: @escaping () -> Void,
                              onFinished: @escaping () -> Void) {}
     /// Default no-op (the phone-driven sync-calibration run), same posture.
-    func stageCompanionMicProbe(staggered: Bool,
+    func stageCompanionMicProbe(routed: Bool,
                                 referenceOnEngine: Bool,
-                                downWindowUID: String?,
-                                upWindowUID: String?,
+                                targetWindowUID: String?,
+                                referenceWindowUID: String?,
                                 onStarted: @escaping () -> Void,
                                 onFinished: @escaping () -> Void) {}
     /// Default no-op (per-device + Main Out EQ), same posture.
@@ -505,6 +521,9 @@ protocol BTSyncedSinkControlling: SyncedLocalPCMSink {
     /// The UIDs whose per-device sink is emitting real audio right now — the
     /// signal a Bluetooth row's `.connecting` hold ends on.
     func renderingDeviceUIDs() -> Set<String>
+    /// One on-demand `bt_sink_health` line per sink in `uids`. Default no-op
+    /// so lifecycle-only spies compile unchanged.
+    func logHealthNow(at: String, uids: Set<String>)
     /// The UIDs handed any captured audio at all — how the hold's ceiling tells
     /// a silent Mac (idle, promote to `.connected`) from a device that got
     /// audio and never played it (a real failure). `nil` means "can't tell",
@@ -570,6 +589,7 @@ extension BTSyncedSinkControlling {
     func lastAudibleRenderNanos() -> Int64? { nil }
     func setTrimMs(_ ms: Double, forDeviceUID uid: String) {}
     func reanchorIfTrimClamped(forDeviceUID uid: String) {}
+    func logHealthNow(at: String, uids: Set<String>) {}
     func reanchorAll(cause: String) {}
     func setOffsetMs(_ ms: Int, forDeviceUID uid: String) {}
     func setBTOnlyBufferMs(_ ms: Int) {}

@@ -4,19 +4,14 @@ import AppKit
 import AudioutCore
 import AudioutSharedUI
 
-/// What the user selected in the sidebar or the scene cards. Drives which
-/// content pane the screen shows (the card overview; a group → its editor; a
-/// device → its detail pane; nothing → auto-select).
+/// The target selected on Scenes or Speakers: a scene, speaker or overview page.
 public enum SidebarSelection: Equatable, Sendable {
     /// The whole mix — everything the app sends to speakers. One row, no id:
     /// it is a destination, not a device.
     case mainOut
-    /// The saved-scene card overview. No sidebar row: the sidebar lists
-    /// speakers only.
-    case groupsOverview
     case speakersOverview
-    /// One saved group's editor. No sidebar row of its own: the overview's
-    /// cards set it.
+    /// A scene selected on the Scenes tab. The Speakers sidebar has no row
+    /// for it and clears its highlight when asked to select one.
     case group(id: String)
     case device(id: String)
 }
@@ -112,7 +107,7 @@ public final class SidebarViewController: NSViewController {
 
     private let outlineView = SidebarOutlineView()
     private let scrollView = NSScrollView()
-    private let addButton = NSButton()
+    private lazy var addButton = Self.makeAddSceneButton(target: self, action: #selector(addTapped(_:)))
 
     /// Top-level nodes: the System Audio title over Main Audio, the Speakers
     /// title over Overview, then the speaker groups. Empty until the first
@@ -248,29 +243,6 @@ public final class SidebarViewController: NSViewController {
         // bottom-left "New Folder" button: borderless, system font, glyph +
         // title. Plain: new empty group. With devices selected: new group
         // from that selection.
-        addButton.translatesAutoresizingMaskIntoConstraints = false
-        addButton.bezelStyle = .recessed
-        addButton.isBordered = false
-        // The plus sits on the speaker rows' icon column and the title on
-        // their name column: a 26 × 22 image with the glyph centred at x 11.
-        let plus = DeviceIcon.image("plus", pointSize: 13, weight: .medium)
-        let plusImage = NSImage(size: NSSize(width: 26, height: 22), flipped: false) { rect in
-            guard let plus else { return false }
-            let size = plus.size
-            plus.draw(in: NSRect(x: 11 - size.width / 2, y: (rect.height - size.height) / 2,
-                                 width: size.width, height: size.height))
-            return true
-        }
-        plusImage.isTemplate = true
-        addButton.image = plusImage
-        addButton.imagePosition = .imageLeading
-        addButton.title = "Add scene"
-        addButton.font = Tokens.Font.body
-        addButton.target = self
-        addButton.action = #selector(addTapped(_:))
-        addButton.toolTip = "Add scene"
-        addButton.setButtonType(.momentaryPushIn)
-
         let addBar = NSView()
         addBar.translatesAutoresizingMaskIntoConstraints = false
         addBar.addSubview(addButton)
@@ -300,6 +272,31 @@ public final class SidebarViewController: NSViewController {
     }
 
     // MARK: Add / new-group actions
+
+    static func makeAddSceneButton(target: AnyObject, action: Selector) -> NSButton {
+        let button = NSButton()
+        button.translatesAutoresizingMaskIntoConstraints = false
+        button.bezelStyle = .recessed
+        button.isBordered = false
+        let plus = DeviceIcon.image("plus", pointSize: 13, weight: .medium)
+        let plusImage = NSImage(size: NSSize(width: 26, height: 22), flipped: false) { rect in
+            guard let plus else { return false }
+            let size = plus.size
+            plus.draw(in: NSRect(x: 11 - size.width / 2, y: (rect.height - size.height) / 2,
+                                 width: size.width, height: size.height))
+            return true
+        }
+        plusImage.isTemplate = true
+        button.image = plusImage
+        button.imagePosition = .imageLeading
+        button.title = "Add scene"
+        button.font = Tokens.Font.body
+        button.target = target
+        button.action = action
+        button.toolTip = "Add scene"
+        button.setButtonType(.momentaryPushIn)
+        return button
+    }
 
     /// The device ids currently selected in the source list (multi-selection),
     /// in row order. Groups/headers are excluded — only device rows count as
@@ -1395,7 +1392,7 @@ final class PlateRowView: SidebarRowView {
 /// works while the sidebar's tree is in the key window and nowhere else, and
 /// no UI can advertise the shortcut. Upgrade path: a real "Add scene…" item in
 /// the app's main menu, which would both widen the scope and print the ⌘N.
-private final class SidebarContainerView: NSView {
+final class SidebarContainerView: NSView {
 
     /// Runs the add path (`SidebarViewController.performAdd`). Set at build time.
     var onCommandN: (() -> Void)?
@@ -1419,15 +1416,21 @@ private final class SidebarContainerView: NSView {
 }
 
 /// The sidebar's outline view. Command-Delete (key code 51 with exactly
-/// Command held) asks `onCommandDelete` first; every other key, and a
-/// Command-Delete it turns down, goes to the outline view as usual.
-private final class SidebarOutlineView: NSOutlineView {
+/// Command held) asks `onCommandDelete` first. An optional Return callback
+/// supports scene renaming; unhandled keys go to the outline view as usual.
+final class SidebarOutlineView: NSOutlineView {
     var onCommandDelete: (() -> Bool)?
+    var onReturn: (() -> Bool)?
 
     override func keyDown(with event: NSEvent) {
         if event.keyCode == 51,
            event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,
            onCommandDelete?() == true {
+            return
+        }
+        if event.keyCode == 36,
+           event.modifierFlags.intersection(.deviceIndependentFlagsMask).isEmpty,
+           onReturn?() == true {
             return
         }
         super.keyDown(with: event)
@@ -1596,7 +1599,7 @@ extension SidebarViewController: NSOutlineViewDelegate {
 
     /// A header's row: its text sits 3 pt above the row's bottom, so the
     /// height sets the gap above it.
-    private static let headerHeight: CGFloat = 19
+    static let headerHeight: CGFloat = 19
     /// The "Speakers" title's row, 12 pt taller to part it from the Main
     /// Audio plate above.
     private static let speakersTitleHeight: CGFloat = 31

@@ -44,8 +44,8 @@ public final class IconLabelCellView: NSTableCellView {
 
     /// The caption under the name. The name's spoken label already says it,
     /// so it is not an accessibility element of its own.
-    public let statusLabel: NSTextField = {
-        let label = NSTextField(labelWithString: "")
+    public let statusLabel: RollingCountLabel = {
+        let label = RollingCountLabel(labelWithString: "")
         label.font = Tokens.Font.caption
         label.textColor = Tokens.Color.labelCool
         label.isHidden = true

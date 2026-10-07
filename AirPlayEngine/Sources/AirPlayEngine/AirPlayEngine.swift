@@ -733,6 +733,16 @@ public actor AirPlayEngine {
                 }
             }
         }
+
+        // The pairing key lives in the app's store; the device holds whatever the
+        // latest feed carried (a value replaces, nil clears).
+        if appearing, let id = descriptor.parsedID, let device = outputs_device_get(id.rawValue) {
+            let held = device.pointee.auth_key.map { String(cString: $0) }
+            if held != descriptor.authKey {
+                free(device.pointee.auth_key)
+                device.pointee.auth_key = descriptor.authKey.map { strdupC($0) }
+            }
+        }
     }
 
     // MARK: - Device-state stream (T-ENG-STATESTREAM-1)
@@ -934,6 +944,37 @@ public actor AirPlayEngine {
     /// dispatcher drops it. Primitive for `NativeBackend.removeOutput`.
     public func removeOutput(_ id: OutputID) async throws {
         try await unbind(id, serialize: true)
+    }
+
+    /// Run `pair-setup` with the code the receiver is showing. Returns the pairing
+    /// key to store and feed back as `DeviceDescriptor.authKey`. Throws
+    /// `.passwordRequired` when the receiver refuses the code (a back-off or
+    /// max-tries answer reads the same, the vendored handler only logs them), and
+    /// `.sessionFailed` when no key was earned.
+    public func authorize(_ id: OutputID, pin: String) async throws -> String {
+        try requireStarted()
+        guard knownOutputs[id] != nil else { throw AirPlayEngineError.unknownOutput(id) }
+
+        let terminal = try await startOp(id: id) { device, cbId in
+            pin.withCString { outputs_device_authorize(device, $0, cbId) }
+        }
+        switch terminal {
+        case .passwordRequired:
+            throw AirPlayEngineError.passwordRequired
+        case .stopped:
+            let read: () -> String? = {
+                guard let device = outputs_device_get(id.rawValue) else { return nil }
+                return device.pointee.auth_key.map { String(cString: $0) }
+            }
+            let key: String?
+            if issueOverride != nil { key = read() }
+            else if let t = engineThreadHolder.current { key = (try? await t.run(read)) ?? nil }
+            else { key = nil }
+            guard let key else { throw AirPlayEngineError.sessionFailed }
+            return key
+        default:
+            throw AirPlayEngineError.sessionFailed
+        }
     }
 
     private func unbind(_ id: OutputID, serialize: Bool) async throws {

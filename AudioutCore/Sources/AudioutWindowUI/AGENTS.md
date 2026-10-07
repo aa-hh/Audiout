@@ -2,35 +2,35 @@
 
 ## Purpose
 
-Configuration-only Speakers and Scenes content: no window, no backend.
+Speakers and Scenes configuration: no window or backend.
 
 ## Rules
 
-- Selection and scene editing configure; neither activates a scene or creates playback intent.
-- Speaker visibility is global and never changes membership, routing or saved intent; membership controls never set visibility.
-- The sidebar, scene editor and speaker pages share identity; remembered records stay outside backend collections and route pickers.
-- The sidebar shows reachability, never routing; its two groups are the visibility setting.
-- Unavailable members stay editable; unknown IDs stay Missing speaker, with no invented transport or playback.
-- Hidden hosts retain fresh snapshots; repaint only visible screens.
-- Every editor exit, keyboard included, uses the host's dismissal path.
-- Never let the sidebar collapse; nothing can restore it.
-- Panes fit the shared surface geometry; never widen the shell.
-- Gold means live audio; magenta, group identity; green, a reachable speaker. Stock sidebar chrome remains native.
+- Selection and editing never activate scenes or request playback.
+- Global visibility never changes membership, routing or saved intent; membership controls never set visibility.
+- Sidebars and pages share identity; remembered records never enter backend collections or route pickers.
+- Speakers sidebar groups express visibility; show reachability, never routing.
+- Unavailable members stay editable; unknown IDs remain Missing speaker, without invented transport or playback.
+- Keep hidden snapshots fresh; repaint only visible screens.
+- Neither sidebar may collapse; nothing restores it.
+- Panes fit shared surface geometry; never widen the shell.
+- Gold means live audio, and membership on the scene page; magenta, group identity; green, a reachable speaker. Stock sidebar chrome remains native.
 - Custom-drawn: `IconPickerViewController` cells, `EqualizerMarkView`.
-- Report persistence failures in plain words; never swallow them.
-- Preserve keyboard focus seeding in visible hosts; headless absence is not dead code.
+- Report persistence failures plainly; never swallow them.
+- Preserve visible-host keyboard focus; headless absence is not dead code.
 - Never regenerate the unreproducible macOS 27 device-detail goldens.
 - Device and group glyphs share `DeviceIcon` resolution.
-- Earlier decisions and traps: [AGENTS-HISTORY.md](AGENTS-HISTORY.md).
+- History: [AGENTS-HISTORY.md](AGENTS-HISTORY.md).
 
 ## Map
 
 - `MixerWindowController` → Scenes and Speakers navigation.
 - `ContentPaneHostViewController` → Swapped content and footer.
 - `SpeakersPageViewController` → Overview; shimmer: AppKit has none.
-- `GroupsOverviewViewController` → Saved-scene cards.
-- `SidebarViewController` → Speaker list.
-- `GroupEditorViewController` → Scene editor.
+- `SidebarViewController` → Speaker list; cells and add button also serve Scenes.
+- `ScenesSidebarViewController` → Scene list beside the scene page.
+- `GroupEditorViewController` → Scene page: rename, membership, delete.
+- `ScenesEmptyPageViewController` → Empty page with one add action.
 - `GroupCreationSheetController` → Scene creation.
 - `DeviceDetailViewController` → Speaker page.
 - `MainOutDetailViewController` → Main Audio configuration.

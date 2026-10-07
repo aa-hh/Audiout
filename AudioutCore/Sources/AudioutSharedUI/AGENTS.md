@@ -22,7 +22,7 @@ Shared AppKit rows, pages and chrome. Hosts own models, routing and persistence;
 - `Tokens.Color.shadow` draws flat clipped bands, never `NSShadow`.
 - The invitation QR stays black-on-white for cameras.
 - "Removed, Undo" and "Play here" offers are host state; rows draw, never decide.
-- Custom-drawn: `GroupedSectionView` and `DeviceIconWellView`.
+- Custom-drawn: `GroupedSectionView` (Equalizer recesses, no light outlines), `DeviceIconWellView`, and `RollingCountLabel`; AppKit has no rolling-count control.
 - History: [AGENTS-HISTORY.md](AGENTS-HISTORY.md).
 
 ## Map
@@ -34,11 +34,8 @@ Shared AppKit rows, pages and chrome. Hosts own models, routing and persistence;
 - `ProminentButton` → Gold call-to-action.
 - `RemoteInviteView` → Companion invitation.
 - `RowVolumeFader` → Row fader.
-- `HoverTracker` → Hover tracking.
-- `RuleView` → Divider.
-- `TintedNoteBackgroundView` → Note ground.
-- `TextLinkButton` → Link.
 - `FoldingClipView` → Disclosure fold.
 - `PageHeaderView` → Page header.
 - `ListRowView` → Outlined-list row.
 - `GroupedSectionView` → Card or well box.
+- `RollingCountLabel` → Rolling count.

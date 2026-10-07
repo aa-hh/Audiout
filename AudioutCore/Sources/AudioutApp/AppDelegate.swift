@@ -1322,9 +1322,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // ONLY when the backend can actually stage it, so a mock/dev run can
         // never reach the mic-permission prompt from the wizard.
         if backend is BTOutputControlling {
-            popoverController.onStageBTMicProbe = { [weak self] started, finished in
+            popoverController.onStageBTMicProbe = { [weak self] levelStepDB, started, finished in
                 (self?.backend as? BTOutputControlling)?
-                    .stageBTMicProbe(onStarted: started, onFinished: finished)
+                    .stageBTMicProbe(levelStepDB: levelStepDB,
+                                     onStarted: started, onFinished: finished)
             }
         }
         // Roadmap 056 Part A: a Bluetooth run measures the speaker's own
@@ -1439,11 +1440,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // The Scenes and Speakers content skips its rebuild while hidden (B8) and has no
         // window of its own to ask about visibility any more, so the surface
         // tells it which screen the user is looking at.
-        // Escape in a group's editor steps back to the overview; the next
-        // Escape closes the surface.
-        surface.groupsCancelHandler = { [weak self] in
-            self?.mixerWindowController?.dismissEditor() ?? false
-        }
         // The screen published before this one; `nil` means the window was closed.
         var previousScreen: SurfaceScreen?
         surface.onVisibleScreenChange = { [weak self] screen in
@@ -1782,7 +1778,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 guard let self else { return }
                 self.licenseGateWindowController = nil
                 self.applyLicenseState()
-                // Same as `general.onLicenseChanged` below: a key entered at
+                // Same as `license.onLicenseChanged` below: a key entered at
                 // the gate registers the device now, not at the next launch.
                 LicenseCheckIn(settings: self.settings).checkInIfNeeded()
                 // A trial handed out by the gate has no key yet, and the launch
@@ -2419,7 +2415,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let selecting { mixerWindowController?.select(selecting) }
     }
 
-    /// The Scenes screen's content: the scene cards and editor.
+    /// The Scenes sidebar beside the scene page or empty page.
     @MainActor
     private func groupsScreenContent() -> NSViewController {
         builtMixerWindowController().scenesContentController
@@ -2711,7 +2707,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// explains it, and the update feed's authorization header (the server
     /// serves the appcast and the download only to a key). Called at launch,
     /// on every validator answer, on a popover open while limited, and whenever
-    /// the General pane commits a key. Idempotent by construction — every write
+    /// the License pane commits a key. Idempotent by construction — every write
     /// is a plain assignment of a computed value.
     ///
     /// A build with no licence server is the free build: no limit and no note,

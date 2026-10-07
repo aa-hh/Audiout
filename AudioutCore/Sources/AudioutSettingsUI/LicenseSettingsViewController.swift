@@ -40,10 +40,10 @@ public final class LicenseSettingsViewController: NSViewController, SettingsRead
     /// Whether this build has a licence server, and so a License section.
     public var isAvailable: Bool { settings.licenseServerURL != nil }
 
-    /// Fired at the end of every license status refresh — launch, and every
-    /// commit of the key field. The app layer re-reads ``AppSettings`` from it
-    /// (the unregistered note, the Sparkle authorization header); nil leaves
-    /// this pane's own display the only thing that moves.
+    /// Fired after a licence status change that the app layer must apply.
+    /// Display-only appearance refreshes do not notify. The app layer re-reads
+    /// ``AppSettings`` from it (the unregistered note, the Sparkle authorization
+    /// header); nil leaves this pane's own display the only thing that moves.
     public var onLicenseChanged: (() -> Void)?
 
     /// The transport ``LicenseValidator`` uses when this pane checks a

@@ -334,7 +334,7 @@ import CoreAudio
     /// ``NativeBackend/castAbsenceGrace``, and a reappearance inside it cancels.
     @Test func oneMissedBrowseKeepsTheCastRowAvailable() {
         let clock = ManualDelayClock()
-        let rig = makeBackend(castAbsenceGrace: 1, delayClock: hopToQueue(clock))
+        let rig = makeBackend(castAbsenceGrace: 1, delayClock: clock.queueHoppingClock)
         let id = Self.graceRecord.id
         rig.cast.fire([Self.graceRecord])
         waitFor { Self.device(rig.backend, id)?.isAvailable == true }
@@ -360,14 +360,6 @@ import CoreAudio
         waitFor { Self.device(rig.backend, id)?.isAvailable == false }
         #expect(Self.device(rig.backend, id)?.isAvailable == false)
         #expect(rig.backend.devices.filter { $0.id == id }.count == 1, "the row never vanishes")
-    }
-
-    /// The manual clock performs jobs on the caller's thread, but `expireCastAbsence`
-    /// must run on `stateQueue`, so each fired job re-enqueues the original work there.
-    private func hopToQueue(_ manual: ManualDelayClock) -> NativeBackend.DelayClock {
-        return { delay, queue, work in
-            manual.clock(delay, queue, DispatchWorkItem { queue.async(execute: work) })
-        }
     }
 
     // MARK: - CAST-OUT selection
@@ -740,6 +732,60 @@ import CoreAudio
         rig.backend.setOutputSet([Self.record.id])
         waitFor { rig.backend.localSinkReferenceDelayMs() == CastRoomDelay.defaultLeadMs }
         #expect(rig.capture.preDelayMs.allSatisfy { $0 == 0 }, "got \(rig.capture.preDelayMs)")
+    }
+
+    /// A Mac wizard run between a Bluetooth target and the Mac mutes a selected
+    /// Cast receiver and drops its term from the room delay, then restores
+    /// both. Turns red if the Cast term stays in the room during a Mac wizard
+    /// run or the Cast receiver is not muted and restored.
+    @Test func aMacWizardRunMutesTheCastReceiverAndDropsItsTerm() {
+        let rig = makeBackend(withBT: true)
+        rig.cast.fire([Self.record])
+        let btID = "C4-38-75-0E-BF-4A:output"
+        rig.bt.fire([BTDeviceSnapshot(id: btID, name: "Move 2", isConnected: true)])
+        waitFor { Self.device(rig.backend, btID) != nil && Self.device(rig.backend, Self.record.id) != nil }
+
+        rig.backend.setOutputSet([Self.record.id, btID])
+        waitFor { rig.backend.localSinkReferenceDelayMs() == CastRoomDelay.defaultLeadMs }
+        rig.backend.setVolume(50, for: Self.record.id)
+        waitFor { rig.manager.levels.last.map { $0.level == 0.5 && $0.id == Self.record.id } ?? false }
+
+        rig.backend.setBTWizardTickActive(true, btTargetDeviceID: btID,
+                                          btReferenceDeviceID: NativeBackend.localDeviceID)
+        waitFor { rig.backend.localSinkReferenceDelayMs() == rig.backend.startBufferMs }
+        waitFor { rig.manager.levels.last.map { $0.level == 0 && $0.id == Self.record.id } ?? false }
+        #expect(rig.manager.levels.last?.level == 0)
+
+        rig.backend.setBTWizardTickActive(false, btTargetDeviceID: nil, btReferenceDeviceID: nil)
+        rig.backend.endBTWizardRun()
+        waitFor { rig.backend.localSinkReferenceDelayMs() == CastRoomDelay.defaultLeadMs }
+        waitFor { rig.manager.levels.last(where: { $0.id == Self.record.id })?.level == 0.5 }
+        #expect(rig.manager.levels.last(where: { $0.id == Self.record.id })?.level == 0.5)
+    }
+
+    /// A phone fine-tune between a Bluetooth speaker and an AirPlay speaker
+    /// drops the Cast term, so the AirPlay pre-delay must come back down with
+    /// the room. Turns red if the companion audition assigns its participants
+    /// without calling roomDelayChangedLocked.
+    @Test func aCompanionAuditionInACastRoomRePushesTheAirPlayPreDelay() async {
+        let rig = makeBackend(withBT: true)
+        let ap = Self.ap2Device()
+        rig.discovery.fire(.appeared(ap))
+        rig.cast.fire([Self.record])
+        let btID = "C4-38-75-0E-BF-4A:output"
+        rig.bt.fire([BTDeviceSnapshot(id: btID, name: "Move 2", isConnected: true)])
+        waitFor { Self.device(rig.backend, btID) != nil && Self.device(rig.backend, ap.id) != nil }
+
+        rig.backend.setOutputSet([Self.record.id, btID, ap.id])
+        let castPre = CastRoomDelay.defaultLeadMs - rig.backend.startBufferMs
+        waitFor { rig.capture.preDelayMs.last == castPre }
+
+        rig.backend.startCompanionAlignmentAudition(
+            targetID: btID, referenceID: ap.id, onReleased: {}, completion: { _ in })
+        // The rig never finishes preparing the clicks, so the audition's
+        // restore may already have put the line back: assert the drop itself.
+        await SuiteWait.until { rig.capture.preDelayMs.contains(0) }
+        #expect(rig.capture.preDelayMs.contains(0), "got \(rig.capture.preDelayMs)")
     }
 
     /// A room held back by a slow Bluetooth speaker alone (the Cast receiver

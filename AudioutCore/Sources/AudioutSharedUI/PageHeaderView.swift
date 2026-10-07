@@ -2,33 +2,23 @@
 
 import AppKit
 
-/// The band every Speakers and Scenes page opens with: the icon well, then
-/// the page's title over an optional caption, as one block centred on the
-/// well. The band draws nothing; it exists for its geometry, which
+/// The band every Speakers, Scenes and Settings page opens with: an icon slot,
+/// then the page's title over an optional caption, as one block centred on the
+/// icon. The slot accepts an icon well or Settings' bare glyph. The band draws
+/// nothing; it exists for its geometry, which
 /// `GroupsHeaderParityTests` holds level across the pages, because a sidebar
 /// switch between pages whose bands differ reads as the window twitching.
 ///
-/// The title slot takes any view: a plain label on the speaker, Main Audio
-/// and Overview pages, the editable rename field on the scene editor. That
-/// difference in skin is the message — see `GroupsPaneLayout`.
+/// The title slot takes any view: a plain label on speaker and Main Audio
+/// pages, or the editable rename field on the scene editor. That difference
+/// in skin is the message — see `GroupsPaneLayout`.
 public final class PageHeaderView: NSView {
-
-    /// Where the icon well starts inside the column.
-    public enum LeadingInset {
-        /// A page with no rail: the well lines up with the page's headings
-        /// and list text.
-        case railFree
-        /// The scene editor: the well sits past the gutter its membership
-        /// rail runs in, and the rail climbs to it.
-        case rail
-    }
 
     let icon: NSView
     /// The title over the caption.
     public let textStack = NSStackView()
 
-    public init(icon: NSView, title: NSView, caption: NSView? = nil,
-         leadingInset: LeadingInset) {
+    public init(icon: NSView, title: NSView, caption: NSView? = nil) {
         self.icon = icon
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false
@@ -42,9 +32,6 @@ public final class PageHeaderView: NSView {
         addSubview(icon)
         addSubview(textStack)
 
-        let inset = leadingInset == .rail
-            ? GroupsPaneLayout.contentLeadingInset
-            : GroupsPaneLayout.railFreeContentLeadingInset
         // A long title truncates inside the band and never widens the pane.
         // 999 rather than required so that on a pathologically narrow pane the
         // rename field's required minimum width wins, instead of AppKit
@@ -56,7 +43,9 @@ public final class PageHeaderView: NSView {
             icon.widthAnchor.constraint(equalToConstant: DeviceIconWellView.size),
             icon.heightAnchor.constraint(equalToConstant: DeviceIconWellView.size),
             icon.topAnchor.constraint(equalTo: topAnchor, constant: GroupsPaneLayout.headerPadding),
-            icon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: inset),
+            icon.leadingAnchor.constraint(
+                equalTo: leadingAnchor,
+                constant: GroupsPaneLayout.railFreeContentLeadingInset),
             bottomAnchor.constraint(equalTo: icon.bottomAnchor, constant: GroupsPaneLayout.headerPadding),
 
             textStack.leadingAnchor.constraint(equalTo: icon.trailingAnchor,

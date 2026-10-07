@@ -946,7 +946,7 @@ import AppKit
                                               store: GroupStore(directory: scratchDir),
                                               loadPersisted: false)
         // A saved group over a fully-discovered fleet, so the screen mounts a
-        // POPULATED content pane (the card overview it auto-selects) — the
+        // POPULATED content pane — the
         // state the live regression was reported in.
         _ = try groupController.createGroup(name: "Group 1",
                                             memberIDs: ["sonos-move", "office"])
@@ -1002,12 +1002,9 @@ import AppKit
                 "the content sits to the RIGHT of the sidebar — a real split, not a stack")
     }
 
-    /// Scenes and Speakers are two screens over one `MixerWindowController`:
-    /// the Speakers tab mounts the split view (sidebar beside the speaker
-    /// pages), the Scenes tab the scenes host with no sidebar, and ⌘3 reaches
-    /// Speakers.
-    // Turns red when the key map or the mount table misses the Speakers case, or hands either tab the other's content.
-    @Test func theSpeakersTabMountsTheSplitAndTheScenesTabTheScenesHost() throws {
+    /// Scenes and Speakers mount independent sidebar splits; ⌘3 reaches Speakers.
+    // Removing the Scenes sidebar, allowing it to collapse, or mounting the Speakers split in Scenes turns it red.
+    @Test func scenesAndSpeakersMountTheirOwnSidebarSplits() throws {
         let backend = MockBackend(fleet: .demoFleet, staggerDiscovery: false,
                                   emitsLevels: false, simulatesDropouts: false)
         let groups = MixerWindowController(
@@ -1044,9 +1041,16 @@ import AppKit
         let scenesScreen = try #require(surface.test_groupsScreen)
         #expect(surface.test_hostedContentViewController === scenesScreen)
         #expect(scenesScreen.content === groups.scenesContentController,
-                "the Scenes tab mounts the scenes host")
-        #expect(!(scenesScreen.content is NSSplitViewController),
-                "and the scenes host has no sidebar")
+                "the Scenes tab mounts its own content")
+        #expect(scenesScreen.content !== speakersScreen.content)
+        let scenesSplit = try #require(scenesScreen.content as? NSSplitViewController)
+        #expect(scenesSplit.splitViewItems.count == 2)
+        let sidebar = try #require(scenesSplit.splitViewItems.first)
+        #expect(sidebar.viewController === groups.test_scenesSidebar)
+        #expect(!sidebar.canCollapse)
+        #expect(sidebar.minimumThickness == 210)
+        #expect(sidebar.maximumThickness == 210)
+        #expect(scenesSplit.splitViewItems.last?.viewController is ContentPaneHostViewController)
     }
 
     // MARK: Visible-screen publishing (the Groups content's hidden-work gate)

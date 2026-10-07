@@ -42,7 +42,7 @@ enum SettingsPane {
             label.textColor = Tokens.Color.labelCool
             return label
         }
-        let header = PageHeaderView(icon: slot, title: helpButton.map { makeTitle(titleLabel, helpButton: $0) } ?? titleLabel, caption: captionLabel, leadingInset: .railFree)
+        let header = PageHeaderView(icon: slot, title: helpButton.map { makeTitle(titleLabel, helpButton: $0) } ?? titleLabel, caption: captionLabel)
         return (header, glyph)
     }
 

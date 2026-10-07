@@ -5,9 +5,10 @@ import AudioutSharedUI
 
 /// Tiny layout kit shared by the Settings panes so every pane reads as one
 /// consistent macOS form: a fixed-width column of `title · optional subtitle`
-/// rows with the control right-aligned, standard insets, and a fitting height
-/// the pane publishes as its own. Deliberately minimal — panes stay small, so
-/// this is a few helpers, not a framework.
+/// rows with the control right-aligned. `paneView` supplies form insets;
+/// `pageView` places the current Settings column on the shared rail-free lane.
+/// Deliberately minimal — panes stay small, so this is a few helpers, not a
+/// framework.
 enum SettingsForm {
 
     /// The pane column inside the one fixed surface frame:
@@ -18,11 +19,9 @@ enum SettingsForm {
     /// to pin them, still get a definite width.
     static let contentWidth: CGFloat = SurfaceLayout.contentPaneWidth
 
-    /// Standard left/right pane margin — shared by `paneView(rows:)` and
-    /// `AudioSettingsViewController.loadView()`'s equivalent hand-rolled
-    /// column, which used to retype this same number.
+    /// Standard left/right form margin used by `paneView(rows:)`.
     static let horizontalPadding: CGFloat = 20
-    /// Standard top/bottom pane margin — same sharing as `horizontalPadding`.
+    /// Standard top/bottom form margin used by `paneView(rows:)`.
     static let verticalPadding: CGFloat = 18
 
     /// A leading-aligned label.
@@ -54,9 +53,9 @@ enum SettingsForm {
     /// `RowContainerView.layout()` resolves their wrap width on every real
     /// layout pass; a full-bleed hint has no such container, so the value is
     /// pinned here instead — `contentWidth` minus the standard 20pt insets on
-    /// each side (`SettingsForm.paneView(rows:)`, and `AudioSettingsViewController
-    /// .loadView()`'s equivalent hand-rolled insets), the usable width every
-    /// full-bleed line in a pane actually gets.
+    /// each side of `SettingsForm.paneView(rows:)`. The current Settings column
+    /// uses `pageView(content:)`, whose rail-free constraints resolve the final
+    /// mounted width separately.
     static func hintLabel(_ string: String = "") -> NSTextField {
         let field = label(string)
         field.font = Tokens.Font.caption
@@ -165,8 +164,7 @@ enum SettingsForm {
     /// Stack `rows` into a pane view: `width` wide (the shared `contentWidth`
     /// column unless a caller outside the surface frame says otherwise — About
     /// keeps its own window's width), standard 20/18pt insets, full-width rows.
-    /// The caller assigns this to `NSViewController.view`; the width lets
-    /// `view.fittingSize.height` drive `preferredContentSize`.
+    /// The fixed width lets rows resolve wrapping and intrinsic height.
     static func paneView(rows: [NSView], width: CGFloat = contentWidth) -> NSView {
         let stack = NSStackView(views: rows)
         stack.orientation = .vertical

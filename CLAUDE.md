@@ -11,7 +11,7 @@ A native AppKit macOS app that sends system audio to multiple AirPlay 2 speakers
 | `AudioutCore/` | The whole app: Swift package with the core library, AppKit UI targets, and the shipping menu-bar executable |
 | `AirPlayEngine/` | Standalone Swift package: vendored AirPlay 2 C sender wrapped in a Swift actor. Separate package on purpose — licensing boundary, no app concepts inside |
 | _(external)_ `audiout-shared` | Two products: ProbeKit (the sync-probe DSP) and AudioutProtocol (the companion wire protocol), at https://github.com/aa-hh/audiout-shared. MIT, not GPL — the closed-source iPhone app links the same code, so it has one home outside both apps. Pinned by version in `AudioutCore/Package.swift` |
-| `dev/` | Offline dev tooling (fake speakers, dev scripts); `dev/notes/` holds research briefs |
+| `dev/` | Offline dev tooling (fake speakers, dev scripts); `dev/notes/` holds research briefs (local only, see below) |
 | `docs/SPEC.md` | Product spec — the source of truth for *what* to build |
 | `scripts/make-app.sh` | Wraps the executable into a signed `.app` bundle (required for TCC/process-tap) |
 | `scripts/make-staging.sh` | The staging environment: a standing `com.audiout.Audiout.staging` build pointed at the staging licence server |
@@ -22,6 +22,10 @@ A native AppKit macOS app that sends system audio to multiple AirPlay 2 speakers
 The iPhone companion now lives in its own private repository,
 `aa-hh/audiout-remote` — this repo no longer contains it. Build it from here
 with `scripts/ios.sh build --root <that checkout>`.
+
+## Internal docs stay off GitHub
+
+Handoffs (`HANDOFF*.md`, `HANDOVER*.md`), `.scratch/`, `dev/notes/`, `docs/plans/`, `docs/notes/`, `PROGRESS.md` and `docs-delta.md` are gitignored. They live on this Mac and never reach GitHub; the `tests` workflow fails any PR that leaves one tracked, `git add -f` included. Write them in the main checkout, not a worktree: an ignored file exists only in the checkout that wrote them and dies when its worktree is pruned. Links to them from tracked files resolve locally only. A checkout that had them deleted by merging the removal commit gets them back with `bash scripts/restore-internal-docs.sh`.
 
 ## First steps in a fresh clone
 
@@ -223,7 +227,7 @@ When writing or modifying license-server code that integrates with Paddle:
 
 ### Issue tracker
 
-Local markdown under `.scratch/<feature-slug>/`: `spec.md` plus one file per ticket in `issues/`. See `docs/agents/issue-tracker.md`.
+Local markdown under the main checkout's `.scratch/<feature-slug>/` (gitignored): `spec.md` plus one file per ticket in `issues/`. See `docs/agents/issue-tracker.md`.
 
 ### Triage labels
 

@@ -1215,8 +1215,8 @@ anything.
 
 The **Scenes sidebar** starts with the heading "Scenes" in
 `captionEmphasized` / `labelCool`. One `IconLabelCellView` row per scene
-follows in name order. A `GroupIdentityGlowView` sits behind every glyph,
-clipped to its row. The count-only caption uses `captionDigits` /
+follows in name order, using native source-list chrome without an identity
+glow. The count-only caption uses `captionDigits` /
 `labelCool` and rolls when membership changes. Selected rows use the stock
 selection pill and its text inks. With no scenes the sidebar reads
 "No scenes yet". It has the same Add scene bar and ⌘N action, a row menu
@@ -1336,10 +1336,14 @@ Three custom-drawn pieces, named in `AudioutWindowUI/AGENTS.md`.
   deliberate flip animates (timings under Speakers Sidebar and Pages).
 
 ### Group Row and Membership Rail (signature component)
-`GroupIdentityGlowView` sits behind every scene glyph in the Scenes sidebar,
-behind the scene page's icon well, and behind Main Audio's icon when its
-destination is a scene. It uses `partyRampDeep`; magenta marks identity,
-independent of playback.
+`GroupIdentityGlowView` sits behind the scene page's icon well and behind
+Main Audio's icon when its destination is a scene. It uses `partyRampDeep`;
+magenta marks identity, independent of playback.
+
+On `.warmPane`, each membership glyph sits over a 30 pt rounded-square
+tile with a 6 pt corner radius, `well` fill and a 1 pt `hairline` edge.
+The tile is centred on the existing 26 pt glyph box; glyph size, name
+alignment and row height stay the same. The creation sheet has no tile.
 
 The scene page's membership rows draw nodes without a rail. A member is a
 gold disc, a non-member is a `railDormant` ring, and an unavailable member
@@ -1433,10 +1437,12 @@ pressable.
 
 ## Motion
 
-Scene counts use `RollingCountLabel`: outgoing digits slide up and the new
+Scene counts use `RollingCountLabel`: the old count slides up and the new
 count slides in over `Tokens.Motion.collapseRevealDuration` (0.15 s), with
-the same quadratic ease as a fold. Both count strings hold the target at
-once. Reduce Motion and off-window updates settle instantly.
+the same quadratic ease as a fold. Both strings use native text-field cell
+drawing throughout, retaining the settled text inset, baseline and
+truncation. The stored string holds the target at once. Reduce Motion and
+off-window updates settle instantly.
 
 Every fold in the app runs on one clock, `FoldAnimator` (`AudioutSharedUI`):
 a Mixer card or subsection folding, a row revealed or removed through

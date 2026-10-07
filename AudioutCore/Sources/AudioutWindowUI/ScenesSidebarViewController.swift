@@ -141,19 +141,6 @@ public final class ScenesSidebarViewController: NSViewController {
         cell.nameLabel.setAccessibilityLabel("\(row.name), \(caption)")
         let rowView = cell.superview as? NSTableRowView
         cell.applySelectionInks(selected: rowView?.isSelected == true, emphasized: rowView?.isEmphasized == true)
-        if !cell.subviews.contains(where: { $0 is GroupIdentityGlowView }), let glyph = cell.imageView {
-            let glow = GroupIdentityGlowView()
-            glow.translatesAutoresizingMaskIntoConstraints = false
-            cell.addSubview(glow, positioned: .below, relativeTo: glyph)
-            NSLayoutConstraint.activate([
-                glow.widthAnchor.constraint(equalToConstant: GroupIdentityGlowView.side),
-                glow.heightAnchor.constraint(equalToConstant: GroupIdentityGlowView.side),
-                glow.centerXAnchor.constraint(equalTo: glyph.centerXAnchor),
-                glow.centerYAnchor.constraint(equalTo: glyph.centerYAnchor),
-            ])
-            cell.wantsLayer = true
-            cell.layer?.masksToBounds = true
-        }
     }
 
     public var selectedSceneID: String? {
@@ -242,12 +229,6 @@ public final class ScenesSidebarViewController: NSViewController {
         outlineView.keyDown(with: event)
     }
     public var test_hasPlaceholderRow: Bool { header.children.contains { if case .placeholder = $0.payload { return true }; return false } }
-    func test_glowIsBehindGlyph(id: String) -> Bool {
-        guard let cell = test_rowCell(id: id), let glyph = cell.imageView,
-              let glowIndex = cell.subviews.firstIndex(where: { $0 is GroupIdentityGlowView }),
-              let glyphIndex = cell.subviews.firstIndex(of: glyph) else { return false }
-        return glowIndex < glyphIndex
-    }
     func test_filteredSelection(ofRows rows: IndexSet) -> IndexSet {
         outlineView(outlineView, selectionIndexesForProposedSelection: rows)
     }

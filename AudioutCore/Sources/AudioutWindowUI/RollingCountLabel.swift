@@ -41,18 +41,26 @@ final class RollingCountLabel: NSTextField {
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        guard test_isRolling else { super.draw(dirtyRect); return }
+        guard test_isRolling,
+              let incomingCell = cell,
+              let outgoingCell = incomingCell.copy() as? NSCell else {
+            super.draw(dirtyRect)
+            return
+        }
+        outgoingCell.stringValue = outgoing
         NSGraphicsContext.saveGraphicsState()
         bounds.clip()
-        let rect = cell?.titleRect(forBounds: bounds) ?? bounds
-        let attributes: [NSAttributedString.Key: Any] = [
-            .font: font ?? NSFont.systemFont(ofSize: NSFont.systemFontSize),
-            .foregroundColor: textColor ?? NSColor.labelColor,
-        ]
-        NSAttributedString(string: outgoing, attributes: attributes).draw(at:
-            NSPoint(x: rect.minX, y: rect.minY - progress * bounds.height))
-        NSAttributedString(string: stringValue, attributes: attributes).draw(at:
-            NSPoint(x: rect.minX, y: rect.minY + (1 - progress) * bounds.height))
+        drawCell(outgoingCell, offset: -progress * bounds.height)
+        drawCell(incomingCell, offset: (1 - progress) * bounds.height)
+        NSGraphicsContext.restoreGraphicsState()
+    }
+
+    private func drawCell(_ cell: NSCell, offset: CGFloat) {
+        NSGraphicsContext.saveGraphicsState()
+        let translation = NSAffineTransform()
+        translation.translateX(by: 0, yBy: offset)
+        translation.concat()
+        cell.draw(withFrame: bounds, in: self)
         NSGraphicsContext.restoreGraphicsState()
     }
 
@@ -65,6 +73,11 @@ final class RollingCountLabel: NSTextField {
         progress = 1
         link?.invalidate()
         link = nil
+        needsDisplay = true
+    }
+
+    func test_setProgress(_ value: CGFloat) {
+        progress = value
         needsDisplay = true
     }
 }

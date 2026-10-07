@@ -338,8 +338,7 @@ public final class MembershipRowView: NSView {
 
     // MARK: The glyph tile (warm pane only)
 
-    /// A 24 pt recess under the member's glyph, the Mac reading of the iPhone
-    /// editor's member row (audiout-remote DESIGN.md:940-943). Drawn, not a
+    /// A 30 pt rounded-square recess under the member's glyph. Drawn, not a
     /// layer colour, so both tokens re-resolve per appearance flip and
     /// Increase Contrast on every paint.
     ///
@@ -347,10 +346,10 @@ public final class MembershipRowView: NSView {
     /// and `well` against the `raised` checklist card behind it is 1.292:1
     /// dark / 1.154:1 light, which is why the tile carries an edge at all.
     ///
-    /// The tile is centred INSIDE the 26 pt icon view's frame, 1 pt in on each
-    /// side, so nothing about the row's layout moves. The system sheet is
-    /// Apple's and gets no tile.
-    private static let glyphTileSide: CGFloat = 24
+    /// The tile extends 2 pt beyond the 26 pt icon view on each side, keeping
+    /// the glyph and name in place. The system sheet gets no tile.
+    private static let glyphTileSide: CGFloat = 30
+    private static let glyphTileCornerRadius: CGFloat = 6
 
     public override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
@@ -362,7 +361,7 @@ public final class MembershipRowView: NSView {
                           y: iconView.frame.midY - Self.glyphTileSide / 2,
                           width: Self.glyphTileSide,
                           height: Self.glyphTileSide).insetBy(dx: 0.5, dy: 0.5)
-        let radius = Tokens.Layout.Radius.control
+        let radius = Self.glyphTileCornerRadius
         let path = NSBezierPath(roundedRect: tile, xRadius: radius, yRadius: radius)
         Tokens.Color.well.setFill()
         path.fill()

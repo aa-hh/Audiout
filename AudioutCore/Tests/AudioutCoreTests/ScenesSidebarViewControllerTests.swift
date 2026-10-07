@@ -111,11 +111,12 @@ import Testing
         #expect(inks() == Array(repeating: Tokens.Color.label, count: 3))
     }
 
-    // Moving the identity glow above the glyph or removing it turns it red.
-    @Test func theIdentityGlowSitsBehindTheGlyph() {
+    // Adding a group identity glow to a native sidebar row turns it red.
+    @Test func sceneRowsHaveNoIdentityGlow() throws {
         let sidebar = makeSidebar()
         sidebar.reload(scenes: rows())
-        #expect(sidebar.test_glowIsBehindGlyph(id: "a"))
+        let cell = try #require(sidebar.test_rowCell(id: "a"))
+        #expect(!cell.subviews.contains { $0 is GroupIdentityGlowView })
     }
 
     // Rebuilding unchanged row IDs prevents their count animation and turns it red.

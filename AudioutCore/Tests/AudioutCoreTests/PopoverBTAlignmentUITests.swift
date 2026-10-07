@@ -1377,6 +1377,32 @@ import AppKit
         #expect(recorder.ticks == [true, false, true])
     }
 
+    /// Turns red if the host stops forwarding the probe's lane verdicts into
+    /// the session.
+    @Test func theProbesLaneVerdictsReachTheSession() async {
+        let (popover, _) = makePopover()
+        armListening(popover, granted: true)
+        let clock = ManualDelayClock()
+        popover.makeMicProbe = {
+            let probe = MicProbeSession(recorder: SilentRecorder(), timeout: 60, pipelineTail: 1.5)
+            probe.delayClock = clock.queueHoppingClock
+            return probe
+        }
+        popover.onStageBTMicProbe = { _, started, _ in started(0) }
+        showNote(popover)
+        popover.startBTAlignmentWizard(deviceID: "bt-a:output", door: .drawer)
+        popover.test_btWizardView()?.test_clickButton(titled: "Start")
+        await SuiteWait.until("the timeout and both lane checks to be scheduled") {
+            clock.pendingCount == 3
+        }
+        clock.advance(by: 10)
+        await SuiteWait.until("both lanes to reach the session") {
+            popover.test_btWizardSession()?.probeSpeakerVerdicts.count == 2
+        }
+        #expect(popover.test_btWizardSession()?.probeSpeakerVerdicts == [.target: false, .reference: false],
+                "a silent mic misses both speakers")
+    }
+
     /// Defect this would catch: "Try again" re-entered listening but the host
     /// never staged a second probe, so the screen listened to nothing. The
     /// counter proves the host re-stages, and the escalation ends at the

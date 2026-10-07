@@ -658,6 +658,39 @@ private func proposalValue(_ session: BTAlignmentWizardSession) -> Double? {
         session.cancel()
     }
 
+    /// Turns red if the lane-to-speaker mapping or the per-listen reset breaks.
+    @Test func aBluetoothTargetsLaneVerdictsLandOnItsSpeakers() {
+        let recorder = Recorder()
+        let session = recorder.makeSession(targetIsBluetooth: true)
+        var checked: [(BTAlignmentWizardSession.ProbeSpeaker, Bool)] = []
+        session.onProbeSpeakerChecked = { checked.append(($0, $1)) }
+        session.requestListening = { $0(true) }
+        session.start()
+        session.probeLaneChecked(.bluetooth, heard: true)
+        session.probeLaneChecked(.engine, heard: false)
+        #expect(checked.map(\.0) == [.target, .reference])
+        #expect(checked.map(\.1) == [true, false])
+        #expect(session.probeSpeakerVerdicts == [.target: true, .reference: false])
+
+        session.endListening()
+        #expect(session.screen == .listening(isRealignment: false), "the retry listen, got \(session.screen)")
+        #expect(session.probeSpeakerVerdicts.isEmpty, "the retry starts with no verdicts")
+        session.cancel()
+    }
+
+    /// Turns red if the mapping stops following the transport.
+    @Test func aMacTargetHearsItsBluetoothReferenceOnTheFirstLane() {
+        let recorder = Recorder()
+        let session = recorder.makeSession(reference: .init(id: "move", name: "Move 2", isBluetooth: true),
+                                           targetIsBluetooth: false)
+        session.requestListening = { $0(true) }
+        session.start()
+        session.probeLaneChecked(.bluetooth, heard: false)
+        session.probeLaneChecked(.engine, heard: true)
+        #expect(session.probeSpeakerVerdicts == [.reference: false, .target: true])
+        session.cancel()
+    }
+
     /// The permission prompt is modal and slow: closing the sheet under it
     /// once let the grant come back and start the ticks on a dead run.
     @Test func stopDuringThePermissionPromptNeverStartsTheRun() {

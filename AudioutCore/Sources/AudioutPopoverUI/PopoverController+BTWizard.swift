@@ -376,6 +376,11 @@ extension PopoverController {
         var appliedMsAtSweep = 0.0
         let probe = makeMicProbe()
         btWizardMicProbe = probe
+        probe.onLaneVerdict = { [weak self, weak probe] lane, heard in
+            guard let self, let probe, self.btWizardDeviceID == deviceID,
+                  self.btWizardMicProbe === probe else { return }
+            self.btWizardSession?.probeLaneChecked(lane, heard: heard)
+        }
         probe.start(stage: { levelStepDB, onStarted, onFinished in
             stageProbe(levelStepDB, { pipelineDelaySeconds in
                 DispatchQueue.main.async { [weak self] in

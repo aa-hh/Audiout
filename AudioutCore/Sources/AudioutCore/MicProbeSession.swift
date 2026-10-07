@@ -68,11 +68,15 @@ public protocol MicProbeRecording {
     /// arrived. The probe reads the room with it just before arming, to pick
     /// its level step.
     func recentRMSdBFS(seconds: Double, slices: Int) -> [Double]
+    /// Everything captured so far, mono, a prefix of what `stop()` will
+    /// return. The probe checks each lane with it while still recording.
+    func samplesSoFar() -> [Float]
 }
 
 public extension MicProbeRecording {
     var firstSampleHostNanos: Int64? { nil }
     func recentRMSdBFS(seconds: Double, slices: Int) -> [Double] { [] }
+    func samplesSoFar() -> [Float] { [] }
 }
 
 /// Captures the Mac's BUILT-IN microphone, pinned by device ID.
@@ -135,6 +139,11 @@ public final class BuiltInMicRecorder: MicProbeRecording {
             let sumSquares = samples[(end - count)..<end].reduce(0.0) { $0 + Double($1) * Double($1) }
             return 10 * log10(max(sumSquares / Double(count), 1e-20))
         }
+    }
+
+    public func samplesSoFar() -> [Float] {
+        lock.lock(); defer { lock.unlock() }
+        return samples
     }
 
     public func start() throws -> Double {
@@ -342,11 +351,37 @@ public final class MicProbeSession {
         min(pipelineTailCeilingSeconds, max(0, pipelineDelaySeconds) + margin)
     }
 
+    /// One of the probe's two lanes, named by the feed that plays it: the
+    /// Bluetooth fan-out's lane sounds first, the engine's one lane spacing
+    /// later.
+    public enum Lane: Equatable, Sendable { case bluetooth, engine }
+
+    /// Whether each lane's sound was recognised in the capture, checked as
+    /// soon as that lane can have reached the mic. Delivered on main, at most
+    /// once per lane per run, never after the completion. Advisory only: the
+    /// final measurement never reads it.
+    public var onLaneVerdict: ((_ lane: Lane, _ heard: Bool) -> Void)?
+
+    /// Schedules the tail, the timeout and the lane checks; tests pass a
+    /// manual clock.
+    var delayClock: NativeBackend.DelayClock = NativeBackend.dispatchDelayClock
+
+    /// Margin past a lane's end before it is checked. It only has to cover the
+    /// recorder's tap buffer (4 096 frames, ~85 ms) and the late main-hop
+    /// stamp of `startedAt`: the lane's own output delay is already inside
+    /// `pipelineDelaySeconds`. It must stay under the final tail
+    /// (`pipelineTailMarginSeconds`), or the second lane's check lands after
+    /// the run finished and its verdict is dropped.
+    static let laneCheckMarginSeconds = 0.5
+
     private let recorder: MicProbeRecording
     private let timeout: TimeInterval
     private let pipelineTail: TimeInterval
     private let now: () -> Int64
     private let queue = DispatchQueue(label: "mic-probe-session")
+    /// Runs the lane correlations off `queue`, one at a time, so `finish` never
+    /// waits on one and the verdicts come back in lane order.
+    private let laneCheckQueue = DispatchQueue(label: "mic-probe-lane-check", qos: .userInitiated)
     private var sampleRate: Double = 0
     /// Monotonic nanoseconds, the clock `firstSampleHostNanos` is on.
     private var startedAt: Int64?
@@ -357,6 +392,9 @@ public final class MicProbeSession {
     private var levelStepDB: Int?
     private var ambientDBFS: Double?
     private var pipelineDelaySeconds: TimeInterval?
+    /// The glide the lane checks search for, rendered on the first check.
+    /// `queue` only.
+    private var laneTemplate: [Float]?
 
     /// `now` is the monotonic clock `startedAt` and `recordingBegan` are stamped from; tests pin it.
     public init(recorder: MicProbeRecording = BuiltInMicRecorder(),
@@ -394,20 +432,34 @@ public final class MicProbeSession {
                 self?.queue.async { self?.levelStepDB = step; self?.ambientDBFS = rms }
                 return step
             }, { [weak self] delay in
-                self?.queue.async { self?.startedAt = self?.now(); self?.pipelineDelaySeconds = delay }
+                self?.queue.async {
+                    guard let self else { return }
+                    self.startedAt = self.now()
+                    self.pipelineDelaySeconds = delay
+                    for lane in [Lane.bluetooth, .engine] {
+                        let due = Self.probeLeadSeconds
+                            + Self.laneIndex(lane) * SyncProbe.Layout.laneSpacingSeconds
+                            + SyncProbe.Layout.laneSeconds
+                            + Self.listeningTailSeconds(pipelineDelaySeconds: delay,
+                                                        margin: Self.laneCheckMarginSeconds)
+                        self.delayClock(due, self.queue, DispatchWorkItem { [weak self] in
+                            self?.checkLane(lane)
+                        })
+                    }
+                }
             }, { [weak self] in
                 guard let self else { return }
                 self.queue.async {
                     let tail = Self.listeningTailSeconds(pipelineDelaySeconds: self.pipelineDelaySeconds ?? 0,
                                                          margin: self.pipelineTail)
-                    self.queue.asyncAfter(deadline: .now() + tail) {
+                    self.delayClock(tail, self.queue, DispatchWorkItem {
                         self.finish(analyze: true)
-                    }
+                    })
                 }
             })
-            queue.asyncAfter(deadline: .now() + timeout) { [weak self] in
+            delayClock(timeout, queue, DispatchWorkItem { [weak self] in
                 self?.finish(analyze: true)
-            }
+            })
         }
     }
 
@@ -415,6 +467,62 @@ public final class MicProbeSession {
     /// completion still fires, with nil.
     public func cancel() {
         queue.async { self.finish(analyze: false) }
+    }
+
+    /// Lanes start this many lane spacings after the probe's own start.
+    private static func laneIndex(_ lane: Lane) -> Double { lane == .bluetooth ? 0 : 1 }
+
+    /// `queue` only. Searches the capture so far for one lane's glide, inside
+    /// the stretch that lane can occupy: from the probe lead (less the same
+    /// 0.25 s slack `measure` keeps) to the lane's end plus the room delay and
+    /// `laneCheckMarginSeconds`. A plain matched filter with no ambient
+    /// weighting — advisory only. The correlation runs on `laneCheckQueue`, so
+    /// `finish` never waits on it; one that comes back after the run finished
+    /// is dropped.
+    private func checkLane(_ lane: Lane) {
+        guard !finished else { return }
+        let snapshot = recorder.samplesSoFar()
+        let template = laneTemplate ?? SyncProbe.samples(.probe(sampleRate: sampleRate))
+        laneTemplate = template
+        var window = ArraySlice<Float>()
+        if let seconds = startedSeconds() {
+            func index(_ s: Double) -> Int { min(max(0, Int(s * sampleRate)), snapshot.count) }
+            let start = seconds + Self.probeLeadSeconds
+                + Self.laneIndex(lane) * SyncProbe.Layout.laneSpacingSeconds - 0.25
+            let end = start + 0.25 + SyncProbe.Layout.laneSeconds
+                + Self.listeningTailSeconds(pipelineDelaySeconds: pipelineDelaySeconds ?? 0,
+                                            margin: Self.laneCheckMarginSeconds)
+            let from = index(start), to = index(end)
+            if to > from { window = snapshot[from..<to] }
+        }
+        let windowSeconds = Double(window.count) / sampleRate
+        guard window.count >= template.count else {
+            reportLane(lane, confidence: nil, windowSeconds: windowSeconds)
+            return
+        }
+        let recording = Array(window)
+        let rate = sampleRate
+        laneCheckQueue.async { [weak self] in
+            let arrival = SyncProbeCorrelator(sampleRate: rate)
+                .arrival(of: template, in: recording, ambientNoise: nil)
+            self?.queue.async {
+                self?.reportLane(lane, confidence: arrival?.peakToSidelobe, windowSeconds: windowSeconds)
+            }
+        }
+    }
+
+    /// `queue` only. Heard means an arrival at the confidence the final
+    /// measurement demands of each lane.
+    private func reportLane(_ lane: Lane, confidence: Double?, windowSeconds: Double) {
+        guard !finished else { return }
+        let heard = (confidence ?? 0) >= Self.minConfidence
+        Telemetry.log(.localPlayback, "mic_probe_lane_checked", [
+            "lane": lane == .bluetooth ? "bluetooth" : "engine",
+            "heard": heard ? "1" : "0",
+            "confidence": confidence.map { String(format: "%.1f", $0) } ?? "-",
+            "windowSeconds": String(format: "%.1f", windowSeconds),
+        ])
+        DispatchQueue.main.async { self.onLaneVerdict?(lane, heard) }
     }
 
     /// `queue` only. Idempotent.

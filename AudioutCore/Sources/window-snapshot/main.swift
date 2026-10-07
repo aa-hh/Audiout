@@ -51,6 +51,12 @@
 //                      it never changes the scene page's appearance.
 //   8. three-scenes — three saved scenes in the sidebar, with Party's page
 //
+// `AIRPLAY_SNAPSHOT_MODE=support` renders, dark only, the screenshots the
+// audiout.app support articles use (`snapshotSupportShots`): the Mixer, an
+// app routed to a speaker, a scene in Main Audio, two dropped speakers, the
+// Speakers tab's Overview and a speaker's Equalizer. Like speaker-management
+// it needs `AUDIOUT_SNAPSHOT_SYMBOL_BUNDLE`.
+//
 // Run: `swift run window-snapshot [output-dir]`.
 
 import AppKit
@@ -665,6 +671,141 @@ func snapshotSpeakerManagement(appearanceName: NSAppearance.Name, outDir: URL) {
     }
 }
 
+/// The audiout.app support articles' screenshots (`AIRPLAY_SNAPSHOT_MODE=support`,
+/// dark only), on the mock's demo fleet. Rebuilt per shot because the surface
+/// measures its height from the Mixer on its first show, so every selection
+/// and route has to be in place before it opens.
+@MainActor
+func snapshotSupportShots(outDir: URL) {
+    let dark = NSAppearance.Name.darkAqua
+    NSApp.appearance = NSAppearance(named: dark)
+    let appNames = [("com.spotify.client", "Spotify"), ("com.apple.Safari", "Safari")]
+    let apps = appNames.map { id, name in
+        RunningAppInfo(bundleID: id, displayName: name,
+                       icon: NSWorkspace.shared.urlForApplication(withBundleIdentifier: id)
+                           .map { NSWorkspace.shared.icon(forFile: $0.path) })
+    }
+    // Mid-screen, so the beak points down the middle as it does under a
+    // status item away from the screen's edge.
+    let anchor = NSScreen.main.map {
+        NSRect(x: $0.visibleFrame.midX - 12, y: $0.visibleFrame.maxY - 4, width: 24, height: 4)
+    }
+
+    func shoot(_ label: String, selected: [String], hidden: [String] = [],
+               failing: [String: ConnectScript] = [:], scene: Bool = false,
+               safari: AppRouteDestination = .noRedirect, spotify: AppRouteDestination = .noRedirect,
+               screen: SurfaceScreen = .mixer, page: (MixerWindowController) -> Void = { _ in }) {
+        let directory = tempDir()
+        let settings = AppSettings(defaults: SpeakerSnapshotDefaults())
+        let backend = MockBackend(fleet: .demoFleet, staggerDiscovery: false, emitsLevels: false,
+                                  simulatesDropouts: false, connectScripts: failing)
+        backend.start()
+        guard waitForFleet(backend, count: 7) else {
+            print("  FAIL  \(label): the demo fleet did not discover")
+            renderFailed = true
+            return
+        }
+        let groups = GroupController(backend: backend, store: GroupStore(directory: directory),
+            routingStore: RoutingStore(directory: directory), settings: settings, loadPersisted: false)
+        let routes = AppRoutingController(store: AppRouteStore(directory: directory), loadPersisted: false)
+        let library = SpeakerLibraryController(store: SpeakerLibraryStore(directory: directory),
+            legacyHiddenStore: HiddenSpeakersStore(directory: directory), loadPersisted: false)
+        let icons = DeviceIconController(store: DeviceIconStore(directory: directory), loadPersisted: false)
+        groups.updateDevices(backend.devices)
+        do {
+            try groups.saveGroup(Group(id: "downstairs", name: "Downstairs",
+                memberIDs: ["homepod-bed", "appletv-lr"], memberVolumes: ["homepod-bed": 25, "appletv-lr": 60]))
+            try groups.saveGroup(Group(id: "evening", name: "Evening",
+                memberIDs: ["sonos-move", "sonos-move-2"], memberVolumes: ["sonos-move": 40, "sonos-move-2": 55]))
+        } catch {
+            print("  FAIL  support fixture scene save: \(error)")
+            renderFailed = true
+        }
+        groups.setMainOutMasterVolume(70)   // the mock never touches the system volume
+        backend.setEQ(DeviceEQ(bassDB: 4, trebleDB: 2, loudness: true,
+                               bandGainsDB: [3, 2, 1, 0, -1, -2, -1, 1, 2, 1]),
+                      for: "homepod-bed", commit: true)
+        // The demo fleet starts with both Sonos speakers selected but never
+        // connected; clear them so no shot shows them in Main Audio, silent.
+        // Re-selecting them in the same pass never reaches the mock as a
+        // change, so the shots below select other speakers.
+        for id in ["sonos-move", "sonos-move-2"] { _ = groups.setDeviceSelected(id, false) }
+        if scene {
+            groups.setMainOut(.group(id: "downstairs"))
+            groups.activateGroup(id: "downstairs")
+        } else {
+            for id in selected { _ = groups.setDeviceSelected(id, true) }
+        }
+        // Land every scripted failure before the panel measures; the mock's
+        // mid-stream drop reconnects for ~1.5 s first.
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline, backend.devices.contains(where: { device in
+            guard failing[device.id] != nil else { return false }
+            if case .failed = device.connectionState { return false }
+            return true
+        }) { drain(0.05) }
+        backend.test_settle()
+        let devices = backend.devices
+        groups.updateDevices(devices)
+        for (id, name) in appNames { routes.addRoute(bundleID: id, displayName: name) }
+        routes.setDestination(spotify, for: "com.spotify.client")
+        routes.setDestination(safari, for: "com.apple.Safari")
+        if case .device = safari { routes.setVolume(28, for: "com.apple.Safari") }
+        for id in ["office"] + hidden { library.setVisibility(.hideWhenNotInUse, for: id) }
+        library.update(liveDevices: devices, groups: groups.groups,
+            currentUse: SpeakerCurrentUse(mainAudioMemberIDs: groups.selectedDeviceIDs,
+                                          appRouteDestinations: routes.appRoutes.map(\.destination)))
+        let window = MixerWindowController(groupController: groups, deviceIconController: icons,
+            appRouting: routes, btHardwareVolumeStore: BTHardwareVolumeStore(directory: tempDir()),
+            settings: settings, speakerLibrary: library)
+        let popover = PopoverController(appRouting: routes, runningAppsProvider: { apps },
+                                        speakerLibrary: library)
+        popover.deviceIconController = icons
+        popover.bluetoothPermissionProvider = { .granted }
+        popover.configure(groupController: groups)
+        popover.update(devices: devices)
+        window.update(devices: devices)
+        let surface = AppSurfaceController(popoverController: popover, settings: settings,
+            groupsContent: { window.scenesContentController },
+            speakersContent: { window.speakersContentController },
+            settingsContent: { SettingsRootViewController(sections: []) },
+            frameAutosaveName: "SupportSnapshotSurface")
+        snapshotControlPanel(surface.shell, label: label, appearanceName: dark, outDir: outDir) { _ in
+            surface.show(anchorRect: anchor)
+            surface.select(screen)
+            settleScreenSwap(surface, label: label)
+            page(window)
+            drain()
+        }
+        groups.flushPendingRoutingSave()
+        surface.performClose()
+    }
+
+    let playing = ["homepod-bed", "appletv-lr"]
+    // Two speakers in Main Audio, Safari kept on the Mac.
+    shoot("support-mixer", selected: playing, safari: .currentDevice)
+    // Safari on its own speaker at its own volume.
+    shoot("support-per-app", selected: playing, safari: .device(id: "office"))
+    // Main Audio playing the Downstairs scene.
+    shoot("support-scene", selected: [], scene: true, safari: .device(id: "office"))
+    // Two speakers dropped off; a third keeps playing Spotify. Two idle rows
+    // stay out so both reasons fit under the list's height cap.
+    shoot("support-dropoff", selected: ["appletv-lr", "airport-mixer", "office"],
+          hidden: ["sonos-move", "sonos-move-2"],
+          failing: ["airport-mixer": ConnectScript(attempts: [
+                        .fail(after: 0.1, ConnectionFailure(cause: .notResponding))]),
+                    "office": ConnectScript(attempts: [
+                        .connectThenDrop(connectAfter: 0.1, dropAfter: 0.1, recovers: false)])],
+          spotify: .device(id: "homepod-bed"))
+    // The Speakers tab's Overview, and one speaker's page with the
+    // Equalizer's ten bands open.
+    shoot("support-speakers", selected: playing, screen: .speakers) { $0.select(.speakersOverview) }
+    shoot("support-eq", selected: playing, screen: .speakers) { window in
+        window.select(.device(id: "homepod-bed"))
+        window.test_detail.test_eqEditor.test_fireAdvancedClick()
+    }
+}
+
 @MainActor
 func run() -> Int32 {
     // Never show a real window on the developer's screen while this
@@ -692,6 +833,12 @@ func run() -> Int32 {
         guard loadSpeakerSnapshotSymbols() else { return 1 }
         snapshotSpeakerManagement(appearanceName: .aqua, outDir: outDir)
         snapshotSpeakerManagement(appearanceName: .darkAqua, outDir: outDir)
+        print("Done.")
+        return renderFailed ? 1 : 0
+    }
+    if ProcessInfo.processInfo.environment["AIRPLAY_SNAPSHOT_MODE"] == "support" {
+        guard loadSpeakerSnapshotSymbols() else { return 1 }
+        snapshotSupportShots(outDir: outDir)
         print("Done.")
         return renderFailed ? 1 : 0
     }

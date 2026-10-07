@@ -1091,6 +1091,8 @@ extension SerializedSharedState {
 
     /// Without a lifetime signal the executable has to guess when cleanup
     /// ended, and a stop that refused on its timeout looks like the end.
+    /// Turns red if the timeout path fires the lifetime callback, or the drain
+    /// fires it twice.
     @Test @MainActor func theLifetimeCallbackFiresOnceAfterTheRealDrainNotTheTimeout() async {
         let engine = RecordingEngine()
         let discovery = FakeDiscovery()
@@ -1149,7 +1151,11 @@ extension SerializedSharedState {
         await SuiteWait.until { released.value == 1 }
         await SuiteWait.until { backend.startCompanionAlignmentProbe(targetID: self.btMove.id,
             referenceID: self.btFlip.id, onStarted: { _ in }, onFinished: {}) == nil }
-        SuiteWait.settle(0.3)
+        // A late second signal would come from the timeout path or a second
+        // cleanup finish: move the clock past the timeout again, then wait for
+        // everything already queued on main to run.
+        clock.advance(by: backend.companionAuditionStopSeconds)
+        await withCheckedContinuation { cont in DispatchQueue.main.async { cont.resume() } }
         #expect(released.value == 1, "the lifetime signal fires exactly once")
         #expect(refusedReleased.value == 1)
         backend.cancelCompanionAlignmentProbe(targetID: btMove.id)
@@ -1157,8 +1163,11 @@ extension SerializedSharedState {
 
     /// Backend teardown is the other honest end of a reservation: the engine
     /// sessions are gone, so no late write can reach a new one.
+    /// Turns red if teardown fires the lifetime callback more than once.
     @Test @MainActor func theLifetimeCallbackFiresOnceAfterBackendTeardown() async {
-        let (backend, bt, _, _) = makeBackend()
+        let clock = ManualDelayClock()
+        let (backend, bt, _, _) = makeBackend(
+            delayClock: clock.queueHoppingClock, uptimeClock: clock.uptime)
         backend.captureCoordinator = ProbeStagingCapture()
         backend.start()
         bt.fire([btMove, btFlip])
@@ -1174,7 +1183,10 @@ extension SerializedSharedState {
         #expect(start.value == .some(nil))
         backend.stop()
         await SuiteWait.until { released.value == 1 }
-        SuiteWait.settle(0.3)
+        // A late second signal would arrive on main after this point: move the
+        // clock past the stop timeout, then let everything queued on main run.
+        clock.advance(by: backend.companionAuditionStopSeconds)
+        await withCheckedContinuation { cont in DispatchQueue.main.async { cont.resume() } }
         #expect(released.value == 1)
     }
 

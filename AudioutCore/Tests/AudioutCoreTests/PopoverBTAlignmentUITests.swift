@@ -1408,6 +1408,12 @@ import AppKit
         #expect(wizard?.test_screen == .listening(isRealignment: false),
                 "got \(screenName(wizard))")
         await SuiteWait.until("the host to stage the first probe") { stages.count == 1 }
+        await SuiteWait.until("the wizard to receive the probe start") {
+            popover.test_btWizardSession()?.probeStartedAt != nil
+        }
+        #expect(wizard?.test_hasProgressBar == true)
+        // Removing the headless guard from startProbeProgress schedules a live UI timer in tests.
+        #expect(wizard?.test_hasActiveProbeProgressTimer == false)
 
         popover.test_btWizardSession()?.offerMeasuredProposal(valueMs: 300)
         #expect(wizard?.test_buttonTitles == [BTAlignmentWizardView.soundsRightTitle,

@@ -1512,7 +1512,7 @@ public final class PopoverController: NSObject {
     /// The pill's copy. Singular on the last day: the spec's example reads
     /// "Trial · 9 days left", and "1 days left" is not English.
     static func trialPillText(daysLeft: Int) -> String {
-        "Trial · \(daysLeft) day\(daysLeft == 1 ? "" : "s") left"
+        LicenseCopy.trialPillText(daysLeft: daysLeft)
     }
 
     /// Each banner's copy, verbatim from the trial spec's § Copy.

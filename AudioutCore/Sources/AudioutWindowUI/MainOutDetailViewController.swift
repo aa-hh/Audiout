@@ -42,7 +42,7 @@ public final class MainOutDetailViewController: NSViewController {
     private let iconWell = DeviceIconWellView()
     private let nameLabel = NSTextField(labelWithString: MainOutDetailViewController.title)
     /// The identity band: the icon well and the name. No caption.
-    private lazy var header = PageHeaderView(iconWell: iconWell, title: nameLabel)
+    private lazy var header = PageHeaderView(icon: iconWell, title: nameLabel)
     private let eqWell = GroupedSectionView()
     /// The Equalizer title row: the Equalizer icon, then the label — the
     /// same idiom (and geometry) as the device pane's title row above its

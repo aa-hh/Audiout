@@ -38,7 +38,7 @@ public final class GroupEditorViewController: NSViewController {
         label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         return label
     }()
-    private lazy var header = PageHeaderView(iconWell: iconWell, title: nameField, caption: countLabel)
+    private lazy var header = PageHeaderView(icon: iconWell, title: nameField, caption: countLabel)
     private let membershipStack = WellRepaintingStackView()
     /// THIS PAGE'S ONE INSTRUMENT, so it is the one `.card` here — a `raised`
     /// fill with a `containerEdge` edge behind the Speakers checklist, plus

@@ -128,6 +128,11 @@ public enum LicenseGatePresentation {
 /// and the recovery.
 public enum LicenseCopy {
 
+    /// The trial's days-left line, shared by the popover's pill and Settings.
+    public static func trialPillText(daysLeft: Int) -> String {
+        "Trial · \(daysLeft) day\(daysLeft == 1 ? "" : "s") left"
+    }
+
     /// A refused key on a limited install, named by the server's `reason`
     /// (`AppSettings.licenseReason`): the popover's standing note and the
     /// Settings status line both read it, so the two never disagree.

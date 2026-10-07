@@ -287,7 +287,7 @@ extension ScenesSidebarViewController: NSOutlineViewDataSource, NSOutlineViewDel
             return cell
         case .scene(let row):
             let cell = (outlineView.makeView(withIdentifier: NSUserInterfaceItemIdentifier("scene"), owner: self) as? IconLabelCellView)
-                ?? SidebarViewController.newCell(identifier: NSUserInterfaceItemIdentifier("scene"), isSpeakerRow: true)
+                ?? IconLabelCellView.make(identifier: NSUserInterfaceItemIdentifier("scene"), isSpeakerRow: true)
             configure(cell, row: row, fresh: true)
             return cell
         }

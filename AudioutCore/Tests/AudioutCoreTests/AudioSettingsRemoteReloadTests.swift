@@ -3,6 +3,7 @@
 import Testing
 import Foundation
 import AppKit
+import AudioutSharedUI
 @testable import AudioutCore
 @testable import AudioutSettingsUI
 
@@ -57,16 +58,28 @@ import AppKit
 
     /// The hint line states the chosen value's consequence, so it is as stale
     /// as the slider until reconciled.
+    // Leaving connection-volume or Bluetooth-pause help stale after a settings reload turns this red.
     @Test func theConnectVolumeHintReloadsWithTheSlider() {
         let settings = AppSettings(defaults: isolatedDefaults)
         settings.connectVolume = 20
+        settings.btKeepAliveMinutes = 0
         let pane = makePane(settings: settings)
         let before = pane.test_connectVolumeHint
 
         settings.connectVolume = 95
+        settings.btKeepAliveMinutes = AppSettings.btKeepAliveMinuteOptions.first(where: { $0 > 0 }) ?? 0
         pane.reloadFromSettings()
 
         #expect(pane.test_connectVolumeHint != before, "the hint must not describe the old level")
+        func pauseHelp(in view: NSView) -> HelpButton? {
+            if let help = view as? HelpButton,
+               help.accessibilityLabel() == "Help for Keep Bluetooth speakers streaming during pauses" { return help }
+            return view.subviews.lazy.compactMap { pauseHelp(in: $0) }.first
+        }
+        let help = pauseHelp(in: pane.view)
+        #expect(help?.toolTip?.hasPrefix("During pauses up to ") == true)
+        #expect(help?.accessibilityHelp() == help?.toolTip)
+
     }
 
     @Test func aBufferWrittenElsewhereLandsOnTheNextReload() throws {
@@ -90,16 +103,29 @@ import AppKit
                 "the buffer hint states the applied value, got \"\(pane.test_bufferHint)\"")
     }
 
-    /// The reconcile is for a pane that is on screen. One that has never been
-    /// loaded has no controls to move, and its load path reads `settings`
-    /// itself — so the call must be a silent no-op, never a forced view build.
-    @Test func reloadingAnUnloadedPaneDoesNotBuildIt() {
+    // Reconciling only loaded controls or resetting the applied buffer on first mount turns this red.
+    @Test func reloadingAnUnloadedPaneDoesNotBuildIt() throws {
         let settings = AppSettings(defaults: isolatedDefaults)
-        let pane = makePane(settings: settings)
+        settings.startBufferMs = 1000
+        let pane = makePane(settings: settings, initialMs: 1500)
+        let provider: any SettingsReadoutProviding = pane
+        #expect(provider.readoutLines == ["No apps stay on this Mac", "Buffer 1500 ms"],
+                "before a reload the readout reports the backend's initial buffer")
+        let chosenIndex = try #require(AppSettings.startBufferOptionsMs.firstIndex { $0 != 1000 && $0 != 1500 })
+        let chosen = AppSettings.startBufferOptionsMs[chosenIndex]
+        settings.startBufferMs = chosen
 
         pane.reloadFromSettings()
 
         #expect(!pane.isViewLoaded, "a reconcile must not construct the pane it was asked to refresh")
+        #expect(provider.readoutLines == ["No apps stay on this Mac", "Buffer \(chosen) ms"])
+
+        let titles = pane.test_latencyOptionTitles
+        #expect(pane.test_bufferSelectedTitle == titles[chosenIndex])
+        #expect(pane.test_bufferHint.contains(titles[chosenIndex]),
+                "the first-mounted help must describe the reconciled buffer")
+        #expect(provider.readoutLines == ["No apps stay on this Mac", "Buffer \(chosen) ms"],
+                "constructing the popup must not reset the sidebar value")
     }
 
     /// Under an env override the popup carries the override as its one item and

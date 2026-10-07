@@ -196,7 +196,7 @@ public final class SidebarViewController: NSViewController {
         // Medium row/icon size (design feedback 2026-07-18: `.default` felt
         // visually small next to the detail pane's large header icon).
         // `NSTableView.RowSizeStyle` alone only changes row HEIGHT — the icon
-        // column's own width/height constraint (`Self.iconSize` below) still
+        // column's own width/height constraint (`IconLabelCellView.iconSize`) still
         // has to be bumped to match, or the taller row just adds empty
         // padding around a still-small glyph.
         outlineView.rowSizeStyle = .medium
@@ -1221,105 +1221,6 @@ public final class SidebarViewController: NSViewController {
 
 }
 
-/// A sidebar row cell: the icon, the name with its optional caption, and a
-/// trailing `chevron.right` saying the row leads somewhere (the two plates).
-///
-/// The chevron lives in an `NSStackView`, which DETACHES hidden arranged
-/// subviews: a speaker row, where it is hidden, gets its full label width
-/// back instead of reserving trailing space it never uses ("MacBook Pro
-/// Speakers" is already the name this 210 pt sidebar barely fits).
-///
-/// Its inks follow the row's selection: resting inks while unselected, the
-/// accent pill's text colour on the focused pill, `label` on the grey one.
-/// The grey pill leaves the cell's `backgroundStyle` alone, so the row view
-/// (`SidebarRowView`) tells the cell instead.
-class IconLabelCellView: NSTableCellView {
-    /// The trailing disclosure chevron — drawing only, and never an AX element:
-    /// the row itself is what VoiceOver announces and activates.
-    let disclosureView: NSImageView = {
-        let v = NSImageView()
-        v.translatesAutoresizingMaskIntoConstraints = false
-        v.image = NSImage(systemSymbolName: "chevron.right", accessibilityDescription: nil)?
-            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 10, weight: .semibold))
-        v.image?.isTemplate = true
-        v.contentTintColor = Tokens.Color.labelCool2
-        v.isHidden = true
-        v.setAccessibilityElement(false)
-        v.setContentHuggingPriority(.required, for: .horizontal)
-        v.redrawOnAccessibilityDisplayChange()
-        return v
-    }()
-
-    /// The row's name. Only a speaker row also hands it to the `textField`
-    /// outlet, which gives it the source list's font and the expansion
-    /// tooltip; a plate keeps its own font.
-    let nameLabel: NSTextField = {
-        let label = NSTextField(labelWithString: "")
-        label.translatesAutoresizingMaskIntoConstraints = false
-        label.lineBreakMode = .byTruncatingTail
-        label.redrawOnAccessibilityDisplayChange()
-        return label
-    }()
-
-    /// The caption under the name. The name's spoken label already says it,
-    /// so it is not an accessibility element of its own.
-    let statusLabel: RollingCountLabel = {
-        let label = RollingCountLabel(labelWithString: "")
-        label.font = Tokens.Font.caption
-        label.textColor = Tokens.Color.labelCool
-        label.isHidden = true
-        label.lineBreakMode = .byTruncatingTail
-        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        label.setAccessibilityElement(false)
-        label.redrawOnAccessibilityDisplayChange()
-        return label
-    }()
-
-    let labelStack: NSStackView = {
-        let stack = NSStackView()
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = Tokens.Layout.titleSubtitleSpacing
-        return stack
-    }()
-
-    /// Holds the chevron. `detachesHiddenViews` (the default) is what makes a
-    /// hidden chevron cost zero width.
-    let trailingStack: NSStackView = {
-        let stack = NSStackView()
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        stack.orientation = .horizontal
-        stack.alignment = .centerY
-        stack.spacing = 6
-        stack.setContentHuggingPriority(.required, for: .horizontal)
-        return stack
-    }()
-
-    /// The name's and the icon's inks while the row is not selected.
-    private var restingNameInk = Tokens.Color.label
-    private var restingIconInk = Tokens.Color.label
-
-    func setDisclosureVisible(_ visible: Bool) {
-        disclosureView.isHidden = !visible
-    }
-
-    func setRestingInks(name: NSColor, icon: NSColor) {
-        restingNameInk = name
-        restingIconInk = icon
-    }
-
-    /// Every ink in the cell: the accent pill's text colour on the focused
-    /// pill, `label` on the grey one, the resting inks otherwise.
-    func applySelectionInks(selected: Bool, emphasized: Bool) {
-        let pillInk: NSColor? = selected ? (emphasized ? NSColor.alternateSelectedControlTextColor : Tokens.Color.label) : nil
-        nameLabel.textColor = pillInk ?? restingNameInk
-        imageView?.contentTintColor = pillInk ?? restingIconInk
-        statusLabel.textColor = pillInk ?? Tokens.Color.labelCool
-        disclosureView.contentTintColor = pillInk ?? Tokens.Color.labelCool2
-    }
-}
-
 /// A section title ("System Audio", "Speakers") or a subsection header (the
 /// two speaker groups). It owns its label and leaves the `textField` outlet
 /// empty: at `.medium` the source list replaces the font of a cell's
@@ -1412,21 +1313,6 @@ final class SidebarDividerCellView: NSTableCellView {
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-}
-
-/// A speaker row's row view: it re-inks its cell when the row's selection or
-/// emphasis changes, because the grey pill leaves the cell's
-/// `backgroundStyle` at `.normal` and the cell alone cannot tell.
-class SidebarRowView: NSTableRowView {
-    override var isSelected: Bool { didSet { reink() } }
-    override var isEmphasized: Bool { didSet { reink() } }
-
-    func reink() {
-        // AppKit sets these while it prepares the row, before the cell is
-        // added; `view(atColumn:)` raises on a row with no cell yet.
-        guard numberOfColumns > 0 else { return }
-        (view(atColumn: 0) as? IconLabelCellView)?.applySelectionInks(selected: isSelected, emphasized: isEmphasized)
-    }
 }
 
 /// A plate's row view (Main Audio, Overview): a plate with a `containerEdge`
@@ -1862,7 +1748,7 @@ extension SidebarViewController: NSOutlineViewDelegate {
     private func iconLabelCell(identifier: String, isSpeakerRow: Bool) -> IconLabelCellView {
         let id = NSUserInterfaceItemIdentifier(identifier)
         return outlineView.makeView(withIdentifier: id, owner: self) as? IconLabelCellView
-            ?? Self.newCell(identifier: id, isSpeakerRow: isSpeakerRow)
+            ?? IconLabelCellView.make(identifier: id, isSpeakerRow: isSpeakerRow)
     }
 
     /// A plate: Main Audio or Overview, a doorway to a page.
@@ -1917,53 +1803,5 @@ extension SidebarViewController: NSOutlineViewDelegate {
     private func applyRowInks(to cell: IconLabelCellView) {
         let row = cell.superview as? NSTableRowView
         cell.applySelectionInks(selected: row?.isSelected == true, emphasized: row?.isEmphasized == true)
-    }
-
-    /// Icon side length matching the outline view's `.medium` `rowSizeStyle`
-    /// (design feedback 2026-07-18: 18pt read as visually small next to the
-    /// detail pane's large header icon).
-    private static let iconSize: CGFloat = SurfaceLayout.sidebarIconSize
-
-    /// A speaker row hands its name to the `textField` outlet, which gives it
-    /// the source list's font and the expansion tooltip, and cuts a long name
-    /// in the middle; a plate keeps `bodyEmphasized` and cuts at the tail.
-    static func newCell(identifier: NSUserInterfaceItemIdentifier, isSpeakerRow: Bool) -> IconLabelCellView {
-        let cell = IconLabelCellView()
-        cell.identifier = identifier
-
-        let imageView = NSImageView()
-        imageView.translatesAutoresizingMaskIntoConstraints = false
-        imageView.redrawOnAccessibilityDisplayChange()
-        cell.addSubview(imageView)
-        cell.imageView = imageView
-
-        cell.labelStack.setViews([cell.nameLabel, cell.statusLabel], in: .leading)
-        cell.addSubview(cell.labelStack)
-        if isSpeakerRow {
-            cell.nameLabel.lineBreakMode = .byTruncatingMiddle
-            cell.textField = cell.nameLabel
-        } else {
-            cell.nameLabel.font = Tokens.Font.bodyEmphasized
-        }
-
-        cell.trailingStack.setViews([cell.disclosureView], in: .leading)
-        cell.addSubview(cell.trailingStack)
-
-        NSLayoutConstraint.activate([
-            imageView.leadingAnchor.constraint(equalTo: cell.leadingAnchor),
-            imageView.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
-            imageView.widthAnchor.constraint(equalToConstant: iconSize),
-            imageView.heightAnchor.constraint(equalToConstant: iconSize),
-
-            cell.labelStack.leadingAnchor.constraint(
-                equalTo: imageView.trailingAnchor, constant: SurfaceLayout.sidebarIconToLabelGap),
-            cell.labelStack.trailingAnchor.constraint(
-                equalTo: cell.trailingStack.leadingAnchor, constant: -6),
-            cell.labelStack.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
-
-            cell.trailingStack.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -2),
-            cell.trailingStack.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
-        ])
-        return cell
     }
 }

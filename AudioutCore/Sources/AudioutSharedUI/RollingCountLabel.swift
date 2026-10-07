@@ -2,19 +2,18 @@
 
 import AppKit
 import QuartzCore
-import AudioutSharedUI
 
 /// A count caption whose text slides when its value changes.
 /// The stored string always holds the target, including during the animation.
-final class RollingCountLabel: NSTextField {
+public final class RollingCountLabel: NSTextField {
     private var outgoing = ""
     private var progress: CGFloat = 1
     private var startTime: CFTimeInterval = 0
     private var link: CADisplayLink?
-    var test_reduceMotionOverride: Bool?
-    var test_isRolling: Bool { link != nil }
+    public var test_reduceMotionOverride: Bool?
+    public var test_isRolling: Bool { link != nil }
 
-    func roll(to text: String) {
+    public func roll(to text: String) {
         guard text != stringValue else { return }
         outgoing = stringValue
         stringValue = text
@@ -40,7 +39,7 @@ final class RollingCountLabel: NSTextField {
         needsDisplay = true
     }
 
-    override func draw(_ dirtyRect: NSRect) {
+    public override func draw(_ dirtyRect: NSRect) {
         guard test_isRolling,
               let incomingCell = cell,
               let outgoingCell = incomingCell.copy() as? NSCell else {
@@ -64,12 +63,12 @@ final class RollingCountLabel: NSTextField {
         NSGraphicsContext.restoreGraphicsState()
     }
 
-    override func viewDidMoveToWindow() {
+    public override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         if window == nil { test_settleNow() }
     }
 
-    func test_settleNow() {
+    public func test_settleNow() {
         progress = 1
         link?.invalidate()
         link = nil

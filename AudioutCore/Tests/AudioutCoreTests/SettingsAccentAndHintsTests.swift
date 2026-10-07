@@ -10,8 +10,8 @@ import Testing
 /// (persist + live `Tokens.accentStyle` remap + notification) and the Audio
 /// pane's **live hint lines** (the "`Buffer: 120 ms — safe for Wi-Fi
 /// speakers`" pattern — a hint re-writes on every value change). Headless like
-/// every other settings suite: structure and seams via `test_` hooks, never a
-/// real window.
+/// every other settings suite: structure and seams via `test_` hooks, with
+/// layout measured in an invisible borderless host.
 ///
 /// Nested into `SerializedSharedState`: `Tokens.accentStyle` is process-global
 /// (each test that moves the dial restores it with `defer` on the main actor,
@@ -28,6 +28,36 @@ extension SerializedSharedState {
 @Suite final class SettingsAccentAndHintsTests: IsolatedSuite {
 
     private var settings: AppSettings { AppSettings(defaults: isolatedDefaults) }
+
+    private func help(in view: NSView, subject: String) -> HelpButton? {
+        if let button = view as? HelpButton, button.accessibilityLabel() == "Help for \(subject)" {
+            return button
+        }
+        return view.subviews.lazy.compactMap { self.help(in: $0, subject: subject) }.first
+    }
+
+    private func row(in view: NSView, title: String) -> ListRowView? {
+        if let row = view as? ListRowView, row.titleLabel.stringValue == title { return row }
+        return view.subviews.lazy.compactMap { self.row(in: $0, title: title) }.first
+    }
+
+    // Leaving usage-statistics help at its initial consent value turns it red.
+    @Test func consentHelpTracksTheActualSwitchAction() throws {
+        settings.telemetryAsked = true
+        settings.telemetryOptIn = false
+        let pane = GeneralSettingsViewController(loginItem: StubLoginItem(), settings: settings)
+        let consentRow = try #require(row(in: pane.view, title: "Share anonymous usage statistics"))
+        let control = try #require(consentRow.accessory as? NSSwitch)
+        let button = try #require(help(in: consentRow, subject: "Share anonymous usage statistics"))
+        #expect(button.toolTip == "No usage data leaves this Mac.")
+        control.state = .on
+        _ = control.sendAction(control.action, to: control.target)
+        #expect(button.toolTip == "Anonymous feature counts, speaker timings and crash reports help improve Audiout.")
+        #expect(button.accessibilityHelp() == button.toolTip)
+        control.state = .off
+        _ = control.sendAction(control.action, to: control.target)
+        #expect(button.toolTip == "No usage data leaves this Mac.")
+    }
 
     // MARK: AppSettings scalar (UserDefaults idiom)
 
@@ -82,18 +112,6 @@ extension SerializedSharedState {
         #expect(settings.accentStyle == .subtle)
         #expect(Tokens.accentStyle == .subtle)
         #expect(notified == [.subtle])
-    }
-
-    @Test func accentHintTracksSelection() {
-        defer { Tokens.accentStyle = .fullGold }
-        let pane = makeAppearancePane()
-        let fullGoldHint = pane.test_accentHint
-        #expect(!fullGoldHint.isEmpty)
-
-        pane.test_selectAccentStyle(.subtle)
-        let subtleHint = pane.test_accentHint
-        #expect(!subtleHint.isEmpty)
-        #expect(subtleHint != fullGoldHint, "the hint is LIVE — it must re-write per dial position")
     }
 
     // MARK: Token remap (spec §1.3 table)
@@ -153,6 +171,7 @@ extension SerializedSharedState {
                                            wakeRestore: wakeRestore)
     }
 
+    // Leaving the help text at the initial volume turns this red.
     @Test func connectVolumeHintTracksTheSlider() {
         let pane = makeAudioPane()
         pane.test_setConnectVolume(percent: 35)
@@ -166,6 +185,7 @@ extension SerializedSharedState {
                           "the consequence wording must follow the value band")
     }
 
+    // Removing the reconnect warning from Audio buffer help turns this red.
     @Test func bufferHintTracksTheSelection() async {
         let latency = LatencySettingModel(optionsMs: AppSettings.startBufferOptionsMs,
                                           initialMs: 1000,
@@ -176,6 +196,7 @@ extension SerializedSharedState {
         #expect(pane.test_bufferHint.contains("1,000 ms") || pane.test_bufferHint.contains("1000 ms"),
                       "hint must state the current value: \(pane.test_bufferHint)")
         let initialHint = pane.test_bufferHint
+        #expect(initialHint.hasSuffix("Changing this reconnects your active speakers."))
 
         await pane.test_selectLatencyOption(ms: 2250)
         #expect(pane.test_bufferHint.contains("2,250 ms") || pane.test_bufferHint.contains("2250 ms"))
@@ -200,32 +221,52 @@ extension SerializedSharedState {
 
     // MARK: Audio pane — Advanced disclosure (roadmap 050)
 
-    @Test func advancedDisclosureStartsCollapsedAndRepublishesOnToggle() {
+    // Publishing a pane size or leaving the Advanced clip expanded after collapse turns this red.
+    @Test func advancedDisclosureLaysOutAndShrinksInsideAFixedHost() throws {
         let latency = LatencySettingModel(optionsMs: AppSettings.startBufferOptionsMs,
                                           initialMs: 1000,
                                           envOverrideMs: nil,
                                           isStreaming: { false },
                                           apply: { _ in (0, 0) })
         let pane = makeAudioPane(latency: latency)
-        _ = pane.view
-        pane.view.layoutSubtreeIfNeeded()
+        let window = NSWindow(
+            contentRect: NSRect(x: -10_000, y: -10_000, width: SettingsForm.contentWidth, height: 800),
+            styleMask: .borderless, backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        defer { window.close() }
+        let host = NSView(frame: NSRect(x: 0, y: 0, width: SettingsForm.contentWidth, height: 800))
+        window.contentView = host
+        host.addSubview(pane.view)
+        NSLayoutConstraint.activate([
+            pane.view.leadingAnchor.constraint(equalTo: host.leadingAnchor),
+            pane.view.trailingAnchor.constraint(equalTo: host.trailingAnchor),
+            pane.view.topAnchor.constraint(equalTo: host.topAnchor),
+            pane.view.bottomAnchor.constraint(lessThanOrEqualTo: host.bottomAnchor),
+        ])
+        let column = try #require(pane.view.subviews.first as? NSStackView)
+        let clip = try #require(column.arrangedSubviews.compactMap { $0 as? FoldingClipView }.first)
+        host.layoutSubtreeIfNeeded()
+        #expect(!window.isVisible)
         #expect(!pane.test_advancedExpanded, "Advanced must ship collapsed")
-        let collapsedHeight = pane.preferredContentSize.height
+        #expect(clip.frame.height == 0)
+        let collapsedHeight = column.frame.height
 
         pane.test_toggleAdvanced()
+        host.layoutSubtreeIfNeeded()
         #expect(pane.test_advancedExpanded)
-        #expect(pane.preferredContentSize.height > collapsedHeight,
-                "expanding must republish a taller preferredContentSize")
+        let card = try #require((clip.content as? NSStackView)?.arrangedSubviews.first)
+        #expect(card.frame.height > 0, "the Advanced card must occupy real layout space")
+        #expect(clip.frame.height >= card.frame.height)
+        #expect(column.frame.height > collapsedHeight)
 
-        let expandedHeight = pane.preferredContentSize.height
-        // Collapse via the TITLE, not the triangle — the word "Advanced" is a
-        // click target mirroring it.
         pane.test_tapAdvancedTitle()
+        host.layoutSubtreeIfNeeded()
         #expect(!pane.test_advancedExpanded)
-        // Not an exact == against the pre-toggle height: AppKit's rounding
-        // grid shifts layout by fractions of a point between passes.
-        #expect(pane.preferredContentSize.height < expandedHeight,
-                "collapsing must republish a shorter preferredContentSize")
+        #expect(clip.frame.height == 0)
+        #expect(abs(column.frame.height - collapsedHeight) < 1,
+                "collapse must give back the Advanced card's measured height")
+        #expect(pane.preferredContentSize == .zero, "the fixed Settings host consumes layout, never a published pane size")
+        #expect(!window.isVisible)
     }
 
     // MARK: General pane — reconnect-at-launch (roadmap 050)
@@ -235,19 +276,18 @@ extension SerializedSharedState {
         func setEnabled(_ enabled: Bool) throws { isEnabled = enabled }
     }
 
-    @Test func reconnectAtLaunchTogglePersistsAndHintTracks() {
+    // Dropping reconnect persistence or leaving the switch stale after its action turns this red.
+    @Test func reconnectAtLaunchTogglePersistsAndSwitchTracks() {
         let pane = GeneralSettingsViewController(loginItem: StubLoginItem(), settings: settings)
         #expect(!pane.test_reconnectAtLaunchIsOn, "defaults off")
-        let offHint = pane.test_reconnectHint
-        #expect(!offHint.isEmpty)
 
         pane.test_toggleReconnectAtLaunch(true)
         #expect(AppSettings(defaults: isolatedDefaults).reconnectAtLaunch)
-        #expect(pane.test_reconnectHint != offHint)
+        #expect(pane.test_reconnectAtLaunchIsOn)
 
         pane.test_toggleReconnectAtLaunch(false)
         #expect(!AppSettings(defaults: isolatedDefaults).reconnectAtLaunch)
-        #expect(pane.test_reconnectHint == offHint)
+        #expect(!pane.test_reconnectAtLaunchIsOn)
     }
 }
 

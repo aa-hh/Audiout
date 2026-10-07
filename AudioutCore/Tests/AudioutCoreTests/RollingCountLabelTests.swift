@@ -2,8 +2,7 @@
 
 import AppKit
 import Testing
-import AudioutSharedUI
-@testable import AudioutWindowUI
+@testable import AudioutSharedUI
 
 @MainActor
 @Suite final class RollingCountLabelTests: IsolatedSuite {

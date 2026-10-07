@@ -187,9 +187,10 @@ let package = Package(
         // the note slot, and the `setSpeakerVisibility`/`forgetSpeakers`
         // commands; 0.21.0 replaces the two sweeps with one glide probe both
         // speakers play in turn (`SyncProbe.Layout`, ADR 0002 there); 0.22.0 adds the
-        // room delay to `alignmentProbeStarted`.
+        // room delay to `alignmentProbeStarted`; 0.23.0 adds `AlignmentState.delayMs`,
+        // the total delay the Mac's speaker row shows.
         .package(url: "https://github.com/aa-hh/audiout-shared.git",
-                 from: "0.22.0"),
+                 from: "0.23.0"),
         // Sparkle 2 (MIT) — in-app updates for the paid, notarised build only.
         // Scoped to the `AudioutApp` executable target so no library, test or
         // harness target ever links it.

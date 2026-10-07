@@ -1398,6 +1398,9 @@ extension NativeBackend {
         }
         if persist {
             do { try btTrimStore?.saveLatencies(all) } catch { StoreRecovery.noteWriteFailure(error) }
+            // The row's number moved, and `noteDriftCorrected` fires only on
+            // the first correction, so tell the phone's snapshot here.
+            btSpeakerTiming.onChange?()
         }
         // The reference floor is a function of the slowest known latency, so a
         // correction can move it — and it must move FIRST, exactly as at the
@@ -1704,7 +1707,21 @@ extension NativeBackend: BTOutputControlling {
     }
 
     public func btAlignmentReport(forDevice id: String) -> BTSpeakerTimingReport? {
-        btSpeakerTiming.report(uid: id)
+        var report = btSpeakerTiming.report(uid: id)
+        report.delayMs = btDelayMs(forDevice: id)
+        return report
+    }
+
+    /// The number the speaker's row on the Mac prints as "<N> ms"
+    /// (`DeviceRowView.syncChipValueMs`): the stored trim plus the stored
+    /// measured latency, rounded half away from zero. `nil` when neither
+    /// exists, which is when the row reads "Not set" (or "Align").
+    func btDelayMs(forDevice id: String) -> Int? {
+        btTrimLock.withLock {
+            let latency = btLatencyMsByUID[id], trim = btTrimsByUID[id]
+            guard latency != nil || trim != nil else { return nil }
+            return Int(((trim ?? 0) + (latency ?? 0)).rounded(.toNearestOrAwayFromZero))
+        }
     }
 
     /// The offset this speaker has stored, which is both halves of what

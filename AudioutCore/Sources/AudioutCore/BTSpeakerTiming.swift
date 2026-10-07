@@ -713,12 +713,20 @@ public struct BTSpeakerTimingReport: Equatable, Sendable {
     /// Always `nil` from ``BTSpeakerTiming/report(uid:now:)`` — see its doc.
     /// The wire field is still there for an older phone to decode.
     public let settleRemainingSeconds: Int?
+    /// The speaker's total delay in whole milliseconds, the number its row on
+    /// the Mac prints ("286 ms"): stored trim plus stored measured latency.
+    /// `nil` when neither is stored, which is when the row reads "Not set"
+    /// (or "Align"). Not part of ``BTSpeakerTiming/report(uid:now:)``, which
+    /// has no trim; `NativeBackend.btAlignmentReport(forDevice:)` fills it.
+    public var delayMs: Int?
 
     public init(status: BTSpeakerTiming.Status,
                 source: BTSpeakerTiming.Source? = nil,
                 clockState: BTSpeakerTiming.ClockState = .steady,
                 staleReason: String? = nil,
-                settleRemainingSeconds: Int? = nil) {
+                settleRemainingSeconds: Int? = nil,
+                delayMs: Int? = nil) {
+        self.delayMs = delayMs
         self.status = status
         self.source = source
         self.clockState = clockState

@@ -838,6 +838,40 @@ import AudioutProtocol
         #expect(snapshot.devices.first { $0.id == "local" }?.alignment == nil,
                 "only Bluetooth rows ever carry an alignment")
     }
+
+    /// The phone shows the Mac row's own number: the report's `delayMs` (trim
+    /// plus measured latency, what the row prints as "286 ms") goes over as-is
+    /// for a tuned speaker, and stays nil for one the row reads "Not set" on.
+    /// Turns red if the builder stops copying `delayMs` onto the wire, which
+    /// sends the phone back to showing only the last run's measured gap.
+    @Test func aBluetoothRowCarriesTheRowsDelayOntoTheWireAndNilWhenNoneIsSet() async throws {
+        let backend = try await makeBackend([
+            Device(id: "local", name: "Mac", kind: .localMac, isLocalDevice: true),
+            Device(id: "bt-tuned", name: "Move", kind: .bluetooth),
+            Device(id: "bt-unset", name: "Flip", kind: .bluetooth),
+        ])
+        let controller = makeGroupController(backend: backend)
+        let appRouting = makeAppRouting()
+
+        let snapshot = CompanionSnapshotBuilder.build(
+            devices: backend.devices, groupController: controller, appRouting: appRouting,
+            excludedBundleIDs: noExcludedBundleIDs, iconFor: iconFor, addableApps: noAddableApps,
+            runningRouted: noRunningRouted, liveRoutedAppNames: noLiveRoutedAppNames,
+            localFallbackActive: false, takeoverStatus: nil, serverName: defaultServerName,
+            connectVolume: defaultConnectVolume, connectVolumeMin: defaultConnectVolumeMin,
+            connectVolumeMax: defaultConnectVolumeMax, startBufferMs: defaultStartBufferMs,
+            startBufferOptionsMs: defaultStartBufferOptionsMs,
+            alignmentFor: { device in
+                switch device.id {
+                case "bt-tuned": return BTSpeakerTimingReport(status: .tuned, source: .measured, delayMs: 286)
+                case "bt-unset": return BTSpeakerTimingReport(status: .notSet)
+                default: return nil
+                }
+            }
+        )
+        #expect(snapshot.devices.first { $0.id == "bt-tuned" }?.alignment?.delayMs == 286)
+        #expect(snapshot.devices.first { $0.id == "bt-unset" }?.alignment?.delayMs == nil)
+    }
 }
 
 private actor CountBox {

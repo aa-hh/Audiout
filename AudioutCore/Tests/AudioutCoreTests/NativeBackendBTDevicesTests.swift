@@ -322,6 +322,27 @@ import CoreAudio
         second.stop()
     }
 
+    /// The delay the phone shows is the number the Mac row prints
+    /// (`DeviceRowView.syncChipValueMs`): trim plus measured latency, rounded
+    /// half away from zero, nil with neither stored. Turns red if the report
+    /// carries only the latency or only the trim (the row then disagrees with
+    /// the phone), or rounds toward zero.
+    @Test func theAlignmentReportCarriesTheRowsTotalDelay() throws {
+        let (backend, _) = makeBackend()
+        #expect(backend.btAlignmentReport(forDevice: sonos.id)?.delayMs == nil, "nothing stored: the row says Not set")
+
+        backend.setBTSyncTrim(-40, forDevice: sonos.id, persist: false)
+        #expect(backend.btAlignmentReport(forDevice: sonos.id)?.delayMs == -40, "a trim alone is the row's number")
+
+        backend.btTrimLock.withLock { backend.btLatencyMsByUID[sonos.id] = 326.5 }
+        #expect(backend.btAlignmentReport(forDevice: sonos.id)?.delayMs == 287, "286.5 rounds away from zero")
+
+        backend.setBTSyncTrim(-500, forDevice: flip.id, persist: false)
+        backend.btTrimLock.withLock { backend.btLatencyMsByUID[flip.id] = 213.5 }
+        #expect(backend.btAlignmentReport(forDevice: flip.id)?.delayMs == -287, "−286.5 rounds away from zero too")
+        backend.stop()
+    }
+
     /// The backend still supports an apply-without-persist write (`persist:
     /// false`) even though the drawer's only controls are now committing
     /// steppers — the seam is kept for a future live control and must behave:

@@ -2684,6 +2684,7 @@ final class StreamLevelTracker: @unchecked Sendable {
         var windowPeak: Int32 = 0
         var silentRunSamples: Int = 0
         var writes: UInt64 = 0
+        var writtenSinceSnapshot = false
     }
 
     private let lock = NSLock()
@@ -2707,6 +2708,7 @@ final class StreamLevelTracker: @unchecked Sendable {
         defer { lock.unlock() }
         var stream = streams[streamId] ?? Stream()
         stream.writes &+= 1
+        stream.writtenSinceSnapshot = true
         if peak > stream.windowPeak { stream.windowPeak = peak }
         stream.silentRunSamples = peak <= Self.silenceThreshold ? stream.silentRunSamples + frames : 0
         streams[streamId] = stream
@@ -2714,10 +2716,13 @@ final class StreamLevelTracker: @unchecked Sendable {
 
     /// Reports every stream written since the last call and resets each
     /// window peak; the silence run and write count persist. A stream that
-    /// stopped being written drops out on the next call.
+    /// stopped being written drops out on the next call: a speaker's own
+    /// stream is retired when it leaves, and an entry kept past that read as
+    /// a stream still open with no speakers (live 2026-10-07).
     func snapshot(sampleRate: Int) -> [StreamLevelSnapshot] {
         lock.lock()
         defer { lock.unlock() }
+        streams = streams.filter { $0.value.writtenSinceSnapshot }
         let out = streams.keys.sorted().map { id -> StreamLevelSnapshot in
             let s = streams[id]!
             let dbfs = s.windowPeak > 0
@@ -2728,7 +2733,10 @@ final class StreamLevelTracker: @unchecked Sendable {
                                        silentSeconds: Double(s.silentRunSamples) / Double(max(sampleRate, 1)),
                                        writes: s.writes)
         }
-        for id in streams.keys { streams[id]?.windowPeak = 0 }
+        for id in streams.keys {
+            streams[id]?.windowPeak = 0
+            streams[id]?.writtenSinceSnapshot = false
+        }
         return out
     }
 }

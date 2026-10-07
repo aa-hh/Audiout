@@ -387,7 +387,7 @@ public struct WriteSchedulingSnapshot: Sendable, Equatable {
 /// What one content stream carried since the previous snapshot: the loudest
 /// sample in the window as dBFS, and how long the stream has been silent in a
 /// row (`silentSeconds`, running across windows until a write above −60 dBFS
-/// or a window with no writes resets it). A stream "connected" with packets flowing and `silentSeconds`
+/// resets it). A stream "connected" with packets flowing and `silentSeconds`
 /// climbing is exactly the shape that could not be told apart from healthy
 /// playback on 2026-09-05 (docs/plans/PLAN-LIVE-DIAGNOSTICS.md C3).
 /// `peakDBFS` floors at −120 for an all-zero window.

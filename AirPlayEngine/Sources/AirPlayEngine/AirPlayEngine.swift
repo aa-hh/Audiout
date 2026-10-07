@@ -2684,7 +2684,6 @@ final class StreamLevelTracker: @unchecked Sendable {
         var windowPeak: Int32 = 0
         var silentRunSamples: Int = 0
         var writes: UInt64 = 0
-        var writtenSinceSnapshot = false
     }
 
     private let lock = NSLock()
@@ -2708,22 +2707,17 @@ final class StreamLevelTracker: @unchecked Sendable {
         defer { lock.unlock() }
         var stream = streams[streamId] ?? Stream()
         stream.writes &+= 1
-        stream.writtenSinceSnapshot = true
         if peak > stream.windowPeak { stream.windowPeak = peak }
         stream.silentRunSamples = peak <= Self.silenceThreshold ? stream.silentRunSamples + frames : 0
         streams[streamId] = stream
     }
 
     /// Reports every stream written since the last call and resets each
-    /// window peak; the silence run and write count persist while writes keep
-    /// coming. A stream that stopped being written drops out on the next call,
-    /// so both restart from zero if it is written again: a speaker's own
-    /// stream is retired when it leaves, and an entry kept past that read as
-    /// a stream still open with no speakers (live 2026-10-07).
+    /// window peak; the silence run and write count persist. The tracker never
+    /// drops a stream it has seen; the host decides which rows to report.
     func snapshot(sampleRate: Int) -> [StreamLevelSnapshot] {
         lock.lock()
         defer { lock.unlock() }
-        streams = streams.filter { $0.value.writtenSinceSnapshot }
         let out = streams.keys.sorted().map { id -> StreamLevelSnapshot in
             let s = streams[id]!
             let dbfs = s.windowPeak > 0
@@ -2734,10 +2728,7 @@ final class StreamLevelTracker: @unchecked Sendable {
                                        silentSeconds: Double(s.silentRunSamples) / Double(max(sampleRate, 1)),
                                        writes: s.writes)
         }
-        for id in streams.keys {
-            streams[id]?.windowPeak = 0
-            streams[id]?.writtenSinceSnapshot = false
-        }
+        for id in streams.keys { streams[id]?.windowPeak = 0 }
         return out
     }
 }

@@ -88,18 +88,4 @@ import Foundation
         #expect(abs(snap[1].peakDBFS - (-20.0)) < 0.05)
         #expect(snap[1].silentSeconds == 0)
     }
-
-    /// Turns red if `snapshot` stops dropping a stream nobody wrote since the
-    /// last call: a removed speaker's own stream then reports forever with no
-    /// devices, frozen writes and a −120 dBFS peak (live 2026-10-07).
-    @Test func aStreamNoLongerWrittenDropsOutWhileItsNeighbourStays() {
-        let tracker = StreamLevelTracker()
-        write(tracker, streamId: 0x8000_0000, amplitude: 3276, times: 10)
-        write(tracker, streamId: 0x8000_0001, amplitude: 3276, times: 10)
-        #expect(tracker.snapshot(sampleRate: sampleRate).count == 2)
-
-        write(tracker, streamId: 0x8000_0001, amplitude: 3276, times: 10)
-        #expect(tracker.snapshot(sampleRate: sampleRate).map(\.streamId) == [0x8000_0001],
-                "the stream whose speaker left must not be reported again")
-    }
 }

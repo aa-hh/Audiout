@@ -1,0 +1,6 @@
+.DS_Store
+*.swp
+# scripts/review-branch.sh: reviewer prompts and replies waiting for --continue.
+.review-pending/
+# Worktrees live here (CLAUDE.md, "Work in worktrees").
+.claude/worktrees/

@@ -1,0 +1,88 @@
+#!/bin/sh
+# Pre-commit guards, cheapest first so a bounce costs seconds.
+#
+# Enable with:  git config core.hooksPath .githooks   (scripts/setup.sh does it)
+# Override once: git commit --no-verify
+#
+# Guard numbers are stable names, not an order: add new guards with the next
+# free number and document them in root AGENTS.md. Every helper is optional —
+# a missing helper or interpreter skips its guard silently, because a hook
+# that errors on an unrelated machine is worse than a hook that isn't there.
+
+hook_dir=$(dirname "$0")
+SOURCE_PATHS="src/ tests/"
+TEST_ON_COMMIT=1
+[ -f "$hook_dir/project.conf" ] && . "$hook_dir/project.conf"
+
+# ---------------------------------------------------------------------------
+# GUARD 1 (BLOCKING): no commits on main.
+#
+# Loose edits in a shared main checkout are a trap for the next agent: one
+# that cannot merge past them commits them to unblock itself, and main then
+# documents (or half-implements) work whose other half lives in another
+# session's worktree. Work in a worktree; main takes changes only through a
+# reviewed pull request.
+branch=$(git symbolic-ref --short HEAD 2>/dev/null)
+if [ "$branch" = "main" ]; then
+    echo "" >&2
+    echo "  REFUSED: direct commit to main." >&2
+    echo "" >&2
+    echo "  Work in a worktree and land it through a pull request (root AGENTS.md)." >&2
+    echo "  If these are someone else's uncommitted edits and they are in your" >&2
+    echo "  way: STOP and ask. Do not commit work you did not write." >&2
+    echo "" >&2
+    echo "  Really meant it?  git commit --no-verify" >&2
+    echo "" >&2
+    exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# GUARD 2 (WARN-ONLY): AGENTS.md must not name symbols this commit lacks.
+checker="$hook_dir/agents-md-symbol-check.py"
+if [ -f "$checker" ] && command -v python3 >/dev/null 2>&1; then
+    python3 "$checker" || true
+fi
+
+# ---------------------------------------------------------------------------
+# GUARD 7 (BLOCKING): added comments must pass the slop screen.
+g7="$hook_dir/guard-self-review.sh"
+[ -f "$g7" ] && { sh "$g7" || exit 1; }
+
+# ---------------------------------------------------------------------------
+# GUARD 12 (BLOCKING): AGENTS.md budget / AGENTS-HISTORY.md append-only.
+g12="$hook_dir/guard-agents-docs.sh"
+[ -f "$g12" ] && { sh "$g12" || exit 1; }
+
+# ---------------------------------------------------------------------------
+# GUARD 4 (BLOCKING): tests pass before code is committed.
+#
+# Runs scripts/test.sh only when the commit stages something under
+# SOURCE_PATHS (project.conf). Through the wrapper, never the bare test
+# command, so the project has one place that knows how tests run.
+# The worktree's own scripts/test.sh wins, else the one beside this hook
+# (core.hooksPath may point every worktree at the primary checkout's hooks).
+if [ "$TEST_ON_COMMIT" = 1 ]; then
+    # shellcheck disable=SC2086
+    staged_code=$(git diff --cached --name-only --diff-filter=ACMD -- $SOURCE_PATHS 2>/dev/null)
+    if [ -n "$staged_code" ]; then
+        repo_root=$(git rev-parse --show-toplevel)
+        hook_root=$(cd "$hook_dir/.." 2>/dev/null && pwd)
+        runner=""
+        if [ -x "$repo_root/scripts/test.sh" ]; then runner="$repo_root/scripts/test.sh"
+        elif [ -x "$hook_root/scripts/test.sh" ]; then runner="$hook_root/scripts/test.sh"
+        fi
+        if [ -n "$runner" ]; then
+            echo "  Guard 4: code staged — running scripts/test.sh (--no-verify to skip)." >&2
+            # Test tools that shell out to git must not inherit the hook's
+            # GIT_DIR / GIT_INDEX_FILE, or they read this repo's index.
+            if ! ( cd "$repo_root" && env -u GIT_DIR -u GIT_INDEX_FILE -u GIT_WORK_TREE "$runner" >&2 ); then
+                echo "" >&2
+                echo "  REFUSED: tests failed. Fix them (or --no-verify for a real emergency)." >&2
+                exit 1
+            fi
+            echo "  Guard 4: tests passed." >&2
+        fi
+    fi
+fi
+
+exit 0

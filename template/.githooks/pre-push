@@ -1,0 +1,53 @@
+#!/bin/sh
+# Pre-push: this repo has no CI, so this hook is the full-suite gate that a
+# `tests` workflow would otherwise be.
+#
+#   1. Refuses any push to main (main moves only via scripts/land.sh after
+#      the owner says yes).
+#   2. Runs the full suite (scripts/test.sh --full) on the commit being
+#      pushed, and records the pass so scripts/land.sh can see it.
+#
+# Override once: git push --no-verify
+
+hook_dir=$(dirname "$0")
+TEST_ON_PUSH=1
+[ -f "$hook_dir/project.conf" ] && . "$hook_dir/project.conf"
+
+repo_root=$(git rev-parse --show-toplevel)
+common=$(cd "$(git rev-parse --git-common-dir)" && pwd)
+zero=0000000000000000000000000000000000000000
+rc=0
+
+while read -r local_ref local_sha remote_ref _remote_sha; do
+    [ "$local_sha" = "$zero" ] && continue          # a delete
+    if [ "$remote_ref" = "refs/heads/main" ] && [ "${ALLOW_PUSH_MAIN:-0}" != 1 ]; then
+        echo "" >&2
+        echo "  REFUSED: push to main. Land through scripts/land.sh after review." >&2
+        echo "" >&2
+        exit 1
+    fi
+    [ "$TEST_ON_PUSH" = 1 ] || continue
+    if grep -qx "$local_sha" "$common/tests-passed" 2>/dev/null; then
+        continue
+    fi
+    if [ "$(git rev-parse HEAD)" != "$local_sha" ]; then
+        echo "  pre-push: $local_ref is not checked out here; full suite not run for it." >&2
+        continue
+    fi
+    if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
+        echo "  pre-push: working tree has uncommitted changes; the suite runs on" >&2
+        echo "  them too, so the pass is not recorded for $local_sha." >&2
+        dirty=1
+    else
+        dirty=0
+    fi
+    echo "  pre-push: running the full suite (scripts/test.sh --full)." >&2
+    if ( cd "$repo_root" && env -u GIT_DIR -u GIT_INDEX_FILE -u GIT_WORK_TREE scripts/test.sh --full >&2 ); then
+        [ "$dirty" = 0 ] && echo "$local_sha" >> "$common/tests-passed"
+    else
+        echo "" >&2
+        echo "  REFUSED: full suite failed. Fix it (or --no-verify for a real emergency)." >&2
+        rc=1
+    fi
+done
+exit $rc

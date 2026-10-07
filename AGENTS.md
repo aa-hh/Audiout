@@ -111,12 +111,12 @@ repo. `AudioutCore` pins it by version.
   `AirPlayEngine/docs/VENDORED-DIFFS.md` with license, rationale and hunk.
 - **UI targets depend on the model, never the reverse.** The
   `AudioutCore` library target imports no AppKit, and that is verified.
-- **The iPhone companion is switched off at the build level** until Audiout
-  Remote is approved: `AppSettings.remoteAppIsOffered`. Everything that names
-  the phone app reads the resolution it feeds — the Setup card, the Settings
-  switch with its QR row and phone list, the alignment wizard's iPhone panel,
-  and the companion server itself. A NEW surface mentioning the phone must ask
-  it too, or a release ships an invitation to an app nobody can download.
+- **Every phone surface asks one build switch**, `AppSettings.remoteAppIsOffered`.
+  Everything that names the phone app reads the resolution it feeds — the Setup
+  card, the Settings switch with its QR row and phone list, the alignment
+  wizard's iPhone panel, and the companion server itself. A NEW surface
+  mentioning the phone must ask it too, so one flip still turns the whole
+  feature off.
   `AUDIOUT_COMPANION=on` still overrides it, which is how a dev build tests
   against a TestFlight phone.
 - **Read `dev/notes/` before a non-trivial phase** — briefs exist to de-risk work

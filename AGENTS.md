@@ -117,8 +117,9 @@ repo. `AudioutCore` pins it by version.
   switch with its QR row and phone list, the alignment wizard's iPhone panel,
   and the companion server itself. A NEW surface mentioning the phone must ask
   it too, or a release ships an invitation to an app nobody can download.
-  `AUDIOUT_COMPANION=on` still overrides it, which is how a dev build tests
-  against a TestFlight phone.
+  A dev build (bundle id `com.audiout.Audiout.<suffix>`) is always offered it,
+  with the Settings switch defaulting OFF; `AUDIOUT_COMPANION=on` still
+  overrides everything.
 - **Read `dev/notes/` before a non-trivial phase** — briefs exist to de-risk work
   before it starts.
 - **"Does this code exist anywhere?" needs more than `git grep`.**

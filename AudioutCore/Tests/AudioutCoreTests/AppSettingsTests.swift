@@ -334,6 +334,16 @@ import Testing
         #expect(!AppSettings(defaults: defaults).allowRemoteControl)
     }
 
+    // Turns red if the shipping app (or the test runner) counts as a dev build,
+    // which would put the companion switch and a listening server in a release.
+    @Test func onlySuffixedBundleIDsAreDevBuilds() {
+        #expect(AppSettings.isDevBundleID("com.audiout.Audiout.dev"))
+        #expect(AppSettings.isDevBundleID("com.audiout.Audiout.staging"))
+        #expect(!AppSettings.isDevBundleID("com.audiout.Audiout"))
+        #expect(!AppSettings.isDevBundleID("com.apple.dt.xctest.tool"))
+        #expect(!AppSettings.isDevBundleID(nil))
+    }
+
     @Test func resolvedAllowRemoteControlExplicitWins() {
         let settings = AppSettings(defaults: defaults)
         settings.allowRemoteControl = false

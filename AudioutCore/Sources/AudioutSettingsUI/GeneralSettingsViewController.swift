@@ -31,6 +31,13 @@ public final class GeneralSettingsViewController: NSViewController {
     private let remoteControlSwitch = NSSwitch()
     private let remoteControlOverrideNote = SettingsForm.label("")
     private let consentSwitch = NSSwitch()
+    /// Dev builds only: the licence-gate override (Developer section).
+    private let licenseGatePopup = NSPopUpButton()
+    private static let licenseGateOptions: [(String, LicenseGatePresentation)] = [
+        ("Automatic", .auto), ("Always show", .forceShow), ("Never show", .forceHide),
+    ]
+    private let isDevBuild: Bool
+    private var developerHeader: NSView?
     private let consentHint = SettingsForm.hintLabel()
     private let licenseStatusHint = SettingsForm.hintLabel()
     private let checkAgainButton = NSButton()
@@ -127,6 +134,8 @@ public final class GeneralSettingsViewController: NSViewController {
     ///     at all; defaults to ``AppSettings/remoteAppIsOffered``. False drops
     ///     every companion row from the pane, so a test covering those rows
     ///     pins it true rather than riding the shipping constant.
+    ///   - isDevBuild: mounts the Developer section; defaults to
+    ///     ``AppSettings/isDevBuild``, so a shipping build never shows it.
     ///   - aboutInfo: the About window's bundle-sourced identity; defaults to
     ///     the live app bundle (`AboutInfo.current()`), injected as a fixed
     ///     value in tests so the rendered version string never depends on how
@@ -143,6 +152,7 @@ public final class GeneralSettingsViewController: NSViewController {
                 settings: AppSettings = AppSettings(),
                 environment: [String: String] = ProcessInfo.processInfo.environment,
                 remoteAppIsOffered: Bool = AppSettings.remoteAppIsOffered,
+                isDevBuild: Bool = AppSettings.isDevBuild,
                 aboutInfo: AboutInfo = .current(),
                 openURL: @escaping (URL) -> Void = { NSWorkspace.shared.open($0) },
                 approvals: CompanionApprovalController? = nil,
@@ -150,6 +160,7 @@ public final class GeneralSettingsViewController: NSViewController {
         self.loginItem = loginItem
         self.settings = settings
         self.approvals = approvals
+        self.isDevBuild = isDevBuild
         self.remoteControlResolution = AppSettings.resolvedAllowRemoteControlWithSource(
             environment: environment, offered: remoteAppIsOffered, settings: settings)
         self.openURL = openURL
@@ -386,6 +397,9 @@ public final class GeneralSettingsViewController: NSViewController {
             hairline,
             strip,
         ])
+        if isDevBuild {
+            rows.append(contentsOf: makeDeveloperViews())
+        }
 
         view = SettingsForm.paneView(rows: rows)
         paneStack = launchRow.superview as? NSStackView
@@ -397,6 +411,30 @@ public final class GeneralSettingsViewController: NSViewController {
         approvals?.onChange = { [weak self] in self?.rebuildPhoneList() }
 
         refreshLicenseStatus()
+    }
+
+    /// Dev builds only: the first-open licence gate override, standing in for
+    /// `AUDIOUT_LICENSE_GATE` (which still wins when set). Read once at launch.
+    private func makeDeveloperViews() -> [NSView] {
+        let header = SettingsForm.sectionHeader("Developer")
+        developerHeader = header
+        licenseGatePopup.translatesAutoresizingMaskIntoConstraints = false
+        for (title, _) in Self.licenseGateOptions { licenseGatePopup.addItem(withTitle: title) }
+        if let index = Self.licenseGateOptions.firstIndex(where: { $0.1 == settings.licenseGatePresentation }) {
+            licenseGatePopup.selectItem(at: index)
+        }
+        licenseGatePopup.target = self
+        licenseGatePopup.action = #selector(licenseGateChanged)
+        licenseGatePopup.setAccessibilityLabel("Licence gate")
+        return [header,
+                SettingsForm.row(title: "Licence gate", subtitle: "Takes effect next launch.",
+                                 control: licenseGatePopup)]
+    }
+
+    @objc private func licenseGateChanged() {
+        let index = licenseGatePopup.indexOfSelectedItem
+        guard Self.licenseGateOptions.indices.contains(index) else { return }
+        settings.licenseGatePresentation = Self.licenseGateOptions[index].1
     }
 
     /// What the status line under the License row says, per state — plain
@@ -989,6 +1027,12 @@ public final class GeneralSettingsViewController: NSViewController {
     public var test_allowRemoteControlIsOn: Bool {
         _ = view
         return remoteControlSwitch.state == .on
+    }
+
+    /// Whether the dev-only Developer section is in the pane.
+    public var test_developerSectionIsMounted: Bool {
+        _ = view
+        return developerHeader?.superview != nil
     }
 
     /// Whether the "Allow control from iPhone" row is in the pane at all. A

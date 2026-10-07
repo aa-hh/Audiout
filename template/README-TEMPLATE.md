@@ -15,7 +15,7 @@ Delete this file once the project is set up.
    template", or copy the directory into a fresh repo:
    `cp -R template/. ../new-project/ && cd ../new-project && git init`.
 2. **Fill the placeholders.** `grep -rn '{{' .` lists them:
-   `{{PROJECT_NAME}}` and `{{ONE_LINE_DESCRIPTION}}` in `AGENTS.md`,
+   `{{PROJECT_NAME}}`, `{{PROJECT_SLUG}}` and `{{ONE_LINE_DESCRIPTION}}` in `AGENTS.md`,
    `CLAUDE.md`, `CONTEXT.md` and `docs/review/*.md`.
 3. **Wire your stack** — the only per-language parts:
    - `scripts/test.sh` and `scripts/build.sh`: the real commands.

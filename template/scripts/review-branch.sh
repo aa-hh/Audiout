@@ -82,7 +82,7 @@ Output format (a script parses this; follow it exactly):
 - One line per finding: SEVERITY | path:line | one sentence naming the defect and the smallest fix.
 - SEVERITY is exactly HIGH, MEDIUM, or LOW.
   HIGH = a defect with a concrete failing scenario, a data-loss or lockout path, or a breach of a quoted AGENTS.md rule.
-  MEDIUM = a likely defect without a confirmed scenario, or changed behaviour with no test.
+  MEDIUM = a likely defect without a confirmed scenario, or changed behaviour with no test where root AGENTS.md's Tests section says one is needed.
   LOW = readability or naming.
 - If there are no findings, output the single line: NO FINDINGS
 - Lines starting with anything else are shown to a human and never counted; add them only when your instructions above ask for them.

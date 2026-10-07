@@ -16,7 +16,7 @@ Where to look hardest, by path:
 - Shell scripts and hooks (`scripts/*.sh`, `.githooks/*`): unquoted paths (paths can contain spaces), `set -e` interactions with expected failures, behaviour when a helper file is missing, and anything that could run on the main checkout.
 - Tests: no weakened or skipped tests; tests that share global state are isolated.
 
-Severity: HIGH is a defect with a concrete failing scenario, a data-loss or lockout path, or a breach of a quoted `AGENTS.md` rule. MEDIUM is a likely defect without a confirmed scenario, or changed behaviour with no test. LOW is readability per `docs/REVIEW-RUBRIC.md` (never flag why-heavy trap comments, doc-anchored tags, `razor:` notes, trailing `slop-ok` markers, string literals, vendored code).
+Severity: HIGH is a defect with a concrete failing scenario, a data-loss or lockout path, or a breach of a quoted `AGENTS.md` rule. MEDIUM is a likely defect without a confirmed scenario, or changed behaviour with no test where the Tests section of root `AGENTS.md` says one is needed (never flag missing tests for glue, config, UI layout or other code it says to skip). LOW is readability per `docs/REVIEW-RUBRIC.md` (never flag why-heavy trap comments, doc-anchored tags, `razor:` notes, trailing `slop-ok` markers, string literals, vendored code).
 
 After the finding lines, add these informational lines (printed to the human, never counted):
 - Exactly one `COMPAT | Compatible | <why callers, persisted data and permissions are unaffected>` or `COMPAT | Incompatible | <exactly what breaks, for whom, when>` or `COMPAT | Not established | <what evidence is missing>`.

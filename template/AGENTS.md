@@ -61,8 +61,67 @@ symbol you cannot find in source, believe the source and fix the doc.
 - **When a fix rests on a claim about live system state, verify the claim with
   a real command before writing the fix.** Tests encode what you believed; a
   running system in the failing state shows what is true.
-- **A new test buys its place.** It carries one comment sentence naming the
-  code change that turns it red. A test nobody can say that about is noise.
+- **Flag finished worktrees; never hand-delete them.** A worktree can hold
+  another session's only copy of unpushed work. When a branch is merged (or
+  abandoned with everything pushed), `touch .claude/worktrees/<slug>/.prunable`
+  and leave removal to a cleanup step that refuses a dirty or unpushed tree.
+- **Dev tooling that outlives its session is labelled, parked and purgeable.**
+  Anything that keeps running after the session that made it (a launchd/cron
+  job, login item, file watcher, watchdog) must (a) carry a name starting
+  `{{PROJECT_SLUG}}.dev.`, (b) live in the repo's `dev/`, never inside the
+  app's own data directory, and (c) be removable by a purge script updated in
+  the same change. Unlabelled tooling dropped onto a machine runs unnoticed
+  for days.
+- **A busy shared resource is reported, not waited on.** When a lock, slot or
+  device another agent holds blocks you, say who holds it, go do other work,
+  and retry later. Never sit in a wait loop.
+
+## Tests
+
+Tests are a tool for catching regressions where they are likely and costly,
+not a coverage target. Every test is a permanent tax on every commit and every
+refactor, so write one when it pays for itself.
+
+**Write a test when the code:**
+- carries logic with branches or edge cases a reader could get wrong:
+  parsing, validation, calculations, state machines, date/time, money;
+- guards something whose failure is expensive or silent: persistence formats
+  and migrations, auth/permissions, billing, data loss, security boundaries;
+- is a public contract other code or other teams depend on (an API, a CLI's
+  output, a wire or file format);
+- just broke: a bug fix gets a regression test that fails without the fix;
+- sits in a review risk path (`is_risk_path` in `scripts/review-branch.sh`).
+
+**Usually skip a test for:** thin glue that only wires other tested parts
+together, straight-line code with no decisions, framework or library
+behaviour, configuration, one-off scripts, prototypes, and UI layout or copy
+(check those by eye). If the only way to test it is to mock everything around
+it, the test checks the mocks — test the logic underneath instead, or skip it.
+
+**When you do write one:**
+1. **It names its defect.** One comment sentence stating the code change that
+   would turn it red. Can't write that sentence, don't write the test.
+2. **Test behaviour through the public surface,** not private helpers or call
+   order, so a refactor that keeps behaviour keeps the test green.
+3. **Test the axis that varies.** A value that is constant across cases gets
+   one assertion, not one per case.
+4. **Extend before adding:** a row in an existing table beats a new test; a
+   new test beats a new file.
+5. **A test that cannot fail is deleted, not patched** — self-comparisons,
+   asserting a constructor's own argument, reading back a value the code just
+   wrote. They read as coverage and cover nothing.
+6. **No wall-clock waits.** Drive time through an injectable clock, or poll
+   until the condition holds with a generous ceiling. Never sleep for a fixed
+   interval and hope; when real timing is the thing under test, mark the line
+   `real-time-ok: <reason>`.
+7. **Tests don't share mutable global state** (env vars, temp paths, shared
+   databases, singletons) without isolating it; shared state is how suites
+   that pass alone flake together.
+
+**Flaky tests are quarantined, not ignored.** A test that fails and then
+passes on a rerun — at pre-push or anywhere else — is skipped in the same PR
+that hit it, with a dated reason and a ticket in `.scratch/`. Rerunning until
+green is not a fix.
 - **A change inside a review risk path is scoped before it is built.** The
   paths are `is_risk_path` at the top of `scripts/review-branch.sh`. State
   the function's invariants and enumerate the cases first; write those cases

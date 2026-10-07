@@ -21,9 +21,8 @@
 //
 // States rendered (light + dark each), all through the real surface except
 // where noted:
-//   1. default      — fresh window, no groups saved: the card overview drawing
-//                      its own zero-groups canvas (direction C absorbed the
-//                      separate "No groups yet" pane into it)
+//   1. default      — no scenes saved: the sidebar says "No scenes yet",
+//                      beside the header and the one-row add card
 //   2. create-sheet — the `GroupCreationSheetController`'s own view, rendered
 //                      standalone at its fitted size (`presentAsSheet` never
 //                      actually draws in a headless run, so the window-frame
@@ -46,13 +45,11 @@
 //                      carrying the shown device's CURRENT override — the
 //                      gold "current icon" selection ring — in a narrowed
 //                      search grid
-//   7. edit-active-group — the Edit Group pane while the shown group is the
-//                      ACTIVE Main Out target (thin gold ring on the icon
-//                      well); activation happens through the model — the
-//                      window stays config-only
-//   8. groups-overview — the card field with three saved groups, one of them
-//                      ACTIVE, so the live card's gold border + wave marker
-//                      and the sidebar Groups row's gold marker both render
+//   7. edit-active-group — the active group's scene page keeps a neutral
+//                      icon well, with no gold ring or playback status.
+//                      Model activation prepares other snapshot state;
+//                      it never changes the scene page's appearance.
+//   8. three-scenes — three saved scenes in the sidebar, with Party's page
 //
 // Run: `swift run window-snapshot [output-dir]`.
 
@@ -659,9 +656,6 @@ func snapshotSpeakerManagement(appearanceName: NSAppearance.Name, outDir: URL) {
             window.select(.group(id: "kitchen"))
             snapshotControlPanel(surface.shell, label: "scene-editor", appearanceName: appearanceName,
                                  outDir: outDir, present: presentScenes)
-            window.select(.groupsOverview)
-            snapshotControlPanel(surface.shell, label: "scene-cards", appearanceName: appearanceName,
-                                 outDir: outDir, present: presentScenes)
             window.select(.device(id: "remembered-network"))
             snapshotControlPanel(surface.shell, label: "remembered-network", appearanceName: appearanceName,
                                  outDir: outDir, present: present)
@@ -775,8 +769,7 @@ func run() -> Int32 {
             settleScreenSwap(surface, label: "Speakers")
         }
 
-        // 1. Default state: no groups — the card overview's own zero-groups
-        //    canvas (direction C absorbed the separate empty pane into it).
+        // 1. No scenes: the separate empty page beside the Scenes sidebar.
         snapshotControlPanel(surface.shell, label: "1-default", appearanceName: appearanceName,
                             outDir: outDir, present: presentGroups)
 
@@ -845,12 +838,9 @@ func run() -> Int32 {
             snapshotStandaloneView(picker.view, label: "6-icon-picker",
                                    appearanceName: appearanceName, outDir: outDir)
 
-            // 7. Edit pane for the ACTIVE group (Warm Signal W3, spec §5.3):
-            // the icon well carries the thin gold ring while the shown group
-            // is the Main Out target. Activation happens through the MODEL
-            // (`GroupController.activateGroup`), exactly as the popover would
-            // — the window itself stays config-only; this render just shows
-            // how the editor looks while its group is playing.
+            // 7. The active group's scene page keeps its neutral icon well,
+            // without a gold ring or playback status. Model activation below
+            // prepares other snapshot state, not the scene page's appearance.
             controller.activateGroup(id: saved.id)
             windowController.update(devices: backend.devices)
             windowController.test_select(.group(id: saved.id))
@@ -871,20 +861,15 @@ func run() -> Int32 {
             snapshotControlPanel(surface.shell, label: "5-panel-chrome",
                                 appearanceName: appearanceName, outDir: outDir, present: presentSpeakers)
 
-            // 8. Groups overview (direction C): the card field the sidebar's
-            // pinned Groups row opens. Two more groups are saved so the grid
-            // has both of its columns AND the dashed "Add scene" tile as its
-            // last cell, and "Downstairs" is still the ACTIVE group from state
-            // 7 — so the live card's gold border + wave marker render beside
-            // two quiet ones, matching the Groups row's own gold marker.
+            // 8. Three scenes in the sidebar, with Party selected.
             _ = try? controller.createGroup(name: "Whole House",
                                             memberIDs: backend.devices.map(\.id))
-            _ = try? controller.createGroup(name: "Party",
+            let party = try? controller.createGroup(name: "Party",
                                             memberIDs: ["sonos-move", "office", "homepod-bed"])
             windowController.update(devices: backend.devices)
-            windowController.test_select(.groupsOverview)
+            if let party { windowController.test_select(.group(id: party.group.id)) }
             drain()
-            snapshotControlPanel(surface.shell, label: "8-groups-overview",
+            snapshotControlPanel(surface.shell, label: "8-three-scenes",
                                 appearanceName: appearanceName, outDir: outDir, present: presentGroups)
         }
     }

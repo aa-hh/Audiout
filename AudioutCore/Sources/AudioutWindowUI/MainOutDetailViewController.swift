@@ -42,8 +42,7 @@ public final class MainOutDetailViewController: NSViewController {
     private let iconWell = DeviceIconWellView()
     private let nameLabel = NSTextField(labelWithString: MainOutDetailViewController.title)
     /// The identity band: the icon well and the name. No caption.
-    private lazy var header = PageHeaderView(iconWell: iconWell, title: nameLabel,
-                                             leadingInset: .railFree)
+    private lazy var header = PageHeaderView(iconWell: iconWell, title: nameLabel)
     private let eqWell = GroupedSectionView()
     /// The Equalizer title row: the Equalizer icon, then the label — the
     /// same idiom (and geometry) as the device pane's title row above its
@@ -309,8 +308,7 @@ public final class MainOutDetailViewController: NSViewController {
 
     /// HEADER PARITY hooks — identical bodies to the device pane's, so
     /// `GroupsHeaderParityTests` can compare the panes' real frames: the same
-    /// header band height and vertical centring as the scene editor, with the
-    /// icon's x differing from the editor's by design on this page.
+    /// header band height, vertical centring and horizontal inset as the scene editor.
 
     public var test_headerIconFrame: NSRect { header.frames(in: view).icon }
 

@@ -73,7 +73,7 @@ public final class DeviceDetailViewController: NSViewController {
     private let subtitleStack = NSStackView()
     /// The identity band: the icon well, then the name over its caption.
     private lazy var header = PageHeaderView(iconWell: iconWell, title: nameLabel,
-                                             caption: subtitleStack, leadingInset: .railFree)
+                                             caption: subtitleStack)
     /// The page's instrument, wrapping the shared editor — a `.well`
     /// (recessed), not a `.card`, so it still reads sunk where `raised`
     /// flattens to the pane's own ground in light (2026-09-04). Every box on
@@ -1080,8 +1080,7 @@ public final class DeviceDetailViewController: NSViewController {
 
     /// HEADER PARITY hooks — compared with `GroupEditorViewController`'s
     /// identically-named hooks by `GroupsHeaderParityTests`, which require the
-    /// same header band height and the same vertical centring; the icon's x
-    /// differs from the editor's by design on this page.
+    /// same header band height, vertical centring and horizontal inset.
 
     /// The icon well's laid-out frame in the pane's own coordinates.
     public var test_headerIconFrame: NSRect { header.frames(in: view).icon }

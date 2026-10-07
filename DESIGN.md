@@ -524,8 +524,7 @@ relative to a text style.
   the Overview's counts): a window page's name and the "Equalizer" heading
   on the speaker page and the Main Audio page — one step above body.
 - **Title Large / Subtitle Large** (`titleLarge` 400/15pt, `subtitleLarge`
-  400/12pt): the licence gate's explanation and key field, and the Scenes
-  overview's empty-state subtitle.
+  400/12pt): the licence gate's explanation and key field.
 - **Body** (400, 13pt; `bodyEmphasized` 600/13pt for the sidebar plates and
   the password sheet's heading):
   list-row titles, form labels, and a section title above a box (the scene
@@ -633,21 +632,21 @@ terms.
 never tabs — a new section becomes another sidebar row. It is its own
 window-hosted surface, not a sheet.
 
-The Scenes and Speakers content (`MixerWindowController`) has two roots. The
-Scenes root is a card-grid scene overview and a configuration-only scene
-editor, with no sidebar. The Speakers root is a sidebar split that must never
-collapse: the sidebar is the only speaker list, beside the Speakers page, a
-speaker's page or Main Audio. Selection on either is never activation. Both
-host their pages in `ContentPaneHostViewController`, on `WarmPanelView`, with
-a 1 pt `hairline` rule under the title bar at the safe-area top (the content
-pane only; the sidebar runs the full height). The Scenes host adds a footer:
+The Scenes and Speakers content (`MixerWindowController`) has two independent
+sidebar splits. Both sidebars are pinned at 210 pt and cannot collapse.
+The Scenes sidebar lists saved scenes beside the selected scene's
+configuration-only page, or the separate empty page when there are none.
+The Speakers sidebar is the only speaker list, beside the Speakers page,
+a speaker's page or Main Audio. Selection never activates a scene.
+Both host their pages in `ContentPaneHostViewController`, on `WarmPanelView`,
+with a 1 pt `hairline` rule under the title bar at the safe-area top.
+The sidebars run the full height. Only the Scenes page host adds a footer:
 one centred caption line in `label2`, 6 pt below the page and 8 pt above the
-window's bottom edge. The speaker page, Main Audio, the scene editor and the
-scene creation sheet are top-anchored scrolling columns capped at
-`GroupsPaneLayout.contentMaxWidth`, each with a `FlippedView`
-(`AudioutWindowUI`) as document view so content starts at the top. The
-Scenes overview scrolls a collection view; the Speakers overview does not
-scroll.
+window's bottom edge. The speaker page, Main Audio, selected-scene page
+and scene creation sheet use top-anchored scrolling columns capped at
+`GroupsPaneLayout.contentMaxWidth`, with `FlippedView` documents so content
+starts at the top. The empty scene page is a plain `WarmPanelView` column
+and does not scroll. The Speakers overview does not scroll.
 
 The **Speakers page** (`SpeakersPageViewController`), behind the sidebar's
 Overview plate, lists no speakers. It opens with the shared page header (see
@@ -767,7 +766,7 @@ match). `GroupedSectionView` takes **panel** or **row**, never this one.
 
 On the speaker page and the Main Audio page every box (the Equalizer well and
 the list) rounds at **row** (16pt), so the page carries one corner. The scene
-editor's checklist and the Speakers page list stay at **panel**. Mixer row
+page's membership card rounds at **row**; the Speakers page list stays at **panel**. Mixer row
 washes, the sidebar plates, the icon well, note banners and inset cards all
 round at **control** (10pt).
 
@@ -1086,8 +1085,7 @@ mounts through the panel's `insertRow` / `removeRow`, one per row.
 **Dismissing.** Every dismissible Mixer notice closes with the diagnosis
 card's ✕ (`NSButton.noticeDismissButton`, `AudioutPopoverUI`): `xmark` at 12 pt bold in `label2`, a hit area of at least 24 × 24
 pt. Only the diagnosis card's ✕ answers Escape; the alignment note's does not,
-so Escape keeps the surface's order (thank-you card, then the Scenes editor,
-then the bubble closes). The thank-you card is the exception and keeps its
+so Escape keeps the surface's order (thank-you card, then the bubble closes). The thank-you card is the exception and keeps its
 **Close** text button.
 
 ### Text Link
@@ -1239,13 +1237,23 @@ speakers selected it reads **Add scene from N speakers…** and creates a
 scene from them. ⌘N reaches it. It opens the scene sheet and never activates
 anything.
 
+The **Scenes sidebar** starts with the heading "Scenes" in
+`captionEmphasized` / `labelCool`. One `IconLabelCellView` row per scene
+follows in name order, using native source-list chrome without an identity
+glow. The count-only caption uses `captionDigits` /
+`labelCool` and rolls when membership changes. Selected rows use the stock
+selection pill and its text inks. With no scenes the sidebar reads
+"No scenes yet". It has the same Add scene bar and ⌘N action, a row menu
+with Rename… and Delete scene…, and ⌘⌫ to request deletion.
+Return on a selected scene row focuses the scene page's rename field.
+
 Every window page opens with one header, `PageHeaderView`
 (`AudioutWindowUI`): the 48 pt icon well, the name in `heading`, and an
 optional caption line in `labelCool`, the name and caption sitting as one
-block centred on the well, `titleSubtitleSpacing` (2 pt) apart. On the Overview, a speaker's page and
-Main Audio the well starts on the page's rail-free 14 pt inset, level with
-the list and the "Equalizer" heading below it; the scene editor starts it at
-its rail inset, and passes its editable name field as the title.
+block centred on the well, `titleSubtitleSpacing` (2 pt) apart. Every page
+starts its well on the same 14 pt inset, level with the content below it.
+The scene page passes its editable name field as the title and its speaker
+count as the caption.
 `GroupsHeaderParityTests` holds the pages level. The page name is a VoiceOver
 heading. A speaker's caption is its kind and
 status ("Sonos · Ready") with "Ready" or "Connected" in `speakersAccent`,
@@ -1280,9 +1288,17 @@ The Main Audio page has no caption, and its icon well is a plain picture with
 no edit badge. Below the Equalizer well sits the note "Applies to audio sent
 to speakers." in `noteLabel`'s style.
 
-Scene checkboxes change membership. Their rows give an unavailable member's
-status and nothing about visibility; scene cards count unavailable members
-alongside the existing Playing and Feeding labels.
+Scene rows change membership without changing playback. Every available
+speaker has a warm name in `label` and glyph in `label2`, checked or not.
+The node is a gold disc for a member, a dormant ring for a non-member, and a
+dimmed disc for an unavailable member. Unreachable rows say "Unavailable"
+or "Not connected"; the sole member stays pinned so a scene cannot become
+empty. This Mac leads the candidate list. The header count and selected
+sidebar count update together, and changes save as they happen.
+The empty page has the default scene well, "Scenes", "No scenes yet", and
+one card row titled "Add scene…" with a gold `ProminentButton` of the same
+title. Its caption reads "Pick the speakers that play together. You switch
+to a scene from Main Audio in the Mixer."
 
 ### List Row (window pages)
 `ListRowView` (`AudioutWindowUI`) is one row of the outlined list on the
@@ -1310,7 +1326,7 @@ different instrument, never by length.
 
 | Style | Fill | Edge | Default radius | Dividers | Used for |
 |---|---|---|---|---|---|
-| `.card` | `raised` | 1 pt `containerEdge` | `panel` | `containerEdge` | the list on the Overview, a speaker's page and the scene editor |
+| `.card` | `raised` | 1 pt `containerEdge` | `panel` | `containerEdge` | the list on the Overview, a speaker's page and the scene page |
 | `.well` | `well`, 1 pt `shadow` band at `insetShadeAlpha` inside the top edge | 1 pt `containerEdge` | `panel` | `containerEdge` | both Equalizers |
 | `.bare` | none | none | none | `hairline` | no page uses it today |
 
@@ -1331,8 +1347,7 @@ Three custom-drawn pieces, named in `AudioutWindowUI/AGENTS.md`.
   22 pt pencil badge (`iconWellBadge` scrim, `iconWellBadgeBorder` rim) sits
   in the bottom-trailing corner at all times and steps up in alpha on hover
   or keyboard focus, beside the 0.10 hover wash; the whole well is the click
-  target and opens the icon picker. The well fronting the active scene draws
-  a 1.5 pt `gold` edge. With `isEditable` off (Main Audio) it is a plain
+  target and opens the icon picker. With `isEditable` off (Main Audio) it is a plain
   picture: no badge, no hover, no click.
 - **Icon picker** (`IconPickerViewController`), an anchored popover: a grid
   of curated SF Symbols, each cell `well` with a 1 pt `hairline` edge and the
@@ -1345,33 +1360,30 @@ Three custom-drawn pieces, named in `AudioutWindowUI/AGENTS.md`.
   `equalizer` on a shaped one. It draws into its own layer so only a
   deliberate flip animates (timings under Speakers Sidebar and Pages).
 
-### Group Row and Membership Rail (Groups, signature component)
-`GroupIdentityGlowView` sits behind every group seat, active or not, and
-behind the Main Audio row's icon while its destination is a scene, drawn in
-`partyRampDeep` — the Mac's own instance of the iOS "magenta is identity,
-never state" rule. Ink carries temperature per decision C5: `labelCool` on idle
-names and glyphs, `label` on the live one, pinned by
-`GroupsInkTemperatureTests`. The membership rail's one dormancy tone is
-`railDormant`, the same hex as `rim`, so a dormant wire, an idle connected
-ring and an unarmed fader fill read as one tone — a Mac-only instrument with
-no iOS equivalent (the phone has no membership rail).
+### Group Row and Membership Rail (signature component)
+`GroupIdentityGlowView` sits behind the scene page's icon well and behind
+Main Audio's icon when its destination is a scene. It uses `partyRampDeep`;
+magenta marks identity, independent of playback.
 
-The rail is one colour from its start to its end.
-`BusRailOverlayView.originColor(for:)` picks it once for the whole line:
-`railDormant` when the rail is dormant; otherwise the host's
-`unarmedLineTone` when one is set and Main Audio's spine is not armed;
-otherwise `Tokens.Color.spineTone`, which is `gold`. Hook, segments, end
+On `.warmPane`, each membership glyph sits over a 30 pt rounded-square
+tile with a 6 pt corner radius, `well` fill and a 1 pt `hairline` edge.
+The tile is centred on the existing 26 pt glyph box; glyph size, name
+alignment and row height stay the same. The creation sheet has no tile.
+
+The scene page's membership rows draw nodes without a rail. A member is a
+gold disc, a non-member is a `railDormant` ring, and an unavailable member
+is a `socket`-filled disc with the heavier rim. Available names use
+`label`, unavailable names `labelCool`, pinned by
+`GroupsInkTemperatureTests`. Enabled rows gain the neutral 0.10 hover wash
+and the existing node growth on hover.
+
+The Mixer's rail keeps one colour from start to end: `railDormant` while
+dormant, otherwise `Tokens.Color.spineTone` (`gold`). Hook, segments, end
 dots, collapsed-header dots, and Main Audio's ring where the line joins it
-all take that one colour. The Mixer never sets `unarmedLineTone`, so its
-line is `gold` in every state but dormant: the system always has Main Audio
-connected, so an idle Mixer rail never occurs. The Groups editor sets
-`unarmedLineTone` to `ember` (`GroupEditorViewController`), and its spine is
-armed only while the group is the active one, so the editor's line is `ember`
-for an inactive group, matching its saved member discs, and `gold` for the
-active group (`MembershipRailTests`). A segment feeding a connecting
-speaker keeps the line's colour and stops 9 pt short of its plain `gold` node
-above and below (`BusRailCollapseResolveTests`); a failed speaker is not
-reached. `armed` also gates the connect pulse.
+all take that colour. A segment reaching a connecting speaker stops 9 pt
+short of its plain gold node above and below
+(`BusRailCollapseResolveTests`); a failed speaker is not reached.
+`armed` also gates the connect pulse.
 
 #### Membership rail extent
 Where the Mixer rail starts and stops. The situations behind it are drawn in
@@ -1413,8 +1425,7 @@ speaker whose node is a member, connecting, or the origin
 
 `RailPlan.resolve` (`BusRailOverlayView.swift`) is the one implementation and
 carries no state, so re-expanding restores the identical rail.
-`BusRailCollapseResolveTests` and `PopoverDeviceVisibilityTests` pin it. The
-Groups editor's rail passes no sections, so only rules 2, 6 and 8 reach it.
+`BusRailCollapseResolveTests` and `PopoverDeviceVisibilityTests` pin it.
 
 ### QR Tile (invitations to Audiout Remote, Mac-only)
 `RemoteInviteView` (`AudioutSharedUI`) is one view hosted three times: the
@@ -1450,6 +1461,13 @@ target; locked and auto-passed rows refuse silently rather than looking
 pressable.
 
 ## Motion
+
+Scene counts use `RollingCountLabel`: the old count slides up and the new
+count slides in over `Tokens.Motion.collapseRevealDuration` (0.15 s), with
+the same quadratic ease as a fold. Both strings use native text-field cell
+drawing throughout, retaining the settled text inset, baseline and
+truncation. The stored string holds the target at once. Reduce Motion and
+off-window updates settle instantly.
 
 Every fold in the app runs on one clock, `FoldAnimator` (`AudioutSharedUI`):
 a Mixer card or subsection folding, a row revealed or removed through

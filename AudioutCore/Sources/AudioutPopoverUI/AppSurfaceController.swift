@@ -144,10 +144,9 @@ public final class AppSurfaceController {
 
     public private(set) var selectedScreen: SurfaceScreen = .mixer
 
-    /// Asked when Escape reaches the surface while the Scenes screen is
-    /// showing. Return `true` when the screen stepped back a level (the app
-    /// wires `MixerWindowController.dismissEditor()`); `false` lets the press
-    /// close the surface.
+    /// Asked when Escape reaches the surface while the Scenes screen shows.
+    /// A screen may consume the key by returning `true`; `false` lets the
+    /// surface close.
     public var groupsCancelHandler: (() -> Bool)?
 
     /// The one frame's content size for THIS open session — measured on every
@@ -341,9 +340,7 @@ public final class AppSurfaceController {
             self?.select(screen)
             return true
         }
-        // Escape on the Scenes screen steps back one level first (a scene
-        // editor pops to the overview); anything else, Speakers included, and
-        // the next Escape, closes the surface.
+        // Escape closes Scenes unless its optional cancel handler consumes it.
         // On the Mixer, a showing thank-you card takes the first Escape.
         shell.cancelHandler = { [weak self] in
             guard let self else { return false }

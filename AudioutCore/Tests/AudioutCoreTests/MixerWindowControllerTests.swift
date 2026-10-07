@@ -7,11 +7,8 @@ import AppKit
 @testable import AudioutSharedUI
 @testable import AudioutWindowUI
 
-/// Structural + integration coverage for the Groups SCREEN's content
-/// controller (design revamp, SPEC §9; the standalone window was retired in
-/// U6). The content isn't visible to CI, so these assert the *built*
-/// structure and that interactions call through the model — the same
-/// checks the `window-harness` executable runs, folded into `swift test`.
+/// Structure and model interactions for the Scenes sidebar split and the
+/// independent Speakers host. Selecting and editing scenes never activates them.
 ///
 /// The screen is CONFIGURATION-ONLY under the revamp: viewing/editing groups
 /// here never activates them or moves audio (activation lives in the app's
@@ -183,11 +180,6 @@ import AppKit
         return dir
     }
 
-    /// Let queued MockBackend echoes drain before asserting on backend state.
-    private func drain() async {
-        try? await Task.sleep(nanoseconds: 150_000_000)
-    }
-
     /// Hosted as the surface's Scenes and Speakers screens this controller
     /// owns no window, so `setVisibleTab(_:)` is what tells it the
     /// user is looking at its content. Turning it on must CATCH UP on whatever
@@ -308,159 +300,121 @@ import AppKit
                 "and it still lists every section")
     }
 
-    @Test func baselineContentIsTheOverviewsEmptyCanvasAtZeroGroups() async throws {
+    // Removing the empty page or sidebar placeholder turns it red.
+    @Test func zeroScenesShowsTheEmptyPageAndPlaceholder() async throws {
         let (window, _, _) = try await makeWindow()
-        #expect(window.test_isShowingScenesOverview, "zero groups + no selection auto-lands on the overview")
-        #expect(window.test_overview.test_isShowingEmptyCanvas,
-                "with nothing saved the overview IS the empty state — there is no separate pane")
+        #expect(window.test_isShowingScenesEmptyPage)
+        #expect(window.test_scenesSidebar.test_hasPlaceholderRow)
     }
 
-    @Test func emptyCanvasNewGroupTilePresentsCreationSheet() async throws {
+    // Disconnecting the empty page's gold add button from creation turns it red.
+    @Test func theEmptyPageAddButtonPresentsCreation() async throws {
         let (window, _, _) = try await makeWindow()
-        #expect(window.test_overview.test_isShowingEmptyCanvas)
-        // The empty canvas's call-to-action runs the same sheet as the sidebar "+".
-        window.test_overview.test_tapNewGroup()
+        #expect(window.test_emptyPage.test_addButtonIsProminent)
+        window.test_emptyPage.test_tapAddScene()
         #expect(window.test_isPresentingCreateSheet)
         window.test_createSheet?.test_cancel()
     }
 
-    // Turns red when the scenes host opens on a scene's editor instead of the card field, or the speakers host leaves the Speakers page with nothing selected.
-    @Test func autoSelectLandsOnTheGroupsOverviewNotAGroupsEditor() async throws {
+    // Omitting the selected scene page or moving the Speakers host turns it red.
+    @Test func autoSelectShowsTheSavedScenesPage() async throws {
         let (window, controller, backend) = try await makeWindow()
         let saved = try makeGroup1(controller)
         window.update(devices: backend.devices)
-        await drain()
-        #expect(window.test_isShowingScenesOverview,
-                "with a saved group the scenes host shows the card field, not one group's editor")
-        #expect(!(window.test_isShowingEditor))
-        #expect(window.test_overview.test_cardGroupIDs == [saved.id])
-        #expect(window.test_isShowingSpeakersPage, "the speakers host is untouched by scenes")
+        #expect(window.test_isShowingEditor)
+        #expect(window.test_editor.editingGroupID == saved.id)
+        #expect(window.test_scenesSidebar.selectedSceneID == saved.id)
+        #expect(window.test_isShowingSpeakersPage)
         #expect(window.test_sidebar.currentSelection == nil)
-        #expect(controller.activeGroupID == nil, "auto-select never activates")
+        #expect(controller.activeGroupID == nil)
     }
 
-    @Test func savingAGroupAddsItsCardAndKeepsAllDevicesListed() async throws {
+    // Omitting a newly saved scene's row or count turns it red.
+    @Test func savingASceneAddsItsRowAndCount() async throws {
         let (window, controller, backend) = try await makeWindow()
         let saved = try makeGroup1(controller)
         window.update(devices: backend.devices)
-
-        #expect(window.test_sidebar.test_sectionTitles == ["System Audio", "Speakers", "Shown in Mixer"])
-        #expect(window.test_overview.test_cardGroupIDs == [saved.id])
-        #expect(!(window.test_overview.test_isShowingEmptyCanvas))
-        #expect(window.test_overview.test_chipCount(forCard: saved.id) == saved.memberIDs.count,
-                "each member gets a chip along the card's bottom edge")
-        #expect(window.test_sidebar.test_deviceRowCount == 7, "the Speakers section lists every device, a saved group's members included")
+        #expect(window.test_scenesSidebar.test_rowIDs == [saved.id])
+        #expect(window.test_scenesSidebar.test_rowCaption(id: saved.id) == "2 speakers")
+        #expect(window.test_sidebar.test_deviceRowCount == 7)
     }
 
-    // MARK: Overview → editor (the in-pane push on the Scenes screen)
-
-    // Turns red when the two hosts stop being independent: returning the scenes host to its cards disturbs a speaker's page, or the reverse.
-    @Test func selectingTheGroupsRowShowsTheOverview() async throws {
+    // Coupling scene selection to the Speakers host turns it red.
+    @Test func theScenesAndSpeakersHostsAreIndependent() async throws {
         let (window, controller, backend) = try await makeWindow()
         let saved = try makeGroup1(controller)
         window.update(devices: backend.devices)
         window.select(.device(id: "office"))
-        window.test_overview.test_clickCard(id: saved.id)
-        await drain()
+        window.test_scenesSidebar.test_select(sceneID: saved.id)
         #expect(window.test_isShowingDetail)
         #expect(window.test_isShowingEditor)
-
-        window.test_select(.groupsOverview)
-        await drain()
-        #expect(window.test_isShowingScenesOverview)
-        #expect(window.test_isShowingDetail, "the speaker's page beside the sidebar stays")
         #expect(window.test_sidebar.currentSelection == .device(id: "office"))
     }
 
-    @Test func openingACardPushesTheEditorAndLeavesTheSidebarAlone() async throws {
+    // Disconnecting scene selection, dropping its pending rename, or activating playback turns it red.
+    @Test func selectingASceneRowShowsItsPage() async throws {
         let (window, controller, backend) = try await makeWindow()
-        let saved = try makeGroup1(controller)
+        let first = try makeGroup1(controller)
+        let saved = try controller.createGroup(name: "Other scene", memberIDs: ["local-mac"], memberVolumes: [:]).group
         window.update(devices: backend.devices)
-        await drain()
-
-        window.test_overview.test_clickCard(id: saved.id)
-        await drain()
-
-        #expect(window.test_isShowingEditor, "a card opens its group's editor")
+        let host = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 700, height: 505),
+                            styleMask: [.titled], backing: .buffered, defer: true)
+        host.contentViewController = window.scenesContentController
+        host.contentView?.layoutSubtreeIfNeeded()
+        window.test_editor.test_countReduceMotionOverride = false
+        defer { window.test_editor.test_settleCount() }
+        #expect(window.test_editor.editingGroupID == first.id)
+        #expect(!window.test_editor.test_captionIsRolling)
+        #expect(host.makeFirstResponder(window.test_editor.test_titleField))
+        let fieldEditor = try #require(window.test_editor.test_titleField.currentEditor() as? NSTextView)
+        fieldEditor.insertText("Saved before selection", replacementRange: NSRange(location: 0, length: fieldEditor.string.utf16.count))
+        window.test_scenesSidebar.test_select(sceneID: saved.id)
+        #expect(controller.groups.first { $0.id == first.id }?.name == "Saved before selection")
+        #expect(window.test_isShowingEditor)
         #expect(window.test_editor.editingGroupID == saved.id)
-        #expect(window.test_sidebar.currentSelection == nil,
-                "the fleet never moves under the pointer — the sidebar is untouched")
-        #expect(controller.activeGroupID == nil, "opening a card never activates the group")
+        #expect(window.test_editor.test_captionText == "1 speaker")
+        #expect(!window.test_editor.test_captionIsRolling)
+        #expect(window.test_scenesSidebar.selectedSceneID == saved.id)
+        #expect(window.test_sidebar.currentSelection == nil)
+        #expect(controller.activeGroupID == nil)
     }
 
-    /// A membership edit reaches the card overview at once, not only when the
-    /// user walks back to it (live report: removing a speaker left the card
-    /// showing its old chips and count, so a group looked like it only ever
-    /// grew). The overview is a projection of the same model and its pane is
-    /// off screen during the edit, so nothing else was re-reading it.
-    @Test func removingAMemberUpdatesTheOverviewCardImmediately() async throws {
+    // Replacing the page count during a synchronous save refresh or dropping either roll turns it red.
+    @Test func removingAMemberUpdatesBothCountsInTheSameTurn() async throws {
         let (window, controller, backend) = try await makeWindow()
         let saved = try makeGroup1(controller)
         window.update(devices: backend.devices)
-        window.test_overview.test_clickCard(id: saved.id)
-        await drain()
-        #expect(window.test_overview.test_chipCount(forCard: saved.id) == 2)
-
+        let host = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 700, height: 505),
+                            styleMask: [.titled], backing: .buffered, defer: true)
+        host.contentViewController = window.scenesContentController
+        host.contentView?.layoutSubtreeIfNeeded()
+        window.test_editor.test_countReduceMotionOverride = false
+        window.test_scenesSidebar.test_setCountReduceMotionOverride(false, for: saved.id)
+        defer {
+            window.test_editor.test_settleCount()
+            window.test_scenesSidebar.test_settleCount(for: saved.id)
+            controller.onStateDidChange = nil
+        }
+        #expect(!window.test_editor.test_captionIsRolling)
+        controller.onStateDidChange = { window.update(devices: backend.devices) }
         window.test_editor.test_setMembership(false, for: "office")
-        await drain()
-
-        #expect(controller.groups.first { $0.id == saved.id }?.memberIDs == ["sonos-move"],
-                "the model drops the member")
-        #expect(window.test_overview.test_chipCount(forCard: saved.id) == 1,
-                "and the card behind the editor already reflects it")
+        #expect(window.test_editor.test_captionText == "1 speaker")
+        #expect(window.test_scenesSidebar.test_rowCaption(id: saved.id) == "1 speaker")
+        #expect(window.test_editor.test_captionIsRolling)
+        #expect(window.test_scenesSidebar.test_countIsRolling(for: saved.id))
+        #expect(window.test_scenesSidebar.selectedSceneID == saved.id)
     }
 
-    @Test func theEditorsBackBandReturnsToTheOverview() async throws {
+    // Selecting the model's first scene instead of the first name-sorted row turns it red.
+    @Test func scenesSortByNameAndAutoSelectTheFirstRow() async throws {
         let (window, controller, backend) = try await makeWindow()
-        let saved = try makeGroup1(controller)
+        let kitchen = try controller.createGroup(name: "Kitchen", memberIDs: ["office"], memberVolumes: [:]).group
+        let attic = try controller.createGroup(name: "Attic", memberIDs: ["sonos-move"], memberVolumes: [:]).group
+        let zoo = try controller.createGroup(name: "Zoo", memberIDs: ["local-mac"], memberVolumes: [:]).group
         window.update(devices: backend.devices)
-        window.test_overview.test_clickCard(id: saved.id)
-        await drain()
-        #expect(window.test_isShowingEditor)
-
-        window.test_editor.test_goBack()
-        await drain()
-
-        #expect(window.test_isShowingScenesOverview, "'‹ Groups' pops the editor back to the card field")
-    }
-
-    /// The surface's Escape asks this: an open editor pops and reports so;
-    /// with nothing to pop the answer is `false` and Escape closes the window.
-    @Test func dismissEditorPopsAnOpenEditorAndRefusesWhenNoneIsOpen() async throws {
-        let (window, controller, backend) = try await makeWindow()
-        let saved = try makeGroup1(controller)
-        window.update(devices: backend.devices)
-        await drain()
-        #expect(window.test_isShowingScenesOverview)
-        #expect(!window.dismissEditor(), "nothing to step back from")
-
-        window.test_overview.test_clickCard(id: saved.id)
-        await drain()
-        #expect(window.test_isShowingEditor)
-
-        #expect(window.dismissEditor())
-        #expect(window.test_isShowingScenesOverview)
-        #expect(!window.dismissEditor(), "a second press has nothing left to pop")
-    }
-
-    @Test func doneAndCommandBracketBothReturnToTheOverview() async throws {
-        let (window, controller, backend) = try await makeWindow()
-        let saved = try makeGroup1(controller)
-        window.update(devices: backend.devices)
-
-        window.test_overview.test_clickCard(id: saved.id)
-        await drain()
-        #expect(window.test_isShowingEditor)
-        window.test_editor.test_done()
-        await drain()
-        #expect(window.test_isShowingScenesOverview, "Done leaves the editor")
-
-        window.test_overview.test_clickCard(id: saved.id)
-        await drain()
-        #expect(window.test_isShowingEditor)
-        #expect(window.test_editor.test_performBackKeyEquivalent(), "the editor claims ⌘[")
-        await drain()
-        #expect(window.test_isShowingScenesOverview, "⌘[ leaves the editor")
+        #expect(window.test_scenesSidebar.test_rowIDs == [attic.id, kitchen.id, zoo.id])
+        #expect(window.test_editor.editingGroupID == attic.id)
+        #expect(window.test_scenesSidebar.selectedSceneID == attic.id)
     }
 
     // Turns red when a deep link to the Overview plate stops showing the Overview or stops lighting its row.
@@ -484,7 +438,6 @@ import AppKit
         window.test_sidebar.test_tapAdd()
         let sheet = try #require(window.test_createSheet)
         sheet.test_commit()
-        await drain()
 
         let group = try #require(controller.groups.first)
         #expect(Set(group.memberIDs) == ["office", "sonos-move"])
@@ -494,43 +447,97 @@ import AppKit
         #expect(controller.activeGroupID == nil, "creating never activates")
     }
 
-    /// The card menu inherits the sidebar group row's two items and both of its
-    /// flows verbatim — open the editor, then focus the rename field.
-    @Test func aCardsRenameOpensTheEditorWithTheRenameFieldFocused() async throws {
+    // Dropping the current scene's pending rename before the other scene's Rename menu opens turns it red.
+    @Test func aScenesRenameOpensItsPage() async throws {
         let (window, controller, backend) = try await makeWindow()
-        let saved = try makeGroup1(controller)
+        let first = try makeGroup1(controller)
+        let saved = try controller.createGroup(name: "Other scene", memberIDs: ["local-mac"], memberVolumes: [:]).group
         window.update(devices: backend.devices)
-        await drain()
-
-        #expect(window.test_overview.test_contextMenuItems(forCard: saved.id)
-                == ["Rename…", "Delete scene…"])
-        window.test_overview.test_clickContextMenuItem("Rename…", forCard: saved.id)
-        await drain()
-
+        let host = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 700, height: 505),
+                            styleMask: [.titled], backing: .buffered, defer: true)
+        host.contentViewController = window.scenesContentController
+        host.contentView?.layoutSubtreeIfNeeded()
+        #expect(window.test_editor.editingGroupID == first.id)
+        #expect(host.makeFirstResponder(window.test_editor.test_titleField))
+        let fieldEditor = try #require(window.test_editor.test_titleField.currentEditor() as? NSTextView)
+        fieldEditor.insertText("Saved before Rename", replacementRange: NSRange(location: 0, length: fieldEditor.string.utf16.count))
+        #expect(window.test_scenesSidebar.test_contextMenuItems(for: saved.id) == ["Rename…", "Delete scene…"])
+        #expect(window.test_scenesSidebar.test_clickContextMenuItem("Rename…", for: saved.id))
+        #expect(controller.groups.first { $0.id == first.id }?.name == "Saved before Rename")
         #expect(window.test_isShowingEditor)
         #expect(window.test_editor.editingGroupID == saved.id)
+        #expect(window.test_scenesSidebar.selectedSceneID == saved.id)
+        #expect(window.test_editor.test_titleField.currentEditor() != nil)
+        #expect(host.firstResponder === window.test_editor.test_titleField.currentEditor())
     }
 
-    @Test func aCardsDeleteRunsTheEditorsConfirmThenDeleteFlow() async throws {
+    // Dropping the pending rename before another scene's Delete menu, or bypassing confirmation, turns it red.
+    @Test func aScenesDeleteRunsTheConfirmationFlow() async throws {
         let (window, controller, backend) = try await makeWindow()
-        let saved = try makeGroup1(controller)
+        let first = try makeGroup1(controller)
+        let saved = try controller.createGroup(name: "Other scene", memberIDs: ["local-mac"], memberVolumes: [:]).group
         window.update(devices: backend.devices)
-        await drain()
-
-        window.test_overview.test_clickContextMenuItem("Delete scene…", forCard: saved.id)
-        await drain()
-        // The card's Delete lands in the editor's confirm flow. Headless there
-        // is no window to host the confirmation sheet, and deleting without
-        // one is exactly what the sheet prevents — so nothing is deleted yet
-        // (`GroupEditorViewController.deleteTapped`), and `test_confirmDelete()`
-        // stands in for the sheet's Delete button.
-        #expect(window.test_isShowingEditor, "the confirm flow runs in the group's editor")
-        #expect(!controller.groups.isEmpty, "no window, no confirmation — nothing deleted yet")
+        let host = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 700, height: 505),
+                            styleMask: [.titled], backing: .buffered, defer: true)
+        host.contentViewController = window.scenesContentController
+        host.contentView?.layoutSubtreeIfNeeded()
+        #expect(host.makeFirstResponder(window.test_editor.test_titleField))
+        let fieldEditor = try #require(window.test_editor.test_titleField.currentEditor() as? NSTextView)
+        fieldEditor.insertText("Saved before Delete", replacementRange: NSRange(location: 0, length: fieldEditor.string.utf16.count))
+        #expect(window.test_scenesSidebar.test_clickContextMenuItem("Delete scene…", for: saved.id))
+        #expect(controller.groups.first { $0.id == first.id }?.name == "Saved before Delete")
+        #expect(window.test_editor.editingGroupID == saved.id)
+        #expect(window.test_isShowingEditor)
+        #expect(controller.groups.count == 2)
         window.test_editor.test_confirmDelete()
-        await drain()
+        #expect(controller.groups.map(\.id) == [first.id])
+        window.test_editor.test_confirmDelete()
         #expect(controller.groups.isEmpty)
-        #expect(window.test_isShowingScenesOverview, "the delete falls back to the overview")
-        #expect(window.test_overview.test_isShowingEmptyCanvas)
+        #expect(window.test_isShowingScenesEmptyPage)
+    }
+
+    // Ignoring a refused or failed rename in showEditor, Rename, or Delete turns it red.
+    @Test(arguments: [("selection", false), ("Rename…", false), ("Delete scene…", false), ("selection", true)])
+    func aRefusedRenameKeepsTheCurrentScene(action: String, saveFails: Bool) throws {
+        let directory = tempDirectory()
+        let device = Device(id: "speaker", name: "Speaker", kind: .sonos)
+        let otherDevice = Device(id: "other", name: "Other", kind: .sonos)
+        let controller = GroupController(backend: MockBackend(fleet: []),
+            store: GroupStore(directory: directory), routingStore: RoutingStore(directory: scratchDir),
+            settings: AppSettings(defaults: isolatedDefaults), loadPersisted: false)
+        let first = try controller.createGroup(name: "Alpha", memberIDs: [device.id], memberVolumes: [:]).group
+        let target = try controller.createGroup(name: "Beta", memberIDs: [otherDevice.id], memberVolumes: [:]).group
+        #expect(first.id != target.id)
+        let window = MixerWindowController(groupController: controller,
+            settings: AppSettings(defaults: isolatedDefaults))
+        window.test_isVisibleOverride = true
+        window.update(devices: [device, otherDevice])
+        let host = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 700, height: 505),
+                            styleMask: [.titled], backing: .buffered, defer: true)
+        host.contentViewController = window.scenesContentController
+        host.contentView?.layoutSubtreeIfNeeded()
+        #expect(window.test_editor.editingGroupID == first.id)
+        #expect(host.makeFirstResponder(window.test_editor.test_titleField))
+        let fieldEditor = try #require(window.test_editor.test_titleField.currentEditor() as? NSTextView)
+        fieldEditor.insertText(saveFails ? "Changed" : target.name,
+            replacementRange: NSRange(location: 0, length: fieldEditor.string.utf16.count))
+        if saveFails {
+            // A file at this test store's directory makes the pending rename write fail.
+            try FileManager.default.removeItem(at: directory)
+            #expect(FileManager.default.createFile(atPath: directory.path, contents: Data()))
+        }
+
+        if action == "selection" { window.test_scenesSidebar.test_select(sceneID: target.id) }
+        else { #expect(window.test_scenesSidebar.test_clickContextMenuItem(action, for: target.id)) }
+
+        #expect(window.test_editor.editingGroupID == first.id)
+        #expect(window.test_scenesSidebar.selectedSceneID == first.id)
+        #expect(controller.groups.map(\.name) == [first.name, target.name])
+        #expect(window.test_editor.test_nameFieldValue == first.name)
+        #expect(fieldEditor.string == first.name)
+        #expect(host.firstResponder === fieldEditor)
+        #expect(saveFails ? window.test_editor.test_saveFailureReported : window.test_editor.test_duplicateNameRefused)
+        if action == "Delete scene…" { #expect(window.test_editor.test_deleteRequestCount == 0) }
     }
 
     @Test func sidebarSupportsMultipleSelection() async throws {
@@ -599,7 +606,6 @@ import AppKit
     @Test func tapAddRoutesToCreationSheet() async throws {
         let (window, controller, _) = try await makeWindow()
         window.test_sidebar.test_tapAdd()
-        await drain()
 
         #expect(window.test_createSheet != nil, "the '+' with no selection presents the New Group sheet")
         #expect(controller.groups.count == 0, "presenting the sheet creates nothing")
@@ -608,7 +614,6 @@ import AppKit
     @Test func createSheetShowsATitleAndAnEditablePencilOnItsIconWell() async throws {
         let (window, _, _) = try await makeWindow()
         window.test_presentCreateSheet(preselected: [])
-        await drain()
         let sheet = try #require(window.test_createSheet)
 
         #expect(sheet.test_titleText == "Add scene", "the sheet names itself instead of opening as a bare form")
@@ -618,7 +623,6 @@ import AppKit
     @Test func createSheetPrefillsPreselectedMembersChecked() async throws {
         let (window, _, _) = try await makeWindow()
         window.test_presentCreateSheet(preselected: ["office", "appletv-lr"])
-        await drain()
 
         let sheet = try #require(window.test_createSheet)
         #expect(Set(sheet.test_checkedDeviceIDs) == ["office", "appletv-lr"], "the sheet is pre-populated with exactly the multi-selected speakers")
@@ -627,7 +631,6 @@ import AppKit
     @Test func createSheetCreateDisabledAtZeroMembersEnabledAtOne() async throws {
         let (window, _, _) = try await makeWindow()
         window.test_presentCreateSheet(preselected: [])
-        await drain()
         let sheet = try #require(window.test_createSheet)
 
         #expect(!(sheet.test_isCreateEnabled), "Create is disabled with zero members checked")
@@ -642,14 +645,12 @@ import AppKit
     @Test func createSheetCommitCreatesExactlyCheckedMembers() async throws {
         let (window, controller, _) = try await makeWindow()
         window.test_presentCreateSheet(preselected: [])
-        await drain()
         let sheet = try #require(window.test_createSheet)
 
         sheet.test_setName("Downstairs")
         sheet.test_setMembership(deviceID: "office", isChecked: true)
         sheet.test_setMembership(deviceID: "homepod-bed", isChecked: true)
         sheet.test_commit()
-        await drain()
 
         #expect(controller.groups.count == 1)
         let group = try #require(controller.groups.first)
@@ -662,12 +663,10 @@ import AppKit
         let (window, controller, _) = try await makeWindow()
         #expect(controller.activeGroupID == nil)
         window.test_presentCreateSheet(preselected: [])
-        await drain()
         let sheet = try #require(window.test_createSheet)
 
         sheet.test_setMembership(deviceID: "office", isChecked: true)
         sheet.test_commit()
-        await drain()
 
         #expect(controller.groups.count == 1)
         #expect(controller.activeGroupID == nil, "creating a group never activates it — CONFIG-ONLY")
@@ -676,11 +675,9 @@ import AppKit
     @Test func createSheetCommitAfterCreateSelectsAndOpensEditorWithoutActivating() async throws {
         let (window, controller, _) = try await makeWindow()
         window.test_presentCreateSheet(preselected: [])
-        await drain()
         let sheet = try #require(window.test_createSheet)
         sheet.test_setMembership(deviceID: "office", isChecked: true)
         sheet.test_commit()
-        await drain()
 
         let group = try #require(controller.groups.first)
         #expect(window.test_isShowingEditor, "creation opens the new group's editor")
@@ -691,12 +688,10 @@ import AppKit
     @Test func createSheetDedupsIdenticalMemberSetToExistingGroup() async throws {
         let (window, controller, _) = try await makeWindow()
         window.test_presentCreateSheet(preselected: ["office", "appletv-lr"])
-        await drain()
         var sheet = try #require(window.test_createSheet)
         var completedResult: (group: Group, alreadyExisted: Bool)?
         sheet.onComplete = { completedResult = $0 }
         sheet.test_commit()
-        await drain()
         #expect(controller.groups.count == 1)
         #expect(completedResult?.alreadyExisted == false)
         let firstID = controller.groups[0].id
@@ -705,7 +700,6 @@ import AppKit
         // rather than letting the user press Create into a refusal (owner's call,
         // 2026-09-03) — the count line names the group that already holds them.
         window.test_presentCreateSheet(preselected: ["appletv-lr", "office"])
-        await drain()
         sheet = try #require(window.test_createSheet)
         completedResult = nil
         sheet.onComplete = { completedResult = $0 }
@@ -715,7 +709,6 @@ import AppKit
                 Comment(rawValue: "and the count line says which group holds them: " + sheet.test_countText))
 
         sheet.test_commit()
-        await drain()
 
         #expect(controller.groups.count == 1, "no duplicate group for an identical member set")
         #expect(controller.groups[0].id == firstID)
@@ -738,7 +731,6 @@ import AppKit
         window.update(devices: devices)
 
         window.test_presentCreateSheet(preselected: [unavailableID])
-        await drain()
         let sheet = try #require(window.test_createSheet)
 
         #expect(sheet.test_candidateDeviceIDs.count == 7,
@@ -758,7 +750,6 @@ import AppKit
         #expect(controller.activeGroupID == nil)
 
         window.test_select(.group(id: saved.id))
-        await drain()
 
         #expect(window.test_isShowingEditor)
         #expect(controller.activeGroupID == nil, "selecting a group in the sidebar never activates it")
@@ -789,7 +780,6 @@ import AppKit
         window.update(devices: devices)
 
         window.test_select(.group(id: saved.id))
-        await drain()
 
         let ids = window.test_editor.test_candidateDeviceIDs
         #expect(ids.contains("office"), "an unavailable member is still offered")
@@ -805,7 +795,6 @@ import AppKit
         let saved = try makeGroup1(controller)
         window.update(devices: backend.devices)
         window.test_select(.group(id: saved.id))
-        await drain()
 
         window.test_editor.test_rename(to: "Whole House")
         #expect(controller.groups.first { $0.id == saved.id }?.name == "Whole House")
@@ -816,7 +805,6 @@ import AppKit
         let saved = try makeGroup1(controller)
         window.update(devices: backend.devices)
         window.test_select(.group(id: saved.id))
-        await drain()
 
         let extra = try #require(backend.devices.first { !saved.memberIDs.contains($0.id) }?.id)
         let before = try #require(controller.groups.first { $0.id == saved.id }).memberIDs.count
@@ -835,7 +823,6 @@ import AppKit
         let saved = try makeGroup1(controller)   // 2 members: sonos-move, office
         window.update(devices: backend.devices)
         window.test_select(.group(id: saved.id))
-        await drain()
 
         // Removing one of two members is allowed — the group drops to a single member.
         window.test_editor.test_setMembership(false, for: "office")
@@ -861,7 +848,6 @@ import AppKit
         let saved = try controller.createGroup(name: "Solo", memberIDs: ["office"]).group
         window.update(devices: backend.devices)
         window.test_select(.group(id: saved.id))
-        await drain()
 
         #expect(!(window.test_editor.test_isMembershipRowEnabled(for: "office")), "the sole member starts pinned")
         let officeRow = try #require(window.test_editor.test_membershipRow(for: "office") as? MembershipRowView)
@@ -876,21 +862,39 @@ import AppKit
         #expect(officeRow.test_checkboxAccessibilityHelp == nil, "the reuse path must clear the stale pin explanation, not just re-enable the checkbox")
     }
 
-    @Test func deleteInEditorCallsDeleteGroupAndReturnsToMixer() async throws {
+    // Failing to return to the empty page after the last deletion turns it red.
+    @Test func deleteInEditorCallsDeleteGroupAndReturnsToEmptyPage() async throws {
         let (window, controller, backend) = try await makeWindow()
         let saved = try makeGroup1(controller)
         window.update(devices: backend.devices)
         window.test_select(.group(id: saved.id))
-        await drain()
         #expect(window.test_isShowingEditor)
 
         window.test_editor.test_confirmDelete()
-        await drain()
 
         #expect(controller.groups.count == 0)
         #expect(!(window.test_isShowingEditor))
-        #expect(window.test_isShowingScenesOverview, "deleting the last group falls back to the overview")
-        #expect(window.test_overview.test_isShowingEmptyCanvas, "which is now the empty state too")
+        #expect(window.test_isShowingScenesEmptyPage)
+    }
+
+    // Leaving a deleted scene selected instead of the remaining page turns it red.
+    @Test func deletingTheSelectedSceneShowsTheRemainingScene() async throws {
+        let (window, controller, backend) = try await makeWindow()
+        let first = try controller.createGroup(name: "Attic", memberIDs: ["office"], memberVolumes: [:]).group
+        let other = try controller.createGroup(name: "Kitchen", memberIDs: ["sonos-move"], memberVolumes: [:]).group
+        window.update(devices: backend.devices)
+        window.test_scenesSidebar.test_select(sceneID: first.id)
+        window.test_editor.test_confirmDelete()
+        #expect(window.test_editor.editingGroupID == other.id)
+        #expect(window.test_scenesSidebar.selectedSceneID == other.id)
+    }
+
+    // Sorting the local Mac among named speakers instead of placing it first turns it red.
+    @Test func thisMacLeadsTheSceneMembershipList() async throws {
+        let (window, controller, backend) = try await makeWindow()
+        _ = try makeGroup1(controller)
+        window.update(devices: backend.devices)
+        #expect(window.test_editor.test_candidateDeviceIDs.first == "local-mac")
     }
 
     // MARK: The delete confirmation (P0-1)
@@ -900,7 +904,6 @@ import AppKit
         let saved = try makeGroup1(controller)
         window.update(devices: backend.devices)
         window.test_select(.group(id: saved.id))
-        await drain()
 
         let alert = try #require(window.test_editor.test_makeDeleteAlert())
         #expect(alert.messageText == "Delete \u{201C}Group 1\u{201D}?",
@@ -923,11 +926,9 @@ import AppKit
         let saved = try makeGroup1(controller)
         window.update(devices: backend.devices)
         window.test_select(.group(id: saved.id))
-        await drain()
 
         controller.activateGroup(id: saved.id)
         window.update(devices: backend.devices)
-        await drain()
 
         let alert = try #require(window.test_editor.test_makeDeleteAlert())
         #expect(alert.informativeText
@@ -942,14 +943,11 @@ import AppKit
         let saved = try makeGroup1(controller)
         window.update(devices: backend.devices)
         window.test_select(.group(id: saved.id))
-        await drain()
 
         window.test_editor.requestDelete()
-        await drain()
         #expect(controller.groups.count == 1, "no window means no confirmation, so nothing is deleted")
 
         window.test_editor.test_confirmDelete()
-        await drain()
         #expect(controller.groups.isEmpty, "the confirmed path still deletes")
         _ = saved
     }
@@ -961,7 +959,6 @@ import AppKit
         let saved = try makeGroup1(controller)
         window.update(devices: backend.devices)
         window.test_select(.group(id: saved.id))
-        await drain()
         let baseline = window.test_editor.test_renderCount
         #expect(baseline > 0, "opening the editor rendered it once")
 
@@ -985,7 +982,6 @@ import AppKit
         let base = backend.devices + [transient]
         window.update(devices: base)
         window.test_select(.group(id: saved.id))
-        await drain()
         let editor = window.test_editor
         let candidatesBefore = editor.test_candidateDeviceIDs
         let row = try #require(editor.test_membershipRow(for: "office"))
@@ -1019,7 +1015,6 @@ import AppKit
         let saved = try makeGroup1(controller)   // sonos-move, office
         window.update(devices: backend.devices)
         window.test_select(.group(id: saved.id))
-        await drain()
         let editor = window.test_editor
         let baseline = editor.test_renderCount
 
@@ -1048,7 +1043,6 @@ import AppKit
         _ = try controller.createGroup(name: "Upstairs", memberIDs: ["homepod-bed"], memberVolumes: [:])
         window.update(devices: backend.devices)
         window.test_select(.group(id: first.id))
-        await drain()
 
         window.test_editor.test_rename(to: "upstairs")
 
@@ -1064,7 +1058,6 @@ import AppKit
         let saved = try makeGroup1(controller)
         window.update(devices: backend.devices)
         window.test_select(.group(id: saved.id))
-        await drain()
 
         window.test_editor.test_rename(to: "GROUP 1")
 
@@ -1077,7 +1070,6 @@ import AppKit
         let (window, controller, _) = try await makeWindow()
         _ = try makeGroup1(controller)   // "Group 1"
         window.test_presentCreateSheet(preselected: [])
-        await drain()
         let sheet = try #require(window.test_createSheet)
         var completed = false
         sheet.onComplete = { _ in completed = true }
@@ -1085,7 +1077,6 @@ import AppKit
         sheet.test_setName("group 1")
         sheet.test_setMembership(deviceID: "homepod-bed", isChecked: true)
         sheet.test_commit()
-        await drain()
 
         #expect(controller.groups.count == 1, "nothing was created")
         #expect(!completed, "the sheet stays up with the form intact")
@@ -1100,14 +1091,12 @@ import AppKit
     @Test func committingTheCreateSheetTwiceCreatesOneGroupAndNoRefusal() async throws {
         let (window, controller, _) = try await makeWindow()
         window.test_presentCreateSheet(preselected: [])
-        await drain()
         let sheet = try #require(window.test_createSheet)
 
         sheet.test_setName("Kitchen")
         sheet.test_setMembership(deviceID: "homepod-bed", isChecked: true)
         sheet.test_commit()
         sheet.test_commit()
-        await drain()
 
         #expect(controller.groups.map(\.name) == ["Kitchen"], "one group, created once")
         #expect(!sheet.test_duplicateNameRefused,
@@ -1121,7 +1110,6 @@ import AppKit
         let (window, controller, _) = try await makeWindow()
         let existing = try makeGroup1(controller)   // "Group 1"
         window.test_presentCreateSheet(preselected: [])
-        await drain()
         let sheet = try #require(window.test_createSheet)
 
         // The member set that already belongs to "Group 1" — the dedup path,
@@ -1133,7 +1121,6 @@ import AppKit
         sheet.onComplete = { _ in completed = true }
         sheet.test_alertIsUpOverride = true
         sheet.test_commit()
-        await drain()
 
         #expect(!completed, "the second landing does nothing at all while the alert is up")
         #expect(controller.groups.count == 1, "and writes nothing")
@@ -1147,7 +1134,6 @@ import AppKit
     @Test func theCreateSheetNameFieldCommitsOnReturnOnly() async throws {
         let (window, _, _) = try await makeWindow()
         window.test_presentCreateSheet(preselected: [])
-        await drain()
         let sheet = try #require(window.test_createSheet)
 
         #expect(!sheet.test_nameFieldCommitsOnEndEditing,
@@ -1176,7 +1162,6 @@ import AppKit
         window.update(devices: backend.devices)
 
         window.test_presentCreateSheet(preselected: [])
-        await drain()
         let sheet = try #require(window.test_createSheet)
         var completed = false
         sheet.onComplete = { _ in completed = true }
@@ -1184,7 +1169,6 @@ import AppKit
         sheet.test_setMembership(deviceID: "office", isChecked: true)
 
         sheet.test_commit()
-        await drain()
 
         #expect(sheet.test_saveFailureReported, "a failed write is reported, never swallowed")
         #expect(!completed, "the sheet does not finish on a failure")
@@ -1200,20 +1184,16 @@ import AppKit
     @Test func aSetThatIsAlreadyAGroupNeverArmsCreate() async throws {
         let (window, controller, _) = try await makeWindow()
         window.test_presentCreateSheet(preselected: ["office", "homepod-bed"])
-        await drain()
         try #require(window.test_createSheet).test_commit()
-        await drain()
         #expect(controller.groups.count == 1)
 
         window.test_presentCreateSheet(preselected: ["homepod-bed", "office"])
-        await drain()
         let second = try #require(window.test_createSheet)
         var result: (group: Group, alreadyExisted: Bool)?
         second.onComplete = { result = $0 }
 
         #expect(!second.test_isCreateEnabled, "Create is disarmed for a set that is already a group")
         second.test_commit()
-        await drain()
 
         #expect(controller.groups.count == 1, "nothing was written")
         #expect(result == nil, "and nothing was reported — there is no outcome to announce")
@@ -1228,7 +1208,6 @@ import AppKit
         let (window, _, backend) = try await makeWindow()
         window.update(devices: [])
         window.test_presentCreateSheet(preselected: [])
-        await drain()
         let sheet = try #require(window.test_createSheet)
 
         #expect(sheet.test_candidateDeviceIDs.isEmpty)
@@ -1243,13 +1222,11 @@ import AppKit
         }
         window.update(devices: allOffline)
         window.test_presentCreateSheet(preselected: [])
-        await drain()
         #expect(try #require(window.test_createSheet).test_candidateDeviceIDs.count == 7,
                 "an all-asleep fleet is still a checklist, not an empty state")
 
         window.update(devices: backend.devices)
         window.test_presentCreateSheet(preselected: [])
-        await drain()
         #expect(try #require(window.test_createSheet).test_emptyChecklistText == nil,
                 "with real rows there is nothing to explain")
     }
@@ -1261,7 +1238,6 @@ import AppKit
         // Untouched by makeGroup1 below (which selects sonos-move + office,
         // actually connecting them) — a clean "Not connected" / "None" case.
         window.test_select(.device(id: "appletv-lr"))
-        await drain()
 
         #expect(window.test_isShowingDetail)
         #expect(!(window.test_isShowingEditor))
@@ -1273,7 +1249,6 @@ import AppKit
         window.update(devices: backend.devices)
 
         window.test_select(.device(id: "office"))
-        await drain()
 
         #expect(window.test_isShowingDetail)
         #expect(window.test_detail.test_shownDeviceID == "office")
@@ -1290,12 +1265,10 @@ import AppKit
         window.update(devices: backend.devices)
 
         window.select(.device(id: "office"))
-        await drain()
         #expect(window.test_isShowingDetail)
         #expect(window.test_detail.test_groupRowTitles == [saved.name])
 
         window.test_detail.test_selectGroupRow(at: 0)
-        await drain()
 
         #expect(window.test_isShowingEditor, "the row opened the group's editor")
         #expect(window.test_editor.editingGroupID == saved.id)
@@ -1314,10 +1287,8 @@ import AppKit
         window.onRequestScenesTab = { requests += 1 }
 
         window.select(.device(id: "office"))
-        await drain()
         #expect(requests == 0, "showing a speaker page asks for no tab")
         window.test_detail.test_selectGroupRow(at: 0)
-        await drain()
 
         #expect(window.test_isShowingEditor)
         #expect(requests == 1, "the scene link asks the surface for the Scenes tab")
@@ -1350,10 +1321,8 @@ import AppKit
         let (window, controller, backend) = try await makeWindow()
         _ = try makeGroup1(controller)
         window.update(devices: backend.devices)
-        await drain()
 
         window.select(.device(id: "office"))
-        await drain()
 
         #expect(window.test_isShowingDetail)
         #expect(window.test_sidebar.currentSelection == .device(id: "office"))
@@ -1363,29 +1332,26 @@ import AppKit
     @Test func deselectingADeviceLandsOnTheSpeakersPage() async throws {
         let (window, controller, backend) = try await makeWindow()
         window.test_select(.device(id: "office"))
-        await drain()
         #expect(window.test_isShowingDetail)
 
         window.test_select(nil)
-        await drain()
         #expect(!(window.test_isShowingDetail))
         #expect(window.test_isShowingSpeakersPage, "deselecting a device lands on the Speakers page")
 
         let saved = try makeGroup1(controller)
         window.update(devices: backend.devices)
         window.test_select(.device(id: "office"))
-        await drain()
         window.test_select(nil)
-        await drain()
         #expect(window.test_isShowingSpeakersPage)
-        #expect(window.test_isShowingScenesOverview, "the scenes host still shows the cards")
-        #expect(window.test_overview.test_cardGroupIDs == [saved.id])
+        #expect(window.test_isShowingEditor)
+        #expect(window.test_editor.editingGroupID == saved.id)
+        #expect(window.test_scenesSidebar.test_rowIDs == [saved.id])
+        #expect(window.test_scenesSidebar.selectedSceneID == saved.id)
     }
 
     @Test func selectingUnknownDeviceIDFallsBackToDefaultContent() async throws {
         let (window, _, _) = try await makeWindow()
         window.test_select(.device(id: "does-not-exist"))
-        await drain()
 
         #expect(!(window.test_isShowingDetail))
         #expect(window.test_isShowingSpeakersPage)
@@ -1399,7 +1365,6 @@ import AppKit
         #expect(controller.activeGroupID == nil)
 
         window.test_select(.device(id: saved.memberIDs[0]))
-        await drain()
 
         #expect(window.test_isShowingDetail)
         #expect(controller.activeGroupID == nil, "selecting a device in the sidebar never activates anything")
@@ -1408,7 +1373,6 @@ import AppKit
     @Test func detailPaneRefreshesLiveWhenDeviceSnapshotChanges() async throws {
         let (window, _, backend) = try await makeWindow()
         window.test_select(.device(id: "office"))
-        await drain()
         #expect(window.test_detail.test_subtitleText == "AirPlay Speaker · Ready")
 
         let updated = backend.devices.map { device -> Device in
@@ -1425,7 +1389,6 @@ import AppKit
     @Test func refreshAllFallsBackWhenShownDeviceDisappears() async throws {
         let (window, _, backend) = try await makeWindow()
         window.test_select(.device(id: "office"))
-        await drain()
         #expect(window.test_isShowingDetail)
 
         let devicesWithoutOffice = backend.devices.filter { $0.id != "office" }
@@ -1574,7 +1537,6 @@ import AppKit
         let saved = try makeGroup1(controller)
         window.update(devices: backend.devices)
         window.test_select(.group(id: saved.id))
-        await drain()
         #expect(controller.groups.first { $0.id == saved.id }?.iconSymbolName == nil)
 
         window.test_editor.test_pickIcon("airpods")
@@ -1586,13 +1548,11 @@ import AppKit
     @Test func createSheetChosenIconLandsOnCreatedGroup() async throws {
         let (window, controller, _) = try await makeWindow()
         window.test_presentCreateSheet(preselected: [])
-        await drain()
         let sheet = try #require(window.test_createSheet)
 
         sheet.test_setMembership(deviceID: "office", isChecked: true)
         sheet.test_pickIcon("airpods")
         sheet.test_commit()
-        await drain()
 
         let group = try #require(controller.groups.first)
         #expect(group.iconSymbolName == "airpods", "the sheet's chosen icon lands on the created group")
@@ -1601,11 +1561,9 @@ import AppKit
     @Test func createSheetDedupDoesNotOverwriteExistingGroupsIcon() async throws {
         let (window, controller, _) = try await makeWindow()
         window.test_presentCreateSheet(preselected: ["office", "appletv-lr"])
-        await drain()
         var sheet = try #require(window.test_createSheet)
         sheet.test_pickIcon("airpods")
         sheet.test_commit()
-        await drain()
         #expect(controller.groups.count == 1)
         let firstID = controller.groups[0].id
         #expect(controller.groups[0].iconSymbolName == "airpods")
@@ -1614,11 +1572,9 @@ import AppKit
         // dedups onto the existing group, whose own icon must win
         // (`GroupController.createGroup`'s documented dedup rule).
         window.test_presentCreateSheet(preselected: ["appletv-lr", "office"])
-        await drain()
         sheet = try #require(window.test_createSheet)
         sheet.test_pickIcon("homepod.fill")
         sheet.test_commit()
-        await drain()
 
         #expect(controller.groups.count == 1, "no duplicate group for an identical member set")
         #expect(controller.groups.first { $0.id == firstID }?.iconSymbolName == "airpods", "dedup resolves to the existing group and does NOT overwrite its icon")
@@ -1630,7 +1586,6 @@ import AppKit
         icons.setSymbolName("sofa.fill", for: "office")
         window.update(devices: backend.devices)
         window.test_select(.group(id: saved.id))
-        await drain()
         // The mixer pane is gone (live-test feedback) — the shared override's
         // window-side rendering surface is the editor's membership rows.
         #expect(window.test_editor.test_candidateDeviceIDs.contains("office"))
@@ -1671,21 +1626,7 @@ import AppKit
         #expect(window.test_sidebar.test_isOutlineViewFirstResponder, "the sidebar's outline view must become first responder once the content appears, or Tab has nothing to advance from")
     }
 
-    // MARK: Live marker (the card)
 
-    // Turns red when the live scene's card stops carrying the gold marker, or carries it while nothing is the active Main Out.
-    @Test func theLiveCardCarriesTheGoldMarker() async throws {
-        let (window, controller, backend) = try await makeWindow()
-        let saved = try makeGroup1(controller)
-        window.update(devices: backend.devices)
-        #expect(!window.test_overview.test_cardShowsLive(id: saved.id),
-                "no marker while nothing is the active Main Out")
-
-        controller.activateGroup(id: saved.id)
-        window.update(devices: backend.devices)
-        #expect(window.test_overview.test_cardShowsLive(id: saved.id),
-                "the card names the live scene")
-    }
 
     // MARK: Add-button retitle (multi-select discoverability)
 
@@ -1855,8 +1796,8 @@ import AppKit
         #expect(reported.last?.2 == true)
     }
 
-    // Turns red when an empty sidebar selection lands on Main Audio (or anywhere but the Speakers page) or disturbs the scene cards.
-    @Test func autoSelectLandsOnTheOverviewWhenNothingIsSelected() async throws {
+    // Sending an empty Speakers selection to Main Audio or disturbing the selected scene page turns it red.
+    @Test func anEmptySpeakersSelectionKeepsTheSelectedScenePage() async throws {
         let (window, controller, backend) = try await makeWindow()
         let group = try makeGroup1(controller)
         window.update(devices: backend.devices)
@@ -1866,8 +1807,10 @@ import AppKit
         #expect(window.test_isShowingSpeakersPage,
                 "the System Audio row must not steal the empty selection's landing")
         #expect(!window.test_isShowingMainOut)
-        #expect(window.test_isShowingScenesOverview)
-        #expect(window.test_overview.test_cardGroupIDs == [group.id])
+        #expect(window.test_isShowingEditor)
+        #expect(window.test_editor.editingGroupID == group.id)
+        #expect(window.test_scenesSidebar.test_rowIDs == [group.id])
+        #expect(window.test_scenesSidebar.selectedSceneID == group.id)
     }
 }
 

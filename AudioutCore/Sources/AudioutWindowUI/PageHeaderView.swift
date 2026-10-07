@@ -3,33 +3,16 @@
 import AppKit
 import AudioutSharedUI
 
-/// The band every Speakers and Scenes page opens with: the icon well, then
-/// the page's title over an optional caption, as one block centred on the
-/// well. The band draws nothing; it exists for its geometry, which
-/// `GroupsHeaderParityTests` holds level across the pages, because a sidebar
-/// switch between pages whose bands differ reads as the window twitching.
-///
-/// The title slot takes any view: a plain label on the speaker, Main Audio
-/// and Overview pages, the editable rename field on the scene editor. That
-/// difference in skin is the message — see `GroupsPaneLayout`.
+/// Every page starts with an icon well and a title over an optional caption.
+/// The shared inset and centred text block keep the header steady when switching pages.
+/// The scene page passes its editable name field as the title.
 final class PageHeaderView: NSView {
-
-    /// Where the icon well starts inside the column.
-    enum LeadingInset {
-        /// A page with no rail: the well lines up with the page's headings
-        /// and list text.
-        case railFree
-        /// The scene editor: the well sits past the gutter its membership
-        /// rail runs in, and the rail climbs to it.
-        case rail
-    }
 
     let iconWell: DeviceIconWellView
     /// The title over the caption.
     let textStack = NSStackView()
 
-    init(iconWell: DeviceIconWellView, title: NSView, caption: NSView? = nil,
-         leadingInset: LeadingInset) {
+    init(iconWell: DeviceIconWellView, title: NSView, caption: NSView? = nil) {
         self.iconWell = iconWell
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false
@@ -43,9 +26,6 @@ final class PageHeaderView: NSView {
         addSubview(iconWell)
         addSubview(textStack)
 
-        let inset = leadingInset == .rail
-            ? GroupsPaneLayout.contentLeadingInset
-            : GroupsPaneLayout.railFreeContentLeadingInset
         // A long title truncates inside the band and never widens the pane.
         // 999 rather than required so that on a pathologically narrow pane the
         // rename field's required minimum width wins, instead of AppKit
@@ -57,7 +37,7 @@ final class PageHeaderView: NSView {
             iconWell.widthAnchor.constraint(equalToConstant: DeviceIconWellView.size),
             iconWell.heightAnchor.constraint(equalToConstant: DeviceIconWellView.size),
             iconWell.topAnchor.constraint(equalTo: topAnchor, constant: GroupsPaneLayout.headerPadding),
-            iconWell.leadingAnchor.constraint(equalTo: leadingAnchor, constant: inset),
+            iconWell.leadingAnchor.constraint(equalTo: leadingAnchor, constant: GroupsPaneLayout.railFreeContentLeadingInset),
             bottomAnchor.constraint(equalTo: iconWell.bottomAnchor, constant: GroupsPaneLayout.headerPadding),
 
             textStack.leadingAnchor.constraint(equalTo: iconWell.trailingAnchor,

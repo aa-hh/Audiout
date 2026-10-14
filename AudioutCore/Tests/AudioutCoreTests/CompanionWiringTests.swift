@@ -17,10 +17,13 @@ import Testing
         var clientCounts: [Int] = []
         /// One entry per icon request handed over, holding its completion.
         var iconCompletions: [@MainActor () -> Void] = []
+        /// When false, prompts stay open and their answers wait in `openPrompts`.
+        var answersPromptsAtOnce = true
+        var openPrompts: [(Bool) -> Void] = []
 
         func presentApprovalPrompt(clientID: String, clientName: String, pairingCode: String,
                                    respond: @escaping (Bool) -> Void) {
-            respond(true)
+            if answersPromptsAtOnce { respond(true) } else { openPrompts.append(respond) }
         }
         func withdrawApprovalPrompt(clientID: String) {}
         var activatedKeys: [String] = []
@@ -195,6 +198,33 @@ import Testing
         #expect(windowChanges == 2)
         #expect(identities.loads == 0,
                 "a build that does not offer the phone app never reaches for the TLS identity")
+    }
+
+    /// Turns red if `wantsServer` stops counting a phone still waiting on its
+    /// prompt, so the pairing window's expiry stops the server under it, or
+    /// keeps counting it once its prompt is answered, so a Mac with nothing
+    /// approved stays on the network. The expiry is the window's work item
+    /// calling `closePairingWindow()`, called directly here; the server's
+    /// own start and stop are out of reach, as the test above explains.
+    @Test func aPromptOpenWhenThePairingWindowEndsKeepsTheServerWantedUntilAnswered() {
+        let host = StubHost()
+        host.answersPromptsAtOnce = false
+        let coordinator = makeCoordinator(host: host, storeName: "window-expiry")
+        coordinator.wire()
+        coordinator.openPairingWindow()
+
+        var decisions: [CompanionServer.ApprovalDecision] = []
+        coordinator.approvals.handleRequest(clientID: "WAITING", clientName: "iPhone",
+                                            pairingCode: "000000") { decisions.append($0) }
+        #expect(decisions == [.pending])
+
+        coordinator.closePairingWindow()
+        #expect(!coordinator.pairingWindowOpen)
+        #expect(coordinator.wantsServer, "the phone on the prompt keeps the server wanted")
+
+        host.openPrompts.first?(false)
+        #expect(decisions == [.pending, .denied])
+        #expect(!coordinator.wantsServer, "answered, and nothing approved: nothing wants the server")
     }
 
     // MARK: Icon requests

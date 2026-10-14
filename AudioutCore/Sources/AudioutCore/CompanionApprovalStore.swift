@@ -175,6 +175,15 @@ public final class CompanionApprovalController {
     /// server runs outside a pairing window.
     public var onApprovedSetChanged: (() -> Void)?
 
+    /// Whether a phone is waiting on its prompt, on screen or queued. The
+    /// coordinator keeps the server running while one is, so a pairing window
+    /// that ends mid-prompt does not cut that phone off.
+    public var hasPendingRequest: Bool { !pendingDeciders.isEmpty }
+
+    /// Fired when the last waiting request is answered or abandoned, so the
+    /// coordinator can stop a server that only that request kept running.
+    public var onPendingRequestsSettled: (() -> Void)?
+
     /// - Parameters:
     ///   - now: injectable clock so tests assert first/last-seen and the
     ///     prompt cooldown deterministically.
@@ -191,7 +200,19 @@ public final class CompanionApprovalController {
         self.schedule = schedule
         // Unreadable/missing/newer-schema all land on []: every phone is
         // unknown and re-prompts — the safe failure direction for trust state.
-        self.approvals = ((try? store.load()) ?? nil) ?? []
+        let loaded = ((try? store.load()) ?? nil) ?? []
+        // A protocol-v1 approval is keyed by a UUID no current phone can
+        // present, yet it would keep the server advertising for nobody.
+        self.approvals = loaded.filter { $0.decision != .approved || Self.isPhoneKeyID($0.clientID) }
+        if approvals.count != loaded.count { persist() }
+    }
+
+    /// Whether `clientID` has the shape `CompanionPairing.clientID` gives:
+    /// 64 uppercase hex digits.
+    private static func isPhoneKeyID(_ clientID: String) -> Bool {
+        clientID.utf8.count == 64
+            && clientID.utf8.allSatisfy { (UInt8(ascii: "0")...UInt8(ascii: "9")).contains($0)
+                || (UInt8(ascii: "A")...UInt8(ascii: "F")).contains($0) }
     }
 
     private let now: () -> Date
@@ -276,14 +297,15 @@ public final class CompanionApprovalController {
             approvals.removeAll { $0.decision == .denied && excess.contains($0.clientID) }
         }
         persist()
-        let waiters = pendingDeciders.removeValue(forKey: clientID) ?? []
-        for decide in waiters {
+        let waiters = pendingDeciders.removeValue(forKey: clientID)
+        for decide in waiters ?? [] {
             decide(allowed ? .approved : .denied)
         }
         if allowed { onApprovedSetChanged?() }
         // A late answer to a prompt that was already withdrawn must not end
         // the cooldown of whichever prompt followed it.
         if activePromptClientID == clientID { finishActivePrompt() }
+        if waiters != nil, pendingDeciders.isEmpty { onPendingRequestsSettled?() }
     }
 
     /// The last connection awaiting this clientID's prompt died before the
@@ -301,6 +323,7 @@ public final class CompanionApprovalController {
         } else {
             promptQueue.removeAll { $0.clientID == clientID }
         }
+        if pendingDeciders.isEmpty { onPendingRequestsSettled?() }
     }
 
     /// Forget a phone entirely (approval OR denial — a revoked denial simply

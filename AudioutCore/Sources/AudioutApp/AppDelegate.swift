@@ -3358,9 +3358,9 @@ extension AppDelegate: CompanionCoordinatorHost {
     /// blocks (its queue keeps running; only this app's own UI waits), and
     /// the controller shows one prompt at a time. The phone's self-reported
     /// name is not in the question: the code is what identifies it.
-    /// "Don't Allow" is the default button, the app is not pulled to the
-    /// front, and the alert floats with a bounce of the Dock icon instead —
-    /// so a Return or click aimed at something else never approves a phone.
+    /// "Don't Allow" is the default button, and the alert floats at
+    /// `.floating` level without activating the app, so a Return or click
+    /// aimed at something else never approves a phone.
     /// An abort from `withdrawApprovalPrompt` is not the user's answer and
     /// records nothing.
     @MainActor

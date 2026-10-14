@@ -89,12 +89,24 @@ public struct AppSettings {
     /// Reads a secret. A value an older build left in `defaults` moves to
     /// `secrets` on the first read that finds the store empty, and leaves
     /// `defaults` only once the store has taken it; a refused move keeps the
-    /// value in `defaults` and is tried again on the next read.
+    /// value in `defaults` and is tried again on the next read. A read the
+    /// store refused moves and deletes nothing: it answers with the `defaults`
+    /// copy, if any, and says it was refused.
+    private func readSecretNotingRefusal(_ key: String) -> (value: String?, refused: Bool) {
+        switch secrets.read(key) {
+        case .value(let value):
+            return (value, false)
+        case .refused:
+            return (defaults.string(forKey: key), true)
+        case .missing:
+            guard let legacy = defaults.string(forKey: key) else { return (nil, false) }
+            if secrets.write(legacy, for: key) { defaults.removeObject(forKey: key) }
+            return (legacy, false)
+        }
+    }
+
     private func readSecret(_ key: String) -> String? {
-        if let value = secrets.read(key) { return value }
-        guard let legacy = defaults.string(forKey: key) else { return nil }
-        if secrets.write(legacy, for: key) { defaults.removeObject(forKey: key) }
-        return legacy
+        readSecretNotingRefusal(key).value
     }
 
     /// Writes a secret. Once the store has it, any copy still in `defaults`
@@ -594,10 +606,11 @@ public struct AppSettings {
     /// General, roadmap 054). `nil` when unset — Audiout is fully functional
     /// without one (the Ardour model: the binary is what's sold, never a
     /// software lock — GPL forbids one). Setting `nil` removes the stored value
-    /// AND clears ``licenseStatus``: a verdict about a key the user has deleted
-    /// is not a verdict about anything. It clears the trial fields for the same
-    /// reason — a trial IS a licence key, so a deleted key leaves no trial
-    /// behind to be on day 9 of.
+    /// (unless the secret store refuses the delete, which leaves its copy for
+    /// a later read) AND clears ``licenseStatus``: a verdict about a key the
+    /// user has deleted is not a verdict about anything. It clears the trial
+    /// fields for the same reason — a trial IS a licence key, so a deleted key
+    /// leaves no trial behind to be on day 9 of.
     public var licenseKey: String? {
         get { readSecret(Keys.licenseKey) }
         nonmutating set {
@@ -609,6 +622,14 @@ public struct AppSettings {
                 clearTrial()
             }
         }
+    }
+
+    /// Whether a licence key is stored, counting one the secret store would
+    /// not hand over (a locked login keychain): that Mac keeps its stored
+    /// verdict instead of reading as unregistered.
+    public var hasLicenseKey: Bool {
+        let read = readSecretNotingRefusal(Keys.licenseKey)
+        return read.refused || !(read.value ?? "").isEmpty
     }
 
     /// What the server last said about ``licenseKey`` (``LicenseValidator``).
@@ -630,7 +651,7 @@ public struct AppSettings {
     /// because a build run from source hides the whole surface rather than
     /// calling anyone unregistered.
     public var licenseUnregistered: Bool {
-        if (licenseKey ?? "").isEmpty { return true }
+        if !hasLicenseKey { return true }
         switch licenseStatus {
         case .unknown, .invalid, .revoked: return true
         case .active, nil: return false

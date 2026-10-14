@@ -85,8 +85,9 @@ public final class CompanionCoordinator {
     /// ``updateServerState()``. It runs while
     /// `AppSettings.resolvedAllowRemoteControl` allows it (the Settings ›
     /// Audiout Remote switch, with the `AUDIOUT_COMPANION` env override
-    /// winning) AND a phone is approved or a pairing window is open — a Mac
-    /// nobody has paired with is not on the network at all.
+    /// winning) AND a phone is approved, a pairing window is open, or a phone
+    /// is still waiting on its prompt — a Mac nobody has paired with is not on
+    /// the network at all.
     public let server: CompanionServer
 
     /// The per-phone approval model (T24): remembers each phone's allow/deny
@@ -473,12 +474,22 @@ public final class CompanionCoordinator {
                 self.updateServerState()
             }
         }
+        // A server kept up only for a waiting prompt stops once the last one
+        // is answered or abandoned.
+        approvals.onPendingRequestsSettled = { [weak self] in self?.updateServerState() }
 
         updateServerState()
     }
 
     private var hasApprovedPhone: Bool {
         approvals.approvals.contains { $0.decision == .approved }
+    }
+
+    /// Whether anything needs the server up, before the Settings switch has
+    /// its say: an approved phone, an open pairing window, or a phone still
+    /// waiting on its prompt after the window that let it in has closed.
+    var wantsServer: Bool {
+        hasApprovedPhone || pairingWindowOpen || approvals.hasPendingRequest
     }
 
     /// Let unknown phones ask to pair for ``pairingWindowDuration``, starting
@@ -495,7 +506,8 @@ public final class CompanionCoordinator {
     }
 
     /// End the pairing window; the server stops too unless a phone is
-    /// approved.
+    /// approved or still waiting on its prompt, in which case it stops once
+    /// the last waiting prompt is answered or abandoned.
     public func closePairingWindow() {
         pairingWindowExpiry?.cancel()
         pairingWindowExpiry = nil
@@ -506,17 +518,17 @@ public final class CompanionCoordinator {
 
     /// Start or stop the companion server: it runs while
     /// `AppSettings.resolvedAllowRemoteControl` allows it (env override →
-    /// persisted switch) and a phone is approved or a pairing window is open.
-    /// Called at launch, from the Settings › Audiout Remote switch, and on
-    /// every pairing-window or approved-set change; a no-op when nothing
-    /// changed. A start that cannot load the TLS identity logs, leaves the
-    /// server stopped, and is tried again on the next call. On start,
-    /// broadcasts an initial snapshot IMMEDIATELY — the server defers a
-    /// helloed client's `welcome` until the first broadcast, so an early
-    /// client would otherwise hang.
+    /// persisted switch) and a phone is approved, a pairing window is open,
+    /// or a phone is still waiting on its prompt. Called at launch, from the
+    /// Settings › Audiout Remote switch, on every pairing-window or
+    /// approved-set change, and when the last waiting prompt settles; a no-op
+    /// when nothing changed. A start that cannot load the TLS identity
+    /// reports it, leaves the server stopped, and is tried again on the next
+    /// call. On start, broadcasts an initial snapshot IMMEDIATELY — the server
+    /// defers a helloed client's `welcome` until the first broadcast, so an
+    /// early client would otherwise hang.
     public func updateServerState() {
-        let shouldRun = AppSettings.resolvedAllowRemoteControl(settings: settings)
-            && (hasApprovedPhone || pairingWindowOpen)
+        let shouldRun = AppSettings.resolvedAllowRemoteControl(settings: settings) && wantsServer
         guard shouldRun != isActive else { return }
         if shouldRun {
             let identity: CompanionIdentity
@@ -524,6 +536,8 @@ public final class CompanionCoordinator {
                 identity = try identityStore.loadOrCreate()
             } catch {
                 host?.log("companion server not started: no TLS identity (\(error))")
+                Telemetry.fail(.settings, "companion:identity_load_failed",
+                               local: ["error": "\(error)"])
                 isActive = false
                 return
             }

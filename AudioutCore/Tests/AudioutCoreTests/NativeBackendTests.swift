@@ -2787,19 +2787,25 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         // stored setting is: stored 50 → effective (wire) 25%.
         backend.setMasterGain(mainOut: 50, group: 100, mirrorToSystemVolume: false)
         await pollUntil { engine.volumeCalls.contains { $0.0 == device.outputID && abs($0.1 - 0.25) < 0.001 } }
-        let callsBeforeEcho = engine.volumeCalls.count
 
         // THE ECHO: the receiver reflects back exactly what we just put on the
         // wire (0.25 = 25%).
         let token = UInt32(truncatingIfNeeded: device.outputID.rawValue)
         await awaitFed(backend, device)
+        // The gain push must have finished, so a wrong re-push shows up as a
+        // fresh `volumeInFlight` mark.
+        await pollUntil { backend.stateQueue.sync { !backend.volumeInFlight.contains(device.outputID) } }
+        let callsBeforeEcho = engine.volumeCalls.count
         backend.applyDacpVolume(remoteHost: device.descriptor.address, activeRemote: token, level: 0.25)
-        // No scheduled interval here either — pure async-settle margin at the
-        // 100ms absolute floor.
-        try? await Task.sleep(nanoseconds: 100_000_000)
+        // `applyDacpVolume` decides in one `stateQueue` block and a push it
+        // starts marks `volumeInFlight` there; the mark clears only after the
+        // engine call is recorded, so reading the mark before the call count
+        // catches a wrong push at either stage.
+        let rePushInFlight = backend.stateQueue.sync { backend.volumeInFlight.contains(device.outputID) }
 
         #expect(backend.devices.first { $0.id == device.id }?.volume == 50,
                        "an echo of our own attenuated write must NOT overwrite the user's stored setting")
+        #expect(!rePushInFlight, "an echo of our own attenuated write must NOT trigger a re-push")
         #expect(engine.volumeCalls.count == callsBeforeEcho,
                        "an echo of our own attenuated write must NOT trigger a re-push")
 
@@ -10251,12 +10257,17 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         backend.applyDacpVolume(remoteHost: device.descriptor.address, activeRemote: token, level: 0.8)
         #expect(await waitForVolumePush(engine, device.outputID, 0.8),
                 "precondition: the first push reached the engine")
+        // The first push must have finished, so a wrong second one shows up as
+        // a fresh `volumeInFlight` mark.
+        await pollUntil { backend.stateQueue.sync { !backend.volumeInFlight.contains(device.outputID) } }
         let countAfterFirst = engine.volumeCalls.count
 
-        // The "echo": same level again. Give any (wrong) push time to land.
-        // No scheduled interval here — pure async-settle margin at the 100ms floor.
+        // The "echo": same level again. The read of the in-flight mark runs
+        // after the apply's `stateQueue` block, and a wrong push either still
+        // holds the mark or has already recorded its engine call.
         backend.applyDacpVolume(remoteHost: device.descriptor.address, activeRemote: token, level: 0.8)
-        try? await Task.sleep(nanoseconds: 100_000_000)
+        let rePushInFlight = backend.stateQueue.sync { backend.volumeInFlight.contains(device.outputID) }
+        #expect(!rePushInFlight, "an echo of the current value must not push again (feedback loop)")
         #expect(engine.volumeCalls.count == countAfterFirst,
                        "an echo of the current value must not push again (feedback loop)")
     }

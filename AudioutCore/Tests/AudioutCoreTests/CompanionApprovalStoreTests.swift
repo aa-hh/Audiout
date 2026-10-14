@@ -13,7 +13,7 @@ import Testing
 @MainActor
 @Suite final class CompanionApprovalStoreTests: IsolatedSuite {
 
-    private static let phoneID = "2B5E5A2B-58D8-4979-9F41-92E668FD9C0A"
+    private static let phoneID = "2B5E5A2B58D849799F4192E668FD9C0A2B5E5A2B58D849799F4192E668FD9C0A"
 
     private func makeStore() -> CompanionApprovalStore {
         CompanionApprovalStore(directory: scratchDir)
@@ -319,5 +319,55 @@ import Testing
         #expect(changes == 2)
         controller.revoke(clientID: "GUEST")
         #expect(changes == 2, "revoking a denial leaves the approved set alone")
+    }
+
+    /// Turns red if `onPendingRequestsSettled` fires while another phone still
+    /// waits, so the coordinator stops the server under it, or stays silent
+    /// when the last waiting request is abandoned or answered, so a server
+    /// kept up for that prompt never stops.
+    @Test func onPendingRequestsSettledFiresOnlyWhenTheLastWaitingRequestEnds() throws {
+        var jobs: [@MainActor () -> Void] = []
+        let controller = CompanionApprovalController(store: makeStore(),
+                                                     schedule: { _, job in jobs.append(job) })
+        controller.isPairingOpen = { true }
+        var answers: [(Bool) -> Void] = []
+        controller.presentPrompt = { _, _, _, respond in answers.append(respond) }
+        var settled = 0
+        controller.onPendingRequestsSettled = { settled += 1 }
+
+        controller.handleRequest(clientID: "FIRST", clientName: "iPhone", pairingCode: "111111") { _ in }
+        controller.handleRequest(clientID: "SECOND", clientName: "iPhone", pairingCode: "222222") { _ in }
+        answers[0](false)
+        #expect(settled == 0, "the second phone is still queued")
+        #expect(controller.hasPendingRequest)
+
+        controller.abandonRequest(clientID: "SECOND")
+        #expect(settled == 1)
+        #expect(!controller.hasPendingRequest)
+
+        controller.handleRequest(clientID: "THIRD", clientName: "iPhone", pairingCode: "333333") { _ in }
+        for job in jobs { job() }
+        answers[1](true)
+        #expect(settled == 2)
+        #expect(!controller.hasPendingRequest)
+    }
+
+    /// Turns red if an approval keyed by a protocol-v1 UUID survives load,
+    /// where it counts as an approved phone no current phone can be, or if
+    /// the cleaned list is not written back.
+    @Test func aProtocolV1ApprovalIsDroppedOnLoad() throws {
+        let store = makeStore()
+        let v1 = CompanionApproval(clientID: "8E4CE9B0-B2C1-4E0E-9D25-000000000001", lastKnownName: "Old iPhone",
+                                   decision: .approved, firstSeen: .distantPast, lastSeen: .distantPast)
+        let current = CompanionApproval(clientID: Self.phoneID, lastKnownName: "Owner's iPhone",
+                                        decision: .approved, firstSeen: .distantPast, lastSeen: .distantPast)
+        let denial = CompanionApproval(clientID: "GUEST", lastKnownName: "Guest's iPhone",
+                                       decision: .denied, firstSeen: .distantPast, lastSeen: .distantPast)
+        try store.save([v1, current, denial])
+
+        let controller = CompanionApprovalController(store: store)
+
+        #expect(controller.approvals == [current, denial])
+        #expect(try store.load() == [current, denial])
     }
 }

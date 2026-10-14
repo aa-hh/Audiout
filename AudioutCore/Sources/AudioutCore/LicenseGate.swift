@@ -32,7 +32,7 @@ public enum LicenseGate {
         case .forceHide: return false
         case .auto:
             guard settings.licenseServerURL != nil,
-                  (settings.licenseKey ?? "").isEmpty,
+                  !settings.hasLicenseKey,
                   case .none = TrialClock.state(settings: settings) else {
                 return false
             }

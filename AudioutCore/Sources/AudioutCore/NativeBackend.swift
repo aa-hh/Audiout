@@ -5574,7 +5574,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// (``RemoteEvent/volume(_:level:)``). Move that device's slider. On `stateQueue`.
     ///
     /// NOTE: in practice AirPlay 2 receivers report volume over DACP, not the event
-    /// channel (see ``applyDacpVolume(activeRemote:level:)``), so this path is rarely
+    /// channel (see ``applyDacpVolume(remoteHost:activeRemote:level:)``), so this path is rarely
     /// exercised — kept so a receiver that DOES use the event channel still works.
     private func applyRemoteVolume(outputID: OutputID, level: Double) {
         stateQueue.async {

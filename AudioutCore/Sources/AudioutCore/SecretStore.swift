@@ -3,13 +3,23 @@
 import Foundation
 import Security
 
+/// What a ``SecretStoring`` read found.
+public enum SecretRead: Equatable, Sendable {
+    case value(String)
+    /// Nothing is stored under the key.
+    case missing
+    /// The store would not answer (a locked login keychain, a dismissed access
+    /// prompt), so a value may still be there.
+    case refused
+}
+
 /// Where ``AppSettings`` keeps the two values that unlock the app and the
 /// iPhone (the licence key and the companion token), so they are not plain text
 /// in the preferences file. `write(nil, ...)` deletes. `write` answers true
 /// only when the store now holds exactly `value`, or, for `nil`, holds nothing
 /// under `key`; a caller must keep its own copy of a value the store refused.
 public protocol SecretStoring {
-    func read(_ key: String) -> String?
+    func read(_ key: String) -> SecretRead
     func write(_ value: String?, for key: String) -> Bool
 }
 
@@ -22,14 +32,19 @@ public final class KeychainSecretStore: SecretStoring {
 
     public init() {}
 
-    public func read(_ key: String) -> String? {
+    public func read(_ key: String) -> SecretRead {
         var q = query(key)
         q[kSecReturnData as String] = true
         q[kSecMatchLimit as String] = kSecMatchLimitOne
         var result: CFTypeRef?
-        guard SecItemCopyMatching(q as CFDictionary, &result) == errSecSuccess,
-              let data = result as? Data else { return nil }
-        return String(data: data, encoding: .utf8)
+        let status = SecItemCopyMatching(q as CFDictionary, &result)
+        guard status != errSecItemNotFound else { return .missing }
+        guard status == errSecSuccess else {
+            report(status, operation: "read")
+            return .refused
+        }
+        guard let data = result as? Data, let value = String(data: data, encoding: .utf8) else { return .missing }
+        return .value(value)
     }
 
     public func write(_ value: String?, for key: String) -> Bool {
@@ -76,7 +91,7 @@ public struct DefaultsSecretStore: SecretStoring {
 
     public init(_ defaults: UserDefaults) { self.defaults = defaults }
 
-    public func read(_ key: String) -> String? { defaults.string(forKey: key) }
+    public func read(_ key: String) -> SecretRead { defaults.string(forKey: key).map(SecretRead.value) ?? .missing }
 
     public func write(_ value: String?, for key: String) -> Bool {
         defaults.set(value, forKey: key)

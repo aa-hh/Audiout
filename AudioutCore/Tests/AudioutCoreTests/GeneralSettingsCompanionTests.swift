@@ -172,7 +172,7 @@ import AppKit
 @MainActor
 @Suite final class GeneralSettingsRememberedPhonesTests: IsolatedSuite {
 
-    private static let ownerID = "2B5E5A2B-58D8-4979-9F41-92E668FD9C0A"
+    private static let ownerID = "2B5E5A2B58D849799F4192E668FD9C0A2B5E5A2B58D849799F4192E668FD9C0A"
     private static let guestID = "7C1D93F0-1111-4A2A-B3C4-D5E6F7A8B9C0"
 
     /// Inside an open pairing window, so a test's unknown phone is prompted

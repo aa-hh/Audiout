@@ -16,7 +16,8 @@
 #     long after the app that made it is deleted
 #   - an always-on ROOT PTP-helper launchd daemon
 #   - stored AirPlay speaker passwords in the login keychain (one item per
-#     speaker under `<bundle id>.airplay-password`)
+#     speaker under `<bundle id>.airplay-password`), and its licence key and
+#     companion token there under `<bundle id>.license`
 #   - possibly its own Application Support / Caches / saved-state directories
 #   - a listening night still running (dev/listening) and its scripts, never
 #     its results/ recordings
@@ -125,7 +126,8 @@ Usage: purge-dev-installs.sh [--apply|--help]
 Removes every trace of every NON-SHIPPING Audiout build from this Mac:
 preference domains, TCC privacy grants, persistent aggregate audio devices,
 root PTP-helper daemons, stored AirPlay speaker passwords in the login keychain
-(one item per speaker under <bundle id>.airplay-password), per-build
+(one item per speaker under <bundle id>.airplay-password), the licence key and
+companion token stored there under <bundle id>.license, per-build
 support/cache/saved-state directories, and stray .app bundles. Also clears the
 preference-domain files leaked by the test suites, any user launch agent under
 either product name, and dev tooling left inside the app's data directories.
@@ -231,8 +233,8 @@ DEV_IDS="$(
     find "$HOME/Library/Application Support" -maxdepth 1 -name "${NAMESPACE}*" 2>/dev/null \
       | sed "s|.*/||"
     printf '%s\n' "$KEYCHAIN_ATTRS" \
-      | grep -oE "\"svce\"<blob>=\"${NAMESPACE_RE}[A-Za-z0-9_.-]+\.airplay-password\"" \
-      | sed 's|^"svce"<blob>="||; s|\.airplay-password"$||'
+      | grep -oE "\"svce\"<blob>=\"${NAMESPACE_RE}[A-Za-z0-9_.-]+\.(airplay-password|license)\"" \
+      | sed -E 's/^"svce"<blob>="//; s/\.(airplay-password|license)"$//'
     [ "${#dev_apps[@]}" -gt 0 ] && printf '%s\n' "${dev_apps[@]}" | cut -d'|' -f1
   } | sort -u | grep -v "^${PROD_BUNDLE_ID}\$" || true
 )"
@@ -283,6 +285,13 @@ if [ "${#dev_ids[@]}" -gt 0 ]; then
     if [ "$pw_count" -gt 0 ]; then
       echo "        $pw_count stored AirPlay speaker password(s) in the login keychain ($pw_service)"
     fi
+    # The licence key and companion token: one keychain item each, service
+    # "<bundle id>.license" (KeychainSecretStore).
+    license_service="$id.license"
+    license_count="$(printf '%s\n' "$KEYCHAIN_ATTRS" | grep -cF "\"svce\"<blob>=\"$license_service\"" || true)"
+    if [ "$license_count" -gt 0 ]; then
+      echo "        $license_count stored licence item(s) in the login keychain ($license_service)"
+    fi
 
     if [ "$APPLY" -eq 1 ]; then
       # `defaults delete` first so cfprefsd drops its in-memory copy; deleting
@@ -301,6 +310,9 @@ if [ "${#dev_ids[@]}" -gt 0 ]; then
       # One item per call, so repeat until none is left.
       if [ "$pw_count" -gt 0 ]; then
         while security delete-generic-password -s "$pw_service" >/dev/null 2>&1; do :; done
+      fi
+      if [ "$license_count" -gt 0 ]; then
+        while security delete-generic-password -s "$license_service" >/dev/null 2>&1; do :; done
       fi
       removed_anything=1
     fi

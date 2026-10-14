@@ -43,9 +43,11 @@ public enum LicenseGate {
     /// Whether this install plays on one speaker at a time: an official build
     /// the server declined, or whose trial ended with a verdict on record. A
     /// freshly typed key with no verdict yet (`licenseStatus == nil`) is not
-    /// limited — the soft-check posture.
+    /// limited — the soft-check posture. The website's app-config can waive the
+    /// limit (``RemoteAppConfig``); a stale or missing file never limits anyone.
     public static func limitsToOneSpeaker(settings: AppSettings) -> Bool {
         guard settings.licenseServerURL != nil else { return false }
+        if RemoteAppConfig.licenseCheckWaived(settings: settings) { return false }
         var declined = settings.licenseUnregistered
         if case .expired = TrialClock.state(settings: settings), settings.licenseStatus != nil {
             declined = true

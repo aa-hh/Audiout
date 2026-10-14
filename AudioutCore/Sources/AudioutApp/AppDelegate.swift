@@ -1009,6 +1009,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.applyLicenseState()
         }
         applyLicenseState()
+        RemoteAppConfigFetcher(settings: settings).refresh { [weak self] in self?.applyLicenseState() }
 
     }
 
@@ -1454,6 +1455,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // that is only now becoming visible.
             if screen == .settings { self?.settingsRootController?.reloadFromSettings() }
             if screen == .mixer, let self {
+                RemoteAppConfigFetcher(settings: settings).refresh(minimumInterval: 3600) { [weak self] in
+                    self?.applyLicenseState()
+                }
                 // A limited install re-asks the server on every open, so a key
                 // bought elsewhere lifts the limit without a relaunch.
                 if LicenseGate.limitsToOneSpeaker(settings: settings) {

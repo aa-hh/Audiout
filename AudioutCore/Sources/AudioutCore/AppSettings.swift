@@ -102,6 +102,8 @@ public struct AppSettings {
         static let licenseMaxMajor = "license.maxMajor"
         static let licenseReason = "license.reason"
         static let companionToken = "license.companionToken"
+        static let remoteConfigData = "remoteConfig.data"
+        static let remoteConfigFetchedAt = "remoteConfig.fetchedAt"
         static let companionServerID = "companion.serverID"
         static let trialStartedAt = "trial.startedAt"
         static let trialExpiresAt = "trial.expiresAt"
@@ -635,6 +637,19 @@ public struct AppSettings {
     public var companionToken: String? {
         get { defaults.string(forKey: Keys.companionToken) }
         nonmutating set { defaults.set(newValue, forKey: Keys.companionToken) }
+    }
+
+    /// The last valid `app-config.json` body from the website, byte for byte.
+    /// Written only by ``RemoteAppConfigFetcher``.
+    public var remoteConfigData: Data? {
+        get { defaults.data(forKey: Keys.remoteConfigData) }
+        nonmutating set { defaults.set(newValue, forKey: Keys.remoteConfigData) }
+    }
+
+    /// When ``remoteConfigData`` was fetched. `nil` when never fetched.
+    public var remoteConfigFetchedAt: Date? {
+        get { defaults.object(forKey: Keys.remoteConfigFetchedAt) as? Date }
+        nonmutating set { defaults.set(newValue, forKey: Keys.remoteConfigFetchedAt) }
     }
 
     /// The two trial dates are stored as ISO 8601 text. No other setting here

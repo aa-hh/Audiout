@@ -237,6 +237,11 @@ extension NativeBackend {
                     self.emitCombinedLevel(forDevice: deviceID)
                 }
             }
+            // With the capture off, every app not routed away plays straight
+            // out of the Mac, so the Mac's bar follows the app levels.
+            if !self.captureRunning, !self.routedBundleIDs.contains(bundleID) {
+                self.emitCombinedLevel(forDevice: Self.localDeviceID)
+            }
         }
     }
 
@@ -272,6 +277,17 @@ extension NativeBackend {
         where routedBundleIDs.contains(route.bundleID) && !deadBundleIDs.contains(route.bundleID) {
             if meterTargetsLocked(of: route.destination).contains(id),
                let level = latestAppLevel[route.bundleID] {
+                sourceContribution = max(sourceContribution, level)
+            }
+        }
+        // Capture off (the Mac is selected alone, or nothing is): no system RMS
+        // exists, and macOS plays every app not routed away on the Mac itself.
+        // razor: only apps with a meter tap (the Applications list) count; an
+        // unlisted app's sound leaves the bar still. Upgrade: a metering-only
+        // whole-system tap while capture is off.
+        if device.isLocalDevice, !captureRunning, !device.isMuted {
+            for (bundleID, level) in latestAppLevel
+            where !routedBundleIDs.contains(bundleID) && !lastExcludedBundleIDs.contains(bundleID) {
                 sourceContribution = max(sourceContribution, level)
             }
         }

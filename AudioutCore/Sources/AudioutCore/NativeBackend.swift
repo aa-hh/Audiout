@@ -6527,6 +6527,8 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             && expectedSelected.contains(where: selectedSpeakerWantsStreamLocked)
         guard want != captureRunning else { return }   // already at target
         captureRunning = want
+        // The Mac's bar reads app levels only while capture is off; re-read it.
+        if levelsFlowing { emitCombinedLevel(forDevice: Self.localDeviceID) }
         if want {
             // T2 (send_sched dead-code fix, whole-system-dropout investigation):
             // capture just started — (re-)arm the scheduling snapshot poll HERE,

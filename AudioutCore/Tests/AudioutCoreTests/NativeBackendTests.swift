@@ -9648,6 +9648,32 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
                              "a .noRedirect listed app must emit .appLevel from its metering-only tap")
     }
 
+    /// With the Mac selected alone the whole-system capture never runs, so the
+    /// Mac's row (and Main Audio, which copies it) must follow the app levels
+    /// macOS is playing on the Mac. Turns red if the local device's level is
+    /// taken only from the capture again: no `.level` for it ever arrives.
+    @Test func localDeviceAloneFollowsAppLevels() async {
+        let registry = TapRegistry()
+        let metering = registeringPerAppCapture(muteBehavior: .unmuted, bundleIDs: ["com.plain"], into: registry)
+        let (backend, engine, discovery) = makeBackend(injectedMeteringCapture: metering)
+        defer { backend.stop() }
+        backend.start(); await waitUntilStarted(engine)
+        _ = discovery
+        await pollUntil { backend.devices.contains { $0.isLocalDevice } }
+
+        let (sink, task) = subscribeLevels(backend); defer { task.cancel() }
+        backend.updateAppRoutes([AppRoute(bundleID: "com.plain", displayName: "Plain")])
+        backend.setMeteringActive(true)
+        await pollUntil { registry.tap(for: "com.plain") != nil }
+
+        await pollUntil {
+            registry.tap(for: "com.plain")?.push(float32Buffer(amplitude: 0.5, frames: 512, atSecond: 1))
+            return (sink.lastDeviceLevel(NativeBackend.localDeviceID) ?? 0) > 0
+        }
+        #expect((sink.lastDeviceLevel(NativeBackend.localDeviceID) ?? 0) > 0,
+                "the Mac playing alone must show the level of the app it is playing")
+    }
+
     /// D3, app half: `.appLevel` rides the SAME leading/trailing-edge sampler the
     /// per-device `.level` does, keyed by bundle id. A tap delivering buffers far
     /// above the ~25 Hz display cadence must not fan out one event per buffer,

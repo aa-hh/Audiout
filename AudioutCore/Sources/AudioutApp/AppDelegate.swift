@@ -423,6 +423,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// connection just died.
     private var companionApprovalAlerts: [String: NSAlert] = [:]
 
+    /// Open pairing-code alerts for approved phones, keyed by clientID.
+    private var companionCodeCheckAlerts: [String: NSAlert] = [:]
+
     /// AIRPLAY_DEBUG_LEVELS=1 → log capture RMS ~1/sec (see the `.level` case).
     private let debugLevels = ProcessInfo.processInfo.environment["AIRPLAY_DEBUG_LEVELS"] == "1"
     private var lastLevelLog = Date.distantPast
@@ -3370,7 +3373,7 @@ extension AppDelegate: CompanionCoordinatorHost {
         // the decision unmade (no persisted denial) and the server's own
         // approval deadline closes the connection.
         guard !HeadlessRuntime.isActive, !isTerminating else { return }
-        let code = "\(pairingCode.prefix(3)) \(pairingCode.dropFirst(3))"
+        let code = Self.formattedPairingCode(pairingCode)
         let alert = NSAlert()
         alert.messageText = "Allow an iPhone to control audio on this Mac?"
         alert.informativeText = "The iPhone is showing a code. Allow only if it shows \(code) too.\n\nIt will be able to see and control what's playing on this Mac's speakers, including which apps are playing audio. You can change this later in Settings › Audiout Remote."
@@ -3396,6 +3399,46 @@ extension AppDelegate: CompanionCoordinatorHost {
     func withdrawApprovalPrompt(clientID: String) {
         guard let alert = companionApprovalAlerts[clientID], NSApp.modalWindow === alert.window else { return }
         NSApp.abortModal()
+    }
+
+    /// "482913" → "482 913", as both pairing-code alerts show it.
+    private static func formattedPairingCode(_ pairingCode: String) -> String {
+        "\(pairingCode.prefix(3)) \(pairingCode.dropFirst(3))"
+    }
+
+    /// An approved phone forgot this Mac and is asking its user to compare
+    /// the pairing code: show it, with only an OK button. Not modal, so it
+    /// never holds up the app or the phone, which is already welcomed;
+    /// `withdrawPairingCodeCheck` closes it. The empty-name fallback is the
+    /// "an iPhone" the approval prompt uses.
+    @MainActor
+    func presentPairingCodeCheck(clientID: String, clientName: String, pairingCode: String) {
+        guard !HeadlessRuntime.isActive, !isTerminating else { return }
+        withdrawPairingCodeCheck(clientID: clientID)
+        let name = clientName.isEmpty ? "An iPhone" : clientName
+        let alert = NSAlert()
+        alert.messageText = "\(name) is checking it reached this Mac"
+        alert.informativeText = "Its screen should show:\n\n\(Self.formattedPairingCode(pairingCode))\n\nIf it shows a different code, tap Cancel on the iPhone."
+        let ok = alert.addButton(withTitle: "OK")
+        ok.target = self
+        ok.action = #selector(closePairingCodeCheck(_:))
+        alert.layout()
+        alert.window.level = .floating
+        alert.window.center()
+        alert.window.orderFrontRegardless()
+        NSApp.requestUserAttention(.informationalRequest)
+        companionCodeCheckAlerts[clientID] = alert
+    }
+
+    @MainActor
+    @objc private func closePairingCodeCheck(_ sender: NSButton) {
+        guard let clientID = companionCodeCheckAlerts.first(where: { $0.value.buttons.first === sender })?.key else { return }
+        withdrawPairingCodeCheck(clientID: clientID)
+    }
+
+    @MainActor
+    func withdrawPairingCodeCheck(clientID: String) {
+        companionCodeCheckAlerts.removeValue(forKey: clientID)?.window.orderOut(nil)
     }
 
     /// The `.regular` running apps. Mirrors

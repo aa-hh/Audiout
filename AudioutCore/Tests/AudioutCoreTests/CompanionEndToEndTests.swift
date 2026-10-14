@@ -92,7 +92,8 @@ import AudioutProtocol
                 lastKnownName: "test phone",
                 decision: .approved,
                 firstSeen: .distantPast,
-                lastSeen: .distantPast)])
+                // Recent: an approval unseen for a month lapses.
+                lastSeen: Date())])
             approvals = CompanionApprovalController(store: approvalStore)
 
             let excluded = excludedApps
@@ -123,7 +124,7 @@ import AudioutProtocol
             // main-actor hop → the approval controller (which answers from
             // the pre-approved fixture with no prompt).
             server.localCertificateSHA256 = Self.fingerprint
-            server.onApprovalRequest = { [self] clientID, clientName, pairingCode, decide in
+            server.onApprovalRequest = { [self] clientID, clientName, pairingCode, _, _, decide in
                 Task { @MainActor in
                     self.approvals.handleRequest(clientID: clientID, clientName: clientName,
                                                  pairingCode: pairingCode, decide: decide)

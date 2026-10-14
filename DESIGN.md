@@ -1528,6 +1528,14 @@ screens show." The Setup window's iPhone card and the wizard sheet's iPhone
 panel, when it shows its code, open the same window as they come on screen.
 The Mac is discoverable on the network only while a pairing window is open
 or once a phone is paired; outside both, a new phone finds nothing to join.
+A paired phone that has forgotten this Mac asks its user to compare the code
+again; the Mac lets it in without asking and shows the code in a stock alert,
+not modal, with only an OK button: "<phone name> is checking it reached this
+Mac", then "Its screen should show:" over the code and "If it shows a
+different code, tap Cancel on the iPhone." It closes itself when that phone
+sends its first command or disconnects, or after 3 minutes. A paired phone
+that has not connected for 30 days counts as new again and needs a pairing
+window.
 
 ### Permission Row (Onboarding, signature component, Mac-only)
 `IconTileView`'s neutral `raised` fill and hairline rim stay untouched; only

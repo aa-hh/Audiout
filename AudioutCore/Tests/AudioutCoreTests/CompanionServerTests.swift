@@ -214,7 +214,8 @@ import AudioutProtocol
                                         key: P256.Signing.PrivateKey = CompanionServerTests.testKey,
                                         name: String = "phone",
                                         protoVersion: Int = CompanionProto.version,
-                                        fingerprint: Data = CompanionServerTests.testFingerprint) async throws {
+                                        fingerprint: Data = CompanionServerTests.testFingerprint,
+                                        checksPairingCode: Bool = false) async throws {
         let nonce = try await challengeNonce(in: log)
         let signature = try key.signature(for: CompanionPairing.authenticationMessage(
             serverNonce: nonce, serverCertificateSHA256: fingerprint))
@@ -222,7 +223,8 @@ import AudioutProtocol
             clientKey: key.publicKey.rawRepresentation.base64EncodedString(),
             clientName: name,
             protoVersion: protoVersion,
-            signature: signature.rawRepresentation.base64EncodedString())).encoded(), over: client)
+            signature: signature.rawRepresentation.base64EncodedString(),
+            checksPairingCode: checksPairingCode)).encoded(), over: client)
     }
 
     /// A server claiming ``testFingerprint`` as its certificate.
@@ -237,7 +239,7 @@ import AudioutProtocol
     /// promoted". The gate's own behavior is tested separately at the end.
     private func makeAutoApprovingServer() -> CompanionServer {
         let server = makeServer()
-        server.onApprovalRequest = { _, _, _, decide in decide(.approved) }
+        server.onApprovalRequest = { _, _, _, _, _, decide in decide(.approved) }
         return server
     }
 
@@ -808,7 +810,7 @@ import AudioutProtocol
         server.broadcast(makeSnapshot())
 
         let asked = LockedBox<(id: String, name: String)?>(nil)
-        server.onApprovalRequest = { clientID, clientName, _, decide in
+        server.onApprovalRequest = { clientID, clientName, _, _, _, decide in
             asked.value = (clientID, clientName)
             decide(.approved)
         }
@@ -833,7 +835,7 @@ import AudioutProtocol
         let server = makeServer()
         defer { server.stop() }
         server.broadcast(makeSnapshot())
-        server.onApprovalRequest = { _, _, _, decide in decide(.denied) }
+        server.onApprovalRequest = { _, _, _, _, _, decide in decide(.denied) }
 
         let (client, log) = try await connectClient(via: hub, to: server)
         defer { client.cancel() }
@@ -860,7 +862,7 @@ import AudioutProtocol
         server.broadcast(makeSnapshot())
 
         let decider = LockedBox<(@Sendable (CompanionServer.ApprovalDecision) -> Void)?>(nil)
-        server.onApprovalRequest = { _, _, _, decide in
+        server.onApprovalRequest = { _, _, _, _, _, decide in
             decide(.pending)
             decider.value = decide
         }
@@ -890,7 +892,7 @@ import AudioutProtocol
         server.test_approvalTimeoutOverride = 0.3 // real default is 180s
         defer { server.stop() }
         server.broadcast(makeSnapshot())
-        server.onApprovalRequest = { _, _, _, decide in decide(.pending) } // never answered
+        server.onApprovalRequest = { _, _, _, _, _, decide in decide(.pending) } // never answered
 
         let (client, log) = try await connectClient(via: hub, to: server)
         defer { client.cancel() }
@@ -911,7 +913,7 @@ import AudioutProtocol
         let server = makeServer()
         defer { server.stop() }
         server.broadcast(makeSnapshot())
-        server.onApprovalRequest = { _, _, _, decide in decide(.pending) }
+        server.onApprovalRequest = { _, _, _, _, _, decide in decide(.pending) }
         let abandoned = LockedBox<[String]>([])
         server.onApprovalAbandoned = { clientID in abandoned.withLock { $0.append(clientID) } }
 
@@ -935,7 +937,7 @@ import AudioutProtocol
         server.test_approvalTimeoutOverride = 0.3 // real default is 180s
         defer { server.stop() }
         server.broadcast(makeSnapshot())
-        server.onApprovalRequest = { _, _, _, decide in decide(.pending) } // never answered
+        server.onApprovalRequest = { _, _, _, _, _, decide in decide(.pending) } // never answered
         let abandoned = LockedBox<[String]>([])
         server.onApprovalAbandoned = { clientID in abandoned.withLock { $0.append(clientID) } }
 
@@ -953,7 +955,7 @@ import AudioutProtocol
         let server = makeServer()
         defer { server.stop() }
         server.broadcast(makeSnapshot())
-        server.onApprovalRequest = { _, _, _, decide in decide(.pending) }
+        server.onApprovalRequest = { _, _, _, _, _, decide in decide(.pending) }
         let abandoned = LockedBox<[String]>([])
         server.onApprovalAbandoned = { clientID in abandoned.withLock { $0.append(clientID) } }
 
@@ -1078,8 +1080,10 @@ import AudioutProtocol
     }
 
     /// Turns red if the approval gate is handed anything other than the hash
-    /// of the verified key as the phone's id, or a pairing code computed over
-    /// anything other than this Mac's fingerprint and that key.
+    /// of the verified key as the phone's id, a pairing code computed over
+    /// anything other than this Mac's fingerprint and that key, a code-check
+    /// flag other than the hello's, or a connection id other than the one
+    /// `onClientDisconnected` later reports (the code-check alert closes on it).
     @Test func aValidHelloYieldsTheKeyHashAsClientIDAndAPairingCode() async throws {
         let hub = try await makeHub()
         defer { hub.cancel() }
@@ -1087,15 +1091,17 @@ import AudioutProtocol
         defer { server.stop() }
         server.broadcast(makeSnapshot())
 
-        let asked = LockedBox<(id: String, code: String)?>(nil)
-        server.onApprovalRequest = { clientID, _, pairingCode, decide in
-            asked.value = (clientID, pairingCode)
+        let asked = LockedBox<(id: String, code: String, checks: Bool, connection: UUID)?>(nil)
+        server.onApprovalRequest = { clientID, _, pairingCode, checksPairingCode, connectionID, decide in
+            asked.value = (clientID, pairingCode, checksPairingCode, connectionID)
             decide(.approved)
         }
+        let disconnected = LockedBox<UUID?>(nil)
+        server.onClientDisconnected = { disconnected.value = $0 }
 
         let (client, log) = try await connectClient(via: hub, to: server)
         defer { client.cancel() }
-        try await sendAuthenticatedHello(over: client, log: log)
+        try await sendAuthenticatedHello(over: client, log: log, checksPairingCode: true)
 
         let request = try #require(await waitUntil { asked.value != nil } ? asked.value : nil,
                                    "the gate was never asked")
@@ -1104,6 +1110,12 @@ import AudioutProtocol
         #expect(request.code == CompanionPairing.pairingCode(serverCertificateSHA256: Self.testFingerprint,
                                                             clientPublicKey: publicKey))
         #expect(request.code.count == 6 && request.code.allSatisfy(\.isNumber))
+        #expect(request.checks)
+
+        #expect(await waitUntil { log.messages.contains { if case .welcome = $0 { return true } else { return false } } })
+        client.cancel()
+        #expect(await waitUntil { disconnected.value != nil })
+        #expect(disconnected.value == request.connection)
     }
 
     /// Turns red if `.pairingClosed` stops reaching the phone as its own
@@ -1114,7 +1126,7 @@ import AudioutProtocol
         let server = makeServer()
         defer { server.stop() }
         server.broadcast(makeSnapshot())
-        server.onApprovalRequest = { _, _, _, decide in decide(.pairingClosed) }
+        server.onApprovalRequest = { _, _, _, _, _, decide in decide(.pairingClosed) }
 
         let (client, log) = try await connectClient(via: hub, to: server)
         defer { client.cancel() }
@@ -1163,7 +1175,7 @@ import AudioutProtocol
         server.test_awaitingCapOverride = 1 // real cap is 8
         defer { server.stop() }
         server.broadcast(makeSnapshot())
-        server.onApprovalRequest = { _, _, _, decide in decide(.pending) } // hold everyone
+        server.onApprovalRequest = { _, _, _, _, _, decide in decide(.pending) } // hold everyone
 
         let (held, heldLog) = try await connectClient(via: hub, to: server)
         defer { held.cancel() }

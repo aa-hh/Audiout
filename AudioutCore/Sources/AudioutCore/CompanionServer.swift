@@ -122,12 +122,18 @@ public final class CompanionServer: @unchecked Sendable {
     /// whose signature proved it holds the key `clientID` names
     /// (`CompanionPairing.clientID(forPublicKey:)`, uppercase hex;
     /// `clientName` already truncated). `pairingCode` is the six digits the
-    /// phone is showing for this Mac and key, for the prompt to repeat. The
+    /// phone is showing for this Mac and key, for the prompt to repeat.
+    /// `checksPairingCode` is the hello's flag: the phone is asking its user
+    /// to compare that code, so the Mac shows it even for a phone it already
+    /// approved. `connectionID` is the connection's id, the one
+    /// ``onCommand`` and ``onClientDisconnected`` later report. The
     /// wiring answers via `decide` — from any thread, any time later (see
     /// ``ApprovalDecision``); the server holds the connection meanwhile and
     /// NEVER blocks waiting. Left nil, no client is ever promoted (the
     /// awaiting deadline reaps them) — the trust boundary fails closed.
-    public var onApprovalRequest: (@Sendable (_ clientID: String, _ clientName: String, _ pairingCode: String, _ decide: @escaping @Sendable (ApprovalDecision) -> Void) -> Void)?
+    public var onApprovalRequest: (@Sendable (_ clientID: String, _ clientName: String, _ pairingCode: String,
+                                              _ checksPairingCode: Bool, _ connectionID: UUID,
+                                              _ decide: @escaping @Sendable (ApprovalDecision) -> Void) -> Void)?
 
     /// Fires when the last awaiting connection carrying this phone
     /// `clientID` went away unanswered — dropped, or the approval deadline
@@ -252,8 +258,10 @@ public final class CompanionServer: @unchecked Sendable {
     /// approval question is considered abandoned and the connection is
     /// closed with `goodbye("approvalTimedOut")`. Deliberately generous —
     /// the Mac's user may be in another room when the prompt appears — and
-    /// retryable: the phone reconnects and asks again.
-    private static let approvalTimeout: TimeInterval = 180
+    /// retryable: the phone reconnects and asks again. The pairing-code
+    /// alert for an approved phone (`CompanionApprovalController`) closes
+    /// after the same time.
+    static let approvalTimeout: TimeInterval = 180
     /// Test-only: overrides ``approvalTimeout``.
     public var test_approvalTimeoutOverride: TimeInterval?
 
@@ -891,7 +899,7 @@ public final class CompanionServer: @unchecked Sendable {
         }
 
         switch envelope.message {
-        case .hello(let rawClientKey, let rawName, let protoVersion, let rawSignature):
+        case .hello(let rawClientKey, let rawName, let protoVersion, let rawSignature, let checksPairingCode):
             guard clients[client.id] == nil else { return } // duplicate hello: ignore
             guard pending[client.id] != nil else { return } // awaiting-duplicate, or lost a race with its own death
             guard !CompanionProto.isIncompatible(peerVersion: protoVersion) else {
@@ -984,7 +992,9 @@ public final class CompanionServer: @unchecked Sendable {
             }
             if let onApprovalRequest {
                 let clientName = client.clientName ?? ""
-                queue.async { onApprovalRequest(phoneClientID, clientName, pairingCode, decide) }
+                queue.async {
+                    onApprovalRequest(phoneClientID, clientName, pairingCode, checksPairingCode, connectionID, decide)
+                }
             }
             // else: nothing to ask — the approval deadline reaps it (closed
             // by default; see onApprovalRequest's doc).

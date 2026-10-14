@@ -26,6 +26,12 @@ import Testing
             if answersPromptsAtOnce { respond(true) } else { openPrompts.append(respond) }
         }
         func withdrawApprovalPrompt(clientID: String) {}
+        var codeChecks: [(clientID: String, name: String, code: String)] = []
+        var withdrawnCodeChecks: [String] = []
+        func presentPairingCodeCheck(clientID: String, clientName: String, pairingCode: String) {
+            codeChecks.append((clientID, clientName, pairingCode))
+        }
+        func withdrawPairingCodeCheck(clientID: String) { withdrawnCodeChecks.append(clientID) }
         var activatedKeys: [String] = []
         func activateLicenseKey(_ key: String,
                                 reply: @escaping (CompanionServer.CommandResult) -> Void) {
@@ -67,14 +73,16 @@ import Testing
     /// coordinator; ``CompanionCoordinator/wire()`` replaces the window
     /// check with the real one.
     private func makeCoordinator(host: StubHost, storeName: String,
-                                 identityStore: RefusingIdentityStore = RefusingIdentityStore()) -> CompanionCoordinator {
+                                 identityStore: RefusingIdentityStore = RefusingIdentityStore(),
+                                 schedule: ((TimeInterval, @escaping @MainActor () -> Void) -> Void)? = nil)
+        -> CompanionCoordinator {
         let directory = scratchDir.appendingPathComponent(storeName)
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let backend = MockBackend(fleet: .demoFleet, staggerDiscovery: false,
                                   emitsLevels: false, simulatesDropouts: false)
         let approvals = CompanionApprovalController(
             store: CompanionApprovalStore(directory: directory),
-            schedule: { _, job in job() })
+            schedule: schedule ?? { _, job in job() })
         approvals.isPairingOpen = { true }
         approvals.presentPrompt = { _, _, _, respond in respond(true) }
         return CompanionCoordinator(
@@ -225,6 +233,37 @@ import Testing
         host.openPrompts.first?(false)
         #expect(decisions == [.pending, .denied])
         #expect(!coordinator.wantsServer, "answered, and nothing approved: nothing wants the server")
+    }
+
+    // MARK: Pairing-code alert
+
+    /// Turns red if the coordinator stops handing the hello's code-check flag
+    /// to the approval controller, stops sending the alert to the host, or
+    /// stops closing it on that connection's first command or its close.
+    @Test func thePairingCodeAlertReachesTheHostAndClosesOnCommandOrDisconnect() async {
+        let host = StubHost()
+        let coordinator = makeCoordinator(host: host, storeName: "code-check", schedule: { _, _ in })
+        let phone = String(repeating: "C", count: 64)
+        approve(clientID: phone, name: "Owner's iPhone", in: coordinator)
+        coordinator.wire()
+        let server = coordinator.server
+        func hello(on connection: UUID) {
+            server.onApprovalRequest?(phone, "Owner's iPhone", "482913", true, connection) { _ in }
+        }
+
+        let first = UUID()
+        hello(on: first)
+        await SuiteWait.until("the alert reaches the host") { host.codeChecks.count == 1 }
+        #expect(host.codeChecks.first?.name == "Owner's iPhone")
+        #expect(host.codeChecks.first?.code == "482913")
+        server.onCommand?("r1", .requestAppIcons(bundleIDs: []), first) { _ in }
+        await SuiteWait.until("the first command closes it") { host.withdrawnCodeChecks == [phone] }
+
+        let second = UUID()
+        hello(on: second)
+        await SuiteWait.until("the reconnect's alert reaches the host") { host.codeChecks.count == 2 }
+        server.onClientDisconnected?(second)
+        await SuiteWait.until("the close closes it") { host.withdrawnCodeChecks == [phone, phone] }
     }
 
     // MARK: Icon requests

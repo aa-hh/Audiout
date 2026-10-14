@@ -20,6 +20,12 @@ public protocol CompanionCoordinatorHost: AnyObject {
                                respond: @escaping (Bool) -> Void)
     /// Close the prompt for `clientID` — its connection died unanswered.
     func withdrawApprovalPrompt(clientID: String)
+    /// Show an information-only alert with the `pairingCode` an approved
+    /// phone is asking its user to compare, replacing any still open for
+    /// `clientID`. Must not block: the phone is already welcomed.
+    func presentPairingCodeCheck(clientID: String, clientName: String, pairingCode: String)
+    /// Close that alert, if it is still open.
+    func withdrawPairingCodeCheck(clientID: String)
     /// The `.regular` running apps, newest read (the coordinator caches it).
     func runningApplications() -> [(bundleID: String, displayName: String)]
     /// Answer a phone's `requestAppIcons` — reading an icon is AppKit work.
@@ -292,6 +298,9 @@ public final class CompanionCoordinator {
                     reply(CompanionServer.CommandResult(applied: false, refusalReason: "Audiout is shutting down."))
                     return
                 }
+                // The phone only sends commands once it is live, so its
+                // pairing code no longer needs comparing.
+                self.approvals.endCodeCheck(connectionID: clientID)
                 // FIX-B2 finding 2a: per-client token bucket, refused before
                 // any main-thread work is spent. A refusal costs the client
                 // nothing once it slows down; the phone's own send policy
@@ -400,6 +409,7 @@ public final class CompanionCoordinator {
         server.onClientDisconnected = { [weak self] clientID in
             DispatchQueue.main.async {
                 guard let self, !self.isTerminating else { return }
+                self.approvals.endCodeCheck(connectionID: clientID)
                 self.rateLimiter.forgetClient(clientID)
                 self.iconRequestsInFlight.remove(clientID)
                 // A run, a fine-tune session and an A/B receipt are all
@@ -435,11 +445,12 @@ public final class CompanionCoordinator {
         // after the server started still reaches the next phone to connect.
         server.companionToken = { [settings] in settings.companionToken }
         server.serverID = { [settings] in settings.companionServerID }
-        server.onApprovalRequest = { [weak self] clientID, clientName, pairingCode, decide in
+        server.onApprovalRequest = { [weak self] clientID, clientName, pairingCode, checksPairingCode, connectionID, decide in
             DispatchQueue.main.async {
                 guard let self, !self.isTerminating else { return }
                 self.approvals.handleRequest(
                     clientID: clientID, clientName: clientName, pairingCode: pairingCode,
+                    checksPairingCode: checksPairingCode, connectionID: connectionID,
                     decide: decide)
             }
         }
@@ -457,6 +468,13 @@ public final class CompanionCoordinator {
         }
         approvals.withdrawPrompt = { [weak self] clientID in
             self?.host?.withdrawApprovalPrompt(clientID: clientID)
+        }
+        approvals.presentCodeCheck = { [weak self] clientID, clientName, pairingCode in
+            self?.host?.presentPairingCodeCheck(clientID: clientID, clientName: clientName,
+                                                pairingCode: pairingCode)
+        }
+        approvals.withdrawCodeCheck = { [weak self] clientID in
+            self?.host?.withdrawPairingCodeCheck(clientID: clientID)
         }
         // Revoking a phone in Settings must also disconnect it if it's live.
         approvals.dropClient = { [weak self] clientID in

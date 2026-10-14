@@ -47,6 +47,12 @@ public struct CompanionApprovalStore: Sendable {
     /// Bump when the on-disk shape changes in a way old readers can't parse.
     static let currentSchemaVersion = 1
 
+    /// An approved phone last seen longer ago than this counts as unknown
+    /// again: its approval is removed and it must pair inside a pairing
+    /// window like a new phone. Owner's call 2026-10-14: one month without a
+    /// single connection.
+    public static let trustLapse: TimeInterval = 30 * 24 * 60 * 60
+
     private let fileURL: URL
     private let encoder: JSONEncoder
     private let decoder: JSONDecoder
@@ -100,9 +106,13 @@ public struct CompanionApprovalStore: Sendable {
 /// sense together):
 ///
 /// - `CompanionServer.onApprovalRequest` funnels every helloed connection
-///   through ``handleRequest(clientID:clientName:pairingCode:decide:)`` (via
-///   the app layer's main-thread hop): a remembered phone resolves instantly
-///   with no UI; an unknown phone is refused with `.pairingClosed` unless
+///   through ``handleRequest(clientID:clientName:pairingCode:checksPairingCode:connectionID:decide:)``
+///   (via the app layer's main-thread hop): a remembered phone resolves
+///   instantly with no Allow/Deny prompt (an approved phone that is checking
+///   the pairing code also gets an information-only alert showing it, see
+///   ``presentCodeCheck``); an approved phone not seen for
+///   `CompanionApprovalStore.trustLapse` is forgotten and treated as unknown;
+///   an unknown phone is refused with `.pairingClosed` unless
 ///   ``isPairingOpen`` says the user opened a pairing window, and is otherwise
 ///   held (`decide(.pending)`) while its prompt waits its turn. One prompt is
 ///   on screen at a time, the next one no sooner than ``promptCooldown``
@@ -142,6 +152,8 @@ public final class CompanionApprovalController {
     private var activePromptClientID: String?
     /// No prompt opens before this moment.
     private var cooldownUntil: Date?
+    /// The connection each open code-check alert belongs to, by clientID.
+    private var codeCheckConnections: [String: UUID] = [:]
 
     /// Show the user "Allow an iPhone…?" with the six-digit `pairingCode` the
     /// phone is also showing, and call back with their answer, exactly once.
@@ -155,6 +167,18 @@ public final class CompanionApprovalController {
     /// (dropped, or reaped by the server's approval deadline). Wired by the
     /// app layer; nil (unwired) leaves any on-screen alert as is.
     public var withdrawPrompt: ((_ clientID: String) -> Void)?
+
+    /// Show the user the six-digit `pairingCode` for an approved phone that
+    /// is asking its own user to compare it (it forgot this Mac): an
+    /// information-only alert, no Allow/Deny, the phone already welcomed.
+    /// Wired by the app layer; nil shows nothing.
+    public var presentCodeCheck: ((_ clientID: String, _ clientName: String, _ pairingCode: String) -> Void)?
+
+    /// Close the alert ``presentCodeCheck`` opened for this clientID: its
+    /// connection closed, sent its first command, the phone reconnected, or
+    /// `CompanionServer.approvalTimeout` passed. A no-op when the user
+    /// already closed it.
+    public var withdrawCodeCheck: ((_ clientID: String) -> Void)?
 
     /// Disconnect any live client with this clientID — fired on
     /// ``revoke(clientID:)`` (the app layer wires it to
@@ -223,23 +247,42 @@ public final class CompanionApprovalController {
     /// with `.approved`/`.denied`/`.pairingClosed` to settle it, or
     /// `.pending` first to hold it (the server then sends `awaitingApproval`
     /// so the phone shows its code and "check your Mac").
+    /// `checksPairingCode` and `connectionID` come from the hello and the
+    /// server; they only matter for an approved phone (``presentCodeCheck``).
     public func handleRequest(clientID: String,
                               clientName: String,
                               pairingCode: String,
+                              checksPairingCode: Bool = false,
+                              connectionID: UUID? = nil,
                               decide: @escaping (CompanionServer.ApprovalDecision) -> Void) {
+        var lapsed = false
         if let index = approvals.firstIndex(where: { $0.clientID == clientID }) {
-            // Remembered — refresh the display name + lastSeen, answer from
-            // the record, never prompt.
-            approvals[index].lastKnownName = clientName
-            approvals[index].lastSeen = now()
-            persist()
-            decide(approvals[index].decision == .approved ? .approved : .denied)
-            return
+            if approvals[index].decision == .approved,
+               now().timeIntervalSince(approvals[index].lastSeen) > CompanionApprovalStore.trustLapse {
+                // Unseen too long: forget the approval and ask like a new phone.
+                approvals.remove(at: index)
+                persist()
+                lapsed = true
+            } else {
+                // Remembered — refresh the display name + lastSeen, answer
+                // from the record, never prompt.
+                approvals[index].lastKnownName = clientName
+                approvals[index].lastSeen = now()
+                persist()
+                let approved = approvals[index].decision == .approved
+                decide(approved ? .approved : .denied)
+                if approved, checksPairingCode {
+                    showCodeCheck(clientID: clientID, clientName: clientName, pairingCode: pairingCode,
+                                  connectionID: connectionID ?? UUID())
+                }
+                return
+            }
         }
         guard isPairingOpen() else {
             // A stranger outside a window the user opened: refused without a
             // prompt and without a record.
             decide(.pairingClosed)
+            if lapsed { onApprovedSetChanged?() }
             return
         }
 
@@ -253,7 +296,29 @@ public final class CompanionApprovalController {
         }
         pendingDeciders[clientID] = [decide]
         promptQueue.append((clientID, clientName, pairingCode))
+        if lapsed { onApprovedSetChanged?() }
         showNextPromptIfIdle()
+    }
+
+    /// Opens the code-check alert for this connection, replacing one still
+    /// up for the same phone, and closes it after
+    /// `CompanionServer.approvalTimeout` unless something closed it first.
+    private func showCodeCheck(clientID: String, clientName: String, pairingCode: String, connectionID: UUID) {
+        if codeCheckConnections[clientID] != nil { withdrawCodeCheck?(clientID) }
+        codeCheckConnections[clientID] = connectionID
+        presentCodeCheck?(clientID, clientName, pairingCode)
+        schedule(CompanionServer.approvalTimeout) { [weak self] in
+            self?.endCodeCheck(connectionID: connectionID)
+        }
+    }
+
+    /// The connection a code-check alert belongs to closed or sent its
+    /// first command: close that alert. Any other connection is a no-op,
+    /// so the coordinator calls this for every command and every close.
+    public func endCodeCheck(connectionID: UUID) {
+        guard let clientID = codeCheckConnections.first(where: { $0.value == connectionID })?.key else { return }
+        codeCheckConnections[clientID] = nil
+        withdrawCodeCheck?(clientID)
     }
 
     /// Opens the oldest queued prompt when none is on screen and the

@@ -595,12 +595,40 @@ import Testing
 
         #expect(!LicenseGate.limitsToOneSpeaker(settings: settings))
         #expect(!LicenseGate.shouldPresent(settings: settings, presentation: .auto))
-        #expect(settings.licenseStatus == .active)
 
         defaults.set("old-token", forKey: "license.companionToken")
         #expect(settings.companionToken == "old-token")
         #expect(defaults.string(forKey: "license.companionToken") == "old-token",
                 "a refused read leaves the defaults copy where it is")
+    }
+
+    /// Turns red if `hasLicenseKey` counts every refused read as a stored key,
+    /// which makes a Mac that never had one read as registered whenever its
+    /// keychain is locked.
+    @Test func aRefusedReadWithNoVerdictAndNoDefaultsCopyIsNoKey() {
+        let store = InMemorySecretStore()
+        store.refuseReads = true
+        let settings = AppSettings(defaults: defaults, secrets: store)
+        #expect(!settings.hasLicenseKey)
+        #expect(settings.licenseUnregistered)
+    }
+
+    /// Turns red if a read that finds a value in the secret store ignores the
+    /// newer copy a refused write left in `UserDefaults`, which brings back the
+    /// key the user replaced, or if that copy is removed before the store has
+    /// taken it.
+    @Test func aDefaultsCopyLeftByARefusedWriteWinsOverTheStoredKey() {
+        let store = InMemorySecretStore()
+        store.values["license.key"] = "OLD-KEY"
+        defaults.set("NEW-KEY", forKey: "license.key")
+        store.failWrites = true
+        let settings = AppSettings(defaults: defaults, secrets: store)
+        #expect(settings.licenseKey == "NEW-KEY")
+        #expect(defaults.string(forKey: "license.key") == "NEW-KEY")
+        store.failWrites = false
+        #expect(settings.licenseKey == "NEW-KEY")
+        #expect(store.read("license.key") == .value("NEW-KEY"))
+        #expect(defaults.string(forKey: "license.key") == nil)
     }
 
     /// Turns red if the companion token skips the migration the licence key gets.

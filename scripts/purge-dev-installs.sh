@@ -184,7 +184,8 @@ removed_anything=0
 # ============================================================================
 # Union of every surface a dead dev build can still be named in — its
 # preferences file, its root helper daemon, its support directory, a stored
-# AirPlay speaker password, and any surviving .app bundle. A build can appear
+# AirPlay speaker password or `<bundle id>.license` licence item in the login
+# keychain, and any surviving .app bundle. A build can appear
 # in any one of those with no trace in the others (its .app deleted but its
 # daemon still registered; or the reverse, an .app that was launched once and
 # left a TCC row but no prefs), so all five are searched and the results unioned.

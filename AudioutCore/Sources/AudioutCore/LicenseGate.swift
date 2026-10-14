@@ -60,7 +60,7 @@ public enum LicenseGate {
     public static func owesThankYouCard(settings: AppSettings) -> Bool {
         settings.licenseServerURL != nil
             && settings.licenseStatus == .active
-            && !(settings.licenseKey ?? "").isEmpty
+            && settings.hasLicenseKey
             && settings.trialStartedAt != nil
             && settings.trialExpiresAt == nil
             && !settings.licenseThankYouShown
@@ -70,7 +70,7 @@ public enum LicenseGate {
     /// the open after its thank-you card. The host reads it on open.
     public static func owesConversionConsentAsk(settings: AppSettings) -> Bool {
         settings.licenseStatus == .active
-            && !(settings.licenseKey ?? "").isEmpty
+            && settings.hasLicenseKey
             && settings.trialStartedAt != nil
             && settings.trialExpiresAt == nil
             && settings.licenseThankYouShown
@@ -88,7 +88,7 @@ public enum LicenseGate {
     /// ``AppSettings/licenseUnregistered`` to read, and without this clause a
     /// Mac on day one of its trial would run limited to one speaker.
     private static func trialIsRunningWithoutAKey(settings: AppSettings) -> Bool {
-        guard (settings.licenseKey ?? "").isEmpty else { return false }
+        guard !settings.hasLicenseKey else { return false }
         if case .active = TrialClock.state(settings: settings) { return true }
         return false
     }

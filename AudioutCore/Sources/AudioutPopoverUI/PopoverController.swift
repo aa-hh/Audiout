@@ -1349,7 +1349,7 @@ public final class PopoverController: NSObject {
         public static func resolve(settings: AppSettings) -> UnregisteredNote? {
             guard LicenseGate.limitsToOneSpeaker(settings: settings) else { return nil }
             if TrialClock.hasEnded(settings: settings) { return .trialEnded }
-            if (settings.licenseKey ?? "").isEmpty { return .noKey }
+            if !settings.hasLicenseKey { return .noKey }
             switch settings.licenseStatus {
             case .revoked: return .keyRefused(reason: settings.licenseReason)
             case .unknown, .invalid: return .keyUnrecognized

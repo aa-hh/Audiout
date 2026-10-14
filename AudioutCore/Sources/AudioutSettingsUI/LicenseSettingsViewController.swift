@@ -98,7 +98,7 @@ public final class LicenseSettingsViewController: NSViewController, SettingsRead
         if case .active(let daysLeft, _, _) = TrialClock.state(settings: settings) {
             return LicenseCopy.trialPillText(daysLeft: daysLeft)
         }
-        if (settings.licenseKey ?? "").isEmpty { return "Unregistered" }
+        if !settings.hasLicenseKey { return "Unregistered" }
         if TrialClock.hasEnded(settings: settings), LicenseGate.limitsToOneSpeaker(settings: settings) {
             return "Trial ended"
         }
@@ -243,21 +243,21 @@ public final class LicenseSettingsViewController: NSViewController, SettingsRead
         // before the first layout, so plain `isHidden` is safe here.
         well?.isHidden = !serverConfigured
 
-        let key = settings.licenseKey ?? ""
+        let hasKey = settings.hasLicenseKey
         let status = settings.licenseStatus
         if case .active(_, let expiresAt, _) = TrialClock.state(settings: settings) {
             statusLabel.stringValue = "Audiout plays on every speaker until your trial ends on "
                 + "\(expiresAt.formatted(.dateTime.day().month(.wide)))."
         } else {
             statusLabel.stringValue = limitedStatusLine()
-                ?? Self.licenseStatusLine(keyIsEmpty: key.isEmpty,
+                ?? Self.licenseStatusLine(keyIsEmpty: !hasKey,
                                           status: status,
                                           reason: settings.licenseReason)
         }
 
         // Only where it can do something: a key is stored, and no verdict has
         // ever come back for it.
-        let canRetry = serverConfigured && !key.isEmpty && status == nil
+        let canRetry = serverConfigured && hasKey && status == nil
         checkAgainButton.isHidden = !canRetry
         // The wrap-width trap (`SettingsForm.hintLabel`): the label must be
         // told the width it will actually get, or it computes its intrinsic
@@ -268,7 +268,7 @@ public final class LicenseSettingsViewController: NSViewController, SettingsRead
         // Disclosed exactly when a check-in can actually fire
         // (`LicenseCheckIn.checkInIfNeeded` guards on key + endpoint) — never
         // as a standing claim about a build that never phones home.
-        let showsDisclosure = serverConfigured && !key.isEmpty
+        let showsDisclosure = serverConfigured && hasKey
         if !showsDisclosure { checkInDisclosureHelp.dismissHelp() }
         checkInDisclosureHelp.isHidden = !showsDisclosure
 
@@ -276,7 +276,7 @@ public final class LicenseSettingsViewController: NSViewController, SettingsRead
         // once one is stored (the sheet then prefills it and offers Remove
         // License…).
         let trialActive = trialIsActive
-        enterLicenseButton.title = key.isEmpty || trialActive ? "Enter license…" : "Change…"
+        enterLicenseButton.title = !hasKey || trialActive ? "Enter license…" : "Change…"
 
         // Buying is offered only where it can work (a server and a buy page)
         // and only where it would help (no key, a key the server won’t

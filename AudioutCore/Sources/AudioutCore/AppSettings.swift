@@ -89,13 +89,19 @@ public struct AppSettings {
     /// Reads a secret. A value an older build left in `defaults` moves to
     /// `secrets` on the first read that finds the store empty, and leaves
     /// `defaults` only once the store has taken it; a refused move keeps the
-    /// value in `defaults` and is tried again on the next read. A read the
+    /// value in `defaults` and is tried again on the next read. A `defaults`
+    /// copy beside a stored value was left by a refused write, so it is the
+    /// newer one: it wins, and moves into the store the same way. A read the
     /// store refused moves and deletes nothing: it answers with the `defaults`
     /// copy, if any, and says it was refused.
     private func readSecretNotingRefusal(_ key: String) -> (value: String?, refused: Bool) {
         switch secrets.read(key) {
         case .value(let value):
-            return (value, false)
+            guard !(secrets is DefaultsSecretStore), let newer = defaults.string(forKey: key) else {
+                return (value, false)
+            }
+            if secrets.write(newer, for: key) { defaults.removeObject(forKey: key) }
+            return (newer, false)
         case .refused:
             return (defaults.string(forKey: key), true)
         case .missing:
@@ -625,11 +631,13 @@ public struct AppSettings {
     }
 
     /// Whether a licence key is stored, counting one the secret store would
-    /// not hand over (a locked login keychain): that Mac keeps its stored
-    /// verdict instead of reading as unregistered.
+    /// not hand over (a locked login keychain) when a verdict is on record,
+    /// since only a stored key ever gets one: that Mac keeps its verdict
+    /// instead of reading as unregistered. A refused read with no verdict and
+    /// no `defaults` copy counts as no key.
     public var hasLicenseKey: Bool {
         let read = readSecretNotingRefusal(Keys.licenseKey)
-        return read.refused || !(read.value ?? "").isEmpty
+        return (read.refused && licenseStatus != nil) || !(read.value ?? "").isEmpty
     }
 
     /// What the server last said about ``licenseKey`` (``LicenseValidator``).
@@ -905,7 +913,7 @@ public struct AppSettings {
     /// key with no trial expiry, which is a paid install — those are asked
     /// before anything is collected.
     public var telemetryDefaultOn: Bool {
-        (licenseKey ?? "").isEmpty || trialExpiresAt != nil
+        !hasLicenseKey || trialExpiresAt != nil
     }
 
     /// Whether usage analytics may be sent right now. The user's own answer

@@ -188,7 +188,8 @@ let package = Package(
         // commands; 0.21.0 replaces the two sweeps with one glide probe both
         // speakers play in turn (`SyncProbe.Layout`, ADR 0002 there).
         .package(url: "https://github.com/aa-hh/audiout-shared.git",
-                 from: "0.21.0"),
+                 branch: "claude/eloquent-dijkstra-njaju1"),
+        // Temporary branch pin, flipped to `from: "0.24.0"` by the landing step.
         // Sparkle 2 (MIT) — in-app updates for the paid, notarised build only.
         // Scoped to the `AudioutApp` executable target so no library, test or
         // harness target ever links it.

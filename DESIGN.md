@@ -1506,6 +1506,18 @@ accessibility and the address printed under it — `audiout.app/remote`, no
 scheme, in the surface's own caption voice — is the element, so a person who
 cannot or will not scan can type it.
 
+Scanning the code only gets the app; pairing needs the Mac to be listening.
+In Settings › Audiout Remote, a "Pair an iPhone" row sits directly under the
+Allow switch (and its override note), above the invitation, mounted only
+while the switch is on. Its stock rounded push button reads "Pair an iPhone"
+and opens a 3-minute pairing window; while the window is open it reads
+"Pairing…" and is disabled. The help text under the title says "Lets a new
+iPhone find this Mac for the next 3 minutes. Approve it with the code both
+screens show." The Setup window's iPhone card and the wizard sheet's iPhone
+panel, when it shows its code, open the same window as they come on screen.
+The Mac is discoverable on the network only while a pairing window is open
+or once a phone is paired; outside both, a new phone finds nothing to join.
+
 ### Permission Row (Onboarding, signature component, Mac-only)
 `IconTileView`'s neutral `raised` fill and hairline rim stay untouched; only
 the SF Symbol glyph carries one of the seven spine hues (six dial-aware

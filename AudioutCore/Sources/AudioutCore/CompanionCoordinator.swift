@@ -13,16 +13,21 @@ import AudioutProtocol
 /// this wiring used to live in a target the suite cannot see.
 @MainActor
 public protocol CompanionCoordinatorHost: AnyObject {
-    /// Ask the user whether this phone may control the Mac, and report the
-    /// answer exactly once. Never called for a remembered phone.
-    func presentApprovalPrompt(clientID: String, clientName: String,
+    /// Ask the user whether this phone may control the Mac, showing the
+    /// six-digit `pairingCode` the phone shows too, and report the answer
+    /// exactly once. Never called for a remembered phone.
+    func presentApprovalPrompt(clientID: String, clientName: String, pairingCode: String,
                                respond: @escaping (Bool) -> Void)
     /// Close the prompt for `clientID` — its connection died unanswered.
     func withdrawApprovalPrompt(clientID: String)
     /// The `.regular` running apps, newest read (the coordinator caches it).
     func runningApplications() -> [(bundleID: String, displayName: String)]
     /// Answer a phone's `requestAppIcons` — reading an icon is AppKit work.
-    func serveAppIconPages(_ requested: [String], to clientID: UUID)
+    /// `completion` runs once the last page has been handed to the server
+    /// (at once when there is nothing to send); until then the coordinator
+    /// refuses that phone's next icon request.
+    func serveAppIconPages(_ requested: [String], to clientID: UUID,
+                           completion: @escaping @MainActor () -> Void)
     /// Run a licence key the phone sent, and reply to that command. Needs
     /// `LicenseValidator`, the gate window and `applyLicenseState`, none of
     /// which an AppKit-free type owns.
@@ -69,24 +74,29 @@ public final class CompanionCoordinator {
     private let excludedBundleIDs: () -> Set<String>
     private let speakerLibrary: SpeakerLibraryController
 
-    /// One name for both the Bonjour advertisement (`start(name:)`) and
-    /// `Snapshot.serverName` — the server's `welcome` reads the latter, so the
-    /// two must agree (one source of truth, `CompanionServer.sendWelcome`).
+    /// The Mac's name as phones see it: `Snapshot.serverName`, which the
+    /// server's `welcome` reads (`CompanionServer.sendWelcome`). It travels
+    /// only inside TLS; the Bonjour advertisement carries
+    /// `CompanionPairing.instanceName` instead.
     public let serverName: String
 
     /// The iPhone-companion link: a Bonjour-advertised WebSocket server the
     /// phone connects to. Created once; started/stopped only by
-    /// ``updateServerState()`` (launch + the Settings › General checkbox, both
-    /// funneled through `AppSettings.resolvedAllowRemoteControl` so the
-    /// `AUDIOUT_COMPANION` env override wins). ON when the setting is unset, so
-    /// a fresh install advertises without being asked twice — the Local Network
-    /// grant is already the user's consent to this.
+    /// ``updateServerState()``. It runs while
+    /// `AppSettings.resolvedAllowRemoteControl` allows it (the Settings ›
+    /// Audiout Remote switch, with the `AUDIOUT_COMPANION` env override
+    /// winning) AND a phone is approved or a pairing window is open — a Mac
+    /// nobody has paired with is not on the network at all.
     public let server: CompanionServer
 
     /// The per-phone approval model (T24): remembers each phone's allow/deny
-    /// answer, funnels unknown phones into ONE prompt per clientID, and backs
-    /// the Settings › General "Remembered iPhones" list.
+    /// answer, funnels unknown phones into one prompt at a time, and backs
+    /// the Settings › Audiout Remote "Remembered iPhones" list.
     public let approvals: CompanionApprovalController
+
+    /// Where the server's TLS identity lives; read each time the server
+    /// starts.
+    private let identityStore: any CompanionIdentityStoring
 
     private weak var host: (any CompanionCoordinatorHost)?
 
@@ -101,6 +111,7 @@ public final class CompanionCoordinator {
                 // Optional rather than defaulted: a default argument is evaluated
                 // in a nonisolated context, and this type's init is `@MainActor`.
                 approvals: CompanionApprovalController? = nil,
+                identityStore: (any CompanionIdentityStoring)? = nil,
                 host: any CompanionCoordinatorHost) {
         self.backend = backend
         self.groupController = groupController
@@ -111,6 +122,7 @@ public final class CompanionCoordinator {
         self.serverName = serverName
         self.server = server
         self.approvals = approvals ?? CompanionApprovalController()
+        self.identityStore = identityStore ?? KeychainCompanionIdentityStore()
         self.host = host
     }
 
@@ -124,6 +136,24 @@ public final class CompanionCoordinator {
     /// triggers can no-op cheaply while the feature is off (the default) and
     /// ``updateServerState()`` only acts on a real edge.
     private var isActive = false
+
+    /// How long ``openPairingWindow()`` lets an unknown phone ask to pair.
+    public static let pairingWindowDuration: TimeInterval = 180
+
+    /// Whether unknown phones may ask to pair right now. Opened by Settings ›
+    /// Audiout Remote's Pair an iPhone button, and when the Setup window's
+    /// iPhone card or the alignment wizard's iPhone panel comes on screen;
+    /// closes after ``pairingWindowDuration`` or once a phone is approved.
+    public private(set) var pairingWindowOpen = false
+
+    /// Fired whenever ``pairingWindowOpen`` changes.
+    public var onPairingWindowChanged: (() -> Void)?
+
+    private var pairingWindowExpiry: DispatchWorkItem?
+
+    /// Phones whose icon pages are still being sent; a second request from
+    /// one of them is refused until the first is done.
+    private var iconRequestsInFlight: Set<UUID> = []
 
     /// Executes phone commands against the exact controllers the popover
     /// drives. Built in ``wire()`` once those controllers exist.
@@ -288,8 +318,20 @@ public final class CompanionCoordinator {
                 // (CompanionCommandDispatcher.swift:219). Rate-limited like
                 // every other command by the guard above.
                 if case .requestAppIcons(let requested) = command {
+                    // One request at a time per phone: a phone repeating the
+                    // request would otherwise queue page after page of the
+                    // same icons on the main thread and the socket.
+                    guard !self.iconRequestsInFlight.contains(clientID) else {
+                        reply(CompanionServer.CommandResult(
+                            applied: false,
+                            refusalReason: "Icons are still being sent. Wait a moment."))
+                        return
+                    }
+                    self.iconRequestsInFlight.insert(clientID)
                     reply(CompanionServer.CommandResult(applied: true))
-                    self.host?.serveAppIconPages(requested, to: clientID)
+                    self.host?.serveAppIconPages(requested, to: clientID) { [weak self] in
+                        self?.iconRequestsInFlight.remove(clientID)
+                    }
                     return  // no snapshot broadcast — icons are not snapshot state
                 }
                 if case .setAlignmentTick(let targetID, let active) = command {
@@ -358,6 +400,7 @@ public final class CompanionCoordinator {
             DispatchQueue.main.async {
                 guard let self, !self.isTerminating else { return }
                 self.rateLimiter.forgetClient(clientID)
+                self.iconRequestsInFlight.remove(clientID)
                 // A run, a fine-tune session and an A/B receipt are all
                 // per-client state, and a phone that walks out of range would
                 // otherwise leave the room holding a sweep feed with every
@@ -391,11 +434,12 @@ public final class CompanionCoordinator {
         // after the server started still reaches the next phone to connect.
         server.companionToken = { [settings] in settings.companionToken }
         server.serverID = { [settings] in settings.companionServerID }
-        server.onApprovalRequest = { [weak self] clientID, clientName, decide in
+        server.onApprovalRequest = { [weak self] clientID, clientName, pairingCode, decide in
             DispatchQueue.main.async {
                 guard let self, !self.isTerminating else { return }
                 self.approvals.handleRequest(
-                    clientID: clientID, clientName: clientName, decide: decide)
+                    clientID: clientID, clientName: clientName, pairingCode: pairingCode,
+                    decide: decide)
             }
         }
         // The last connection carrying this phone identity died before the
@@ -406,9 +450,9 @@ public final class CompanionCoordinator {
                 self.approvals.abandonRequest(clientID: clientID)
             }
         }
-        approvals.presentPrompt = { [weak self] clientID, clientName, respond in
+        approvals.presentPrompt = { [weak self] clientID, clientName, pairingCode, respond in
             self?.host?.presentApprovalPrompt(clientID: clientID, clientName: clientName,
-                                              respond: respond)
+                                              pairingCode: pairingCode, respond: respond)
         }
         approvals.withdrawPrompt = { [weak self] clientID in
             self?.host?.withdrawApprovalPrompt(clientID: clientID)
@@ -417,25 +461,78 @@ public final class CompanionCoordinator {
         approvals.dropClient = { [weak self] clientID in
             self?.server.dropClient(clientID: clientID)
         }
+        // An unknown phone is only ever prompted for inside a pairing window.
+        approvals.isPairingOpen = { [weak self] in self?.pairingWindowOpen ?? false }
+        // The first approval ends the window that let it in; the last
+        // revocation stops the server unless a window is open.
+        approvals.onApprovedSetChanged = { [weak self] in
+            guard let self else { return }
+            if self.hasApprovedPhone && self.pairingWindowOpen {
+                self.closePairingWindow()
+            } else {
+                self.updateServerState()
+            }
+        }
 
         updateServerState()
     }
 
-    /// Start or stop the companion server to match
-    /// `AppSettings.resolvedAllowRemoteControl` (env override → persisted
-    /// checkbox). Called at launch and from the Settings › General checkbox
-    /// callback; a no-op when nothing changed. On start, broadcasts an initial
-    /// snapshot IMMEDIATELY — the server defers a helloed client's `welcome`
-    /// until the first broadcast, so an early client would otherwise hang.
+    private var hasApprovedPhone: Bool {
+        approvals.approvals.contains { $0.decision == .approved }
+    }
+
+    /// Let unknown phones ask to pair for ``pairingWindowDuration``, starting
+    /// the server if nothing else keeps it running. Opening an open window
+    /// restarts its clock.
+    public func openPairingWindow() {
+        pairingWindowExpiry?.cancel()
+        let expiry = DispatchWorkItem { [weak self] in self?.closePairingWindow() }
+        pairingWindowExpiry = expiry
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.pairingWindowDuration, execute: expiry)
+        pairingWindowOpen = true
+        updateServerState()
+        onPairingWindowChanged?()
+    }
+
+    /// End the pairing window; the server stops too unless a phone is
+    /// approved.
+    public func closePairingWindow() {
+        pairingWindowExpiry?.cancel()
+        pairingWindowExpiry = nil
+        pairingWindowOpen = false
+        updateServerState()
+        onPairingWindowChanged?()
+    }
+
+    /// Start or stop the companion server: it runs while
+    /// `AppSettings.resolvedAllowRemoteControl` allows it (env override →
+    /// persisted switch) and a phone is approved or a pairing window is open.
+    /// Called at launch, from the Settings › Audiout Remote switch, and on
+    /// every pairing-window or approved-set change; a no-op when nothing
+    /// changed. A start that cannot load the TLS identity logs, leaves the
+    /// server stopped, and is tried again on the next call. On start,
+    /// broadcasts an initial snapshot IMMEDIATELY — the server defers a
+    /// helloed client's `welcome` until the first broadcast, so an early
+    /// client would otherwise hang.
     public func updateServerState() {
         let shouldRun = AppSettings.resolvedAllowRemoteControl(settings: settings)
+            && (hasApprovedPhone || pairingWindowOpen)
         guard shouldRun != isActive else { return }
-        isActive = shouldRun
         if shouldRun {
-            server.start(name: serverName)
+            let identity: CompanionIdentity
+            do {
+                identity = try identityStore.loadOrCreate()
+            } catch {
+                host?.log("companion server not started: no TLS identity (\(error))")
+                isActive = false
+                return
+            }
+            isActive = true
+            server.start(identity: identity)
             broadcastSnapshotNow()
-            host?.log("companion server started (\(serverName))")
+            host?.log("companion server started")
         } else {
+            isActive = false
             broadcastWork?.cancel()
             broadcastWork = nil
             // `disabled`, not the `shutdown` default: the phone settles

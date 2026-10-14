@@ -1349,7 +1349,7 @@ public final class PopoverController: NSObject {
         public static func resolve(settings: AppSettings) -> UnregisteredNote? {
             guard LicenseGate.limitsToOneSpeaker(settings: settings) else { return nil }
             if TrialClock.hasEnded(settings: settings) { return .trialEnded }
-            if (settings.licenseKey ?? "").isEmpty { return .noKey }
+            if !settings.hasLicenseKey { return .noKey }
             switch settings.licenseStatus {
             case .revoked: return .keyRefused(reason: settings.licenseReason)
             case .unknown, .invalid: return .keyUnrecognized
@@ -3312,6 +3312,11 @@ public final class PopoverController: NSObject {
     /// "Allow is on, no phone here", the state that shows the code.
     public var remoteInviteStateProvider:
         (() -> BTAlignmentWizardView.RemoteInviteState)?
+
+    /// Fired when the wizard sheet comes on screen with its iPhone panel
+    /// inviting a phone (the code is showing). The app opens a pairing window
+    /// then, so a phone that scans the code may ask to pair with this Mac.
+    public var onRemoteInviteShown: (() -> Void)?
 
     /// Where a speaker's applied offset came from, asked of the app layer on
     /// every push. Unset until T14 publishes a source, and the drawer's

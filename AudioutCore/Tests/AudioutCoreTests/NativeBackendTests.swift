@@ -437,8 +437,8 @@ private final class FakeDiscovery: DiscoverySource, @unchecked Sendable {
 /// `applyDacpVolume`/`applyDacpVolumeStep` — the exact closures
 /// `NativeBackend.start()` wires to `onVolume`/`onVolumeStep` — directly.
 private final class FakeDACPEndpoint: DACPEndpoint, @unchecked Sendable {
-    var onVolume: (@Sendable (_ activeRemote: UInt32, _ level: Double) -> Void)?
-    var onVolumeStep: (@Sendable (_ activeRemote: UInt32, _ direction: Int) -> Void)?
+    var onVolume: (@Sendable (_ remoteHost: String?, _ activeRemote: UInt32, _ level: Double) -> Void)?
+    var onVolumeStep: (@Sendable (_ remoteHost: String?, _ activeRemote: UInt32, _ direction: Int) -> Void)?
     private(set) var startCount = 0
     private(set) var stopCount = 0
     func start(dacpID: UInt64) { startCount += 1 }
@@ -675,6 +675,12 @@ private func ap1Device(id: String = "AA:BB:CC:DD:EE:99", name: String = "Old Exp
     let desc = DeviceDescriptor(name: name, address: "192.168.1.20", family: .ipv4, port: 5000, kind: .raop, txtRecord: txt)
     return DiscoveredDevice(id: parsedID, descriptor: desc, outputID: outputID, isAirPlay2Supported: false,
                             access: access)
+}
+
+/// Waits until the backend has recorded the descriptor it fed the engine for
+/// `device` (`fedDescriptors`), the address a DACP report is checked against.
+private func awaitFed(_ backend: NativeBackend, _ device: DiscoveredDevice) async {
+    await pollUntil { backend.stateQueue.sync { backend.fedDescriptors[device.id] != nil } }
 }
 
 /// An AP1-only receiver as the real ones advertise: its product sits under the
@@ -2815,18 +2821,25 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         // stored setting is: stored 50 → effective (wire) 25%.
         backend.setMasterGain(mainOut: 50, group: 100, mirrorToSystemVolume: false)
         await pollUntil { engine.volumeCalls.contains { $0.0 == device.outputID && abs($0.1 - 0.25) < 0.001 } }
-        let callsBeforeEcho = engine.volumeCalls.count
 
         // THE ECHO: the receiver reflects back exactly what we just put on the
         // wire (0.25 = 25%).
         let token = UInt32(truncatingIfNeeded: device.outputID.rawValue)
-        backend.applyDacpVolume(activeRemote: token, level: 0.25)
-        // No scheduled interval here either — pure async-settle margin at the
-        // 100ms absolute floor.
-        try? await Task.sleep(nanoseconds: 100_000_000)
+        await awaitFed(backend, device)
+        // The gain push must have finished, so a wrong re-push shows up as a
+        // fresh `volumeInFlight` mark.
+        await pollUntil { backend.stateQueue.sync { !backend.volumeInFlight.contains(device.outputID) } }
+        let callsBeforeEcho = engine.volumeCalls.count
+        backend.applyDacpVolume(remoteHost: device.descriptor.address, activeRemote: token, level: 0.25)
+        // `applyDacpVolume` decides in one `stateQueue` block and a push it
+        // starts marks `volumeInFlight` there; the mark clears only after the
+        // engine call is recorded, so reading the mark before the call count
+        // catches a wrong push at either stage.
+        let rePushInFlight = backend.stateQueue.sync { backend.volumeInFlight.contains(device.outputID) }
 
         #expect(backend.devices.first { $0.id == device.id }?.volume == 50,
                        "an echo of our own attenuated write must NOT overwrite the user's stored setting")
+        #expect(!rePushInFlight, "an echo of our own attenuated write must NOT trigger a re-push")
         #expect(engine.volumeCalls.count == callsBeforeEcho,
                        "an echo of our own attenuated write must NOT trigger a re-push")
 
@@ -2835,7 +2848,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         // (0.40 wire / 50% gain = 0.80 → stored 80) and pushed back out at that
         // same wire level — AirPlay volume is sender-owned, so the receiver's
         // audible level only moves once we write it back (SET_PARAMETER).
-        backend.applyDacpVolume(activeRemote: token, level: 0.40)
+        backend.applyDacpVolume(remoteHost: device.descriptor.address, activeRemote: token, level: 0.40)
         await pollUntil { backend.devices.first { $0.id == device.id }?.volume == 80 }
         // The store and the re-push land on different queues — wait for the
         // push too, or the assert below races it under load.
@@ -10291,9 +10304,10 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         // Active-Remote is the low 32 bits of the device id (airplay.c). 0.8 → 80,
         // deliberately != the discovered default of 50 so the change actually emits.
         let token = UInt32(truncatingIfNeeded: device.outputID.rawValue)
+        await awaitFed(backend, device)
         let events = await collect(from: backend) { events in
             events.contains { if case .deviceUpdated(let d) = $0 { return d.id == device.id && d.volume == 80 } else { return false } }
-        } after: { backend.applyDacpVolume(activeRemote: token, level: 0.8) }
+        } after: { backend.applyDacpVolume(remoteHost: device.descriptor.address, activeRemote: token, level: 0.8) }
 
         let updated = events.compactMap { event -> Device? in
             if case .deviceUpdated(let d) = event, d.id == device.id { return d } else { return nil }
@@ -10312,7 +10326,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         let events = await collect(from: backend) { events in
             events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
         } after: {
-            backend.applyDacpVolume(activeRemote: 0xDEADBEEF, level: 0.9) // no such token
+            backend.applyDacpVolume(remoteHost: device.descriptor.address, activeRemote: 0xDEADBEEF, level: 0.9) // no such token
             discovery.fire(.appeared(device))
         }
         #expect(!(
@@ -10337,7 +10351,8 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         } after: { discovery.fire(.appeared(device)) }
 
         let token = UInt32(truncatingIfNeeded: device.outputID.rawValue)
-        backend.applyDacpVolume(activeRemote: token, level: 0.8)
+        await awaitFed(backend, device)
+        backend.applyDacpVolume(remoteHost: device.descriptor.address, activeRemote: token, level: 0.8)
 
         let pushed = await waitForVolumePush(engine, device.outputID, 0.8)
         #expect(pushed, "a speaker-requested volume must be pushed back to the engine so the speaker actually changes level")
@@ -10357,15 +10372,21 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         } after: { discovery.fire(.appeared(device)) }
 
         let token = UInt32(truncatingIfNeeded: device.outputID.rawValue)
-        backend.applyDacpVolume(activeRemote: token, level: 0.8)
+        await awaitFed(backend, device)
+        backend.applyDacpVolume(remoteHost: device.descriptor.address, activeRemote: token, level: 0.8)
         #expect(await waitForVolumePush(engine, device.outputID, 0.8),
                 "precondition: the first push reached the engine")
+        // The first push must have finished, so a wrong second one shows up as
+        // a fresh `volumeInFlight` mark.
+        await pollUntil { backend.stateQueue.sync { !backend.volumeInFlight.contains(device.outputID) } }
         let countAfterFirst = engine.volumeCalls.count
 
-        // The "echo": same level again. Give any (wrong) push time to land.
-        // No scheduled interval here — pure async-settle margin at the 100ms floor.
-        backend.applyDacpVolume(activeRemote: token, level: 0.8)
-        try? await Task.sleep(nanoseconds: 100_000_000)
+        // The "echo": same level again. The read of the in-flight mark runs
+        // after the apply's `stateQueue` block, and a wrong push either still
+        // holds the mark or has already recorded its engine call.
+        backend.applyDacpVolume(remoteHost: device.descriptor.address, activeRemote: token, level: 0.8)
+        let rePushInFlight = backend.stateQueue.sync { backend.volumeInFlight.contains(device.outputID) }
+        #expect(!rePushInFlight, "an echo of the current value must not push again (feedback loop)")
         #expect(engine.volumeCalls.count == countAfterFirst,
                        "an echo of the current value must not push again (feedback loop)")
     }
@@ -10384,6 +10405,8 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         } after: { discovery.fire(.appeared(device)) }
 
         let token = UInt32(truncatingIfNeeded: device.outputID.rawValue)
+        await awaitFed(backend, device)
+        let host = device.descriptor.address
         let step = NativeBackend.speakerVolumeStep
         let deviceID = device.id
         let volumesOf: @Sendable ([BackendEvent]) -> [Int] = { events in
@@ -10394,14 +10417,46 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         let events = await collect(from: backend) { events in
             volumesOf(events).count >= 3
         } after: {
-            backend.applyDacpVolumeStep(activeRemote: token, direction: 1)
-            backend.applyDacpVolumeStep(activeRemote: token, direction: 1)
-            backend.applyDacpVolumeStep(activeRemote: token, direction: -1)
+            backend.applyDacpVolumeStep(remoteHost: host, activeRemote: token, direction: 1)
+            backend.applyDacpVolumeStep(remoteHost: host, activeRemote: token, direction: 1)
+            backend.applyDacpVolumeStep(remoteHost: host, activeRemote: token, direction: -1)
         }
 
         let volumes = volumesOf(events)
         #expect(volumes == [50 + step, 50 + 2 * step, 50 + step],
                        "steps must accumulate from the current level, up then back down")
+    }
+
+    /// A DACP report only counts when it comes from the speaker's own address:
+    /// the listener is open to the whole LAN and the token is 32 bits of a MAC.
+    /// Turns red if `applyDacpVolume` / `applyDacpVolumeStep` stop comparing the
+    /// sender's address with the fed descriptor's `address`.
+    @Test func dacpReportFromAnotherHostMovesNothing() async {
+        let (backend, engine, discovery) = makeBackend()
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        let device = ap2Device()
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+        await awaitFed(backend, device)
+
+        let token = UInt32(truncatingIfNeeded: device.outputID.rawValue)
+        let volumeOf: () -> Int? = { backend.devices.first { $0.id == device.id }?.volume }
+        let before = volumeOf()
+        let callsBefore = engine.volumeCalls.count
+
+        backend.applyDacpVolume(remoteHost: "192.168.1.99", activeRemote: token, level: 0.8)
+        backend.applyDacpVolume(remoteHost: nil, activeRemote: token, level: 0.8)
+        backend.applyDacpVolumeStep(remoteHost: "192.168.1.99", activeRemote: token, direction: 1)
+        backend.stateQueue.sync {}   // the three calls above have run
+        #expect(volumeOf() == before, "a report from a host that is not the speaker must not move its slider")
+        #expect(engine.volumeCalls.count == callsBefore, "and must not push anything to the engine")
+
+        backend.applyDacpVolume(remoteHost: device.descriptor.address, activeRemote: token, level: 0.8)
+        await pollUntil { volumeOf() == 80 }
+        #expect(volumeOf() == 80, "the same report from the speaker's own address moves it")
     }
 
     /// Both routing chokepoints must fire `onRoutingAction` — this is what makes

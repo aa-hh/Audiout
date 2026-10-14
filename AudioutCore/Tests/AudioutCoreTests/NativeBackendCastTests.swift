@@ -175,8 +175,8 @@ import CoreAudio
     /// No sockets: the real `DACPServer.start(dacpID:)` binds a live
     /// `NWListener` (Local Network prompt).
     private final class FakeDACPEndpoint: DACPEndpoint, @unchecked Sendable {
-        var onVolume: (@Sendable (_ activeRemote: UInt32, _ level: Double) -> Void)?
-        var onVolumeStep: (@Sendable (_ activeRemote: UInt32, _ direction: Int) -> Void)?
+        var onVolume: (@Sendable (_ remoteHost: String?, _ activeRemote: UInt32, _ level: Double) -> Void)?
+        var onVolumeStep: (@Sendable (_ remoteHost: String?, _ activeRemote: UInt32, _ direction: Int) -> Void)?
         func start(dacpID: UInt64) {}
         func stop() {}
     }

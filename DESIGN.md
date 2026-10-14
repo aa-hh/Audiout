@@ -1517,6 +1517,28 @@ accessibility and the address printed under it — `audiout.app/remote`, no
 scheme, in the surface's own caption voice — is the element, so a person who
 cannot or will not scan can type it.
 
+Scanning the code only gets the app; pairing needs the Mac to be listening.
+In Settings › Audiout Remote, a "Pair an iPhone" row sits directly under the
+Allow switch (and its override note), above the invitation, mounted only
+while the switch is on. Its stock rounded push button reads "Pair an iPhone"
+and opens a 3-minute pairing window; while the window is open it reads
+"Pairing…" and is disabled. The help text under the title says "Lets a new
+iPhone find this Mac for the next 3 minutes. Approve it with the code both
+screens show." The Setup window's iPhone card and the wizard sheet's iPhone
+panel, when it shows its code, open the same window as they come on screen.
+The Mac is discoverable on the network only while a pairing window is open
+or once a phone is paired; outside both, a new phone finds nothing to join.
+A paired phone that has forgotten this Mac asks its user to compare the code
+again; the Mac lets it in without asking and shows the code in a stock alert,
+not modal, with only an OK button: "<phone name> is checking it reached this
+Mac", then "Its screen should show:" over the code and "If it shows a
+different code, tap Cancel on the iPhone." OK, Return or Escape closes it,
+and it closes itself when that phone sends its first command, disconnects or
+is refused, or after 3 minutes. A paired phone that has not connected for 30
+days counts as new again and needs a pairing window; it leaves the
+Remembered iPhones list at that moment, and connecting again never closes a
+pairing window that is already open.
+
 ### Permission Row (Onboarding, signature component, Mac-only)
 `IconTileView`'s neutral `raised` fill and hairline rim stay untouched; only
 the SF Symbol glyph carries one of the seven spine hues (six dial-aware

@@ -32,7 +32,7 @@ public enum LicenseGate {
         case .forceHide: return false
         case .auto:
             guard settings.licenseServerURL != nil,
-                  (settings.licenseKey ?? "").isEmpty,
+                  !settings.hasLicenseKey,
                   case .none = TrialClock.state(settings: settings) else {
                 return false
             }
@@ -43,9 +43,11 @@ public enum LicenseGate {
     /// Whether this install plays on one speaker at a time: an official build
     /// the server declined, or whose trial ended with a verdict on record. A
     /// freshly typed key with no verdict yet (`licenseStatus == nil`) is not
-    /// limited — the soft-check posture.
+    /// limited — the soft-check posture. The website's app-config can waive the
+    /// limit (``RemoteAppConfig``); a stale or missing file never limits anyone.
     public static func limitsToOneSpeaker(settings: AppSettings) -> Bool {
         guard settings.licenseServerURL != nil else { return false }
+        if RemoteAppConfig.licenseCheckWaived(settings: settings) { return false }
         var declined = settings.licenseUnregistered
         if case .expired = TrialClock.state(settings: settings), settings.licenseStatus != nil {
             declined = true
@@ -58,7 +60,7 @@ public enum LicenseGate {
     public static func owesThankYouCard(settings: AppSettings) -> Bool {
         settings.licenseServerURL != nil
             && settings.licenseStatus == .active
-            && !(settings.licenseKey ?? "").isEmpty
+            && settings.hasLicenseKey
             && settings.trialStartedAt != nil
             && settings.trialExpiresAt == nil
             && !settings.licenseThankYouShown
@@ -68,7 +70,7 @@ public enum LicenseGate {
     /// the open after its thank-you card. The host reads it on open.
     public static func owesConversionConsentAsk(settings: AppSettings) -> Bool {
         settings.licenseStatus == .active
-            && !(settings.licenseKey ?? "").isEmpty
+            && settings.hasLicenseKey
             && settings.trialStartedAt != nil
             && settings.trialExpiresAt == nil
             && settings.licenseThankYouShown
@@ -86,7 +88,7 @@ public enum LicenseGate {
     /// ``AppSettings/licenseUnregistered`` to read, and without this clause a
     /// Mac on day one of its trial would run limited to one speaker.
     private static func trialIsRunningWithoutAKey(settings: AppSettings) -> Bool {
-        guard (settings.licenseKey ?? "").isEmpty else { return false }
+        guard !settings.hasLicenseKey else { return false }
         if case .active = TrialClock.state(settings: settings) { return true }
         return false
     }

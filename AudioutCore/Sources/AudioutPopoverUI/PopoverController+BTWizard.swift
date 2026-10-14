@@ -87,6 +87,7 @@ extension PopoverController {
                 if let state = Self.remoteInviteAnalyticsState(view.remoteInvite) {
                     Analytics.capture("remote_invite:sheet_shown", ["state": state])
                 }
+                if case .notConnected = view.remoteInvite { onRemoteInviteShown?() }
             }
         }
     }

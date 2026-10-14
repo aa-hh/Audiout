@@ -220,6 +220,34 @@ import CoreAudio
                 "a snapshot with no class read keeps the last one, it does not erase it")
     }
 
+    /// Turns red if a read `bt:` id can be replaced by the weaker name-matched
+    /// phrase, or erased by a snapshot carrying no model at all: one speaker
+    /// would then be counted under two `speaker_model` strings in a session.
+    @Test func aReadBluetoothIDIsNeverDowngradedByALaterSnapshot() {
+        let (backend, bt) = makeBackend()
+        defer { backend.stop() }
+        backend.start()
+
+        bt.fire([BTDeviceSnapshot(id: sonos.id, name: sonos.name, isConnected: true,
+                                  model: "bt:004c:2002")])
+        waitFor { self.device(backend, self.sonos.id)?.model == "bt:004c:2002" }
+
+        // Same trick as the class test above: the rename is what makes each
+        // later fold observable, since snapshots are applied on `stateQueue`.
+        // First the phrase fallback, which is the weaker read.
+        bt.fire([BTDeviceSnapshot(id: sonos.id, name: "Renamed", isConnected: true,
+                                  model: "sonosmove")])
+        waitFor { self.device(backend, self.sonos.id)?.name == "Renamed" }
+        #expect(device(backend, sonos.id)?.model == "bt:004c:2002",
+                "a name phrase must not replace ids the speaker itself reported")
+
+        // Then a snapshot that read nothing at all.
+        bt.fire([BTDeviceSnapshot(id: sonos.id, name: "Renamed again", isConnected: true)])
+        waitFor { self.device(backend, self.sonos.id)?.name == "Renamed again" }
+        #expect(device(backend, sonos.id)?.model == "bt:004c:2002",
+                "a snapshot with no model read keeps the last one, it does not erase it")
+    }
+
     /// A device that leaves the merged list entirely (unpaired mid-session)
     /// goes unavailable but keeps its row — mirrors `markDisappeared`.
     @Test func vanishedDeviceGoesUnavailableNotRemoved() {

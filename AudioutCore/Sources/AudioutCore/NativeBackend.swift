@@ -5723,17 +5723,19 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // it when the device stops streaming.
             eq: eqByDeviceID[id] ?? .flat,
             airPlayAccess: discovered.access,
-            hasStoredPassword: hasStoredPassword
+            hasStoredPassword: hasStoredPassword,
+            model: Self.advertisedModel(for: discovered)
         )
     }
 
     /// Merge a freshly-discovered device with the existing snapshot: take
-    /// discovery's truth for name/kind/AP2, but preserve the app-side control state
+    /// discovery's truth for name/kind/model/AP2, but preserve the app-side control state
     /// (volume/mute/selection) and the availability we derive from engine sessions.
     func merge(existing: Device, discovered: Device) -> Device {
         var result = existing
         result.name = discovered.name
         result.kind = discovered.kind
+        result.model = discovered.model
         result.supportsAirPlay2 = discovered.supportsAirPlay2
         // `hasStoredPassword` stays the existing value: the backend's own writes own it.
         result.airPlayAccess = discovered.airPlayAccess
@@ -5782,6 +5784,22 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         if hay.contains("airport") || hay.contains("express") { return .airportExpress }
         if hay.contains("sonos") || hay.contains("move") || hay.contains("roam") { return .sonos }
         return .generic
+    }
+
+    /// The receiver's own advertised model code, kept rather than discarded
+    /// after ``kind(for:)`` has guessed with it: the phone's sync events
+    /// report which product a measurement was taken on, and this is the only
+    /// place an AirPlay receiver says what it is.
+    ///
+    /// `am` is the last fallback because an AP1-only `_raop._tcp` receiver —
+    /// an AirPort Express, shairport-sync — puts its product there and never
+    /// advertises `model` at all, so without it every such speaker reports no
+    /// model. It is last because an AP2 receiver advertising both means the
+    /// `_airplay._tcp` `model` key, which is the one the kind heuristic above
+    /// already trusts.
+    static func advertisedModel(for discovered: DiscoveredDevice) -> String? {
+        let txt = discovered.descriptor.txtRecord
+        return Device.advertisedModel(txt["model"] ?? txt["Model"] ?? txt["am"])
     }
 
     // MARK: Volume mapping (UI 0–100 → engine 0.0–1.0)

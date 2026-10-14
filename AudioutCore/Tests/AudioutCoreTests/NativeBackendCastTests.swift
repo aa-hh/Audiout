@@ -317,6 +317,9 @@ import CoreAudio
         #expect(row?.kind == .cast)
         #expect(row?.isCast == true)
         #expect(row?.name == "Living Room TV")
+        // Turns red if the advertised `md` model stops reaching the `Device`,
+        // which is the only place a Cast receiver says what product it is.
+        #expect(row?.model == "Google TV Streamer")
         #expect(row?.isAvailable == true)
         #expect(row?.supportsAirPlay2 == false)
         #expect(row?.isLocalDevice == false)

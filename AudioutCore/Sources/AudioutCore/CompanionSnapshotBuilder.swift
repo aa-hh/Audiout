@@ -319,7 +319,8 @@ public enum CompanionSnapshotBuilder {
             alignment: alignment,
             mixerVisibility: record?.visibility.rawValue,
             isVisibleInMixer: record?.isVisibleInMixer,
-            isPlaying: isPlaying
+            isPlaying: isPlaying,
+            model: device.model
         )
     }
 

@@ -972,6 +972,24 @@ import AppKit
                 "the name gives way to the click count, never overprints it")
     }
 
+    /// Alignment ships as a beta, and the title row is where this window says
+    /// so. Turns red if the chip leaves the title row on any screen, or if it
+    /// overprints the name or the click count once it is there.
+    @Test func theBetaChipStaysInTheTitleRowThroughTheRun() {
+        let fleet = [local(), airplay(), bt()]
+        let (popover, _) = makePopover(fleet: fleet)
+        popover.update(devices: fleet)
+        popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
+        popover.test_toggleDeviceEnabled(deviceID: "bt-a:output", on: true)
+        popover.startBTAlignmentWizard(deviceID: "bt-a:output", door: .menu)
+        let wizard = popover.test_btWizardView()
+        #expect(wizard?.test_betaChipText == "Beta")
+        wizard?.test_clickButton(titled: "Start")
+        #expect(wizard?.test_betaChipText == "Beta")
+        #expect(wizard?.test_titleSlotsAreClear == true,
+                "the chip sits between the name and the click count, clear of both")
+    }
+
     // MARK: Manual relaunch (the wizard outlives "Not now" — locked UX)
 
     /// The mix-selected row without any card: ⌥-click on the DRAWER's

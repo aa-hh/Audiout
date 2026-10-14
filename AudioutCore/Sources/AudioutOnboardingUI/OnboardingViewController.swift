@@ -1616,7 +1616,7 @@ public final class OnboardingViewController: NSViewController {
         // where it really lives rather than a System Settings pane.
         case .audioutRemote:
             return "Audiout Remote is connected. Manage iPhones in Audiout's "
-                + "settings, under General."
+                + "settings, under Audiout Remote."
         }
     }
 

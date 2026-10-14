@@ -769,6 +769,17 @@ The popover's own
 `NSPanel` has no arrow) is a separate, named custom-drawn exception that
 does not itself draw a shadow.
 
+`BetaChipView`, in the alignment wizard's title row, is the other named
+exception: a layer-backed `well` capsule with a 1pt `rim` border carrying
+`Beta` in `microLabel` `label2`. Alignment ships as a beta and the window
+that offers it says so, between the speaker's name and the click count. No
+stock control is a label on a tinted capsule — `NSButton`'s recessed bezel
+is the nearest look and it is a control, which this is not. It is
+fixed-width chrome, so the truncating name is the half that gives way, and
+it is one accessibility element, not two. The iPhone draws the same capsule
+as `BetaBadge` on its three alignment doors; neither app puts the word in a
+menu item, where a capsule cannot go.
+
 ### Named Rules
 
 **Custom Drawing Is a Short, Named List.** Root `AGENTS.md` names the

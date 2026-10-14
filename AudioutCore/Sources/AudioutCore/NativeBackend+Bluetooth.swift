@@ -811,8 +811,12 @@ extension NativeBackend {
                 }
                 // The model keeps the last known value for the same reason: a
                 // snapshot taken without the grant, or one whose SDP cache has
-                // gone, carries none.
-                if let model = snapshot.model {
+                // gone, carries none. It also never DOWNGRADES: once the ids
+                // have been read, a later snapshot whose SDP cache has gone
+                // falls back to a name phrase, and letting that replace the
+                // ids would count one speaker under two strings in a session.
+                if let model = snapshot.model,
+                   updated.model == nil || model.hasPrefix("bt:") {
                     updated.model = model
                 }
                 if updated != existing {

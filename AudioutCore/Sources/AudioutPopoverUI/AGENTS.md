@@ -16,7 +16,7 @@ Menu-bar Mixer and shared surface host; Core owns routing.
 - Publish height through the content-size channel; screen swaps never resize the session frame.
 - One sync drawer; scrubs sound immediately, persist only when committed.
 - Permission answers restore window manners; abandoned alignment runs never reopen the surface.
-- The tab capsule (`SurfaceToolbarTabCapsule`) and Pin are custom-drawn: AppKit's toolbar hover and selection are two unsettable shapes. No cue sits behind `#available`.
+- The tab capsule (`SurfaceToolbarTabCapsule`), Pin and `BetaChipView` are custom-drawn: AppKit's toolbar hover and selection are two unsettable shapes. No cue sits behind `#available`.
 - Group-route membership stays live; exclusivity never hides saved-group choices.
 - The alignment note may carry one underlined text action left of its button, both centred.
 - Under the limit the note is session state (`limitNoteRaised`) a wizard door shows, not the wizard; the thank-you card is marked shown on Close or hide, not raise.

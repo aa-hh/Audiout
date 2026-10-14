@@ -1817,10 +1817,15 @@ public final class BTAlignmentWizardView: NSView {
         return titleLabel.frame.maxX <= betaChip.frame.minX
             && betaChip.frame.maxX <= clickCountLabel.frame.minX
     }
-    /// The title row's middle slot: the Beta chip's word, or `nil` when the
-    /// chip is not on screen.
+    /// The title row's middle slot: the word the chip is DRAWING, or `nil`
+    /// when it is not in the row, hidden, or laid out to nothing. Reads the
+    /// label's own `stringValue` and the chip's real placement rather than the
+    /// static constant, so it can actually fail.
     var test_betaChipText: String? {
-        betaChip.isHidden ? nil : BetaChipView.text
+        layoutSubtreeIfNeeded()
+        guard betaChip.superview != nil, !betaChip.isHiddenOrHasHiddenAncestor,
+              !betaChip.frame.isEmpty else { return nil }
+        return betaChip.drawnText
     }
     private func clickButton(titled title: String) {
         actionButtons.first { $0.title == title }?.performClick(nil)
@@ -1852,6 +1857,9 @@ private final class BetaChipView: NSView {
 
     private let label = NSTextField(labelWithString: BetaChipView.text)
 
+    /// What the chip's label actually holds, for the test hook to read.
+    var drawnText: String? { label.stringValue.isEmpty ? nil : label.stringValue }
+
     init() {
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false
@@ -1865,6 +1873,9 @@ private final class BetaChipView: NSView {
         label.alignment = .center
         label.font = Tokens.Font.microLabel
         label.textColor = Tokens.Color.label2
+        // The capsule is the accessibility element, so the label inside it
+        // must not be one too — VoiceOver would say "Beta" twice.
+        label.setAccessibilityElement(false)
         addSubview(label)
         NSLayoutConstraint.activate([
             label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),

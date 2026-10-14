@@ -503,12 +503,22 @@ import AudioutProtocol
 
     // MARK: - Client cap
 
+    /// Also turns red if a connection the gate approved into a full server
+    /// is not reported as closed unadmitted, which leaves its pairing-code
+    /// alert up.
     @Test func clientCapRefusesPolitelyAndKeepsExistingClients() async throws {
         let hub = try await makeHub()
         defer { hub.cancel() }
         let server = makeAutoApprovingServer()
         server.test_maxClientsOverride = 1 // real cap is 16
         defer { server.stop() }
+        let asked = LockedBox<[String: UUID]>([:])
+        server.onApprovalRequest = { _, name, _, _, connectionID, decide in
+            asked.withLock { $0[name] = connectionID }
+            decide(.approved)
+        }
+        let closedUnadmitted = LockedBox<[UUID]>([])
+        server.onAwaitingConnectionClosed = { id in closedUnadmitted.withLock { $0.append(id) } }
 
         let (kept, keptLog) = try await connectClient(via: hub, to: server)
         defer { kept.cancel() }
@@ -525,6 +535,8 @@ import AudioutProtocol
                 "the over-cap client never got its polite goodbye")
         #expect(await waitUntil { refusedLog.closed },
                 "the over-cap client's connection was never closed")
+        #expect(await waitUntil { closedUnadmitted.value == [asked.value["second"]].compactMap { $0 } },
+                "the over-cap client was never reported closed unadmitted")
 
         // The kept client said hello before any snapshot existed, so this
         // first broadcast also exercises the deferred-welcome path.
@@ -740,6 +752,15 @@ import AudioutProtocol
                 "the attacker-controlled clientName was not truncated at parse")
     }
 
+    /// Turns red if a line break or control character in the hello's name
+    /// reaches a surface that shows it (an alert title, a Settings row), or
+    /// if the cut to 64 characters stops applying.
+    @Test func aClientNameIsFlattenedToOneLine() {
+        #expect(CompanionServer.displayName("  Ada's\niPhone\r\u{2028}\u{0007}  ") == "Ada's iPhone")
+        #expect(CompanionServer.displayName("\n\n") == "")
+        #expect(CompanionServer.displayName(String(repeating: "b", count: 200)).count == 64)
+    }
+
     /// Refuse-forward must hold on EVERY frame, not just the hello — a peer
     /// that hellos at a compatible version and then sends newer-versioned
     /// envelopes gets the same goodbye a newer hello would.
@@ -907,15 +928,23 @@ import AudioutProtocol
         #expect(server.test_awaitingCount() == 0)
     }
 
+    /// Also turns red if a connection dying before admission is not
+    /// reported, by its own id, as closed unadmitted.
     @Test func droppedAwaitingConnectionReportsAbandonment() async throws {
         let hub = try await makeHub()
         defer { hub.cancel() }
         let server = makeServer()
         defer { server.stop() }
         server.broadcast(makeSnapshot())
-        server.onApprovalRequest = { _, _, _, _, _, decide in decide(.pending) }
+        let asked = LockedBox<[UUID]>([])
+        server.onApprovalRequest = { _, _, _, _, connectionID, decide in
+            asked.withLock { $0.append(connectionID) }
+            decide(.pending)
+        }
         let abandoned = LockedBox<[String]>([])
         server.onApprovalAbandoned = { clientID in abandoned.withLock { $0.append(clientID) } }
+        let closedUnadmitted = LockedBox<[UUID]>([])
+        server.onAwaitingConnectionClosed = { id in closedUnadmitted.withLock { $0.append(id) } }
 
         let (client, log) = try await connectClient(via: hub, to: server)
         try await sendAuthenticatedHello(over: client, log: log)
@@ -928,6 +957,8 @@ import AudioutProtocol
                 "the dropped connection never reported abandonment")
         #expect(await waitUntil { server.test_awaitingCount() == 0 },
                 "the dropped connection's awaiting entry was never removed")
+        #expect(await waitUntil { !asked.value.isEmpty && closedUnadmitted.value == asked.value },
+                "the dropped connection was never reported closed unadmitted")
     }
 
     @Test func approvalDeadlineReportsAbandonment() async throws {

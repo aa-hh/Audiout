@@ -141,6 +141,13 @@ public final class CompanionServer: @unchecked Sendable {
     /// The wiring uses this to withdraw the prompt still on screen.
     public var onApprovalAbandoned: (@Sendable (_ clientID: String) -> Void)?
 
+    /// Fires once for each connection reported through
+    /// ``onApprovalRequest`` that closed without being admitted: refused
+    /// (any decision but `.approved`, or approved into a full server),
+    /// dropped, timed out, or cut by ``stop(reason:)``. An admitted
+    /// connection reports its end through ``onClientDisconnected`` instead.
+    public var onAwaitingConnectionClosed: (@Sendable (_ connectionID: UUID) -> Void)?
+
     /// A client went away for any reason — clean close, error, liveness
     /// reaping, or `stop()` — after being accepted (helloed + promoted;
     /// connections that die before their `hello` are removed silently).
@@ -312,6 +319,17 @@ public final class CompanionServer: @unchecked Sendable {
     /// no downstream consumer (logs, future UI) ever sees an unbounded string.
     private static let maxClientNameLength = 64
 
+    /// The hello's attacker-controlled name as every surface shows it: line
+    /// breaks and control characters become spaces, so a name cannot add
+    /// lines to an alert title or a Settings row, then it is trimmed and cut
+    /// to ``maxClientNameLength``.
+    static func displayName(_ rawName: String) -> String {
+        let flattened = String(String.UnicodeScalarView(rawName.unicodeScalars.map {
+            $0.properties.generalCategory == .control || CharacterSet.newlines.contains($0) ? " " : $0
+        }))
+        return String(flattened.trimmingCharacters(in: .whitespaces).prefix(maxClientNameLength))
+    }
+
     /// `hello.clientKey` and `hello.signature` are attacker-controlled too:
     /// each is base64 of 64 bytes (88 characters), so anything longer than
     /// this is refused before it is decoded.
@@ -446,6 +464,7 @@ public final class CompanionServer: @unchecked Sendable {
         let droppedAwaiting = awaiting
         awaiting.removeAll()
         for (_, client) in droppedAwaiting {
+            noteAwaitingClosed(client.id)
             client.handshakeTimeout?.cancel()
             let connection = client.connection
             if let goodbye {
@@ -697,6 +716,7 @@ public final class CompanionServer: @unchecked Sendable {
             guard clients.count < (test_maxClientsOverride ?? Self.maxClients) else {
                 log.notice("companion client approved but refused: at capacity")
                 awaiting[id] = nil
+                noteAwaitingClosed(id)
                 refuse(client, reason: CompanionGoodbyeReason.serverFull)
                 return
             }
@@ -704,10 +724,12 @@ public final class CompanionServer: @unchecked Sendable {
         case .denied:
             log.notice("companion client refused: not approved")
             awaiting[id] = nil
+            noteAwaitingClosed(id)
             refuse(client, reason: CompanionGoodbyeReason.notApproved)
         case .pairingClosed:
             log.notice("companion client refused: unknown phone and no pairing window open")
             awaiting[id] = nil
+            noteAwaitingClosed(id)
             refuse(client, reason: CompanionGoodbyeReason.pairingClosed)
         }
     }
@@ -757,6 +779,7 @@ public final class CompanionServer: @unchecked Sendable {
         if let waiting = awaiting.removeValue(forKey: id) {
             waiting.handshakeTimeout?.cancel()
             waiting.connection.cancel()
+            noteAwaitingClosed(id)
             noteApprovalAbandoned(waiting)
             return // never promoted: no disconnect signal, never counted
         }
@@ -769,6 +792,13 @@ public final class CompanionServer: @unchecked Sendable {
             disconnected?(id)
             countChanged?(count)
         }
+    }
+
+    /// MUST only run on ``queue``, once per connection leaving ``awaiting``
+    /// unadmitted.
+    private func noteAwaitingClosed(_ id: UUID) {
+        let closed = onAwaitingConnectionClosed
+        queue.async { closed?(id) }
     }
 
     /// MUST only run on ``queue``, and only for a connection just removed
@@ -972,13 +1002,14 @@ public final class CompanionServer: @unchecked Sendable {
             let pairingCode = CompanionPairing.pairingCode(
                 serverCertificateSHA256: localCertificateSHA256, clientPublicKey: keyBytes)
             client.phoneClientID = phoneClientID
-            client.clientName = String(rawName.prefix(Self.maxClientNameLength))
+            client.clientName = Self.displayName(rawName)
             client.lastActivity = Date()
             let connectionID = client.id
             let approvalWork = DispatchWorkItem { [weak self] in
                 guard let self, let held = self.awaiting.removeValue(forKey: connectionID) else { return }
                 self.log.notice("companion client refused: approval prompt unanswered")
                 self.refuse(held, reason: CompanionGoodbyeReason.approvalTimedOut)
+                self.noteAwaitingClosed(connectionID)
                 self.noteApprovalAbandoned(held)
             }
             client.handshakeTimeout = approvalWork

@@ -1532,10 +1532,12 @@ A paired phone that has forgotten this Mac asks its user to compare the code
 again; the Mac lets it in without asking and shows the code in a stock alert,
 not modal, with only an OK button: "<phone name> is checking it reached this
 Mac", then "Its screen should show:" over the code and "If it shows a
-different code, tap Cancel on the iPhone." It closes itself when that phone
-sends its first command or disconnects, or after 3 minutes. A paired phone
-that has not connected for 30 days counts as new again and needs a pairing
-window.
+different code, tap Cancel on the iPhone." OK, Return or Escape closes it,
+and it closes itself when that phone sends its first command, disconnects or
+is refused, or after 3 minutes. A paired phone that has not connected for 30
+days counts as new again and needs a pairing window; it leaves the
+Remembered iPhones list at that moment, and connecting again never closes a
+pairing window that is already open.
 
 ### Permission Row (Onboarding, signature component, Mac-only)
 `IconTileView`'s neutral `raised` fill and hairline rim stay untouched; only

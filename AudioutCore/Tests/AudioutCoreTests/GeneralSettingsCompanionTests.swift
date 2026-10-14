@@ -191,14 +191,19 @@ import AppKit
                                      approvals: approvals)
     }
 
-    private func record(_ id: String, name: String, decision: CompanionApproval.Decision) -> CompanionApproval {
+    private func record(_ id: String, name: String, decision: CompanionApproval.Decision,
+                        lastSeen: Date = Date()) -> CompanionApproval {
         CompanionApproval(clientID: id, lastKnownName: name, decision: decision,
-                          firstSeen: .distantPast, lastSeen: .distantPast)
+                          firstSeen: .distantPast, lastSeen: lastSeen)
     }
 
+    /// Turns red if a phone past `CompanionApprovalStore.trustLapse` is
+    /// still listed as "Allowed" before it next connects.
     @Test func rememberedPhonesRenderWithTheirDecisions() throws {
         let controller = try makeController(records: [
             record(Self.ownerID, name: "Owner's iPhone", decision: .approved),
+            record(String(repeating: "F", count: 64), name: "Lapsed iPhone", decision: .approved,
+                   lastSeen: Date().addingTimeInterval(-CompanionApprovalStore.trustLapse - 60)),
             record(Self.guestID, name: "Guest's iPhone", decision: .denied),
         ])
         let pane = makePane(approvals: controller)

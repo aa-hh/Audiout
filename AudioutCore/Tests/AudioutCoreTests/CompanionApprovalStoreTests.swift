@@ -211,8 +211,8 @@ import Testing
         let controller = CompanionApprovalController(store: store, now: { now }, schedule: { _, job in job() })
         var prompts = 0
         controller.presentPrompt = { _, _, _, _ in prompts += 1 }
-        var approvedSetChanges = 0
-        controller.onApprovedSetChanged = { approvedSetChanges += 1 }
+        var approvedSetChanges: [Bool] = []
+        controller.onApprovedSetChanged = { approvedSetChanges.append($0) }
 
         var recentDecisions: [CompanionServer.ApprovalDecision] = []
         controller.handleRequest(clientID: recent, clientName: "Owner's iPhone", pairingCode: "000000") { recentDecisions.append($0) }
@@ -234,7 +234,31 @@ import Testing
 
         #expect(controller.approvals.map(\.clientID) == [recent])
         #expect(try store.load()?.map(\.clientID) == [recent], "the lapsed approvals are removed from disk")
-        #expect(approvedSetChanges == 2)
+        #expect(approvedSetChanges == [false, false], "a lapse is a removal, never a recorded approval")
+
+        now = now.addingTimeInterval(30 * day + 1)
+        #expect(controller.approvals.isEmpty,
+                "a phone that lapses without connecting leaves the list Settings shows at once")
+    }
+
+    /// Turns red if trust outlasts `CompanionApprovalStore.trustLapse` in
+    /// either direction (a clock set back leaves the last-seen time in the
+    /// future), lapses a day early at the boundary, or ever lapses a denial.
+    @Test func trustLapsesPastThirtyDaysEitherSideOfTheLastConnection() {
+        let lastSeen = Date(timeIntervalSince1970: 1_000_000_000)
+        let approval = CompanionApproval(clientID: Self.phoneID, lastKnownName: "iPhone", decision: .approved,
+                                         firstSeen: .distantPast, lastSeen: lastSeen)
+        let lapse = CompanionApprovalStore.trustLapse
+        let rows: [(offset: TimeInterval, lapsed: Bool)] = [
+            (lapse, false), (lapse + 1, true), (-lapse, false), (-lapse - 1, true),
+        ]
+        for row in rows {
+            #expect(CompanionApprovalStore.hasLapsed(approval, at: lastSeen.addingTimeInterval(row.offset)) == row.lapsed,
+                    "offset \(row.offset) s")
+        }
+        var denial = approval
+        denial.decision = .denied
+        #expect(!CompanionApprovalStore.hasLapsed(denial, at: lastSeen.addingTimeInterval(10 * lapse)))
     }
 
     @Test func unknownPhonePromptsOnceAndTheAnswerResolvesEveryWaiter() throws {
@@ -350,7 +374,7 @@ import Testing
         let store = makeStore()
         try store.save([CompanionApproval(
             clientID: Self.phoneID, lastKnownName: "iPhone",
-            decision: .approved, firstSeen: .distantPast, lastSeen: .distantPast)])
+            decision: .approved, firstSeen: .distantPast, lastSeen: Date())])
         let controller = CompanionApprovalController(store: store)
         var dropped: [String] = []
         controller.dropClient = { dropped.append($0) }
@@ -407,7 +431,7 @@ import Testing
         let store = makeStore()
         try store.save([CompanionApproval(
             clientID: Self.phoneID, lastKnownName: "Owner's iPhone",
-            decision: .approved, firstSeen: .distantPast, lastSeen: .distantPast)])
+            decision: .approved, firstSeen: .distantPast, lastSeen: Date(timeIntervalSince1970: 0))])
         var tick = 0.0
         let controller = makeOpenController(store: store, now: {
             tick += 1
@@ -428,26 +452,26 @@ import Testing
 
     /// Turns red if approving or revoking a phone stops telling the
     /// coordinator, which starts or stops the server and closes the pairing
-    /// window on it — or if a denial is reported as a change to the approved
-    /// set.
+    /// window on a recorded approval — if a revocation is reported as a
+    /// recorded approval, or a denial as a change to the approved set.
     @Test func onApprovedSetChangedFiresOnApproveAndRevoke() throws {
         let controller = makeOpenController()
         controller.dropClient = { _ in }
-        var changes = 0
-        controller.onApprovedSetChanged = { changes += 1 }
+        var changes: [Bool] = []
+        controller.onApprovedSetChanged = { changes.append($0) }
 
         controller.presentPrompt = { _, _, _, respond in respond(true) }
         controller.handleRequest(clientID: Self.phoneID, clientName: "Owner's iPhone", pairingCode: "111111") { _ in }
-        #expect(changes == 1)
+        #expect(changes == [true])
 
         controller.presentPrompt = { _, _, _, respond in respond(false) }
         controller.handleRequest(clientID: "GUEST", clientName: "Guest's iPhone", pairingCode: "222222") { _ in }
-        #expect(changes == 1, "a denial leaves the approved set alone")
+        #expect(changes == [true], "a denial leaves the approved set alone")
 
         controller.revoke(clientID: Self.phoneID)
-        #expect(changes == 2)
+        #expect(changes == [true, false])
         controller.revoke(clientID: "GUEST")
-        #expect(changes == 2, "revoking a denial leaves the approved set alone")
+        #expect(changes == [true, false], "revoking a denial leaves the approved set alone")
     }
 
     /// Turns red if `onPendingRequestsSettled` fires while another phone still
@@ -489,7 +513,7 @@ import Testing
         let v1 = CompanionApproval(clientID: "8E4CE9B0-B2C1-4E0E-9D25-000000000001", lastKnownName: "Old iPhone",
                                    decision: .approved, firstSeen: .distantPast, lastSeen: .distantPast)
         let current = CompanionApproval(clientID: Self.phoneID, lastKnownName: "Owner's iPhone",
-                                        decision: .approved, firstSeen: .distantPast, lastSeen: .distantPast)
+                                        decision: .approved, firstSeen: .distantPast, lastSeen: Date())
         let denial = CompanionApproval(clientID: "GUEST", lastKnownName: "Guest's iPhone",
                                        decision: .denied, firstSeen: .distantPast, lastSeen: .distantPast)
         try store.save([v1, current, denial])

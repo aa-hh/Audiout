@@ -53,6 +53,14 @@ public struct CompanionApprovalStore: Sendable {
     /// single connection.
     public static let trustLapse: TimeInterval = 30 * 24 * 60 * 60
 
+    /// Whether `approval` is an approval past ``trustLapse`` at `now`. A
+    /// last-seen time more than ``trustLapse`` in the FUTURE lapses too, so
+    /// a clock set back cannot stretch trust past the limit. Denials never
+    /// lapse.
+    public static func hasLapsed(_ approval: CompanionApproval, at now: Date) -> Bool {
+        approval.decision == .approved && abs(now.timeIntervalSince(approval.lastSeen)) > trustLapse
+    }
+
     private let fileURL: URL
     private let encoder: JSONEncoder
     private let decoder: JSONDecoder
@@ -139,7 +147,19 @@ public final class CompanionApprovalController {
     public static let maxRememberedDenials = 8
 
     private let store: CompanionApprovalStore
-    public private(set) var approvals: [CompanionApproval]
+    /// Everything remembered, including approvals that lapsed since launch.
+    /// Read ``approvals`` instead.
+    private var records: [CompanionApproval]
+
+    /// The remembered phones, without approvals past
+    /// `CompanionApprovalStore.trustLapse`: Settings, the server's "is any
+    /// phone approved" and the wizard's phone name all read this, so a
+    /// lapsed phone stops counting as allowed the moment it lapses, not when
+    /// it next connects.
+    public var approvals: [CompanionApproval] {
+        let now = now()
+        return records.filter { !CompanionApprovalStore.hasLapsed($0, at: now) }
+    }
 
     /// Deciders held while this clientID's prompt is open or queued — every
     /// connection that helloed with that ID while the user hadn't answered
@@ -194,10 +214,11 @@ public final class CompanionApprovalController {
     /// `CompanionCoordinator` wires it.
     public var isPairingOpen: () -> Bool = { false }
 
-    /// Fired after a prompt records an approval and after ``revoke(clientID:)``
-    /// removes one — whether any phone is approved decides whether the
-    /// server runs outside a pairing window.
-    public var onApprovedSetChanged: (() -> Void)?
+    /// Fired after a prompt records an approval (`approvalRecorded` true)
+    /// and after ``revoke(clientID:)`` or a lapse removes one (false) —
+    /// whether any phone is approved decides whether the server runs outside
+    /// a pairing window. Only a recorded approval ends the pairing window.
+    public var onApprovedSetChanged: ((_ approvalRecorded: Bool) -> Void)?
 
     /// Whether a phone is waiting on its prompt, on screen or queued. The
     /// coordinator keeps the server running while one is, so a pairing window
@@ -227,8 +248,8 @@ public final class CompanionApprovalController {
         let loaded = ((try? store.load()) ?? nil) ?? []
         // A protocol-v1 approval is keyed by a UUID no current phone can
         // present, yet it would keep the server advertising for nobody.
-        self.approvals = loaded.filter { $0.decision != .approved || Self.isPhoneKeyID($0.clientID) }
-        if approvals.count != loaded.count { persist() }
+        self.records = loaded.filter { $0.decision != .approved || Self.isPhoneKeyID($0.clientID) }
+        if records.count != loaded.count { persist() }
     }
 
     /// Whether `clientID` has the shape `CompanionPairing.clientID` gives:
@@ -256,20 +277,19 @@ public final class CompanionApprovalController {
                               connectionID: UUID? = nil,
                               decide: @escaping (CompanionServer.ApprovalDecision) -> Void) {
         var lapsed = false
-        if let index = approvals.firstIndex(where: { $0.clientID == clientID }) {
-            if approvals[index].decision == .approved,
-               now().timeIntervalSince(approvals[index].lastSeen) > CompanionApprovalStore.trustLapse {
+        if let index = records.firstIndex(where: { $0.clientID == clientID }) {
+            if CompanionApprovalStore.hasLapsed(records[index], at: now()) {
                 // Unseen too long: forget the approval and ask like a new phone.
-                approvals.remove(at: index)
+                records.remove(at: index)
                 persist()
                 lapsed = true
             } else {
                 // Remembered — refresh the display name + lastSeen, answer
                 // from the record, never prompt.
-                approvals[index].lastKnownName = clientName
-                approvals[index].lastSeen = now()
+                records[index].lastKnownName = clientName
+                records[index].lastSeen = now()
                 persist()
-                let approved = approvals[index].decision == .approved
+                let approved = records[index].decision == .approved
                 decide(approved ? .approved : .denied)
                 if approved, checksPairingCode {
                     showCodeCheck(clientID: clientID, clientName: clientName, pairingCode: pairingCode,
@@ -278,11 +298,13 @@ public final class CompanionApprovalController {
                 return
             }
         }
+        // A lapse is reported after `decide`, so a server it stops refuses
+        // this phone with the decision's own reason, not a shutdown.
         guard isPairingOpen() else {
             // A stranger outside a window the user opened: refused without a
             // prompt and without a record.
             decide(.pairingClosed)
-            if lapsed { onApprovedSetChanged?() }
+            if lapsed { onApprovedSetChanged?(false) }
             return
         }
 
@@ -296,7 +318,7 @@ public final class CompanionApprovalController {
         }
         pendingDeciders[clientID] = [decide]
         promptQueue.append((clientID, clientName, pairingCode))
-        if lapsed { onApprovedSetChanged?() }
+        if lapsed { onApprovedSetChanged?(false) }
         showNextPromptIfIdle()
     }
 
@@ -349,24 +371,24 @@ public final class CompanionApprovalController {
 
     private func resolvePrompt(clientID: String, clientName: String, allowed: Bool) {
         let timestamp = now()
-        approvals.append(CompanionApproval(
+        records.append(CompanionApproval(
             clientID: clientID,
             lastKnownName: clientName,
             decision: allowed ? .approved : .denied,
             firstSeen: timestamp,
             lastSeen: timestamp))
         if !allowed {
-            let denials = approvals.filter { $0.decision == .denied }
+            let denials = records.filter { $0.decision == .denied }
                 .sorted { $0.firstSeen < $1.firstSeen }
             let excess = Set(denials.prefix(max(0, denials.count - Self.maxRememberedDenials)).map(\.clientID))
-            approvals.removeAll { $0.decision == .denied && excess.contains($0.clientID) }
+            records.removeAll { $0.decision == .denied && excess.contains($0.clientID) }
         }
         persist()
         let waiters = pendingDeciders.removeValue(forKey: clientID)
         for decide in waiters ?? [] {
             decide(allowed ? .approved : .denied)
         }
-        if allowed { onApprovedSetChanged?() }
+        if allowed { onApprovedSetChanged?(true) }
         // A late answer to a prompt that was already withdrawn must not end
         // the cooldown of whichever prompt followed it.
         if activePromptClientID == clientID { finishActivePrompt() }
@@ -395,14 +417,17 @@ public final class CompanionApprovalController {
     /// re-prompts on its next connect inside a pairing window) and drop it
     /// if it's live right now.
     public func revoke(clientID: String) {
-        guard approvals.contains(where: { $0.clientID == clientID }) else { return }
+        guard records.contains(where: { $0.clientID == clientID }) else { return }
         let wasApproved = approvals.contains { $0.clientID == clientID && $0.decision == .approved }
-        approvals.removeAll { $0.clientID == clientID }
+        records.removeAll { $0.clientID == clientID }
         persist()
         dropClient?(clientID)
-        if wasApproved { onApprovedSetChanged?() }
+        if wasApproved { onApprovedSetChanged?(false) }
     }
 
+    /// Saves ``approvals``, so an approval that lapsed since the last save
+    /// leaves the disk with it. Memory keeps it until that phone connects,
+    /// which is how ``handleRequest`` still knows it lapsed.
     private func persist() {
         do {
             try store.save(approvals)

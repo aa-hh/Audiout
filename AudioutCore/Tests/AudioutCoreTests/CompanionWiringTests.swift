@@ -20,9 +20,11 @@ import Testing
         /// When false, prompts stay open and their answers wait in `openPrompts`.
         var answersPromptsAtOnce = true
         var openPrompts: [(Bool) -> Void] = []
+        var promptCodes: [String] = []
 
         func presentApprovalPrompt(clientID: String, clientName: String, pairingCode: String,
                                    respond: @escaping (Bool) -> Void) {
+            promptCodes.append(pairingCode)
             if answersPromptsAtOnce { respond(true) } else { openPrompts.append(respond) }
         }
         func withdrawApprovalPrompt(clientID: String) {}
@@ -235,11 +237,50 @@ import Testing
         #expect(!coordinator.wantsServer, "answered, and nothing approved: nothing wants the server")
     }
 
+    /// Turns red if a phone whose approval lapsed closes or changes the
+    /// pairing window the user opened, with or without another phone still
+    /// approved, or is let in without the Allow/Don't Allow prompt showing
+    /// its code.
+    @Test func aLapsedPhoneIsAskedAgainAndLeavesThePairingWindowOpen() throws {
+        let lapsed = String(repeating: "D", count: 64)
+        for anotherPhoneApproved in [true, false] {
+            let storeName = "lapse-\(anotherPhoneApproved)"
+            let directory = scratchDir.appendingPathComponent(storeName)
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            var records = [CompanionApproval(
+                clientID: lapsed, lastKnownName: "Old iPhone", decision: .approved, firstSeen: .distantPast,
+                lastSeen: Date().addingTimeInterval(-CompanionApprovalStore.trustLapse - 60))]
+            if anotherPhoneApproved {
+                records.append(CompanionApproval(clientID: String(repeating: "E", count: 64),
+                                                 lastKnownName: "Owner's iPhone", decision: .approved,
+                                                 firstSeen: .distantPast, lastSeen: Date()))
+            }
+            try CompanionApprovalStore(directory: directory).save(records)
+            let host = StubHost()
+            host.answersPromptsAtOnce = false
+            let coordinator = makeCoordinator(host: host, storeName: storeName)
+            coordinator.wire()
+            coordinator.openPairingWindow()
+            var windowChanges = 0
+            coordinator.onPairingWindowChanged = { windowChanges += 1 }
+
+            var decisions: [CompanionServer.ApprovalDecision] = []
+            coordinator.approvals.handleRequest(clientID: lapsed, clientName: "Old iPhone",
+                                                pairingCode: "482913") { decisions.append($0) }
+
+            #expect(decisions == [.pending], "another phone approved: \(anotherPhoneApproved)")
+            #expect(host.promptCodes == ["482913"], "another phone approved: \(anotherPhoneApproved)")
+            #expect(coordinator.pairingWindowOpen, "another phone approved: \(anotherPhoneApproved)")
+            #expect(windowChanges == 0, "another phone approved: \(anotherPhoneApproved)")
+        }
+    }
+
     // MARK: Pairing-code alert
 
     /// Turns red if the coordinator stops handing the hello's code-check flag
     /// to the approval controller, stops sending the alert to the host, or
-    /// stops closing it on that connection's first command or its close.
+    /// stops closing it on that connection's first command, its close, or
+    /// its refusal or death before it was admitted.
     @Test func thePairingCodeAlertReachesTheHostAndClosesOnCommandOrDisconnect() async {
         let host = StubHost()
         let coordinator = makeCoordinator(host: host, storeName: "code-check", schedule: { _, _ in })
@@ -264,6 +305,14 @@ import Testing
         await SuiteWait.until("the reconnect's alert reaches the host") { host.codeChecks.count == 2 }
         server.onClientDisconnected?(second)
         await SuiteWait.until("the close closes it") { host.withdrawnCodeChecks == [phone, phone] }
+
+        let third = UUID()
+        hello(on: third)
+        await SuiteWait.until("the third alert reaches the host") { host.codeChecks.count == 3 }
+        server.onAwaitingConnectionClosed?(third)
+        await SuiteWait.until("a refusal before admission closes it") {
+            host.withdrawnCodeChecks == [phone, phone, phone]
+        }
     }
 
     // MARK: Icon requests

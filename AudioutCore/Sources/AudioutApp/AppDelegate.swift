@@ -425,6 +425,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// Open pairing-code alerts for approved phones, keyed by clientID.
     private var companionCodeCheckAlerts: [String: NSAlert] = [:]
+    /// Closes a pairing-code alert on Escape, which a non-modal one-button
+    /// `NSAlert` ignores. Installed with the first alert.
+    private var companionCodeCheckEscapeMonitor: Any?
 
     /// AIRPLAY_DEBUG_LEVELS=1 → log capture RMS ~1/sec (see the `.level` case).
     private let debugLevels = ProcessInfo.processInfo.environment["AIRPLAY_DEBUG_LEVELS"] == "1"
@@ -3410,7 +3413,10 @@ extension AppDelegate: CompanionCoordinatorHost {
     /// the pairing code: show it, with only an OK button. Not modal, so it
     /// never holds up the app or the phone, which is already welcomed;
     /// `withdrawPairingCodeCheck` closes it. The empty-name fallback is the
-    /// "an iPhone" the approval prompt uses.
+    /// "an iPhone" the approval prompt uses. Ordered front without
+    /// activating the app, at the approval prompt's `.floating` level, on
+    /// every Space and over a full-screen app, since the user may be anywhere
+    /// when the phone asks.
     @MainActor
     func presentPairingCodeCheck(clientID: String, clientName: String, pairingCode: String) {
         guard !HeadlessRuntime.isActive, !isTerminating else { return }
@@ -3423,11 +3429,32 @@ extension AppDelegate: CompanionCoordinatorHost {
         ok.target = self
         ok.action = #selector(closePairingCodeCheck(_:))
         alert.layout()
-        alert.window.level = .floating
-        alert.window.center()
-        alert.window.orderFrontRegardless()
+        let window = alert.window
+        window.level = .floating
+        // A panel hides when its app loses focus; this one stays up until
+        // OK or its phone closes it.
+        window.hidesOnDeactivate = false
+        window.collectionBehavior.formUnion([.canJoinAllSpaces, .fullScreenAuxiliary])
+        window.center()
+        // A second phone checking at the same time: step down and right
+        // from the first rather than cover it.
+        if let shown = companionCodeCheckAlerts.values.first(where: { $0.window.isVisible })?.window {
+            window.cascadeTopLeft(from: shown.cascadeTopLeft(from: .zero))
+        }
+        window.orderFrontRegardless()
         NSApp.requestUserAttention(.informationalRequest)
         companionCodeCheckAlerts[clientID] = alert
+        if companionCodeCheckEscapeMonitor == nil {
+            companionCodeCheckEscapeMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+                MainActor.assumeIsolated {
+                    guard event.keyCode == 53, let self,
+                          let clientID = self.companionCodeCheckAlerts.first(where: { $0.value.window === event.window })?.key
+                    else { return event }
+                    self.withdrawPairingCodeCheck(clientID: clientID)
+                    return nil
+                }
+            }
+        }
     }
 
     @MainActor

@@ -454,6 +454,14 @@ public final class CompanionCoordinator {
                     decide: decide)
             }
         }
+        // A connection the gate let in can still be refused (server full) or
+        // die before it is admitted: its pairing-code alert goes with it.
+        server.onAwaitingConnectionClosed = { [weak self] connectionID in
+            DispatchQueue.main.async {
+                guard let self, !self.isTerminating else { return }
+                self.approvals.endCodeCheck(connectionID: connectionID)
+            }
+        }
         // The last connection carrying this phone identity died before the
         // user answered — withdraw its prompt rather than leave it stranded.
         server.onApprovalAbandoned = { [weak self] clientID in
@@ -482,11 +490,12 @@ public final class CompanionCoordinator {
         }
         // An unknown phone is only ever prompted for inside a pairing window.
         approvals.isPairingOpen = { [weak self] in self?.pairingWindowOpen ?? false }
-        // The first approval ends the window that let it in; the last
-        // revocation stops the server unless a window is open.
-        approvals.onApprovedSetChanged = { [weak self] in
+        // The first approval ends the window that let it in; a removal (a
+        // revocation, or a lapse) never touches the window, and the last one
+        // stops the server unless a window is open.
+        approvals.onApprovedSetChanged = { [weak self] approvalRecorded in
             guard let self else { return }
-            if self.hasApprovedPhone && self.pairingWindowOpen {
+            if approvalRecorded && self.pairingWindowOpen {
                 self.closePairingWindow()
             } else {
                 self.updateServerState()

@@ -745,6 +745,29 @@ public func makeBackend(
         let captureCoordinator = NativeCaptureCoordinator(
             engine: engine, processResolver: resolver)
         nativeBackend.captureCoordinator = captureCoordinator
+        // Closures copied from `NativeCaptureCoordinator`'s convenience init.
+        nativeBackend.localMeterCapture = NativeCaptureCoordinator(
+            makeTap: {
+                if #available(macOS 14.2, *) {
+                    return CoreAudioSystemTap(name: "AudioutLocalMeter")
+                } else {
+                    return UnavailableSystemTap()
+                }
+            },
+            sink: DiscardingPCMSink(),
+            makeConverter: { AVFormatConverter(from: $0) },
+            resolveDefaultOutputDeviceID: {
+                if #available(macOS 14.2, *) {
+                    guard let raw = try? CoreAudioSystemTap.defaultOutputDeviceID() else { return nil }
+                    return EffectiveCaptureDevice.resolve(
+                        default: raw,
+                        uidOf: { try? CoreAudioSystemTap.readDeviceUID($0) },
+                        mainSubDeviceOf: CoreAudioSystemTap.aggregateMainSubDeviceID)
+                }
+                return nil
+            },
+            processResolver: resolver,
+            muteBehavior: .unmuted)
         // Passive drift tracking (roadmap 085 ticket 05). Wired here because
         // the reference it correlates the microphone against is this
         // coordinator's retained outgoing audio, and this is the only place
@@ -877,4 +900,9 @@ func nativeStartBufferMs(
     settings: AppSettings = AppSettings()
 ) -> Int {
     nativeStartBufferEnvOverrideMs(environment: environment) ?? settings.startBufferMs
+}
+
+/// The listen-only tap's sink: it meters the Mac and sends nothing anywhere.
+private struct DiscardingPCMSink: PCMSink {
+    func write(pcm: Data, pts: timespec) {}
 }

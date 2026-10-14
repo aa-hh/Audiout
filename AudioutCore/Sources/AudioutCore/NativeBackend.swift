@@ -6549,7 +6549,9 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         // Before the early return, so wake re-decides the listen-only tap even
         // when capture stays off, and before `coordinator.start()` is enqueued,
         // so the listen-only tap's stop lands first on the same serial queue.
-        reconcileLocalMeterTapLocked()
+        // On the stop edge it runs after `coordinator.stop()` instead (below),
+        // so un-muting the Mac never waits behind the listen tap's creation.
+        if want || !changed { reconcileLocalMeterTapLocked() }
         guard changed else { return }   // already at target
         if want {
             // T2 (send_sched dead-code fix, whole-system-dropout investigation):
@@ -6560,7 +6562,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // `startSchedulingSnapshotPolling()` is idempotent on its own (it
             // cancels any previously-scheduled work item before arming a fresh
             // one), and this call site is additionally guarded by the
-            // `want != captureRunning` check above, so a second selection while
+            // `guard changed` above, so a second selection while
             // already capturing never reaches here to re-arm a second time.
             startSchedulingSnapshotPolling()
         } else {
@@ -6600,6 +6602,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         captureControlQueue.async {
             if want { coordinator.start() } else { coordinator.stop() }
         }
+        if !want { reconcileLocalMeterTapLocked() }
     }
 
     /// Move every LEVELED app between its two renderers on a `captureRunning`

@@ -517,6 +517,38 @@ import Testing
         #expect(AppSettings(defaults: defaults).licenseKey == nil)
     }
 
+    /// A bare dictionary standing in for the Keychain, so these tests never touch it.
+    private final class InMemorySecretStore: SecretStoring {
+        var values: [String: String] = [:]
+        func read(_ key: String) -> String? { values[key] }
+        func write(_ value: String?, for key: String) { values[key] = value }
+    }
+
+    /// Turns red if the first read stops moving a key an older build left in
+    /// `UserDefaults` into the secret store (leaving it as plain text), or if
+    /// clearing the key lets the leftover copy migrate back.
+    @Test func aLicenceKeyLeftInDefaultsMovesToTheSecretStoreOnFirstRead() {
+        let store = InMemorySecretStore()
+        defaults.set("OLD-KEY", forKey: "license.key")
+        let settings = AppSettings(defaults: defaults, secrets: store)
+        #expect(settings.licenseKey == "OLD-KEY")
+        #expect(store.read("license.key") == "OLD-KEY")
+        #expect(defaults.string(forKey: "license.key") == nil)
+        settings.licenseKey = nil
+        #expect(store.read("license.key") == nil)
+        #expect(settings.licenseKey == nil)
+    }
+
+    /// Turns red if the companion token skips the migration the licence key gets.
+    @Test func companionTokenFollowsTheSameMigration() {
+        let store = InMemorySecretStore()
+        defaults.set("old-token", forKey: "license.companionToken")
+        let settings = AppSettings(defaults: defaults, secrets: store)
+        #expect(settings.companionToken == "old-token")
+        #expect(store.read("license.companionToken") == "old-token")
+        #expect(defaults.string(forKey: "license.companionToken") == nil)
+    }
+
     /// The bundle key is what a real build reads; under a test run
     /// `Bundle.main` is the runner, so the honest default here is "no server"
     /// — which IS the free build's state — and the init override is the only

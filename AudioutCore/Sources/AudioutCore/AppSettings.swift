@@ -61,6 +61,7 @@ public struct AppSettings {
     private let defaults: UserDefaults
     private let licenseServerURLOverride: URL?
     private let buyURLOverride: URL?
+    private let secrets: SecretStoring
 
     /// - Parameters:
     ///   - licenseServerURL: overrides the bundle-supplied license server (see
@@ -71,12 +72,36 @@ public struct AppSettings {
     ///   Info.plist, and under `swift test` `Bundle.main` is the test
     ///   runner — there is no other way to exercise a build that HAS a license
     ///   server. The app always passes neither.
+    ///   - secrets: where ``licenseKey`` and ``companionToken`` live. `nil`
+    ///     picks the login keychain in a real app run and `defaults` under
+    ///     `swift test` / headless tools (``HeadlessRuntime``), so the suites
+    ///     that set a key through a throwaway suite keep working unchanged.
     public init(defaults: UserDefaults = .standard,
                 licenseServerURL: URL? = nil,
-                buyURL: URL? = nil) {
+                buyURL: URL? = nil,
+                secrets: SecretStoring? = nil) {
         self.defaults = defaults
         self.licenseServerURLOverride = licenseServerURL
         self.buyURLOverride = buyURL
+        self.secrets = secrets ?? (HeadlessRuntime.isActive ? DefaultsSecretStore(defaults) : KeychainSecretStore())
+    }
+
+    /// Reads a secret. A value an older build left in `defaults` moves to
+    /// `secrets` on the first read that finds the store empty: written there,
+    /// then removed from `defaults`.
+    private func readSecret(_ key: String) -> String? {
+        if let value = secrets.read(key) { return value }
+        guard let legacy = defaults.string(forKey: key) else { return nil }
+        secrets.write(legacy, for: key)
+        defaults.removeObject(forKey: key)
+        return legacy
+    }
+
+    /// Writes a secret. Any copy still in `defaults` goes too (unless `defaults`
+    /// IS the store), or the next read would migrate a cleared value back.
+    private func writeSecret(_ value: String?, for key: String) {
+        secrets.write(value, for: key)
+        if !(secrets is DefaultsSecretStore) { defaults.removeObject(forKey: key) }
     }
 
     private enum Keys {
@@ -567,9 +592,9 @@ public struct AppSettings {
     /// reason — a trial IS a licence key, so a deleted key leaves no trial
     /// behind to be on day 9 of.
     public var licenseKey: String? {
-        get { defaults.string(forKey: Keys.licenseKey) }
+        get { readSecret(Keys.licenseKey) }
         nonmutating set {
-            defaults.set(newValue, forKey: Keys.licenseKey)
+            writeSecret(newValue, for: Keys.licenseKey)
             if newValue == nil {
                 licenseStatus = nil
                 licenseReason = nil
@@ -635,8 +660,8 @@ public struct AppSettings {
     /// Written only by ``LicenseValidator``. `nil` when never issued, or
     /// cleared alongside ``licenseKey``/``licenseStatus``.
     public var companionToken: String? {
-        get { defaults.string(forKey: Keys.companionToken) }
-        nonmutating set { defaults.set(newValue, forKey: Keys.companionToken) }
+        get { readSecret(Keys.companionToken) }
+        nonmutating set { writeSecret(newValue, for: Keys.companionToken) }
     }
 
     /// The last valid `app-config.json` body from the website, byte for byte.

@@ -2425,11 +2425,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             //     reaches us here (the receiver calls back over DACP, not the event
             //     channel). Advertise under the SAME id the engine sends receivers,
             //     and route each report to that speaker's slider.
-            self.dacpServer.onVolume = { [weak self] token, level in
-                self?.applyDacpVolume(activeRemote: token, level: level)
+            self.dacpServer.onVolume = { [weak self] remoteHost, token, level in
+                self?.applyDacpVolume(remoteHost: remoteHost, activeRemote: token, level: level)
             }
-            self.dacpServer.onVolumeStep = { [weak self] token, direction in
-                self?.applyDacpVolumeStep(activeRemote: token, direction: direction)
+            self.dacpServer.onVolumeStep = { [weak self] remoteHost, token, direction in
+                self?.applyDacpVolumeStep(remoteHost: remoteHost, activeRemote: token, direction: direction)
             }
             self.dacpServer.start(dacpID: self.engine.dacpID)
 
@@ -5587,14 +5587,27 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// called our ``DACPServer`` back — the real path for Sonos et al.). The
     /// `Active-Remote` token is the low 32 bits of the device id (`airplay.c`), so
     /// match it against the known outputs and move that one speaker's slider.
+    /// The DACP listener is open to the whole LAN and the token is only 32 bits
+    /// of a MAC, so a report also has to come from the matched speaker's own
+    /// address (`remoteHost`, see ``dacpReportIsFromSpeaker(id:remoteHost:verb:)``).
     /// Internal (not private) so the routing is unit-testable without a live socket.
-    func applyDacpVolume(activeRemote: UInt32, level: Double) {
+    func applyDacpVolume(remoteHost: String?, activeRemote: UInt32, level: Double) {
         stateQueue.async {
             guard let match = self.outputIDs.first(where: {
                 UInt32(truncatingIfNeeded: $0.value.rawValue) == activeRemote
-            }) else { return }
+            }), self.dacpReportIsFromSpeaker(id: match.key, remoteHost: remoteHost, verb: "volume") else { return }
             self.setSpeakerVolume(id: match.key, outputID: match.value, level: level)
         }
+    }
+
+    /// True when a DACP report came from the address the engine was fed for
+    /// device `id`; otherwise logs one count-only line and returns false. A device
+    /// that was never fed has no address to match, so its reports are refused too.
+    /// On `stateQueue`.
+    private func dacpReportIsFromSpeaker(id: String, remoteHost: String?, verb: String) -> Bool {
+        if let remoteHost, fedDescriptors[id]?.address == remoteHost { return true }
+        Telemetry.log(.airplay, "dacp_refused_host", ["verb": verb, "hostKnown": remoteHost == nil ? "false" : "true"])
+        return false
     }
 
     /// Shared core for a speaker-initiated volume change (event channel or DACP).
@@ -5657,11 +5670,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// calibration (Sonos observed sending absolute `setproperty` instead, so
     /// this is a safety net for receivers that use the relative verbs).
     /// Internal (not private) so the routing is unit-testable without a socket.
-    func applyDacpVolumeStep(activeRemote: UInt32, direction: Int) {
+    func applyDacpVolumeStep(remoteHost: String?, activeRemote: UInt32, direction: Int) {
         stateQueue.async {
             guard let match = self.outputIDs.first(where: {
                 UInt32(truncatingIfNeeded: $0.value.rawValue) == activeRemote
-            }) else { return }
+            }), self.dacpReportIsFromSpeaker(id: match.key, remoteHost: remoteHost, verb: "step") else { return }
             let id = match.key
             let current = self.muted.contains(id)
                 ? (self.stashedVolume[id] ?? self.known[id]?.volume ?? 0)

@@ -128,6 +128,13 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// currently-selected, unmuted device.
     public var captureCoordinator: CaptureControlling?
 
+    /// The listen-only whole-system coordinator that meters the Mac while it
+    /// plays alone, when `captureCoordinator` never runs. It never feeds audio
+    /// anywhere: its tap is `.unmuted` and its sink discards every buffer.
+    /// Assigned before `start()` like `captureCoordinator`; `nil` in tests
+    /// unless one is injected.
+    public var localMeterCapture: CaptureControlling?
+
     /// The local-playback engine (Bug T2): renders every `.currentDevice`-routed
     /// app's per-app capture on the Mac's BUILT-IN speakers as an independent
     /// stream with its own volume. Wired by ``makeBackend(_:)`` (the real
@@ -1658,6 +1665,10 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// truth `meteringTapDiffLocked()` diffs against. On `stateQueue`.
     var meteringTapTargets: Set<String> = []
 
+    /// Whether `localMeterCapture` was last told to start — the gate's last
+    /// decision, like `captureRunning`. On `stateQueue`.
+    var localMeterTapRunning = false
+
     // MARK: Init
 
     /// Public seam: the real native backend over the in-process ``AirPlayEngine``
@@ -2450,6 +2461,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             //    drain reads at the display cadence — this closure runs on the
             //    tap's IOProc delivery thread and must not enqueue per buffer.
             self.captureCoordinator?.onLevel = { [weak self] rms in self?.noteSystemRMS(rms) }
+            self.localMeterCapture?.onLevel = { [weak self] rms in self?.noteSystemRMS(rms) }
 
             // Hand the delivery path the leveled-app intercept (the coordinator is
             // assigned before `start()`); it contributes nothing until
@@ -2545,6 +2557,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         // documented final word and reaches the same state off the caller thread.
         // Then discovery, then the engine itself.
         captureCoordinator?.onLevel = nil
+        localMeterCapture?.onLevel = nil
         captureCoordinator?.onStateChange = nil
         // T2: stop observing the whole-system tap's device/rate rebuilds so the
         // ordered `captureControlQueue` stop below (which tears the tap down) can't
@@ -2556,6 +2569,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         leveledInjector.setActive(false)
         leveledInjector.updateLeveled([])
         captureCoordinator?.setMeteringActive(false)
+        localMeterCapture?.setMeteringActive(false)
         // Metering (T3): leave every metering source switched off (teardown
         // discipline — a closed backend has nobody to render a meter for) and stop
         // every metering-only tap. `meteringCapture.stopAll()` is off `stateQueue`
@@ -2634,6 +2648,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // Reset the capture gate: a later start() re-decides from scratch, and
             // capture stays off until a setOutputSet selects a real AP2 output.
             self.captureRunning = false
+            self.localMeterTapRunning = false
             // B6b / R11: drop any pending silence watchdog + reset sleep/wake flags so
             // a stop mid-wait can't leave capture wedged off (override) or suspended.
             self.silenceWatchdog?.cancel()
@@ -2725,6 +2740,9 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // inside this critical section, this stop is ordered after every gate
             // decision that preceded it, so the FIFO's final op is always the stop.
             // Idempotent.
+            if let localMeter = self.localMeterCapture {
+                self.captureControlQueue.async { localMeter.stop() }
+            }
             if let coordinator = self.captureCoordinator {
                 self.captureControlQueue.async { coordinator.stop() }
             }
@@ -4351,6 +4369,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         // other gate decision) so the Mac isn't left muted by a tap streaming into
         // dead sockets. `expectedSelected` is untouched.
         self.captureRunning = false
+        self.reconcileLocalMeterTapLocked()
         // The leveled apps lose the program they were being summed into — hand
         // them back to the local engine, exactly as the gate's own false edge does
         // (this path bypasses `reconcileCaptureGate` entirely).
@@ -6525,10 +6544,13 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         // tap, so the Mac keeps playing with no banner (owner ruling 2026-10-06).
         let want = !suspended && !silenceCaptureOverride
             && expectedSelected.contains(where: selectedSpeakerWantsStreamLocked)
-        guard want != captureRunning else { return }   // already at target
+        let changed = want != captureRunning
         captureRunning = want
-        // The Mac's bar reads app levels only while capture is off; re-read it.
-        if levelsFlowing { emitCombinedLevel(forDevice: Self.localDeviceID) }
+        // Before the early return, so wake re-decides the listen-only tap even
+        // when capture stays off, and before `coordinator.start()` is enqueued,
+        // so the listen-only tap's stop lands first on the same serial queue.
+        reconcileLocalMeterTapLocked()
+        guard changed else { return }   // already at target
         if want {
             // T2 (send_sched dead-code fix, whole-system-dropout investigation):
             // capture just started — (re-)arm the scheduling snapshot poll HERE,

@@ -9648,30 +9648,89 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
                              "a .noRedirect listed app must emit .appLevel from its metering-only tap")
     }
 
-    /// With the Mac selected alone the whole-system capture never runs, so the
-    /// Mac's row (and Main Audio, which copies it) must follow the app levels
-    /// macOS is playing on the Mac. Turns red if the local device's level is
-    /// taken only from the capture again: no `.level` for it ever arrives.
-    @Test func localDeviceAloneFollowsAppLevels() async {
-        let registry = TapRegistry()
-        let metering = registeringPerAppCapture(muteBehavior: .unmuted, bundleIDs: ["com.plain"], into: registry)
-        let (backend, engine, discovery) = makeBackend(injectedMeteringCapture: metering)
+    /// The listen-only tap that meters the Mac runs only while levels are wanted
+    /// and the sending capture is off, and stops across sleep. Turns red if the
+    /// listen tap starts while capture runs, survives capture start, sleep or
+    /// levels stopping, or never starts when the popover opens with the Mac alone.
+    @Test func localMeterTapRunsOnlyWhileLevelsFlowAndCaptureIsOff() async {
+        let (backend, engine, discovery) = makeBackend()
+        let capture = FakeCapture()
+        let listen = FakeCapture()
+        backend.captureCoordinator = capture
+        backend.localMeterCapture = listen
         defer { backend.stop() }
-        backend.start(); await waitUntilStarted(engine)
-        _ = discovery
-        await pollUntil { backend.devices.contains { $0.isLocalDevice } }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:81", name: "Meter Speaker")
+        await startAndDiscover(backend, engine, discovery, device)
+        #expect(listen.ops.isEmpty, "levels are not wanted yet, so the listen tap must not start")
 
-        let (sink, task) = subscribeLevels(backend); defer { task.cancel() }
-        backend.updateAppRoutes([AppRoute(bundleID: "com.plain", displayName: "Plain")])
         backend.setMeteringActive(true)
-        await pollUntil { registry.tap(for: "com.plain") != nil }
+        await pollUntil { listen.isCapturing }
+        #expect(listen.ops == ["start"])
 
+        backend.setOutputSet([device.id])
+        await pollUntil { capture.isCapturing && !listen.isCapturing }
+        #expect(listen.ops == ["start", "stop"], "the sending capture took over, so the listen tap must stop")
+
+        backend.setOutputSet([])
+        await pollUntil { listen.isCapturing }
+
+        backend.handleSystemWillSleep()
+        await pollUntil { !listen.isCapturing }
+        backend.handleSystemDidWake()
+        await pollUntil { listen.isCapturing }
+
+        backend.setMeteringActive(false)
+        await pollUntil { !listen.isCapturing }
+        #expect(listen.ops == ["start", "stop", "start", "stop", "start", "stop"])
+    }
+
+    /// With the Mac playing alone, its bar reads the listen-only tap's level and
+    /// drops to 0 when the sending capture takes over. Turns red if `isMeterable`
+    /// stops counting the listen tap, its `onLevel` is no longer wired to
+    /// `noteSystemRMS`, or the bar is not re-emitted to 0 when the tap stops.
+    @Test func localDeviceLevelComesFromTheListenOnlyTapWhileTheMacPlaysAlone() async {
+        let (backend, engine, discovery) = makeBackend()
+        let capture = FakeCapture()
+        let listen = FakeCapture()
+        backend.captureCoordinator = capture
+        backend.localMeterCapture = listen
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:82", name: "Meter Speaker")
+        await startAndDiscover(backend, engine, discovery, device)
+
+        backend.setMeteringActive(true)
+        await pollUntil { listen.isCapturing && listen.meteringActive }
+        let (levels, task) = subscribeLevels(backend); defer { task.cancel() }
         await pollUntil {
-            registry.tap(for: "com.plain")?.push(float32Buffer(amplitude: 0.5, frames: 512, atSecond: 1))
-            return (sink.lastDeviceLevel(NativeBackend.localDeviceID) ?? 0) > 0
+            listen.fireLevelIfActive(0.6)
+            return (levels.lastDeviceLevel(NativeBackend.localDeviceID) ?? 0) > 0
         }
-        #expect((sink.lastDeviceLevel(NativeBackend.localDeviceID) ?? 0) > 0,
-                "the Mac playing alone must show the level of the app it is playing")
+        #expect(abs((levels.lastDeviceLevel(NativeBackend.localDeviceID) ?? 0) - 0.6) <= 0.001,
+                "the Mac playing alone must show the listen-only tap's level")
+
+        backend.setOutputSet([device.id])
+        await pollUntil { !listen.isCapturing }
+        await pollUntil { levels.lastDeviceLevel(NativeBackend.localDeviceID) == 0 }
+    }
+
+    /// The listen-only tap leaves out the same routed-away and user-excluded apps
+    /// the sending capture does. Turns red if `updateAppRoutes` stops handing the
+    /// listen tap the routed-away apps or the user's excluded apps.
+    @Test func localMeterTapExcludesRoutedAndExcludedAppsLikeTheMainCapture() async {
+        let (backend, engine, discovery) = makeBackend()
+        let capture = FakeCapture()
+        let listen = FakeCapture()
+        backend.captureCoordinator = capture
+        backend.localMeterCapture = listen
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:83", name: "Meter Speaker")
+        await startAndDiscover(backend, engine, discovery, device)
+
+        backend.updateAppRoutes([route("com.foo", name: "Foo", toDevice: device.id)],
+                                excludedBundleIDs: ["com.secret"])
+        await pollUntil { listen.lastExcludedBundleIDs == ["com.foo", "com.secret"] }
+        #expect(listen.lastExcludedBundleIDs == ["com.foo", "com.secret"])
+        #expect(capture.lastExcludedBundleIDs == ["com.foo", "com.secret"])
     }
 
     /// D3, app half: `.appLevel` rides the SAME leading/trailing-edge sampler the

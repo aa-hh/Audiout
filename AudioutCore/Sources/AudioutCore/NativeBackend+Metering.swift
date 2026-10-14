@@ -56,13 +56,33 @@ extension NativeBackend {
             }
             // When off, the drain chain stops itself on its next fire.
             self.scheduleSystemRMSDrainLocked()
+            self.reconcileLocalMeterTapLocked()
             return (self.levelsFlowing, self.meteringTapDiffLocked())
         }
         captureCoordinator?.setMeteringActive(flowing)
+        localMeterCapture?.setMeteringActive(flowing)
         routeMixer.setMeteringActive(flowing)
         leveledInjector.setMeteringActive(flowing)
         localPlaybackEngine?.setMeteringActive(flowing)
         applyMeteringTapDiff(diff)
+    }
+
+    /// Start or stop the listen-only tap (`localMeterCapture`) that gives the
+    /// Mac's bar a level while the sending capture is off: it runs only while
+    /// levels are wanted, the backend is started and not asleep. Decided under
+    /// `stateQueue`, executed on `captureControlQueue` in decision order, the
+    /// same split `reconcileCaptureGate` keeps. On `stateQueue`.
+    func reconcileLocalMeterTapLocked() {   // on stateQueue
+        let want = localMeterCapture != nil && started && levelsFlowing
+            && !captureRunning && !suspended
+        guard want != localMeterTapRunning else { return }
+        localMeterTapRunning = want
+        // The Mac stops being meterable from this tap; drop its bar to 0.
+        if !want, levelsFlowing { emitCombinedLevel(forDevice: Self.localDeviceID) }
+        guard let coordinator = localMeterCapture else { return }
+        captureControlQueue.async {
+            if want { coordinator.start() } else { coordinator.stop() }
+        }
     }
 
     // MARK: Synced local sink (T-FANOUT / "play everywhere")
@@ -167,11 +187,14 @@ extension NativeBackend {
     /// device's own delay line, which sits DOWNSTREAM of this measurement, so
     /// changing a trim changes when the speaker sounds and never when the bar moves;
     /// one system RMS feeds every device's bar and no per-device delay can reach it.
+    /// The local device's second "rendering now" fact is `localMeterTapRunning`:
+    /// with the sending capture off, macOS plays the system mix on the Mac
+    /// itself, and the listen-only tap measures exactly that mix.
     /// Must run on `stateQueue`, like every caller.
     func isMeterable(_ device: Device) -> Bool {
         if device.isBluetooth { return device.connectionState == .connected }
         if device.isCast { return castPlaying.contains(device.id) }
-        return device.isLocalDevice ? syncedLocalSinkApplied : device.isSelected
+        return device.isLocalDevice ? (syncedLocalSinkApplied || localMeterTapRunning) : device.isSelected
     }
 
     /// Read whatever `noteSystemRMS` last stored (stream_id 0) and, if it is
@@ -237,11 +260,6 @@ extension NativeBackend {
                     self.emitCombinedLevel(forDevice: deviceID)
                 }
             }
-            // With the capture off, every app not routed away plays straight
-            // out of the Mac, so the Mac's bar follows the app levels.
-            if !self.captureRunning, !self.routedBundleIDs.contains(bundleID) {
-                self.emitCombinedLevel(forDevice: Self.localDeviceID)
-            }
         }
     }
 
@@ -277,17 +295,6 @@ extension NativeBackend {
         where routedBundleIDs.contains(route.bundleID) && !deadBundleIDs.contains(route.bundleID) {
             if meterTargetsLocked(of: route.destination).contains(id),
                let level = latestAppLevel[route.bundleID] {
-                sourceContribution = max(sourceContribution, level)
-            }
-        }
-        // Capture off (the Mac is selected alone, or nothing is): no system RMS
-        // exists, and macOS plays every app not routed away on the Mac itself.
-        // razor: only apps with a meter tap (the Applications list) count; an
-        // unlisted app's sound leaves the bar still. Upgrade: a metering-only
-        // whole-system tap while capture is off.
-        if device.isLocalDevice, !captureRunning, !device.isMuted {
-            for (bundleID, level) in latestAppLevel
-            where !routedBundleIDs.contains(bundleID) && !lastExcludedBundleIDs.contains(bundleID) {
                 sourceContribution = max(sourceContribution, level)
             }
         }

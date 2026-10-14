@@ -13,9 +13,13 @@ import Testing
 /// stored. A bad version, junk, a server error and a dead network all leave
 /// the last good file exactly where it was, so a flaky fetch can never turn the
 /// waiver on or off.
-@Suite struct RemoteAppConfigTests {
+@Suite(.serialized) struct RemoteAppConfigTests {
 
     private let isolation = TestIsolation(owner: "RemoteAppConfigTests")
+
+    /// The fetcher remembers its last attempt in a shared static, so each test
+    /// starts with it cleared and the suite runs one test at a time.
+    init() { RemoteAppConfigFetcher.resetAttemptsForTesting() }
     private var defaults: UserDefaults { isolation.isolatedDefaults }
 
     private static let valid = Data(#"{"v": 1, "mac": {"licenseCheck": {"disabled": true, "upToBuild": null}}}"#.utf8)
@@ -42,9 +46,10 @@ import Testing
     }
 
     private func refresh(_ settings: AppSettings, _ transport: Transport,
-                         minimumInterval: TimeInterval = 0) async {
+                         minimumInterval: TimeInterval = 0,
+                         now: @escaping () -> Date = Date.init) async {
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            RemoteAppConfigFetcher(settings: settings, transport: transport.closure)
+            RemoteAppConfigFetcher(settings: settings, transport: transport.closure, now: now)
                 .refresh(minimumInterval: minimumInterval) { continuation.resume() }
         }
     }
@@ -52,19 +57,22 @@ import Testing
     // MARK: Parsing
 
     /// Red if the parser started accepting a file whose version is not exactly
-    /// 1, or text that is not a JSON object: the cached file would then be
-    /// replaced by something this build cannot read.
+    /// the number 1 (including `true`, which Swift bridges to 1), or text that
+    /// is not a JSON object: the cached file would then be replaced by
+    /// something this build cannot read.
     @Test func parseRefusesWhatItCannotRead() {
         #expect(RemoteAppConfig.parse(Data(#"{"v": 2}"#.utf8)) == nil)
         #expect(RemoteAppConfig.parse(Data(#"{"v": "1"}"#.utf8)) == nil)
+        #expect(RemoteAppConfig.parse(Data(#"{"v": true}"#.utf8)) == nil)
         #expect(RemoteAppConfig.parse(Data("{}".utf8)) == nil)
         #expect(RemoteAppConfig.parse(Data("[1]".utf8)) == nil)
         #expect(RemoteAppConfig.parse(Data("<html>".utf8)) == nil)
         #expect(RemoteAppConfig.parse(Data()) == nil)
     }
 
-    /// Red if a version-1 file with no `mac` section switched anything off:
-    /// a missing or unknown key has to mean normal behaviour.
+    /// Red if a version-1 file with no `mac` section, or one whose `disabled`
+    /// is the number 1 rather than the boolean true, switched anything off:
+    /// a missing, unknown or wrongly typed key has to mean normal behaviour.
     @Test func aBareVersionOneFileSwitchesNothingOff() throws {
         let bare = try #require(RemoteAppConfig.parse(Data(#"{"v": 1}"#.utf8)))
         #expect(!bare.licenseCheckDisabled(build: 1))
@@ -72,14 +80,23 @@ import Testing
         let off = try #require(RemoteAppConfig.parse(
             Data(#"{"v": 1, "mac": {"licenseCheck": {"disabled": false, "upToBuild": null}}}"#.utf8)))
         #expect(!off.licenseCheckDisabled(build: 1))
+
+        let number = try #require(RemoteAppConfig.parse(
+            Data(#"{"v": 1, "mac": {"licenseCheck": {"disabled": 1, "upToBuild": null}}}"#.utf8)))
+        #expect(!number.licenseCheckDisabled(build: 1))
     }
 
-    /// Red if a cut-off that is not a whole number started waiving builds,
-    /// which would let a typo in the file switch the check off for everyone.
+    /// Red if a cut-off that is not a whole number (text, or a boolean that
+    /// Swift would bridge to 1) started waiving builds, which would let a typo
+    /// in the file switch the check off for everyone.
     @Test func aCutOffThatIsNotAWholeNumberSwitchesNothingOff() throws {
         let typo = try #require(RemoteAppConfig.parse(
             Data(#"{"v": 1, "mac": {"licenseCheck": {"disabled": true, "upToBuild": "ten"}}}"#.utf8)))
         #expect(!typo.licenseCheckDisabled(build: 1))
+
+        let boolean = try #require(RemoteAppConfig.parse(
+            Data(#"{"v": 1, "mac": {"licenseCheck": {"disabled": true, "upToBuild": true}}}"#.utf8)))
+        #expect(!boolean.licenseCheckDisabled(build: 1))
     }
 
     // MARK: Fetching
@@ -157,5 +174,21 @@ import Testing
         settings.remoteConfigFetchedAt = Date(timeIntervalSinceNow: -7200)
         await refresh(settings, transport, minimumInterval: 3600)
         #expect(transport.requests.count == 1, "a file two hours old is asked for again")
+    }
+
+    /// Red if a failed fetch stopped counting as an attempt, so an unreachable
+    /// website would be asked again on every popover open instead of once an
+    /// hour.
+    @Test func aFailedFetchIsNotRetriedWithinTheMinimumInterval() async {
+        let settings = AppSettings(defaults: defaults)
+        let transport = Transport()
+        transport.stub(status: 500, body: Data())
+        let start = Date(timeIntervalSince1970: 1_800_000_000)
+
+        await refresh(settings, transport, minimumInterval: 3600, now: { start })
+        await refresh(settings, transport, minimumInterval: 3600, now: { start.addingTimeInterval(600) })
+
+        #expect(transport.requests.count == 1)
+        #expect(settings.remoteConfigFetchedAt == nil)
     }
 }

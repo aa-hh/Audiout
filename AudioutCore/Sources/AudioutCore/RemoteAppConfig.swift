@@ -26,17 +26,36 @@ public struct RemoteAppConfig {
     /// `mac.licenseCheck` is read; a missing or malformed key means no switch.
     public static func parse(_ data: Data) -> RemoteAppConfig? {
         guard let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
-              root["v"] as? Int == 1 else { return nil }
+              jsonInt(root["v"]) == 1 else { return nil }
         let check = ((root["mac"] as? [String: Any])?["licenseCheck"]) as? [String: Any]
-        var off = check?["disabled"] as? Bool == true
+        var off = jsonBool(check?["disabled"]) == true
         var upTo: Int?
         if let raw = check?["upToBuild"], !(raw is NSNull) {
             // A cut-off that is not a whole number is a typo, and a typo must
             // not waive every build.
-            upTo = raw as? Int
+            upTo = jsonInt(raw)
             if upTo == nil { off = false }
         }
         return RemoteAppConfig(licenseCheckIsOff: off, licenseCheckUpToBuild: upTo)
+    }
+
+    /// JSONSerialization hands back every number and boolean as an NSNumber, and
+    /// Swift's `as? Int` / `as? Bool` bridge between them (`true` reads as 1,
+    /// `1` reads as true). The phone's JSONDecoder refuses both, so these two
+    /// tell them apart by the underlying CFBoolean type.
+    private static func isJSONBool(_ value: Any) -> Bool {
+        guard let number = value as? NSNumber else { return false }
+        return CFGetTypeID(number) == CFBooleanGetTypeID()
+    }
+
+    private static func jsonInt(_ value: Any?) -> Int? {
+        guard let value, !isJSONBool(value) else { return nil }
+        return value as? Int
+    }
+
+    private static func jsonBool(_ value: Any?) -> Bool? {
+        guard let value, isJSONBool(value) else { return nil }
+        return value as? Bool
     }
 
     /// Whether the switch is in force for `build`: `disabled` is true and
@@ -74,24 +93,39 @@ public struct RemoteAppConfigFetcher {
 
     private let settings: AppSettings
     private let transport: LicenseValidator.Transport
+    private let now: () -> Date
+
+    /// When the last request was sent, successful or not. Kept in memory and
+    /// shared by every fetcher, so an unreachable website is asked once per
+    /// `minimumInterval`, not on every popover open. Main queue only.
+    private nonisolated(unsafe) static var lastAttemptAt: Date?
+
+    static func resetAttemptsForTesting() { lastAttemptAt = nil }
 
     public init(settings: AppSettings,
-                transport: @escaping LicenseValidator.Transport = LicenseValidator.defaultTransport) {
+                transport: @escaping LicenseValidator.Transport = LicenseValidator.defaultTransport,
+                now: @escaping () -> Date = Date.init) {
         self.settings = settings
         self.transport = transport
+        self.now = now
     }
 
-    /// Asks for the file unless the stored copy is newer than
-    /// `minimumInterval` seconds. Only an HTTP 200 whose body parses writes
-    /// anything; every other outcome leaves the stored copy as it was.
+    /// Asks for the file unless the stored copy, or the last attempt, is newer
+    /// than `minimumInterval` seconds; `minimumInterval: 0` always asks. Only
+    /// an HTTP 200 whose body parses writes anything; every other outcome
+    /// leaves the stored copy as it was.
     /// `completion` always lands on the main queue, including when no request
     /// is made.
     public func refresh(minimumInterval: TimeInterval = 0, completion: @escaping () -> Void) {
-        if let last = settings.remoteConfigFetchedAt,
-           Date().timeIntervalSince(last) < minimumInterval {
+        let current = now()
+        let recent = [settings.remoteConfigFetchedAt, Self.lastAttemptAt].contains {
+            $0.map { current.timeIntervalSince($0) < minimumInterval } ?? false
+        }
+        if recent {
             DispatchQueue.main.async(execute: completion)
             return
         }
+        Self.lastAttemptAt = current
         var request = URLRequest(url: RemoteAppConfig.url)
         request.timeoutInterval = 5
         request.cachePolicy = .reloadIgnoringLocalCacheData
@@ -101,7 +135,7 @@ public struct RemoteAppConfigFetcher {
                    (response as? HTTPURLResponse)?.statusCode == 200,
                    RemoteAppConfig.parse(data) != nil {
                     settings.remoteConfigData = data
-                    settings.remoteConfigFetchedAt = Date()
+                    settings.remoteConfigFetchedAt = now()
                 }
                 completion()
             }

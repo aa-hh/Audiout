@@ -466,7 +466,9 @@ final class BTDeviceEnumerator: BTDeviceEnumerating, @unchecked Sendable {
         let paired = (IOBluetoothDevice.pairedDevices() as? [IOBluetoothDevice]) ?? []
         // Diagnostic: nobody has established what AirPods report in the MINOR
         // class field, and the glyph mapping in `Device.symbolName` rests on
-        // it. The CLASS NUMBERS are the whole answer, so that is all this
+        // it; nor whether a speaker's Device ID record is cached at all, which
+        // `model` rests on. The CLASS AND ID NUMBERS are the whole answer, so
+        // that is all this
         // writes — one `.debug` line for the whole enumeration, which
         // `refreshLocked` runs on every Core Audio device-list change. Device
         // NAMES stay out of it entirely: a unified-log entry is readable by

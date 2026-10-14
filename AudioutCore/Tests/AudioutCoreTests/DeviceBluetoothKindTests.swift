@@ -175,4 +175,16 @@ import Testing
         #expect(Device.bluetoothProductModel(forName: "Bose SoundLink Flex") == "soundlinkflex")
         #expect(Device.bluetoothProductModel(forName: "Kitchen") == nil)
     }
+
+    /// Turns red if an advertised model stops being trimmed or capped — a
+    /// receiver advertising padding or a paragraph would otherwise put either
+    /// straight into an analytics property.
+    @Test func anAdvertisedModelIsTrimmedCappedAndAbsentWhenEmpty() {
+        #expect(Device.advertisedModel("  AudioAccessory5,1 \n") == "AudioAccessory5,1")
+        #expect(Device.advertisedModel("   ") == nil)
+        #expect(Device.advertisedModel(nil) == nil)
+
+        let long = String(repeating: "M", count: 60)
+        #expect(Device.advertisedModel(long)?.count == 40)
+    }
 }

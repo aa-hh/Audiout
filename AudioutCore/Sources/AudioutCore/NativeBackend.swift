@@ -5729,7 +5729,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     }
 
     /// Merge a freshly-discovered device with the existing snapshot: take
-    /// discovery's truth for name/kind/AP2, but preserve the app-side control state
+    /// discovery's truth for name/kind/model/AP2, but preserve the app-side control state
     /// (volume/mute/selection) and the availability we derive from engine sessions.
     func merge(existing: Device, discovered: Device) -> Device {
         var result = existing

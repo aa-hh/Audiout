@@ -1797,6 +1797,9 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         #expect(d?.isAvailable == true)
         #expect(d?.name == "Sonos Move")
         #expect(d?.kind == .sonos)
+        // The advertised TXT `model` is KEPT, not just used to guess the kind
+        // and thrown away: the phone's sync events report it.
+        #expect(d?.model == "S13")
 
         // The engine got the AP2 descriptor.
         await pollUntil { engine.fedIDs.contains(device.outputID) }

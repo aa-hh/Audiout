@@ -977,10 +977,36 @@ import AudioutProtocol
                 "abandonment never fired once the last awaiting connection for the phone died")
     }
 
-    /// Turns red if the server stops parsing `clientKey` as a P-256 point
-    /// before trusting it: 64 zero bytes have the right length and are no
-    /// point on the curve.
+    /// Turns red if the server stops checking `clientKey`'s length before
+    /// trusting it: 63 bytes can be no raw P-256 point, so the refusal is
+    /// `invalidClientKey` whatever CryptoKit would make of the bytes.
     @Test func helloWithAMalformedKeyIsRefusedWithInvalidClientKey() async throws {
+        let hub = try await makeHub()
+        defer { hub.cancel() }
+        let server = makeAutoApprovingServer()
+        defer { server.stop() }
+        server.broadcast(makeSnapshot())
+
+        let (client, log) = try await connectClient(via: hub, to: server)
+        defer { client.cancel() }
+        _ = try await challengeNonce(in: log)
+        sendText(try CompanionEnvelope(message: .hello(
+            clientKey: Data(count: 63).base64EncodedString(),
+            clientName: "phone",
+            protoVersion: CompanionProto.version,
+            signature: Data(count: 64).base64EncodedString())).encoded(), over: client)
+
+        #expect(await waitUntil { log.contains(.goodbye(reason: CompanionGoodbyeReason.invalidClientKey)) },
+                "the malformed key was never refused")
+        #expect(await waitUntil { log.closed }, "the refused client's connection was never closed")
+        #expect(!log.messages.contains { if case .welcome = $0 { return true } else { return false } })
+    }
+
+    /// Turns red if a 64-byte key that is no point on the curve ever gets a
+    /// welcome. On macOS CryptoKit imports the all-zero bytes without throwing,
+    /// so the refusal can come from the signature check instead of the key
+    /// check; either refusal is correct, a welcome never is.
+    @Test func helloWithAnAllZeroKeyIsRefusedAndNeverWelcomed() async throws {
         let hub = try await makeHub()
         defer { hub.cancel() }
         let server = makeAutoApprovingServer()
@@ -996,8 +1022,10 @@ import AudioutProtocol
             protoVersion: CompanionProto.version,
             signature: Data(count: 64).base64EncodedString())).encoded(), over: client)
 
-        #expect(await waitUntil { log.contains(.goodbye(reason: CompanionGoodbyeReason.invalidClientKey)) },
-                "the malformed key was never refused")
+        #expect(await waitUntil {
+            log.contains(.goodbye(reason: CompanionGoodbyeReason.invalidClientKey))
+                || log.contains(.goodbye(reason: CompanionGoodbyeReason.authenticationFailed))
+        }, "the all-zero key was never refused")
         #expect(await waitUntil { log.closed }, "the refused client's connection was never closed")
         #expect(!log.messages.contains { if case .welcome = $0 { return true } else { return false } })
     }

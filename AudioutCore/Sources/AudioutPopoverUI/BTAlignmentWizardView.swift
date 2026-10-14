@@ -187,7 +187,7 @@ public final class BTAlignmentWizardView: NSView {
     /// showing a code that would lead nowhere.
     static let remoteAllowOffLine =
         "To measure with your iPhone, turn on Allow control from iPhone in "
-        + "Audiout's settings, under General."
+        + "Audiout's settings, under Audiout Remote."
     /// A phone is already here: no code, just what to do on it. The phone's
     /// name is the approval's own, the only phone identity this Mac shows.
     static func remoteConnectedLine(phoneName: String?, target: String) -> String {

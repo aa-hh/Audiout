@@ -190,11 +190,10 @@ let package = Package(
         // carries the room delay on `alignmentProbeStarted`; 0.23.0 each
         // speaker's total delay; 0.24.0 and 0.25.0 the Mac app version and the
         // speaker's product model in the snapshot; 0.26.0 is protocol version 2
-        // (TLS, the phone's signed `hello`, `CompanionPairing`). The branch
-        // pin below carries `hello`'s `checksPairingCode` (audiout-shared
-        // PR #39); it moves to `from: "0.27.0"` once that is tagged.
+        // (TLS, the phone's signed `hello`, `CompanionPairing`); 0.27.0 adds
+        // `hello`'s optional `checksPairingCode`.
         .package(url: "https://github.com/aa-hh/audiout-shared.git",
-                 branch: "claude/pairing-code-check"),
+                 from: "0.27.0"),
         // Sparkle 2 (MIT) — in-app updates for the paid, notarised build only.
         // Scoped to the `AudioutApp` executable target so no library, test or
         // harness target ever links it.

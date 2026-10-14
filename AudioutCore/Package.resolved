@@ -6,8 +6,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/aa-hh/audiout-shared.git",
       "state" : {
-        "branch" : "claude/pairing-code-check",
-        "revision" : "e89ba2595410b5b35c0f1e49b58696344c367e40"
+        "revision" : "b9006cea66b3cc85e7fcfb297e4a71fa4922e4c4",
+        "version" : "0.27.0"
       }
     },
     {

@@ -5790,9 +5790,16 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// after ``kind(for:)`` has guessed with it: the phone's sync events
     /// report which product a measurement was taken on, and this is the only
     /// place an AirPlay receiver says what it is.
+    ///
+    /// `am` is the last fallback because an AP1-only `_raop._tcp` receiver —
+    /// an AirPort Express, shairport-sync — puts its product there and never
+    /// advertises `model` at all, so without it every such speaker reports no
+    /// model. It is last because an AP2 receiver advertising both means the
+    /// `_airplay._tcp` `model` key, which is the one the kind heuristic above
+    /// already trusts.
     static func advertisedModel(for discovered: DiscoveredDevice) -> String? {
         let txt = discovered.descriptor.txtRecord
-        return Device.advertisedModel(txt["model"] ?? txt["Model"])
+        return Device.advertisedModel(txt["model"] ?? txt["Model"] ?? txt["am"])
     }
 
     // MARK: Volume mapping (UI 0–100 → engine 0.0–1.0)

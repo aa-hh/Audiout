@@ -677,6 +677,18 @@ private func ap1Device(id: String = "AA:BB:CC:DD:EE:99", name: String = "Old Exp
                             access: access)
 }
 
+/// An AP1-only receiver as the real ones advertise: its product sits under the
+/// `_raop._tcp` TXT key `am`, with no `model` key anywhere in the record. An
+/// AirPort Express and shairport-sync both look like this.
+private func raopAMOnlyDevice(id: String = "AA:BB:CC:DD:EE:98", name: String = "Study Express",
+                              am: String = "AirPort10,115") -> DiscoveredDevice {
+    let txt = ["deviceid": id, "am": am]
+    let (parsedID, outputID) = NativeDiscovery.parseDeviceID(txt)!
+    let desc = DeviceDescriptor(name: name, address: "192.168.1.21", family: .ipv4, port: 5000, kind: .raop, txtRecord: txt)
+    return DiscoveredDevice(id: parsedID, descriptor: desc, outputID: outputID, isAirPlay2Supported: false,
+                            access: .open)
+}
+
 /// `systemVolume` defaults to a fresh ``FakeSystemVolume`` so EVERY call
 /// site — all ~34 of them, unchanged — gets a hermetic double with no
 /// explicit opt-in; NO test in this file ever constructs a real
@@ -1827,6 +1839,25 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         // Fed to the engine so it becomes addOutput-able, same as an AP2 device.
         await pollUntil { engine.fedIDs.contains(ap1.outputID) }
         #expect(engine.fedIDs.contains(ap1.outputID), "AP1 device must be fed to the shared engine (T7)")
+    }
+
+    /// A `_raop._tcp` receiver that names its product only under TXT `am` still
+    /// reaches the phone with a model. Drop the `am` fallback from
+    /// `advertisedModel(for:)` and this goes red: `model` is nil for every
+    /// AirPort Express and shairport-sync on the network, because none of them
+    /// advertises the `model` key the AP2 path reads.
+    @Test func raopReceiverAdvertisingOnlyAMStillReportsItsModel() async {
+        let (backend, engine, discovery) = makeBackend()
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        let raop = raopAMOnlyDevice()
+        let events = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == raop.id } else { return false } }
+        } after: { discovery.fire(.appeared(raop)) }
+
+        let d = events.compactMap { if case .deviceAdded(let x) = $0 { return x } else { return nil } }.first { $0.id == raop.id }
+        #expect(d?.model == "AirPort10,115", "an AP1-only receiver's `am` product must land in Device.model")
     }
 
     /// Selecting an AP1 device converges it through the SAME engine surface as AP2:

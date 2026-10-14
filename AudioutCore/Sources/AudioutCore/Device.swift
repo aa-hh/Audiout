@@ -210,7 +210,8 @@ public struct Device: Identifiable, Equatable, Sendable {
 
     /// What this receiver says it IS, never what its owner called it.
     ///
-    /// AirPlay carries the advertised TXT `model` code, Cast the advertised
+    /// AirPlay carries the advertised TXT `model` code (or `am`, which is where
+    /// an AP1-only receiver puts it instead), Cast the advertised
     /// `md` model string, and a Bluetooth pairing either `bt:<vendor>:<product>`
     /// (four lowercase hex digits each, from its cached Device ID record) or a
     /// phrase from ``bluetoothProductModels`` matched against its name.

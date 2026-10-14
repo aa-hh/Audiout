@@ -518,10 +518,16 @@ import Testing
     }
 
     /// A bare dictionary standing in for the Keychain, so these tests never touch it.
+    /// `failWrites` makes it refuse every write, as a locked keychain does.
     private final class InMemorySecretStore: SecretStoring {
         var values: [String: String] = [:]
+        var failWrites = false
         func read(_ key: String) -> String? { values[key] }
-        func write(_ value: String?, for key: String) { values[key] = value }
+        func write(_ value: String?, for key: String) -> Bool {
+            guard !failWrites else { return false }
+            values[key] = value
+            return true
+        }
     }
 
     /// Turns red if the first read stops moving a key an older build left in
@@ -537,6 +543,36 @@ import Testing
         settings.licenseKey = nil
         #expect(store.read("license.key") == nil)
         #expect(settings.licenseKey == nil)
+    }
+
+    /// Turns red if `readSecret` removes the `UserDefaults` copy after the
+    /// secret store refused the migration write, which deletes the only copy
+    /// of the licence key, or if a later read stops retrying the move.
+    @Test func aRefusedMigrationKeepsTheLicenceKeyInDefaultsAndRetries() {
+        let store = InMemorySecretStore()
+        store.failWrites = true
+        defaults.set("OLD-KEY", forKey: "license.key")
+        let settings = AppSettings(defaults: defaults, secrets: store)
+        #expect(settings.licenseKey == "OLD-KEY")
+        #expect(defaults.string(forKey: "license.key") == "OLD-KEY")
+        #expect(AppSettings(defaults: defaults, secrets: store).licenseKey == "OLD-KEY")
+        store.failWrites = false
+        #expect(settings.licenseKey == "OLD-KEY")
+        #expect(store.read("license.key") == "OLD-KEY")
+        #expect(defaults.string(forKey: "license.key") == nil)
+    }
+
+    /// Turns red if `writeSecret` drops a value the secret store refused
+    /// instead of keeping it in `UserDefaults`.
+    @Test func aRefusedWriteKeepsTheLicenceKeyReadableFromDefaults() {
+        let store = InMemorySecretStore()
+        store.failWrites = true
+        let settings = AppSettings(defaults: defaults, secrets: store)
+        settings.licenseKey = "NEW-KEY"
+        #expect(store.read("license.key") == nil)
+        #expect(defaults.string(forKey: "license.key") == "NEW-KEY")
+        #expect(settings.licenseKey == "NEW-KEY")
+        #expect(AppSettings(defaults: defaults, secrets: store).licenseKey == "NEW-KEY")
     }
 
     /// Turns red if the companion token skips the migration the licence key gets.

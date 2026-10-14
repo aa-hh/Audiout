@@ -87,21 +87,28 @@ public struct AppSettings {
     }
 
     /// Reads a secret. A value an older build left in `defaults` moves to
-    /// `secrets` on the first read that finds the store empty: written there,
-    /// then removed from `defaults`.
+    /// `secrets` on the first read that finds the store empty, and leaves
+    /// `defaults` only once the store has taken it; a refused move keeps the
+    /// value in `defaults` and is tried again on the next read.
     private func readSecret(_ key: String) -> String? {
         if let value = secrets.read(key) { return value }
         guard let legacy = defaults.string(forKey: key) else { return nil }
-        secrets.write(legacy, for: key)
-        defaults.removeObject(forKey: key)
+        if secrets.write(legacy, for: key) { defaults.removeObject(forKey: key) }
         return legacy
     }
 
-    /// Writes a secret. Any copy still in `defaults` goes too (unless `defaults`
-    /// IS the store), or the next read would migrate a cleared value back.
+    /// Writes a secret. Once the store has it, any copy still in `defaults`
+    /// goes too (unless `defaults` IS the store), or the next read would migrate
+    /// a cleared value back. A value the store refuses lands in `defaults`
+    /// instead, so a locked keychain never loses the licence key.
     private func writeSecret(_ value: String?, for key: String) {
-        secrets.write(value, for: key)
-        if !(secrets is DefaultsSecretStore) { defaults.removeObject(forKey: key) }
+        let stored = secrets.write(value, for: key)
+        guard !(secrets is DefaultsSecretStore) else { return }
+        if stored {
+            defaults.removeObject(forKey: key)
+        } else {
+            defaults.set(value, forKey: key)
+        }
     }
 
     private enum Keys {

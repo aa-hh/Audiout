@@ -5,10 +5,12 @@ import Security
 
 /// Where ``AppSettings`` keeps the two values that unlock the app and the
 /// iPhone (the licence key and the companion token), so they are not plain text
-/// in the preferences file. `write(nil, ...)` deletes.
+/// in the preferences file. `write(nil, ...)` deletes. `write` answers true
+/// only when the store now holds exactly `value`, or, for `nil`, holds nothing
+/// under `key`; a caller must keep its own copy of a value the store refused.
 public protocol SecretStoring {
     func read(_ key: String) -> String?
-    func write(_ value: String?, for key: String)
+    func write(_ value: String?, for key: String) -> Bool
 }
 
 /// Generic-password Keychain items under one service, `<bundle id>.license`,
@@ -30,14 +32,18 @@ public final class KeychainSecretStore: SecretStoring {
         return String(data: data, encoding: .utf8)
     }
 
-    public func write(_ value: String?, for key: String) {
-        guard delete(key, operation: "save") else { return }
-        guard let value else { return }
+    public func write(_ value: String?, for key: String) -> Bool {
+        guard delete(key, operation: "save") else { return false }
+        guard let value else { return true }
         var q = query(key)
         q[kSecAttrLabel as String] = "Audiout licence"
         q[kSecValueData as String] = Data(value.utf8)
         let status = SecItemAdd(q as CFDictionary, nil)
-        if status != errSecSuccess { report(status, operation: "save") }
+        guard status == errSecSuccess else {
+            report(status, operation: "save")
+            return false
+        }
+        return true
     }
 
     private func query(_ account: String) -> [String: Any] {
@@ -72,5 +78,8 @@ public struct DefaultsSecretStore: SecretStoring {
 
     public func read(_ key: String) -> String? { defaults.string(forKey: key) }
 
-    public func write(_ value: String?, for key: String) { defaults.set(value, forKey: key) }
+    public func write(_ value: String?, for key: String) -> Bool {
+        defaults.set(value, forKey: key)
+        return true
+    }
 }

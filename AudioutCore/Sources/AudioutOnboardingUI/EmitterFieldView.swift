@@ -162,9 +162,14 @@ final class EmitterFieldView: NSView {
     /// envelope adds on top of it.
     private static let baseGain = Float(AudioutField.defaults.gain)
     /// The surge raises the shared `sharp` by this much × envelope ×
-    /// intensity, so a full surge peaks at 2.5× the shared crest exponent —
-    /// the rings thin and crisp as the field brightens, one gesture rather
-    /// than two. The iPhone's connect surge uses the same two peaks.
+    /// intensity. `surgeEnvelope` tops out at about 0.686 rather than 1 — the
+    /// exponential fall is already under way before the smoothstep rise
+    /// finishes — so a full surge reaches about 2.03× the shared crest
+    /// exponent, and the `0.55 ×` gain term in `makeUniforms` reaches about
+    /// 1.58× the shared gain. The rings thin and crisp as the field
+    /// brightens, one gesture rather than two. The iPhone's connect surge is
+    /// the same gesture at higher peaks, 2.5× and 1.85×; whether to match
+    /// them here is a tuning call.
     private static let surgeSharpen: Float = 1.5
     /// The site composes its stills at t = 40 s and starts its live clock
     /// there, so frame one is a developed field rather than three points

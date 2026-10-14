@@ -5723,7 +5723,8 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // it when the device stops streaming.
             eq: eqByDeviceID[id] ?? .flat,
             airPlayAccess: discovered.access,
-            hasStoredPassword: hasStoredPassword
+            hasStoredPassword: hasStoredPassword,
+            model: Self.advertisedModel(for: discovered)
         )
     }
 
@@ -5734,6 +5735,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         var result = existing
         result.name = discovered.name
         result.kind = discovered.kind
+        result.model = discovered.model
         result.supportsAirPlay2 = discovered.supportsAirPlay2
         // `hasStoredPassword` stays the existing value: the backend's own writes own it.
         result.airPlayAccess = discovered.airPlayAccess
@@ -5782,6 +5784,15 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         if hay.contains("airport") || hay.contains("express") { return .airportExpress }
         if hay.contains("sonos") || hay.contains("move") || hay.contains("roam") { return .sonos }
         return .generic
+    }
+
+    /// The receiver's own advertised model code, kept rather than discarded
+    /// after ``kind(for:)`` has guessed with it: the phone's sync events
+    /// report which product a measurement was taken on, and this is the only
+    /// place an AirPlay receiver says what it is.
+    static func advertisedModel(for discovered: DiscoveredDevice) -> String? {
+        let txt = discovered.descriptor.txtRecord
+        return Device.advertisedModel(txt["model"] ?? txt["Model"])
     }
 
     // MARK: Volume mapping (UI 0–100 → engine 0.0–1.0)

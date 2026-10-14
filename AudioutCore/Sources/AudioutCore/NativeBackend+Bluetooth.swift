@@ -809,6 +809,12 @@ extension NativeBackend {
                 if let minor = snapshot.deviceClassMinor {
                     updated.bluetoothDeviceClassMinor = minor
                 }
+                // The model keeps the last known value for the same reason: a
+                // snapshot taken without the grant, or one whose SDP cache has
+                // gone, carries none.
+                if let model = snapshot.model {
+                    updated.model = model
+                }
                 if updated != existing {
                     let availabilityMoved = updated.isAvailable != existing.isAvailable
                     if availabilityMoved, expectedSelected.contains(id) {
@@ -867,7 +873,8 @@ extension NativeBackend {
                     // gets the value re-pushed on every arm, so the snapshot and
                     // what is audible agree.
                     eq: eqByDeviceID[id] ?? .flat,
-                    bluetoothDeviceClassMinor: snapshot.deviceClassMinor)
+                    bluetoothDeviceClassMinor: snapshot.deviceClassMinor,
+                    model: snapshot.model)
                 // The first time this process lists a connected Bluetooth
                 // device is the only link-up it will ever see for it: a first
                 // pairing, or a speaker already up when the app launched. Both

@@ -166,4 +166,13 @@ import Testing
         #expect(!device.supportsAirPlay2, "BT devices are never AirPlay-2 capable")
         #expect(!device.isLocalDevice, "BT is non-local — it may mix with AirPlay in groups")
     }
+
+    /// Turns red if a less specific phrase is ordered ahead of a longer one it
+    /// is a prefix of (every Bose becoming "soundlink"), or if the fold stops
+    /// ignoring punctuation, spacing and case.
+    @Test func theProductPhraseIsTheMostSpecificOneTheNameHolds() {
+        #expect(Device.bluetoothProductModel(forName: "Alec's JBL Flip 6") == "jblflip")
+        #expect(Device.bluetoothProductModel(forName: "Bose SoundLink Flex") == "soundlinkflex")
+        #expect(Device.bluetoothProductModel(forName: "Kitchen") == nil)
+    }
 }

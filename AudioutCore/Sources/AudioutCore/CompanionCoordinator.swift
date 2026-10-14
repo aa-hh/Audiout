@@ -562,9 +562,16 @@ public final class CompanionCoordinator {
                 .filter { !$0.isLocalDevice && $0.liveDevice == nil }
                 .map { ($0.id, $0.displayName, $0.kind?.rawValue) },
             note: Self.noteSlot(captureFailure: captureFailureMessage, routingBlocked: routingBlocked,
-                                takeover: takeoverStatus, doublePath: systemDefaultIsAirPlayActive))
+                                takeover: takeoverStatus, doublePath: systemDefaultIsAirPlayActive),
+            macAppVersion: Self.appVersion)
         server.broadcast(snapshot)
     }
+
+    /// The version the phone names in a problem report. No `"dev"` fallback:
+    /// a run with no bundle to read sends nothing, which is the same `nil` a
+    /// Mac built before the field sends.
+    private static let appVersion: String? =
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String
 
     /// The cached-or-rebuilt `.regular` running-app list (FIX-B2 finding 2b).
     /// The enumeration was the dominant per-broadcast cost, so the host's

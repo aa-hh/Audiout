@@ -838,6 +838,39 @@ import AudioutProtocol
         #expect(snapshot.devices.first { $0.id == "local" }?.alignment == nil,
                 "only Bluetooth rows ever carry an alignment")
     }
+
+    // MARK: The Mac's app version
+
+    /// Turns red if the builder stops passing `macAppVersion` through to the
+    /// snapshot, or starts inventing a value when the caller gives it none.
+    @Test func macAppVersionIsAPassthroughAndDefaultsToNothing() async throws {
+        let backend = try await makeBackend()
+        let controller = makeGroupController(backend: backend)
+        let appRouting = makeAppRouting()
+
+        let given = CompanionSnapshotBuilder.build(
+            devices: backend.devices, groupController: controller, appRouting: appRouting,
+            excludedBundleIDs: noExcludedBundleIDs, iconFor: iconFor, addableApps: noAddableApps,
+            runningRouted: noRunningRouted, liveRoutedAppNames: noLiveRoutedAppNames,
+            localFallbackActive: false, takeoverStatus: nil, serverName: defaultServerName,
+            connectVolume: defaultConnectVolume, connectVolumeMin: defaultConnectVolumeMin,
+            connectVolumeMax: defaultConnectVolumeMax, startBufferMs: defaultStartBufferMs,
+            startBufferOptionsMs: defaultStartBufferOptionsMs,
+            macAppVersion: "1.3"
+        )
+        #expect(given.macAppVersion == "1.3")
+
+        let omitted = CompanionSnapshotBuilder.build(
+            devices: backend.devices, groupController: controller, appRouting: appRouting,
+            excludedBundleIDs: noExcludedBundleIDs, iconFor: iconFor, addableApps: noAddableApps,
+            runningRouted: noRunningRouted, liveRoutedAppNames: noLiveRoutedAppNames,
+            localFallbackActive: false, takeoverStatus: nil, serverName: defaultServerName,
+            connectVolume: defaultConnectVolume, connectVolumeMin: defaultConnectVolumeMin,
+            connectVolumeMax: defaultConnectVolumeMax, startBufferMs: defaultStartBufferMs,
+            startBufferOptionsMs: defaultStartBufferOptionsMs
+        )
+        #expect(omitted.macAppVersion == nil, "a caller with no version to give sends none")
+    }
 }
 
 private actor CountBox {

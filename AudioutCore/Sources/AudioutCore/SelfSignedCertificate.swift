@@ -13,6 +13,9 @@ import Foundation
 /// that Security's own parser accepts them and that TLS can present them.
 enum SelfSignedCertificate {
 
+    /// The subject and issuer common name of every certificate this makes.
+    static let commonName = "Audiout Remote"
+
     /// `sign` receives the DER `tbsCertificate` and returns the DER
     /// `SEQUENCE { r, s }` that `SecKeyCreateSignature(_,
     /// .ecdsaSignatureMessageX962SHA256, _)` produces; it is placed in the
@@ -27,7 +30,7 @@ enum SelfSignedCertificate {
         serialBytes[0] = (serialBytes[0] & 0x7F) | 0x01
 
         let signatureAlgorithm = Data([0x30, 0x0A, 0x06, 0x08, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x04, 0x03, 0x02])
-        let commonName = Data([0x06, 0x03, 0x55, 0x04, 0x03]) + tlv(0x0C, Data("Audiout Remote".utf8))
+        let commonName = Data([0x06, 0x03, 0x55, 0x04, 0x03]) + tlv(0x0C, Data(commonName.utf8))
         let name = sequence(setOf(sequence(commonName)))
         let validity = sequence(utcTime(notBefore) + utcTime(notAfter))
         let ecPublicKey = Data([0x06, 0x07, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x02, 0x01])

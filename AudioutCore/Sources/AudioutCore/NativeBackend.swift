@@ -3266,9 +3266,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     ///     its clock — never at `engine.start()` (Q1=B: woken only by an
     ///     actual routing action, never at launch).
     ///
-    /// Returns whether the clock is ready; the caller decides what its own
-    /// failure means (whole-system: park + `.timingUnavailable`; per-app:
-    /// walk the binding back so a later recovery re-binds).
+    /// Returns the activation outcome; anything but `.ready` means no clock,
+    /// and the caller decides what its own failure means (whole-system: park +
+    /// `.timingUnavailable`; per-app: walk the binding back so a later
+    /// recovery re-binds). The outcome is what tells an unapproved helper
+    /// from busy timing ports in `airplay:connect_failed`'s `reason`.
     ///
     /// This gate originally ran inline in `convergeDevice` ONLY, which made a
     /// per-app redirect ORDER-DEPENDENT: a redirect applied before any
@@ -3283,7 +3285,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// topology (``replayPendingPerAppBindings(trigger:)``), so a redirect
     /// that was refused clockless re-binds by itself the moment a later
     /// connect wins the ports — no user re-pick.
-    func ensurePTPTakeover(telemetryDeviceID: String) async -> Bool {
+    func ensurePTPTakeover(telemetryDeviceID: String) async -> PTPHelperActivationOutcome {
         var switchAwayOutcome: DefaultOutputSwitchOutcome?
         if let defaultOutputSwitcher {
             let takeover = defaultOutputSwitcher.switchAwayFromAirPlay()
@@ -3313,16 +3315,10 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         let activationStartUptime = ProcessInfo.processInfo.systemUptime
         let outcome = await ptpHelperActivator.activate(timeout: Self.ptpActivationTimeout)
         let elapsedMs = Int(((ProcessInfo.processInfo.systemUptime - activationStartUptime) * 1000).rounded())
-        let outcomeName: String
-        switch outcome {
-        case .ready: outcomeName = "ready"
-        case .needsApproval: outcomeName = "needsApproval"
-        case .timingPortsUnavailable: outcomeName = "timingPortsUnavailable"
-        }
         Telemetry.log(.airplay, "ptp_activate", [
             "device": telemetryDeviceID,
             "will_wait": willWaitForClock ? "true" : "false",
-            "outcome": outcomeName,
+            "outcome": outcome.telemetryName,
             "elapsed_ms": "\(elapsedMs)",
             "switch_away": switchAwayOutcome.map { "\($0)" } ?? "none",
         ])
@@ -3338,7 +3334,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             return ready && !was
         }
         if becameAvailable { replayPendingPerAppBindings(trigger: "clock_recovery") }
-        return ready
+        return outcome
     }
 
     /// Re-run the cached per-app binding pass for devices the table wants but
@@ -3560,7 +3556,8 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                     // A PTP-only receiver (Sonos/HomePod) accepts the session
                     // but plays silence with no clock, so failing the connect
                     // now beats a "connected" row that never makes a sound.
-                    guard await ensurePTPTakeover(telemetryDeviceID: id) else {
+                    let gate = await ensurePTPTakeover(telemetryDeviceID: id)
+                    guard gate == .ready else {
                         stateQueue.sync {
                             self.removeFromAddedLocked(id)
                             self.failedGate.insert(id)
@@ -3569,7 +3566,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                         }
                         Telemetry.fail(.airplay, "airplay:connect_failed",
                                        local: ["device": id],
-                                       shared: ["cause": "timingUnavailable"])
+                                       shared: ["cause": "timingUnavailable", "reason": gate.telemetryName])
                         return
                     }
 
@@ -3775,11 +3772,12 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                     }
                     guard let outcome else { continue }
                     guard outcome.failed else { return }
-                    // The engine error rides along locally only: its
-                    // description can name the receiver.
+                    // The engine error's description rides along locally
+                    // only, since it can name the receiver; its case name is
+                    // what `reason` shares.
                     Telemetry.fail(.airplay, "airplay:connect_failed",
                                    local: ["device": id, "detail": String(describing: error)],
-                                   shared: ["cause": "\(outcome.cause)"])
+                                   shared: ["cause": "\(outcome.cause)", "reason": Self.failureReason(error)])
                     return
                 }
             } else {
@@ -6103,6 +6101,31 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         reconcileCaptureGate()
     }
 
+    /// The `reason` an `airplay:connect_failed` shares: the engine error's case
+    /// name, the PTP gate's outcome, or else the error's type name. Never the
+    /// error's description, which can name the receiver. The engine switch has
+    /// no default so a new engine case cannot reach PostHog unnamed.
+    static func failureReason(_ error: Error) -> String {
+        switch error {
+        case let error as AirPlayEngineError:
+            switch error {
+            case .engineNotRunning: return "engineNotRunning"
+            case .initFailed: return "initFailed"
+            case .operationRejected: return "operationRejected"
+            case .sessionFailed: return "sessionFailed"
+            case .passwordRequired: return "passwordRequired"
+            case .unknownOutput: return "unknownOutput"
+            case .invalidDescriptor: return "invalidDescriptor"
+            case .engineThreadFailed: return "engineThreadFailed"
+            case .opTimedOut: return "opTimedOut"
+            }
+        case let error as PTPClockUnavailableError:
+            return error.outcome.telemetryName
+        default:
+            return String(describing: type(of: error))
+        }
+    }
+
     // MARK: AirPlay passwords
 
     /// The cause for an engine failure, read against what the receiver
@@ -6327,7 +6350,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 }
                 Telemetry.fail(.airplay, "airplay:connect_failed",
                                local: ["device": id, "detail": String(describing: error)],
-                               shared: ["cause": "\(cause)"])
+                               shared: ["cause": "\(cause)", "reason": Self.failureReason(error)])
             }
         }
     }

@@ -161,6 +161,18 @@ public final class CompanionApprovalController {
         return records.filter { !CompanionApprovalStore.hasLapsed($0, at: now) }
     }
 
+    /// When the first of the phones still approved stops counting as
+    /// approved: the earliest `lastSeen + CompanionApprovalStore.trustLapse`
+    /// among them, or nil when none is. Nothing happens at a lapse on its own
+    /// — no phone connects, no setting changes — so `CompanionCoordinator`
+    /// re-checks whether the server is still wanted at this moment.
+    public var earliestApprovalLapse: Date? {
+        approvals.lazy
+            .filter { $0.decision == .approved }
+            .map { $0.lastSeen.addingTimeInterval(CompanionApprovalStore.trustLapse) }
+            .min()
+    }
+
     /// Deciders held while this clientID's prompt is open or queued — every
     /// connection that helloed with that ID while the user hadn't answered
     /// yet.

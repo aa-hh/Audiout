@@ -76,7 +76,9 @@ import Testing
     /// check with the real one.
     private func makeCoordinator(host: StubHost, storeName: String,
                                  identityStore: RefusingIdentityStore = RefusingIdentityStore(),
-                                 schedule: ((TimeInterval, @escaping @MainActor () -> Void) -> Void)? = nil)
+                                 schedule: ((TimeInterval, @escaping @MainActor () -> Void) -> Void)? = nil,
+                                 now: (() -> Date)? = nil,
+                                 scheduleWork: ((TimeInterval, DispatchWorkItem) -> Void)? = nil)
         -> CompanionCoordinator {
         let directory = scratchDir.appendingPathComponent(storeName)
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -84,6 +86,7 @@ import Testing
                                   emitsLevels: false, simulatesDropouts: false)
         let approvals = CompanionApprovalController(
             store: CompanionApprovalStore(directory: directory),
+            now: now ?? Date.init,
             schedule: schedule ?? { _, job in job() })
         approvals.isPairingOpen = { true }
         approvals.presentPrompt = { _, _, _, respond in respond(true) }
@@ -104,6 +107,7 @@ import Testing
             server: CompanionServer(),
             approvals: approvals,
             identityStore: identityStore,
+            schedule: scheduleWork ?? { _, _ in },
             host: host)
     }
 
@@ -273,6 +277,38 @@ import Testing
             #expect(coordinator.pairingWindowOpen, "another phone approved: \(anotherPhoneApproved)")
             #expect(windowChanges == 0, "another phone approved: \(anotherPhoneApproved)")
         }
+    }
+
+    /// Turns red if the coordinator stops arming a re-check of the server
+    /// decision for the moment an approval lapses. `approvals` drops a lapsed
+    /// approval on its own, with no phone connecting and no setting changing,
+    /// so without the armed re-check a Mac left running past the 30 days
+    /// keeps the listener up and keeps advertising with nothing approved
+    /// (DESIGN.md: discoverable only while a pairing window is open or a
+    /// phone is paired).
+    @Test func anApprovalLapsingWithNothingConnectedRechecksTheServerDecision() throws {
+        let directory = scratchDir.appendingPathComponent("lapse-recheck")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let approvedAt = Date()
+        try CompanionApprovalStore(directory: directory).save([CompanionApproval(
+            clientID: String(repeating: "A", count: 64), lastKnownName: "Ada's iPhone",
+            decision: .approved, firstSeen: approvedAt, lastSeen: approvedAt)])
+        var clock = approvedAt
+        var rechecks: [(after: TimeInterval, work: DispatchWorkItem)] = []
+        let coordinator = makeCoordinator(host: StubHost(), storeName: "lapse-recheck",
+                                          now: { clock },
+                                          scheduleWork: { rechecks.append(($0, $1)) })
+        coordinator.wire()
+
+        #expect(coordinator.wantsServer, "an approved phone keeps the server wanted")
+        #expect(rechecks.count == 1, "one approval on file: one re-check armed")
+        #expect(abs((rechecks.first?.after ?? 0) - CompanionApprovalStore.trustLapse) < 2,
+                "the re-check is armed for the moment that approval lapses")
+
+        clock = approvedAt.addingTimeInterval(CompanionApprovalStore.trustLapse + 60)
+        rechecks[0].work.perform()
+        #expect(!coordinator.wantsServer, "the approval lapsed unused: nothing wants the server")
+        #expect(rechecks.count == 1, "nothing is approved now, so no further re-check is armed")
     }
 
     // MARK: Pairing-code alert

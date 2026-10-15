@@ -105,6 +105,9 @@ public final class CompanionCoordinator {
     /// starts.
     private let identityStore: any CompanionIdentityStoring
 
+    /// Runs a work item after a delay — the approval-lapse re-check below.
+    private let schedule: (TimeInterval, DispatchWorkItem) -> Void
+
     private weak var host: (any CompanionCoordinatorHost)?
 
     public init(backend: OutputBackend,
@@ -119,6 +122,12 @@ public final class CompanionCoordinator {
                 // in a nonisolated context, and this type's init is `@MainActor`.
                 approvals: CompanionApprovalController? = nil,
                 identityStore: (any CompanionIdentityStoring)? = nil,
+                // Runs the approval-lapse re-check after a delay; tests pass a
+                // recorder and fire the work item by hand, 30 days being out of
+                // reach of a test's wall clock.
+                schedule: @escaping (TimeInterval, DispatchWorkItem) -> Void = { delay, work in
+                    DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+                },
                 host: any CompanionCoordinatorHost) {
         self.backend = backend
         self.groupController = groupController
@@ -130,6 +139,7 @@ public final class CompanionCoordinator {
         self.server = server
         self.approvals = approvals ?? CompanionApprovalController()
         self.identityStore = identityStore ?? KeychainCompanionIdentityStore()
+        self.schedule = schedule
         self.host = host
     }
 
@@ -157,6 +167,17 @@ public final class CompanionCoordinator {
     public var onPairingWindowChanged: (() -> Void)?
 
     private var pairingWindowExpiry: DispatchWorkItem?
+
+    /// Re-runs ``updateServerState()`` when the longest-unseen approved phone
+    /// passes `CompanionApprovalStore.trustLapse`: that approval stops
+    /// counting on its own, with no phone connecting and no setting changing,
+    /// so without this a Mac left running keeps the listener up and keeps
+    /// advertising over Bonjour for a phone nothing trusts any more.
+    private var approvalLapseRecheck: DispatchWorkItem?
+    /// The moment ``approvalLapseRecheck`` is armed for, so an unchanged
+    /// deadline keeps its work item instead of being rescheduled on every
+    /// call.
+    private var approvalLapseDeadline: Date?
 
     /// Phones whose icon pages are still being sent; a second request from
     /// one of them is refused until the first is done.
@@ -543,18 +564,47 @@ public final class CompanionCoordinator {
         onPairingWindowChanged?()
     }
 
+    /// Arm (or re-arm) the re-check for the next approval to lapse, replacing
+    /// any work item already waiting. Safe for a server something else still
+    /// needs: the re-check only calls ``updateServerState()``, which reads
+    /// ``wantsServer`` — a pairing window or a waiting prompt keeps it true.
+    private func armApprovalLapseRecheck() {
+        let deadline = approvals.earliestApprovalLapse
+        guard deadline != approvalLapseDeadline else { return }
+        approvalLapseRecheck?.cancel()
+        approvalLapseDeadline = deadline
+        guard let deadline else {
+            approvalLapseRecheck = nil
+            return
+        }
+        let recheck = DispatchWorkItem { [weak self] in
+            guard let self, !self.isTerminating else { return }
+            self.approvalLapseRecheck = nil
+            // Cleared before the re-check, so its own call back into here
+            // arms the next deadline (a phone that reconnected meanwhile has
+            // pushed its lapse out).
+            self.approvalLapseDeadline = nil
+            self.updateServerState()
+        }
+        approvalLapseRecheck = recheck
+        schedule(max(0, deadline.timeIntervalSinceNow), recheck)
+    }
+
     /// Start or stop the companion server: it runs while
     /// `AppSettings.resolvedAllowRemoteControl` allows it (env override →
     /// persisted switch) and a phone is approved, a pairing window is open,
     /// or a phone is still waiting on its prompt. Called at launch, from the
     /// Settings › Audiout Remote switch, on every pairing-window or
-    /// approved-set change, and when the last waiting prompt settles; a no-op
-    /// when nothing changed. A start that cannot load the TLS identity
-    /// reports it, leaves the server stopped, and is tried again on the next
-    /// call. On start, broadcasts an initial snapshot IMMEDIATELY — the server
+    /// approved-set change, when the last waiting prompt settles, and from
+    /// ``armApprovalLapseRecheck()`` when an approval lapses with nothing
+    /// connected; a no-op when nothing changed. A start that cannot load the
+    /// TLS identity reports it, leaves the server stopped, and is tried again
+    /// on the next call.
+    /// On start, broadcasts an initial snapshot IMMEDIATELY — the server
     /// defers a helloed client's `welcome` until the first broadcast, so an
     /// early client would otherwise hang.
     public func updateServerState() {
+        armApprovalLapseRecheck()
         let shouldRun = AppSettings.resolvedAllowRemoteControl(settings: settings) && wantsServer
         guard shouldRun != isActive else { return }
         if shouldRun {
@@ -591,6 +641,9 @@ public final class CompanionCoordinator {
     public func shutDown() {
         broadcastWork?.cancel()
         broadcastWork = nil
+        approvalLapseRecheck?.cancel()
+        approvalLapseRecheck = nil
+        approvalLapseDeadline = nil
         isActive = false
         server.stop()
     }

@@ -165,7 +165,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // the Setup card would never contribute one.
                 Self.captureCoarseLocationOnce()
             },
-            captureAt: { PostHogSDK.shared.capture($0, properties: $1, timestamp: $2) }
+            captureAt: { PostHogSDK.shared.capture($0, properties: $1, timestamp: $2) },
+            anonymousID: { PostHogSDK.shared.getDistinctId() }
         ), consent: settings.telemetryEnabled)
         if settings.telemetryEnabled { Self.captureCoarseLocationOnce() }
     }

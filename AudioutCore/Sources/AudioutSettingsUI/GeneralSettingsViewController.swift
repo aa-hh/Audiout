@@ -31,6 +31,8 @@ public final class GeneralSettingsViewController: NSViewController, SettingsRead
     private var consentRow: ListRowView?
     private let loginApprovalButton = NSButton()
     private var loginApprovalRow: NSView?
+    private let anonymousIDField = NSTextField(labelWithString: "")
+    private var anonymousIDRow: NSView?
     // The card the approval row is mounted into and unmounted from (never
     // hidden in place — `NSStackView` keeps a hidden child's last height,
     // AGENTS.md).
@@ -154,8 +156,30 @@ public final class GeneralSettingsViewController: NSViewController, SettingsRead
                 helpText: "While Audiout is playing to speakers, the Touch Bar volume keys control the speakers instead of the Mac."))
         }
         rows.append(consentRow)
+
+        // The id this Mac's usage counts are filed under, so the user can
+        // quote it in a deletion or access request. Mounted only while
+        // sharing is on (`syncAnonymousIDRow()`).
+        anonymousIDField.font = .monospacedSystemFont(ofSize: NSFont.smallSystemFontSize, weight: .regular)
+        anonymousIDField.textColor = .secondaryLabelColor
+        anonymousIDField.isSelectable = true
+        anonymousIDField.lineBreakMode = .byTruncatingMiddle
+        anonymousIDField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        anonymousIDField.setAccessibilityLabel("Anonymous ID")
+        let copyButton = NSButton(title: "Copy", target: self, action: #selector(copyAnonymousIDTapped))
+        copyButton.bezelStyle = .rounded
+        copyButton.controlSize = .small
+        copyButton.setAccessibilityLabel("Copy anonymous ID")
+        let idAccessory = NSStackView(views: [anonymousIDField, copyButton])
+        idAccessory.orientation = .horizontal
+        idAccessory.alignment = .centerY
+        idAccessory.spacing = 8
+        idAccessory.translatesAutoresizingMaskIntoConstraints = false
+        anonymousIDRow = ListRowView(title: "Anonymous ID", accessory: idAccessory)
+
         let card = SettingsPane.makeCard(rows: rows)
         self.card = card
+        syncAnonymousIDRow()
 
         // Rare-use buttons: "Run setup again…" re-opens the first-run
         // permission-priming window — the way a user re-checks the System
@@ -211,6 +235,29 @@ public final class GeneralSettingsViewController: NSViewController, SettingsRead
         settings.telemetryAsked = true
         Analytics.setConsent(enabled)
         consentRow?.helpText = Self.consentHintLine(enabled)
+        syncAnonymousIDRow()
+    }
+
+    @objc private func copyAnonymousIDTapped() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(anonymousIDField.stringValue, forType: .string)
+    }
+
+    /// Mounts the Anonymous ID row under the consent row exactly while
+    /// `Analytics.anonymousID` has a value, i.e. while sharing is on.
+    private func syncAnonymousIDRow() {
+        guard let row = anonymousIDRow, let card, let consentRow else { return }
+        let id = Analytics.anonymousID
+        anonymousIDField.stringValue = id ?? ""
+        if id != nil, row.superview == nil,
+           let index = card.stack.arrangedSubviews.firstIndex(of: consentRow) {
+            card.stack.insertArrangedSubview(row, at: index + 1)
+            row.widthAnchor.constraint(equalTo: card.stack.widthAnchor).isActive = true
+        } else if id == nil, row.superview != nil {
+            card.stack.removeArrangedSubview(row)
+            row.removeFromSuperview()
+        }
+        card.box.rows = card.stack.arrangedSubviews.filter { !$0.isHidden }
     }
 
     @objc private func touchBarToggled() {

@@ -26,6 +26,17 @@ extension SerializedSharedState {
             // No crash, no observable effect — nothing further to assert.
         }
 
+        // Turns red if `Analytics.anonymousID` stops checking consent or stops reading the sink's id.
+        @Test func anonymousIDIsNilWithoutConsentAndTheSinksIDWithIt() {
+            Analytics.install(Analytics.Sink(capture: { _, _ in }, captureError: { _, _ in },
+                                             consentChanged: { _ in }, anonymousID: { "abc-123" }),
+                              consent: false)
+            defer { Analytics.install(nil, consent: false) }
+            #expect(Analytics.anonymousID == nil)
+            Analytics.setConsent(true)
+            #expect(Analytics.anonymousID == "abc-123")
+        }
+
         @Test func installedSinkWithConsentFalseDoesNotCapture() {
             let captured = Captured()
             Analytics.install(Analytics.Sink(capture: { name, props in

@@ -5,16 +5,18 @@
 #
 # Picks a level from the committed diff against origin/main (fetched first;
 # local main is never used, since nothing updates it any more): skip (no model), cheap
-# (one sonnet pass) or full (four parallel reviewers, the deep one on fable, then one haiku
-# confidence score per finding, findings under 75 dropped). Prints the
+# (one sonnet pass) or full (four parallel reviewers, the deep one on fable when a risk path
+# is touched and on opus when full only by size or escalation, round 2 reusing round 1's
+# deep model, then one haiku confidence score per finding, findings under 75 dropped). Prints the
 # findings and appends one line to <git-common-dir>/audiout-branch-reviews.log.
 # Instruction files: docs/review/<pass>.md.
 #
 # At most two rounds per PR. The round state lives on the PR, not in local
 # files, so a fresh checkout works the same: every comment this script posts
 # starts with a marker line
-#   <!-- audiout-review round=<n> head=<sha> level=<level> high=<k> changes=<id> -->
-# and the next run reads the PR's comments, highest round wins. <id> is the
+#   <!-- audiout-review round=<n> head=<sha> level=<level> high=<k> changes=<id> deep=<model> -->
+# and the next run reads the PR's comments, highest round wins. `deep` is the deep
+# pass's model, `-` when no deep pass ran. <id> is the
 # patch id of the branch's own non-Markdown changes against origin/main
 # (`none` when there are none). A push that leaves it unchanged, such as
 # merging main in or a docs-only commit, uses no round: the run re-posts that
@@ -46,13 +48,14 @@
 set -uo pipefail
 
 # ---------------------------------------------------------------------------
-# The one place to edit: thresholds, risk paths, the model each pass runs on.
+# The one place to edit: thresholds, risk paths, the model each pass runs on (the deep pass picks risk or size).
 SKIP_UNDER_LINES=50
 FULL_OVER_LINES=300
 SCORE_KEEP_AT=75
 
 CHEAP_MODEL=sonnet
-DEEP_MODEL=fable
+DEEP_MODEL_RISK=fable
+DEEP_MODEL_SIZE=opus
 RULES_MODEL=sonnet
 HISTORY_MODEL=sonnet
 COMMENTS_MODEL=sonnet
@@ -143,7 +146,7 @@ post_status() {
 # The last round posted on this branch's PR: prev_round, prev_head,
 # prev_level, prev_high, prev_changes (prev_round 0 when none or no PR).
 pr=$($GH pr view --json number -q .number 2>/dev/null)
-prev_round=0; prev_head=""; prev_level=""; prev_high=0; prev_changes=""
+prev_round=0; prev_head=""; prev_level=""; prev_high=0; prev_changes=""; prev_deep=""
 if [ -n "$pr" ]; then
   bodies=$($GH api --paginate "repos/aa-hh/Audiout/issues/$pr/comments" --jq '.[].body') \
     || { echo "Could not read the comments on PR #$pr, so the review round is unknown." >&2; exit 2; }
@@ -153,7 +156,7 @@ if [ -n "$pr" ]; then
   if [ -n "$last" ]; then
     prev_round=$(marker_field round); prev_head=$(marker_field head)
     prev_level=$(marker_field level); prev_high=$(marker_field high)
-    prev_changes=$(marker_field changes)
+    prev_changes=$(marker_field changes); prev_deep=$(marker_field deep)
   fi
 fi
 round=$((prev_round + 1))
@@ -204,6 +207,13 @@ elif [ "$lines" -gt "$FULL_OVER_LINES" ]; then level=full
 else level=cheap
 fi
 
+# Round 2 reuses round 1's deep model; an old marker without deep= (or deep=-)
+# gets the rule applied to this round's own diff, as round 1 would.
+if [ -n "$prev_deep" ] && [ "$prev_deep" != - ]; then deep_model=$prev_deep
+elif [ ${#risk[@]} -gt 0 ]; then deep_model=$DEEP_MODEL_RISK
+else deep_model=$DEEP_MODEL_SIZE
+fi
+
 state="$pending_root/$hash"
 
 if [ "$mode" = --continue ]; then
@@ -218,6 +228,7 @@ if [ "$mode" = --continue ]; then
     exit 2
   fi
   level=$(cat "$state/level")
+  deep_model=$(cat "$state/deep")
 fi
 
 summary="$lines product lines"
@@ -227,10 +238,15 @@ if [ ${#risk[@]} -gt 0 ]; then
 fi
 echo "Review level: $level ($summary), round $round"
 
+# deep_recorded: the deep pass's model, or - when this level has none.
+deep_recorded() {
+  case "$level" in full|full-escalated) echo "$deep_model" ;; *) echo - ;; esac
+}
+
 # log_line <high> <medium> <low> <dropped>
 log_line() {
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-    "$branch" "$level" "$1" "$2" "$3" "$4" "$files" >> "$review_log"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    "$branch" "$level" "$1" "$2" "$3" "$4" "$files" "$(deep_recorded)" >> "$review_log"
 }
 
 # post_result <high> <comment file>: the PR comment, marker line first (or the
@@ -240,7 +256,7 @@ post_result() {
   local st=success desc
   [ "$1" -gt 0 ] && st=failure
   if [ "$level" = skip ]; then desc=skip; else desc="$level, round $round, $1 HIGH"; fi
-  { echo "<!-- audiout-review round=$round head=$tip level=$level high=$1 changes=$changes -->"; cat "$2"; } > "$2.post" || exit 2
+  { echo "<!-- audiout-review round=$round head=$tip level=$level high=$1 changes=$changes deep=$(deep_recorded) -->"; cat "$2"; } > "$2.post" || exit 2
   if [ -n "$pr" ]; then
     $GH pr comment "$pr" --body-file "$2.post" > /dev/null \
       || { echo "Review result not posted: gh pr comment failed for PR #$pr." >&2; exit 2; }
@@ -264,7 +280,7 @@ fi
 pass_model() {
   case "$1" in
     cheap)    echo "$CHEAP_MODEL" ;;
-    deep)     echo "$DEEP_MODEL" ;;
+    deep)     echo "$deep_model" ;;
     rules)    echo "$RULES_MODEL" ;;
     history)  echo "$HISTORY_MODEL" ;;
     comments) echo "$COMMENTS_MODEL" ;;
@@ -308,6 +324,7 @@ REVIEWERS=(deep rules history comments)
 # plan_reviewers <level> <pass>...: prompts for the reviewer passes, then hand over.
 plan_reviewers() {
   echo "$1" > "$state/level" || exit 2
+  echo "$deep_model" > "$state/deep" || exit 2
   shift
   for p in "$@"; do rm -f "$state/$p.out"; write_prompt "$p" "$p"; done
   hand_over "$REVIEW_STEPS" "$@"
@@ -432,7 +449,10 @@ echo "Findings: $high high, $medium medium, $low low ($dropped dropped)"
 
 comment="$state/comment.md"
 {
-  echo "## Review: $level, round $round"
+  case "$level" in
+    full|full-escalated) echo "## Review: $level, round $round (deep pass: $deep_model)" ;;
+    *) echo "## Review: $level, round $round" ;;
+  esac
   echo
   if [ ${#survivors[@]} -eq 0 ]; then
     echo "Review: no findings"

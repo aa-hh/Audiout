@@ -2,7 +2,7 @@
 
 import AppKit
 
-/// The **Warm Signal canvas** (spec `dev/notes/warm-signal-v3.md` §5.1): the
+/// The **Warm Signal canvas** (spec `docs/warm-signal-v3.md` §5.1): the
 /// background of the windows that open outside the surface, the Setup window
 /// and the alignment wizard sheet. Every screen inside the surface sits on
 /// `WarmPanelView`'s flat `panel` instead.

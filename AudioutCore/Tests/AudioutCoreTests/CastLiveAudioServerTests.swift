@@ -137,6 +137,61 @@ import Testing
         return out
     }
 
+    /// A buffering source whose fill the test sets, recording every render's
+    /// size and uptime.
+    private final class ScriptedSource: CastPCMSource, @unchecked Sendable {
+        private let lock = NSLock()
+        private var renders: [Int] = []
+        private var times: [UInt64] = []
+        private var buffered = 0
+        func render(frames: Int) -> Data {
+            let now = DispatchTime.now().uptimeNanoseconds
+            lock.withLock { renders.append(frames); times.append(now) }
+            return Data(count: frames * 4)
+        }
+        var renderedAt: [UInt64] { lock.withLock { times } }
+        var bufferedFrames: Int? {
+            get { lock.withLock { buffered } }
+            set { lock.withLock { buffered = newValue ?? 0 } }
+        }
+        var rendered: [Int] { lock.withLock { renders } }
+    }
+
+    /// Turns red if the prime stops being rendered whole at GET time or the
+    /// pacing clock starts before the ring holds the cushion.
+    @Test func thePrimeIsRenderedWholeAndPacingWaitsForTheCushion() async throws {
+        #expect(CastLiveAudioServer.cushionFrames == 22_050)
+        let source = ScriptedSource()
+        let server = CastLiveAudioServer(source: source, loopbackOnly: true, primeMilliseconds: 1000)
+        defer { server.stop() }
+        let box = PortBox()
+        server.start { result in
+            if case .success(let port) = result { box.set(port) }
+        }
+        let bindDeadline = Date().addingTimeInterval(2)
+        while box.value == nil && Date() < bindDeadline { Thread.sleep(forTimeInterval: 0.005) }
+        let port = try #require(box.value, "live audio server never bound a loopback port")
+        let get = "GET /live.wav HTTP/1.1\r\nHost: x\r\n\r\n"
+
+        _ = await exchange(port: port, request: get, timeout: 0.6) { _ in false }
+        let first = source.rendered
+        #expect(first.first == 44_100)
+        // By time, not count: a loaded run can stretch the 0.6 s wait past the
+        // 2 s deadline, after which pacing renders legitimately.
+        let times = source.renderedAt
+        let early = times.dropFirst().filter { $0 - times[0] < 1_900_000_000 }
+        #expect(early.isEmpty, "pacing rendered with an empty source inside the 2 s deadline: \(first)")
+
+        source.bufferedFrames = CastLiveAudioServer.cushionFrames
+        let before = source.rendered.count
+        // 1 s, not 2: the first GET's pacing timer falls back at its 2 s deadline, so this window must close before 0.6 + 2.0 s.
+        _ = await exchange(port: port, request: get, timeout: 1) { _ in
+            source.rendered.dropFirst(before).contains { $0 != 44_100 }
+        }
+        #expect(source.rendered.dropFirst(before).contains { $0 != 44_100 },
+                "pacing never started with the cushion in place: \(source.rendered)")
+    }
+
     private func u16(_ data: Data, _ offset: Int) -> UInt16 {
         UInt16(data[offset]) | (UInt16(data[offset + 1]) << 8)
     }

@@ -113,6 +113,42 @@ struct CastFeedStats: Sendable, Equatable {
     let writes: Int
 }
 
+/// Where the time went for the frame the server rendered last, read from the
+/// stamp the producer left on its block. The `LastRender` terms obey
+/// `ageMs == ioprocToPushMs + delayLineMs + ringWaitMs`, and `ringWaitMs`
+/// splits into `queueAheadMs + pacingPhaseMs`.
+///
+/// A block pushed through the one-argument ``CastFeedRing/push(_:)`` carries a
+/// zero `pts`, which makes `ageMs` and `ioprocToPushMs` meaningless; the other
+/// terms still hold.
+struct CastFeedTiming: Sendable, Equatable {
+    /// The APPLIED feed delay right now.
+    let delayLineMs: Int
+    /// Audio queued in the ring right now.
+    let queuedMs: Int
+    /// Frames rendered (taken plus zero-filled) since the last
+    /// ``CastFeedRing/reset()``: the server's frames sent for the current GET,
+    /// prime included.
+    let renderedFramesSinceReset: Int
+    /// `nil` until a render since the last reset took real frames.
+    let lastRender: LastRender?
+
+    struct LastRender: Sendable, Equatable {
+        /// Render time minus the capture time of the frame's content.
+        let ageMs: Double
+        /// Capture of the frame to its block's push into the ring.
+        let ioprocToPushMs: Double
+        /// The feed delay applied when the block went through the line.
+        let delayLineMs: Double
+        /// Push to render.
+        let ringWaitMs: Double
+        /// Audio queued ahead of this frame when its block was pushed.
+        let queueAheadMs: Double
+        /// `ringWaitMs - queueAheadMs`: what the pacing clock added.
+        let pacingPhaseMs: Double
+    }
+}
+
 /// One Cast receiver's feed: the 2-second hand-off between the capture IOProc
 /// (producer) and the HTTP server's pacing timer (consumer).
 ///
@@ -161,7 +197,7 @@ final class CastFeedRing: CastPCMSource, @unchecked Sendable {
     private var targetGain: Float = 1
     /// Lock-guarded, and `nil` until a non-zero delay is asked for.
     private var delayLine: PCMDelayLine?
-    /// Producer-owned: incremented only by ``push(_:)``, which cannot take the
+    /// Producer-owned: incremented only by ``push(_:pts:nowNanos:)``, which cannot take the
     /// lock on the path that matters (a failed `try()` IS one of the drops).
     /// How many times the producer re-tries the ring's lock before it gives up
     /// and drops the block. Small: the holder is only ever a memcpy away from
@@ -180,6 +216,38 @@ final class CastFeedRing: CastPCMSource, @unchecked Sendable {
     /// What an all-zero block reports, matching the AirPlay leg's floor.
     private static let floorDBFS: Double = -120
 
+    /// One accepted producer block, stamped for ``timing``.
+    private struct Stamp {
+        /// Cumulative index of the block's first frame in the pushed stream.
+        var startFrame: Int
+        var livePtsNanos: Int64
+        var pushedAtNanos: Int64
+        var delayFramesAtPush: Int
+        var framesAheadAtPush: Int
+    }
+
+    /// What ``timing`` reads for the last render that took real frames.
+    private struct RenderStamp {
+        var renderAtNanos: Int64
+        var contentPtsNanos: Int64
+        var pushedAtNanos: Int64
+        var delayFramesAtPush: Int
+        var framesAhead: Int
+    }
+
+    /// razor: the table covers 1024 blocks. The ring holds 2 s, which at the
+    /// 512-frame tap block is 172 entries, so the table never wraps past live
+    /// data; if it ever does, the lookup falls to the oldest surviving entry.
+    private static let stampCapacity = 1024
+    private let stamps: UnsafeMutablePointer<Stamp>
+    // All lock-guarded.
+    private var pushedFrames = 0
+    private var takenFrameIndex = 0
+    private var renderedFramesSinceReset = 0
+    private var stampsWritten = 0
+    private var stampCursor = 0
+    private var lastRender: RenderStamp?
+
     init() {
         storage = UnsafeMutablePointer<Int16>.allocate(capacity: Self.capacityFrames * 2)
         storage.initialize(repeating: 0, count: Self.capacityFrames * 2)
@@ -187,6 +255,10 @@ final class CastFeedRing: CastPCMSource, @unchecked Sendable {
         droppedBlocksWord.initialize(to: 0)
         droppedLockBusyWord = UnsafeMutablePointer<Int>.allocate(capacity: 1)
         droppedLockBusyWord.initialize(to: 0)
+        stamps = UnsafeMutablePointer<Stamp>.allocate(capacity: Self.stampCapacity)
+        stamps.initialize(repeating: Stamp(startFrame: 0, livePtsNanos: 0, pushedAtNanos: 0,
+                                           delayFramesAtPush: 0, framesAheadAtPush: 0),
+                          count: Self.stampCapacity)
     }
 
     deinit {
@@ -194,10 +266,24 @@ final class CastFeedRing: CastPCMSource, @unchecked Sendable {
         storage.deallocate()
         droppedBlocksWord.deallocate()
         droppedLockBusyWord.deallocate()
+        stamps.deinitialize(count: Self.stampCapacity)
+        stamps.deallocate()
+    }
+
+    private static func monotonicNowNanos() -> Int64 {
+        var now = timespec()
+        clock_gettime(CLOCK_MONOTONIC, &now)
+        return SyncTiming.monotonicNanos(now)
     }
 
     /// Producer side (capture IOProc). Interleaved S16LE stereo, 4 bytes/frame.
     func push(_ pcm: Data) {
+        push(pcm, pts: timespec(tv_sec: 0, tv_nsec: 0), nowNanos: Self.monotonicNowNanos())
+    }
+
+    /// ``push(_:)`` with the block's capture `pts` and the push instant, both
+    /// CLOCK_MONOTONIC, stamped for ``timing``.
+    func push(_ pcm: Data, pts: timespec, nowNanos: Int64) {
         let frames = pcm.count / 4
         guard frames > 0 else { return }
         // Retry before giving up. The consumer's critical section is a memcpy
@@ -237,6 +323,14 @@ final class CastFeedRing: CastPCMSource, @unchecked Sendable {
                 memcpy(storage, base + firstRun * 4, (frames - firstRun) * 4)
             }
         }
+        stamps[stampsWritten & (Self.stampCapacity - 1)] = Stamp(
+            startFrame: pushedFrames,
+            livePtsNanos: SyncTiming.monotonicNanos(pts),
+            pushedAtNanos: nowNanos,
+            delayFramesAtPush: delayLine?.delayFrames ?? 0,
+            framesAheadAtPush: availableFrames)
+        stampsWritten += 1
+        pushedFrames += frames
         availableFrames += frames
         writes &+= 1
     }
@@ -295,6 +389,32 @@ final class CastFeedRing: CastPCMSource, @unchecked Sendable {
             writes: writes)
     }
 
+    /// Where the time went for the last rendered frame. Built under the lock,
+    /// like ``stats``.
+    var timing: CastFeedTiming {
+        lock.lock()
+        defer { lock.unlock() }
+        func ms(frames: Int) -> Double { Double(frames) * 1000 / Double(Self.sampleRate) }
+        func ms(nanos: Int64) -> Double { Double(nanos) / 1_000_000 }
+        let last = lastRender.map { stamp -> CastFeedTiming.LastRender in
+            let delayNanos = Int64(stamp.delayFramesAtPush) * 1_000_000_000 / Int64(Self.sampleRate)
+            let ringWait = ms(nanos: stamp.renderAtNanos - stamp.pushedAtNanos)
+            let queueAhead = ms(frames: stamp.framesAhead)
+            return CastFeedTiming.LastRender(
+                ageMs: ms(nanos: stamp.renderAtNanos - stamp.contentPtsNanos),
+                ioprocToPushMs: ms(nanos: stamp.pushedAtNanos - stamp.contentPtsNanos - delayNanos),
+                delayLineMs: ms(frames: stamp.delayFramesAtPush),
+                ringWaitMs: ringWait,
+                queueAheadMs: queueAhead,
+                pacingPhaseMs: ringWait - queueAhead)
+        }
+        return CastFeedTiming(
+            delayLineMs: (delayLine?.delayFrames ?? 0) * 1000 / Self.sampleRate,
+            queuedMs: availableFrames * 1000 / Self.sampleRate,
+            renderedFramesSinceReset: renderedFramesSinceReset,
+            lastRender: last)
+    }
+
     /// How much audio is queued right now. The server's pacing clock waits on
     /// this before it starts, so it never paces against an empty ring.
     var bufferedFrames: Int? { lock.withLock { availableFrames } }
@@ -302,11 +422,35 @@ final class CastFeedRing: CastPCMSource, @unchecked Sendable {
     /// Consumer side (the server's pacing timer). Always exactly `frames * 4`
     /// bytes; anything the ring is short of is silence.
     func render(frames: Int) -> Data {
+        render(frames: frames, nowNanos: Self.monotonicNowNanos())
+    }
+
+    /// ``render(frames:)`` at an injected CLOCK_MONOTONIC instant, stamped for
+    /// ``timing``.
+    func render(frames: Int, nowNanos: Int64) -> Data {
         guard frames > 0 else { return Data() }
         var out = Data(count: frames * 4)
         lock.lock()
         let taken = min(frames, availableFrames)
         if taken > 0 {
+            // Forward only, bounded by the blocks queued ahead.
+            stampCursor = max(stampCursor, stampsWritten - Self.stampCapacity)
+            while stampCursor + 1 < stampsWritten,
+                  stamps[(stampCursor + 1) & (Self.stampCapacity - 1)].startFrame <= takenFrameIndex {
+                stampCursor += 1
+            }
+            let stamp = stamps[stampCursor & (Self.stampCapacity - 1)]
+            let offset = takenFrameIndex - stamp.startFrame
+            let rate = Int64(Self.sampleRate)
+            lastRender = RenderStamp(
+                renderAtNanos: nowNanos,
+                contentPtsNanos: stamp.livePtsNanos
+                    + Int64(offset) * 1_000_000_000 / rate
+                    - Int64(stamp.delayFramesAtPush) * 1_000_000_000 / rate,
+                pushedAtNanos: stamp.pushedAtNanos,
+                delayFramesAtPush: stamp.delayFramesAtPush,
+                framesAhead: stamp.framesAheadAtPush + offset)
+            takenFrameIndex += taken
             let firstRun = min(taken, Self.capacityFrames - readFrame)
             out.withUnsafeMutableBytes { raw in
                 guard let base = raw.baseAddress else { return }
@@ -319,6 +463,7 @@ final class CastFeedRing: CastPCMSource, @unchecked Sendable {
             availableFrames -= taken
         }
         underrunFrames += frames - taken
+        renderedFramesSinceReset += frames
         // Unity on both ends is the whole attenuation-receiver path: the
         // memcpy above is all it costs.
         if currentGain != 1 || targetGain != 1 { applyGainLocked(&out, frames: frames) }
@@ -397,6 +542,12 @@ final class CastFeedRing: CastPCMSource, @unchecked Sendable {
         readFrame = 0
         availableFrames = 0
         feedResets += 1
+        // The first post-reset render must map to the first post-reset push,
+        // never to discarded audio.
+        takenFrameIndex = pushedFrames
+        renderedFramesSinceReset = 0
+        stampCursor = max(0, stampsWritten - 1)
+        lastRender = nil
         // A fresh GET starts at the level the user asked for, not partway
         // through the ramp the previous one was left in.
         currentGain = targetGain
@@ -406,11 +557,26 @@ final class CastFeedRing: CastPCMSource, @unchecked Sendable {
 }
 
 /// The capture fan-out's Cast slot: one `write` in, one `push` per desired
-/// receiver out. `pts` is ignored — a Cast receiver paces itself off the socket.
+/// receiver out. `pts` only stamps the blocks for ``CastFeedRing/timing``; a
+/// Cast receiver paces itself off the socket.
 final class CastFanOut: PCMSink, @unchecked Sendable {
 
     private let lock = NSLock()
     private var rings: [CastFeedRing] = []
+    /// Producer-owned: writes thrown away because `setRings` held the lock.
+    private let droppedWritesWord: UnsafeMutablePointer<Int>
+
+    init() {
+        droppedWritesWord = UnsafeMutablePointer<Int>.allocate(capacity: 1)
+        droppedWritesWord.initialize(to: 0)
+    }
+
+    deinit { droppedWritesWord.deallocate() }
+
+    var droppedWrites: Int {
+        OSMemoryBarrier()                       // acquire: see the producer's word
+        return droppedWritesWord.pointee
+    }
 
     func setRings(_ rings: [CastFeedRing]) {
         lock.lock()
@@ -421,10 +587,23 @@ final class CastFanOut: PCMSink, @unchecked Sendable {
     func write(pcm: Data, pts: timespec) {
         // Called from the capture IOProc: never block, and never hold the lock
         // across the pushes.
-        guard lock.try() else { return }
+        guard lock.try() else {
+            droppedWritesWord.pointee &+= 1
+            OSMemoryBarrier()                   // release: publish before a reader's acquire
+            return
+        }
         let rings = self.rings
         lock.unlock()
-        for ring in rings { ring.push(pcm) }
+        var now = timespec()
+        clock_gettime(CLOCK_MONOTONIC, &now)
+        let nowNanos = SyncTiming.monotonicNanos(now)
+        for ring in rings { ring.push(pcm, pts: pts, nowNanos: nowNanos) }
+    }
+
+    func test_withLockHeld(_ body: () -> Void) {
+        lock.lock()
+        body()
+        lock.unlock()
     }
 }
 
@@ -937,6 +1116,27 @@ final class CastOutputManager: CastOutputControlling, @unchecked Sendable {
             "writes": String(feed.writes),
             "achieved_delay_ms": String(feed.achievedDelayMs),
         ])
+        if AudioDiag.isEnabled {
+            // Same direct read as `stats` above, for the same reason.
+            let timing = session.ring.timing
+            let last = timing.lastRender
+            func ms(_ value: Double?) -> String { value.map { String(format: "%.1f", $0) } ?? "nil" }
+            Telemetry.log(.cast, "cast_stage_timing", [
+                "device": id,
+                "lead_ms": String(leadMs),
+                "kept": kept ? "1" : "0",
+                "age_ms": ms(last?.ageMs),
+                "ioproc_to_push_ms": ms(last?.ioprocToPushMs),
+                "delay_line_ms": ms(last?.delayLineMs),
+                "queue_ahead_ms": ms(last?.queueAheadMs),
+                "pacing_phase_ms": ms(last?.pacingPhaseMs),
+                "ring_wait_ms": ms(last?.ringWaitMs),
+                "e2e_ms": ms(last.map { $0.ageMs + Double(leadMs) }),
+                "queued_ms": String(timing.queuedMs),
+                "rendered_s": String(format: "%.2f", Double(timing.renderedFramesSinceReset) / 44_100),
+                "fanout_drops": String(fanOut.droppedWrites),
+            ])
+        }
         guard kept else { return }
         onLeadSample?(id, leadMs)
     }

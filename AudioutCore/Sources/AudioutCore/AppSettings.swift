@@ -828,20 +828,31 @@ public struct AppSettings {
     /// it. Two cases deliberately get the plain page: a trial that has not
     /// registered yet holds no key, and an invented `t` would name nothing; and
     /// a converted trial (state `.none`) holds a paid key, not a trial id.
+    ///
+    /// Every Buy link also carries `?s=mac-app`, the website's source tag
+    /// (`src/AGENTS.md` "Attribution rides the URL" in the site repo), so the
+    /// site's analytics and the Paddle sale itself say the buyer came from
+    /// the app rather than from a page on the site.
     public var buyURL: URL? {
-        guard let page = buyPageURL else { return nil }
+        guard let page = buyPageURL,
+              var components = URLComponents(url: page, resolvingAgainstBaseURL: false)
+        else { return buyPageURL }
+        var items = (components.queryItems ?? []) + [URLQueryItem(name: "s", value: Self.buySourceTag)]
         let trialHoldsKey: Bool
         switch TrialClock.state(settings: self) {
         case .active, .expired: trialHoldsKey = true
         case .none: trialHoldsKey = false
         }
-        guard trialHoldsKey,
-              let key = licenseKey, !key.isEmpty,
-              var components = URLComponents(url: page, resolvingAgainstBaseURL: false)
-        else { return page }
-        components.queryItems = (components.queryItems ?? []) + [URLQueryItem(name: "t", value: key)]
+        if trialHoldsKey, let key = licenseKey, !key.isEmpty {
+            items.append(URLQueryItem(name: "t", value: key))
+        }
+        components.queryItems = items
         return components.url ?? page
     }
+
+    /// The `s` value on every Buy link. Must match the site's tag shape,
+    /// `^[a-z0-9-]{1,32}$`, or the site ignores it.
+    public static let buySourceTag = "mac-app"
 
     /// The purchase page as configured, before the trial id is added.
     private var buyPageURL: URL? {

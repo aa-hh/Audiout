@@ -527,6 +527,130 @@ import Testing
         #expect(AppSettings(defaults: defaults).licenseKey == nil)
     }
 
+    /// A bare dictionary standing in for the Keychain, so these tests never touch it.
+    /// `failWrites` and `refuseReads` make it refuse every write or read, as a
+    /// locked keychain does.
+    private final class InMemorySecretStore: SecretStoring {
+        var values: [String: String] = [:]
+        var failWrites = false
+        var refuseReads = false
+        func read(_ key: String) -> SecretRead {
+            guard !refuseReads else { return .refused }
+            return values[key].map(SecretRead.value) ?? .missing
+        }
+        func write(_ value: String?, for key: String) -> Bool {
+            guard !failWrites else { return false }
+            values[key] = value
+            return true
+        }
+    }
+
+    /// Turns red if the first read stops moving a key an older build left in
+    /// `UserDefaults` into the secret store (leaving it as plain text), or if
+    /// clearing the key lets the leftover copy migrate back.
+    @Test func aLicenceKeyLeftInDefaultsMovesToTheSecretStoreOnFirstRead() {
+        let store = InMemorySecretStore()
+        defaults.set("OLD-KEY", forKey: "license.key")
+        let settings = AppSettings(defaults: defaults, secrets: store)
+        #expect(settings.licenseKey == "OLD-KEY")
+        #expect(store.read("license.key") == .value("OLD-KEY"))
+        #expect(defaults.string(forKey: "license.key") == nil)
+        settings.licenseKey = nil
+        #expect(store.read("license.key") == .missing)
+        #expect(settings.licenseKey == nil)
+    }
+
+    /// Turns red if `readSecret` removes the `UserDefaults` copy after the
+    /// secret store refused the migration write, which deletes the only copy
+    /// of the licence key, or if a later read stops retrying the move.
+    @Test func aRefusedMigrationKeepsTheLicenceKeyInDefaultsAndRetries() {
+        let store = InMemorySecretStore()
+        store.failWrites = true
+        defaults.set("OLD-KEY", forKey: "license.key")
+        let settings = AppSettings(defaults: defaults, secrets: store)
+        #expect(settings.licenseKey == "OLD-KEY")
+        #expect(defaults.string(forKey: "license.key") == "OLD-KEY")
+        #expect(AppSettings(defaults: defaults, secrets: store).licenseKey == "OLD-KEY")
+        store.failWrites = false
+        #expect(settings.licenseKey == "OLD-KEY")
+        #expect(store.read("license.key") == .value("OLD-KEY"))
+        #expect(defaults.string(forKey: "license.key") == nil)
+    }
+
+    /// Turns red if `writeSecret` drops a value the secret store refused
+    /// instead of keeping it in `UserDefaults`.
+    @Test func aRefusedWriteKeepsTheLicenceKeyReadableFromDefaults() {
+        let store = InMemorySecretStore()
+        store.failWrites = true
+        let settings = AppSettings(defaults: defaults, secrets: store)
+        settings.licenseKey = "NEW-KEY"
+        #expect(store.read("license.key") == .missing)
+        #expect(defaults.string(forKey: "license.key") == "NEW-KEY")
+        #expect(settings.licenseKey == "NEW-KEY")
+        #expect(AppSettings(defaults: defaults, secrets: store).licenseKey == "NEW-KEY")
+    }
+
+    /// Turns red if a read the secret store refused (a locked login keychain)
+    /// makes a registered Mac look unregistered, so it plays on one speaker
+    /// and sees the first-open gate, or if that read moves or deletes the
+    /// copy in `UserDefaults`.
+    @Test func aRefusedReadKeepsARegisteredMacRegistered() {
+        let store = InMemorySecretStore()
+        store.values["license.key"] = "PAID-KEY"
+        let settings = AppSettings(defaults: defaults,
+                                   licenseServerURL: URL(string: "https://license.example.com")!,
+                                   secrets: store)
+        settings.licenseStatus = .active
+        store.refuseReads = true
+
+        #expect(!LicenseGate.limitsToOneSpeaker(settings: settings))
+        #expect(!LicenseGate.shouldPresent(settings: settings, presentation: .auto))
+
+        defaults.set("old-token", forKey: "license.companionToken")
+        #expect(settings.companionToken == "old-token")
+        #expect(defaults.string(forKey: "license.companionToken") == "old-token",
+                "a refused read leaves the defaults copy where it is")
+    }
+
+    /// Turns red if `hasLicenseKey` counts every refused read as a stored key,
+    /// which makes a Mac that never had one read as registered whenever its
+    /// keychain is locked.
+    @Test func aRefusedReadWithNoVerdictAndNoDefaultsCopyIsNoKey() {
+        let store = InMemorySecretStore()
+        store.refuseReads = true
+        let settings = AppSettings(defaults: defaults, secrets: store)
+        #expect(!settings.hasLicenseKey)
+        #expect(settings.licenseUnregistered)
+    }
+
+    /// Turns red if a read that finds a value in the secret store ignores the
+    /// newer copy a refused write left in `UserDefaults`, which brings back the
+    /// key the user replaced, or if that copy is removed before the store has
+    /// taken it.
+    @Test func aDefaultsCopyLeftByARefusedWriteWinsOverTheStoredKey() {
+        let store = InMemorySecretStore()
+        store.values["license.key"] = "OLD-KEY"
+        defaults.set("NEW-KEY", forKey: "license.key")
+        store.failWrites = true
+        let settings = AppSettings(defaults: defaults, secrets: store)
+        #expect(settings.licenseKey == "NEW-KEY")
+        #expect(defaults.string(forKey: "license.key") == "NEW-KEY")
+        store.failWrites = false
+        #expect(settings.licenseKey == "NEW-KEY")
+        #expect(store.read("license.key") == .value("NEW-KEY"))
+        #expect(defaults.string(forKey: "license.key") == nil)
+    }
+
+    /// Turns red if the companion token skips the migration the licence key gets.
+    @Test func companionTokenFollowsTheSameMigration() {
+        let store = InMemorySecretStore()
+        defaults.set("old-token", forKey: "license.companionToken")
+        let settings = AppSettings(defaults: defaults, secrets: store)
+        #expect(settings.companionToken == "old-token")
+        #expect(store.read("license.companionToken") == .value("old-token"))
+        #expect(defaults.string(forKey: "license.companionToken") == nil)
+    }
+
     /// The bundle key is what a real build reads; under a test run
     /// `Bundle.main` is the runner, so the honest default here is "no server"
     /// — which IS the free build's state — and the init override is the only

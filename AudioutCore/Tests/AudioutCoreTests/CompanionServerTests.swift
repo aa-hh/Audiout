@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+import CryptoKit
 import Foundation
 import Testing
 import Network
@@ -8,7 +9,7 @@ import AudioutProtocol
 
 /// Lifecycle tests for `CompanionServer` (PLAN-COMPANION-APP T5), driven
 /// through real loopback WebSocket connections handed straight to the
-/// internal `accept(_:)` seam — NEVER through `start(name:)`'s own listener.
+/// internal `accept(_:)` seam — NEVER through `start(identity:)`'s own listener.
 /// That listener binds ALL interfaces and Bonjour-advertises, and an
 /// all-interfaces bind is exactly what trips macOS's Application Firewall
 /// "accept incoming network connections?" prompt for the xctest process on a
@@ -75,9 +76,9 @@ import AudioutProtocol
     // MARK: - Loopback WebSocket harness
 
     /// A `127.0.0.1`-only WebSocket listener whose accepted server-side
-    /// connections are exactly what `CompanionServer.start(name:)`'s own
-    /// `newConnectionHandler` would see: un-started, WebSocket in the stack,
-    /// ready to hand to `accept(_:)`.
+    /// connections are what `CompanionServer.start(identity:)`'s own
+    /// `newConnectionHandler` would see minus the TLS layer: un-started,
+    /// WebSocket in the stack, ready to hand to `accept(_:)`.
     private final class LoopbackHub: @unchecked Sendable {
         let listener: NWListener
         let netQueue = DispatchQueue(label: "CompanionServerTests.loopback")
@@ -186,20 +187,59 @@ import AudioutProtocol
         client.send(content: data, contentContext: context, isComplete: true, completion: .contentProcessed { _ in })
     }
 
-    /// A syntactically valid phone identity for tests that aren't about the
-    /// clientID itself.
-    static let validClientID = "2B5E5A2B-58D8-4979-9F41-92E668FD9C0A"
+    /// The phone key every test signs with unless it is about telling
+    /// phones apart: a fixed scalar, so its client id is a constant.
+    static let testKey = try! P256.Signing.PrivateKey(rawRepresentation: Data(repeating: 0x11, count: 32))
+    static var testClientID: String {
+        CompanionPairing.clientID(forPublicKey: testKey.publicKey.rawRepresentation)
+    }
 
-    private func sendHello(over client: NWConnection, name: String = "phone", clientID: String = CompanionServerTests.validClientID, protoVersion: Int = CompanionProto.version) throws {
-        sendText(try CompanionEnvelope(message: .hello(clientID: clientID, clientName: name, protoVersion: protoVersion)).encoded(), over: client)
+    /// The certificate fingerprint every server under test claims, and so
+    /// what every test phone signs over.
+    static let testFingerprint = Data(repeating: 0xAB, count: 32)
+
+    /// The nonce of the `challenge` this client received, once it has.
+    private func challengeNonce(in log: MessageLog) async throws -> Data {
+        func nonce() -> Data? {
+            for case .challenge(let text) in log.messages { return Data(base64Encoded: text) }
+            return nil
+        }
+        try #require(await waitUntil { nonce() != nil }, "the server never sent its challenge")
+        return try #require(nonce())
+    }
+
+    /// Wait for this connection's challenge, sign it with `key` over
+    /// `fingerprint`, and send the version 2 hello — what a real phone does.
+    private func sendAuthenticatedHello(over client: NWConnection, log: MessageLog,
+                                        key: P256.Signing.PrivateKey = CompanionServerTests.testKey,
+                                        name: String = "phone",
+                                        protoVersion: Int = CompanionProto.version,
+                                        fingerprint: Data = CompanionServerTests.testFingerprint,
+                                        checksPairingCode: Bool = false) async throws {
+        let nonce = try await challengeNonce(in: log)
+        let signature = try key.signature(for: CompanionPairing.authenticationMessage(
+            serverNonce: nonce, serverCertificateSHA256: fingerprint))
+        sendText(try CompanionEnvelope(message: .hello(
+            clientKey: key.publicKey.rawRepresentation.base64EncodedString(),
+            clientName: name,
+            protoVersion: protoVersion,
+            signature: signature.rawRepresentation.base64EncodedString(),
+            checksPairingCode: checksPairingCode)).encoded(), over: client)
+    }
+
+    /// A server claiming ``testFingerprint`` as its certificate.
+    private func makeServer() -> CompanionServer {
+        let server = CompanionServer()
+        server.localCertificateSHA256 = Self.testFingerprint
+        return server
     }
 
     /// A server whose T24 approval gate answers `.approved` instantly — what
     /// every pre-approval test below means by "a client hellos and is
     /// promoted". The gate's own behavior is tested separately at the end.
     private func makeAutoApprovingServer() -> CompanionServer {
-        let server = CompanionServer()
-        server.onApprovalRequest = { _, _, decide in decide(.approved) }
+        let server = makeServer()
+        server.onApprovalRequest = { _, _, _, _, _, decide in decide(.approved) }
         return server
     }
 
@@ -237,7 +277,7 @@ import AudioutProtocol
 
         let (client, log) = try await connectClient(via: hub, to: server)
         defer { client.cancel() }
-        try sendHello(over: client)
+        try await sendAuthenticatedHello(over: client, log: log)
 
         #expect(await waitUntil { log.contains(.welcome(serverName: "TestMac", protoVersion: CompanionProto.version, snapshot: snapshot, companionToken: nil)) },
                 "the client never received its welcome with the cached snapshot")
@@ -255,7 +295,7 @@ import AudioutProtocol
 
         let (client, log) = try await connectClient(via: hub, to: server)
         defer { client.cancel() }
-        try sendHello(over: client)
+        try await sendAuthenticatedHello(over: client, log: log)
 
         #expect(await waitUntil { log.contains(.welcome(serverName: "TestMac", protoVersion: CompanionProto.version, snapshot: snapshot, companionToken: "eyJ2IjoxfQ.c2ln")) },
                 "the welcome should carry the token the wiring answered at send time")
@@ -278,7 +318,7 @@ import AudioutProtocol
         func joinIDOfNextWelcome() async throws -> String? {
             let (client, log) = try await connectClient(via: hub, to: server)
             defer { client.cancel() }
-            try sendHello(over: client)
+            try await sendAuthenticatedHello(over: client, log: log)
             try #require(await waitUntil { log.messages.contains { if case .welcome = $0 { return true } else { return false } } },
                          "the client was never welcomed")
             for message in log.messages {
@@ -300,7 +340,7 @@ import AudioutProtocol
 
         let (client, log) = try await connectClient(via: hub, to: server)
         defer { client.cancel() }
-        try sendHello(over: client)
+        try await sendAuthenticatedHello(over: client, log: log)
         try #require(await waitUntil { log.messages.contains { if case .welcome = $0 { return true } else { return false } } },
                      "welcome never arrived")
 
@@ -319,7 +359,7 @@ import AudioutProtocol
 
         let (client, log) = try await connectClient(via: hub, to: server)
         defer { client.cancel() }
-        try sendHello(over: client, protoVersion: CompanionProto.version + 1)
+        try await sendAuthenticatedHello(over: client, log: log, protoVersion: CompanionProto.version + 1)
 
         #expect(await waitUntil { log.contains(.goodbye(reason: "protoMismatch")) },
                 "the newer-proto client never got its goodbye")
@@ -364,7 +404,7 @@ import AudioutProtocol
 
         let (client, log) = try await connectClient(via: hub, to: server)
         defer { client.cancel() }
-        try sendHello(over: client)
+        try await sendAuthenticatedHello(over: client, log: log)
         // Wait for promotion before the first command. Approval reaches the
         // server as two queued jobs; a command frame that lands between them
         // is dropped as "command before hello" and the reply never comes.
@@ -391,8 +431,8 @@ import AudioutProtocol
         defer { clientA.cancel() }
         let (clientB, logB) = try await connectClient(via: hub, to: server)
         defer { clientB.cancel() }
-        try sendHello(over: clientA, name: "phoneA")
-        try sendHello(over: clientB, name: "phoneB")
+        try await sendAuthenticatedHello(over: clientA, log: logA, name: "phoneA")
+        try await sendAuthenticatedHello(over: clientB, log: logB, name: "phoneB")
         try #require(await waitUntil {
             logA.contains(.welcome(serverName: "TestMac", protoVersion: CompanionProto.version, snapshot: snap1, companionToken: nil))
                 && logB.contains(.welcome(serverName: "TestMac", protoVersion: CompanionProto.version, snapshot: snap1, companionToken: nil))
@@ -426,10 +466,12 @@ import AudioutProtocol
         defer { offender.cancel() }
         let (bystander, bystanderLog) = try await connectClient(via: hub, to: server)
         defer { bystander.cancel() }
-        try sendHello(over: offender, name: "offender")
-        try sendHello(over: bystander, name: "bystander")
+        try await sendAuthenticatedHello(over: offender, log: offenderLog, name: "offender")
+        try await sendAuthenticatedHello(over: bystander, log: bystanderLog, name: "bystander")
         try #require(await waitUntil {
-            offenderLog.messages.count >= 1 && bystanderLog.messages.count >= 1
+            [offenderLog, bystanderLog].allSatisfy { log in
+                log.messages.contains { if case .welcome = $0 { return true } else { return false } }
+            }
         }, "both clients must be welcomed first")
 
         sendText(Data("definitely not json".utf8), over: offender)
@@ -454,23 +496,33 @@ import AudioutProtocol
         // Valid JSON, over the 64 KB per-message cap — the size check, not
         // the malformed-frame path, is what must trip.
         let hugeName = String(repeating: "a", count: 70_000)
-        try sendHello(over: client, name: hugeName)
+        try await sendAuthenticatedHello(over: client, log: log, name: hugeName)
         #expect(await waitUntil { log.closed },
                 "the oversized-frame sender was never closed")
     }
 
     // MARK: - Client cap
 
+    /// Also turns red if a connection the gate approved into a full server
+    /// is not reported as closed unadmitted, which leaves its pairing-code
+    /// alert up.
     @Test func clientCapRefusesPolitelyAndKeepsExistingClients() async throws {
         let hub = try await makeHub()
         defer { hub.cancel() }
         let server = makeAutoApprovingServer()
         server.test_maxClientsOverride = 1 // real cap is 16
         defer { server.stop() }
+        let asked = LockedBox<[String: UUID]>([:])
+        server.onApprovalRequest = { _, name, _, _, connectionID, decide in
+            asked.withLock { $0[name] = connectionID }
+            decide(.approved)
+        }
+        let closedUnadmitted = LockedBox<[UUID]>([])
+        server.onAwaitingConnectionClosed = { id in closedUnadmitted.withLock { $0.append(id) } }
 
         let (kept, keptLog) = try await connectClient(via: hub, to: server)
         defer { kept.cancel() }
-        try sendHello(over: kept, name: "first")
+        try await sendAuthenticatedHello(over: kept, log: keptLog, name: "first")
         try #require(await waitUntil { server.test_clientNames() == ["first"] },
                      "the first client was never promoted")
 
@@ -478,11 +530,13 @@ import AudioutProtocol
         // connecting must not trip it (that's the pre-hello ghost fix).
         let (refused, refusedLog) = try await connectClient(via: hub, to: server)
         defer { refused.cancel() }
-        try sendHello(over: refused, name: "second")
+        try await sendAuthenticatedHello(over: refused, log: refusedLog, name: "second")
         #expect(await waitUntil { refusedLog.contains(.goodbye(reason: "serverFull")) },
                 "the over-cap client never got its polite goodbye")
         #expect(await waitUntil { refusedLog.closed },
                 "the over-cap client's connection was never closed")
+        #expect(await waitUntil { closedUnadmitted.value == [asked.value["second"]].compactMap { $0 } },
+                "the over-cap client was never reported closed unadmitted")
 
         // The kept client said hello before any snapshot existed, so this
         // first broadcast also exercises the deferred-welcome path.
@@ -510,8 +564,8 @@ import AudioutProtocol
         defer { clientA.cancel() }
         let (clientB, logB) = try await connectClient(via: hub, to: server)
         defer { clientB.cancel() }
-        try sendHello(over: clientA, name: "phoneA")
-        try sendHello(over: clientB, name: "phoneB")
+        try await sendAuthenticatedHello(over: clientA, log: logA, name: "phoneA")
+        try await sendAuthenticatedHello(over: clientB, log: logB, name: "phoneB")
         try #require(await waitUntil { counts.value.last == 2 }, "both clients were never counted")
 
         server.stop()
@@ -536,7 +590,7 @@ import AudioutProtocol
 
         let (client, log) = try await connectClient(via: hub, to: server)
         defer { client.cancel() }
-        try sendHello(over: client)
+        try await sendAuthenticatedHello(over: client, log: log)
         try #require(await waitUntil { log.messages.contains { if case .welcome = $0 { return true } else { return false } } },
                      "the client was never welcomed")
 
@@ -571,7 +625,7 @@ import AudioutProtocol
         // A real phone arriving after the ghost must still get the one slot.
         let (real, realLog) = try await connectClient(via: hub, to: server)
         defer { real.cancel() }
-        try sendHello(over: real, name: "real")
+        try await sendAuthenticatedHello(over: real, log: realLog, name: "real")
         #expect(await waitUntil { realLog.messages.contains { if case .welcome = $0 { return true } else { return false } } },
                 "an un-helloed ghost consumed the only client slot")
 
@@ -579,7 +633,7 @@ import AudioutProtocol
         // refused.
         let (late, lateLog) = try await connectClient(via: hub, to: server)
         defer { late.cancel() }
-        try sendHello(over: late, name: "late")
+        try await sendAuthenticatedHello(over: late, log: lateLog, name: "late")
         #expect(await waitUntil { lateLog.contains(.goodbye(reason: CompanionGoodbyeReason.serverFull)) },
                 "the over-cap helloing client was never refused")
     }
@@ -641,7 +695,7 @@ import AudioutProtocol
         // shape (a real live client's stack auto-pongs).
         let (client, log) = try await connectClient(via: hub, to: server)
         defer { client.cancel() }
-        try sendHello(over: client)
+        try await sendAuthenticatedHello(over: client, log: log)
         try #require(await waitUntil { log.messages.contains { if case .welcome = $0 { return true } else { return false } } },
                      "the client was never welcomed")
 
@@ -665,7 +719,7 @@ import AudioutProtocol
 
         let (client, log) = try await connectClient(via: hub, to: server, autoReplyPing: true)
         defer { client.cancel() }
-        try sendHello(over: client)
+        try await sendAuthenticatedHello(over: client, log: log)
         try #require(await waitUntil { log.messages.contains { if case .welcome = $0 { return true } else { return false } } },
                      "the client was never welcomed")
 
@@ -691,11 +745,20 @@ import AudioutProtocol
 
         let (client, log) = try await connectClient(via: hub, to: server)
         defer { client.cancel() }
-        try sendHello(over: client, name: String(repeating: "a", count: 200))
+        try await sendAuthenticatedHello(over: client, log: log, name: String(repeating: "a", count: 200))
         try #require(await waitUntil { log.messages.contains { if case .welcome = $0 { return true } else { return false } } },
                      "the long-named client was never welcomed")
         #expect(server.test_clientNames() == [String(repeating: "a", count: 64)],
                 "the attacker-controlled clientName was not truncated at parse")
+    }
+
+    /// Turns red if a line break or control character in the hello's name
+    /// reaches a surface that shows it (an alert title, a Settings row), or
+    /// if the cut to 64 characters stops applying.
+    @Test func aClientNameIsFlattenedToOneLine() {
+        #expect(CompanionServer.displayName("  Ada's\niPhone\r\u{2028}\u{0007}  ") == "Ada's iPhone")
+        #expect(CompanionServer.displayName("\n\n") == "")
+        #expect(CompanionServer.displayName(String(repeating: "b", count: 200)).count == 64)
     }
 
     /// Refuse-forward must hold on EVERY frame, not just the hello — a peer
@@ -710,7 +773,7 @@ import AudioutProtocol
 
         let (client, log) = try await connectClient(via: hub, to: server)
         defer { client.cancel() }
-        try sendHello(over: client)
+        try await sendAuthenticatedHello(over: client, log: log)
         try #require(await waitUntil { log.messages.contains { if case .welcome = $0 { return true } else { return false } } },
                      "the client was never welcomed")
 
@@ -742,7 +805,7 @@ import AudioutProtocol
         }
 
         let (client, log) = try await connectClient(via: hub, to: server)
-        try sendHello(over: client)
+        try await sendAuthenticatedHello(over: client, log: log)
         // Same race as commandRoundTripDeliversTheReply: wait for promotion, then command.
         try #require(await waitUntil { server.test_clientNames().contains("phone") },
                      "the client was never promoted")
@@ -763,24 +826,23 @@ import AudioutProtocol
     @Test func approvedDecisionPromotesAndWelcomes() async throws {
         let hub = try await makeHub()
         defer { hub.cancel() }
-        let server = CompanionServer()
+        let server = makeServer()
         defer { server.stop() }
         server.broadcast(makeSnapshot())
 
         let asked = LockedBox<(id: String, name: String)?>(nil)
-        server.onApprovalRequest = { clientID, clientName, decide in
+        server.onApprovalRequest = { clientID, clientName, _, _, _, decide in
             asked.value = (clientID, clientName)
             decide(.approved)
         }
 
         let (client, log) = try await connectClient(via: hub, to: server)
         defer { client.cancel() }
-        try sendHello(over: client, name: "Owner's iPhone")
+        try await sendAuthenticatedHello(over: client, log: log, name: "Owner's iPhone")
 
         #expect(await waitUntil { log.messages.contains { if case .welcome = $0 { return true } else { return false } } },
                 "the approved client was never welcomed")
         let request = try #require(asked.value)
-        #expect(request.id == Self.validClientID, "the gate must see the (canonicalized) clientID")
         #expect(request.name == "Owner's iPhone")
         // No awaitingApproval frame on the fast path: an already-approved
         // phone must never flash "check your Mac".
@@ -791,14 +853,14 @@ import AudioutProtocol
     @Test func deniedDecisionSendsNotApprovedAndCloses() async throws {
         let hub = try await makeHub()
         defer { hub.cancel() }
-        let server = CompanionServer()
+        let server = makeServer()
         defer { server.stop() }
         server.broadcast(makeSnapshot())
-        server.onApprovalRequest = { _, _, decide in decide(.denied) }
+        server.onApprovalRequest = { _, _, _, _, _, decide in decide(.denied) }
 
         let (client, log) = try await connectClient(via: hub, to: server)
         defer { client.cancel() }
-        try sendHello(over: client)
+        try await sendAuthenticatedHello(over: client, log: log)
 
         #expect(await waitUntil { log.contains(.goodbye(reason: CompanionGoodbyeReason.notApproved)) },
                 "the denied client never learned why it was refused")
@@ -813,7 +875,7 @@ import AudioutProtocol
     @Test func unknownClientIsHeldPastTheHandshakeDeadlineThenPromotedOnApproval() async throws {
         let hub = try await makeHub()
         defer { hub.cancel() }
-        let server = CompanionServer()
+        let server = makeServer()
         // Short enough to outlive cheaply below, long enough that the hello
         // itself always lands inside it even on a loaded machine.
         server.test_handshakeTimeoutOverride = 0.5
@@ -821,14 +883,14 @@ import AudioutProtocol
         server.broadcast(makeSnapshot())
 
         let decider = LockedBox<(@Sendable (CompanionServer.ApprovalDecision) -> Void)?>(nil)
-        server.onApprovalRequest = { _, _, decide in
+        server.onApprovalRequest = { _, _, _, _, _, decide in
             decide(.pending)
             decider.value = decide
         }
 
         let (client, log) = try await connectClient(via: hub, to: server)
         defer { client.cancel() }
-        try sendHello(over: client)
+        try await sendAuthenticatedHello(over: client, log: log)
 
         #expect(await waitUntil { log.contains(.awaitingApproval) },
                 "the unknown client was never told it's awaiting approval")
@@ -847,15 +909,15 @@ import AudioutProtocol
     @Test func awaitingApprovalTimesOutWithARetryableReason() async throws {
         let hub = try await makeHub()
         defer { hub.cancel() }
-        let server = CompanionServer()
+        let server = makeServer()
         server.test_approvalTimeoutOverride = 0.3 // real default is 180s
         defer { server.stop() }
         server.broadcast(makeSnapshot())
-        server.onApprovalRequest = { _, _, decide in decide(.pending) } // never answered
+        server.onApprovalRequest = { _, _, _, _, _, decide in decide(.pending) } // never answered
 
         let (client, log) = try await connectClient(via: hub, to: server)
         defer { client.cancel() }
-        try sendHello(over: client)
+        try await sendAuthenticatedHello(over: client, log: log)
 
         #expect(await waitUntil { log.contains(.goodbye(reason: CompanionGoodbyeReason.approvalTimedOut)) },
                 "the unanswered client never got the timeout goodbye")
@@ -866,62 +928,72 @@ import AudioutProtocol
         #expect(server.test_awaitingCount() == 0)
     }
 
+    /// Also turns red if a connection dying before admission is not
+    /// reported, by its own id, as closed unadmitted.
     @Test func droppedAwaitingConnectionReportsAbandonment() async throws {
         let hub = try await makeHub()
         defer { hub.cancel() }
-        let server = CompanionServer()
+        let server = makeServer()
         defer { server.stop() }
         server.broadcast(makeSnapshot())
-        server.onApprovalRequest = { _, _, decide in decide(.pending) }
+        let asked = LockedBox<[UUID]>([])
+        server.onApprovalRequest = { _, _, _, _, connectionID, decide in
+            asked.withLock { $0.append(connectionID) }
+            decide(.pending)
+        }
         let abandoned = LockedBox<[String]>([])
         server.onApprovalAbandoned = { clientID in abandoned.withLock { $0.append(clientID) } }
+        let closedUnadmitted = LockedBox<[UUID]>([])
+        server.onAwaitingConnectionClosed = { id in closedUnadmitted.withLock { $0.append(id) } }
 
-        let (client, _) = try await connectClient(via: hub, to: server)
-        try sendHello(over: client)
+        let (client, log) = try await connectClient(via: hub, to: server)
+        try await sendAuthenticatedHello(over: client, log: log)
 
         #expect(await waitUntil { server.test_awaitingCount() == 1 },
                 "the client never reached the awaiting pool")
         client.cancel()
 
-        #expect(await waitUntil { abandoned.value == [Self.validClientID] },
+        #expect(await waitUntil { abandoned.value == [Self.testClientID] },
                 "the dropped connection never reported abandonment")
         #expect(await waitUntil { server.test_awaitingCount() == 0 },
                 "the dropped connection's awaiting entry was never removed")
+        #expect(await waitUntil { !asked.value.isEmpty && closedUnadmitted.value == asked.value },
+                "the dropped connection was never reported closed unadmitted")
     }
 
     @Test func approvalDeadlineReportsAbandonment() async throws {
         let hub = try await makeHub()
         defer { hub.cancel() }
-        let server = CompanionServer()
+        let server = makeServer()
         server.test_approvalTimeoutOverride = 0.3 // real default is 180s
         defer { server.stop() }
         server.broadcast(makeSnapshot())
-        server.onApprovalRequest = { _, _, decide in decide(.pending) } // never answered
+        server.onApprovalRequest = { _, _, _, _, _, decide in decide(.pending) } // never answered
         let abandoned = LockedBox<[String]>([])
         server.onApprovalAbandoned = { clientID in abandoned.withLock { $0.append(clientID) } }
 
-        let (client, _) = try await connectClient(via: hub, to: server)
+        let (client, log) = try await connectClient(via: hub, to: server)
         defer { client.cancel() }
-        try sendHello(over: client)
+        try await sendAuthenticatedHello(over: client, log: log)
 
-        #expect(await waitUntil { abandoned.value == [Self.validClientID] },
+        #expect(await waitUntil { abandoned.value == [Self.testClientID] },
                 "the approval-deadline reap never reported abandonment")
     }
 
     @Test func abandonmentWaitsForTheLastConnectionOfThatPhone() async throws {
         let hub = try await makeHub()
         defer { hub.cancel() }
-        let server = CompanionServer()
+        let server = makeServer()
         defer { server.stop() }
         server.broadcast(makeSnapshot())
-        server.onApprovalRequest = { _, _, decide in decide(.pending) }
+        server.onApprovalRequest = { _, _, _, _, _, decide in decide(.pending) }
         let abandoned = LockedBox<[String]>([])
         server.onApprovalAbandoned = { clientID in abandoned.withLock { $0.append(clientID) } }
 
-        let (clientA, _) = try await connectClient(via: hub, to: server)
-        try sendHello(over: clientA)
-        let (clientB, _) = try await connectClient(via: hub, to: server)
-        try sendHello(over: clientB)
+        let (clientA, logA) = try await connectClient(via: hub, to: server)
+        try await sendAuthenticatedHello(over: clientA, log: logA)
+        let (clientB, logB) = try await connectClient(via: hub, to: server)
+        try await sendAuthenticatedHello(over: clientB, log: logB)
 
         #expect(await waitUntil { server.test_awaitingCount() == 2 },
                 "both connections never reached the awaiting pool")
@@ -934,11 +1006,14 @@ import AudioutProtocol
 
         clientB.cancel()
 
-        #expect(await waitUntil { abandoned.value == [Self.validClientID] },
+        #expect(await waitUntil { abandoned.value == [Self.testClientID] },
                 "abandonment never fired once the last awaiting connection for the phone died")
     }
 
-    @Test func helloWithoutClientIDIsRefusedWithAClearReason() async throws {
+    /// Turns red if the server stops checking `clientKey`'s length before
+    /// trusting it: 63 bytes can be no raw P-256 point, so the refusal is
+    /// `invalidClientKey` whatever CryptoKit would make of the bytes.
+    @Test func helloWithAMalformedKeyIsRefusedWithInvalidClientKey() async throws {
         let hub = try await makeHub()
         defer { hub.cancel() }
         let server = makeAutoApprovingServer()
@@ -947,19 +1022,24 @@ import AudioutProtocol
 
         let (client, log) = try await connectClient(via: hub, to: server)
         defer { client.cancel() }
-        // Raw frame with NO clientID key — the exact shape a pre-T24 client
-        // would send. It must decode (not read as malformed) and be refused
-        // with a reason the phone can act on.
-        sendText(Data("""
-        {"v": 1, "type": "hello", "payload": {"clientName": "old phone", "protoVersion": 1}}
-        """.utf8), over: client)
+        _ = try await challengeNonce(in: log)
+        sendText(try CompanionEnvelope(message: .hello(
+            clientKey: Data(count: 63).base64EncodedString(),
+            clientName: "phone",
+            protoVersion: CompanionProto.version,
+            signature: Data(count: 64).base64EncodedString())).encoded(), over: client)
 
-        #expect(await waitUntil { log.contains(.goodbye(reason: CompanionGoodbyeReason.invalidClientID)) },
-                "the clientID-less hello never got its reasoned refusal")
+        #expect(await waitUntil { log.contains(.goodbye(reason: CompanionGoodbyeReason.invalidClientKey)) },
+                "the malformed key was never refused")
         #expect(await waitUntil { log.closed }, "the refused client's connection was never closed")
+        #expect(!log.messages.contains { if case .welcome = $0 { return true } else { return false } })
     }
 
-    @Test func helloWithAMalformedClientIDIsRefused() async throws {
+    /// Turns red if a 64-byte key that is no point on the curve ever gets a
+    /// welcome. On macOS CryptoKit imports the all-zero bytes without throwing,
+    /// so the refusal can come from the signature check instead of the key
+    /// check; either refusal is correct, a welcome never is.
+    @Test func helloWithAnAllZeroKeyIsRefusedAndNeverWelcomed() async throws {
         let hub = try await makeHub()
         defer { hub.cancel() }
         let server = makeAutoApprovingServer()
@@ -968,31 +1048,175 @@ import AudioutProtocol
 
         let (client, log) = try await connectClient(via: hub, to: server)
         defer { client.cancel() }
-        try sendHello(over: client, clientID: "definitely-not-a-uuid")
+        _ = try await challengeNonce(in: log)
+        sendText(try CompanionEnvelope(message: .hello(
+            clientKey: Data(count: 64).base64EncodedString(),
+            clientName: "phone",
+            protoVersion: CompanionProto.version,
+            signature: Data(count: 64).base64EncodedString())).encoded(), over: client)
 
-        #expect(await waitUntil { log.contains(.goodbye(reason: CompanionGoodbyeReason.invalidClientID)) },
-                "the malformed clientID was never refused")
+        #expect(await waitUntil {
+            log.contains(.goodbye(reason: CompanionGoodbyeReason.invalidClientKey))
+                || log.contains(.goodbye(reason: CompanionGoodbyeReason.authenticationFailed))
+        }, "the all-zero key was never refused")
         #expect(await waitUntil { log.closed }, "the refused client's connection was never closed")
+        #expect(!log.messages.contains { if case .welcome = $0 { return true } else { return false } })
+    }
+
+    /// Turns red if the signed message stops binding this Mac's certificate
+    /// fingerprint, so a signature made for another Mac would verify here.
+    @Test func helloSignedOverTheWrongFingerprintIsRefusedWithAuthenticationFailed() async throws {
+        let hub = try await makeHub()
+        defer { hub.cancel() }
+        let server = makeAutoApprovingServer()
+        defer { server.stop() }
+        server.broadcast(makeSnapshot())
+
+        let (client, log) = try await connectClient(via: hub, to: server)
+        defer { client.cancel() }
+        try await sendAuthenticatedHello(over: client, log: log,
+                                         fingerprint: Data(repeating: 0xCD, count: 32))
+
+        #expect(await waitUntil { log.contains(.goodbye(reason: CompanionGoodbyeReason.authenticationFailed)) },
+                "a signature over another certificate was accepted")
+        #expect(await waitUntil { log.closed }, "the refused client's connection was never closed")
+        #expect(!log.messages.contains { if case .welcome = $0 { return true } else { return false } })
+    }
+
+    /// Turns red if the server checks the signature against anything but the
+    /// key the hello presents — a phone could then claim an approved phone's
+    /// key without holding it.
+    @Test func helloSignedWithAnotherKeyIsRefused() async throws {
+        let hub = try await makeHub()
+        defer { hub.cancel() }
+        let server = makeAutoApprovingServer()
+        defer { server.stop() }
+        server.broadcast(makeSnapshot())
+
+        let (client, log) = try await connectClient(via: hub, to: server)
+        defer { client.cancel() }
+        let nonce = try await challengeNonce(in: log)
+        let impostor = P256.Signing.PrivateKey()
+        let signature = try impostor.signature(for: CompanionPairing.authenticationMessage(
+            serverNonce: nonce, serverCertificateSHA256: Self.testFingerprint))
+        sendText(try CompanionEnvelope(message: .hello(
+            clientKey: Self.testKey.publicKey.rawRepresentation.base64EncodedString(),
+            clientName: "phone",
+            protoVersion: CompanionProto.version,
+            signature: signature.rawRepresentation.base64EncodedString())).encoded(), over: client)
+
+        #expect(await waitUntil { log.contains(.goodbye(reason: CompanionGoodbyeReason.authenticationFailed)) },
+                "a hello signed by a different key was accepted")
+        #expect(!log.messages.contains { if case .welcome = $0 { return true } else { return false } })
+    }
+
+    /// Turns red if the approval gate is handed anything other than the hash
+    /// of the verified key as the phone's id, a pairing code computed over
+    /// anything other than this Mac's fingerprint and that key, a code-check
+    /// flag other than the hello's, or a connection id other than the one
+    /// `onClientDisconnected` later reports (the code-check alert closes on it).
+    @Test func aValidHelloYieldsTheKeyHashAsClientIDAndAPairingCode() async throws {
+        let hub = try await makeHub()
+        defer { hub.cancel() }
+        let server = makeServer()
+        defer { server.stop() }
+        server.broadcast(makeSnapshot())
+
+        let asked = LockedBox<(id: String, code: String, checks: Bool, connection: UUID)?>(nil)
+        server.onApprovalRequest = { clientID, _, pairingCode, checksPairingCode, connectionID, decide in
+            asked.value = (clientID, pairingCode, checksPairingCode, connectionID)
+            decide(.approved)
+        }
+        let disconnected = LockedBox<UUID?>(nil)
+        server.onClientDisconnected = { disconnected.value = $0 }
+
+        let (client, log) = try await connectClient(via: hub, to: server)
+        defer { client.cancel() }
+        try await sendAuthenticatedHello(over: client, log: log, checksPairingCode: true)
+
+        let request = try #require(await waitUntil { asked.value != nil } ? asked.value : nil,
+                                   "the gate was never asked")
+        let publicKey = Self.testKey.publicKey.rawRepresentation
+        #expect(request.id == CompanionPairing.clientID(forPublicKey: publicKey))
+        #expect(request.code == CompanionPairing.pairingCode(serverCertificateSHA256: Self.testFingerprint,
+                                                            clientPublicKey: publicKey))
+        #expect(request.code.count == 6 && request.code.allSatisfy(\.isNumber))
+        #expect(request.checks)
+
+        #expect(await waitUntil { log.messages.contains { if case .welcome = $0 { return true } else { return false } } })
+        client.cancel()
+        #expect(await waitUntil { disconnected.value != nil })
+        #expect(disconnected.value == request.connection)
+    }
+
+    /// Turns red if `.pairingClosed` stops reaching the phone as its own
+    /// goodbye reason, which is what tells the user to click Pair an iPhone.
+    @Test func pairingClosedDecisionSendsThatGoodbye() async throws {
+        let hub = try await makeHub()
+        defer { hub.cancel() }
+        let server = makeServer()
+        defer { server.stop() }
+        server.broadcast(makeSnapshot())
+        server.onApprovalRequest = { _, _, _, _, _, decide in decide(.pairingClosed) }
+
+        let (client, log) = try await connectClient(via: hub, to: server)
+        defer { client.cancel() }
+        try await sendAuthenticatedHello(over: client, log: log)
+
+        #expect(await waitUntil { log.contains(.goodbye(reason: CompanionGoodbyeReason.pairingClosed)) },
+                "the refused phone never learned the pairing window was closed")
+        #expect(await waitUntil { log.closed }, "the refused client's connection was never closed")
+        #expect(!log.messages.contains { if case .welcome = $0 { return true } else { return false } })
+    }
+
+    /// Turns red if `send` stops counting a frame's bytes against the
+    /// backlog cap before handing it to the stack: a phone that stops reading
+    /// would then pile snapshots into this process's memory without bound.
+    @Test func aClientWhoseUnsentBytesPassTheCapIsDropped() async throws {
+        let hub = try await makeHub()
+        defer { hub.cancel() }
+        let server = makeAutoApprovingServer()
+        // Room for the challenge and the small welcome, not for one of the
+        // two large snapshots below.
+        server.test_maxSendBacklogBytesOverride = 16_384
+        defer { server.stop() }
+        server.broadcast(makeSnapshot())
+
+        let (client, log) = try await connectClient(via: hub, to: server)
+        defer { client.cancel() }
+        try await sendAuthenticatedHello(over: client, log: log)
+        try #require(await waitUntil { log.messages.contains { if case .welcome = $0 { return true } else { return false } } },
+                     "the client was never welcomed")
+
+        let first = makeSnapshot(volume: 20, serverName: String(repeating: "a", count: 40_000))
+        let second = makeSnapshot(volume: 30, serverName: String(repeating: "b", count: 40_000))
+        server.broadcast(first)
+        server.broadcast(second)
+
+        #expect(await waitUntil { log.closed }, "the client over the backlog cap was never dropped")
+        #expect(!log.contains(.state(snapshot: first)) && !log.contains(.state(snapshot: second)),
+                "a frame past the cap was sent anyway")
+        #expect(await waitUntil { server.test_clientNames().isEmpty })
     }
 
     @Test func awaitingPoolIsBounded() async throws {
         let hub = try await makeHub()
         defer { hub.cancel() }
-        let server = CompanionServer()
+        let server = makeServer()
         server.test_awaitingCapOverride = 1 // real cap is 8
         defer { server.stop() }
         server.broadcast(makeSnapshot())
-        server.onApprovalRequest = { _, _, decide in decide(.pending) } // hold everyone
+        server.onApprovalRequest = { _, _, _, _, _, decide in decide(.pending) } // hold everyone
 
         let (held, heldLog) = try await connectClient(via: hub, to: server)
         defer { held.cancel() }
-        try sendHello(over: held, clientID: UUID().uuidString)
+        try await sendAuthenticatedHello(over: held, log: heldLog, key: P256.Signing.PrivateKey())
         try #require(await waitUntil { heldLog.contains(.awaitingApproval) },
                      "the first client was never held")
 
         let (overflow, overflowLog) = try await connectClient(via: hub, to: server)
         defer { overflow.cancel() }
-        try sendHello(over: overflow, clientID: UUID().uuidString)
+        try await sendAuthenticatedHello(over: overflow, log: overflowLog, key: P256.Signing.PrivateKey())
         #expect(await waitUntil { overflowLog.contains(.goodbye(reason: CompanionGoodbyeReason.serverFull)) },
                 "the over-cap awaiting client was never refused")
         #expect(!heldLog.closed, "the held client must survive the overflow refusal")
@@ -1008,17 +1232,17 @@ import AudioutProtocol
         let disconnected = LockedBox<[UUID]>([])
         server.onClientDisconnected = { id in disconnected.withLock { $0.append(id) } }
 
-        let revokedID = UUID().uuidString
+        let revokedKey = P256.Signing.PrivateKey()
         let (revoked, revokedLog) = try await connectClient(via: hub, to: server)
         defer { revoked.cancel() }
-        try sendHello(over: revoked, name: "revoked", clientID: revokedID)
+        try await sendAuthenticatedHello(over: revoked, log: revokedLog, key: revokedKey, name: "revoked")
         let (kept, keptLog) = try await connectClient(via: hub, to: server)
         defer { kept.cancel() }
-        try sendHello(over: kept, name: "kept", clientID: UUID().uuidString)
+        try await sendAuthenticatedHello(over: kept, log: keptLog, key: P256.Signing.PrivateKey(), name: "kept")
         try #require(await waitUntil { Set(server.test_clientNames()) == ["revoked", "kept"] },
                      "both clients must be promoted first")
 
-        server.dropClient(clientID: revokedID)
+        server.dropClient(clientID: CompanionPairing.clientID(forPublicKey: revokedKey.publicKey.rawRepresentation))
 
         #expect(await waitUntil { revokedLog.closed }, "revoking never dropped the live client")
         #expect(await waitUntil { !disconnected.value.isEmpty },
@@ -1052,10 +1276,10 @@ import AudioutProtocol
 
         let (asker, askerLog) = try await connectClient(via: hub, to: server)
         defer { asker.cancel() }
-        try sendHello(over: asker, name: "asker", clientID: UUID().uuidString)
+        try await sendAuthenticatedHello(over: asker, log: askerLog, key: P256.Signing.PrivateKey(), name: "asker")
         let (bystander, bystanderLog) = try await connectClient(via: hub, to: server)
         defer { bystander.cancel() }
-        try sendHello(over: bystander, name: "bystander", clientID: UUID().uuidString)
+        try await sendAuthenticatedHello(over: bystander, log: bystanderLog, key: P256.Signing.PrivateKey(), name: "bystander")
         try #require(await waitUntil { Set(server.test_clientNames()) == ["asker", "bystander"] },
                      "both clients must be promoted first")
 
@@ -1083,7 +1307,7 @@ import AudioutProtocol
 
         let (client, log) = try await connectClient(via: hub, to: server)
         defer { client.cancel() }
-        try sendHello(over: client)
+        try await sendAuthenticatedHello(over: client, log: log)
         try #require(await waitUntil { server.test_clientNames() == ["phone"] })
 
         server.sendAppIcons([AppIconPayload(bundleID: "com.example.app", png: nil)],

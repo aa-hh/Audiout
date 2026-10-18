@@ -556,6 +556,10 @@ extension NativeBackend {
                 excludedBundleIDs: excludedBundleIDs
                     .union(plan.localExcluded)
                     .union(plan.leveled))
+            // `.currentDevice` and leveled apps play on the Mac through our own (self-excluded)
+            // process, so the listen-only tap must keep their own process to meter them at all.
+            self.localMeterCapture?.updateRouting(
+                appRoutes: plan.effectiveRoutes, excludedBundleIDs: excludedBundleIDs)
         }
     }
 
@@ -757,6 +761,7 @@ extension NativeBackend {
             // excluded/routed-away, so it's cheap for a bundle that turns out not
             // to be excluded (a `.currentDevice` app, or metering-only capture).
             captureCoordinator?.refreshExcludedProcessSet(forRelaunchedBundleID: bundleID)
+            localMeterCapture?.refreshExcludedProcessSet(forRelaunchedBundleID: bundleID)
 
         case .failed(let error):
             let (justDied, shouldRetry, attempt): (Bool, Bool, Int) = stateQueue.sync {
@@ -1560,6 +1565,7 @@ extension NativeBackend {
         // coordinator itself no-ops unless `bundleID` is actually in that set,
         // so this is cheap to call for every app launch, routed or not.
         captureCoordinator?.refreshExcludedProcessSet(forRelaunchedBundleID: bundleID)
+        localMeterCapture?.refreshExcludedProcessSet(forRelaunchedBundleID: bundleID)
 
         // `localBundleIDs` is ours (synced-local): an app routed to the Mac itself
         // still has a capture slot to revive on relaunch, so it takes this path too.

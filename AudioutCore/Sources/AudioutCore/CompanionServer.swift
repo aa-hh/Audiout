@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+import CryptoKit
 import Foundation
 import Network
 import os
+import Security
 import AudioutProtocol
 
 /// The Mac side of the companion-app link (PLAN-COMPANION-APP T5): a
@@ -12,49 +14,65 @@ import AudioutProtocol
 /// (AppDelegate, T7) feeds it snapshots via ``broadcast(_:)`` and consumes
 /// ``onCommand``/``onClientDisconnected``.
 ///
+/// ## Transport
+/// TLS 1.3 under the WebSocket, presenting the Mac's self-signed
+/// ``CompanionIdentity``. The phone trusts no chain: it pins the SHA-256 of
+/// the certificate, which the Bonjour TXT `fp` key advertises. The service
+/// is named `CompanionPairing.instanceName`, so the computer's name never
+/// leaves the Mac outside TLS; it reaches the phone only in `welcome`.
+///
 /// ## Session shape
 /// 1. Client connects; it enters a bounded PENDING pool — it does NOT count
 ///    against ``maxClients`` until it completes a valid `hello`, so
-///    pre-upgrade probes (the iOS client's own address-resolve probe, port
-///    scanners, half-opens) can never exhaust the client cap. It has
-///    ``preHelloTimeout`` seconds to say `hello` or it is cancelled; beyond
-///    ``pendingCap`` simultaneous un-helloed connections, new ones are
-///    dropped immediately (flood backstop — every refused socket is a
-///    process-wide fd this app's AirPlay/PTP/DACP work also needs).
-/// 2. `hello` with a protocol version NEWER than ours →
-///    `goodbye("protoMismatch")` and close (refuse-forward,
-///    `CompanionProto.isIncompatible`). A missing/non-UUID `clientID` →
-///    `goodbye("invalidClientID")` and close. At the client cap →
-///    `goodbye("serverFull")` and close. Otherwise the connection moves to
-///    the AWAITING pool (T24 per-phone approval gate) and the app layer is
-///    asked via ``onApprovalRequest``; the answer (see ``ApprovalDecision``)
-///    settles it: `.approved` → PROMOTED into `clients` (see
-///    ``promote(_:)`` — the single decision point) and welcomed with the
-///    latest cached snapshot — or, if no snapshot has been broadcast yet,
-///    the `welcome` is deferred until the first ``broadcast(_:)`` (the
+///    pre-upgrade probes (port scanners, half-opens) can never exhaust the
+///    client cap. Once the connection is ready the server sends `challenge`
+///    with 32 fresh random bytes. It has ``preHelloTimeout`` seconds to say
+///    `hello` or it is cancelled; beyond ``pendingCap`` simultaneous
+///    un-helloed connections, new ones are dropped immediately (flood
+///    backstop — every refused socket is a process-wide fd this app's
+///    AirPlay/PTP/DACP work also needs).
+/// 2. `hello` with a protocol version outside what
+///    `CompanionProto.isIncompatible` accepts → `goodbye("protoMismatch")`
+///    and close. A `clientKey` that is not 64 bytes of a P-256 point, or a
+///    hello before this connection's challenge → `goodbye("invalidClientKey")`.
+///    A `signature` that does not verify over
+///    `CompanionPairing.authenticationMessage` for this connection's nonce
+///    and ``localCertificateSHA256`` → `goodbye("authenticationFailed")`. At
+///    the client cap → `goodbye("serverFull")`. Every refusal closes.
+///    Otherwise the phone's id is `CompanionPairing.clientID(forPublicKey:)`,
+///    proven by the signature before anything consults it, and the
+///    connection moves to the AWAITING pool (T24 per-phone approval gate);
+///    the app layer is asked via ``onApprovalRequest`` with that id and the
+///    six-digit pairing code both screens show. The answer (see
+///    ``ApprovalDecision``) settles it: `.approved` → PROMOTED into `clients`
+///    (see ``promote(_:)`` — the single decision point) and welcomed with
+///    the latest cached snapshot — or, if no snapshot has been broadcast
+///    yet, the `welcome` is deferred until the first ``broadcast(_:)`` (the
 ///    wiring broadcasts immediately after start, so this window is
-///    milliseconds); `.denied` → `goodbye("notApproved")` and close;
-///    `.pending` → an `awaitingApproval` frame (the phone shows "check your
-///    Mac") and the connection is held — released from the pre-hello
-///    deadline, bounded instead by the much more generous
-///    ``approvalTimeout`` (the user may be walking to the Mac), after which
-///    it gets `goodbye("approvalTimedOut")` and may simply reconnect. The
-///    server never blocks on the decision; an unwired ``onApprovalRequest``
-///    means the deadline eventually closes the connection — closed by
-///    default, never silently open.
+///    milliseconds); `.denied` → `goodbye("notApproved")`; `.pairingClosed`
+///    → `goodbye("pairingClosed")`; `.pending` → an `awaitingApproval` frame
+///    (the phone shows the code and "check your Mac") and the connection is
+///    held — released from the pre-hello deadline, bounded instead by the
+///    much more generous ``approvalTimeout`` (the user may be walking to the
+///    Mac), after which it gets `goodbye("approvalTimedOut")` and may simply
+///    reconnect. The server never blocks on the decision; an unwired
+///    ``onApprovalRequest`` means the deadline eventually closes the
+///    connection — closed by default, never silently open.
 /// 3. Thereafter: `command` frames flow to ``onCommand``; every
 ///    ``broadcast(_:)`` fans a `state` frame out to all welcomed clients,
 ///    suppressed when `Equatable`-identical to the previous snapshot. The
 ///    server pings each promoted client every ``pingInterval`` and reaps any
 ///    with no inbound activity (frame or pong) for ``livenessTimeout`` — a
 ///    phone that vanishes without a FIN (airplane mode, out of range) must
-///    not hold its slot, its fd, or an orphaned Main Out drag forever.
+///    not hold its slot, its fd, or an orphaned Main Out drag forever. A
+///    client that stops reading is dropped once more than
+///    ``maxSendBacklogBytes`` of its frames sit unsent.
 ///
 /// ## Structure (mirrors `DACPServer` deliberately)
 /// All mutable state (`listener`, `pending`, `clients`, `latestSnapshot`)
 /// is confined to ``queue``: the listener and every connection are started
 /// with `queue: queue` so their callbacks already run there, and the public
-/// entry points (`start(name:)`/`stop()`/`broadcast(_:)`/`accept(_:)`)
+/// entry points (`start(identity:)`/`stop()`/`broadcast(_:)`/`accept(_:)`)
 /// dispatch onto it rather than mutating from the caller's thread.
 public final class CompanionServer: @unchecked Sendable {
 
@@ -78,8 +96,10 @@ public final class CompanionServer: @unchecked Sendable {
     /// `awaitingApproval` and keeps holding it — and must be followed
     /// (possibly minutes later) by exactly one `.approved`/`.denied`; a
     /// verdict for a connection that already died or timed out is a no-op.
+    /// `.pairingClosed` refuses an unknown phone that arrived while no
+    /// pairing window was open, without asking anyone.
     public enum ApprovalDecision: Sendable {
-        case approved, denied, pending
+        case approved, denied, pending, pairingClosed
     }
 
     // MARK: - Wiring surface
@@ -99,20 +119,34 @@ public final class CompanionServer: @unchecked Sendable {
     public var onCommand: (@Sendable (_ requestID: String, _ command: CompanionCommand, _ clientID: UUID, _ reply: @escaping @Sendable (CommandResult) -> Void) -> Void)?
 
     /// T24 approval gate: one valid, compatible, within-cap `hello` arrived
-    /// from the phone identified by `clientID` (already validated as a UUID
-    /// string and canonicalized to uppercase; `clientName` already
-    /// truncated). The wiring answers via `decide` — from any thread, any
-    /// time later (see ``ApprovalDecision``); the server holds the
-    /// connection meanwhile and NEVER blocks waiting. Left nil, no client
-    /// is ever promoted (the awaiting deadline reaps them) — the trust
-    /// boundary fails closed.
-    public var onApprovalRequest: (@Sendable (_ clientID: String, _ clientName: String, _ decide: @escaping @Sendable (ApprovalDecision) -> Void) -> Void)?
+    /// whose signature proved it holds the key `clientID` names
+    /// (`CompanionPairing.clientID(forPublicKey:)`, uppercase hex;
+    /// `clientName` already truncated). `pairingCode` is the six digits the
+    /// phone is showing for this Mac and key, for the prompt to repeat.
+    /// `checksPairingCode` is the hello's flag: the phone is asking its user
+    /// to compare that code, so the Mac shows it even for a phone it already
+    /// approved. `connectionID` is the connection's id, the one
+    /// ``onCommand`` and ``onClientDisconnected`` later report. The
+    /// wiring answers via `decide` — from any thread, any time later (see
+    /// ``ApprovalDecision``); the server holds the connection meanwhile and
+    /// NEVER blocks waiting. Left nil, no client is ever promoted (the
+    /// awaiting deadline reaps them) — the trust boundary fails closed.
+    public var onApprovalRequest: (@Sendable (_ clientID: String, _ clientName: String, _ pairingCode: String,
+                                              _ checksPairingCode: Bool, _ connectionID: UUID,
+                                              _ decide: @escaping @Sendable (ApprovalDecision) -> Void) -> Void)?
 
     /// Fires when the last awaiting connection carrying this phone
     /// `clientID` went away unanswered — dropped, or the approval deadline
     /// reaped it. Never fires for an answered request (approved or denied).
     /// The wiring uses this to withdraw the prompt still on screen.
     public var onApprovalAbandoned: (@Sendable (_ clientID: String) -> Void)?
+
+    /// Fires once for each connection reported through
+    /// ``onApprovalRequest`` that closed without being admitted: refused
+    /// (any decision but `.approved`, or approved into a full server),
+    /// dropped, timed out, or cut by ``stop(reason:)``. An admitted
+    /// connection reports its end through ``onClientDisconnected`` instead.
+    public var onAwaitingConnectionClosed: (@Sendable (_ connectionID: UUID) -> Void)?
 
     /// A client went away for any reason — clean close, error, liveness
     /// reaping, or `stop()` — after being accepted (helloed + promoted;
@@ -142,6 +176,12 @@ public final class CompanionServer: @unchecked Sendable {
     /// carries no id at all and the phone simply has none to attach.
     public var serverID: (@Sendable () -> String?)?
 
+    /// SHA-256 of the certificate this server presents — the value every
+    /// hello's signature must cover. Set by ``start(identity:)``; tests that
+    /// drive connections through ``accept(_:)`` assign it directly. Read on
+    /// ``queue``.
+    public var localCertificateSHA256 = Data(count: 32)
+
     // MARK: - State (queue-confined)
 
     private let log = Logger(subsystem: "com.audiout.Audiout", category: "companion")
@@ -154,16 +194,24 @@ public final class CompanionServer: @unchecked Sendable {
         let connection: NWConnection
         /// From `hello`, truncated to ``maxClientNameLength``; nil until then.
         var clientName: String?
-        /// From `hello`, validated as a UUID and canonicalized (T24); nil
-        /// until then. This is the phone's persistent identity — ``id`` above
-        /// is only this CONNECTION's handle.
+        /// `CompanionPairing.clientID(forPublicKey:)` of the hello's verified
+        /// key; nil until then. This is the phone's persistent identity —
+        /// ``id`` above is only this CONNECTION's handle.
         var phoneClientID: String?
+        /// The 32 random bytes this connection's `challenge` carried; nil
+        /// until the connection is ready. A hello is checked against these
+        /// and nothing else, so a signature recorded on another connection
+        /// never verifies here.
+        var serverNonce: Data?
+        /// Bytes handed to the stack and not yet reported sent. Past
+        /// ``maxSendBacklogBytes`` the client is dropped.
+        var unsentBytes = 0
         /// `welcome` sent (requires a cached snapshot; may lag promotion).
         var isWelcomed = false
         /// The active deadline work item: the pre-hello deadline while in
         /// `pending`, re-armed as the (much longer) approval deadline while
         /// in `awaiting`; cancelled on promotion. For a connection refused
-        /// AT hello (proto mismatch / bad clientID / server full) it is
+        /// AT hello (proto mismatch / bad key or signature / server full) it is
         /// deliberately left armed as the close backstop in case the goodbye
         /// send never flushes.
         var handshakeTimeout: DispatchWorkItem?
@@ -217,13 +265,15 @@ public final class CompanionServer: @unchecked Sendable {
     /// approval question is considered abandoned and the connection is
     /// closed with `goodbye("approvalTimedOut")`. Deliberately generous —
     /// the Mac's user may be in another room when the prompt appears — and
-    /// retryable: the phone reconnects and asks again.
-    private static let approvalTimeout: TimeInterval = 180
+    /// retryable: the phone reconnects and asks again. The pairing-code
+    /// alert for an approved phone (`CompanionApprovalController`) closes
+    /// after the same time.
+    static let approvalTimeout: TimeInterval = 180
     /// Test-only: overrides ``approvalTimeout``.
     public var test_approvalTimeoutOverride: TimeInterval?
 
     /// Hard bound on simultaneous awaiting-approval connections — a LAN
-    /// peer cycling fresh clientIDs must not grow `awaiting` (each entry
+    /// peer cycling fresh keys must not grow `awaiting` (each entry
     /// holds an fd for up to ``approvalTimeout``) without limit. Beyond it,
     /// a helloing client gets the same `serverFull` refusal as the client
     /// cap. Smaller than ``maxClients``: a household legitimately onboards
@@ -257,14 +307,33 @@ public final class CompanionServer: @unchecked Sendable {
     /// builder's to bound; the server can only observe it.
     private static let iosInboundCapBytes = 1_048_576
 
+    /// How many bytes of one client's frames may sit handed to the stack but
+    /// not yet sent. A phone that stops reading while snapshots keep coming
+    /// would otherwise grow this process's memory without bound; past the
+    /// cap it is dropped and may reconnect.
+    private static let maxSendBacklogBytes = 4 * 1024 * 1024
+    /// Test-only: overrides ``maxSendBacklogBytes``.
+    public var test_maxSendBacklogBytesOverride: Int?
+
     /// `hello.clientName` is attacker-controlled input; bound it at parse so
     /// no downstream consumer (logs, future UI) ever sees an unbounded string.
     private static let maxClientNameLength = 64
 
-    /// `hello.clientID` is attacker-controlled too: length-capped before the
-    /// (already strict, canonical-36-char) `UUID(uuidString:)` parse, so a
-    /// deliberately huge string is rejected without even being scanned.
-    private static let maxClientIDLength = 64
+    /// The hello's attacker-controlled name as every surface shows it: line
+    /// breaks and control characters become spaces, so a name cannot add
+    /// lines to an alert title or a Settings row, then it is trimmed and cut
+    /// to ``maxClientNameLength``.
+    static func displayName(_ rawName: String) -> String {
+        let flattened = String(String.UnicodeScalarView(rawName.unicodeScalars.map {
+            $0.properties.generalCategory == .control || CharacterSet.newlines.contains($0) ? " " : $0
+        }))
+        return String(flattened.trimmingCharacters(in: .whitespaces).prefix(maxClientNameLength))
+    }
+
+    /// `hello.clientKey` and `hello.signature` are attacker-controlled too:
+    /// each is base64 of 64 bytes (88 characters), so anything longer than
+    /// this is refused before it is decoded.
+    private static let maxKeyFieldLength = 128
 
     /// Server-initiated WebSocket ping cadence per promoted client. A live
     /// phone's stack auto-pongs; the pong (or any frame) refreshes
@@ -285,14 +354,15 @@ public final class CompanionServer: @unchecked Sendable {
 
     // MARK: - Lifecycle
 
-    /// Advertise `_audiout._tcp` as `name` (TXT: proto + name) on an
-    /// ephemeral port and start accepting. Idempotent-ish: a second call
-    /// restarts. `.async` for the same reason as `DACPServer.start`:
-    /// `listener.start` is itself asynchronous, so there is no synchronous
-    /// guarantee worth blocking the caller for.
-    public func start(name: String) {
+    /// Advertise `_audiout._tcp` as `CompanionPairing.instanceName` (TXT:
+    /// proto + the certificate fingerprint) on an ephemeral port and start
+    /// accepting TLS 1.3 connections that present `identity`. Idempotent-ish:
+    /// a second call restarts. `.async` for the same reason as
+    /// `DACPServer.start`: `listener.start` is itself asynchronous, so there
+    /// is no synchronous guarantee worth blocking the caller for.
+    public func start(identity: CompanionIdentity) {
         queue.async { [weak self] in
-            self?.startLocked(name: name)
+            self?.startLocked(identity: identity)
         }
     }
 
@@ -300,7 +370,7 @@ public final class CompanionServer: @unchecked Sendable {
     /// public `stop()` — that does `queue.sync`, which from here would
     /// recursively sync onto the queue we're already on and deadlock (the
     /// exact hazard `DACPServer.startLocked` documents).
-    private func startLocked(name: String) {
+    private func startLocked(identity: CompanionIdentity) {
         stopLocked(reason: CompanionGoodbyeReason.shutdown)
 
         // TCP keepalive is defense in depth under the WebSocket-level
@@ -309,7 +379,11 @@ public final class CompanionServer: @unchecked Sendable {
         let tcp = NWProtocolTCP.Options()
         tcp.enableKeepalive = true
         tcp.keepaliveIdle = 30
-        let params = NWParameters(tls: nil, tcp: tcp)
+        let tls = NWProtocolTLS.Options()
+        sec_protocol_options_set_local_identity(tls.securityProtocolOptions,
+                                                sec_identity_create(identity.secIdentity)!)
+        sec_protocol_options_set_min_tls_protocol_version(tls.securityProtocolOptions, .TLSv13)
+        let params = NWParameters(tls: tls, tcp: tcp)
         params.includePeerToPeer = false
         let ws = NWProtocolWebSocket.Options()
         ws.autoReplyPing = true
@@ -324,10 +398,12 @@ public final class CompanionServer: @unchecked Sendable {
             return
         }
 
+        localCertificateSHA256 = identity.fingerprint
+        let serviceName = CompanionPairing.instanceName(serverCertificateSHA256: identity.fingerprint)
         var txt = NWTXTRecord()
         txt[CompanionProto.TXTKey.proto] = String(CompanionProto.version)
-        txt[CompanionProto.TXTKey.name] = name
-        listener.service = NWListener.Service(name: name, type: CompanionProto.serviceType, txtRecord: txt)
+        txt[CompanionProto.TXTKey.fingerprint] = CompanionPairing.fingerprintHex(identity.fingerprint)
+        listener.service = NWListener.Service(name: serviceName, type: CompanionProto.serviceType, txtRecord: txt)
 
         listener.newConnectionHandler = { [weak self] connection in
             self?.accept(connection)
@@ -339,7 +415,7 @@ public final class CompanionServer: @unchecked Sendable {
         }
         listener.start(queue: queue)
         self.listener = listener
-        log.notice("companion server advertising \(name, privacy: .public) (\(CompanionProto.serviceType, privacy: .public))")
+        log.notice("companion server advertising \(serviceName, privacy: .public) (\(CompanionProto.serviceType, privacy: .public), TLS)")
     }
 
     /// `.sync`, unlike `start`'s `.async`, for `DACPServer.stop`'s reason:
@@ -368,7 +444,7 @@ public final class CompanionServer: @unchecked Sendable {
     }
 
     /// MUST only run on ``queue``. Also called directly by
-    /// `startLocked(name:)` — see its doc comment for why never via `stop()`.
+    /// `startLocked(identity:)` — see its doc comment for why never via `stop()`.
     private func stopLocked(reason: String) {
         listener?.cancel()
         listener = nil
@@ -380,6 +456,7 @@ public final class CompanionServer: @unchecked Sendable {
             client.handshakeTimeout?.cancel()
             client.connection.cancel()
         }
+        let goodbye = encoded(.goodbye(reason: reason))
         // Awaiting-approval clients get the same best-effort goodbye as
         // promoted ones (the phone is showing "check your Mac" and should
         // learn the close was deliberate) but no disconnect signal — they
@@ -387,10 +464,13 @@ public final class CompanionServer: @unchecked Sendable {
         let droppedAwaiting = awaiting
         awaiting.removeAll()
         for (_, client) in droppedAwaiting {
+            noteAwaitingClosed(client.id)
             client.handshakeTimeout?.cancel()
             let connection = client.connection
-            sendRaw(.goodbye(reason: reason), over: connection) {
-                connection.cancel()
+            if let goodbye {
+                sendRaw(goodbye, over: connection) {
+                    connection.cancel()
+                }
             }
             queue.asyncAfter(deadline: .now() + 0.25) { connection.cancel() }
         }
@@ -400,8 +480,10 @@ public final class CompanionServer: @unchecked Sendable {
             // Cancel from the send's completion, not inline — an immediate
             // cancel aborts the just-enqueued goodbye (observed on loopback).
             let connection = client.connection
-            sendRaw(.goodbye(reason: reason), over: connection) {
-                connection.cancel()
+            if let goodbye {
+                sendRaw(goodbye, over: connection) {
+                    connection.cancel()
+                }
             }
             // Bounded backstop for a send that never completes. A bare
             // asyncAfter is safe HERE (unlike the old `refused` timer bug):
@@ -514,7 +596,7 @@ public final class CompanionServer: @unchecked Sendable {
 
     /// `internal` (not `private`) so `CompanionServerTests` can hand it a
     /// real loopback connection directly via `@testable import`, without
-    /// going through `start(name:)`'s own listener — which binds ALL
+    /// going through `start(identity:)`'s own listener — which binds ALL
     /// interfaces and Bonjour-advertises, neither of which tests need, and
     /// an all-interfaces bind is exactly what trips macOS's Application
     /// Firewall "accept incoming network connections?" prompt for the xctest
@@ -545,6 +627,8 @@ public final class CompanionServer: @unchecked Sendable {
         let id = client.id
         connection.stateUpdateHandler = { [weak self] state in
             switch state {
+            case .ready:
+                self?.queue.async { self?.sendChallenge(id) }
             case .cancelled, .failed:
                 // Close, error, and our own cancels all land here — the ONE
                 // cleanup path, so there is exactly one disconnect signal
@@ -569,6 +653,25 @@ public final class CompanionServer: @unchecked Sendable {
         }
         client.handshakeTimeout = work
         queue.asyncAfter(deadline: .now() + timeout, execute: work)
+    }
+
+    /// MUST only run on ``queue``. The connection is up: hand it the 32
+    /// random bytes its hello must sign. Once per connection, and only while
+    /// it has not said hello.
+    private func sendChallenge(_ id: UUID) {
+        guard let client = pending[id], client.serverNonce == nil else { return }
+        var nonce = Data(count: CompanionPairing.nonceLength)
+        let status = nonce.withUnsafeMutableBytes {
+            SecRandomCopyBytes(kSecRandomDefault, CompanionPairing.nonceLength, $0.baseAddress!)
+        }
+        guard status == errSecSuccess else {
+            // A predictable nonce would let a recorded signature through.
+            log.error("companion challenge could not be generated (\(status)); closing the connection")
+            client.connection.cancel()
+            return
+        }
+        client.serverNonce = nonce
+        send(.challenge(nonce: nonce.base64EncodedString()), to: client)
     }
 
     /// THE single promotion decision point (awaiting → counted client),
@@ -613,6 +716,7 @@ public final class CompanionServer: @unchecked Sendable {
             guard clients.count < (test_maxClientsOverride ?? Self.maxClients) else {
                 log.notice("companion client approved but refused: at capacity")
                 awaiting[id] = nil
+                noteAwaitingClosed(id)
                 refuse(client, reason: CompanionGoodbyeReason.serverFull)
                 return
             }
@@ -620,7 +724,13 @@ public final class CompanionServer: @unchecked Sendable {
         case .denied:
             log.notice("companion client refused: not approved")
             awaiting[id] = nil
+            noteAwaitingClosed(id)
             refuse(client, reason: CompanionGoodbyeReason.notApproved)
+        case .pairingClosed:
+            log.notice("companion client refused: unknown phone and no pairing window open")
+            awaiting[id] = nil
+            noteAwaitingClosed(id)
+            refuse(client, reason: CompanionGoodbyeReason.pairingClosed)
         }
     }
 
@@ -631,8 +741,10 @@ public final class CompanionServer: @unchecked Sendable {
         client.handshakeTimeout?.cancel()
         client.handshakeTimeout = nil
         let connection = client.connection
-        sendRaw(.goodbye(reason: reason), over: connection) {
-            connection.cancel()
+        if let goodbye = encoded(.goodbye(reason: reason)) {
+            sendRaw(goodbye, over: connection) {
+                connection.cancel()
+            }
         }
         queue.asyncAfter(deadline: .now() + 0.25) { connection.cancel() }
     }
@@ -667,6 +779,7 @@ public final class CompanionServer: @unchecked Sendable {
         if let waiting = awaiting.removeValue(forKey: id) {
             waiting.handshakeTimeout?.cancel()
             waiting.connection.cancel()
+            noteAwaitingClosed(id)
             noteApprovalAbandoned(waiting)
             return // never promoted: no disconnect signal, never counted
         }
@@ -679,6 +792,13 @@ public final class CompanionServer: @unchecked Sendable {
             disconnected?(id)
             countChanged?(count)
         }
+    }
+
+    /// MUST only run on ``queue``, once per connection leaving ``awaiting``
+    /// unadmitted.
+    private func noteAwaitingClosed(_ id: UUID) {
+        let closed = onAwaitingConnectionClosed
+        queue.async { closed?(id) }
     }
 
     /// MUST only run on ``queue``, and only for a connection just removed
@@ -796,12 +916,12 @@ public final class CompanionServer: @unchecked Sendable {
             return
         }
 
-        // Refuse-forward on EVERY frame's envelope version, symmetric with
+        // The version check runs on EVERY frame's envelope, symmetric with
         // the iOS client (see `CompanionEnvelope`'s doc): a peer that said
-        // hello at a compatible version must not smuggle newer-versioned
+        // hello at a compatible version must not smuggle other-versioned
         // frames past the handshake check.
         guard !CompanionProto.isIncompatible(peerVersion: envelope.v) else {
-            log.notice("companion client refused: frame v\(envelope.v) > \(CompanionProto.version)")
+            log.notice("companion client refused: frame v\(envelope.v) outside \(CompanionProto.minimumPeerVersion)...\(CompanionProto.version)")
             send(.goodbye(reason: CompanionGoodbyeReason.protoMismatch), to: client) {
                 client.connection.cancel()
             }
@@ -809,28 +929,46 @@ public final class CompanionServer: @unchecked Sendable {
         }
 
         switch envelope.message {
-        case .hello(let rawClientID, let rawName, let protoVersion):
+        case .hello(let rawClientKey, let rawName, let protoVersion, let rawSignature, let checksPairingCode):
             guard clients[client.id] == nil else { return } // duplicate hello: ignore
             guard pending[client.id] != nil else { return } // awaiting-duplicate, or lost a race with its own death
             guard !CompanionProto.isIncompatible(peerVersion: protoVersion) else {
-                // Refuse-forward: a NEWER peer might mean things we can't
-                // interpret; tell it why, then close. The pre-hello deadline
-                // stays armed as the close backstop if this send never
-                // flushes.
-                log.notice("companion client refused: proto \(protoVersion) > \(CompanionProto.version)")
+                // A newer peer might mean things we can't interpret, and an
+                // older one speaks the handshake version 2 replaced; tell it
+                // why, then close. The pre-hello deadline stays armed as the
+                // close backstop if this send never flushes.
+                log.notice("companion client refused: proto \(protoVersion) outside \(CompanionProto.minimumPeerVersion)...\(CompanionProto.version)")
                 send(.goodbye(reason: CompanionGoodbyeReason.protoMismatch), to: client) {
                     client.connection.cancel()
                 }
                 return
             }
-            // The phone's persistent identity (T24) — untrusted input. It
-            // must parse as a UUID (which also bounds it to the canonical
-            // 36-char form); canonicalize so "abc…" and "ABC…" can never
-            // alias into two approval records for one phone.
-            guard rawClientID.count <= Self.maxClientIDLength,
-                  let parsedID = UUID(uuidString: rawClientID) else {
-                log.notice("companion client refused: missing or malformed clientID")
-                send(.goodbye(reason: CompanionGoodbyeReason.invalidClientID), to: client) {
+            // The phone's key — untrusted input, length-capped before it is
+            // decoded. Without this connection's challenge there is nothing
+            // its signature could have covered.
+            guard let nonce = client.serverNonce,
+                  rawClientKey.count <= Self.maxKeyFieldLength,
+                  let keyBytes = Data(base64Encoded: rawClientKey),
+                  keyBytes.count == CompanionPairing.publicKeyLength,
+                  let publicKey = try? P256.Signing.PublicKey(rawRepresentation: keyBytes) else {
+                log.notice("companion client refused: missing or malformed clientKey, or no challenge yet")
+                send(.goodbye(reason: CompanionGoodbyeReason.invalidClientKey), to: client) {
+                    client.connection.cancel()
+                }
+                return
+            }
+            // Possession of that key, over this connection's nonce and this
+            // Mac's certificate: a signature replayed from another connection
+            // or made for another Mac does not verify.
+            let signedMessage = CompanionPairing.authenticationMessage(
+                serverNonce: nonce, serverCertificateSHA256: localCertificateSHA256)
+            guard rawSignature.count <= Self.maxKeyFieldLength,
+                  let signatureBytes = Data(base64Encoded: rawSignature),
+                  signatureBytes.count == CompanionPairing.signatureLength,
+                  let signature = try? P256.Signing.ECDSASignature(rawRepresentation: signatureBytes),
+                  publicKey.isValidSignature(signature, for: signedMessage) else {
+                log.notice("companion client refused: signature did not verify")
+                send(.goodbye(reason: CompanionGoodbyeReason.authenticationFailed), to: client) {
                     client.connection.cancel()
                 }
                 return
@@ -860,14 +998,18 @@ public final class CompanionServer: @unchecked Sendable {
             client.handshakeTimeout?.cancel()
             pending[client.id] = nil
             awaiting[client.id] = client
-            client.phoneClientID = parsedID.uuidString
-            client.clientName = String(rawName.prefix(Self.maxClientNameLength))
+            let phoneClientID = CompanionPairing.clientID(forPublicKey: keyBytes)
+            let pairingCode = CompanionPairing.pairingCode(
+                serverCertificateSHA256: localCertificateSHA256, clientPublicKey: keyBytes)
+            client.phoneClientID = phoneClientID
+            client.clientName = Self.displayName(rawName)
             client.lastActivity = Date()
             let connectionID = client.id
             let approvalWork = DispatchWorkItem { [weak self] in
                 guard let self, let held = self.awaiting.removeValue(forKey: connectionID) else { return }
                 self.log.notice("companion client refused: approval prompt unanswered")
                 self.refuse(held, reason: CompanionGoodbyeReason.approvalTimedOut)
+                self.noteAwaitingClosed(connectionID)
                 self.noteApprovalAbandoned(held)
             }
             client.handshakeTimeout = approvalWork
@@ -880,9 +1022,10 @@ public final class CompanionServer: @unchecked Sendable {
                 self.queue.async { self.resolveApproval(connectionID, decision) }
             }
             if let onApprovalRequest {
-                let phoneClientID = parsedID.uuidString
                 let clientName = client.clientName ?? ""
-                queue.async { onApprovalRequest(phoneClientID, clientName, decide) }
+                queue.async {
+                    onApprovalRequest(phoneClientID, clientName, pairingCode, checksPairingCode, connectionID, decide)
+                }
             }
             // else: nothing to ask — the approval deadline reaps it (closed
             // by default; see onApprovalRequest's doc).
@@ -913,7 +1056,7 @@ public final class CompanionServer: @unchecked Sendable {
                 reply(CommandResult(applied: false, refusalReason: "The Mac isn't ready yet. Try again in a moment."))
             }
 
-        case .welcome, .awaitingApproval, .state, .commandResult, .goodbye, .appIcons,
+        case .challenge, .welcome, .awaitingApproval, .state, .commandResult, .goodbye, .appIcons,
              .alignmentProbeStarted, .alignmentProbeFinished, .alignmentApplied,
              .companionToken, .unknown:
             // Server-to-client message types arriving FROM a client, or a
@@ -925,28 +1068,51 @@ public final class CompanionServer: @unchecked Sendable {
 
     // MARK: - Sending (queue-confined)
 
-    /// The `welcome`'s `serverName` comes from the snapshot itself (the
-    /// wiring sets `Snapshot.serverName` from the same host name it passes
-    /// to `start(name:)`) — one source of truth, and the value the
-    /// ``accept(_:)`` test seam exercises without ever starting a listener.
+    /// The `welcome`'s `serverName` comes from the snapshot itself — the
+    /// Mac's name travels only inside TLS, never in the Bonjour
+    /// advertisement, and this is also the value the ``accept(_:)`` test
+    /// seam exercises without ever starting a listener.
     private func sendWelcome(_ snapshot: Snapshot, to client: Client) {
         client.isWelcomed = true
         send(.welcome(serverName: snapshot.serverName, protoVersion: CompanionProto.version, snapshot: snapshot,
                       companionToken: companionToken?(), serverID: serverID?()), to: client)
     }
 
+    /// Every per-client frame goes through here, so its bytes count against
+    /// ``maxSendBacklogBytes`` from the moment they are handed to the stack
+    /// until the stack reports them sent. A client already over the cap is
+    /// cancelled instead of sent to; the state handler then cleans it up
+    /// like any other death. MUST only run on ``queue``.
     private func send(_ message: CompanionMessage, to client: Client, whenDone: (@Sendable () -> Void)? = nil) {
-        sendRaw(message, over: client.connection, whenDone: whenDone)
-    }
-
-    /// Encode and send one text frame. `whenDone` fires on ``queue`` once
-    /// the frame has been handed to the stack (used to close after a
-    /// `goodbye` has actually been sent, not before).
-    private func sendRaw(_ message: CompanionMessage, over connection: NWConnection, whenDone: (@Sendable () -> Void)? = nil) {
-        guard let data = try? CompanionEnvelope(message: message).encoded() else {
-            log.error("companion frame failed to encode; dropping it")
+        guard let data = encoded(message) else { return }
+        client.unsentBytes += data.count
+        let cap = test_maxSendBacklogBytesOverride ?? Self.maxSendBacklogBytes
+        guard client.unsentBytes <= cap else {
+            log.notice("companion client dropped: \(client.unsentBytes) bytes unsent, over the \(cap)-byte cap")
+            client.connection.cancel()
             return
         }
+        let count = data.count
+        sendRaw(data, over: client.connection) { [weak client] in
+            client?.unsentBytes -= count
+            whenDone?()
+        }
+    }
+
+    private func encoded(_ message: CompanionMessage) -> Data? {
+        guard let data = try? CompanionEnvelope(message: message).encoded() else {
+            log.error("companion frame failed to encode; dropping it")
+            return nil
+        }
+        return data
+    }
+
+    /// Send one encoded text frame. `whenDone` fires on ``queue`` once the
+    /// frame has been handed to the stack (used to close after a `goodbye`
+    /// has actually been sent, not before). No backlog accounting: only
+    /// ``send(_:to:whenDone:)`` and the goodbyes of `stopLocked`/`refuse`
+    /// call this.
+    private func sendRaw(_ data: Data, over connection: NWConnection, whenDone: (@Sendable () -> Void)? = nil) {
         if data.count > Self.iosInboundCapBytes {
             // Sent anyway (a future client may accept it), but this WILL
             // kill the current iOS client's connection — the snapshot

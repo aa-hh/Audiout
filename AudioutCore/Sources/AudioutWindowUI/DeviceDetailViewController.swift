@@ -72,7 +72,7 @@ public final class DeviceDetailViewController: NSViewController {
     private let subtitleGlyph = NSImageView()
     private let subtitleStack = NSStackView()
     /// The identity band: the icon well, then the name over its caption.
-    private lazy var header = PageHeaderView(iconWell: iconWell, title: nameLabel,
+    private lazy var header = PageHeaderView(icon: iconWell, title: nameLabel,
                                              caption: subtitleStack)
     /// The page's instrument, wrapping the shared editor — a `.well`
     /// (recessed), not a `.card`, so it still reads sunk where `raised`

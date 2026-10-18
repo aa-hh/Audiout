@@ -186,9 +186,14 @@ let package = Package(
         // Mac does; 0.20.0 adds per-speaker Mixer visibility, missing speakers,
         // the note slot, and the `setSpeakerVisibility`/`forgetSpeakers`
         // commands; 0.21.0 replaces the two sweeps with one glide probe both
-        // speakers play in turn (`SyncProbe.Layout`, ADR 0002 there).
+        // speakers play in turn (`SyncProbe.Layout`, ADR 0002 there); 0.22.0
+        // carries the room delay on `alignmentProbeStarted`; 0.23.0 each
+        // speaker's total delay; 0.24.0 and 0.25.0 the Mac app version and the
+        // speaker's product model in the snapshot; 0.26.0 is protocol version 2
+        // (TLS, the phone's signed `hello`, `CompanionPairing`); 0.27.0 adds
+        // `hello`'s optional `checksPairingCode`.
         .package(url: "https://github.com/aa-hh/audiout-shared.git",
-                 from: "0.21.0"),
+                 from: "0.27.0"),
         // Sparkle 2 (MIT) — in-app updates for the paid, notarised build only.
         // Scoped to the `AudioutApp` executable target so no library, test or
         // harness target ever links it.

@@ -410,6 +410,45 @@ review
   && status_call | grep -q "statuses/$(git rev-parse HEAD) .*-f state=success -f description=cheap, round 1, 0 HIGH$" \
   && ok "n2: main merged in → round 1 status re-posted on the merge commit, no round used" || { fail "n2: exit $rc"; show; }
 
+# (n3) Round 2 after main was merged in reviews only the branch's own change
+# since round 1, not main's.
+# Catches: round 2 diffing round 1's head against the tip, which drags in
+# everything the merge brought (here 400 lines in a risk path).
+reset_answers
+make_branch merged-then-fixed "$analytics" 120
+review
+git checkout -q main
+for i in $(seq 1 400); do echo "// n3 main-only line $i" >> "$license"; done
+git commit -q --no-verify -am "main moves a lot"
+git checkout -q merged-then-fixed
+git merge -q --no-verify --no-edit main > /dev/null 2>&1 || fail "n3: merging main did not merge cleanly"
+echo "// own fix after the merge" >> "$analytics"; git commit -q --no-verify -am "own fix"
+reset_answers
+review
+grep -q '^Review level: cheap (1 product lines), round 2$' "$out" \
+  && grep -q '^+// own fix after the merge$' "$PROMPTS/cheap.prompt" \
+  && ! grep -q '^+// n3 main-only line' "$PROMPTS/cheap.prompt" && ! grep -q '^+// review test line' "$PROMPTS/cheap.prompt" \
+  && [ "$rc" = 0 ] && ok "n3: round 2 after a main merge holds only the one own line" || { fail "n3: exit $rc"; show; }
+
+# (n4) When round 1's head no longer merges cleanly with main, round 2 says so
+# and reviews the branch's whole change against main.
+# Catches: a conflicted merge-tree result used as the diff base, or the
+# fallback reviewing nothing.
+reset_answers
+make_branch conflicted "$analytics" 120
+review
+git checkout -q main
+echo "// main edits the same spot" >> "$analytics"; git commit -q --no-verify -am "main conflicts"
+git checkout -q conflicted
+git merge -q --no-verify --no-edit -X ours main > /dev/null 2>&1 || fail "n4: merging main failed"
+echo "// own fix after the conflict" >> "$analytics"; git commit -q --no-verify -am "own fix"
+reset_answers
+review
+grep -q 'does not merge cleanly with origin/main' "$out" \
+  && grep -q ', round 2$' "$out" && grep -q '^+// own fix after the conflict$' "$PROMPTS/cheap.prompt" \
+  && grep -q '^+// review test line 1 (conflicted)$' "$PROMPTS/cheap.prompt" \
+  && ok "n4: conflict → whole own change against main, with a note" || { fail "n4: exit $rc"; show; }
+
 # (v) A commit between the handover and --continue means no review.
 # Catches: replies about older code recorded against the new code.
 reset_answers

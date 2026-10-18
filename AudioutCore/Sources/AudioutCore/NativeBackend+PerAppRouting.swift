@@ -1267,9 +1267,11 @@ extension NativeBackend {
         // clockless one re-establishes a session that plays silence, so it stays
         // gated. Practically instant mid-session (the clock is already up); on a
         // genuine refusal the `false` return feeds this chain's backoff/give-up.
-        guard await ensurePTPTakeover(telemetryDeviceID: deviceID(for: outputID) ?? "\(outputID)") else {
+        let gate = await ensurePTPTakeover(telemetryDeviceID: deviceID(for: outputID) ?? "\(outputID)")
+        guard gate == .ready else {
             Telemetry.log(.airplay, "rebind_recover_failed", [
                 "output": "\(outputID)", "scope": label, "error": "timingUnavailable",
+                "gate": gate.telemetryName,
             ])
             return false
         }
@@ -1938,10 +1940,11 @@ extension NativeBackend {
             // used to skip this entirely). `clearBinding` on failure is what
             // lets the clock-recovery replay / discovery re-drive re-issue
             // this op without a topology change.
-            guard await ensurePTPTakeover(telemetryDeviceID: deviceID(for: outputID) ?? "\(outputID)") else {
+            let gate = await ensurePTPTakeover(telemetryDeviceID: deviceID(for: outputID) ?? "\(outputID)")
+            guard gate == .ready else {
                 handleBindFailure(
                     outputID: outputID, stream: stream, op: "bind",
-                    error: PTPClockUnavailableError(), clearBinding: true)
+                    error: PTPClockUnavailableError(outcome: gate), clearBinding: true)
                 return
             }
             // Roadmap 008 fire-time gate — AFTER the PTP wait (the widest window
@@ -1957,10 +1960,11 @@ extension NativeBackend {
             }
         case .rebind(let outputID, let stream):
             reportPerAppConnectionState(.connecting, outputID: outputID)
-            guard await ensurePTPTakeover(telemetryDeviceID: deviceID(for: outputID) ?? "\(outputID)") else {
+            let gate = await ensurePTPTakeover(telemetryDeviceID: deviceID(for: outputID) ?? "\(outputID)")
+            guard gate == .ready else {
                 handleBindFailure(
                     outputID: outputID, stream: stream, op: "rebind",
-                    error: PTPClockUnavailableError(), clearBinding: true)
+                    error: PTPClockUnavailableError(outcome: gate), clearBinding: true)
                 return
             }
             guard perAppOpMayFire(outputID: outputID, op: "rebind", stream: stream) else { return }
@@ -2058,8 +2062,9 @@ extension NativeBackend {
 
     /// A per-app bind was refused because no PTP clock is available (the T4
     /// gate said not-ready). Distinct from an engine throw only so telemetry
-    /// reads the actual cause.
+    /// reads the actual cause, and carries the gate's outcome for its `reason`.
     struct PTPClockUnavailableError: Error, CustomStringConvertible {
+        let outcome: PTPHelperActivationOutcome
         var description: String { "timingUnavailable" }
     }
 
@@ -2174,7 +2179,7 @@ extension NativeBackend {
                 self.fedDescriptors[deviceID]?.authKey = nil
                 Telemetry.fail(.airplay, "airplay:connect_failed",
                                local: ["device": deviceID, "op": op, "stream": "\(stream)", "error": "\(error)"],
-                               shared: ["cause": "\(cause)"])
+                               shared: ["cause": "\(cause)", "reason": Self.failureReason(error)])
             }
             if self.streamBindings[deviceID] != nil {
                 self.setPerAppConnectionStateLocked(

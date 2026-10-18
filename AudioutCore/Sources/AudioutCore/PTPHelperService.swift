@@ -164,6 +164,16 @@ public enum PTPHelperActivationOutcome: Equatable, Sendable {
     /// timeout — the bind may still be racing macOS's own AirPlay off the
     /// ports (G1: ~1-3 s typical), or the daemon failed to come up at all.
     case timingPortsUnavailable
+
+    /// Stable short token for a telemetry line, and the `reason` a gate
+    /// refusal sends with `airplay:connect_failed`.
+    var telemetryName: String {
+        switch self {
+        case .ready: return "ready"
+        case .needsApproval: return "needsApproval"
+        case .timingPortsUnavailable: return "timingPortsUnavailable"
+        }
+    }
 }
 
 /// Demand-starts the PTP helper for an about-to-connect session and waits,

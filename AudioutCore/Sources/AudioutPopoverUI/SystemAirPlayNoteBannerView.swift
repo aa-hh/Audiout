@@ -8,13 +8,11 @@ import AudioutSharedUI
 /// when the macOS SYSTEM default output is itself an AirPlay device WHILE this
 /// app is actively streaming a captured whole-system mix to AirPlay, which
 /// risks the same audio going out twice (echo). The iOS Status Banner recipe:
-/// the tier's tint at 12 % on the
-/// control radius, no border (a 1 pt one under Increase Contrast), a glyph and a wrapping label. `.info` (the
+/// the tier's tint on a `TintedNoteBackgroundView`, a glyph and a wrapping label. `.info` (the
 /// default) carries this note and the takeover strip; `.warning` carries
 /// T-UI's routing-blocked-needs-default note, the urgent tier that reuses the
-/// silence banner's own tint rather than forking a second banner class. No
-/// custom drawing beyond the layer-backed rounded rect.
-final class SystemAirPlayNoteBannerView: NSView {
+/// silence banner's own tint rather than forking a second banner class.
+final class SystemAirPlayNoteBannerView: TintedNoteBackgroundView {
 
     /// An optional trailing call-to-action (T6, takeover status strip state 1:
     /// "needs permission" deep-links to Login Items & Extensions). A single
@@ -29,8 +27,7 @@ final class SystemAirPlayNoteBannerView: NSView {
 
     /// Tint tier (T-UI, routing-blocked-needs-default). `.info` is a note the
     /// reader can act on later, so it wears `ring`; `.warning` is a real
-    /// problem — routing is dead — so it wears `failure`. Both fill at 12 %
-    /// on the control radius with no border.
+    /// problem — routing is dead — so it wears `failure`.
     enum Severity {
         case info
         case warning
@@ -96,14 +93,7 @@ final class SystemAirPlayNoteBannerView: NSView {
         let labelFont = NSFont.systemFont(ofSize: NSFont.systemFontSize, weight: .medium)
         var linkButton: NSButton?
         if let textAction {
-            let b = NSButton(title: textAction.title, target: nil, action: nil)
-            b.bezelStyle = .accessoryBar
-            b.isBordered = false
-            b.attributedTitle = NSAttributedString(string: textAction.title, attributes: [
-                .font: labelFont,
-                .underlineStyle: NSUnderlineStyle.single.rawValue,
-                .foregroundColor: NSColor.labelColor,
-            ])
+            let b = TextLinkButton(title: textAction.title, size: .body)
             b.translatesAutoresizingMaskIntoConstraints = false
             b.setContentHuggingPriority(.required, for: .horizontal)
             b.setContentCompressionResistancePriority(.required, for: .horizontal)
@@ -121,18 +111,14 @@ final class SystemAirPlayNoteBannerView: NSView {
 
         let text = NSTextField(wrappingLabelWithString: text)
         text.font = labelFont
-        text.textColor = .labelColor
+        text.textColor = Tokens.Color.label
         text.isSelectable = false
         text.translatesAutoresizingMaskIntoConstraints = false
         text.preferredMaxLayoutWidth = max(100, maxTextWidth - buttonReserve)
         self.label = text
 
-        super.init(frame: .zero)
+        super.init(tint: severity.tintColor)
         translatesAutoresizingMaskIntoConstraints = false
-        wantsLayer = true
-        layer?.cornerRadius = Tokens.Layout.Radius.control
-        layer?.cornerCurve = .continuous
-        stampLayerColors()
 
         // The icon+text pair sits at its own natural (leading-hugging) width —
         // it does NOT stretch to fill the banner. The button is a SEPARATE
@@ -193,32 +179,13 @@ final class SystemAirPlayNoteBannerView: NSView {
         setAccessibilityElement(true)
         setAccessibilityRole(.group)
         setAccessibilityLabel(text.stringValue)
-
-        // Increase Contrast changes no appearance, so it needs its own repaint
-        // (DESIGN.md, the Variant Rule) for the edge `stampLayerColors` adds.
-        NSWorkspace.shared.notificationCenter.addObserver(
-            self, selector: #selector(accessibilityDisplayChanged),
-            name: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification, object: nil)
     }
-
-    deinit { NSWorkspace.shared.notificationCenter.removeObserver(self) }
-
-    @objc private func accessibilityDisplayChanged() { needsDisplay = true }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     @objc private func actionButtonTapped() { actionHandler?() }
     @objc private func textActionButtonTapped() { textActionHandler?() }
-
-    /// The underlined text action reads as a link, so it takes a link's cursor;
-    /// a borderless `NSButton` keeps the arrow on its own.
-    override func resetCursorRects() {
-        super.resetCursorRects()
-        if let textActionButton {
-            addCursorRect(textActionButton.frame, cursor: .pointingHand)
-        }
-    }
 
     // MARK: Test-support hooks
 
@@ -239,44 +206,4 @@ final class SystemAirPlayNoteBannerView: NSView {
     var test_textActionButton: NSButton? { textActionButton }
     var test_actionButton: NSButton? { actionButton }
     var test_iconView: NSImageView { iconView }
-
-    /// Keep the CGColor-backed fills correct across light/dark appearance
-    /// switches (layer colors don't auto-resolve dynamic `NSColor`s).
-    ///
-    /// `wantsUpdateLayer` is what makes this run at all: without it AppKit takes
-    /// the `draw(_:)` path and `updateLayer()` is never called, so the re-stamp
-    /// below sat dead and the banner kept its build-time appearance across a
-    /// live light/dark flip.
-    override var wantsUpdateLayer: Bool { true }
-
-    override func updateLayer() {
-        super.updateLayer()
-        stampLayerColors()
-    }
-
-    /// The one place the tint is resolved and stamped — under the view's own
-    /// effective appearance, the `ConnectionDiagnosisView.applyBackgroundTint`
-    /// idiom, so a dynamic token resolves for the appearance actually on screen
-    /// rather than whatever was current at build time.
-    ///
-    /// Under Increase Contrast a 12 % tint alone gives the banner no edge, so
-    /// it gains a 1 pt border in the same tint at full strength.
-    func stampLayerColors(
-        increaseContrast: Bool = NSWorkspace.shared.accessibilityDisplayShouldIncreaseContrast
-    ) {
-        effectiveAppearance.performAsCurrentDrawingAppearance {
-            layer?.backgroundColor = severity.tintColor
-                .withAlphaComponent(0.12).cgColor
-            layer?.borderColor = severity.tintColor.cgColor
-        }
-        layer?.borderWidth = increaseContrast ? 1 : 0
-    }
-
-    /// The layer's currently-stamped fill, read back as `NSColor` — asserts it
-    /// resolves from `Tokens.Color.ring` / `.failure` per tier, never a raw
-    /// system-color literal.
-    var test_backgroundColor: NSColor? {
-        guard let cgColor = layer?.backgroundColor else { return nil }
-        return NSColor(cgColor: cgColor)
-    }
 }

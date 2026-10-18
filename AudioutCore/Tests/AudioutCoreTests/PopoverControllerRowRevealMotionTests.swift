@@ -53,7 +53,12 @@ import AppKit
         return (panel, row, panel.fittingSizeSettled().height)
     }
 
-    @Test(.enabled(if: ProcessInfo.processInfo.environment["CI"] == nil, "Quarantined on GitHub runners 2026-10-04: reveal/collapse heights and the toolbar alpha depend on an awake display and the runner's appearance. Issue #258.")) func theRevealStartsCollapsedWhileTheSurfaceIsToldTheFullHeight() {
+    @Test func theRevealStartsCollapsedWhileTheSurfaceIsToldTheFullHeight() {
+        defer {
+            FoldAnimator.shared.test_reduceMotionOverride = nil
+            FoldAnimator.shared.test_settleNow()
+        }
+        FoldAnimator.shared.test_reduceMotionOverride = false
         let (panel, row, collapsed) = makePanel()
         let drawer = FixedRow(height: Self.drawerHeight)
 
@@ -71,7 +76,12 @@ import AppKit
 
     /// The reused drawer — the case the correctness fix exists for — takes the
     /// same trajectory: arriving hidden must not cost it its start state either.
-    @Test(.enabled(if: ProcessInfo.processInfo.environment["CI"] == nil, "Quarantined on GitHub runners 2026-10-04: reveal/collapse heights and the toolbar alpha depend on an awake display and the runner's appearance. Issue #258.")) func aRowThatArrivesHiddenTakesTheSameTrajectory() {
+    @Test func aRowThatArrivesHiddenTakesTheSameTrajectory() {
+        defer {
+            FoldAnimator.shared.test_reduceMotionOverride = nil
+            FoldAnimator.shared.test_settleNow()
+        }
+        FoldAnimator.shared.test_reduceMotionOverride = false
         let (panel, row, collapsed) = makePanel()
         let drawer = FixedRow(height: Self.drawerHeight)
         drawer.isHidden = true      // exactly what an animated `removeRow` leaves behind

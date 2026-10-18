@@ -245,9 +245,10 @@ import AppKit
                 "…while staying in the same warm family, not becoming a second hue")
     }
 
-    /// The light idle/armed gap has a floor. `spineTone(armed:)` resolves to
-    /// `gold` or `ember`; under ~1.40:1 the two are one visible colour on a
-    /// 2 pt line and the rail cannot report armed vs idle. The 1.60:1 ceiling
+    /// The light idle/armed gap has a floor. The Groups editor's member discs
+    /// (`MembershipBusView`) are `gold` when routed and `ember` when only
+    /// saved; under ~1.40:1 the two are one visible colour and the disc cannot
+    /// report armed vs idle. (The rail LINE is always gold since 2026-10-04.) The 1.60:1 ceiling
     /// that guarded ember from sinking into brown went with the light gold
     /// move of 2026-09-17: the gap is now bought by gold lifting, ember's
     /// depth unchanged.
@@ -256,7 +257,7 @@ import AppKit
         let ember = resolved(Tokens.Color.ember, appearanceName: .aqua)
         let gap = contrastRatio(gold, ember)
 
-        #expect(gap >= 1.40, Comment(rawValue: "gold vs ember \(gap):1 — the idle rail merges into the armed one"))
+        #expect(gap >= 1.40, Comment(rawValue: "gold vs ember \(gap):1 — an idle member disc merges into an armed one"))
     }
 
     // MARK: Structural — the editor's checklist actually wears the new surface

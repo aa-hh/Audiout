@@ -156,7 +156,8 @@ func runLiveSession(_ args: ProbeArgs) async {
                     "tp": "UDP",   // required: raop_device_cb rejects tp without "UDP"
                 ]
             }
-            if let pw = d.password { txt["pw"] = "true"; _ = pw }
+            // raop.c reads `pw` to mark the device protected; AirPlay 2 ignores it.
+            if kind == .raop, d.password != nil { txt["pw"] = "true" }
 
             let descriptor = DeviceDescriptor(
                 name: feedName,
@@ -165,7 +166,8 @@ func runLiveSession(_ args: ProbeArgs) async {
                 family: d.ipv6 ? .ipv6 : .ipv4,
                 port: d.port,
                 kind: kind,
-                txtRecord: txt
+                txtRecord: txt,
+                password: d.password
             )
 
             print("[probe] feeding \(kind == .raop ? "RAOP/AirPlay-1" : "AirPlay 2") discovery descriptor for \(d.deviceName)...")

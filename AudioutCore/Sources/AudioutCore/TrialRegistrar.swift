@@ -54,7 +54,7 @@ public enum TrialRegistrar {
         completion: @escaping (Bool) -> Void = { _ in }
     ) {
         guard case .active(_, _, registered: false) = TrialClock.state(settings: settings),
-              (settings.licenseKey ?? "").isEmpty,
+              !settings.hasLicenseKey,
               let startedAt = settings.trialStartedAt,
               let server = settings.licenseServerURL
         else {
@@ -80,7 +80,7 @@ public enum TrialRegistrar {
             // Parsed off the main queue; only the write and the callback hop.
             let answer = Self.parse(data: data, response: response)
             DispatchQueue.main.async {
-                guard let answer, (settings.licenseKey ?? "").isEmpty else {
+                guard let answer, !settings.hasLicenseKey else {
                     return completion(false)
                 }
                 TrialClock.apply(settings: settings,

@@ -42,3 +42,18 @@ public extension NSView {
         needsDisplay = true
     }
 }
+
+// MARK: - VoiceOver headings
+
+public extension NSView {
+
+    /// Gives this view the heading role, so VoiceOver's heading rotor
+    /// (VO-⌘-H) stops on it. Page titles and section titles take it.
+    ///
+    /// The raw string is `kAXHeadingRole`: AppKit's `NSAccessibilityHeadingRole`
+    /// is macOS 26+ and this app installs on 14.2. A role, not a subrole —
+    /// VoiceOver's rotor reads the role.
+    func setAccessibilityHeading() {
+        setAccessibilityRole(NSAccessibility.Role(rawValue: "AXHeading"))
+    }
+}

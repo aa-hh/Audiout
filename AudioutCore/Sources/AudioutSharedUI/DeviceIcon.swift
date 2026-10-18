@@ -79,6 +79,80 @@ public enum DeviceIcon {
         resolve("hifispeaker.arrow.forward.fill", default: "hifispeaker.fill")
     }
 
+    /// Point size and offset for each glyph a row draws inside its ring
+    /// (owner-approved table, `dev/notes/ring-glyph-optical-table-2026-10-03.md`):
+    /// each symbol is sized to the AirPlay speaker's visual weight and nudged
+    /// so its optical centre sits on the ring's centre. Offsets in pt,
+    /// + x = right, + y = up. A symbol missing here draws at
+    /// `PopoverColumnGrid.iconGlyphPointSize`, centred.
+    static let rowGlyphFits: [String: (pointSize: CGFloat, dx: CGFloat, dy: CGFloat)] = [
+        "hifispeaker.fill": (18, 0, 0),
+        "homepod.fill": (19, 0, 0),
+        "appletv.fill": (16, 0, 0),
+        "wifi.router.fill": (14.75, 0.25, 1.25),
+        "laptopcomputer": (14.25, 0, 0.25),
+        "tv.and.hifispeaker.fill": (14.25, 0, -0.5),
+        "radio.fill": (14, 0, 0.75),
+        "headphones": (17.5, 0, 0.5),
+        "car.fill": (16.25, 0, 0.25),
+        "airpods": (17.75, 0, -1),
+        "airpodspro": (17.25, 0.25, 0),
+        "airpodsmax": (17.25, 0, 0.5),
+        "airpods.gen3": (16.75, 0, -0.5),
+        "airpods.gen4": (17, 0, -0.5),
+        "beats.powerbeatspro": (15, 0, 0),
+        "beats.earphones": (16.5, 0, -1.25),
+        "beats.fit.pro": (14.25, 0, 0.25),
+        "beats.studiobud.right": (20.75, 0.75, 0.5),
+        "beats.headphones": (18.25, 0, 0.25),
+        "hifispeaker.arrow.forward.fill": (16.75, 0.5, 0),
+        "hifispeaker.2.fill": (14.5, 0, -0.5),
+        "homepod.2.fill": (15, 0, -0.5),
+        "tv.fill": (14.25, 0, -0.25),
+        "speaker.wave.2.fill": (17.5, 0.75, 0),
+        "speaker.wave.3.fill": (15.5, 0.5, 0.25),
+        "music.note": (21.25, 0, 0),
+        "music.note.house.fill": (15, 0, 0.5),
+        "house.fill": (15.25, 0, 0.5),
+        "bed.double.fill": (15.75, 0, 0),
+        "sofa.fill": (14, 0, -0.25),
+        "fork.knife": (19.25, -0.25, -0.25),
+        "desktopcomputer": (15.5, 0, 0),
+        "guitars.fill": (14.5, -0.25, 1),
+        "gamecontroller.fill": (14.5, 0, 0),
+    ]
+
+    @MainActor
+    private static var rowGlyphCache: [String: NSImage] = [:]
+
+    /// The glyph a row draws inside its ring: a `PopoverColumnGrid.iconWidth`
+    /// square template image with `name` drawn at its ``rowGlyphFits`` size,
+    /// centred in the square and moved by its offset. The image is the icon
+    /// box's own size, so the image view shows it 1:1 and the ring and dot
+    /// anchored to that view stay put. A symbol too big for the box shrinks
+    /// to fit, as `.scaleProportionallyDown` did before. SHARED — never
+    /// mutate it; tint with `contentTintColor`.
+    @MainActor
+    public static func rowGlyph(_ name: String) -> NSImage? {
+        if let cached = rowGlyphCache[name] { return cached }
+        let fit = rowGlyphFits[name] ?? (PopoverColumnGrid.iconGlyphPointSize, 0, 0)
+        guard let symbol = NSImage(systemSymbolName: name, accessibilityDescription: nil)?
+            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: fit.pointSize, weight: .regular))
+        else { return nil }
+        let box = PopoverColumnGrid.iconWidth
+        let scale = min(1, box / symbol.size.width, box / symbol.size.height)
+        let size = NSSize(width: symbol.size.width * scale, height: symbol.size.height * scale)
+        let image = NSImage(size: NSSize(width: box, height: box), flipped: false) { rect in
+            symbol.draw(in: NSRect(x: rect.midX - size.width / 2 + fit.dx,
+                                   y: rect.midY - size.height / 2 + fit.dy,
+                                   width: size.width, height: size.height))
+            return true
+        }
+        image.isTemplate = true
+        rowGlyphCache[name] = image
+        return image
+    }
+
     /// The cache behind ``image(_:pointSize:weight:)``. Main-actor isolated —
     /// every call site is AppKit view code, so no lock is bought for a
     /// dictionary that is only ever touched from the main actor.

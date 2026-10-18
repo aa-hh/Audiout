@@ -85,7 +85,7 @@ import Testing
     @Test func theDrawnSquareFillsItsColumnWithoutOutgrowingIt() throws {
         let image = try #require(
             RowAccessorySymbol.image(named: RowAccessorySymbol.muteEngaged, ink: .black))
-        let ink = try #require(inkBounds(image))
+        let ink = try #require(CompiledSymbolFixture.inkBounds(image))
         let column = PopoverColumnGrid.eqButtonWidth
         #expect(ink.width <= column && ink.height <= column,
                 "the square draws \(ink.size), past its \(column) pt column")
@@ -103,8 +103,8 @@ import Testing
             RowAccessorySymbol.image(named: RowAccessorySymbol.muteRest, ink: .black))
         let engaged = try #require(
             RowAccessorySymbol.image(named: RowAccessorySymbol.muteEngaged, ink: .black))
-        let restInk = try #require(inkBounds(rest))
-        let engagedInk = try #require(inkBounds(engaged))
+        let restInk = try #require(CompiledSymbolFixture.inkBounds(rest))
+        let engagedInk = try #require(CompiledSymbolFixture.inkBounds(engaged))
         #expect(abs(restInk.width - engagedInk.width) <= 1
                 && abs(restInk.height - engagedInk.height) <= 1,
                 "the square changed: rest \(restInk.size), engaged \(engagedInk.size)")
@@ -127,22 +127,21 @@ import Testing
         return count
     }
 
-    /// The bounding box of everything `image` actually paints.
-    private func inkBounds(_ image: NSImage) -> NSRect? {
-        guard let rep = image.tiffRepresentation.flatMap(NSBitmapImageRep.init(data:))
-        else { return nil }
-        let scale = CGFloat(rep.pixelsWide) / image.size.width
-        var minX = rep.pixelsWide, maxX = -1, minY = rep.pixelsHigh, maxY = -1
-        for y in 0..<rep.pixelsHigh {
-            for x in 0..<rep.pixelsWide where (rep.colorAt(x: x, y: y)?.alphaComponent ?? 0) > 0.05 {
-                minX = min(minX, x); maxX = max(maxX, x)
-                minY = min(minY, y); maxY = max(maxY, y)
-            }
+    /// The heading icon's constraint subtracts ``RowAccessorySymbol/headingMarkSquareInset``
+    /// so the drawn square, not the symbol's box, sits on the page's inset.
+    /// Turns red when the symbol's side bearing changes (a re-export, a new
+    /// point size or weight) without the constant following it.
+    @Test func theHeadingMarkSquareInsetMatchesTheDrawnSymbol() throws {
+        for name in [RowAccessorySymbol.equalizerRest, RowAccessorySymbol.equalizerEngaged] {
+            let image = try #require(RowAccessorySymbol.image(
+                named: name, ink: .black, pointSize: RowAccessorySymbol.headingPointSize))
+            let ink = try #require(CompiledSymbolFixture.inkBounds(image))
+            let measured = (RowAccessorySymbol.headingPointSize - image.size.width) / 2 + ink.minX
+            #expect(abs(measured - RowAccessorySymbol.headingMarkSquareInset) <= 0.5, Comment(rawValue:
+                    "\(name): the drawn square starts \(measured) pt into a " +
+                    "\(RowAccessorySymbol.headingPointSize) pt box, " +
+                    "the constant says \(RowAccessorySymbol.headingMarkSquareInset)"))
         }
-        guard maxX >= 0 else { return nil }
-        return NSRect(x: CGFloat(minX) / scale, y: CGFloat(minY) / scale,
-                      width: CGFloat(maxX - minX + 1) / scale,
-                      height: CGFloat(maxY - minY + 1) / scale)
     }
 
     /// Both controls draw at ONE point size, so mute and the Equalizer door

@@ -925,3 +925,5 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
 | `CompanionCommandDispatcher` | MainActor dispatcher: executes the companion commands (select device, change volume, group CRUD, etc.) via controller calls. |
 | `Telemetry` | Always-on structured JSON-lines decision log; never the render path. |
 | `Analytics` | Opt-in anonymous usage-analytics facade; sink installed by the app target. |
+
+- 2026-10-06: the wizard's two sounds changed. The mic probe is one `SyncProbe.lane` (a 600 → 150 Hz glide with 2nd/3rd partials over a 110 + 165 Hz drone) played by the Bluetooth speaker first and the reference 4.5 s later, raised 6 or 12 dB when the lead-in hears a loud room; the by-ear ticks are mallet notes, 440 Hz on the Mac side and 660 Hz on the Bluetooth side, 15 ms fundamental decay. The `mic-probe-spike` and `AlignmentTickInjector` rows above describe the earlier sweeps and click.

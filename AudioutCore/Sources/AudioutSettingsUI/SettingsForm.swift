@@ -5,9 +5,10 @@ import AudioutSharedUI
 
 /// Tiny layout kit shared by the Settings panes so every pane reads as one
 /// consistent macOS form: a fixed-width column of `title · optional subtitle`
-/// rows with the control right-aligned, standard insets, and a fitting height
-/// the pane publishes as its own. Deliberately minimal — panes stay small, so
-/// this is a few helpers, not a framework.
+/// rows with the control right-aligned. `paneView` supplies form insets;
+/// `pageView` places the current Settings column on the shared rail-free lane.
+/// Deliberately minimal — panes stay small, so this is a few helpers, not a
+/// framework.
 enum SettingsForm {
 
     /// The pane column inside the one fixed surface frame:
@@ -18,11 +19,9 @@ enum SettingsForm {
     /// to pin them, still get a definite width.
     static let contentWidth: CGFloat = SurfaceLayout.contentPaneWidth
 
-    /// Standard left/right pane margin — shared by `paneView(rows:)` and
-    /// `AudioSettingsViewController.loadView()`'s equivalent hand-rolled
-    /// column, which used to retype this same number.
+    /// Standard left/right form margin used by `paneView(rows:)`.
     static let horizontalPadding: CGFloat = 20
-    /// Standard top/bottom pane margin — same sharing as `horizontalPadding`.
+    /// Standard top/bottom form margin used by `paneView(rows:)`.
     static let verticalPadding: CGFloat = 18
 
     /// A leading-aligned label.
@@ -54,9 +53,9 @@ enum SettingsForm {
     /// `RowContainerView.layout()` resolves their wrap width on every real
     /// layout pass; a full-bleed hint has no such container, so the value is
     /// pinned here instead — `contentWidth` minus the standard 20pt insets on
-    /// each side (`SettingsForm.paneView(rows:)`, and `AudioSettingsViewController
-    /// .loadView()`'s equivalent hand-rolled insets), the usable width every
-    /// full-bleed line in a pane actually gets.
+    /// each side of `SettingsForm.paneView(rows:)`. The current Settings column
+    /// uses `pageView(content:)`, whose rail-free constraints resolve the final
+    /// mounted width separately.
     static func hintLabel(_ string: String = "") -> NSTextField {
         let field = label(string)
         field.font = Tokens.Font.caption
@@ -64,16 +63,6 @@ enum SettingsForm {
         field.lineBreakMode = .byWordWrapping
         field.maximumNumberOfLines = 0
         field.preferredMaxLayoutWidth = contentWidth - horizontalPadding * 2
-        return field
-    }
-
-    /// A **section header** (roadmap 050 visual pass): semibold caption in the
-    /// secondary color, so headers carry real weight separation from body-font
-    /// row titles. One helper so every pane's headers match.
-    static func sectionHeader(_ string: String) -> NSTextField {
-        let field = label(string)
-        field.font = Tokens.Font.captionEmphasized
-        field.textColor = Tokens.Color.label2
         return field
     }
 
@@ -175,8 +164,7 @@ enum SettingsForm {
     /// Stack `rows` into a pane view: `width` wide (the shared `contentWidth`
     /// column unless a caller outside the surface frame says otherwise — About
     /// keeps its own window's width), standard 20/18pt insets, full-width rows.
-    /// The caller assigns this to `NSViewController.view`; the width lets
-    /// `view.fittingSize.height` drive `preferredContentSize`.
+    /// The fixed width lets rows resolve wrapping and intrinsic height.
     static func paneView(rows: [NSView], width: CGFloat = contentWidth) -> NSView {
         let stack = NSStackView(views: rows)
         stack.orientation = .vertical
@@ -208,12 +196,45 @@ enum SettingsForm {
         }
         return container
     }
+
+    /// A Settings page: `content` stacked with no spacing on the page's
+    /// rail-free lane, so a pane's header, cards and notes line up with the
+    /// Speakers page's. Callers set each gap with `setCustomSpacing(_:after:)`
+    /// on the stack (the container's only subview).
+    static func pageView(content: [NSView]) -> NSView {
+        let stack = NSStackView(views: content)
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 0
+        stack.translatesAutoresizingMaskIntoConstraints = false
+
+        let container = NSView()
+        container.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(stack)
+
+        // `.defaultHigh` for the reason `paneView` gives.
+        let widthConstraint = container.widthAnchor.constraint(equalToConstant: contentWidth)
+        widthConstraint.priority = .defaultHigh
+
+        NSLayoutConstraint.activate([
+            widthConstraint,
+            stack.leadingAnchor.constraint(equalTo: container.leadingAnchor,
+                                           constant: GroupsPaneLayout.railFreeContentLeadingInset),
+            stack.trailingAnchor.constraint(equalTo: container.trailingAnchor,
+                                            constant: -GroupsPaneLayout.contentTrailingInset),
+            stack.topAnchor.constraint(equalTo: container.topAnchor),
+            stack.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -22),
+        ])
+        for child in content {
+            child.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+        }
+        return container
+    }
 }
 
 /// The value-readout backing: the panel's inset `well` fill in a rounded rect,
 /// drawn in `draw(_:)` (not a stamped layer color), so it needs both repaint
-/// triggers to track the current appearance — same reasoning as
-/// `BorderedListView`: `viewDidChangeEffectiveAppearance` for light/dark, and
+/// triggers to track the current appearance: `viewDidChangeEffectiveAppearance` for light/dark, and
 /// `redrawOnAccessibilityDisplayChange` for Increase Contrast, which fires no
 /// appearance change of its own (`AccessibilityDisplayRedraw.swift`).
 private final class ReadoutWellView: NSView {

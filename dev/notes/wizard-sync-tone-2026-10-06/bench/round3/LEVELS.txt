@@ -1,0 +1,57 @@
+Levels of the round-3 listening files, dBFS (0 dBFS = digital full scale). Not normalised: the samples are the
+values the app would send. Bluetooth lane on the right, Mac lane on the left, each 2 dB down on the other side.
+Real level: Bluetooth peak -15 dBFS, Mac peak -27 dBFS. raised/*_plus6dB = -9 / -21 dBFS, *_plus12dB = -3 / -15 dBFS:
+the +12 dB files are 12 dB louder than the others; turn the volume down before playing them.
+1 s silence first; a bed starts at 1.0 s and its glide 0.5 s later. today.wav peaks above -15 because both lanes play at once.
+audition.wav: today, D2, D4, E1c, E1t, E1n, E24, E26, E26c, E29, E29c (E2 with tilt -4, -6, -9 dB per octave; c = with the fifth-chord bed), 2 s gaps.
+audition_broken_control.wav: D4, E1x (D4 + parallel glide a fifth below at -6 dB), E1x0 (same at equal level),
+  then D2, E1y (D2 + parallel glides a fifth below at -6 dB), E1y0 (same at equal level).
+audition_raised.wav: D4 at real level, +6, +12 dB, then E1c at real level, +6, +12 dB.
+RMS while sounding skips samples below -60 dBFS.
+
+today.wav                          2.5 s  peak  -12.2 dBFS  RMS while sounding  -18.5 dBFS
+D2.wav                             9.5 s  peak  -15.0 dBFS  RMS while sounding  -26.6 dBFS
+raised/D2_plus6dB.wav              9.5 s  peak   -9.0 dBFS  RMS while sounding  -20.7 dBFS
+raised/D2_plus12dB.wav             9.5 s  peak   -3.0 dBFS  RMS while sounding  -14.8 dBFS
+D4.wav                             9.5 s  peak  -15.0 dBFS  RMS while sounding  -22.6 dBFS
+raised/D4_plus6dB.wav              9.5 s  peak   -9.0 dBFS  RMS while sounding  -16.7 dBFS
+raised/D4_plus12dB.wav             9.5 s  peak   -3.0 dBFS  RMS while sounding  -10.7 dBFS
+E1c.wav                           10.0 s  peak  -15.0 dBFS  RMS while sounding  -26.3 dBFS
+raised/E1c_plus6dB.wav            10.0 s  peak   -9.0 dBFS  RMS while sounding  -20.4 dBFS
+raised/E1c_plus12dB.wav           10.0 s  peak   -3.0 dBFS  RMS while sounding  -14.4 dBFS
+E1t.wav                           10.0 s  peak  -15.0 dBFS  RMS while sounding  -26.5 dBFS
+raised/E1t_plus6dB.wav            10.0 s  peak   -9.0 dBFS  RMS while sounding  -20.6 dBFS
+raised/E1t_plus12dB.wav           10.0 s  peak   -3.0 dBFS  RMS while sounding  -14.6 dBFS
+E1n.wav                           10.0 s  peak  -15.0 dBFS  RMS while sounding  -28.2 dBFS
+raised/E1n_plus6dB.wav            10.0 s  peak   -9.0 dBFS  RMS while sounding  -22.3 dBFS
+raised/E1n_plus12dB.wav           10.0 s  peak   -3.0 dBFS  RMS while sounding  -16.3 dBFS
+E1x0.wav                           9.5 s  peak  -15.0 dBFS  RMS while sounding  -25.0 dBFS
+raised/E1x0_plus6dB.wav            9.5 s  peak   -9.0 dBFS  RMS while sounding  -19.2 dBFS
+raised/E1x0_plus12dB.wav           9.5 s  peak   -3.0 dBFS  RMS while sounding  -13.2 dBFS
+E1x.wav                            9.5 s  peak  -15.0 dBFS  RMS while sounding  -24.8 dBFS
+raised/E1x_plus6dB.wav             9.5 s  peak   -9.0 dBFS  RMS while sounding  -18.8 dBFS
+raised/E1x_plus12dB.wav            9.5 s  peak   -3.0 dBFS  RMS while sounding  -12.9 dBFS
+E1y0.wav                           9.5 s  peak  -15.0 dBFS  RMS while sounding  -25.6 dBFS
+raised/E1y0_plus6dB.wav            9.5 s  peak   -9.0 dBFS  RMS while sounding  -19.7 dBFS
+raised/E1y0_plus12dB.wav           9.5 s  peak   -3.0 dBFS  RMS while sounding  -13.8 dBFS
+E1y.wav                            9.5 s  peak  -15.0 dBFS  RMS while sounding  -25.3 dBFS
+raised/E1y_plus6dB.wav             9.5 s  peak   -9.0 dBFS  RMS while sounding  -19.4 dBFS
+raised/E1y_plus12dB.wav            9.5 s  peak   -3.0 dBFS  RMS while sounding  -13.4 dBFS
+E24.wav                            9.5 s  peak  -15.0 dBFS  RMS while sounding  -26.8 dBFS
+raised/E24_plus6dB.wav             9.5 s  peak   -9.0 dBFS  RMS while sounding  -20.9 dBFS
+raised/E24_plus12dB.wav            9.5 s  peak   -3.0 dBFS  RMS while sounding  -15.0 dBFS
+E26.wav                            9.5 s  peak  -15.0 dBFS  RMS while sounding  -27.9 dBFS
+raised/E26_plus6dB.wav             9.5 s  peak   -9.0 dBFS  RMS while sounding  -22.0 dBFS
+raised/E26_plus12dB.wav            9.5 s  peak   -3.0 dBFS  RMS while sounding  -16.1 dBFS
+E26c.wav                          10.0 s  peak  -15.0 dBFS  RMS while sounding  -29.8 dBFS
+raised/E26c_plus6dB.wav           10.0 s  peak   -9.0 dBFS  RMS while sounding  -24.0 dBFS
+raised/E26c_plus12dB.wav          10.0 s  peak   -3.0 dBFS  RMS while sounding  -18.1 dBFS
+E29.wav                            9.5 s  peak  -15.0 dBFS  RMS while sounding  -28.5 dBFS
+raised/E29_plus6dB.wav             9.5 s  peak   -9.0 dBFS  RMS while sounding  -22.8 dBFS
+raised/E29_plus12dB.wav            9.5 s  peak   -3.0 dBFS  RMS while sounding  -17.0 dBFS
+E29c.wav                          10.0 s  peak  -15.0 dBFS  RMS while sounding  -30.4 dBFS
+raised/E29c_plus6dB.wav           10.0 s  peak   -9.0 dBFS  RMS while sounding  -24.6 dBFS
+raised/E29c_plus12dB.wav          10.0 s  peak   -3.0 dBFS  RMS while sounding  -18.7 dBFS
+audition.wav                     110.0 s  peak  -12.2 dBFS  RMS while sounding  -26.5 dBFS
+audition_broken_control.wav       62.0 s  peak  -15.0 dBFS  RMS while sounding  -24.8 dBFS
+audition_raised.wav               63.5 s  peak   -3.0 dBFS  RMS while sounding  -15.8 dBFS

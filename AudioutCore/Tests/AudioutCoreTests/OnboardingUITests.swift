@@ -832,9 +832,10 @@ import Testing
     /// A Local Network prime can sit a full minute on an unanswered dialog, so
     /// the ribbon has to say what it is waiting for — and then say something
     /// different once the answer lands and only the count is left.
-    @Test(.enabled(if: ProcessInfo.processInfo.environment["CI"] == nil, "Quarantined on GitHub runners 2026-10-04: depends on timers the runner starves. Issue #258.")) func theRibbonNamesBothHalvesOfTheLocalNetworkWait() async {
+    @Test func theRibbonNamesBothHalvesOfTheLocalNetworkWait() async {
         let net = SteppedLocalNetwork(found: 2)
         let vc = makeVC(model: makeModel(audio: .granted, localNetwork: net))
+        vc.test_ribbonReduceMotionOverride = false
         await vc.test_tapAllow(.audio)
 
         let priming = Task { await vc.test_tapAllow(.localNetwork) }
@@ -913,10 +914,11 @@ import Testing
     /// back for the real dialog, and NO buttons — the answer is somewhere else
     /// now. Bluetooth's answer arrives on a callback the click can't await, so
     /// it is the step that shows the beat at rest.
-    @Test(.enabled(if: ProcessInfo.processInfo.environment["CI"] == nil, "Quarantined on GitHub runners 2026-10-04: depends on timers the runner starves. Issue #258.")) func anUndecidedPromptDimsTheStageAndTakesEveryButtonAway() async {
+    @Test func anUndecidedPromptDimsTheStageAndTakesEveryButtonAway() async {
         let model = makeModel(audio: .granted, foundSpeakers: 2,
                               bluetoothPrimer: NeverDecidingBluetooth())
         let vc = makeVC(model: model)
+        vc.test_ribbonReduceMotionOverride = false
         await vc.test_allow([.audio, .localNetwork])
         #expect(vc.test_activeStep == .bluetooth)
 
@@ -930,11 +932,12 @@ import Testing
 
     /// …and the wait expires, so the ask comes back instead of staying wedged
     /// for the rest of the presentation.
-    @Test(.enabled(if: ProcessInfo.processInfo.environment["CI"] == nil, "Quarantined on GitHub runners 2026-10-04: depends on timers the runner starves. Issue #258.")) func anUndecidedBluetoothPromptStopsWaitingAfterItsTimeout() async {
+    @Test func anUndecidedBluetoothPromptStopsWaitingAfterItsTimeout() async {
         let model = makeModel(audio: .granted, foundSpeakers: 2,
                               bluetoothPrimer: NeverDecidingBluetooth(),
                               bluetoothPromptTimeout: 0.05)
         let vc = makeVC(model: model)
+        vc.test_ribbonReduceMotionOverride = false
         await vc.test_allow([.audio, .localNetwork])
         await vc.test_tapAllow(.bluetooth)
         #expect(vc.test_ribbonIsWaiting)
@@ -1206,10 +1209,11 @@ import Testing
     /// None of the three has anything a screen reader can see: the buttons leave
     /// the layout, the stage dims, and the ✕ simply does nothing. So all three
     /// are spoken, and the refusal takes the ribbon's status line too.
-    @Test(.enabled(if: ProcessInfo.processInfo.environment["CI"] == nil, "Quarantined on GitHub runners 2026-10-04: depends on timers the runner starves. Issue #258.")) func theWaitTheStuckHintAndARefusedCloseAreAllSpoken() async {
+    @Test func theWaitTheStuckHintAndARefusedCloseAreAllSpoken() async {
         let model = makeModel(audio: .granted, foundSpeakers: 2,
                               bluetoothPrimer: NeverDecidingBluetooth())
         let vc = makeVC(model: model)
+        vc.test_ribbonReduceMotionOverride = false
         await vc.test_awaitInitialStatuses()   // announcements start once the opening state is known
         await vc.test_allow([.audio, .localNetwork])
 
@@ -1490,17 +1494,24 @@ import Testing
     /// Defect this names: the card asking for something macOS raises (a
     /// caption promising a system dialog, a Settings deep link), or drawing
     /// anything other than the invitation the other two hosts mount.
+    /// Also turns red if the card stops firing `onRemoteInviteShown` once as
+    /// it comes on screen: the app opens a pairing window on it, and without
+    /// one a phone that scans the card is refused.
     @Test func theIPhoneCardStagesTheInvitationAndOpensThePage() async {
         var opened: [URL] = []
+        var invitesShown = 0
         let vc = makeVC(model: makeModel(audio: .granted, foundSpeakers: 3,
                                          remoteAppAvailable: true,
                                          ptpHelper: FakePTPHelper(status: .enabled)))
         vc.openURL = { opened.append($0) }
+        vc.onRemoteInviteShown = { invitesShown += 1 }
         await vc.test_allow([.audio, .localNetwork])
         vc.test_tapSkip(.bluetooth)
+        #expect(invitesShown == 0, "no pairing window before the card is up")
         vc.test_tapSkip(.remoteControl)
 
         #expect(vc.test_activeStep == .audioutRemote)
+        #expect(invitesShown == 1, "the card coming on screen opens one pairing window")
         #expect(vc.test_heroHeadline == "Measure with your iPhone")
         #expect(vc.test_previewFrameLabel == nil,
                 "macOS raises nothing here, so nothing may claim it does")

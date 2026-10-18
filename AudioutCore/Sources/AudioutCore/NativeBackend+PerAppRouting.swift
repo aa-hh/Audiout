@@ -25,8 +25,15 @@ extension NativeBackend {
     /// unreachable, which is also what makes launch safe — persisted routes are
     /// pushed in before discovery has found anything, and each one engages as its
     /// device shows up.
+    ///
+    /// A speaker waiting for a password or code (`.awaitingPassword`, or
+    /// `.failed` with `.authRequired` or `.codeRequired`) stays available so its
+    /// row offers "Enter password",
+    /// but it cannot carry audio until one is entered, so it reads unreachable
+    /// here; its `.connected` edge replays the route.
     private func isRouteTargetReachableLocked(_ id: String) -> Bool {   // on stateQueue
-        guard let device = known[id], device.isAvailable else { return false }
+        guard let device = known[id], device.isAvailable,
+              !Self.waitsForPasswordEntry(device.connectionState) else { return false }
         return outputIDs[id] != nil || device.isBluetooth
     }
 
@@ -48,8 +55,52 @@ extension NativeBackend {
     /// on intent alone — because their job is precisely the in-flight window
     /// intent cannot see: a deselected device whose teardown `removeOutput` is
     /// still in flight is still whole-system-owned at the engine. On `stateQueue`.
-    private func isWholeSystemOperationallyClaimedLocked(_ id: String) -> Bool {   // on stateQueue
+    func isWholeSystemOperationallyClaimedLocked(_ id: String) -> Bool {   // on stateQueue
         desiredOn[id] == true || converging.contains(id) || added.contains(id)
+    }
+
+    /// Report a per-app-only target's connection state. Whole-system routing
+    /// owns the state of any device it claims, so this writes nothing for one;
+    /// the claim is read at write time, so a device whole-system took over
+    /// mid-op is left alone. `makingAvailable` sets `isAvailable` in the same
+    /// commit, so the eligibility check sees both changes as one edge. On `stateQueue`.
+    func setPerAppConnectionStateLocked(_ state: ConnectionState, for id: String, makingAvailable: Bool = false) {   // on stateQueue
+        guard !isWholeSystemOperationallyClaimedLocked(id) else { return }
+        setConnectionState(state, for: id, makingAvailable: makingAvailable)
+    }
+
+    /// Whether a route leaving `id` was dropped by the speaker's own failure
+    /// (unavailable and `.failed`, or available and waiting for a password or
+    /// code, `.awaitingPassword` included) rather than removed by the user;
+    /// such a route keeps its state, so a password speaker keeps its "Enter
+    /// password" prompt and its `.off` cannot make it reachable again and
+    /// re-bind into the same refusal. The Bluetooth caller is unaffected:
+    /// Bluetooth never reports those states. On `stateQueue`.
+    func droppedByOwnFailureLocked(_ id: String) -> Bool {   // on stateQueue
+        guard let device = known[id] else { return false }
+        if case .failed = device.connectionState, !device.isAvailable { return true }
+        return Self.waitsForPasswordEntry(device.connectionState)
+    }
+
+    /// Whether `state` is a password or code demand the user has yet to answer
+    /// (`.awaitingPassword`) or answered wrongly (`.failed` with `.authRequired`
+    /// or `.codeRequired`).
+    static func waitsForPasswordEntry(_ state: ConnectionState) -> Bool {
+        if state == .awaitingPassword { return true }
+        guard case .failed(let failure) = state else { return false }
+        return failure.cause == .authRequired || failure.cause == .codeRequired
+    }
+
+    /// `setPerAppConnectionStateLocked` for an engine handle, from the bind
+    /// tail's async context. Writes only while the route still binds the
+    /// device: a bind that outlives its route must not write over the `.off`
+    /// the removal already reported.
+    private func reportPerAppConnectionState(_ state: ConnectionState, outputID: OutputID) {
+        stateQueue.sync {
+            guard let id = self.outputIDs.first(where: { $0.value == outputID })?.key,
+                  self.streamBindings[id] != nil else { return }
+            self.setPerAppConnectionStateLocked(state, for: id)
+        }
     }
 
     /// Reachable AND not whole-system-claimed — the full eligibility test a
@@ -247,11 +298,20 @@ extension NativeBackend {
         // and same non-blocking contract as `setOutputSet`'s — see `onRoutingAction`.
         onRoutingAction?()
         let plan: UpdateRoutesPlan = stateQueue.sync {
+            let waitingForPassword = self.known.values
+                .filter { Self.waitsForPasswordEntry($0.connectionState) && self.routesTargetDeviceLocked($0.id) }
+                .map(\.id)
             self.lastRoutes = routes
             // A `.group` route is a live reference: this snapshot is what it
             // resolves against, so a group edit re-pushing an unchanged route
             // table still moves the audio.
             self.lastGroupTargets = groupTargets
+            // The user's table stopped naming a speaker that was waiting for a
+            // password or code, so its row reads `.off`. The self-drop keeps its
+            // `.failed` in `handleDestinationSetsChanged` because the table still names it there.
+            for id in waitingForPassword where !self.routesTargetDeviceLocked(id) {
+                self.setPerAppConnectionStateLocked(.off, for: id)
+            }
             // Retained so the metering-only target set can subtract it and so a
             // denylist change alone re-reconciles the metering taps (T3, PRIVACY).
             self.lastExcludedBundleIDs = excludedBundleIDs
@@ -496,6 +556,10 @@ extension NativeBackend {
                 excludedBundleIDs: excludedBundleIDs
                     .union(plan.localExcluded)
                     .union(plan.leveled))
+            // `.currentDevice` and leveled apps play on the Mac through our own (self-excluded)
+            // process, so the listen-only tap must keep their own process to meter them at all.
+            self.localMeterCapture?.updateRouting(
+                appRoutes: plan.effectiveRoutes, excludedBundleIDs: excludedBundleIDs)
         }
     }
 
@@ -557,6 +621,9 @@ extension NativeBackend {
                 let wantsLocal = self.localBundleIDs.contains(bundleID)
                     || (self.leveledBundleIDs.contains(bundleID) && !self.captureRunning)
                 guard wantsLocal else { return nil }
+                // Re-assert the Mac row's level on every start, so an engine
+                // swapped in after the last push still plays at the row's level.
+                self.pushLocalPlaybackGainLocked()
                 let vol = self.lastRoutes.first { $0.bundleID == bundleID }?.volume ?? 100
                 return Float(vol) / 100.0
             }
@@ -694,6 +761,7 @@ extension NativeBackend {
             // excluded/routed-away, so it's cheap for a bundle that turns out not
             // to be excluded (a `.currentDevice` app, or metering-only capture).
             captureCoordinator?.refreshExcludedProcessSet(forRelaunchedBundleID: bundleID)
+            localMeterCapture?.refreshExcludedProcessSet(forRelaunchedBundleID: bundleID)
 
         case .failed(let error):
             let (justDied, shouldRetry, attempt): (Bool, Bool, Int) = stateQueue.sync {
@@ -1497,6 +1565,7 @@ extension NativeBackend {
         // coordinator itself no-ops unless `bundleID` is actually in that set,
         // so this is cheap to call for every app launch, routed or not.
         captureCoordinator?.refreshExcludedProcessSet(forRelaunchedBundleID: bundleID)
+        localMeterCapture?.refreshExcludedProcessSet(forRelaunchedBundleID: bundleID)
 
         // `localBundleIDs` is ours (synced-local): an app routed to the Mac itself
         // still has a capture slot to revive on relaunch, so it takes this path too.
@@ -1656,6 +1725,9 @@ extension NativeBackend {
             // Remember the topology so a LATER device discovery can re-drive this
             // binding pass for a target that wasn't discovered yet (see
             // `addOrUpdate`'s per-app re-drive).
+            // Read before the overwrite: a PTP-refused bind left `streamBindings`,
+            // so only the previous topology still names it when its route goes.
+            let previousDeviceIDs = Set(self.lastDestinationSets.flatMap(\.deviceIDs))
             self.lastDestinationSets = sets
             // --- .routedApps diff (UI signal; independent of device discovery) ---
             var newAppNames: [String: [String]] = [:]
@@ -1722,6 +1794,15 @@ extension NativeBackend {
                 self.rebindRecoveryGen.removeValue(forKey: deviceID)
                 self.pendingRebindRecoveries.removeValue(forKey: deviceID)?.cancel()
             }
+            for deviceID in previousDeviceIDs
+            where self.outputIDs[deviceID] != nil && newBindings[deviceID] == nil {
+                // A route the speaker's own failure dropped (unavailable, or
+                // waiting for a password or code) is not the user removing it,
+                // and the engine's cause must outlive the route.
+                if !self.droppedByOwnFailureLocked(deviceID) {
+                    self.setPerAppConnectionStateLocked(.off, for: deviceID)
+                }
+            }
             self.streamBindings = newBindings
             self.enqueueBindOps(ops)
             // The per-app domain just took (or gave back) stream ids, which is
@@ -1761,7 +1842,23 @@ extension NativeBackend {
                 .filter { self.known[$0]?.isBluetooth == true }
                 .sorted()
             if perAppBTUIDs != self.btPerAppClaimedUIDs {
+                let previouslyClaimed = Set(self.btPerAppClaimedUIDs)
                 self.btPerAppClaimedUIDs = perAppBTUIDs
+                // A per-app-only speaker reports its own connect story: it
+                // breathes until its sink renders, and reads `.off` once the
+                // route lets it go. A whole-system-selected one keeps the
+                // story the selection gives it.
+                for id in Set(perAppBTUIDs).symmetricDifference(previouslyClaimed)
+                where !self.expectedSelected.contains(id) {
+                    if previouslyClaimed.contains(id) {
+                        self.btConnectingDeadlines[id] = nil
+                        if !self.droppedByOwnFailureLocked(id) {
+                            self.setConnectionState(.off, for: id)
+                        }
+                    } else if self.known[id]?.isAvailable == true {
+                        self.beginBTConnectingLocked(id, perApp: true)
+                    }
+                }
                 let (armed, armedUIDs) = self.btArmingLocked()
                 let composition = self.btComposition
                 let gains = self.btSinkGains(forUIDs: armedUIDs)
@@ -1822,13 +1919,19 @@ extension NativeBackend {
     /// op is NOT silently retried here — the binding is idempotently re-established on
     /// the next topology change — but a bind/rebind failure is no longer swallowed
     /// blind: `handleBindFailure` walks the `.routedApps` claim back to empty so the
-    /// UI stops asserting a stream that never actually established (dot-truthfulness
-    /// fix; deliberately does NOT touch `Device.connectionState` — out of scope here).
+    /// UI stops asserting a stream that never actually established. For a target
+    /// whole-system routing does not claim, the bind path also reports the device's
+    /// connection state: `.connecting` at the top of `.bind`/`.rebind` and
+    /// `.connected` once `bindOutput` returns (here), `.failed` in
+    /// `handleBindFailure`, and `.off` when the route is removed
+    /// (`handleDestinationSetsChanged`'s unbind loop), unless the speaker's own
+    /// failure dropped the route, which keeps the `.failed`.
     /// The engine's `addOutput(_:streamId:)` binds the device's session to the given
     /// master stream (T2).
     func performBindOp(_ op: StreamBindOp) async {
         switch op {
         case .bind(let outputID, let stream):
+            reportPerAppConnectionState(.connecting, outputID: outputID)
             // The same T5+T4 takeover gate `convergeDevice` runs — a per-app
             // stream is a real AirPlay session and is just as silent without a
             // clock (the ROOT of the redirect-order bug: redirect-first binds
@@ -1848,10 +1951,12 @@ extension NativeBackend {
             Telemetry.log(.airplay, "engine_bind", ["output": "\(outputID)", "stream": "\(stream)"])
             do {
                 try await bindOutput(outputID, toStream: stream)
+                reportPerAppConnectionState(.connected, outputID: outputID)
             } catch {
                 handleBindFailure(outputID: outputID, stream: stream, op: "bind", error: error)
             }
         case .rebind(let outputID, let stream):
+            reportPerAppConnectionState(.connecting, outputID: outputID)
             guard await ensurePTPTakeover(telemetryDeviceID: deviceID(for: outputID) ?? "\(outputID)") else {
                 handleBindFailure(
                     outputID: outputID, stream: stream, op: "rebind",
@@ -1862,6 +1967,7 @@ extension NativeBackend {
             Telemetry.log(.airplay, "engine_rebind", ["output": "\(outputID)", "stream": "\(stream)"])
             do {
                 try await bindOutput(outputID, toStream: stream, tearDownWhenBindingUnknown: true)
+                reportPerAppConnectionState(.connected, outputID: outputID)
             } catch {
                 handleBindFailure(outputID: outputID, stream: stream, op: "rebind", error: error)
             }
@@ -2038,9 +2144,45 @@ extension NativeBackend {
     ) {
         stateQueue.sync {
             guard let deviceID = self.outputIDs.first(where: { $0.value == outputID })?.key else { return }
-            Telemetry.log(.airplay, "bind_failed", [
-                "device": deviceID, "op": op, "stream": "\(stream)", "error": "\(error)",
-            ])
+            // The same mapping as the whole-system converge catch, so a
+            // password speaker's refused bind reads `.authRequired` whichever of
+            // this and the state stream's report lands first.
+            let access = self.known[deviceID]?.airPlayAccess
+            let kind = self.lastDescriptors[deviceID]?.kind
+            let cause: ConnectionFailure.Cause
+            switch error {
+            case is PTPClockUnavailableError:
+                cause = .timingUnavailable
+            case AirPlayEngineError.passwordRequired:
+                cause = Self.accessCause(access, kind: kind, passwordRequired: true)
+            case AirPlayEngineError.opTimedOut:
+                cause = .timedOut
+            case AirPlayEngineError.sessionFailed:
+                cause = Self.accessCause(access, kind: kind, passwordRequired: false)
+            default:
+                cause = .unknown
+            }
+            // A password demand nobody answered yet is a wait, not a failure.
+            let fedCredential = self.fedCredential(deviceID)
+            let awaitsPassword = Self.awaitsPassword(cause, fedPassword: fedCredential)
+            if !awaitsPassword {
+                // The sender drops its own copy of the key when an
+                // encrypted SETUP times out (airplay.c `start_failure`),
+                // reported as a plain failure. Forget the fed key so the
+                // next feed sends the stored one again; the Keychain
+                // keeps it, since the receiver did not refuse it.
+                self.fedDescriptors[deviceID]?.authKey = nil
+                Telemetry.fail(.airplay, "airplay:connect_failed",
+                               local: ["device": deviceID, "op": op, "stream": "\(stream)", "error": "\(error)"],
+                               shared: ["cause": "\(cause)"])
+            }
+            if self.streamBindings[deviceID] != nil {
+                self.setPerAppConnectionStateLocked(
+                    awaitsPassword
+                        ? .awaitingPassword
+                        : .failed(ConnectionFailure(cause: cause, detail: String(describing: error))),
+                    for: deviceID)
+            }
             if clearBinding { self.streamBindings.removeValue(forKey: deviceID) }
             guard self.routedAppNames[deviceID] != nil else { return }
             self.routedAppNames.removeValue(forKey: deviceID)

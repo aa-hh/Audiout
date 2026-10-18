@@ -149,7 +149,7 @@ public struct PassiveDriftSampler: Sendable {
         guard !isBlind else { return .blind }
         guard !baselines.isEmpty else { return .observations([]) }
 
-        let (outcome, candidates) = correlator.analyzeWithCandidates(
+        let (outcome, candidates, _) = correlator.analyzeWithCandidates(
             reference: reference, referenceRate: referenceRate,
             capture: capture, captureRate: captureRate,
             expectedDelaysMs: baselines.map(\.expectedDelayMs),

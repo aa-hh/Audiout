@@ -62,10 +62,21 @@ public protocol MicProbeRecording {
     /// without this; the chirp wizard measures one arrival against another
     /// inside the same capture and never asks.
     var firstSampleHostNanos: Int64? { get }
+    /// RMS in dBFS of each of the last `slices` back-to-back `seconds`-long
+    /// stretches of capture, newest first. Only fully captured stretches
+    /// count, so it is empty while fewer than `seconds` of samples have
+    /// arrived. The probe reads the room with it just before arming, to pick
+    /// its level step.
+    func recentRMSdBFS(seconds: Double, slices: Int) -> [Double]
+    /// Everything captured so far, mono, a prefix of what `stop()` will
+    /// return. The probe checks each lane with it while still recording.
+    func samplesSoFar() -> [Float]
 }
 
 public extension MicProbeRecording {
     var firstSampleHostNanos: Int64? { nil }
+    func recentRMSdBFS(seconds: Double, slices: Int) -> [Double] { [] }
+    func samplesSoFar() -> [Float] { [] }
 }
 
 /// Captures the Mac's BUILT-IN microphone, pinned by device ID.
@@ -85,6 +96,8 @@ public final class BuiltInMicRecorder: MicProbeRecording {
     /// restart leaves a hole in the capture, so `samples[i]` no longer sits at
     /// `firstSampleNanos + i / rate` and the timestamp must not be offered.
     private var timelineBroken = false
+    /// `sampleRate` again, readable under `lock` from any thread.
+    private var lockedSampleRate: Double = 0
 
     /// Every touch of `engine` happens on this queue, including the
     /// configuration-change observer's restart.
@@ -117,11 +130,28 @@ public final class BuiltInMicRecorder: MicProbeRecording {
         return timelineBroken ? nil : firstSampleNanos
     }
 
+    public func recentRMSdBFS(seconds: Double, slices: Int) -> [Double] {
+        lock.lock(); defer { lock.unlock() }
+        let count = Int(seconds * lockedSampleRate)
+        guard count > 0 else { return [] }
+        return (0..<min(slices, samples.count / count)).map { slice in
+            let end = samples.count - slice * count
+            let sumSquares = samples[(end - count)..<end].reduce(0.0) { $0 + Double($1) * Double($1) }
+            return 10 * log10(max(sumSquares / Double(count), 1e-20))
+        }
+    }
+
+    public func samplesSoFar() -> [Float] {
+        lock.lock(); defer { lock.unlock() }
+        return samples
+    }
+
     public func start() throws -> Double {
         try recorderQueue.sync {
             lock.lock(); samples = []; firstSampleNanos = nil; timelineBroken = false; lock.unlock()
             let format = try tapAndStart(expectedRate: nil)
             sampleRate = format.sampleRate
+            lock.lock(); lockedSampleRate = sampleRate; lock.unlock()
             return sampleRate
         }
     }
@@ -274,14 +304,14 @@ public final class BuiltInMicRecorder: MicProbeRecording {
 // MARK: - Session
 
 /// One mic-probe measurement, end to end: start the built-in-mic capture,
-/// have the wizard feed play the staged sweeps (DOWN on the engine/Mac lane,
-/// UP on the Bluetooth lane), then matched-filter the capture and reduce it
-/// to the one number the wizard wants — how many ms LATER the Bluetooth side
-/// sounded than the reference.
+/// have the wizard feed play the probe's two lanes (Bluetooth first, the
+/// engine/Mac lane `SyncProbe.Layout.laneSpacingSeconds` later), then
+/// matched-filter the capture and reduce it to the one number the wizard
+/// wants — how many ms LATER the Bluetooth side sounded than the reference.
 ///
 /// The session never fails loudly: every path that cannot produce a
 /// convincing measurement — permission lost, probe never armed (run torn
-/// down), sweeps inaudible, low confidence — completes with `nil`, and the
+/// down), probe inaudible, low confidence or a near rival — completes with `nil`, and the
 /// by-ear wizard simply proceeds as it always has.
 public final class MicProbeSession {
 
@@ -292,37 +322,96 @@ public final class MicProbeSession {
         public let deltaMs: Double
         /// The weaker of the two arrivals' peak-to-sidelobe ratios.
         public let confidence: Double
+        /// The smaller of the two lanes' margins over their strongest rival
+        /// lag (`ProbeAnalysis.peakMargin`); 1 means a rival matched.
+        public let peakMargin: Double
     }
 
-    /// Stages the sweeps on the live wizard feed; the two callbacks report
-    /// the arm-gate opening and the last sweep frame entering the feed.
-    public typealias StageProbe = (_ onStarted: @escaping () -> Void,
+    /// Stages the probe on the live wizard feed. `levelStepDB` is asked once,
+    /// at arm time, for the level step to play at; the two callbacks report
+    /// the arm-gate opening and the last probe frame entering the feed.
+    public typealias StageProbe = (_ levelStepDB: @escaping () -> Int,
+                                   _ onStarted: @escaping (_ pipelineDelaySeconds: TimeInterval) -> Void,
                                    _ onFinished: @escaping () -> Void) -> Void
 
-    /// Must match `AlignmentTickInjector.probeSweepSeconds` — asserted by test.
-    static let sweepSeconds = 1.0
-    /// Air lags the feed by the sinks' pipeline delay (reference timeline,
-    /// Bluetooth buffers). Generous ceiling; the correlator finds the arrivals
-    /// wherever they land after the sweeps entered the feed.
+    /// The injector's lead before the probe; the wizard view reads it here
+    /// because `AlignmentTickInjector` is internal to this module.
+    public static let probeLeadSeconds = AlignmentTickInjector.probeLeadSeconds
+    /// Only the companion stand-down reads this fixed wait now.
     public static let pipelineTailSeconds = 3.0
+    /// Air lags the feed by the room delay the stage reports at the gate
+    /// opening (the slowest participating lane). The recording runs that long
+    /// past the last probe frame entering the feed, plus this margin, capped
+    /// at `pipelineTailCeilingSeconds`.
+    public static let pipelineTailMarginSeconds = 1.5
+    public static let pipelineTailCeilingSeconds = 10.0
+
+    public static func listeningTailSeconds(pipelineDelaySeconds: TimeInterval,
+                                            margin: TimeInterval = pipelineTailMarginSeconds) -> TimeInterval {
+        min(pipelineTailCeilingSeconds, max(0, pipelineDelaySeconds) + margin)
+    }
+
+    /// One of the probe's two lanes, named by the feed that plays it: the
+    /// Bluetooth fan-out's lane sounds first, the engine's one lane spacing
+    /// later.
+    public enum Lane: Equatable, Sendable { case bluetooth, engine }
+
+    /// Whether each lane's sound was recognised in the capture, checked as
+    /// soon as that lane can have reached the mic. Delivered on main, at most
+    /// once per lane per run, never after the completion. Advisory only: the
+    /// final measurement never reads it.
+    public var onLaneVerdict: ((_ lane: Lane, _ heard: Bool) -> Void)?
+
+    /// Schedules the tail, the timeout and the lane checks; tests pass a
+    /// manual clock.
+    var delayClock: NativeBackend.DelayClock = NativeBackend.dispatchDelayClock
+
+    /// Margin past a lane's end before it is checked. It only has to cover the
+    /// recorder's tap buffer (4 096 frames, ~85 ms) and the late main-hop
+    /// stamp of `startedAt`: the lane's own output delay is already inside
+    /// `pipelineDelaySeconds`. It must stay under the final tail
+    /// (`pipelineTailMarginSeconds`), or the second lane's check lands after
+    /// the run finished and its verdict is dropped.
+    static let laneCheckMarginSeconds = 0.5
 
     private let recorder: MicProbeRecording
     private let timeout: TimeInterval
     private let pipelineTail: TimeInterval
+    private let now: () -> Int64
     private let queue = DispatchQueue(label: "mic-probe-session")
+    /// Runs the lane correlations off `queue`, one at a time, so `finish` never
+    /// waits on one and the verdicts come back in lane order.
+    private let laneCheckQueue = DispatchQueue(label: "mic-probe-lane-check", qos: .userInitiated)
     private var sampleRate: Double = 0
     /// Monotonic nanoseconds, the clock `firstSampleHostNanos` is on.
     private var startedAt: Int64?
     private var recordingBegan: Int64?
     private var finished = false
     private var completion: ((Result?) -> Void)?
+    /// What the level closure answered, for `mic_probe_finished`.
+    private var levelStepDB: Int?
+    /// The room level the level step measured. Written by the stager's thread,
+    /// read by `finish` on `queue` and by `levelAboveRoomDB` from the main thread.
+    private let ambientLock = NSLock()
+    private var ambientStore: Double?
+    private var ambientDBFS: Double? {
+        get { ambientLock.withLock { ambientStore } }
+        set { ambientLock.withLock { ambientStore = newValue } }
+    }
+    private var pipelineDelaySeconds: TimeInterval?
+    /// The glide the lane checks search for, rendered on the first check.
+    /// `queue` only.
+    private var laneTemplate: [Float]?
 
+    /// `now` is the monotonic clock `startedAt` and `recordingBegan` are stamped from; tests pin it.
     public init(recorder: MicProbeRecording = BuiltInMicRecorder(),
-                timeout: TimeInterval = 20,
-                pipelineTail: TimeInterval = MicProbeSession.pipelineTailSeconds) {
+                timeout: TimeInterval = 40,
+                pipelineTail: TimeInterval = MicProbeSession.pipelineTailMarginSeconds,
+                now: (() -> Int64)? = nil) {
         self.recorder = recorder
         self.timeout = timeout
         self.pipelineTail = pipelineTail
+        self.now = now ?? Self.nowNanos
     }
 
     /// Kick the measurement off. `completion` is called exactly once, on the
@@ -339,18 +428,46 @@ public final class MicProbeSession {
                 finish(analyze: false)
                 return
             }
-            recordingBegan = Self.nowNanos()
+            recordingBegan = now()
+            let recorder = recorder
             stage({ [weak self] in
-                self?.queue.async { self?.startedAt = Self.nowNanos() }
+                // The quietest of the last three half-second slices: music the
+                // wizard just silenced can still be draining from the speakers,
+                // and a slice it no longer reaches is the room.
+                let rms = recorder.recentRMSdBFS(seconds: 0.5, slices: 3).min()
+                let step = Self.levelStepDB(ambientRMSdBFS: rms)
+                self?.ambientDBFS = rms
+                self?.queue.async { self?.levelStepDB = step }
+                return step
+            }, { [weak self] delay in
+                self?.queue.async {
+                    guard let self else { return }
+                    self.startedAt = self.now()
+                    self.pipelineDelaySeconds = delay
+                    for lane in [Lane.bluetooth, .engine] {
+                        let due = Self.probeLeadSeconds
+                            + Self.laneIndex(lane) * SyncProbe.Layout.laneSpacingSeconds
+                            + SyncProbe.Layout.laneSeconds
+                            + Self.listeningTailSeconds(pipelineDelaySeconds: delay,
+                                                        margin: Self.laneCheckMarginSeconds)
+                        self.delayClock(due, self.queue, DispatchWorkItem { [weak self] in
+                            self?.checkLane(lane)
+                        })
+                    }
+                }
             }, { [weak self] in
                 guard let self else { return }
-                self.queue.asyncAfter(deadline: .now() + self.pipelineTail) {
-                    self.finish(analyze: true)
+                self.queue.async {
+                    let tail = Self.listeningTailSeconds(pipelineDelaySeconds: self.pipelineDelaySeconds ?? 0,
+                                                         margin: self.pipelineTail)
+                    self.delayClock(tail, self.queue, DispatchWorkItem {
+                        self.finish(analyze: true)
+                    })
                 }
             })
-            queue.asyncAfter(deadline: .now() + timeout) { [weak self] in
+            delayClock(timeout, queue, DispatchWorkItem { [weak self] in
                 self?.finish(analyze: true)
-            }
+            })
         }
     }
 
@@ -358,6 +475,72 @@ public final class MicProbeSession {
     /// completion still fires, with nil.
     public func cancel() {
         queue.async { self.finish(analyze: false) }
+    }
+
+    /// How far the newest 0.1 s of mic sound sits above the room level measured
+    /// at the level step, in dB. Advisory: the listening screen polls it, the
+    /// measurement never reads it. `nil` until the room level exists or while the
+    /// recorder has no full 0.1 s yet.
+    public func levelAboveRoomDB() -> Double? {
+        guard let room = ambientDBFS,
+              let newest = recorder.recentRMSdBFS(seconds: 0.1, slices: 1).first else { return nil }
+        return newest - room
+    }
+
+    /// Lanes start this many lane spacings after the probe's own start.
+    static func laneIndex(_ lane: Lane) -> Double { lane == .bluetooth ? 0 : 1 }
+
+    /// `queue` only. Searches the capture so far for one lane's glide, inside
+    /// the stretch that lane can occupy: from the probe lead (less the same
+    /// 0.25 s slack `measure` keeps) to the lane's end plus the room delay and
+    /// `laneCheckMarginSeconds`. A plain matched filter with no ambient
+    /// weighting — advisory only. The correlation runs on `laneCheckQueue`, so
+    /// `finish` never waits on it; one that comes back after the run finished
+    /// is dropped.
+    private func checkLane(_ lane: Lane) {
+        guard !finished else { return }
+        let snapshot = recorder.samplesSoFar()
+        let template = laneTemplate ?? SyncProbe.samples(.probe(sampleRate: sampleRate))
+        laneTemplate = template
+        var window = ArraySlice<Float>()
+        if let seconds = startedSeconds() {
+            func index(_ s: Double) -> Int { min(max(0, Int(s * sampleRate)), snapshot.count) }
+            let start = seconds + Self.probeLeadSeconds
+                + Self.laneIndex(lane) * SyncProbe.Layout.laneSpacingSeconds - 0.25
+            let end = start + 0.25 + SyncProbe.Layout.laneSeconds
+                + Self.listeningTailSeconds(pipelineDelaySeconds: pipelineDelaySeconds ?? 0,
+                                            margin: Self.laneCheckMarginSeconds)
+            let from = index(start), to = index(end)
+            if to > from { window = snapshot[from..<to] }
+        }
+        let windowSeconds = Double(window.count) / sampleRate
+        guard window.count >= template.count else {
+            reportLane(lane, confidence: nil, windowSeconds: windowSeconds)
+            return
+        }
+        let recording = Array(window)
+        let rate = sampleRate
+        laneCheckQueue.async { [weak self] in
+            let arrival = SyncProbeCorrelator(sampleRate: rate)
+                .arrival(of: template, in: recording, ambientNoise: nil)
+            self?.queue.async {
+                self?.reportLane(lane, confidence: arrival?.peakToSidelobe, windowSeconds: windowSeconds)
+            }
+        }
+    }
+
+    /// `queue` only. Heard means an arrival at the confidence the final
+    /// measurement demands of each lane.
+    private func reportLane(_ lane: Lane, confidence: Double?, windowSeconds: Double) {
+        guard !finished else { return }
+        let heard = (confidence ?? 0) >= Self.minConfidence
+        Telemetry.log(.localPlayback, "mic_probe_lane_checked", [
+            "lane": lane == .bluetooth ? "bluetooth" : "engine",
+            "heard": heard ? "1" : "0",
+            "confidence": confidence.map { String(format: "%.1f", $0) } ?? "-",
+            "windowSeconds": String(format: "%.1f", windowSeconds),
+        ])
+        DispatchQueue.main.async { self.onLaneVerdict?(lane, heard) }
     }
 
     /// `queue` only. Idempotent.
@@ -396,6 +579,8 @@ public final class MicProbeSession {
             "confidence": result.map { String(format: "%.1f", $0.confidence) } ?? "-",
             "capturedSeconds": sampleRate > 0
                 ? String(format: "%.1f", Double(recording.count) / sampleRate) : "0",
+            "levelStepDB": levelStepDB.map { String($0) } ?? "-",
+            "ambientDBFS": ambientDBFS.map { String(format: "%.1f", $0) } ?? "-",
         ])
         let completion = completion
         self.completion = nil
@@ -442,40 +627,26 @@ public final class MicProbeSession {
     /// it a scene with an exact ambient boundary.
     ///
     /// Arrivals are searched for only from `searchFrom` on. Searched over the
-    /// whole capture, a missing Bluetooth sweep's best match comes from
-    /// whatever played before the sweeps (live, v1.2.0: Δ −778 to −3748 ms
+    /// whole capture, a missing Bluetooth lane's best match comes from
+    /// whatever played before the probe (live, v1.2.0: Δ −778 to −3748 ms
     /// at confidence 5.9–7.9, shown as an implausible reading). Such a match
     /// scores with the loudness of that earlier sound, so no confidence
     /// floor can tell it from a weak real arrival; where it sits can.
     ///
-    /// The SNR weighting gets first go, but its failure is never the run's:
-    /// the ambient slice describes the room BEFORE the sweeps, and during a
-    /// wizard entry that slice legitimately carries the tail of the user's
-    /// music still draining through the sinks' ~2 s delay (live finding,
-    /// 2026-08-28: every probe measured fine acoustically and was then
-    /// refused, because weighting by the music's spectrum crushed exactly
-    /// the sweep band — for noise that was gone by sweep time). Weighting is
-    /// an optimization for noise that is genuinely stationary; when it finds
-    /// nothing, the plain matched filter decides.
+    /// The weighted-then-plain fallback lives in `ProbeAnalyzer`: the
+    /// ambient slice describes the room BEFORE the probe, and during a wizard
+    /// entry it legitimately carries the tail of the user's music still
+    /// draining through the sinks' ~2 s delay (live finding, 2026-08-28), so
+    /// a weighted search that finds nothing hands over to the plain matched
+    /// filter.
     static func analyze(recording: [Float], sampleRate: Double,
                         ambientEnd: Int, searchFrom: Int = 0) -> Result? {
-        let down = SyncProbe.samples(.downSweep(sampleRate: sampleRate,
-                                                duration: sweepSeconds))
-        let up = SyncProbe.samples(.upSweep(sampleRate: sampleRate,
-                                            duration: sweepSeconds))
-        let correlator = SyncProbeCorrelator(sampleRate: sampleRate)
-        let ambient: [Float]? = ambientEnd > Int(0.3 * sampleRate)
-            ? Array(recording[0..<ambientEnd]) : nil
-        let searched = Array(recording[min(max(0, searchFrom), recording.count)...])
-        let measurement = ambient.flatMap {
-            correlator.relativeOffset(probeA: down, probeB: up,
-                                      recording: searched, ambientNoise: $0)
-        } ?? correlator.relativeOffset(probeA: down, probeB: up,
-                                       recording: searched, ambientNoise: nil)
-        guard let m = measurement else { return nil }
-        return accepting(Result(deltaMs: m.offsetSeconds * 1000,
-                                confidence: min(m.arrivalA.peakToSidelobe,
-                                                m.arrivalB.peakToSidelobe)))
+        guard let analysis = try? ProbeAnalyzer(sampleRate: sampleRate)
+            .analyze(recording: recording, ambientEndSample: ambientEnd,
+                     searchFromSample: searchFrom) else { return nil }
+        return accepting(Result(deltaMs: analysis.offsetMs,
+                                confidence: analysis.confidence,
+                                peakMargin: analysis.peakMargin))
     }
 
     /// The weakest arrival the wizard trusts. ProbeKit's own floor (5) only
@@ -491,11 +662,31 @@ public final class MicProbeSession {
     /// alignable speaker can sound further than this from the reference.
     static let maxPlausibleDeltaMs = Double(NativeBackend.btWizardReferenceBufferMs)
 
-    /// A weak or physically impossible measurement is refused rather than
-    /// proposed: the wizard then falls back to asking by ear.
+    /// The smallest margin, 6 dB, a lane's peak must hold over its strongest
+    /// rival lag. A parallel glide or a strong reflection matches the
+    /// template almost as well as the true arrival, and the per-lane margin
+    /// is the one number that sees a rival anywhere in the searched range,
+    /// not only near the winner.
+    static let minPeakMargin = 1.995
+
+    /// A weak, ambiguous or physically impossible measurement is refused
+    /// rather than proposed: the wizard then falls back to asking by ear.
     static func accepting(_ result: Result) -> Result? {
         guard result.confidence >= minConfidence,
+              result.peakMargin >= minPeakMargin,
               abs(result.deltaMs) <= maxPlausibleDeltaMs else { return nil }
         return result
+    }
+
+    /// The probe's level step for the room the mic heard during the lead-in:
+    /// 0, 6 or 12 dB above the staged level. The thresholds take the
+    /// 2026-08-28 capture's −71 dBFS floor as the bench's standard room and
+    /// the bench's +10 dB condition as a loud one
+    /// (`dev/notes/wizard-sync-tone-2026-10-06/shaped/ROUND3-OPTIONS.md`).
+    /// razor: three fixed steps; tune the thresholds from the `levelStepDB` /
+    /// `ambientDBFS` fields of `mic_probe_finished` once runs are logged.
+    static func levelStepDB(ambientRMSdBFS: Double?) -> Int {
+        guard let rms = ambientRMSdBFS, rms > -68 else { return 0 }
+        return rms <= -62 ? 6 : 12
     }
 }

@@ -39,6 +39,7 @@ public struct DiscoveredDevice: Sendable, Equatable {
         lhs.outputID == rhs.outputID &&
         lhs.isAirPlay2Supported == rhs.isAirPlay2Supported &&
         lhs.isAvailable == rhs.isAvailable &&
+        lhs.access == rhs.access &&
         lhs.descriptor.name == rhs.descriptor.name &&
         lhs.descriptor.hostname == rhs.descriptor.hostname &&
         lhs.descriptor.address == rhs.descriptor.address &&
@@ -97,13 +98,19 @@ public struct DiscoveredDevice: Sendable, Equatable {
     /// streamable and has now gone offline.
     public let isAvailable: Bool
 
+    /// What the receiver asks for before it plays, from its TXT records
+    /// (``NativeDiscovery/access(airplay:raop:)``).
+    public let access: AirPlayAccess
+
     public init(id: String, descriptor: DeviceDescriptor, outputID: OutputID,
-                isAirPlay2Supported: Bool, isAvailable: Bool = true) {
+                isAirPlay2Supported: Bool, isAvailable: Bool = true,
+                access: AirPlayAccess = .open) {
         self.id = id
         self.descriptor = descriptor
         self.outputID = outputID
         self.isAirPlay2Supported = isAirPlay2Supported
         self.isAvailable = isAvailable
+        self.access = access
     }
 }
 
@@ -564,11 +571,13 @@ public final class NativeDiscovery: @unchecked Sendable {
         // advertised `_airplay._tcp` with the AP2 feature bits stays AP1-only.
         let isAP2 = entry.hasEverBeenAP2 || classify(airplay: entry.airplay)
         // A sticky-AP2 device that has gone offline (lost `_airplay._tcp`, only
-        // `_raop._tcp` lingers) keeps its last AP2-sourced descriptor — name,
-        // address, port, TXT all stay put — so the row doesn't cosmetically flip
-        // to the raop-decorated name just because the device powered off. It's
-        // the same physical device at the same address; only availability changed.
-        let built: DeviceDescriptor = (entry.hasEverBeenAP2 && entry.airplay == nil)
+        // `_raop._tcp` lingers) keeps its last AP2-sourced descriptor and access
+        // — name, address, port, TXT, the advertised lock all stay put — so the
+        // row doesn't cosmetically flip to the raop-decorated name, or change its
+        // lock glyph, just because the device powered off. It's the same physical
+        // device at the same address; only availability changed.
+        let carriesForward = entry.hasEverBeenAP2 && entry.airplay == nil
+        let built: DeviceDescriptor = carriesForward
             ? entry.device.descriptor
             : descriptor(from: source)
         // The `DeviceDescriptor` is the ENGINE-facing contract, so its `name`
@@ -594,7 +603,8 @@ public final class NativeDiscovery: @unchecked Sendable {
             descriptor: built,
             outputID: outputID,
             isAirPlay2Supported: isAP2,
-            isAvailable: available
+            isAvailable: available,
+            access: carriesForward ? entry.device.access : access(airplay: entry.airplay, raop: entry.raop)
         )
     }
 
@@ -631,6 +641,31 @@ public final class NativeDiscovery: @unchecked Sendable {
         return supportsAudio && supportsCoreUtils
     }
 
+    /// What a receiver asks for before it plays. Reads `flags` (`_airplay._tcp`)
+    /// and `sf` (`_raop._tcp`) as hex status flags, plus `pw` and `act` on
+    /// either record. `pw` counts when present, non-empty and not "false",
+    /// the same test as the vendored `raop_device_cb` (`raop.c` ~:4446).
+    /// Precedence: Home-only (`act=2`, bit 10), then on-screen code on every
+    /// join (bit 3), then on-screen code the first time only (bit 9), then
+    /// password (`pw`, bit 7).
+    static func access(airplay: ResolvedService?, raop: ResolvedService?) -> AirPlayAccess {
+        let records = [airplay?.txtRecord, raop?.txtRecord].compactMap { $0 }
+        let flags = [airplay?.txtRecord["flags"], raop?.txtRecord["sf"]]
+            .compactMap { $0.flatMap { parseHex32($0) } }
+            .reduce(UInt32(0), |)
+        func bit(_ n: UInt32) -> Bool { (flags >> n) & 1 == 1 }
+        let pw = records.contains { txt in
+            guard let value = txt["pw"], !value.isEmpty else { return false }
+            return value.lowercased() != "false"
+        }
+        let homeOnly = records.contains { $0["act"] == "2" }
+        if homeOnly || bit(10) { return .homeMembersOnly }
+        if bit(3) { return .onScreenCodeEveryTime }
+        if bit(9) { return .onScreenCode }
+        if pw || bit(7) { return .password }
+        return .open
+    }
+
     /// Parse the AirPlay `features` TXT value into a 64-bit mask. The field is
     /// either a single 32-bit hex value (`0x444F8A00`) or two comma-separated
     /// 32-bit hex values `LOW,HIGH` (`0x445D0A00,0x1C340`) where LOW is the low
@@ -646,7 +681,7 @@ public final class NativeDiscovery: @unchecked Sendable {
         return UInt64(low) | (UInt64(high) << 32)
     }
 
-    private static func parseHex32<S: StringProtocol>(_ s: S) -> UInt32? {
+    static func parseHex32<S: StringProtocol>(_ s: S) -> UInt32? {
         var str = s.trimmingCharacters(in: .whitespaces)
         if str.hasPrefix("0x") || str.hasPrefix("0X") { str = String(str.dropFirst(2)) }
         guard !str.isEmpty else { return nil }

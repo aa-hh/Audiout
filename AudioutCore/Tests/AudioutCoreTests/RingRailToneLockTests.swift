@@ -18,8 +18,9 @@ import AppKit
 /// `CALayer`, and no accent-dial signal re-stamped it).
 ///
 /// These tests lock BOTH halves of the fix:
-///  - the drawn rail ink and the ring's stamped stroke agree for every accent
-///    dial position x light/dark x armed/ember — sampled from a real
+///  - the drawn rail ink and the ring's stamped stroke agree, and are `gold`,
+///    for every accent dial position x light/dark x armed/muted/resting (the
+///    line is always gold — owner's ruling, 2026-10-04) — sampled from a real
 ///    `cacheDisplay` render of `BusRailOverlayView` and from the ring's actual
 ///    layer colour, never from a re-derived expectation;
 ///  - a dial change re-tints the ring with NO rebuild and no `apply` — the
@@ -87,8 +88,8 @@ extension SerializedSharedState {
     private func apply(_ row: MainOutRowView, armed: Bool,
                        connectionState: ConnectionState = .connected,
                        localOnlyArmed: Bool = false) {
-        // Armed = connected ∧ unmuted; a muted connected target is the ember
-        // half of the same pair (the ring still renders its `.connected` form).
+        // Armed = connected ∧ unmuted; a muted connected target is the unarmed
+        // case (the ring still renders its `.connected` form, still gold).
         // Local-only playback is unmuted by definition, so it never mutes here.
         row.setRailLive(true)
         row.apply(options: [.init(title: "Selected Devices (1)", target: .selectedDevices,
@@ -156,13 +157,14 @@ extension SerializedSharedState {
         #expect(same, "\(message) — expected \(a), got \(b)")
     }
 
-    // MARK: 1 — the sweep: every dial position x appearance x armed/ember
+    // MARK: 1 — the sweep: every dial position x appearance x armed/muted/resting
 
     /// The whole matrix. For each accent-dial position and each appearance, the
-    /// ring's stamped stroke must equal the rail's drawn ink — for the armed
-    /// (gold) tone AND the unarmed (ember) tone, and for the RESTING ring as
-    /// well as the connected one. The resting ring used to be stamped a flat
-    /// grey `rim` while the wire curving into it was gold.
+    /// ring's stamped stroke must equal the rail's drawn ink and both must be
+    /// `gold` — armed, muted, and for the RESTING ring as well as the connected
+    /// one. The Mixer has no idle line: an `ember`
+    /// line read as a connecting state that wasn't one. The resting ring used
+    /// to be stamped a flat grey `rim` while the wire curving into it was gold.
     @Test func ringStrokeMatchesRailInkAcrossEveryDialPositionAndAppearance() throws {
         // (connection state, armed, local-only armed) — the last pairing is the
         // resting ring: a rail exists, nothing has connected, the Mac is playing.
@@ -185,16 +187,16 @@ extension SerializedSharedState {
                     let plan = try #require(overlay.test_resolvePlan(),
                                             "the overlay must resolve a plan from the laid-out row")
                     let live = armed || localOnly
-                    #expect(plan.gold == live,
-                            "the rail's own armed bit must track the row's (\(style)/\(appearanceName.rawValue))")
+                    #expect(plan.armed == live,
+                            "the rail's armed bit (the connect pulse's gate) must track the row's (\(style)/\(appearanceName.rawValue))")
 
                     let railInk = try sampledRailInk(of: overlay)
                     expectSameInk(railInk, row.test_ringStrokeColor,
                                   "\(style)/\(appearanceName.rawValue)/armed=\(live): the hook and the ring it lands on must be one colour")
 
-                    // …and both must be THE shared spine tone, not a coincidence.
-                    expectSameInk(railInk, resolved(Tokens.Color.spineTone(armed: live), appearanceName),
-                                  "\(style)/\(appearanceName.rawValue)/armed=\(live): the drawn ink must be Tokens.Color.spineTone")
+                    // …and both must be gold, whatever the armed state.
+                    expectSameInk(railInk, resolved(Tokens.Color.gold, appearanceName),
+                                  "\(style)/\(appearanceName.rawValue)/armed=\(live): the line must be gold in every state")
                 }
             }
         }
@@ -223,8 +225,8 @@ extension SerializedSharedState {
                     let ink = try sampledRailInk(of: overlay)
                     expectSameInk(ink, row.test_ringStrokeColor,
                                   "after flipping the dial to \(style) with no rebuild (\(appearanceName.rawValue)/armed=\(armed)), the ring must re-tint with the rail")
-                    expectSameInk(ink, resolved(Tokens.Color.spineTone(armed: armed), appearanceName),
-                                  "after flipping the dial to \(style), both must be the current spine tone")
+                    expectSameInk(ink, resolved(Tokens.Color.gold, appearanceName),
+                                  "after flipping the dial to \(style), both must be the current gold")
                 }
             }
         }
@@ -238,7 +240,7 @@ extension SerializedSharedState {
     @Test func aDeviceRowRingStaysRimInEveryDialPosition() {
         let ring = HaloRingView()
         ring.appearance = NSAppearance(named: .darkAqua)
-        ring.apply(.connected)                      // no `connectedSpineArmed`
+        ring.apply(.connected)                      // `joinsSpine` left false
         for style in AccentStyle.allCases {
             Tokens.accentStyle = style      // the broadcast re-stamps it in place
             expectSameInk(resolved(Tokens.Color.rim, .darkAqua), ring.test_strokeColor,

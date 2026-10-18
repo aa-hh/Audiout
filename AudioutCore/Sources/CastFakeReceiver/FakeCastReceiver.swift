@@ -70,6 +70,10 @@ public final class FakeCastReceiver: @unchecked Sendable {
     /// are tens of ppm; nobody has measured the Streamer's, so the default is
     /// a clock that does not drift at all.
     private let clockDriftPPM: Double
+    /// What the play clock reads.
+    private let uptimeClock: CastUptimeClock
+    /// What runs the fetch delay, the stalls and the one PING.
+    private let delayClock: CastDelayClock
     private let queue = DispatchQueue(label: "FakeCastReceiver")
 
     /// Lock-guarded rather than `queue.sync`-guarded: a test reads this from
@@ -79,6 +83,8 @@ public final class FakeCastReceiver: @unchecked Sendable {
     private var _pongCount = 0
     private var _setVolumeCount = 0
     private var _events: [String] = []
+    private var _mediaStatusRequestCount = 0
+    private var _receivedBodyBytes = 0
 
     /// Everything fetched from the stream (from the first content byte up to
     /// wherever `fetchBytes` was reached, interior chunk framing included), and
@@ -102,13 +108,16 @@ public final class FakeCastReceiver: @unchecked Sendable {
     /// Only ever compared against a threshold, never differentiated, so the
     /// ~0.2 % that chunk framing adds moves the moment playback starts by a
     /// few milliseconds and biases nothing after that.
-    private var receivedBodyBytes = 0
+    private var receivedBodyBytes: Int {
+        get { stateLock.withLock { _receivedBodyBytes } }
+        set { stateLock.withLock { _receivedBodyBytes = newValue } }
+    }
     private var fetchCompleted = false
     private var playbackStarted = false
     /// Media seconds played, banked whenever the clock stops.
     private var playedSeconds: Double = 0
     /// When the clock last started running; `nil` while it is stopped.
-    private var playingSince: DispatchTime?
+    private var playingSince: TimeInterval?
     private var stalled = false
     /// Who to volunteer a MEDIA_STATUS to: the sender that sent the LOAD. A
     /// status the receiver produces on its own — either edge of a stall, or a
@@ -132,7 +141,9 @@ public final class FakeCastReceiver: @unchecked Sendable {
         startupLead: TimeInterval = 4.6,
         steadyLead: TimeInterval = 5.5,
         startupRebufferAfter: TimeInterval = 2,
-        clockDriftPPM: Double = 0
+        clockDriftPPM: Double = 0,
+        uptimeClock: @escaping CastUptimeClock = castDispatchUptimeClock,
+        delayClock: @escaping CastDelayClock = castDispatchDelayClock
     ) {
         self.fetchBytes = fetchBytes
         self.controlType = controlType
@@ -141,6 +152,8 @@ public final class FakeCastReceiver: @unchecked Sendable {
         self.steadyLead = steadyLead
         self.startupRebufferAfter = startupRebufferAfter
         self.clockDriftPPM = clockDriftPPM
+        self.uptimeClock = uptimeClock
+        self.delayClock = delayClock
     }
 
     /// Injects a rebuffer: the receiver re-enters BUFFERING for `duration` and
@@ -153,7 +166,7 @@ public final class FakeCastReceiver: @unchecked Sendable {
     /// started simply holds the start off that much longer, which puts the
     /// lead in the same place.
     public func stall(after: TimeInterval, duration: TimeInterval) {
-        queue.asyncAfter(deadline: .now() + after) { [weak self] in self?.beginStall(duration) }
+        delayClock(after, queue, DispatchWorkItem { [weak self] in self?.beginStall(duration) })
     }
 
     public var pongCount: Int { stateLock.withLock { _pongCount } }
@@ -166,6 +179,14 @@ public final class FakeCastReceiver: @unchecked Sendable {
     /// `connect`, `close`, `LAUNCH`, `STOP`. What a relaunch-ordering test
     /// reads to prove the second LAUNCH followed the first channel's close.
     public var events: [String] { stateLock.withLock { _events } }
+
+    /// How many media-namespace `GET_STATUS` requests arrived — the sender's
+    /// status poll, counted so a test can wait for polls instead of seconds.
+    public var mediaStatusRequestCount: Int { stateLock.withLock { _mediaStatusRequestCount } }
+
+    /// Body bytes the current fetch has read, chunk framing and WAV header
+    /// included. Zero again after a STOP or a new LOAD.
+    public var bodyBytesReceived: Int { receivedBodyBytes }
 
     private func record(_ event: String) { stateLock.withLock { _events.append(event) } }
 
@@ -229,7 +250,7 @@ public final class FakeCastReceiver: @unchecked Sendable {
     /// actually running, which is what makes a stall's cost permanent.
     private func currentTime() -> Double {
         guard let since = playingSince else { return playedSeconds }
-        return playedSeconds + Self.seconds(since: since) * (1 + clockDriftPPM / 1_000_000)
+        return playedSeconds + (uptimeClock() - since) * (1 + clockDriftPPM / 1_000_000)
     }
 
     private func freezeClock() {
@@ -240,7 +261,7 @@ public final class FakeCastReceiver: @unchecked Sendable {
 
     private func resumeClock() {
         guard playbackStarted, !stalled, playerState == "PLAYING", playingSince == nil else { return }
-        playingSince = .now()
+        playingSince = uptimeClock()
     }
 
     /// Starts the clock the moment the buffer holds `startupLead` seconds —
@@ -249,7 +270,7 @@ public final class FakeCastReceiver: @unchecked Sendable {
         guard !playbackStarted, !stalled, playerState == "PLAYING" else { return }
         guard Double(receivedBodyBytes) / Self.bytesPerSecond >= startupLead else { return }
         playbackStarted = true
-        playingSince = .now()
+        playingSince = uptimeClock()
         guard steadyLead > startupLead else { return }
         stall(after: startupRebufferAfter, duration: steadyLead - startupLead)
     }
@@ -261,14 +282,14 @@ public final class FakeCastReceiver: @unchecked Sendable {
         playerState = "BUFFERING"
         idleReason = nil
         sendUnsolicitedMediaStatus()
-        queue.asyncAfter(deadline: .now() + duration) { [weak self] in
+        delayClock(duration, queue, DispatchWorkItem { [weak self] in
             guard let self, self.stalled, self.currentMediaSessionID != nil else { return }
             self.stalled = false
             // A PAUSE that landed mid-stall outranks the resume.
             if self.playerState == "BUFFERING" { self.playerState = "PLAYING" }
             self.resumeClock()
             self.sendUnsolicitedMediaStatus()
-        }
+        })
     }
 
     private func resetPlayback() {
@@ -278,10 +299,6 @@ public final class FakeCastReceiver: @unchecked Sendable {
         playedSeconds = 0
         playingSince = nil
         stalled = false
-    }
-
-    private static func seconds(since: DispatchTime) -> Double {
-        Double(DispatchTime.now().uptimeNanoseconds - since.uptimeNanoseconds) / 1_000_000_000
     }
 
     // MARK: - One sender connection
@@ -368,7 +385,7 @@ public final class FakeCastReceiver: @unchecked Sendable {
     private func pingOnce(_ session: Session) {
         guard !session.pinged else { return }
         session.pinged = true
-        queue.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+        delayClock(0.1, queue, DispatchWorkItem { [weak self] in
             guard let self, self.sessions[ObjectIdentifier(session.connection)] != nil else { return }
             self.send(
                 CastMessage(
@@ -379,7 +396,7 @@ public final class FakeCastReceiver: @unchecked Sendable {
                 ),
                 on: session
             )
-        }
+        })
     }
 
     // MARK: - Receiver namespace
@@ -468,9 +485,9 @@ public final class FakeCastReceiver: @unchecked Sendable {
                 startFetch(contentID: contentID)
                 return
             }
-            queue.asyncAfter(deadline: .now() + fetchDelay) { [weak self] in
+            delayClock(fetchDelay, queue, DispatchWorkItem { [weak self] in
                 self?.startFetch(contentID: contentID)
-            }
+            })
             return
         case "PAUSE":
             playerState = "PAUSED"
@@ -495,7 +512,7 @@ public final class FakeCastReceiver: @unchecked Sendable {
             mediaTarget = nil
             resetPlayback()
         case "GET_STATUS":
-            break
+            stateLock.withLock { _mediaStatusRequestCount += 1 }
         default:
             return
         }

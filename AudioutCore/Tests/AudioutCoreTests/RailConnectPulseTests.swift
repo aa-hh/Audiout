@@ -19,13 +19,13 @@ import Testing
     // MARK: Windowed overlay behavior
 
     private final class StubHook: RailHookProviding {
-        var gold = false
+        var armed = false
         /// How many landed beads this hook was handed — the ring's bloom is the
         /// ring's own business, so the overlay's contract is exactly this call.
         var receivedPulses = 0
         func railHookAnchor(in view: NSView)
-            -> (centerY: CGFloat, ringCenterX: CGFloat, ringRadius: CGFloat, gold: Bool)? {
-            (centerY: 300, ringCenterX: 40, ringRadius: 15, gold: gold)
+            -> (centerY: CGFloat, ringCenterX: CGFloat, ringRadius: CGFloat, armed: Bool)? {
+            (centerY: 300, ringCenterX: 40, ringRadius: 15, armed: armed)
         }
         func receiveRailPulse() { receivedPulses += 1 }
     }
@@ -93,7 +93,7 @@ import Testing
         let scene = makeScene(nodes: [.member])
         scene.window.orderFrontRegardless()          // off-screen; see `makeScene`
         defer { scene.window.orderOut(nil) }
-        scene.hook.gold = true
+        scene.hook.armed = true
         scene.overlay.playConnectPulse(joinedDeviceIDs: [], cameToLife: true)
         drainMainQueue()
         try #require(scene.overlay.test_isConnectPulsing)
@@ -106,7 +106,7 @@ import Testing
     @Test func anOrderedOutWindowNeverPulses() {
         let scene = makeScene(nodes: [.member])
         scene.overlay.test_windowVisibleOverride = nil  // read the real, never-ordered-in window
-        scene.hook.gold = true
+        scene.hook.armed = true
         scene.overlay.playConnectPulse(joinedDeviceIDs: [], cameToLife: true)
         drainMainQueue()
         #expect(!scene.overlay.test_isConnectPulsing,
@@ -136,7 +136,7 @@ import Testing
         scene.rows[0].railDeviceID = "top"
         scene.rows[1].railDeviceID = "middle"
         scene.rows[2].railDeviceID = "bottom"
-        scene.hook.gold = true
+        scene.hook.armed = true
         scene.overlay.playConnectPulse(joinedDeviceIDs: ["middle"], cameToLife: false)
         drainMainQueue()
         let departure = try #require(scene.overlay.test_lastPulseDeparture)
@@ -147,7 +147,7 @@ import Testing
 
     @Test func comingToLifeDepartsFromTheTerminus() throws {
         let scene = makeScene(nodes: [.member, .member])
-        scene.hook.gold = true
+        scene.hook.armed = true
         scene.overlay.playConnectPulse(joinedDeviceIDs: [], cameToLife: true)
         drainMainQueue()
         let departure = try #require(scene.overlay.test_lastPulseDeparture)
@@ -159,7 +159,7 @@ import Testing
         // No row carries this id (`StubRow.railDeviceID` defaults to `nil`) —
         // the departure falls back to the whole wire (`.max() ?? 1`).
         let scene = makeScene(nodes: [.member, .member])
-        scene.hook.gold = true
+        scene.hook.armed = true
         scene.overlay.playConnectPulse(joinedDeviceIDs: ["never-mounted"], cameToLife: false)
         drainMainQueue()
         let departure = try #require(scene.overlay.test_lastPulseDeparture)
@@ -197,7 +197,7 @@ import Testing
         let scene = makeScene(nodes: [.member])
         scene.window.orderFrontRegardless()          // off-screen; see `makeScene`
         defer { scene.window.orderOut(nil) }
-        scene.hook.gold = true
+        scene.hook.armed = true
         scene.overlay.playConnectPulse(joinedDeviceIDs: [], cameToLife: true)
         drainMainQueue()
         #expect(scene.overlay.test_isConnectPulsing)
@@ -209,7 +209,7 @@ import Testing
 
     @Test func aCancelledPulseNeverReachesTheRing() {
         let scene = makeScene(nodes: [.member])
-        scene.hook.gold = true
+        scene.hook.armed = true
         scene.overlay.playConnectPulse(joinedDeviceIDs: [], cameToLife: true)
         drainMainQueue()
         #expect(scene.overlay.test_isConnectPulsing)
@@ -293,7 +293,7 @@ import Testing
 
     @Test func armingMountsThePulseWithASettledModel() {
         let scene = makeScene(nodes: [.member, .nonMember])
-        scene.hook.gold = true
+        scene.hook.armed = true
         scene.overlay.playConnectPulse(joinedDeviceIDs: [], cameToLife: true)
         drainMainQueue()
         #expect(scene.overlay.test_isConnectPulsing, "the connect fires the pulse")
@@ -305,7 +305,7 @@ import Testing
     @Test func aSingleJoinMountsTheBead() {
         let scene = makeScene(nodes: [.member, .member])
         scene.rows[1].railDeviceID = "joined"
-        scene.hook.gold = true
+        scene.hook.armed = true
         scene.overlay.playConnectPulse(joinedDeviceIDs: ["joined"], cameToLife: false)
         drainMainQueue()
         #expect(scene.overlay.test_isConnectPulsing,
@@ -319,7 +319,7 @@ import Testing
         let scene = makeScene(nodes: [.member, .member])
         scene.rows[0].railDeviceID = "room1"
         scene.rows[1].railDeviceID = "room2"
-        scene.hook.gold = true
+        scene.hook.armed = true
         scene.overlay.playConnectPulse(joinedDeviceIDs: ["room1"], cameToLife: true)
         drainMainQueue()
         #expect(scene.overlay.test_isConnectPulsing, "the connect fires a pulse")
@@ -336,7 +336,7 @@ import Testing
     @Test func reduceMotionRemovesThePulseEntirely() {
         let scene = makeScene(nodes: [.member])
         scene.overlay.test_reduceMotionOverride = true
-        scene.hook.gold = true
+        scene.hook.armed = true
         scene.overlay.playConnectPulse(joinedDeviceIDs: [], cameToLife: true)
         drainMainQueue()
         #expect(!scene.overlay.test_isConnectPulsing,
@@ -345,7 +345,7 @@ import Testing
 
     @Test func aMidFlightReduceMotionToggleCancelsThePulse() {
         let scene = makeScene(nodes: [.member])
-        scene.hook.gold = true
+        scene.hook.armed = true
         scene.overlay.playConnectPulse(joinedDeviceIDs: [], cameToLife: true)
         drainMainQueue()
         #expect(scene.overlay.test_isConnectPulsing)
@@ -360,7 +360,7 @@ import Testing
 
     @Test func anAccentDialChangeCancelsThePulse() {
         let scene = makeScene(nodes: [.member])
-        scene.hook.gold = true
+        scene.hook.armed = true
         scene.overlay.playConnectPulse(joinedDeviceIDs: [], cameToLife: true)
         drainMainQueue()
         #expect(scene.overlay.test_isConnectPulsing)
@@ -373,7 +373,7 @@ import Testing
 
     @Test func aMidFlightResizeCancelsThePulse() {
         let scene = makeScene(nodes: [.member])
-        scene.hook.gold = true
+        scene.hook.armed = true
         scene.overlay.playConnectPulse(joinedDeviceIDs: [], cameToLife: true)
         drainMainQueue()
         #expect(scene.overlay.test_isConnectPulsing)
@@ -386,7 +386,7 @@ import Testing
 
     @Test func aSameSizeLayoutPassNeverCancelsThePulse() {
         let scene = makeScene(nodes: [.member])
-        scene.hook.gold = true
+        scene.hook.armed = true
         scene.overlay.playConnectPulse(joinedDeviceIDs: [], cameToLife: true)
         drainMainQueue()
         #expect(scene.overlay.test_isConnectPulsing)
@@ -399,20 +399,20 @@ import Testing
     @Test func aDormantWireNeverPulses() {
         let scene = makeScene(nodes: [.member])
         scene.overlay.dormant = true
-        scene.hook.gold = true
+        scene.hook.armed = true
         scene.overlay.playConnectPulse(joinedDeviceIDs: [], cameToLife: true)
         drainMainQueue()
         #expect(!scene.overlay.test_isConnectPulsing,
                 "a dormant wire feeds nothing — there is no current to show arriving")
     }
 
-    @Test func anIdleWireNeverPulses() {
+    @Test func anUnarmedWireNeverPulses() {
         let scene = makeScene(nodes: [.member])
-        scene.hook.gold = false
+        scene.hook.armed = false
         scene.overlay.playConnectPulse(joinedDeviceIDs: [], cameToLife: true)
         drainMainQueue()
         #expect(!scene.overlay.test_isConnectPulsing,
-                "an idle (un-armed) wire carries nothing — no pulse")
+                "an un-armed wire (Main Audio muted or nothing connected) carries nothing — no pulse")
     }
 
     // MARK: Redraw skip (a layout pass that moved nothing)

@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Speakers Page, L</title>
+<style>
+/* Tokens: copied from K2 (DESIGN.md scaffolding + Tokens.swift). Success mark = NSColor.systemGreen. */
+:root{
+  --canvas:#FAFAFB; --panel:#FAFAFB; --raised:#FAFAFB; --well:#E9EAEC;
+  --label:#1D1D1F; --label2:#6B5F4E; --label3:#6B6459; --labelCool:#4E5A63; --labelCool2:#5F6A73;
+  --hairline:#CBCED4; --containerEdge:#AEB3BB; --rim:#66717A;
+  --gold:#E8B84B; --ember:#7A5E2A; --failure:#B03327; --green:#28CD41;
+  --sidebar:#EEEEEF; --toolbar:#F4F4F5; --sideSel:#DCDCDE;
+  --popFill:#FFFFFF; --popEdge:rgba(0,0,0,.16); --popShadow:0 .5px 1px rgba(0,0,0,.12);
+  --page:#E4E5E8; --frame:rgba(0,0,0,.18); --note:#5F6A73;
+  color-scheme:light;
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    --canvas:#0A0A0C; --panel:#15171A; --raised:#1F232A; --well:#050507;
+    --label:#F2F2F3; --label2:#B7AC95; --label3:#9E947F; --labelCool:#A9B3BB; --labelCool2:#818C94;
+    --hairline:#2A2E33; --containerEdge:#3D4247; --rim:#6B767D;
+    --ember:#8A6A2F; --failure:#D9564A; --green:#32D74B;
+    --sidebar:#1B1C1F; --toolbar:#18191C; --sideSel:#3A3B3F;
+    --popFill:rgba(255,255,255,.12); --popEdge:rgba(255,255,255,.10); --popShadow:none;
+    --page:#050507; --frame:rgba(255,255,255,.16); --note:#818C94;
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --canvas:#0A0A0C; --panel:#15171A; --raised:#1F232A; --well:#050507;
+  --label:#F2F2F3; --label2:#B7AC95; --label3:#9E947F; --labelCool:#A9B3BB; --labelCool2:#818C94;
+  --hairline:#2A2E33; --containerEdge:#3D4247; --rim:#6B767D;
+  --ember:#8A6A2F; --failure:#D9564A; --green:#32D74B;
+  --sidebar:#1B1C1F; --toolbar:#18191C; --sideSel:#3A3B3F;
+  --popFill:rgba(255,255,255,.12); --popEdge:rgba(255,255,255,.10); --popShadow:none;
+  --page:#050507; --frame:rgba(255,255,255,.16); --note:#818C94;
+  color-scheme:dark;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{background:var(--page)}
+body{font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","Helvetica Neue",sans-serif;font-size:13px;color:var(--label);-webkit-font-smoothing:antialiased;padding:16px}
+svg.i{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.4;stroke-linecap:round;stroke-linejoin:round;flex:none}
+.layout{display:flex;gap:24px;justify-content:center;align-items:flex-start}
+h2{font-size:12px;font-weight:600;color:var(--label2);margin:0 0 8px 2px}
+h2 span{font-weight:400;color:var(--note)}
+
+/* window chrome, as shipped (653 pt wide, 210 pt sidebar) */
+.win{width:653px;border-radius:12px;overflow:hidden;background:var(--canvas);box-shadow:0 0 0 .5px var(--frame),0 18px 40px rgba(0,0,0,.18)}
+.tb{height:52px;background:var(--toolbar);border-bottom:1px solid var(--hairline);display:flex;align-items:center;padding:0 14px;position:relative}
+.dotR{width:12px;height:12px;border-radius:50%;background:#FF5F57;margin-right:14px}
+.seg{display:flex;align-items:center;gap:2px;padding:3px;border-radius:999px;border:1px solid var(--containerEdge)}
+.seg span{display:flex;align-items:center;gap:6px;height:26px;padding:0 9px;border-radius:999px;color:var(--label2);font-size:12px}
+.seg span.on{background:var(--sideSel);color:var(--label)}
+.seg svg{width:17px;height:17px}
+.tb .title{position:absolute;left:0;right:0;text-align:center;font-weight:700;font-size:17px;color:var(--label2);pointer-events:none}
+.tb .pin{margin-left:auto;color:var(--label2)}
+.body{display:grid;grid-template-columns:210px 443px;height:760px}
+
+.sb{background:var(--sidebar);border-right:1px solid var(--hairline);display:flex;flex-direction:column;overflow:hidden}
+.sbList{flex:1;padding:12px 10px 0;overflow:hidden}
+.hdr{font-size:11px;font-weight:600;color:var(--label3);height:24px;padding:6px 0 0 4px}
+.plate{display:flex;align-items:center;gap:9px;height:34px;padding:0 10px 0 12px;border-radius:10px;border:1px solid var(--containerEdge);background:var(--raised);font-size:13px;margin:6px 0 8px}
+.plate .chev{margin-left:auto;color:var(--label2);display:flex}
+.plate .chev svg{width:11px;height:11px}
+.row{display:flex;align-items:center;gap:8px;height:28px;padding:0 6px;color:var(--label2)}
+.row .n{font-size:13px;color:var(--label);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;min-width:0}
+.row.away .n{color:var(--labelCool)}
+.nd{width:9px;height:9px;border-radius:50%;flex:none;display:inline-block}
+.nd.on{background:var(--ember)}
+.nd.away{border:1.5px solid var(--ember)}
+.nd.no{visibility:hidden}
+svg.lost{width:11px;height:11px;color:var(--failure);stroke-width:1.9;flex:none}
+.addbar{height:36px;border-top:1px solid var(--hairline);display:flex;align-items:center;gap:6px;padding:0 14px;font-size:13px;flex:none}
+.addbar svg{width:13px;height:13px}
+
+/* content pane: top-aligned column, ground below stays empty */
+.ct{background:var(--panel)}
+.pane{padding:44px 28px 20px}
+.ph{display:flex;align-items:center;gap:12px}
+.idw{width:48px;height:48px;border-radius:14px;border:1px solid var(--containerEdge);display:grid;place-items:center;color:var(--label2);flex:none;background:var(--raised)}
+.idw svg{width:26px;height:26px;stroke-width:1.3}
+.ph h1{font-size:16px;font-weight:600;line-height:20px}
+.sub{font-size:11px;color:var(--label2);margin-top:2px;display:flex;align-items:center;gap:5px;white-space:nowrap}
+.sub .ok{width:12px;height:12px;color:var(--green);stroke-width:2.2}
+.sub .nd{width:7px;height:7px}
+.sub .nd.away{border-width:1.2px}
+.sub .sep{color:var(--label3)}
+.spin{width:12px;height:12px;flex:none;color:var(--label)}
+
+/* the one card: GroupedSectionView .card, rows stacked, inset hairlines from 18 pt */
+.card{border:1px solid var(--containerEdge);background:var(--raised);border-radius:26px;margin:36px -14px 0;overflow:hidden}
+.kinds{display:flex;padding:12px 10px 11px 18px}
+.kinds .k{flex:1;min-width:0}
+.kinds .top{display:flex;align-items:center;gap:6px;color:var(--label2)}
+.kinds .num{font-size:16px;font-weight:600;color:var(--label);font-variant-numeric:tabular-nums;line-height:20px}
+.kinds .lab{font-size:11px;color:var(--label2);margin-top:1px;white-space:nowrap}
+.li{display:flex;align-items:center;gap:10px;height:44px;padding:0 16px 0 0;margin-left:18px;border-top:1px solid var(--hairline)}
+.li .t{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.li .g{color:var(--label2);display:flex}
+.li .g.fail{color:var(--failure)}
+.li .go{color:var(--label2);display:flex}
+.li .go svg{width:12px;height:12px;stroke-width:1.8}
+.btn{font:inherit;font-size:12px;height:22px;padding:0 10px;border-radius:6px;background:var(--popFill);border:.5px solid var(--popEdge);box-shadow:var(--popShadow);display:inline-flex;align-items:center;color:var(--label);white-space:nowrap;flex:none}
+
+/* right column: content pane only, cropped */
+.side{display:flex;flex-direction:column;gap:18px;width:443px}
+.crop{width:443px;border-radius:10px;overflow:hidden;background:var(--panel);box-shadow:0 0 0 .5px var(--frame),0 8px 20px rgba(0,0,0,.12)}
+.crop .pane{padding:24px 28px 22px}
+.note{font-size:10.5px;color:var(--note);line-height:1.45;margin-top:6px}
+.note b{color:var(--label2);font-weight:600}
+.under{width:653px;margin-top:8px}
+</style>
+</head>
+<body>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+ <defs>
+  <symbol id="laptop" viewBox="0 0 24 24"><rect x="4.5" y="6" width="15" height="10" rx="1.2"/><path d="M2.5 18.5h19"/></symbol>
+  <symbol id="spk" viewBox="0 0 24 24"><rect x="7" y="3" width="10" height="18" rx="2"/><circle cx="12" cy="14.5" r="3"/><circle cx="12" cy="7.2" r="1.2"/></symbol>
+  <symbol id="radio" viewBox="0 0 24 24"><rect x="3.5" y="8" width="17" height="11.5" rx="2"/><path d="M7 8 16 4"/><circle cx="9" cy="13.8" r="2.6"/><path d="M15 12h3M15 15.5h3"/></symbol>
+  <symbol id="tv" viewBox="0 0 24 24"><rect x="2.5" y="5" width="14" height="10" rx="1.2"/><path d="M6 18h7"/><rect x="15.5" y="10" width="6" height="9.5" rx="1.2"/><circle cx="18.5" cy="16.5" r="1.4"/></symbol>
+  <symbol id="atv" viewBox="0 0 24 24"><rect x="3" y="6" width="18" height="12" rx="2.5"/><path d="M8 12h2M13 10.5v3M15 10.5l1.2 3 1.2-3"/></symbol>
+  <symbol id="phones" viewBox="0 0 24 24"><path d="M4 15v-3a8 8 0 0 1 16 0v3"/><rect x="3.5" y="14" width="4" height="6.5" rx="1.5"/><rect x="16.5" y="14" width="4" height="6.5" rx="1.5"/></symbol>
+  <symbol id="buds" viewBox="0 0 24 24"><circle cx="7" cy="7" r="3"/><path d="M8 10v9"/><circle cx="17" cy="7" r="3"/><path d="M16 10v9"/></symbol>
+  <symbol id="spkOut" viewBox="0 0 24 24"><path d="M5 9.5h3l5-4v13l-5-4H5z"/></symbol>
+  <symbol id="airplay" viewBox="0 0 24 24"><path d="M6 17H4.5A1.5 1.5 0 0 1 3 15.5v-9A1.5 1.5 0 0 1 4.5 5h15A1.5 1.5 0 0 1 21 6.5v9a1.5 1.5 0 0 1-1.5 1.5H18"/><path d="m12 14 5 6H7z"/></symbol>
+  <symbol id="question" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M9.5 9.5a2.5 2.5 0 1 1 3.5 2.3c-.7.3-1 .9-1 1.6v.6M12 17v.3"/></symbol>
+  <symbol id="scenes" viewBox="0 0 24 24"><rect x="3" y="5" width="8" height="14" rx="1.4"/><rect x="13" y="5" width="8" height="14" rx="1.4"/></symbol>
+  <symbol id="main" viewBox="0 0 24 24"><rect x="9" y="3.5" width="9" height="17" rx="1.6"/><path d="M3 12h9M9.5 9l3 3-3 3"/></symbol>
+  <symbol id="speakers" viewBox="0 0 24 24"><rect x="4" y="4" width="8" height="16" rx="1.6"/><circle cx="8" cy="14" r="2.2"/><rect x="14" y="7" width="6" height="13" rx="1.4"/><circle cx="17" cy="15.5" r="1.4"/></symbol>
+  <symbol id="chev" viewBox="0 0 24 24"><path d="m9 5 7 7-7 7"/></symbol>
+  <symbol id="tri" viewBox="0 0 24 24"><path d="M12 3.5 22 20H2z"/><path d="M12 10v4.5M12 17.2v.3"/></symbol>
+  <symbol id="bt" viewBox="0 0 24 24"><path d="m7 7 10 10-5 4.5V2.5L17 7 7 17"/></symbol>
+  <symbol id="plus" viewBox="0 0 24 24"><path d="M12 4v16M4 12h16"/></symbol>
+  <symbol id="plusC" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 8v8M8 12h8"/></symbol>
+  <symbol id="pinS" viewBox="0 0 24 24"><path d="M8 3h8M9 3v6l-3 4h12l-3-4V3M12 13v8"/></symbol>
+  <symbol id="bars" viewBox="0 0 24 24"><path d="M4 9v6M8 6v12M12 4v16M16 7v10M20 10v4"/></symbol>
+  <symbol id="gear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 3.5l1.6 2.3 2.7-.8.6 2.8 2.7.9-.8 2.7 2.3 1.6-2.3 1.6.8 2.7-2.7.9-.6 2.8-2.7-.8L12 20.5l-1.6-2.3-2.7.8-.6-2.8-2.7-.9.8-2.7L2.9 12l2.3-1.6-.8-2.7 2.7-.9.6-2.8 2.7.8z"/></symbol>
+  <symbol id="okC" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" fill="currentColor" stroke="none"/><path d="m7.5 12.3 3 3 6-6.3" stroke="#fff" stroke-width="2.2"/></symbol>
+  <symbol id="spinS" viewBox="0 0 24 24"><g stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><line x1="12" y1="2.5" x2="12" y2="7"/><line x1="12" y1="2.5" x2="12" y2="7" opacity=".9" transform="rotate(-30 12 12)"/><line x1="12" y1="2.5" x2="12" y2="7" opacity=".8" transform="rotate(-60 12 12)"/><line x1="12" y1="2.5" x2="12" y2="7" opacity=".7" transform="rotate(-90 12 12)"/><line x1="12" y1="2.5" x2="12" y2="7" opacity=".6" transform="rotate(-120 12 12)"/><line x1="12" y1="2.5" x2="12" y2="7" opacity=".5" transform="rotate(-150 12 12)"/><line x1="12" y1="2.5" x2="12" y2="7" opacity=".42" transform="rotate(-180 12 12)"/><line x1="12" y1="2.5" x2="12" y2="7" opacity=".36" transform="rotate(-210 12 12)"/><line x1="12" y1="2.5" x2="12" y2="7" opacity=".3" transform="rotate(-240 12 12)"/><line x1="12" y1="2.5" x2="12" y2="7" opacity=".26" transform="rotate(-270 12 12)"/><line x1="12" y1="2.5" x2="12" y2="7" opacity=".22" transform="rotate(-300 12 12)"/><line x1="12" y1="2.5" x2="12" y2="7" opacity=".2" transform="rotate(-330 12 12)"/></g></symbol>
+ </defs>
+</svg>
+
+<div class="layout">
+ <div>
+  <h2>Done looking, 11 away, 1 can't be found <span>(the owner's 20 speakers)</span></h2>
+  <div class="win" id="mainwin"></div>
+  <p class="note under"><b>Header line</b> is the search result: green mark once looking is done, then the sidebar's own dots with their counts. <b>Kinds row</b> counts every kept speaker by how it connects; a kind with none is left out. <b>Rows below</b> appear only when true, one line each; "Forget 1 speaker…" opens the existing confirmation, which already says how many scenes it leaves. The card ends with its last row; the pane ground stays empty below it.</p>
+ </div>
+ <div class="side">
+  <div><h2>Still looking <span>(away and lost held back)</span></h2><div class="crop" id="s1"></div>
+   <p class="note">Counts tick up as speakers arrive. "Away" and "can't be found" wait until looking is done, so a cold launch never flashes "20 speakers can't be found".</p></div>
+  <div><h2>Done, every speaker found</h2><div class="crop" id="s2"></div></div>
+  <div><h2>Done, Bluetooth access off, 2 can't be found</h2><div class="crop" id="s3"></div>
+   <p class="note">Bluetooth first, then lost speakers, then Pair. The longer sentence each row used to carry becomes its tooltip and its VoiceOver hint.</p></div>
+ </div>
+</div>
+
+<script>
+var u=function(id,cls){return '<svg class="i'+(cls?' '+cls:'')+'"><use href="#'+id+'"/></svg>'};
+function kinds(list){return '<div class="kinds">'+list.map(function(k){return '<div class="k"><div class="top">'+u(k[0])+'<span class="num">'+k[1]+'</span></div><div class="lab">'+k[2]+'</div></div>'}).join('')+'</div>'}
+var PAIR='<div class="li"><span class="g">'+u('plusC')+'</span><span class="t">Pair Bluetooth speaker…</span><span class="go">'+u('chev')+'</span></div>';
+function lost(n){return '<div class="li"><span class="g fail">'+u('tri')+'</span><span class="t">'+(n==1?'1 speaker can’t be found':n+' speakers can’t be found')+'</span><button class="btn" type="button">Forget '+(n==1?'1 speaker':n+' speakers')+'…</button></div>'}
+var BTOFF='<div class="li"><span class="g">'+u('bt')+'</span><span class="t">Bluetooth access is off</span><button class="btn" type="button">Open Privacy Settings…</button></div>';
+function pane(sub,card){return '<div class="pane"><div class="ph"><div class="idw">'+u('speakers')+'</div><div><h1>Speakers</h1><div class="sub" role="status">'+sub+'</div></div></div><div class="card">'+card+'</div></div>'}
+var ok='<svg class="i ok"><use href="#okC"/></svg>';
+function doneAway(f,a){return ok+'Done looking<span class="sep">·</span><span class="nd on"></span>'+f+' found<span class="sep">·</span><span class="nd away"></span>'+a+' away'}
+
+var K20=[['airplay',9,'AirPlay'],['bt',6,'Bluetooth'],['tv',3,'Cast'],['laptop',1,'This Mac'],['question',1,'Unknown']];
+var mainPane=pane(doneAway(8,11),kinds(K20)+lost(1)+PAIR);
+
+var rows=[['on','laptop','MacBook Pro Speakers'],['away','phones','A AirPods Max'],['away','buds','AirPods Pro'],['away','buds','Alec’s AirPods Pro'],['on','spk','Alec’s MacBook Pro'],['on','atv','casty'],['on','tv','casty'],['on','spk','Fancyy'],['away','phones','ION Speaker'],['away','radio','isaac'],['away','radio','JBL Flip 5'],['on','tv','Mac Cast Receiver'],['lost','spkOut','Missing speaker'],['away','radio','Move 2 (SONOS B…'],['away','phones','Onkyo TX-8220'],['on','spk','Sonos Move'],['away','radio','Sonos Move (SON…'],['away','spk','teevee'],['on','tv','TV'],['away','phones','WH-1000XM3']];
+var sb=rows.map(function(r){var d=r[0]=='lost'?'<svg class="i lost"><use href="#tri"/></svg>':'<span class="nd '+r[0]+'"></span>';return '<div class="row'+(r[0]=='on'?'':' away')+'">'+d+u(r[1])+'<span class="n">'+r[2]+'</span></div>'}).join('');
+
+document.getElementById("mainwin").innerHTML=
+ '<div class="tb"><span class="dotR"></span><div class="seg"><span>'+u('bars')+'</span><span>'+u('scenes')+'</span><span class="on">'+u('speakers')+'Speakers</span><span>'+u('gear')+'</span></div><div class="title">Audiout</div><div class="pin">'+u('pinS')+'</div></div>'+
+ '<div class="body"><aside class="sb"><div class="sbList"><div class="hdr">System Audio</div><div class="row"><span class="nd no"></span>'+u('main')+'<span class="n">Main Audio</span></div>'+
+ '<div class="plate" style="background:var(--sideSel);border-color:transparent">'+u('speakers')+'Speakers<span class="chev">'+u('chev')+'</span></div><div class="hdr">In the Mixer</div>'+sb+
+ '</div><div class="addbar">'+u('plus')+'Add scene</div></aside><section class="ct">'+mainPane+'</section></div>';
+
+document.getElementById('s1').innerHTML=pane('<svg class="spin" aria-hidden="true"><use href="#spinS"/></svg>Looking for speakers on your network…<span class="sep">·</span>6 found so far',
+ kinds([['airplay',4,'AirPlay'],['tv',1,'Cast'],['laptop',1,'This Mac']])+PAIR);
+document.getElementById('s2').innerHTML=pane(ok+'All 20 speakers found',kinds([['airplay',10,'AirPlay'],['bt',6,'Bluetooth'],['tv',3,'Cast'],['laptop',1,'This Mac']])+PAIR);
+document.getElementById('s3').innerHTML=pane(doneAway(9,9),kinds([['airplay',10,'AirPlay'],['bt',6,'Bluetooth'],['tv',3,'Cast'],['laptop',1,'This Mac']])+BTOFF+lost(2)+PAIR);
+</script>
+<script>document.documentElement.setAttribute("data-theme","dark");</script></body>
+</html>

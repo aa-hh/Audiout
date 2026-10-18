@@ -5,7 +5,7 @@
 #
 # Picks a level from the committed diff against origin/main (fetched first;
 # local main is never used, since nothing updates it any more): skip (no model), cheap
-# (one sonnet pass) or full (four parallel reviewers, then one haiku
+# (one sonnet pass) or full (four parallel reviewers, the deep one on fable, then one haiku
 # confidence score per finding, findings under 75 dropped). Prints the
 # findings and appends one line to <git-common-dir>/audiout-branch-reviews.log.
 # Instruction files: docs/review/<pass>.md.
@@ -52,7 +52,7 @@ FULL_OVER_LINES=300
 SCORE_KEEP_AT=75
 
 CHEAP_MODEL=sonnet
-DEEP_MODEL=opus
+DEEP_MODEL=fable
 RULES_MODEL=sonnet
 HISTORY_MODEL=sonnet
 COMMENTS_MODEL=sonnet

@@ -26,10 +26,10 @@
 // `Device` values and pushed through `PopoverController.update(devices:)` —
 // no script timing to wait on, so the render is fully deterministic. This is
 // the PRIMARY visual gate for the Warm Signal v3 §3.2 halo ring: `.off` → no
-// ring · `.connecting`/`.reconnecting` → dashed `ringConnected` ring (the
+// ring · `.connecting`/`.reconnecting` → dashed `rim` ring (the
 // breathing pulse renders settled/full-opacity via `cacheDisplay`, so the PNG
-// is deterministic) · `.connected` → solid `ringConnected` ring · `.failed` →
-// heavier solid red `failure` ring + red "Couldn't connect" sublabel.
+// is deterministic) · `.connected` → solid `rim` ring · `.failed` →
+// solid red `failure` ring + red "Couldn't connect" sublabel.
 //
 // `AIRPLAY_SNAPSHOT_MODE=feed-composite` renders the Warm Signal v4.1 item 3
 // FEED column's full precedence ladder in one panel — see
@@ -390,8 +390,8 @@ func snapshotMeters(appearanceName: NSAppearance.Name, label: String, outDir: UR
 /// `connection-states` snapshot mode. Each device's name says what it's
 /// demoing so the PNG is self-explanatory without cross-referencing code. This
 /// now exercises the halo connection ring (Warm Signal v3 §3.2): `.off` shows
-/// no ring, `.connecting`/`.reconnecting` a dashed breathing `ringConnected`
-/// ring, `.connected` a solid `ringConnected` ring, `.failed` a heavier solid
+/// no ring, `.connecting`/`.reconnecting` a dashed breathing `rim`
+/// ring, `.connected` a solid `rim` ring, `.failed` a solid
 /// red `failure` ring with the red "Couldn't connect" sublabel.
 private var connectionStatesFleet: [Device] {
     [
@@ -413,11 +413,11 @@ private var connectionStatesFleet: [Device] {
 /// AirPlay members caught mid-switch to a group plus one that fails:
 ///   - `en-kitchen` — already `.connected` (the top of the sweep has landed:
 ///     filled gold node + gold rail segment),
-///   - `en-living` — `.connecting` (mid-handshake: gold DASHED node, ember
-///     segment) in the mid-sequence variant; `.connected` in the settled
+///   - `en-living` — `.connecting` (mid-handshake: plain gold node, line
+///     stops short) in the mid-sequence variant; `.connected` in the settled
 ///     Reduce-Motion variant so there is no in-flight residue to strip,
 ///   - `en-office` / `en-bedroom` — still `.off`: these carry the energize
-///     PENDING beat (ember dashed node) mid-sequence, and SNAP to their
+///     PENDING beat (plain gold node) mid-sequence, and SNAP to their
 ///     resolved filled-gold member node under Reduce Motion,
 ///   - `en-patio` — `.failed` (never toggled in, so it bounces off selection
 ///     exactly like the `connection-states` fixture's failed row): red halo
@@ -472,7 +472,7 @@ private func stageEnergize(fleet: [Device], reduceMotion: Bool,
     popover.test_simulateOpen()             // rebuild as if reopened → rows mounted
 
     // Fixed Reduce Motion posture on the still-`.off` members, THEN raise the
-    // pending beat: mid-sequence (motion on) → ember dashed pending nodes;
+    // pending beat: mid-sequence (motion on) → plain gold pending nodes;
     // settled (motion reduced) → the beat is dropped, the members render their
     // resolved filled-gold member nodes (snap to resolved).
     for id in ["en-office", "en-bedroom"] {
@@ -506,9 +506,9 @@ private func stageEnergize(fleet: [Device], reduceMotion: Bool,
 }
 
 /// Render the `energize-mid-sequence` scenario (Warm Signal v4.1 item 9): a
-/// FROZEN mid-switch frame — one member landed (gold), one connecting (gold
-/// dashed), two on the ember PENDING beat, one failed — so the whole energize
-/// vocabulary reads in one panel. Motion ON (the pending nodes are dashed).
+/// FROZEN mid-switch frame — one member landed (gold), one connecting (plain
+/// gold node), two on the PENDING beat (plain gold node), one failed — so the whole energize
+/// vocabulary reads in one panel. Motion ON (the pending nodes are plain gold).
 @MainActor
 func snapshotEnergizeMidSequence(appearanceName: NSAppearance.Name, label: String, outDir: URL) {
     guard let panelView = stageEnergize(fleet: energizeFleet(livingConnecting: true),
@@ -617,10 +617,10 @@ func snapshotConnectionStates(appearanceName: NSAppearance.Name, label: String, 
 /// label. Two app routes are seeded so the two rungs are visible side by
 /// side in one panel:
 ///   - "office": redirected to Music AND given a live `.routedApps` event ⇒
-///     its row shows the CONFIRMED label ("Music") — and (S2, spec §3.3) its
-///     GOLD route-armed corner dot, lit via the `liveAppNames` branch on an
-///     UNCHECKED row (redirect-only: hollow bus node + gold dot + bright feed
-///     token).
+///     its row shows the CONFIRMED label ("Music"): the mock marks a device
+///     with a live `.routedApps` feed connected, so the unchecked row shows
+///     the connected ring and the gold dot (redirect-only: hollow bus node,
+///     gold dot, bright feed token).
 ///   - "homepod-bed": redirected to Safari but given NO live event ⇒ its row
 ///     falls back to the INTENT-based label ("Safari"), demonstrating the
 ///     "routed but not yet confirmed streaming" fallback case.
@@ -1038,6 +1038,159 @@ func snapshotFeedComposite(appearanceName: NSAppearance.Name, label: String, out
 }
 
 @MainActor
+func loadSpeakerSnapshotSymbols() -> Bool {
+    guard let path = ProcessInfo.processInfo.environment["AUDIOUT_SNAPSHOT_SYMBOL_BUNDLE"],
+          let bundle = Bundle(path: path) else {
+        print("  FAIL  AUDIOUT_SNAPSHOT_SYMBOL_BUNDLE must name the compiled native symbol bundle")
+        renderFailed = true
+        return false
+    }
+    for name in RowAccessorySymbol.allNames {
+        guard let image = bundle.image(forResource: name), image.setName(NSImage.Name(name)),
+              RowAccessorySymbol.rawImage(named: name) != nil else {
+            print("  FAIL  native snapshot symbol missing: \(name)")
+            renderFailed = true
+            return false
+        }
+    }
+    return true
+}
+
+@MainActor
+func settleSpeakerSnapshot(_ interval: TimeInterval) {
+    let deadline = Date().addingTimeInterval(interval)
+    while Date() < deadline {
+        RunLoop.current.run(mode: .default, before: min(deadline, Date().addingTimeInterval(0.02)))
+    }
+}
+
+private final class SpeakerSnapshotDefaults: UserDefaults, @unchecked Sendable {
+    private let lock = NSLock()
+    private var values: [String: Any] = [:]
+    override func object(forKey key: String) -> Any? { lock.withLock { values[key] } }
+    override func set(_ value: Any?, forKey key: String) { lock.withLock { values[key] = value } }
+    override func removeObject(forKey key: String) { _ = lock.withLock { values.removeValue(forKey: key) } }
+}
+
+@MainActor
+func speakerManagementFixture(empty: Bool = false) ->
+    (GroupController, AppRoutingController, SpeakerLibraryController, AppSettings, DeviceIconController, [Device]) {
+    let directory = tempDir()
+    let settings = AppSettings(defaults: SpeakerSnapshotDefaults())
+    let local = Device(id: "mac", name: "MacBook Pro Speakers", kind: .localMac,
+                       isAvailable: true, isLocalDevice: true)
+    let airplay = Device(id: "airplay", name: "Move 2", kind: .sonos, volume: 50)
+    let cast = Device(id: "cast", name: "TV", kind: .cast, isAvailable: false,
+                      volume: 50, connectionState: .connected)
+    let bluetooth = Device(id: "bt-offline", name: "Sonos Move", kind: .bluetooth,
+                           isAvailable: false, volume: 50)
+    let hidden = Device(id: "bt-hidden", name: "Onkyo TX-8220", kind: .bluetooth, volume: 50)
+    let remembered = Device(id: "remembered-network", name: "Bedroom", kind: .homePod, isAvailable: false)
+    let legacyID = "legacy-scene-member-42"
+    let devices = empty ? [local] : [local, airplay, cast, bluetooth, hidden]
+    let backend = MockBackend(fleet: devices, staggerDiscovery: false,
+                              emitsLevels: false, simulatesDropouts: false)
+    let groups = GroupController(backend: backend, store: GroupStore(directory: directory),
+        routingStore: RoutingStore(directory: directory), settings: settings, loadPersisted: false)
+    let routes = AppRoutingController(store: AppRouteStore(directory: directory), loadPersisted: false)
+    let library = SpeakerLibraryController(store: SpeakerLibraryStore(directory: directory),
+        legacyHiddenStore: HiddenSpeakersStore(directory: directory), loadPersisted: false)
+    let icons = DeviceIconController(store: DeviceIconStore(directory: directory), loadPersisted: false)
+    groups.updateDevices(devices)
+    if !empty {
+        do {
+            try groups.saveGroup(Group(id: "kitchen", name: "Kitchen",
+                memberIDs: ["airplay", "cast", "bt-offline", legacyID], memberVolumes: ["airplay": 50, "cast": 50]))
+            try groups.saveGroup(Group(id: "living", name: "Living Room",
+                memberIDs: ["airplay", "remembered-network"], memberVolumes: ["airplay": 50]))
+        } catch {
+            print("  FAIL  speaker fixture scene save: \(error)")
+            renderFailed = true
+        }
+        library.update(liveDevices: devices + [remembered], groups: groups.groups,
+                       confirmedUsedIDs: ["remembered-network"])
+        library.setVisibility(.always, for: "bt-offline")
+        library.setVisibility(.always, for: "remembered-network")
+        library.setVisibility(.always, for: legacyID)
+        library.setVisibility(.hideWhenNotInUse, for: "bt-hidden")
+        _ = groups.setDeviceSelected("cast", true)
+    }
+    library.update(liveDevices: devices, groups: groups.groups,
+        confirmedUsedIDs: empty ? [] : ["cast"],
+        currentUse: SpeakerCurrentUse(mainAudioMemberIDs: groups.selectedDeviceIDs))
+    return (groups, routes, library, settings, icons, devices)
+}
+
+@MainActor
+func snapshotSpeakerManagement(appearanceName: NSAppearance.Name, label: String, outDir: URL) {
+    for variant in ["mixer", "denied", "empty", "large-list"] {
+        let (groups, routes, library, _, icons, fixtureDevices) = speakerManagementFixture(empty: variant == "empty")
+        var devices = fixtureDevices
+        if variant == "denied" {
+            devices.removeAll { $0.id == "bt-offline" }
+            groups.updateDevices(devices)
+            library.update(liveDevices: devices, groups: groups.groups,
+                currentUse: SpeakerCurrentUse(mainAudioMemberIDs: groups.selectedDeviceIDs))
+        }
+        if variant == "large-list" {
+            devices += (1...16).map { Device(id: "extra-\($0)", name: String(format: "Room %02d", $0), kind: .homePod) }
+            groups.updateDevices(devices)
+            library.update(liveDevices: devices, groups: groups.groups,
+                currentUse: SpeakerCurrentUse(mainAudioMemberIDs: groups.selectedDeviceIDs))
+        }
+        let popover = PopoverController(appRouting: routes, runningAppsProvider: { [] }, speakerLibrary: library)
+        popover.deviceIconController = icons
+        popover.bluetoothPermissionProvider = { variant == "denied" ? .denied : .granted }
+        popover.configure(groupController: groups)
+        popover.test_isShownOverride = true
+        library.onChange = { [weak popover] in popover?.refreshSpeakerPresentation() }
+        popover.update(devices: devices)
+        popover.test_simulateOpen()
+        if variant == "empty" {
+            settleSpeakerSnapshot(3.5)
+            guard popover.test_speakerSearchStateText == "No AirPlay speakers found on your Wi-Fi network." else {
+                print("  FAIL  empty speaker search did not settle")
+                renderFailed = true
+                continue
+            }
+        }
+        let appearance = snapshotAppearance(appearanceName)
+        let panel = popover.test_panelView
+        panel.appearance = appearance
+        panel.layoutSubtreeIfNeeded()
+        let size = panel.fittingSize
+        let window = NSWindow(contentRect: NSRect(origin: .zero, size: size),
+                              styleMask: [.borderless], backing: .buffered, defer: false)
+        window.appearance = appearance
+        window.ignoresMouseEvents = true
+        window.contentView?.addSubview(panel)
+        panel.frame = NSRect(origin: .zero, size: size)
+        window.setContentSize(size)
+        window.layoutIfNeeded()
+        panel.layoutSubtreeIfNeeded()
+        drain(0.1)
+        renderPNG(view: panel, to: outDir.appendingPathComponent("popover-\(variant)-\(label).png"))
+        if variant == "mixer" {
+            guard popover.test_fireSubsectionHeaderClick(title: "Bluetooth Speakers"),
+                  popover.test_isSubsectionCollapsed(title: "Bluetooth Speakers") else {
+                print("  FAIL  Bluetooth subsection did not collapse")
+                renderFailed = true
+                continue
+            }
+            settleSpeakerSnapshot(0.5)
+            panel.layoutSubtreeIfNeeded()
+            let collapsedSize = panel.fittingSize
+            window.setContentSize(collapsedSize)
+            panel.frame = NSRect(origin: .zero, size: collapsedSize)
+            panel.layoutSubtreeIfNeeded()
+            renderPNG(view: panel, to: outDir.appendingPathComponent("popover-collapsed-bluetooth-\(label).png"))
+        }
+        groups.flushPendingRoutingSave()
+        window.contentView = NSView()
+    }
+}
+
+@MainActor
 func run() -> Int32 {
     // Never show a real window on the developer's screen while this
     // headless tool runs (`HeadlessRuntime` in AudioutCore) — set BEFORE
@@ -1067,6 +1220,13 @@ func run() -> Int32 {
     // (`AIRPLAY_MOCK_SCENARIO`): env var selects an alternate render, default
     // mode is unaffected. See brief §8.
     let mode = ProcessInfo.processInfo.environment["AIRPLAY_SNAPSHOT_MODE"]
+    if mode == "speaker-management" {
+        guard loadSpeakerSnapshotSymbols() else { return 1 }
+        snapshotSpeakerManagement(appearanceName: .aqua, label: "light", outDir: outDir)
+        snapshotSpeakerManagement(appearanceName: .darkAqua, label: "dark", outDir: outDir)
+        print("Done.")
+        return renderFailed ? 1 : 0
+    }
     if mode == "connection-states" {
         snapshotConnectionStates(appearanceName: .aqua, label: "light", outDir: outDir)
         snapshotConnectionStates(appearanceName: .darkAqua, label: "dark", outDir: outDir)

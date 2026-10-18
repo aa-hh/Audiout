@@ -133,7 +133,7 @@ git clone -q --shared "$REPO" "$CLONE" || { fail "e2e: git clone failed"; CLONE=
 if [ -n "$CLONE" ]; then
     # The working-tree copies, so an uncommitted change is what gets tested.
     cp "$SCRIPT_DIR/run-tests.sh" "$CLONE/scripts/run-tests.sh"
-    cp "$SCRIPT_DIR/lib/suite-cache.sh" "$SCRIPT_DIR/lib/remote.sh" "$CLONE/scripts/lib/"
+    cp "$SCRIPT_DIR/lib/suite-cache.sh" "$SCRIPT_DIR/lib/remote.sh" "$SCRIPT_DIR/lib/suite-shards.sh" "$CLONE/scripts/lib/"
     # The orphan reaper scans the whole machine; nothing to reap here.
     printf '#!/bin/sh\nexit 0\n' > "$CLONE/scripts/reap-orphaned-swift.sh"
     # A warm checkout folder skips the runner's `swift package resolve` step.

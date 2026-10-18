@@ -10,8 +10,10 @@ import Testing
 /// function directly lets us pin the four contracted behaviors deterministically
 /// at ANY intermediate collapse height, with no view tree and no graphics context:
 ///
-///   1. a collapsed section cuts the rail with a terminus dot at its header,
-///   2. WHICH section collapses changes the shape (origin moves up vs terminus up),
+///   1. a collapsed header hiding a reached speaker carries a dot, and the rail
+///      ends at the lower of that dot and the lowest visible reached node
+///      (owner's ruling, 2026-10-04 — DESIGN.md "Membership rail extent"),
+///   2. WHICH section collapses changes the shape (origin moves up vs end up),
 ///   3. the shape tracks the LIVE clip floor frame-by-frame (the in-sync squeeze),
 ///   4. re-expanding restores the exact prior geometry (resolve is a pure function
 ///      of its input — same input, same plan).
@@ -22,17 +24,18 @@ import Testing
 @Suite final class BusRailCollapseResolveTests: IsolatedSuite {
 
     // A three-device band: two through-members, a member, then a NON-member below
-    // them — all under the Main Audio ring. Device clip fully expanded (floor
-    // below every node).
+    // them — all under the Main Audio ring. The list's visible band holds every
+    // node.
     private func expandedInput() -> RailPlan.Input {
         RailPlan.Input(
-            gold: true,
+            armed: true,
             ringCenterY: 500, ringCenterX: 20, ringRadius: 15, landingDrop: 16,
             originSectionCollapsed: false,
             originClipBand: 460...540,      // ring (500) sits inside → ring visible
             originHeaderY: 560,
             deviceSectionCollapsed: false,
-            deviceFloorY: 260,              // below every stop → no clip
+            listBand: 260...440,            // holds every stop → no clip
+            listHeaderDotY: 452,            // the card header's text line
             stops: [
                 .init(y: 420, node: .member),
                 .init(y: 380, node: .member),
@@ -94,7 +97,7 @@ import Testing
     /// are what state the failure — a line running down to it said the signal
     /// arrives there, which is the one thing that is not happening.
     @Test func theWireStopsAboveAFailedRoom() {
-        let plan = RailPlan.resolve(toneInput(gold: true, nodes: [.member, .failed]))
+        let plan = RailPlan.resolve(toneInput(armed: true, nodes: [.member, .failed]))
         #expect(plan.signalTerminusIndex == 0, "the lowest room the wire REACHES is the member")
         let runs = BusRailOverlayView().wireRuns(for: plan)
         #expect(runs.count == 2, "hook + the one segment into the member; nothing below it")
@@ -112,7 +115,7 @@ import Testing
     /// A band whose ONLY on-spine room has failed has no rail at all — the
     /// failed node keeps its own red rim, and nothing curves out of Main Audio.
     @Test func aBandOfNothingButAFailedRoomHasNoRail() {
-        let plan = RailPlan.resolve(toneInput(gold: true, nodes: [.nonMember, .failed]))
+        let plan = RailPlan.resolve(toneInput(armed: true, nodes: [.nonMember, .failed]))
         #expect(plan.signalTerminusIndex == nil, "a failed room is never the wire's terminus")
         #expect(BusRailOverlayView().wireRuns(for: plan).isEmpty, "nothing reached ⇒ no rail")
     }
@@ -129,19 +132,19 @@ import Testing
                 "dormancy changes the ink, never the geometry")
     }
 
-    @Test func collapsedDeviceSectionCutsRailWithHeaderDotAndDropsAllNodes() throws {
+    @Test func collapsedDeviceCardEndsOnItsHeaderDotAndDropsAllNodes() throws {
         var input = expandedInput()
-        // Device body collapsed: clip height 0, floor risen to just under the
-        // device header (say y = 452, header at ~455).
+        // Card body collapsed: clip height 0 at y = 444, under a header whose
+        // text line is y = 452.
         input.deviceSectionCollapsed = true
-        input.deviceFloorY = 452
+        input.listBand = 444...444
         let plan = RailPlan.resolve(input)
 
         #expect(plan.stops.count == 0,
-                       "a collapsed device section draws NONE of its now-hidden nodes")
+                       "a collapsed device card draws NONE of its now-hidden nodes")
         let terminusDotY = try #require(plan.terminusDotY)
         #expect(abs(terminusDotY - 452) <= 0.001,
-                       "the rail is cut with a terminus dot at the collapsed section floor (its header)")
+                       "the rail ends on a dot on the card header's text line")
         #expect(plan.origin == .ring(centerY: 500, ringCenterX: 20, ringRadius: 15),
                        "the ORIGIN is untouched — only the far end collapsed (behavior 2 contrast)")
     }
@@ -162,7 +165,7 @@ import Testing
                        "the vertical rail now starts at the header, not the ring landing")
         #expect(plan.stops.count == 4,
                        "the device section is still expanded, so all its nodes still draw")
-        #expect(plan.terminusDotY == nil, "device end unaffected by the origin collapsing")
+        #expect(plan.lineEndY == nil, "device end unaffected by the origin collapsing")
     }
 
     @Test func originStillRidesTheRingWhileItRemainsInsideTheShrinkingBand() {
@@ -176,68 +179,91 @@ import Testing
                        "while the ring is still within the clip band the origin stays on the ring")
     }
 
-    // MARK: Behavior 3 — the terminus tracks the live clip floor frame-by-frame
+    // MARK: Behavior 3 — the end tracks the live clip floor frame-by-frame
 
-    @Test func terminusFloorSqueezesContinuouslyWithTheClipHeight() throws {
-        // Sweep the device clip floor UP through the three node ys; the number of
-        // drawn stops and the cut position must track it monotonically — proof the
-        // rail squeezes in sync with the live (animating) clip, not a before/after
-        // snap.
+    /// The card collapsing: the overlay hands in the card dot riding a fixed
+    /// distance above the shrinking floor (`headerDotY(of:)`), here 8 pt.
+    private func collapsing(floor: CGFloat) -> RailPlan.Input {
         var input = expandedInput()
-
-        // Floor just above the lowest two nodes: they are clipped, two remain.
-        input.deviceFloorY = 360
-        var plan = RailPlan.resolve(input)
-        #expect(plan.stops.map(\.y) == [420, 380],
-                       "floor at 360 clips the lower two nodes")
-        var terminusDotY = try #require(plan.terminusDotY)
-        #expect(abs(terminusDotY - 360) <= 0.001)
-
-        // Floor risen further (above 380): only the top node remains.
-        input.deviceFloorY = 400
-        plan = RailPlan.resolve(input)
-        #expect(plan.stops.map(\.y) == [420], "floor at 400 clips the lower three nodes")
-        terminusDotY = try #require(plan.terminusDotY)
-        #expect(abs(terminusDotY - 400) <= 0.001)
-
-        // Floor above every node: the rail is a bare stub to the floor, no nodes.
-        input.deviceFloorY = 450
-        plan = RailPlan.resolve(input)
-        #expect(plan.stops.isEmpty, "floor above all nodes clips them all")
-        terminusDotY = try #require(plan.terminusDotY)
-        #expect(abs(terminusDotY - 450) <= 0.001,
-                       "the cut dot follows the floor exactly as it rises")
+        input.deviceSectionCollapsed = true
+        input.listBand = floor...max(floor, 440)
+        input.listHeaderDotY = floor + 8
+        return input
     }
 
-    // MARK: The cut represents hidden SIGNAL, not any hidden row
+    @Test func theEndSqueezesContinuouslyWithTheClipHeight() throws {
+        // Sweep the card's clip floor UP through the node ys; the drawn stops
+        // and the dot must track it monotonically — proof the rail squeezes in
+        // sync with the live (animating) clip, not a before/after snap.
+        var plan = RailPlan.resolve(collapsing(floor: 360))
+        #expect(plan.stops.map(\.y) == [420, 380], "floor at 360 clips the lower two nodes")
+        #expect(plan.terminusDotY == 368, "the hidden member puts the card dot 8 pt above the floor")
+
+        plan = RailPlan.resolve(collapsing(floor: 400))
+        #expect(plan.stops.map(\.y) == [420], "floor at 400 clips the lower three nodes")
+        #expect(plan.terminusDotY == 408)
+
+        plan = RailPlan.resolve(collapsing(floor: 432))
+        #expect(plan.stops.isEmpty, "floor above all nodes clips them all")
+        #expect(plan.terminusDotY == 440, "the dot follows the floor exactly as it rises")
+    }
+
+    // MARK: The card's dot represents hidden SIGNAL, not any hidden row
 
     @Test func clippingOnlyANonMemberEndsAtTheMemberWithNoTail() throws {
         // THE SECTION-TOGGLE BUG (live repro 2026-08-22). As a section collapses,
         // the clip floor rises through the NON-member rows sitting below the lowest
         // member FIRST. Hiding a non-member hides no signal, so the rail must still
-        // end at the lowest member — not grow a tail down to the cut floor through
+        // end at the lowest member — not grow a tail down to the floor through
         // the non-member area ("the rail expanding into areas where it wasn't
-        // before" on a rapid toggle). Only a hidden MEMBER cuts the rail.
-        var input = expandedInput()
-        input.deviceFloorY = 320          // between the non-member (300) and lowest member (340)
-        let plan = RailPlan.resolve(input)
+        // before" on a rapid toggle). Only a hidden MEMBER dots the card.
+        // Floor between the non-member (300) and lowest member (340).
+        let plan = RailPlan.resolve(collapsing(floor: 320))
         #expect(plan.stops.map(\.y) == [420, 380, 340],
                 "the non-member below the floor is clipped; every member stays drawn")
         #expect(plan.signalTerminusIndex == 2, "the wire still ends at the lowest member")
-        #expect(plan.terminusDotY == nil,
-                "no member is hidden ⇒ no cut: the rail ends at the member, no tail down to the floor")
+        #expect(plan.lineEndY == nil && plan.headerDotYs.isEmpty,
+                "no member is hidden ⇒ no dot: the rail ends at the member, no tail down to the floor")
     }
 
-    @Test func clippingTheLowestMemberDoesCutTheRail() throws {
+    @Test func clippingTheLowestMemberRunsTheRailToTheCardDot() throws {
         // The mirror of the above: once the floor rises past the lowest MEMBER, a
-        // real signal IS hidden below the fold, so the cut returns.
-        var input = expandedInput()
-        input.deviceFloorY = 350          // now above the lowest member (340)
-        let plan = RailPlan.resolve(input)
+        // real signal IS hidden below the fold, so the card's dot returns.
+        let plan = RailPlan.resolve(collapsing(floor: 350))   // above the lowest member (340)
         #expect(plan.stops.map(\.y) == [420, 380], "the lowest member is now clipped")
-        let terminusDotY = try #require(plan.terminusDotY,
-                "a hidden member is hidden signal — the rail cuts to the floor")
-        #expect(abs(terminusDotY - 350) <= 0.001)
+        #expect(plan.terminusDotY == 358,
+                "a hidden member is hidden signal — the rail runs on to the card's dot")
+    }
+
+    // Turns red if the collapsing card's dot appears while the member's centre is still inside the band.
+    @Test func aCollapsingCardKeepsAMemberWhoseCentreIsStillInTheBand() {
+        var input = expandedInput()
+        input.deviceSectionCollapsed = true
+        input.stops = [.init(y: 420, node: .member, halfHeight: 14),
+                       .init(y: 380, node: .member, halfHeight: 14),
+                       .init(y: 340, node: .member, halfHeight: 14),
+                       .init(y: 300, node: .nonMember, halfHeight: 14)]
+        input.listBand = 335...440
+        input.listHeaderDotY = 343
+        var plan = RailPlan.resolve(input)
+        #expect(plan.signalTerminusIndex == 2, "the member's centre (340) is in the band, so it ends the rail")
+        #expect(plan.headerDotYs.isEmpty && plan.lineEndY == nil, "no card dot yet")
+
+        input.listBand = 345...440
+        input.listHeaderDotY = 353
+        plan = RailPlan.resolve(input)
+        #expect(plan.terminusDotY == 353, "the centre has passed the floor, so the card dot appears")
+    }
+
+    @Test func collapsingTheCardDotsAReachedSpeakerScrolledAboveTheList() throws {
+        // The only reached speaker sits above the list's top edge (440); the
+        // card's collapse hides it all the same, so the header gets its dot.
+        var input = expandedInput()
+        input.deviceSectionCollapsed = true
+        input.stops = [.init(y: 470, node: .member, halfHeight: 14),
+                       .init(y: 300, node: .nonMember, halfHeight: 14)]
+        let plan = RailPlan.resolve(input)
+        #expect(plan.terminusDotY == 452, "the rail ends on a dot on the card header's text line")
     }
 
     // MARK: Behavior 4 — re-expand restores the exact prior geometry
@@ -246,10 +272,7 @@ import Testing
         let before = RailPlan.resolve(expandedInput())
 
         // Collapse (any intermediate + fully-collapsed state) …
-        var collapsing = expandedInput()
-        collapsing.deviceSectionCollapsed = true
-        collapsing.deviceFloorY = 452
-        _ = RailPlan.resolve(collapsing)
+        _ = RailPlan.resolve(collapsing(floor: 440))
 
         // … then expand again with the SAME expanded input: identical plan back.
         let after = RailPlan.resolve(expandedInput())
@@ -260,14 +283,11 @@ import Testing
     // MARK: Guard — a degenerate collapse never puts the dot above the rail start
 
     @Test func terminusDotIsClampedNotAboveRailTop() throws {
-        var input = expandedInput()
         // Pathological: device floor risen ABOVE the ring landing (panel squashed).
-        input.deviceSectionCollapsed = true
-        input.deviceFloorY = 900
-        let plan = RailPlan.resolve(input)
+        let plan = RailPlan.resolve(collapsing(floor: 900))
         let terminusDotY = try #require(plan.terminusDotY)
         #expect(abs(terminusDotY - plan.railTopY) <= 0.001,
-                       "the cut dot is clamped to railTop so it never draws above the origin")
+                       "the end dot is clamped to railTop so it never draws above the origin")
     }
 
     // MARK: Segment tone — the wire is ONE line
@@ -289,44 +309,87 @@ import Testing
             && abs(a.blueComponent - b.blueComponent) <= 0.005
     }
 
-    private func toneInput(gold: Bool, nodes: [MembershipBusView.Node]) -> RailPlan.Input {
+    private func toneInput(armed: Bool, nodes: [MembershipBusView.Node]) -> RailPlan.Input {
         var input = expandedInput()
-        input.gold = gold
+        input.armed = armed
         input.stops = zip([420, 380, 340, 300], nodes).map { .init(y: $0, node: $1) }
         return input
     }
 
-    /// A segment that detours PAST a non-member keeps the spine's tone: the
-    /// line carries the same signal past that node as it does into the member
-    /// below, so nothing on the wire changes colour between hook and terminus.
-    @Test func detourPastNonMembersKeepsTheArmedSpineTone() {
-        let plan = RailPlan.resolve(toneInput(gold: true, nodes: [.nonMember, .nonMember, .member]))
-        let runs = BusRailOverlayView().wireRuns(for: plan)
-        #expect(runs.count > 1, "hook plus at least one segment")
-        let spine = Tokens.Color.spineTone(armed: true)
-        #expect(runs.allSatisfy { sameInk($0.color, spine) }, "every run wears the armed spine tone")
+    /// The Mixer's wire is one colour from hook to terminus, armed or not: a
+    /// detour past a non-member, and the segments feeding a connecting and a
+    /// failed node, all wear the spine tone. The line's length, not its colour,
+    /// marks a connecting node (owner's rulings, 2026-10-03 and 2026-10-04).
+    @Test func theMixerWireIsOneColourPastEveryKindOfNode() {
+        for armed in [true, false] {
+            let plan = RailPlan.resolve(toneInput(armed: armed,
+                                                  nodes: [.nonMember, .connecting, .failed, .member]))
+            let runs = BusRailOverlayView().wireRuns(for: plan)
+            #expect(runs.count == 6, "hook, detour (line + arc), three on-spine runs")
+            #expect(runs.allSatisfy { sameInk($0.color, Tokens.Color.spineTone) },
+                    "every run wears the spine tone (armed=\(armed))")
+        }
     }
 
-    @Test func detourPastNonMembersKeepsTheIdleSpineTone() {
-        let plan = RailPlan.resolve(toneInput(gold: false, nodes: [.nonMember, .nonMember, .member]))
+    // Turns red if the connecting gap drops back to `busNodeRailGap` or the line starts colouring the segment.
+    @Test func theWireStopsShortOfAConnectingNode() {
+        let plan = RailPlan.resolve(toneInput(armed: true,
+                                              nodes: [.member, .connecting, .member, .nonMember]))
         let runs = BusRailOverlayView().wireRuns(for: plan)
-        #expect(runs.count > 1, "hook plus at least one segment")
-        let spine = Tokens.Color.spineTone(armed: false)
-        #expect(runs.allSatisfy { sameInk($0.color, spine) }, "every run wears the idle spine tone")
+        let ys = runs.map { run -> [CGFloat] in
+            (0..<run.path.elementCount).map { i -> CGFloat in
+                var points = [NSPoint](repeating: .zero, count: 3)
+                run.path.element(at: i, associatedPoints: &points)
+                return points[0].y
+            }
+        }
+        let r: CGFloat = 7.5
+        func has(_ y: CGFloat, _ pick: ([CGFloat]) -> CGFloat?) -> Bool {
+            ys.contains { pick($0).map { abs($0 - y) < 0.01 } ?? false }
+        }
+        let connectingGap = r + PopoverColumnGrid.busConnectingNodeRailGap
+        #expect(has(380 + connectingGap, { $0.min() }), "a run ends 7.5 + 9 above the connecting node")
+        #expect(has(380 - connectingGap, { $0.max() }), "the next run resumes 7.5 + 9 below it")
+        #expect(PopoverColumnGrid.busConnectingNodeRailGap == 9, "the connecting gap is 9 pt")
+        #expect(has(420 + r + 3, { $0.min() }), "the member above keeps the 3 pt gap")
+        #expect(runs.allSatisfy { sameInk($0.color, Tokens.Color.spineTone) }, "the line stays the spine tone")
     }
 
-    /// The one segment that IS allowed to step is the connecting one — the
-    /// energize sweep's ember, brightening to gold once the node connects.
-    @Test func onlyTheConnectingSegmentWearsEmber() {
-        let plan = RailPlan.resolve(toneInput(gold: true, nodes: [.connecting, .member]))
+    // MARK: Folded subsections (owner's ruling, 2026-10-04)
+
+    /// S6: a collapsed subsection hiding a member ABOVE a visible member gets
+    /// its dot, and the line passes straight through it to the member below.
+    @Test func aFoldAboveAVisibleMemberIsDottedAndTheLineRunsThrough() throws {
+        var input = expandedInput()
+        input.stops = [.init(y: 420, node: .member), .init(y: 340, node: .member)]
+        input.folds = [.init(dotY: 380, headerSpan: 372...388)]
+        let plan = RailPlan.resolve(input)
+        #expect(plan.headerDotYs == [380], "the fold hiding a member carries a dot")
+        #expect(plan.signalTerminusIndex == 1, "the rail ends on the visible member below it")
+        #expect(plan.lineEndY == nil)
+        #expect(lowestInk(BusRailOverlayView().wireRuns(for: plan)) < 380,
+                "the line continues past the dot")
+    }
+
+    /// S5: two folds each hiding a member, nothing reached visible below them:
+    /// two dots, and the rail ends on the lower one.
+    @Test func twoFoldsHidingMembersGetTwoDotsAndTheRailEndsAtTheLower() throws {
+        var input = expandedInput()
+        input.stops = [.init(y: 420, node: .member), .init(y: 340, node: .nonMember)]
+        input.folds = [.init(dotY: 380, headerSpan: 372...388),
+                       .init(dotY: 300, headerSpan: 292...308)]
+        let plan = RailPlan.resolve(input)
+        #expect(plan.headerDotYs == [380, 300], "a dot on every fold hiding a member")
+        #expect(plan.terminusDotY == 300, "the rail ends on the lower dot")
         let runs = BusRailOverlayView().wireRuns(for: plan)
-        let spine = Tokens.Color.spineTone(armed: true)
-        let ember = Tokens.Color.ember
-        // Path order: hook, run above the connecting node, run above the member.
-        #expect(runs.count == 3, "hook + two on-spine runs")
-        #expect(sameInk(runs[0].color, spine), "the hook is the spine tone")
-        #expect(sameInk(runs[1].color, ember), "the connecting segment is ember")
-        #expect(sameInk(runs[2].color, spine), "the member segment is the spine tone")
+        #expect(abs(lowestInk(runs) - 300) < 0.01, "…and draws nothing below it")
+    }
+
+    private func lowestInk(_ runs: [BusRailOverlayView.WireRun]) -> CGFloat {
+        runs.flatMap { run -> [CGFloat] in
+            let b = run.path.bounds
+            return [b.minY]
+        }.min() ?? .greatestFiniteMagnitude
     }
 
     // MARK: A collapsed SUBSECTION low in the list must not erase the rows above it
@@ -361,61 +424,124 @@ import Testing
     }
 
     private final class FakeHook: NSView, RailHookProviding {
-        func railHookAnchor(in view: NSView) -> (centerY: CGFloat, ringCenterX: CGFloat, ringRadius: CGFloat, gold: Bool)? {
+        func railHookAnchor(in view: NSView) -> (centerY: CGFloat, ringCenterX: CGFloat, ringRadius: CGFloat, armed: Bool)? {
             let f = view.convert(bounds, from: self)
             return (f.midY, 20, 8, true)
         }
         func receiveRailPulse() {}
     }
 
-    /// The live regression: with the Bluetooth subsection COLLAPSED at the bottom
-    /// of the list while it hides a selected speaker, the overlay read its stop
-    /// ceiling off that subsection's clip — which sits below every visible row —
-    /// and dropped the whole visible band, so the rail above ran as one bare line
-    /// with no nodes fed and no detours.
-    @Test func collapsedSubsectionBelowTheVisibleRowsKeepsThemAsStops() {
+    /// The panel the overlay tests run in: a hook up top, the device card's
+    /// clip from y = 40 to 320 under a header at 320...344.
+    private func mountedOverlay(rows rowSpecs: [(y: CGFloat, node: MembershipBusView.Node)],
+                                folds foldSections: [FakeRailSection] = [])
+        -> (BusRailOverlayView, NSView)
+    {
         let container = NSView(frame: NSRect(x: 0, y: 0, width: 360, height: 400))
-
-        let hook = FakeHook(frame: NSRect(x: 0, y: 340, width: 360, height: 28))
+        let hook = FakeHook(frame: NSRect(x: 0, y: 360, width: 360, height: 28))
         container.addSubview(hook)
-
-        // The device CARD's clip covers the whole list.
         let card = FakeRailSection(frame: container.bounds)
         card.mount(clip: NSRect(x: 0, y: 40, width: 360, height: 280),
                    header: NSRect(x: 0, y: 320, width: 360, height: 24))
         container.addSubview(card)
-
-        // Three visible speaker rows inside the card.
-        var rows: [FakeStopRow] = []
-        for (i, y) in [280, 240, 200].enumerated() {
-            let row = FakeStopRow(frame: NSRect(x: 0, y: CGFloat(y), width: 360, height: 28))
-            row.node = i == 1 ? .nonMember : .member
+        let rows = rowSpecs.map { spec -> FakeStopRow in
+            let row = FakeStopRow(frame: NSRect(x: 0, y: spec.y, width: 360, height: 28))
+            row.node = spec.node
             container.addSubview(row)
-            rows.append(row)
+            return row
         }
-
-        // The collapsed Bluetooth subsection at the bottom: a zero-height clip
-        // under its own header, holding a member the model has dropped.
-        let subsection = FakeRailSection(frame: container.bounds)
-        subsection.collapsed = true
-        subsection.mount(clip: NSRect(x: 0, y: 120, width: 360, height: 0),
-                         header: NSRect(x: 0, y: 120, width: 360, height: 24))
-        container.addSubview(subsection)
-
+        for fold in foldSections { container.addSubview(fold) }
         let overlay = BusRailOverlayView()
         overlay.frame = container.bounds
         container.addSubview(overlay)
         overlay.mainOutRow = hook
         overlay.deviceRows = rows
         overlay.deviceListSection = card
-        overlay.deviceSection = subsection
-        overlay.deviceSectionRowsDropped = true
+        overlay.foldedSections = foldSections
         container.layoutSubtreeIfNeeded()
+        return (overlay, container)
+    }
 
-        let plan = overlay.test_resolvePlan()
-        #expect(plan?.stops.count == 3,
-                "the rows above the collapsed subsection stay on the rail")
-        #expect(plan?.terminusDotY != nil,
-                "the hidden member still cuts the rail at the subsection's fold")
+    /// A collapsed subsection: header at `headerY...headerY + 24`, a zero-height
+    /// clip directly under it.
+    private func collapsedSubsection(headerY: CGFloat) -> FakeRailSection {
+        let subsection = FakeRailSection(frame: NSRect(x: 0, y: 0, width: 360, height: 400))
+        subsection.collapsed = true
+        subsection.mount(clip: NSRect(x: 0, y: headerY, width: 360, height: 0),
+                         header: NSRect(x: 0, y: headerY, width: 360, height: 24))
+        return subsection
+    }
+
+    /// S4/S8 and the old regression together. The dot sits on the collapsed
+    /// header's vertical centre (y = 132 for a header at 120...144), not its
+    /// bottom edge (y = 120, where the old single cut put it). And the rows
+    /// above the fold stay on the rail: the old code read the stop ceiling off
+    /// the cut subsection's clip, which sits below every visible row, and
+    /// dropped the whole visible band.
+    @Test func aFoldedHeaderDotSitsOnTheHeaderCentreAndTheRowsAboveStay() throws {
+        let (overlay, _) = mountedOverlay(
+            rows: [(280, .member), (240, .nonMember), (200, .member)],
+            folds: [collapsedSubsection(headerY: 120)])
+        let plan = try #require(overlay.test_resolvePlan())
+        #expect(plan.stops.count == 3, "the rows above the collapsed subsection stay on the rail")
+        #expect(plan.terminusDotY == 132,
+                "the rail ends on a dot on the header's centre line, not its bottom edge (120)")
+    }
+
+    /// S16/S18: a reached speaker (and a dotted header) scrolled below the
+    /// list's visible edge. The rail ends on the lowest FULLY visible reached
+    /// row with no dot, and no ink — line or detour arc — lands below the
+    /// list's bottom edge (y = 40), where the old code ran the line and arcs
+    /// over whatever card sat below.
+    @Test func aMemberScrolledBelowTheListEndsTheRailOnTheLowestVisibleNode() throws {
+        let (overlay, _) = mountedOverlay(
+            rows: [(280, .member), (240, .nonMember), (200, .member),
+                   (30, .nonMember),     // straddles the bottom edge
+                   (-20, .member)],      // scrolled out of view, still in the mix
+            folds: [collapsedSubsection(headerY: -60)])
+        let plan = try #require(overlay.test_resolvePlan())
+        let end = try #require(plan.signalTerminusIndex)
+        #expect(plan.stops[end].y == 214, "the rail ends on the row at 200...228, the lowest fully visible member")
+        #expect(plan.lineEndY == nil && plan.headerDotYs.isEmpty,
+                "no end dot, and the off-screen fold's dot is not drawn")
+        #expect(lowestInk(overlay.wireRuns(for: plan)) >= 40, "nothing draws below the list's bottom edge")
+    }
+
+    /// The mirror case: the only reached speaker is scrolled ABOVE the list's
+    /// top edge (y = 320) and nothing reached is visible. The rail runs to that
+    /// top edge with no dot and no end node.
+    @Test func aMemberScrolledAboveTheListRunsTheRailToTheTopEdge() throws {
+        let (overlay, _) = mountedOverlay(rows: [(326, .member),   // centre 340, out of view
+                                                 (240, .nonMember)])
+        let plan = try #require(overlay.test_resolvePlan())
+        #expect(plan.stops.map(\.y) == [254], "only the visible non-member is drawn")
+        #expect(plan.signalTerminusIndex == nil, "no visible node ends the rail")
+        #expect(plan.lineEndY == 320 && plan.headerDotYs.isEmpty,
+                "the line stops at the list's top edge, with no dot")
+    }
+
+    /// The only reached speaker straddles the list's TOP edge (band 260...440):
+    /// its centre is inside, so its node draws, and the line must run into it
+    /// rather than stop at the edge above it (DESIGN.md rule 4, "the lowest
+    /// visible reached node").
+    @Test func aReachedRowCutByTheTopEdgeStillEndsTheRail() {
+        var input = expandedInput()
+        input.stops = [.init(y: 432, node: .member, halfHeight: 14),    // 418...446
+                       .init(y: 380, node: .nonMember, halfHeight: 14),
+                       .init(y: 340, node: .nonMember, halfHeight: 14)]
+        let plan = RailPlan.resolve(input)
+        #expect(plan.signalTerminusIndex == 0, "the straddling member ends the rail")
+        #expect(plan.lineEndY == nil, "no line runs to the top edge instead")
+    }
+
+    // Turns red if the scrolled rail ends inside a failed speaker's node again.
+    @Test func aScrolledRailNeverEndsOnAFailedNode() {
+        var input = expandedInput()
+        input.stops = [.init(y: 420, node: .member, halfHeight: 14),
+                       .init(y: 380, node: .failed, halfHeight: 14),
+                       .init(y: 250, node: .member, halfHeight: 14)]    // below the band 260...440
+        let plan = RailPlan.resolve(input)
+        #expect(plan.signalTerminusIndex == 0, "the lowest fully visible reached row ends the rail, not the failed node")
+        #expect(plan.lineEndY == nil, "no line runs on past the end node")
     }
 }

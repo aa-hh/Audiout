@@ -78,6 +78,8 @@ public final class MainOutRowView: NSView {
     public static let rowHeight: CGFloat = 44
 
     public weak var delegate: Delegate?
+    private var saveSceneAction: (() -> Void)?
+    private var saveSceneEnabled = false
 
     /// Under-name VU meter (task T4a) — the master row gets a LIVE meter (SPEC:
     /// Main Out shares the same level as the device meters for now, until
@@ -97,37 +99,40 @@ public final class MainOutRowView: NSView {
     /// §3.2 Main Out note): reflects the AGGREGATE connection lifecycle of the
     /// active Audio Out target's members — **pending** (dashed breathing) during
     /// a destination-switch handshake so the multi-second gap never reads as
-    /// dead/broken (spec §6), **connected** (solid `ringConnected`) once ≥1
+    /// dead/broken (spec §6), **connected** (solid, the rail's spine tone) once ≥1
     /// member is live, no ring when idle. The host computes the aggregate and
     /// passes it to ``apply(options:current:master:isMuted:connectionState:)``.
     private let haloRingView: HaloRingView = {
         let ring = HaloRingView()
-        // Bespoke terminus sizing (Warm Signal nitpicks — Main Audio's ring is
-        // the rail's terminus, not a peer of the device rows' rings): matches
-        // the rail's own stroke weight so the join reads as one line.
+        // Bespoke terminus size (Warm Signal nitpicks — Main Audio's ring is
+        // the rail's terminus, not a peer of the device rows' rings). Its
+        // stroke is the shared `ringStrokeWidth`, like every other ring.
         ring.diameterOverride = PopoverColumnGrid.mainAudioRingDiameter
-        ring.connectedStrokeWidthOverride = PopoverColumnGrid.mainAudioRingConnectedStroke
+        // The ring's CONNECTED stroke wears the rail's own SPINE TONE (Warm
+        // Signal nitpicks, "rail into the ring"), so the join reads as one
+        // continuous line, not a gold line touching a hue-neutral ring.
+        ring.joinsSpine = true
         return ring
     }()
     /// The **gold route-armed corner dot** on the Main Out icon (Warm Signal
-    /// v3 §3.3, S2): lit iff the active target set has a connected member AND
-    /// the master is unmuted — the aggregate `.connected` ring state already
-    /// implies "target set non-empty ∧ ≥1 member connected", so armed =
-    /// `connectionState == .connected ∧ !isMuted`. Pure model state, never RMS
+    /// v3 §3.3, S2): lit whenever the spine is live (`isSpineLive`): the active
+    /// target has a connected member and the master is unmuted, or the
+    /// local-only armed case (`localOnlyArmed`) where the Mac plays on its own.
+    /// Pure model state, never RMS
     /// (R3): paused and playing render identically; only the meter differs.
     private let armedDotView = RouteArmedDotView()
     /// Whether the master mute is currently engaged — gates the armed dot and
     /// coerces incoming meter pushes to 0 so the drained master meter stays
     /// down while muted (S3).
     private var isMasterMuted = false
-    /// Whether the Main Audio spine is LIVE — the continuous rail overlay reads
-    /// this to tone the origin hook AND the member segments below it, gold vs
-    /// ember. Live = the armed target (connected ∧ unmuted) **or** the
+    /// Whether the Main Audio spine is LIVE. It feeds the armed dot, the rail's
+    /// connect-pulse gate and the VoiceOver "armed" word; it never tones the
+    /// rail line, which is always gold (`Tokens.Color.spineTone`,
+    /// `BusRailOverlayView.originColor(for:)`). Live = the armed target
+    /// (connected ∧ unmuted) **or** the
     /// local-only armed case, where audio genuinely plays through the
     /// Mac and no remote handshake exists for `connectionState` to report. Both
-    /// carry real audio to a member node, so both must read live: the hook's
-    /// corner and the rail leaving it are one stroke, and a truth that covers
-    /// only the remote case draws them in two tones.
+    /// carry real audio to a member node, so both must read live.
     private var isSpineLive = false
     /// Whether a rail exists at all — the host pushes it through
     /// ``setRailLive(_:)``, resolved from the same rule the wire itself draws by
@@ -147,17 +152,12 @@ public final class MainOutRowView: NSView {
     /// vertically centred in the row; the stack recentres its visible lines,
     /// so no manual name-offset juggling is needed when the meter shows/hides.
     private let identityStack = NSStackView()
-    private let slider = NSSlider()
-    /// The Warm Signal fader skin over the master slider (drawing-only
-    /// `NSSliderCell` swap — behavior/keyboard/VoiceOver stay stock): recessed
-    /// `well` trough, gold `ember → gold` fill iff the Main Out route is armed
-    /// (the same `connected ∧ !muted` predicate the corner dot renders),
-    /// rounded-rect `raised` thumb. See ``WarmFaderCell``.
-    private let faderCell = WarmFaderCell()
+    /// The master slider and its `%` readout. Gold iff the Main Out route is
+    /// armed (the same `connected ∧ !muted` predicate the corner dot renders).
+    private let fader = RowVolumeFader()
     /// A speaker mute button sitting LEFT of the master slider (mirrors the
     /// per-device mute glyph in `DeviceRowView`). `pushOnPushOff`: `.on` = muted.
     private let muteButton = NSButton()
-    private let readoutLabel = NSTextField(labelWithString: "")
     /// The **named** SoundSource-style destination dropdown (task B) — an
     /// `NSPopUpButton` (`pullsDown = false`) whose visible title is the currently
     /// selected target. Replaces the old circular icon button. Owns the
@@ -179,7 +179,6 @@ public final class MainOutRowView: NSView {
     private let busOriginView = MembershipBusView()
 
     private var options: [Option] = []
-    private var isDraggingMaster = false
     /// The title of the currently-selected (checkmarked) target, mirrored for the
     /// `test_selectedTitle` hook and the button's accessibility value.
     private var selectedTitle: String?
@@ -222,7 +221,11 @@ public final class MainOutRowView: NSView {
     public func apply(options: [Option], current: MainOutTarget, master: Int, isMuted: Bool = false,
                       connectionState: ConnectionState = .off,
                       localOnlyArmed: Bool = false,
-                      busOriginDimmed: Bool? = nil) {
+                      busOriginDimmed: Bool? = nil,
+                      saveSceneEnabled: Bool = false,
+                      onSaveScene: (() -> Void)? = nil) {
+        self.saveSceneEnabled = saveSceneEnabled
+        self.saveSceneAction = onSaveScene
         self.options = options
         isMasterMuted = isMuted
         muteButton.state = isMuted ? .on : .off
@@ -238,21 +241,16 @@ public final class MainOutRowView: NSView {
         if case .connected = connectionState { isConnected = true } else { isConnected = false }
         let armed = isConnected && !isMuted
         isSpineLive = armed || localOnlyArmed
-        // The ring's CONNECTED stroke wears the rail's own SPINE TONE (Warm
-        // Signal nitpicks, "rail into the ring"), so the join reads as one
-        // continuous line, not a gold line touching a hue-neutral ring. The
-        // row hands over the armed STATE only — `HaloRingView` resolves the
-        // tone through the same `Tokens.Color.spineTone` the rail overlay
-        // uses, at stamp time, so the two cannot drift and the accent dial
-        // moves both.
-        haloRingView.connectedSpineArmed = isSpineLive
-        armedDotView.apply(armed: armed)
-        // The master fader's engaged (gold) fill reuses the EXACT same armed
-        // predicate the dot renders — one armed truth, two instruments.
-        faderCell.isRouteArmed = armed
+        // Gold whenever the spine is live (a connected member playing, or
+        // the Mac playing on its own); otherwise a hollow ring in the ring's
+        // own colour, pushed by `haloRingView.cutoutDot`. Shown whenever the
+        // ring is.
+        armedDotView.apply(armed: isSpineLive)
+        // The master fader's engaged (gold) fill takes `armed` alone; the dot
+        // also lights for the Mac playing on its own (`localOnlyArmed`).
         // The readout agrees with the fill beside it: gold while the master is
         // actually sounding, ember while it only holds a stored level.
-        readoutLabel.textColor = armed ? Tokens.Color.goldText : Tokens.Color.emberText
+        fader.isRouteArmed = armed
         // Under-name meter shown only on armed (connected + unmuted) rows (v4
         // §Call-1); hidden it collapses in the identity stack, leaving the name.
         meterView.isHidden = !armed
@@ -278,6 +276,7 @@ public final class MainOutRowView: NSView {
         groupGlowView.isHidden = !isGroupTarget
 
         let menu = destinationPopUp.menu ?? NSMenu()
+        menu.autoenablesItems = false
         menu.removeAllItems()
         selectedTitle = nil
         var currentItem: NSMenuItem?
@@ -313,7 +312,7 @@ public final class MainOutRowView: NSView {
             item.representedObject = option.target
             if option.isDimmed {
                 item.attributedTitle = NSAttributedString(string: option.title, attributes: [
-                    .font: menu.font ?? NSFont.menuFont(ofSize: 0),
+                    .font: menu.font ?? Tokens.Font.menuItem,
                     .foregroundColor: Tokens.Color.label2,
                 ])
             }
@@ -325,6 +324,17 @@ public final class MainOutRowView: NSView {
                 currentButtonTitle = option.buttonTitle
             }
             menu.addItem(item)
+        }
+        if onSaveScene != nil {
+            if !options.contains(where: { $0.isHeader && $0.title == "Scenes" }) {
+                if !menu.items.isEmpty { menu.addItem(.separator()) }
+                menu.addItem(.sectionHeader(title: "Scenes"))
+            }
+            let save = NSMenuItem(title: "Save selected speakers as scene", action: #selector(saveSceneSelected(_:)), keyEquivalent: "")
+            save.target = self
+            save.indentationLevel = 1
+            save.isEnabled = saveSceneEnabled
+            menu.addItem(save)
         }
         destinationPopUp.menu = menu
         // Show the currently selected target as the button's visible title
@@ -354,15 +364,9 @@ public final class MainOutRowView: NSView {
             cell.menuItem = displayItem
         }
 
-        // The readout is guarded WITH the thumb, not separately: the two show the
-        // same number, so letting a master move from elsewhere (the phone, T7)
-        // land on the label alone would print that value under the finger still
-        // dragging the slider. `masterChanged` keeps the label live during the
-        // drag from the drag's own value.
-        if !isDraggingMaster {
-            slider.integerValue = master
-            readoutLabel.stringValue = VolumePercent.label(master)
-        }
+        // Ignored mid-drag, thumb and readout together: a master move from
+        // elsewhere (the phone, T7) must not land under the dragging finger.
+        fader.value = master
         configureAccessibility()
     }
 
@@ -392,16 +396,9 @@ public final class MainOutRowView: NSView {
         // screen's Main Audio page: `DeviceIcon.mainAudioSymbolName` owns the
         // owner's `hifispeaker.arrow.forward.fill` and its below-macOS-15
         // fallback, so the two surfaces can never draw different speakers.
-        // Match the device rows' glyph sizing (2026-07-17): size the symbol to
-        // fill the shared 26pt icon box so the Main Out icon reads at the same
-        // scale as the device icons below it (without a config it renders at the
-        // small default size and floats in a big box).
-        let iconConfig = NSImage.SymbolConfiguration(pointSize: PopoverColumnGrid.iconGlyphPointSize,
-                                                     weight: .regular)
+        // Sized and centred by the same table as the device rows' glyphs.
         iconView.imageScaling = .scaleProportionallyDown
-        iconView.image = NSImage(systemSymbolName: DeviceIcon.mainAudioSymbolName,
-                                 accessibilityDescription: "Main Audio")?
-            .withSymbolConfiguration(iconConfig)
+        iconView.image = DeviceIcon.rowGlyph(DeviceIcon.mainAudioSymbolName)
         // The icon is the visible door to this row's menu. Main Audio always
         // has an Equalizer, so unlike a device row it is armed once, here, and
         // never disarmed.
@@ -410,7 +407,7 @@ public final class MainOutRowView: NSView {
         // Match device row icon styling (2026-07-17): neutral gray, not accent.
         // Consistency across System and Devices sections — all icons are identity
         // only, connection status lives on the icon as a corner badge.
-        iconView.contentTintColor = Tokens.Color.secondaryLabel
+        iconView.contentTintColor = Tokens.Color.label2
         iconView.setContentHuggingPriority(.required, for: .horizontal)
 
         // Connection halo ring around the Main Out icon (spec §3.2 Main Out note).
@@ -420,19 +417,12 @@ public final class MainOutRowView: NSView {
         // Route-armed corner dot on the Main Out icon (spec §3.3, S2).
         armedDotView.translatesAutoresizingMaskIntoConstraints = false
 
-        slider.translatesAutoresizingMaskIntoConstraints = false
-        // Warm fader skin: install the drawing-only cell BEFORE the value/
-        // target configuration below (a cell swap resets cell-held state, so
-        // everything after re-lands on the new cell). Tracking, keyboard,
-        // scroll-wheel, `isContinuous`, and VoiceOver stay stock NSSlider.
-        slider.cell = faderCell
-        slider.minValue = 0
-        slider.maxValue = 100
-        slider.isContinuous = true
-        slider.target = self
-        slider.action = #selector(masterChanged(_:))
+        fader.onChange = { [weak self] value in
+            guard let self else { return }
+            self.delegate?.mainOutRow(self, didSetMaster: value)
+        }
         // Master slider remains enabled while muted to support immediate volume adjustments (audit A5).
-        slider.isEnabled = true
+        fader.isAdjustable = true
 
         // Speaker mute button, LEFT of the master slider (same visual pattern as
         // `DeviceRowView`'s per-device mute): `pushOnPushOff` so the mute STATE
@@ -442,24 +432,10 @@ public final class MainOutRowView: NSView {
         // mute that changes nothing but its tint reads as no mute at all. This
         // is only the seeded image; `updateMuteTint()` owns both states and
         // re-makes it on every appearance change.
-        muteButton.translatesAutoresizingMaskIntoConstraints = false
-        muteButton.setButtonType(.pushOnPushOff)
-        muteButton.isBordered = false
-        muteButton.imagePosition = .imageOnly
-        // Unscaled — see ``RowAccessorySymbol/pointSize``.
-        muteButton.imageScaling = .scaleNone
-        muteButton.image = RowAccessorySymbol.image(
-            named: RowAccessorySymbol.muteRest,
-            ink: Tokens.Color.label2)
-        muteButton.target = self
-        muteButton.action = #selector(muteToggled(_:))
+        RowAccessorySymbol.configure(
+            muteButton, image: RowAccessorySymbol.mute(engaged: false, in: effectiveAppearance),
+            target: self, action: #selector(muteToggled(_:)))
         muteButton.setContentHuggingPriority(.required, for: .horizontal)
-
-        readoutLabel.translatesAutoresizingMaskIntoConstraints = false
-        readoutLabel.font = Tokens.Font.readout
-        readoutLabel.textColor = Tokens.Color.emberText
-        readoutLabel.alignment = .right
-        readoutLabel.setContentHuggingPriority(.required, for: .horizontal)
 
         // Named SoundSource-style destination dropdown (task B): a real
         // `NSPopUpButton` (`pullsDown = false`, SPEC §9 "choosing one from a set,
@@ -483,7 +459,7 @@ public final class MainOutRowView: NSView {
         destinationPopUp.setContentCompressionResistancePriority(.required, for: .horizontal)
 
         nameLabel.translatesAutoresizingMaskIntoConstraints = false
-        nameLabel.font = Tokens.Font.body
+        nameLabel.font = Tokens.Font.menuItem   // the device and app rows' name face
         nameLabel.textColor = Tokens.Color.label
         nameLabel.lineBreakMode = .byTruncatingTail
         nameLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
@@ -496,7 +472,7 @@ public final class MainOutRowView: NSView {
         identityStack.translatesAutoresizingMaskIntoConstraints = false
         identityStack.orientation = .vertical
         identityStack.alignment = .leading
-        identityStack.spacing = 2
+        identityStack.spacing = Tokens.Layout.titleSubtitleSpacing
         identityStack.distribution = .fill
         identityStack.addArrangedSubview(nameLabel)
         identityStack.addArrangedSubview(meterView)
@@ -508,10 +484,10 @@ public final class MainOutRowView: NSView {
         addSubview(iconView)
         addSubview(haloRingView)
         addSubview(armedDotView)
+        haloRingView.cutoutDot = armedDotView
         addSubview(identityStack)
         addSubview(muteButton)
-        addSubview(slider)
-        addSubview(readoutLabel)
+        addSubview(fader)
         addSubview(destinationPopUp)
 
         // Laid out against the shared column grid (task B). The meter leads
@@ -584,23 +560,16 @@ public final class MainOutRowView: NSView {
             meterView.heightAnchor.constraint(equalToConstant: PopoverColumnGrid.masterMeterThickness),
 
             // Speaker mute button, LEFT of the slider.
-            muteButton.trailingAnchor.constraint(equalTo: slider.leadingAnchor,
+            muteButton.trailingAnchor.constraint(equalTo: fader.leadingAnchor,
                                                  constant: -PopoverColumnGrid.muteToSlider),
             muteButton.centerYAnchor.constraint(equalTo: centerYAnchor),
             muteButton.widthAnchor.constraint(equalToConstant: PopoverColumnGrid.muteWidth),
 
-            slider.centerYAnchor.constraint(equalTo: centerYAnchor),
-            slider.widthAnchor.constraint(equalToConstant: PopoverColumnGrid.sliderWidth),
-            slider.trailingAnchor.constraint(equalTo: trailingAnchor,
-                                             constant: -PopoverColumnGrid.sliderTrailing),
-
-            // `%` readout: tight to the right of the slider (change 4), not
-            // trailing-anchored — so the number reads against its slider and the
-            // flex slack sits between it and the trailing dropdown.
-            readoutLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
-            readoutLabel.widthAnchor.constraint(equalToConstant: PopoverColumnGrid.readoutWidth),
-            readoutLabel.leadingAnchor.constraint(equalTo: slider.trailingAnchor,
-                                                  constant: PopoverColumnGrid.sliderToReadout),
+            // Slider + `%` readout; the slider lands on `sliderTrailing`, and
+            // the flex slack sits between the readout and the trailing dropdown.
+            fader.centerYAnchor.constraint(equalTo: centerYAnchor),
+            fader.trailingAnchor.constraint(equalTo: trailingAnchor,
+                                            constant: -PopoverColumnGrid.readoutTrailing),
 
             destinationPopUp.centerYAnchor.constraint(equalTo: centerYAnchor),
             destinationPopUp.widthAnchor.constraint(
@@ -650,35 +619,11 @@ public final class MainOutRowView: NSView {
         let engaged = muteButton.state == .on
         // The slash belongs to the muted state only; both states are
         // outlines — see `DeviceRowView.updateMuteTint()`.
-        muteButton.image = RowAccessorySymbol.image(
-            named: engaged ? RowAccessorySymbol.muteEngaged : RowAccessorySymbol.muteRest,
-            ink: engaged ? Self.engagedInk(in: effectiveAppearance)
-                         : Self.restInk(in: effectiveAppearance))
+        muteButton.image = RowAccessorySymbol.mute(engaged: engaged, in: effectiveAppearance)
         configureAccessibility()
     }
 
-    /// ``Tokens/Color/muted`` over the whole slashed outline — square,
-    /// speaker and slash. Resolved in this row's own appearance,
-    /// because a dynamic `NSColor` would otherwise resolve against whichever
-    /// appearance is current when the image is composited.
-    private static func engagedInk(in appearance: NSAppearance) -> NSColor {
-        var fill = Tokens.Color.muted
-        appearance.performAsCurrentDrawingAppearance {
-            fill = Tokens.Color.muted.usingColorSpace(.sRGB) ?? fill
-        }
-        return fill
-    }
-
-    /// One neutral ink over the whole outline square.
-    private static func restInk(in appearance: NSAppearance) -> NSColor {
-        var ink = Tokens.Color.label
-        appearance.performAsCurrentDrawingAppearance {
-            ink = Tokens.Color.label.usingColorSpace(.sRGB) ?? ink
-        }
-        return ink
-    }
-
-    /// The pill's engaged fill is a static `CGColor` — re-stamp on a live
+    /// The mute mark's ink is baked into its image — re-make it on a live
     /// light/dark or Increase-Contrast switch (ring/dot/bus handle their own).
     public override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
@@ -686,6 +631,11 @@ public final class MainOutRowView: NSView {
     }
 
     // MARK: Actions
+
+    @objc private func saveSceneSelected(_ sender: NSMenuItem) {
+        guard saveSceneEnabled, sender.isEnabled else { return }
+        saveSceneAction?()
+    }
 
     @objc private func selectionChanged(_ sender: NSMenuItem) {
         guard let target = sender.representedObject as? MainOutTarget else { return }
@@ -701,25 +651,6 @@ public final class MainOutRowView: NSView {
         delegate?.mainOutRow(self, didSetMuted: sender.state == .on)
     }
 
-    @objc private func masterChanged(_ sender: NSSlider) {
-        // `isDraggingMaster` exists so `apply(...)` won't yank the thumb out from
-        // under a live MOUSE drag. Set it from whether a drag is actually in flight,
-        // NOT "set on first change, clear only on .leftMouseUp": a keyboard or
-        // VoiceOver change arrives as a single event that is never a `.leftMouseUp`,
-        // so the old logic set the flag and never cleared it — the thumb then stopped
-        // tracking the model forever (stability-audit-2026-07-18 §D4). A keyboard
-        // change has no drag in flight, so it leaves the flag false and repaints stay
-        // live.
-        switch NSApp?.currentEvent?.type {
-        case .leftMouseDown, .leftMouseDragged:
-            isDraggingMaster = true
-        default:
-            isDraggingMaster = false
-        }
-        delegate?.mainOutRow(self, didSetMaster: sender.integerValue)
-        readoutLabel.stringValue = VolumePercent.label(sender.integerValue)
-    }
-
     // The Main Out row lives INSIDE the System card (T-U8), so it paints no fill
     // of its own — the card provides the module surface.
 
@@ -728,16 +659,16 @@ public final class MainOutRowView: NSView {
     private func configureAccessibility() {
         setAccessibilityElement(true)
         setAccessibilityRole(.group)
-        setAccessibilityLabel("Main Audio, master volume \(VolumePercent.spoken(slider.integerValue))")
+        setAccessibilityLabel("Main Audio, master volume \(VolumePercent.spoken(fader.value))")
         // The row's VALUE carries the live signal channels (S2/S3): "muted"
         // for the engaged master-mute pill, "armed" for the lit route-armed
         // dot — the spoken equivalents shipped with the drawing.
         var valueParts: [String] = []
         if isMasterMuted { valueParts.append("muted") }
-        if armedDotView.test_isLit { valueParts.append("armed") }
+        if isSpineLive { valueParts.append("armed") }
         setAccessibilityValue(valueParts.joined(separator: ", "))
-        slider.setAccessibilityRole(.slider)
-        slider.setAccessibilityLabel("Main Audio master volume")
+        fader.slider.setAccessibilityRole(.slider)
+        fader.slider.setAccessibilityLabel("Main Audio master volume")
         muteButton.setAccessibilityLabel(muteButton.state == .on ? "Unmute Main Audio" : "Mute Main Audio")
         destinationPopUp.setAccessibilityLabel("Main Audio destination")
         destinationPopUp.setAccessibilityValue(selectedTitle ?? "")
@@ -750,14 +681,14 @@ public final class MainOutRowView: NSView {
     /// The selectable (non-header) targets, in order.
     public var test_selectableTargets: [MainOutTarget] { options.filter { !$0.isHeader }.map(\.target) }
     /// The currently shown master value.
-    public var test_masterValue: Int { slider.integerValue }
+    public var test_masterValue: Int { fader.value }
     /// The master percentage the READOUT prints — a separate surface from the
     /// thumb, and the one an off-Mac master move used to overwrite mid-drag.
-    public var test_masterReadout: String { readoutLabel.stringValue }
+    public var test_masterReadout: String { fader.readoutLabel.stringValue }
     /// The readout's current ink — gold while the master sounds, ember at rest.
-    public var test_masterReadoutColor: NSColor? { readoutLabel.textColor }
+    public var test_masterReadoutColor: NSColor? { fader.readoutLabel.textColor }
     /// The readout's current face.
-    public var test_masterReadoutFont: NSFont? { readoutLabel.font }
+    public var test_masterReadoutFont: NSFont? { fader.readoutLabel.font }
     /// The attributed string the collapsed pop-up actually renders — pins the
     /// ink and the truncation the plain title cannot show.
     public var test_buttonAttributedTitle: NSAttributedString? {
@@ -769,8 +700,8 @@ public final class MainOutRowView: NSView {
     /// while the user's finger is down. There is no other way in: the flag is set
     /// from `NSApp.currentEvent`, which is always nil under `swift test`.
     public var test_isDraggingMaster: Bool {
-        get { isDraggingMaster }
-        set { isDraggingMaster = newValue }
+        get { fader.test_isDragging }
+        set { fader.test_isDragging = newValue }
     }
     /// The currently checkmarked selection title (the full menu title).
     public var test_selectedTitle: String? { selectedTitle }
@@ -806,19 +737,20 @@ public final class MainOutRowView: NSView {
     /// drawn ink, not a re-derived token.
     public var test_ringStrokeColor: NSColor? { haloRingView.test_strokeColor }
 
-    /// Whether the Main Out route-armed corner dot is LIT (spec §3.3: active
-    /// target has a connected member ∧ master unmuted) — reads the dot view's
-    /// rendered state, so it can't drift from the pixels.
+    /// Whether the Main Out route-armed corner dot is LIT: a connected member
+    /// with the master unmuted, or the Mac playing on its own
+    /// (`localOnlyArmed`). Read off the dot itself.
     public var test_routeArmed: Bool { armedDotView.test_isLit }
 
     /// Whether the master fader would render its ENGAGED (gold-gradient) fill
-    /// — the cell's own gate, so the test can't drift from the pixels. Must
-    /// track `test_routeArmed` (one armed truth, two instruments).
-    public var test_isFaderEngaged: Bool { faderCell.test_isEngagedFill }
+    /// — the cell's own gate, so the test can't drift from the pixels. Tracks
+    /// `test_routeArmed` except while the Mac plays on its own, which lights
+    /// the dot but not the fader.
+    public var test_isFaderEngaged: Bool { fader.faderCell.test_isEngagedFill }
 
     /// Whether the master slider is wearing the Warm fader skin (structural).
-    public var test_hasWarmFaderSkin: Bool { slider.cell is WarmFaderCell }
-    /// The dot's current fill color (resolved) — gold armed / socket dark.
+    public var test_hasWarmFaderSkin: Bool { fader.slider.cell is WarmFaderCell }
+    /// The dot's current fill color (resolved) — gold armed, `nil` (hollow) otherwise.
     public var test_dotFillColor: NSColor? { armedDotView.test_fillColor }
     /// Whether the master-mute button is drawing its ENGAGED symbol — a
     /// raster comparison against the same symbol built from the same ink,
@@ -826,9 +758,8 @@ public final class MainOutRowView: NSView {
     public var test_isMutePillEngaged: Bool {
         guard muteButton.state == .on,
               let drawn = muteButton.image?.tiffRepresentation,
-              let reference = RowAccessorySymbol.image(
-                named: RowAccessorySymbol.muteEngaged,
-                ink: Self.engagedInk(in: effectiveAppearance))?.tiffRepresentation
+              let reference = RowAccessorySymbol.mute(
+                engaged: true, in: effectiveAppearance)?.tiffRepresentation
         else { return false }
         return drawn == reference
     }
@@ -963,10 +894,11 @@ extension MainOutRowView: RailHookProviding {
     /// The Main Audio ring's own geometry (Warm Signal nitpicks — "rail into
     /// the ring"): the icon's centre, converted into `view`'s coordinates,
     /// plus the ring's radius (a distance, unaffected by the sibling-view
-    /// coordinate conversion) and whether the spine is armed (gold vs ember).
+    /// coordinate conversion) and whether the spine is armed (gates the connect
+    /// pulse; the line is always gold).
     /// The overlay curves the rail up to meet this ring's left edge directly,
     /// replacing the old bare gutter-dot terminus.
-    public func railHookAnchor(in view: NSView) -> (centerY: CGFloat, ringCenterX: CGFloat, ringRadius: CGFloat, gold: Bool)? {
+    public func railHookAnchor(in view: NSView) -> (centerY: CGFloat, ringCenterX: CGFloat, ringRadius: CGFloat, armed: Bool)? {
         layoutSubtreeIfNeeded()
         let iconRectInSelf = iconView.convert(iconView.bounds, to: self)
         let iconCenter = convert(NSPoint(x: iconRectInSelf.midX, y: iconRectInSelf.midY), to: view)

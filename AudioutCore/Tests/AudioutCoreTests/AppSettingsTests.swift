@@ -317,6 +317,13 @@ import Testing
 
     // MARK: Companion — allow remote control (T6)
 
+    // Turns red if a dev build starts listening on the network before its
+    // owner turns the switch on, or the shipping app stops defaulting on.
+    @Test func allowRemoteControlDefaultsOffOnlyOnDevBuilds() {
+        #expect(AppSettings.defaultAllowRemoteControl(isDevBuild: false))
+        #expect(!AppSettings.defaultAllowRemoteControl(isDevBuild: true))
+    }
+
     @Test func allowRemoteControlDefaultsTrueWhenUnset() {
         // T22 flip: enabled out of the box — the per-phone approval gate is
         // what protects the listener, not the checkbox. Unchecking still
@@ -332,6 +339,16 @@ import Testing
 
         settings.allowRemoteControl = false
         #expect(!AppSettings(defaults: defaults).allowRemoteControl)
+    }
+
+    // Turns red if the shipping app (or the test runner) counts as a dev build,
+    // which would put the companion switch and a listening server in a release.
+    @Test func onlySuffixedBundleIDsAreDevBuilds() {
+        #expect(AppSettings.isDevBundleID("com.audiout.Audiout.dev"))
+        #expect(AppSettings.isDevBundleID("com.audiout.Audiout.staging"))
+        #expect(!AppSettings.isDevBundleID("com.audiout.Audiout"))
+        #expect(!AppSettings.isDevBundleID("com.apple.dt.xctest.tool"))
+        #expect(!AppSettings.isDevBundleID(nil))
     }
 
     @Test func resolvedAllowRemoteControlExplicitWins() {

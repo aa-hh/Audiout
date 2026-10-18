@@ -170,6 +170,31 @@ import Testing
             environment: ["AUDIOUT_LICENSE_GATE": "gibberish"]) == .auto)
     }
 
+    // Turns red if a shipping build reads the Developer popup's stored value,
+    // which would let a leftover dev preference hide the gate in a release.
+    @Test func shippingBuildIgnoresTheStoredGateSetting() {
+        let stored = settings(store: isolation.makeDefaults())
+        stored.licenseGatePresentation = .forceShow
+        #expect(LicenseGatePresentation.resolved(
+            environment: [:], settings: stored, isDevBuild: false) == .auto)
+    }
+
+    // Turns red if the resolver stops reading the Developer popup on a dev build.
+    @Test func devBuildStoredGateSettingBeatsAuto() {
+        let stored = settings(store: isolation.makeDefaults())
+        stored.licenseGatePresentation = .forceHide
+        #expect(LicenseGatePresentation.resolved(
+            environment: [:], settings: stored, isDevBuild: true) == .forceHide)
+    }
+
+    // Turns red if the stored setting is checked before `AUDIOUT_LICENSE_GATE`.
+    @Test func environmentKnobBeatsTheStoredGateSetting() {
+        let stored = settings(store: isolation.makeDefaults())
+        stored.licenseGatePresentation = .forceHide
+        #expect(LicenseGatePresentation.resolved(
+            environment: ["AUDIOUT_LICENSE_GATE": "force"], settings: stored, isDevBuild: true) == .forceShow)
+    }
+
     // MARK: Remote waiver
 
     /// A purchased build whose key the server revoked: limited to one speaker

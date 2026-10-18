@@ -439,11 +439,17 @@ public struct AppSettings {
     /// that sit above it, which is what AppDelegate actually reads at launch.
     public var allowRemoteControl: Bool {
         get {
-            guard defaults.object(forKey: Keys.allowRemoteControl) != nil else { return !Self.isDevBuild }
+            guard defaults.object(forKey: Keys.allowRemoteControl) != nil else {
+                return Self.defaultAllowRemoteControl(isDevBuild: Self.isDevBuild)
+            }
             return defaults.bool(forKey: Keys.allowRemoteControl)
         }
         nonmutating set { defaults.set(newValue, forKey: Keys.allowRemoteControl) }
     }
+
+    /// ``allowRemoteControl`` when nothing is stored: on for the shipping app,
+    /// off for a dev build until its owner turns the switch on.
+    static func defaultAllowRemoteControl(isDevBuild: Bool) -> Bool { !isDevBuild }
 
     /// The env var that force-overrides ``allowRemoteControl`` for one launch,
     /// mirroring `BackendKind.environmentVariableName`'s dev-convenience idiom.
@@ -537,9 +543,9 @@ public struct AppSettings {
     /// uses, but returned alongside ``RemoteControlResolution`` so a UI can
     /// render the override honestly instead of just reading the raw setting.
     ///
-    /// The two overrides sit ABOVE `offered` on purpose: a build with no
-    /// companion is the shipping default, and `AUDIOUT_COMPANION=on` is how a
-    /// dev build gets the feature back to test it.
+    /// The two overrides sit ABOVE `offered` on purpose: `AUDIOUT_COMPANION`
+    /// forces the companion on or off for one launch whatever the build
+    /// offers.
     ///
     /// This is an explicit knob, never a silent fallback (mirrors
     /// `BackendKind.resolved`'s policy, OutputBackend.swift): an unrecognized
@@ -548,8 +554,9 @@ public struct AppSettings {
     /// to go.
     ///
     /// - Parameter offered: whether this build carries the companion at all.
-    ///   Injectable so a test pins it instead of inheriting the shipping
-    ///   constant, the way `SetupModel` takes `remoteAppAvailable`.
+    ///   Injectable so a test pins it instead of inheriting the value worked
+    ///   out from this process's bundle id, the way `SetupModel` takes
+    ///   `remoteAppAvailable`.
     public static func resolvedAllowRemoteControlWithSource(
         explicit: Bool? = nil,
         environment: [String: String] = ProcessInfo.processInfo.environment,

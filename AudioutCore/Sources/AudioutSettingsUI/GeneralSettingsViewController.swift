@@ -199,13 +199,19 @@ public final class GeneralSettingsViewController: NSViewController, SettingsRead
         buttons.translatesAutoresizingMaskIntoConstraints = false
 
         var content: [NSView] = [header, card.container, buttons]
+        let developerTitle = SettingsPane.makeSectionTitle("Developer")
         if isDevBuild {
             let developer = makeDeveloperCard()
             developerCard = developer
-            content.append(contentsOf: [SettingsPane.makeSectionTitle("Developer"), developer])
+            content.append(contentsOf: [developerTitle, developer])
         }
         let page = SettingsForm.pageView(content: content)
-        (page.subviews.first as? NSStackView)?.setCustomSpacing(14, after: card.container)
+        let pageStack = page.subviews.first as? NSStackView
+        pageStack?.setCustomSpacing(14, after: card.container)
+        if isDevBuild {
+            pageStack?.setCustomSpacing(GroupsPaneLayout.sectionGap, after: buttons)
+            pageStack?.setCustomSpacing(GroupsPaneLayout.labelToSectionGap, after: developerTitle)
+        }
         view = page
     }
 

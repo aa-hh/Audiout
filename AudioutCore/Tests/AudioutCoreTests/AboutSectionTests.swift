@@ -38,7 +38,7 @@ import AudioutCore
     // Turns red if the Developer card is mounted regardless of `isDevBuild`,
     // which would ship the licence-gate override in a release.
     @Test func theDeveloperCardIsMountedOnlyInADevBuild() {
-        let settings = AppSettings(defaults: UserDefaults(suiteName: "AudioutTests.\(UUID().uuidString)")!)
+        let settings = AppSettings(defaults: TestIsolation(owner: "AboutSectionTests").makeDefaults())
         let shipping = GeneralSettingsViewController(loginItem: FakeLoginItem(), settings: settings,
                                                      isDevBuild: false)
         #expect(!shipping.test_developerSectionIsMounted)

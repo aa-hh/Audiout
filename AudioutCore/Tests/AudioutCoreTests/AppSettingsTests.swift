@@ -730,6 +730,9 @@ import Testing
 
     private static let buyPage = URL(string: "https://audiout.app/buy")!
     private static let trialKey = "AUDT-AAAAA-BBBBB-CCCCC-DDDDD"
+    /// The Buy page as the app opens it: tagged so the site knows the click
+    /// came from the app.
+    private static let taggedBuyPage = URL(string: "https://audiout.app/buy?s=mac-app")!
 
     private func buySettings() -> AppSettings {
         AppSettings(defaults: defaults, buyURL: Self.buyPage)
@@ -741,7 +744,7 @@ import Testing
         let settings = buySettings()
         settings.licenseKey = Self.trialKey
         settings.licenseStatus = .active
-        #expect(settings.buyURL == Self.buyPage)
+        #expect(settings.buyURL == Self.taggedBuyPage)
 
         #expect(AppSettings(defaults: defaults).buyURL == nil,
                 "a build with no purchase page still has none")
@@ -756,7 +759,7 @@ import Testing
                          expiresAt: Date(timeIntervalSinceNow: 9 * 86_400),
                          key: Self.trialKey)
         #expect(settings.buyURL
-                == URL(string: "https://audiout.app/buy?t=\(Self.trialKey)"))
+                == URL(string: "https://audiout.app/buy?s=mac-app&t=\(Self.trialKey)"))
     }
 
     /// Red if a trial that has not reached the server yet started inventing a
@@ -764,7 +767,7 @@ import Testing
     @Test func buyURLCarriesNoTrialIDBeforeAKey() {
         let settings = buySettings()
         TrialClock.start(settings: settings)
-        #expect(settings.buyURL == Self.buyPage, "an unregistered trial has no key to send")
+        #expect(settings.buyURL == Self.taggedBuyPage, "an unregistered trial has no key to send")
     }
 
     /// Red if an expired trial stopped sending its key — the checkout could no
@@ -775,7 +778,7 @@ import Testing
                          startedAt: Date(timeIntervalSinceNow: -20 * 86_400),
                          expiresAt: Date(timeIntervalSinceNow: -6 * 86_400),
                          key: Self.trialKey)
-        #expect(expired.buyURL == URL(string: "https://audiout.app/buy?t=\(Self.trialKey)"))
+        #expect(expired.buyURL == URL(string: "https://audiout.app/buy?s=mac-app&t=\(Self.trialKey)"))
     }
 
     /// Red if a converted trial sent its paid key as a trial id.
@@ -786,7 +789,7 @@ import Testing
                          expiresAt: Date(timeIntervalSinceNow: 11 * 86_400),
                          key: Self.trialKey)
         converted.trialExpiresAt = nil
-        #expect(converted.buyURL == Self.buyPage)
+        #expect(converted.buyURL == Self.taggedBuyPage)
     }
 
     @Test func checkInURLDefaultsNilAndRoundTrips() {

@@ -5,6 +5,7 @@
 // not add a GPL header or copy code in from GPL-headered siblings.
 
 import Foundation
+import ProbeKit
 
 /// Which affordance opened a wizard run — carried into
 /// `bt_sync:wizard_started` so the four doors can be told apart.
@@ -34,6 +35,11 @@ public final class BTAlignmentWizardSession {
 
     public enum Screen: Equatable {
         case intro
+        /// The mic probe is running: the Mac is listening to both speakers
+        /// before it asks the user anything. `isRealignment` is true when the
+        /// run opened with a stored value, which the measurement is about to
+        /// replace.
+        case listening(isRealignment: Bool)
         /// `progress` feeds the narrowing indicator, `credibleIntervalMs` the
         /// confidence line (already in VALUE space — the panel never does the
         /// sign conversion), and `answersSoFar` gates Back. The candidate ms
@@ -69,9 +75,10 @@ public final class BTAlignmentWizardSession {
         public let id: String
         public let name: String
         /// Which fan-out this speaker plays through, and so WHICH SOUND it
-        /// makes during the run: the Bluetooth fan-out carries the bright
-        /// click, the engine feed (AirPlay, and the Mac's own output) the low
-        /// knock. See ``BTAlignmentWizardSession/pairSoundsDiffer``.
+        /// makes during the run: the Bluetooth fan-out carries the higher
+        /// (660 Hz) mallet note, the engine feed (AirPlay, and the Mac's own
+        /// output) the lower (440 Hz) one. See
+        /// ``BTAlignmentWizardSession/pairSoundsDiffer``.
         public let isBluetooth: Bool
         public init(id: String, name: String, isBluetooth: Bool = false) {
             self.id = id
@@ -107,7 +114,130 @@ public final class BTAlignmentWizardSession {
     /// Repainted on every transition (also fired by ``start()``).
     public var onScreenChange: ((Screen) -> Void)?
 
+    /// When the current listen's probe began playing into the feed, nil until
+    /// ``probeDidStart(pipelineDelaySeconds:)`` and again at each new listen.
+    public private(set) var probeStartedAt: Date?
+    /// How long this listen's microphone runs from the gate opening: lead,
+    /// probe, and the wait for the slowest lane. Nil when `probeStartedAt` is.
+    public private(set) var probeListeningSeconds: TimeInterval?
+    /// The room delay ``probeDidStart(pipelineDelaySeconds:)`` reported for
+    /// this listen; nil until then and again at each new listen.
+    public private(set) var probePipelineDelaySeconds: TimeInterval?
+    /// Fired by ``probeDidStart(pipelineDelaySeconds:)`` — the listening screen's cue to start its
+    /// progress bar.
+    public var onProbeStarted: (() -> Void)?
+
+    /// The host's report that the probe's arm gate opened and the probe is
+    /// playing.
+    public func probeDidStart(pipelineDelaySeconds: TimeInterval) {
+        probeStartedAt = Date()
+        probePipelineDelaySeconds = pipelineDelaySeconds
+        probeListeningSeconds = MicProbeSession.probeLeadSeconds + SyncProbe.Layout.totalSeconds
+            + MicProbeSession.listeningTailSeconds(pipelineDelaySeconds: pipelineDelaySeconds)
+        onProbeStarted?()
+    }
+
+    /// The two speakers of a listen, as the probe's lane checks name them.
+    public enum ProbeSpeaker: Hashable, Sendable { case target, reference }
+
+    /// Whether each speaker's probe sound was recognised during the current
+    /// listen. Advisory: the measurement never reads it. Empty again at each
+    /// new listen.
+    public private(set) var probeSpeakerVerdicts: [ProbeSpeaker: Bool] = [:]
+    /// Fired by ``probeLaneChecked(_:heard:)`` once per checked speaker.
+    public var onProbeSpeakerChecked: ((_ speaker: ProbeSpeaker, _ heard: Bool) -> Void)?
+
+    /// The host's report of one probe lane's check. Lanes are split by
+    /// transport, so the Bluetooth lane is the target's when the target is
+    /// Bluetooth and the reference's otherwise. The Bluetooth lane always
+    /// sounds first, so a Mac-target run hears its reference first.
+    public func probeLaneChecked(_ lane: MicProbeSession.Lane, heard: Bool) {
+        guard case .listening = screen, !ended else { return }
+        let speaker = speaker(for: lane)
+        probeSpeakerVerdicts[speaker] = heard
+        onProbeSpeakerChecked?(speaker, heard)
+    }
+
+    private func speaker(for lane: MicProbeSession.Lane) -> ProbeSpeaker {
+        switch lane {
+        case .bluetooth: targetIsBluetooth ? .target : .reference
+        case .engine: targetIsBluetooth ? .reference : .target
+        }
+    }
+
+    /// The speaker whose probe turn covers `elapsedSeconds` after the gate
+    /// opened, or nil between turns and before ``probeDidStart(pipelineDelaySeconds:)``.
+    /// This is the play schedule offset by the slowest lane's room delay, not a
+    /// heard event; the per-speaker verdicts in ``probeSpeakerVerdicts`` are
+    /// the heard events.
+    public func probeSpeakerPlaying(at elapsedSeconds: TimeInterval) -> ProbeSpeaker? {
+        guard let delay = probePipelineDelaySeconds else { return nil }
+        for lane in [MicProbeSession.Lane.bluetooth, .engine] {
+            let start = MicProbeSession.probeLeadSeconds
+                + MicProbeSession.laneIndex(lane) * SyncProbe.Layout.laneSpacingSeconds + delay
+            if elapsedSeconds >= start, elapsedSeconds < start + SyncProbe.Layout.laneSeconds {
+                return speaker(for: lane)
+            }
+        }
+        return nil
+    }
+
+    /// Host-assigned live read for the listening screen: how far the newest
+    /// mic level sits above the room, in dB. Nil when no probe is live.
+    public var probeLevelAboveRoomDB: (() -> Double?)?
+
+    /// Asks the host to get the microphone ready — the system prompt when the
+    /// permission is undecided — and answers whether the run may listen.
+    /// `nil` means this host has no probe to run at all.
+    public var requestListening: ((_ proceed: @escaping (Bool) -> Void) -> Void)?
+
+    /// Whether a listening pass is even on the table: a host that can run the
+    /// probe, and two speakers making DIFFERENT sounds for it to tell apart.
+    public var listeningIsPossible: Bool { requestListening != nil && pairSoundsDiffer }
+
+    /// Whether the proposal on screen is the stored value from a previous run,
+    /// recalled rather than measured or earned — the one case the panel asks
+    /// "still right?" instead of naming a fresh result.
+    public var proposalIsRecalled: Bool {
+        guard case .proposal = screen else { return false }
+        return estimator.openingProposalStands
+    }
+
+    /// Whether the proposal on screen is one the mic MEASURED this run — the
+    /// only proposal whose rejection listens again instead of dropping to the
+    /// by-ear questions. A proposal earned from answers or recalled from the
+    /// store is false.
+    public var proposalIsMeasured: Bool {
+        guard case .proposal = screen else { return false }
+        return proposalCameFromMic
+    }
+
+    /// Whether rejecting the on-screen proposal re-runs the mic rather than
+    /// falling to the questions: a measured proposal, until the mic has spent
+    /// its per-run budget (``maxMicAttempts``). Read by both the view (the
+    /// reject plate's title) and ``rejectProposal()``.
+    public var rejectReRunsMic: Bool { proposalIsMeasured && micAttempts < Self.maxMicAttempts }
+
+    /// How many times one run may listen: the opening pass plus one retry,
+    /// earned by the opening pass hearing nothing, by rejecting a measured
+    /// proposal, or by Try again on an implausible reading. All three share
+    /// this one budget, so after the retry any of them falls to the by-ear
+    /// questions.
+    public static let maxMicAttempts = 2
+
+    /// How many listening passes this run has started so far.
+    public private(set) var micAttempts = 0
+
     public private(set) var screen: Screen = .intro
+
+    /// Whether the current on-screen proposal came from a mic measurement. Set
+    /// by ``presentEstimatorPhase(measured:)``; read (screen-guarded) through
+    /// ``proposalIsMeasured``.
+    private var proposalCameFromMic = false
+
+    /// Set between ``start()`` and the host's permission answer, so a second
+    /// Start does nothing and a ``cancel()`` in between voids the answer.
+    private var startPending = false
 
     /// The wizard's wide tempo and its close-quarters one. A run that is still
     /// hundreds of milliseconds wide walks an unknown 150–700 ms Bluetooth
@@ -178,11 +308,14 @@ public final class BTAlignmentWizardSession {
     ///     every candidate is relative to, and what cancel restores.
     ///   - candidateRangeMs: the values a candidate may actually take.
     ///   - invertsEstimate: see ``invertsEstimate``.
-    ///   - openingProposalMs: a value to open the run's PROPOSAL on instead of
-    ///     the first question — the zero-click path for a device that has been
-    ///     measured before. Deliberately NOT kept: ``tryAgain()`` means "that
-    ///     value was wrong", so re-offering it would be the one useless thing
-    ///     a restart could do.
+    ///   - openingProposalMs: the stored value from a previous run. A run
+    ///     that can listen measures over it and never shows it; it is RECALLED
+    ///     as the opening proposal only when listening never starts (no probe,
+    ///     or the mic refused). Deliberately NOT kept across a restart:
+    ///     ``tryAgain()`` means "that value was wrong", so re-offering it would
+    ///     be the one useless thing a restart could do. A mic measurement
+    ///     landing before the user has judged it
+    ///     (``offerMeasuredProposal(valueMs:)``) replaces it.
     ///   - applyPreviewTrim: live, non-persisting trim push (absolute ms),
     ///     carrying the belief's current half-width for the run's telemetry.
     ///   - endPreview: commit (`keepMs`) or restore (`nil`) — see
@@ -277,23 +410,118 @@ public final class BTAlignmentWizardSession {
         case .question:
             estimator = makeEstimator()
             presentEstimatorPhase()
-        case .proposal, .kept, .unsettled, .unreachable, .macIsLate:
+        case .listening, .proposal, .kept, .unsettled, .unreachable, .macIsLate:
             break
         }
     }
 
-    /// Intro's Start: tick on (the wake preamble runs while the first
-    /// question renders), first candidate applied. Refused without a
-    /// reference — there would be nothing to compare the target against.
-    /// A run carrying an opening proposal goes straight to it: the device has
-    /// been measured before, so the honest first question is "still right?".
+    /// Intro's Start: the mic permission is asked for here, because the intro
+    /// is where the panel said the Mac would listen. Granted, the run opens on
+    /// ``Screen/listening(isRealignment:)`` and the probe measures before
+    /// anyone is asked anything; refused (or impossible), it opens the way it
+    /// always did. Refused outright without a reference — there would be
+    /// nothing to compare the target against.
+    ///
+    /// A run carrying an opening proposal that cannot listen goes straight to
+    /// it: the device has been measured before, so the honest first question
+    /// is "still right?".
     public func start() {
-        guard case .intro = screen, !ended, reference != nil else { return }
+        guard case .intro = screen, !ended, !startPending, reference != nil else { return }
+        guard listeningIsPossible, let requestListening else {
+            beginRun(listening: false)
+            return
+        }
+        startPending = true
+        requestListening { [weak self] granted in
+            guard let self, self.startPending, !self.ended else { return }
+            self.startPending = false
+            Analytics.capture("bt_sync:mic_permission_answered", ["granted": granted ? "true" : "false"])
+            self.beginRun(listening: granted)
+        }
+    }
+
+    /// The tick gate goes on either way: the backend plays the probe in place
+    /// of the first ticks and re-arms the ticks itself afterwards.
+    private func beginRun(listening: Bool) {
         // A fresh injector comes up with a fresh beat clock, so whatever tempo
         // the session pushed before is void.
         lastTempoBPM = nil
         setTick(true)
+        guard listening else {
+            presentEstimatorPhase()
+            return
+        }
+        enterListening()
+    }
+
+    /// Show the listening screen and count the pass. Shared by the run's start
+    /// and a measured proposal's first rejection. The probe measures against
+    /// whatever the device is playing at, so the base value is what has to be on
+    /// the wire while the probe plays.
+    private func enterListening() {
+        probeStartedAt = nil
+        probeListeningSeconds = nil
+        probePipelineDelaySeconds = nil
+        probeSpeakerVerdicts = [:]
+        applyPreviewTrim(baseValueMs, nil)
+        micAttempts += 1
+        transition(to: .listening(isRealignment: estimator.openingProposalStands))
+    }
+
+    /// The probe is over — it landed (``offerMeasuredProposal(valueMs:)``
+    /// already moved the run on) or it failed. A failed listen on a
+    /// REALIGNMENT drops the stored value rather than proposing it: the mic
+    /// just tried and could not confirm it, so asking "still right?" would be
+    /// leaning on the one thing that was checked and not confirmed.
+    ///
+    /// A failed FIRST listen plays the probe once more before giving up. The
+    /// commonest reason nothing was heard is a Bluetooth speaker that had not
+    /// played since it connected and was still waking when the probe
+    /// arrived; the first pass woke it, so the second is heard. That spends
+    /// the run's second mic attempt, so a measurement the retry produces is
+    /// judged by ear if rejected, never listened to a third time.
+    public func endListening() {
+        guard case .listening = screen, !ended else { return }
+        let missed = [ProbeSpeaker.target, .reference].filter { probeSpeakerVerdicts[$0] == false }
+        Telemetry.log(.localPlayback, "wizard_listen_failed", [
+            "uid": deviceID,
+            "attempt": String(micAttempts),
+            "missed": missed.isEmpty ? "none"
+                : missed.map { $0 == .target ? "target" : "reference" }.joined(separator: ","),
+            "checked": String(probeSpeakerVerdicts.count),
+        ])
+        Analytics.capture("bt_sync:listening_ended", ["outcome": "failed", "attempt": String(micAttempts),
+                                                      "probe_sound": SyncProbe.Layout.analyticsName])
+        if micAttempts < Self.maxMicAttempts, let requestListening {
+            replaySweeps()
+            listenAgain(requestListening)
+            return
+        }
+        if estimator.openingProposalStands { estimator = makeEstimator() }
         presentEstimatorPhase()
+    }
+
+    /// A fresh injector (a tick off→on edge) is the only way to replay the
+    /// sweeps — the same cost ``tryAgain()`` pays — and its fresh beat clock
+    /// voids the pushed tempo.
+    private func replaySweeps() {
+        setTick(false)
+        lastTempoBPM = nil
+        setTick(true)
+    }
+
+    /// The retry listen shared by a silent first listen, a rejected
+    /// measurement and an implausible one's Try again, under the run's mic
+    /// budget. The caller has already put the tick on a fresh edge. The host
+    /// stages the probe from its `requestListening` answer; a refusal there
+    /// ends the listen the ordinary way.
+    private func listenAgain(_ requestListening: (@escaping (Bool) -> Void) -> Void) {
+        enterListening()
+        requestListening { [weak self] granted in
+            guard let self, !self.ended, granted == false,
+                  case .listening = self.screen else { return }
+            self.endListening()
+        }
     }
 
     /// One which-side (or they-sound-together) answer folded in.
@@ -305,20 +533,61 @@ public final class BTAlignmentWizardSession {
 
     /// A mic-probe measurement landing mid-run (roadmap 064): present it as
     /// the proposal to confirm by ear. `valueMs` is in VALUE space (a
-    /// Bluetooth run's measured latency in ms). Meaningful only while
-    /// questions are running — a run already proposing, ended, or still on the
-    /// intro keeps its state, and the probe result is simply dropped (the
-    /// by-ear machinery owes it nothing). The estimator's belief is untouched:
-    /// the measurement feeds the proposal, never the prior.
+    /// Bluetooth run's measured latency in ms). Meaningful while questions are
+    /// running, and ALSO while the run is still showing its OPENING proposal
+    /// (the stored value, unjudged) — a measurement replaces that one number
+    /// because the user has not weighed in on it yet. A proposal the run
+    /// earned from answers, or an earlier measurement, is never shoved aside;
+    /// a run ended or still on the intro keeps its state, and the probe result
+    /// is simply dropped (the by-ear machinery owes it nothing). The
+    /// estimator's belief is untouched: the measurement feeds the proposal,
+    /// never the prior.
     public func offerMeasuredProposal(valueMs: Double) {
-        guard case .question = screen, !ended else { return }
+        guard !ended else { return }
+        let wasListening: Bool
+        switch screen {
+        case .question:
+            wasListening = false
+        case .listening:
+            wasListening = true
+        case .proposal:
+            guard estimator.openingProposalStands else { return }
+            wasListening = false
+        default:
+            return
+        }
         let estimate = invertsEstimate ? baseValueMs - valueMs : valueMs - baseValueMs
         estimator.offerProposal(estimate)
         Telemetry.log(.localPlayback, "wizard_mic_proposal", [
             "uid": deviceID,
             "valueMs": String(Int(valueMs.rounded())),
         ])
-        presentEstimatorPhase()
+        presentEstimatorPhase(measured: true)
+        if wasListening {
+            let outcome: String
+            if case .macIsLate = screen { outcome = "implausible" } else { outcome = "measured" }
+            Analytics.capture("bt_sync:listening_ended", [
+                "outcome": outcome,
+                "attempt": String(micAttempts),
+                "value_ms_bucket": Self.valueMsBucket(valueMs),
+                "probe_sound": SyncProbe.Layout.analyticsName,
+            ])
+        }
+    }
+
+    /// The measured value as a coarse band for analytics — a raw number never
+    /// leaves the Mac. The labels are an external contract
+    /// (`docs/analytics-events.md` in audiout-shared).
+    static func valueMsBucket(_ valueMs: Double) -> String {
+        switch valueMs {
+        case ..<(-4): "below_-4"
+        case ..<0: "-4_to_0"
+        case ..<10: "0-9"
+        case ..<40: "10-39"
+        case ..<100: "40-99"
+        case ..<200: "100-199"
+        default: "200+"
+        }
     }
 
     /// Undo the last answer and ask that question again. Available only while
@@ -352,23 +621,47 @@ public final class BTAlignmentWizardSession {
         transition(to: .kept(valueMs: keptMs))
     }
 
-    /// The proposal's "Still off": the run takes the correction and goes back
-    /// to questions, or bows out if this was the second time.
+    /// The proposal's reject. A MEASURED proposal escalates: its first
+    /// rejection folds the correction in and LISTENS again; its second (the mic
+    /// budget spent, ``rejectReRunsMic`` false) falls to the by-ear questions. A
+    /// proposal earned from answers or recalled from the store always goes back
+    /// to the questions. Either way the correction is folded into the belief,
+    /// and rejecting never ends a run — only the estimator's own stop rules do.
     public func rejectProposal() {
         guard case .proposal(let valueMs) = screen, !ended else { return }
         logProposal(valueMs: valueMs, accepted: false)
+        let reRunMic = rejectReRunsMic
         estimator.rejectProposal()
-        presentEstimatorPhase()
+        guard reRunMic, let requestListening else {
+            presentEstimatorPhase()
+            return
+        }
+        replaySweeps()
+        Analytics.capture("bt_sync:mic_retried")
+        listenAgain(requestListening)
     }
 
     /// Try again: a fresh run from a flat prior. Reachable from the proposal
     /// and from every screen the run can bow out on, and the two arrive in
     /// opposite states — hence the split. Either way a SECOND edge of the tick
     /// or the preview costs the backend a re-anchor of every sink for nothing.
+    /// A mic reading that landed on ``Screen/macIsLate`` listens once more
+    /// while the mic budget (``maxMicAttempts``) allows, instead of dropping
+    /// to the by-ear questions.
     public func tryAgain() {
         switch screen {
         case .proposal, .unsettled, .unreachable, .macIsLate: break
-        case .intro, .question, .kept: return
+        case .intro, .listening, .question, .kept: return
+        }
+        if case .macIsLate = screen, proposalCameFromMic,
+           micAttempts < Self.maxMicAttempts, let requestListening {
+            ended = false
+            lastTempoBPM = nil
+            setTick(true)
+            estimator = makeEstimator()
+            Analytics.capture("bt_sync:mic_retried")
+            listenAgain(requestListening)
+            return
         }
         if ended {
             // A bow-out already restored the prior value and silenced the tick;
@@ -408,7 +701,10 @@ public final class BTAlignmentWizardSession {
     /// Put whatever the estimator is now on, on screen — the ONE place a
     /// candidate is applied and a screen is chosen, so every intent
     /// (start/answer/back/reject/restart) lands on identical behaviour.
-    private func presentEstimatorPhase() {
+    /// `measured` records whether a proposal reached here from a mic
+    /// measurement, so a later earned or recalled proposal clears the flag.
+    private func presentEstimatorPhase(measured: Bool = false) {
+        proposalCameFromMic = measured
         switch estimator.phase {
         case .asking(let estimateMs):
             applyPreviewTrim(candidate(for: estimateMs), estimator.credibleHalfWidthMs)
@@ -489,7 +785,7 @@ public final class BTAlignmentWizardSession {
         // being PRESENTED — never between a level and its answer, or the user
         // would be judging one thing and answering about another.
         switch newScreen {
-        case .question, .proposal:
+        case .question, .proposal, .listening:
             let bpm = estimator.credibleHalfWidthMs > Self.fineTempoHalfWidthMs
                 ? Self.searchTickBPM : Self.blocksTickBPM
             if lastTempoBPM != bpm {

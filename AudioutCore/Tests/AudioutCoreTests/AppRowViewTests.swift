@@ -216,6 +216,32 @@ import AppKit
         #expect(row.test_volume == 42, "test_setVolume only fires the delegate; a real reapply drives the model")
     }
 
+    // MARK: 08 — a non-mouse slider change never wedges the drag flag
+
+    @Test func keyboardShapedSliderChangeNeverWedgesTheDragFlag() {
+        // `test_fireSliderAction` fires the slider's real target/action while
+        // `NSApp` is nil headless, so `NSApp?.currentEvent?.type` is nil — the
+        // keyboard / scroll / VoiceOver shape, where no drag is in flight and
+        // the flag must stay false. Before the fix, ANY change set the flag and
+        // only a coincident `.leftMouseUp` cleared it, so this left the row
+        // permanently ignoring model pushes.
+        let (row, _) = makeRow()
+
+        row.test_fireSliderAction(settingValueTo: 30)
+
+        row.apply(AppRowView.Configuration(
+            appID: "com.example.app",
+            name: "Example App",
+            icon: nil,
+            volume: 55,
+            selectedDestinationID: "local",
+            destinations: makeDestinations()
+        ))
+
+        #expect(row.test_volume == 55,
+                "a non-mouse change must not wedge isDraggingSlider and block the model push")
+    }
+
     @Test func removeFiresDelegate() {
         let (row, delegate) = makeRow()
         row.test_remove()
@@ -334,6 +360,14 @@ import AppKit
                      "a click routed to the slider's own frame must never request row selection")
     }
 
+    /// Turns red if `isInSelectableDeadZone` stops carving out `destinationPopUp.frame`.
+    @Test func destinationPopUpClickDoesNotFireDidRequestSelect() {
+        let (row, delegate) = makeRow()
+        row.test_simulateDestinationPopUpClick()
+        #expect(delegate.selectRequestedAppID == nil,
+                     "a click routed to the destination popup's own frame must never request row selection")
+    }
+
     @Test func removeButtonClickDoesNotAlsoRequestSelect() {
         let (row, delegate) = makeRow()
         row.test_remove()
@@ -428,11 +462,11 @@ import AppKit
     }
 
     @Test func hoverWashUsesUnifiedHoverAlpha() {
-        // Hover is the faintest of the three, so it needs a row that is not
-        // sounding to be the wash that shows.
-        let (row, _) = makeRowWithThreeStates(selected: "no-redirect")
+        let (row, _) = makeRow(selected: "device-1")
         row.test_setHovered(true)
-        #expect(row.test_highlightAlpha == PopoverColumnGrid.rowHoverWashAlpha)
+        #expect(row.test_isFaderEngaged, "the fixture row must be sounding for this test to mean anything")
+        #expect(row.test_highlightAlpha == PopoverColumnGrid.rowHoverWashAlpha,
+                "hover still paints on a sounding row")
     }
 
     @Test func selectionWashTakesPriorityOverHoverWash() {
@@ -443,17 +477,18 @@ import AppKit
                        "selection must win when both selected and hovered")
     }
 
-    @Test func liveWashUsesTheLiveAlphaWhenNeitherSelectedNorHovered() {
+    /// Turns red if `currentHighlightColor` paints a wash for `faderCell.isRouteArmed` again.
+    @Test func soundingRowPaintsNoWash() {
         let (row, _) = makeRow(selected: "device-1")
-        #expect(row.test_highlightAlpha == PopoverColumnGrid.rowLiveWashAlpha,
-                       "a sounding row paints the gold live wash")
+        #expect(row.test_highlightAlpha == nil,
+                       "a sounding row paints no wash of its own")
     }
 
-    @Test func selectionWashOutranksLiveWash() {
+    @Test func selectionWashPaintsOnASoundingRow() {
         let (row, _) = makeRow(selected: "device-1")
         row.test_setSelected(true)
         #expect(row.test_highlightAlpha == PopoverColumnGrid.rowSelectionWashAlpha,
-                       "keyboard selection must stay visible over a live row (D3)")
+                       "selection stays visible on a sounding row")
     }
 
     // MARK: Readout colour (V7)
@@ -810,9 +845,9 @@ import AppKit
     /// S6 item 6: the composed VoiceOver label reads "…, follows main output"
     /// for an unrouted app — the spoken equivalent of the bridge phrase —
     /// never "routed to No Redirect".
-    @Test func accessibilityLabelReadsFollowsMainOutputWhenUnrouted() {
+    @Test func accessibilityLabelReadsFollowsMainOutputWhenUnrouted() throws {
         let row = makeThreeStateRow(selected: "no-redirect", isRunning: true)
-        let label = try! #require(row.test_accessibilityLabel)
+        let label = try #require(row.test_accessibilityLabel)
         #expect(label.contains("follows main output"), "label was \"\(label)\"")
         #expect(!(label.contains("routed to")), "an unrouted app is not 'routed to' anywhere")
     }
@@ -820,9 +855,9 @@ import AppKit
     /// …and "routed to <device>" when routed, with the clean name (no visual
     /// " (idle)" suffix leaking into speech) plus the discrete "not running"
     /// phrase when idle.
-    @Test func accessibilityLabelReadsRoutedToDeviceAndCleanNameWhenIdle() {
+    @Test func accessibilityLabelReadsRoutedToDeviceAndCleanNameWhenIdle() throws {
         let row = makeThreeStateRow(selected: "device-1", isRunning: false)
-        let label = try! #require(row.test_accessibilityLabel)
+        let label = try #require(row.test_accessibilityLabel)
         #expect(label.contains("routed to Living Room"), "label was \"\(label)\"")
         #expect(!(label.contains("(idle)")), "the visual idle suffix must not leak into the spoken label")
         #expect(label.localizedCaseInsensitiveContains("not running"))

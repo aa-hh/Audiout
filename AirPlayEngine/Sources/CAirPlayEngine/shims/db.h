@@ -14,12 +14,7 @@
 // (id, path). Since db_queue_fetch_byitemid returns NULL (metadata stubbed),
 // the field-access code at 1698-1710 is dead at runtime but must still compile.
 //
-// STUB STATUS (T-BUILD-1): db.c bodies are no-ops — db_queue_fetch_byitemid
-// returns NULL, db_speaker_save returns 0 (fire-and-forget; does not block the
-// volume-set callback per seam-map §3.4), free_queue_item does nothing.
-//
-// TODO(T-SHIM-1): keep these no-ops. Volume persistence, if wanted, lives in
-// the Swift/app layer, not here.
+// db.c is a permanent no-op by design (audio-only sender; metadata path cut).
 
 #ifndef CAIRPLAYENGINE_SHIM_DB_H
 #define CAIRPLAYENGINE_SHIM_DB_H

@@ -166,7 +166,7 @@ public enum Telemetry {
 
     /// Owns the actual disk I/O. Everything below is touched only from
     /// `queue`'s closures (queue confinement — the same pattern as
-    /// `MockBackend`/`CaptureCoordinator`/`DACPServer` in this package), so
+    /// `MockBackend`/`NativeCaptureCoordinator`/`DACPServer` in this package), so
     /// `@unchecked Sendable` is honest.
     private final class Writer: @unchecked Sendable {
         static let shared = Writer()

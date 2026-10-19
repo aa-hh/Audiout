@@ -49,7 +49,8 @@ import AudioutCore
         let row = makeBusRow()
         // Even a held (selected) membership renders hollow while unavailable —
         // the device is not currently in the mix (matrix §3.6 "Unavailable").
-        row.apply(makeDevice(isAvailable: false), selected: true)
+        // .off on purpose: a connected-but-undiscovered device is a live Cast session and renders live.
+        row.apply(makeDevice(connectionState: .off, isAvailable: false), selected: true)
         #expect(row.test_busNode == .nonMember, "an unavailable device's node is hollow")
         // The dim flag rides along; it reaches only a FILL, and a hollow node
         // has none — the rim is the rail's and stays ember.
@@ -254,7 +255,7 @@ import AudioutCore
 
     @Test func rowHoverNeverResizesADisabledCheckbox() {
         let row = makeBusRow()
-        row.apply(makeDevice(isAvailable: false), selected: false)
+        row.apply(makeDevice(connectionState: .off, isAvailable: false), selected: false)
         row.test_setHovered(true)
         #expect(!row.test_nodePreviewsClick, "never preview a click the checkbox would refuse")
     }
@@ -312,6 +313,22 @@ import AudioutCore
                 Comment(rawValue: "the hovered member spans \(hoveredMember) px against \(restingMember) at rest"))
         #expect(restingMember > restingNonMember,
                 "sanity: the resting sizes the two hovers trade between are the real ones")
+    }
+
+    // Turns red if the connecting node's rim leaves gold or any hollow rim colour swaps.
+    @Test func hollowNodeRimColours() {
+        func same(_ a: NSColor, _ b: NSColor) -> Bool {
+            guard let a = a.usingColorSpace(.sRGB), let b = b.usingColorSpace(.sRGB) else { return false }
+            return abs(a.redComponent - b.redComponent) <= 0.02
+                && abs(a.greenComponent - b.greenComponent) <= 0.02
+                && abs(a.blueComponent - b.blueComponent) <= 0.02
+        }
+        #expect(same(makeBusView(node: .connecting).test_rimColor, Tokens.Color.gold),
+                "a connecting node is a plain gold circle")
+        #expect(same(makeBusView(node: .nonMember).test_rimColor, Tokens.Color.ember),
+                "a non-member rim is ember")
+        #expect(same(makeBusView(node: .failed).test_rimColor, Tokens.Color.failure),
+                "a failed rim is failure red")
     }
 
     private func makeBusView(node: MembershipBusView.Node = .nonMember) -> MembershipBusView {

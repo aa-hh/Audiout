@@ -222,8 +222,8 @@ import Testing
         await vc.test_tapAllow(.bluetooth)
         #expect((wc.window as? OnboardingWindow)?.suppressesActivation == true)
 
-        for _ in 0..<600 where vc.test_isPromptInFlight {   // ≤3 s, then give up
-            try? await Task.sleep(nanoseconds: 5_000_000)
+        await SuiteWait.until("the Bluetooth prompt to stop being in flight") {
+            !vc.test_isPromptInFlight
         }
 
         #expect(wc.test_windowLevel == .floating)
@@ -252,8 +252,8 @@ import Testing
 
         // The dialog is notionally on screen: the app is quiet, the level stays.
         await net.waitUntilParked()
-        for _ in 0..<600 where !vc.test_isPromptInFlight {
-            try? await Task.sleep(nanoseconds: 5_000_000)
+        await SuiteWait.until("the Local Network prompt to go in flight") {
+            vc.test_isPromptInFlight
         }
         #expect(vc.test_isPromptInFlight)
         #expect(wc.test_windowLevel == .floating,
@@ -263,8 +263,8 @@ import Testing
         // settling, but there is no dialog left to go quiet for.
         net.resume()
         await net.waitUntilParked()
-        for _ in 0..<600 where vc.test_isPromptInFlight {
-            try? await Task.sleep(nanoseconds: 5_000_000)
+        await SuiteWait.until("the Local Network prompt to stop being in flight") {
+            !vc.test_isPromptInFlight
         }
         #expect(!vc.test_isPromptInFlight,
                 "the quiet ends the moment the answer lands, not after the count settles")

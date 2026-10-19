@@ -117,7 +117,7 @@ HITS="$(scan -name '*.sh' -type f)"
 # The names this repo's own dev tooling uses, plus the watchdog shape of the
 # 2026-09-05 incident. Belt-and-braces over check 3: a watchdog with no .sh
 # suffix, or a compiled one, still gets caught here.
-HITS="$(scan \( -name 'perfwatch*' -o -name '*watchdog*' -o -name 'purge-*' -o -name 'livetest*' -o -name 'self-review*' -o -name 'guard-*' \))"
+HITS="$(scan \( -name 'perfwatch*' -o -name '*watchdog*' -o -name 'purge-*' -o -name 'livetest*' -o -name 'review-branch*' -o -name 'guard-*' \))"
 [ -z "$HITS" ] || fail "dev tooling inside the bundle" "$HITS"
 
 # --- 5. repo docs -----------------------------------------------------------
@@ -192,5 +192,12 @@ esac
 # launchd a MachServices name no client ever connects to.
 ! grep -q '__BUNDLE_ID__' "$SANCTIONED_PLIST" \
   || fail "the sanctioned daemon plist still carries an unrendered __BUNDLE_ID__ token" "$SANCTIONED_PLIST"
+! grep -q '__TEAM_ID__' "$SANCTIONED_PLIST" \
+  || fail "the sanctioned daemon plist still carries an unrendered __TEAM_ID__ token" "$SANCTIONED_PLIST"
+# The peer requirement key must exist (its value may legitimately be empty —
+# an ad-hoc build ships it empty by design, so the helper refuses every
+# release).
+grep -q '<key>AUDIOUT_PTP_PEER_REQUIREMENT</key>' "$SANCTIONED_PLIST" \
+  || fail "the sanctioned daemon plist is missing the AUDIOUT_PTP_PEER_REQUIREMENT key" "$SANCTIONED_PLIST"
 
-echo "    bundle content gate PASSED (1 sanctioned launchd plist, helper identity = $SANCTIONED_LABEL, no scripts, no dev tooling, no launchctl/LaunchAgents in the binaries)"
+echo "    bundle content gate PASSED (1 sanctioned launchd plist, helper identity = $SANCTIONED_LABEL, peer requirement key present, no scripts, no dev tooling, no launchctl/LaunchAgents in the binaries)"

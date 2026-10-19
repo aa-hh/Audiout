@@ -129,10 +129,15 @@ Free on the App Store, included with Audiout for Mac. → **[audiout.app/remote]
 ## Privacy
 
 Audio never leaves your network. Two things do, and both are described in full in
-[PRODUCT.md](PRODUCT.md#data-collection): anonymous usage statistics, which are
-**off unless you turn them on**, and a licence check-in that counts how many
-machines a key is used on. Neither ever carries what you're playing, your speaker
-names, or anything you type.
+[PRODUCT.md](PRODUCT.md#data-collection): anonymous usage statistics, and a
+licence check-in that counts how many machines a key is used on. Neither ever
+carries what you're playing, your speaker names, or anything you type.
+
+Usage statistics are on by default during the trial and switched off at any time
+in Settings › General. A paid copy asks once before it sends anything. A copy you
+build from this repository reports too, tagged as a source build: the PostHog
+project token is committed in `scripts/make-app.sh` because it is a write-only
+public key. Delete those two lines to build a copy that never reports.
 
 ## License
 

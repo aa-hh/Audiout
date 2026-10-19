@@ -24,8 +24,9 @@
 //   * The "ipv6" config gate (cfg_getbool(cfg_getsec(cfg,"general"),"ipv6"))
 //     is preserved; conffile.c now returns true for it so v6 is attempted
 //     (PTP peers can be link-local v6). See conffile.c.
-//   * uuid_make uses the dependency-free PRNG variant (OwnTone's #else branch)
-//     so we don't need to link libuuid.
+//   * uuid_make replaces OwnTone's srand/rand fallback with arc4random_buf:
+//     still no libuuid to link, and no seeding, so two calls in the same
+//     second no longer return the same string.
 //
 // TODO(seam-map §10.4): net_if_get / the %ifname v6 link-local scope handling
 // is Linux-validated in OwnTone; macOS scope-id semantics still need a live
@@ -185,8 +186,9 @@ net_connect_addrinfo(struct addrinfo *ai, int timeout_ms, bool set_nonblock, con
       goto error;
     }
 
-  // For Linux we could just give SOCK_CLOEXEC to socket(), but that won't work
-  // with MacOS, so we have to use fcntl()
+  // Linux could pass SOCK_CLOEXEC to socket(), macOS cannot, so close-on-exec
+  // goes on separately below with F_SETFD: F_SETFL carries status flags only
+  // and silently ignores O_CLOEXEC.
   flags = fcntl(fd, F_GETFL, 0);
   if (flags < 0)
     {
@@ -194,10 +196,17 @@ net_connect_addrinfo(struct addrinfo *ai, int timeout_ms, bool set_nonblock, con
       goto error;
     }
 
-  ret = fcntl(fd, F_SETFL, flags | O_NONBLOCK | O_CLOEXEC);
+  ret = fcntl(fd, F_SETFL, flags | O_NONBLOCK);
   if (ret < 0)
     {
       *errmsg = "fcntl() with F_SETFL non-block returned an error";
+      goto error;
+    }
+
+  ret = fcntl(fd, F_SETFD, FD_CLOEXEC);
+  if (ret < 0)
+    {
+      *errmsg = "fcntl() with F_SETFD close-on-exec returned an error";
       goto error;
     }
 
@@ -235,7 +244,7 @@ net_connect_addrinfo(struct addrinfo *ai, int timeout_ms, bool set_nonblock, con
 
   if (!set_nonblock)
     {
-      ret = fcntl(fd, F_SETFL, flags | O_CLOEXEC);
+      ret = fcntl(fd, F_SETFL, flags);
       if (ret < 0)
         {
           *errmsg = "fcntl() with F_SETFL block returned an error";
@@ -355,7 +364,11 @@ bind_one(const char *node, unsigned short *port, int type, int family, const cha
       flags = fcntl(fd, F_GETFL, 0);
       if (flags < 0)
         continue;
-      ret = fcntl(fd, F_SETFL, (type == SOCK_STREAM) ? flags | O_NONBLOCK | O_CLOEXEC : flags | O_CLOEXEC);
+      ret = fcntl(fd, F_SETFL, (type == SOCK_STREAM) ? flags | O_NONBLOCK : flags);
+      if (ret < 0)
+        continue;
+
+      ret = fcntl(fd, F_SETFD, FD_CLOEXEC);
       if (ret < 0)
         continue;
 
@@ -779,19 +792,15 @@ void
 uuid_make(char *str)
 {
   uint16_t uuid[8];
-  time_t now;
   unsigned int i;
 
   if (!str)
     return;
 
-  now = time(NULL);
-  srand((unsigned int)now);
+  arc4random_buf(uuid, sizeof(uuid));
 
   for (i = 0; i < ARRAY_SIZE(uuid); i++)
     {
-      uuid[i] = (uint16_t)rand();
-
       // time_hi_and_version, set version to 4 (=random)
       if (i == 3)
         uuid[i] = (uuid[i] & 0x0FFF) | 0x4000;

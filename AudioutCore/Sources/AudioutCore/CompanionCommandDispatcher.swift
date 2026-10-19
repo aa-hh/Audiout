@@ -31,7 +31,10 @@ import AudioutProtocol
 @MainActor
 public struct CompanionAlignmentActions {
     public var startProbe: (_ targetID: String, _ clientID: UUID?) -> String?
-    public var cancelProbe: (_ targetID: String) -> String?
+    /// Carries the asking client, like `startProbe` does: cancel is the
+    /// owner's own exit, and without the id one phone's cancel can end
+    /// another phone's run.
+    public var cancelProbe: (_ targetID: String, _ clientID: UUID?) -> String?
     public var reportMeasurement: (_ targetID: String, _ offsetMs: Double, _ confidence: Double) -> String?
     public var setTick: (_ targetID: String, _ active: Bool, _ clientID: UUID?) -> String?
     public var nudgeTrim: (_ targetID: String, _ deltaMs: Double) -> String?
@@ -41,7 +44,7 @@ public struct CompanionAlignmentActions {
 
     public init(
         startProbe: @escaping (String, UUID?) -> String?,
-        cancelProbe: @escaping (String) -> String?,
+        cancelProbe: @escaping (String, UUID?) -> String?,
         reportMeasurement: @escaping (String, Double, Double) -> String?,
         setTick: @escaping (String, Bool, UUID?) -> String?,
         nudgeTrim: @escaping (String, Double) -> String?,
@@ -132,6 +135,9 @@ public final class CompanionCommandDispatcher {
     /// The alignment family's actuators — see ``CompanionAlignmentActions``.
     /// `nil` on a backend with no Bluetooth sink of its own.
     private let alignmentActions: CompanionAlignmentActions?
+    /// The Mac's remembered speakers, for `setSpeakerVisibility` and
+    /// `forgetSpeakers`. `nil` refuses both.
+    private let speakerLibrary: SpeakerLibraryController?
 
     /// True while a `setStartBufferMs` apply Task is running. The apply tears
     /// every AirPlay stream down and back (~3-5s); overlapping runs would keep
@@ -154,7 +160,8 @@ public final class CompanionCommandDispatcher {
         isExcluded: @escaping (String) -> Bool,
         setLocalPlaybackVolume: @escaping (Int, String) -> Void,
         applyStartBuffer: @escaping (Int) async -> Void,
-        alignmentActions: CompanionAlignmentActions? = nil
+        alignmentActions: CompanionAlignmentActions? = nil,
+        speakerLibrary: SpeakerLibraryController? = nil
     ) {
         self.groupController = groupController
         self.appRouting = appRouting
@@ -163,6 +170,7 @@ public final class CompanionCommandDispatcher {
         self.setLocalPlaybackVolume = setLocalPlaybackVolume
         self.applyStartBuffer = applyStartBuffer
         self.alignmentActions = alignmentActions
+        self.speakerLibrary = speakerLibrary
     }
 
     /// Execute one command, mapping it to the exact controller method the
@@ -171,9 +179,10 @@ public final class CompanionCommandDispatcher {
     /// empty-membership group edit, an excluded app's `addAppRoute`, unknown
     /// device/group targets, an out-of-range `setStartBufferMs`, `.unknown`)
     /// plus the trust-boundary hardening: `Limits` caps, blank/overlong names,
-    /// unknown-id `updateGroup`, duplicate-member-set `createGroup`, device
-    /// writes on a device that can't accept them, and store failures (which
-    /// roll back so the reply matches the state the next snapshot shows).
+    /// unknown-id `updateGroup`, an unknown-group `setGroupMuted`, an
+    /// unrouted-bundle `removeAppRoute`, duplicate-member-set `createGroup`,
+    /// device writes on a device that can't accept them, and store failures
+    /// (which roll back so the reply matches the state the next snapshot shows).
     @discardableResult
     public func execute(_ command: CompanionCommand) -> Result {
         execute(command, clientID: nil)
@@ -187,10 +196,23 @@ public final class CompanionCommandDispatcher {
     public func execute(_ command: CompanionCommand, clientID: UUID?) -> Result {
         switch command {
         case .setDeviceSelected(let id, let selected):
-            return Result(groupController.setDeviceSelected(id, selected))
+            let selection = groupController.setDeviceSelected(id, selected)
+            if selection.refusalReason == GroupController.oneSpeakerLimitReason {
+                return .refused("Audiout plays on one speaker at a time until you buy.")
+            }
+            return Result(selection)
 
         case .retryConnection(let id):
             return Result(groupController.retryConnection(for: id))
+
+        case .submitSpeakerPassword(let id, let password):
+            let trimmed = password.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { return .refused("Enter the speaker's password.") }
+            guard groupController.devices.contains(where: { $0.id == id }) else {
+                return .refused("Unknown speaker.")
+            }
+            groupController.submitAirPlayPassword(trimmed, for: id, source: "phone")
+            return .ok
 
         case .setMainOut(let state):
             return applySetMainOut(state)
@@ -229,6 +251,9 @@ public final class CompanionCommandDispatcher {
             return applyDeleteGroup(id: id)
 
         case .setGroupMuted(let id, let muted):
+            guard groupController.groups.contains(where: { $0.id == id }) else {
+                return .refused("That scene no longer exists on the Mac.")
+            }
             groupController.setGroupMuted(muted, groupID: id)
             return .ok
 
@@ -236,6 +261,9 @@ public final class CompanionCommandDispatcher {
             return applyAddAppRoute(bundleID: bundleID, displayName: displayName)
 
         case .removeAppRoute(let bundleID):
+            guard appRouting.appRoutes.contains(where: { $0.bundleID == bundleID }) else {
+                return .refused("That app identifier isn't valid.")
+            }
             appRouting.removeRoute(bundleID: bundleID)
             return .ok
 
@@ -271,8 +299,8 @@ public final class CompanionCommandDispatcher {
             }
             startBufferApplyInFlight = true
             Task {
+                defer { startBufferApplyInFlight = false }
                 await applyStartBuffer(ms)
-                startBufferApplyInFlight = false
             }
             return .ok
 
@@ -288,13 +316,14 @@ public final class CompanionCommandDispatcher {
             return alignment(targetID) { actions, id in actions.startProbe(id, clientID) }
 
         case .cancelAlignmentProbe(let targetID):
-            return alignment(targetID) { actions, id in actions.cancelProbe(id) }
+            return alignment(targetID) { actions, id in actions.cancelProbe(id, clientID) }
 
         case .reportAlignmentMeasurement(let targetID, let offsetMs, let confidence):
             // A measurement turns straight into a persisted latency, so the
-            // numbers are bounded here rather than trusted. `maxOffsetMs` is
-            // generous over any staggered run's own separation; a value past
-            // it is a peer bug or a hostile one, never a room.
+            // numbers are bounded here rather than trusted. The phone's
+            // offset arrives with the lane spacing already removed, so
+            // `maxOffsetMs` only has to be generous over a real room; a value
+            // past it is a peer bug or a hostile one, never a room.
             // Signed on purpose: the phone reports what its microphone heard,
             // and a speaker that arrives AHEAD of the reference is a real
             // result, not a bad one.
@@ -332,6 +361,48 @@ public final class CompanionCommandDispatcher {
         case .playAlignmentDemo(let targetID):
             return alignment(targetID) { actions, id in actions.playDemo(id, clientID) }
 
+        case .activateLicenseKey:
+            // Handled in `AppDelegate.onCommand` like `.requestAppIcons`: it
+            // needs `LicenseValidator`, the gate window and `applyLicenseState`,
+            // none of which this AppKit-free type owns. A host that does not
+            // intercept it refuses, same as any other unhandled command.
+            return .refused("This Mac’s Audiout can’t accept a licence from an iPhone. Update Audiout on your Mac.")
+
+        // The Mac does not implement transport control yet; these refusals keep the pre-0.17.0 behaviour.
+        case .transportPlayPause:
+            return .refused("Unknown command: transportPlayPause.")
+        case .transportNext:
+            return .refused("Unknown command: transportNext.")
+        case .transportPrevious:
+            return .refused("Unknown command: transportPrevious.")
+
+        case .setSpeakerVisibility(let id, let visibility):
+            guard let choice = SpeakerMixerVisibility(rawValue: visibility) else {
+                return .refused("That isn't a Show in Mixer choice.")
+            }
+            guard let speakerLibrary, let record = speakerLibrary.record(for: id) else {
+                return .refused("Unknown speaker.")
+            }
+            if record.isLocalDevice { return .refused("This Mac is always shown in the Mixer.") }
+            guard speakerLibrary.setVisibility(choice, for: id) else {
+                return .refused("The Mac couldn't save that change.")
+            }
+            return .ok
+
+        case .forgetSpeakers(let ids):
+            guard !ids.isEmpty, !ids.contains(where: { $0.count > Limits.maxMemberIDChars }) else {
+                return .refused("Unknown speaker.")
+            }
+            guard let speakerLibrary else { return .refused("This Mac can't forget speakers right now.") }
+            do {
+                try speakerLibrary.forget(Set(ids), scenes: groupController)
+            } catch GroupController.GroupError.emptyMembership {
+                return .refused("Forgetting it would leave a scene with no speakers.")
+            } catch {
+                return .refused("The Mac couldn't save that change.")
+            }
+            return .ok
+
         case .unknown(let name):
             return .refused("Unknown command: \(name).")
         }
@@ -346,14 +417,16 @@ public final class CompanionCommandDispatcher {
         _ targetID: String,
         _ action: (CompanionAlignmentActions, String) -> String?
     ) -> Result {
-        guard !targetID.isEmpty, targetID.count <= Limits.maxMemberIDChars else {
-            return .refused("Unknown speaker.")
-        }
+        if let reason = Self.alignmentTargetIDRefusal(targetID) { return .refused(reason) }
         guard let alignmentActions else {
             return .refused("This Mac can't measure speaker timing right now. Reconnect the speaker and try again.")
         }
         if let reason = action(alignmentActions, targetID) { return .refused(reason) }
         return .ok
+    }
+
+    public static func alignmentTargetIDRefusal(_ targetID: String) -> String? {
+        targetID.isEmpty || targetID.count > Limits.maxMemberIDChars ? "Unknown speaker." : nil
     }
 
     // MARK: - Group CRUD (validated + all-or-nothing)
@@ -508,7 +581,7 @@ public final class CompanionCommandDispatcher {
         switch device.connectionState {
         case .connected, .reconnecting:
             return nil
-        case .off, .connecting, .failed:
+        case .off, .connecting, .awaitingPassword, .failed:
             return .refused("\(device.name) isn't connected yet, so it can't take volume changes.")
         }
     }
@@ -566,6 +639,9 @@ public final class CompanionCommandDispatcher {
             guard let groupID = state.groupID,
                   groupController.groups.contains(where: { $0.id == groupID }) else {
                 return .refused("Unknown scene.")
+            }
+            if groupController.limitsToOneSpeaker {
+                return .refused("Scenes need more than one speaker. Buy Audiout to use them.")
             }
             groupController.setMainOut(.group(id: groupID))
             return .ok

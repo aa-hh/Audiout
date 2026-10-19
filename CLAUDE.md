@@ -15,6 +15,7 @@ A native AppKit macOS app that sends system audio to multiple AirPlay 2 speakers
 | `docs/SPEC.md` | Product spec — the source of truth for *what* to build |
 | `scripts/make-app.sh` | Wraps the executable into a signed `.app` bundle (required for TCC/process-tap) |
 | `scripts/make-staging.sh` | The staging environment: a standing `com.audiout.Audiout.staging` build pointed at the staging licence server |
+| `scripts/run-on-vm.sh` | macOS 14 checks: builds a self-contained `.app`, starts the `sonoma-14.4` tart VM on the mule if it's off, and launches the app there with dummy devices (incl. a fake Bluetooth speaker). `scripts/guest-setup.sh` is the one-time ssh setup inside a new VM |
 
 ## iOS companion app
 
@@ -27,9 +28,13 @@ with `scripts/ios.sh build --root <that checkout>`.
 ```bash
 # Enable the pre-commit guards (once per clone)
 git config core.hooksPath .githooks
+
+# Keep local main a fast-forward mirror of origin/main (every 2 minutes)
+cp scripts/launchd/com.audiout.sync-main.plist ~/Library/LaunchAgents/ && launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.audiout.sync-main.plist
+# Remove it with: launchctl bootout gui/$(id -u)/com.audiout.sync-main
 ```
 
-Guards: **Guard 1** blocks direct commits on `main` (merges only). **Guard 4/6** run the test suites on any commit touching Swift sources — on a branch commit Guard 4 runs only the suites covering the staged files (`.githooks/guard-test-scope.sh` derives them, and falls back to the full suite whenever it cannot map a file or the commit deletes one); a merge landing on `main` runs the full suite with the pass cache off. `AUDIOUT_FULL_SUITE=1` forces the full run anywhere. Guard 6 (AirPlayEngine, ~2s) always runs in full. **Guard 7** blocks Swift commits until the staged-diff readability self-review has run — `scripts/self-review.sh`, rubric in [`docs/REVIEW-RUBRIC.md`](docs/REVIEW-RUBRIC.md).
+Guards: **Guard 1** blocks every commit on `main`. **Guard 4/6** run the test suites on any commit touching Swift sources — Guard 4 runs only the suites covering the staged files (`.githooks/guard-test-scope.sh` derives them: a staged file matches tests by name with any `+Aspect` part dropped, so `NativeBackend+Bluetooth.swift` runs the `NativeBackend*Tests` files; a file that matches no test by name runs every test file importing its target or a target built on it, except for `AudioutCore` and the targets it depends on; a deleted file maps by its old name; a commit where no file maps to any test only compiles, through `scripts/build.sh`, and leaves testing to the pull request's full run. `bash scripts/test-guard-test-scope.sh` tests these rules and checks the script's target table against `AudioutCore/Package.swift`). `AUDIOUT_FULL_SUITE=1` forces the full run. The full suite runs on GitHub: the `tests` workflow, on every pull request and again in the merge queue. Guard 6 (AirPlayEngine, ~2s) always runs in full. **Guard 9** blocks any newly-added line that could put a window on a real screen during a test run (see "Tests must stay invisible" in [`AudioutCore/AGENTS.md`](AudioutCore/AGENTS.md)). **Guard 7** blocks a Swift commit whose added comments match near-certain slop patterns (rubric in [`docs/REVIEW-RUBRIC.md`](docs/REVIEW-RUBRIC.md)). **Guard 11** blocks a new test without its 'turns red' sentence, `print` in tests, a new one-test file, and a real-time wait in a test (sleeps, `asyncAfter`, `SuiteWait.settle(`, any `.wait(timeout:`, or a Timeout/Delay/Deadline/Interval/Grace/Window/Seconds value set to a fraction of a second; `real-time-ok: <reason>` exempts, and a hang ceiling is a reason); **Guard 12** blocks ruling phrasing or over-budget growth in a folder AGENTS.md and any rewrite of an AGENTS-HISTORY.md line.
 
 ## Build & run
 
@@ -146,23 +151,38 @@ on macOS. `run-tests.sh` refuses with a message rather than let this surface as
 a mysterious build failure, and its message names the exact command for the
 Xcode it finds: `sudo xcode-select -s
 /Applications/<Xcode>.app/Contents/Developer`. `AUDIOUT_TEST_MODE=serial`
-runs the suite strictly one test at a time, for flake hunting.
+runs the suite strictly one test at a time, for flake hunting only, never for a gate.
 
-**Capacity.** Every compile and test run — local or on the mule — takes one capacity permit from a machine-wide pool. Local pool: `git config audiout.localSlots` (set to 2 on 2026-09-10). Mule pool: `git config audiout.remoteSlots` (set to 3 the same day; the M3 Air has more memory and carries nothing else). When the mule is full, work falls back to local immediately (no wait). Which machine a job is offered to first is `git config audiout.testPrefer`: `permits` (set 2026-09-11) sends each job to whichever Mac has more free permits, with a tie going to the mule because this machine also carries the agents, the editor and any app under live test. `remote` is the older setting that always tried the mule first, whether or not it had room. When the local pool is full, the runner waits up to 600 seconds, printing progress; if the ceiling is reached, it proceeds uncapped with a loud warning (never refuses a commit). `bash scripts/capacity.sh status` shows who holds which permit on both machines and which setting is active. `bash scripts/test-capacity.sh` tests the permit pool itself. A mule job now dies with the local run that started it — the runner kills its own ssh client as soon as it is gone, and the mule-side job kills itself when its ssh session disappears — so an orphaned run gives its mule permit back within seconds instead of holding it for the 45-minute ceiling. Commands typed in a terminal outside Claude Code bypass the hook but not the permits, which live in the scripts.
+**Code a real-time test drives brings that test along.** Before committing a production change, run `bash scripts/real-time-tests.sh <changed source files>`; every test it lists gets converted to the wait helpers in root [`AGENTS.md`](AGENTS.md) ("How a test waits without the wall clock") in the same PR, or gets a roadmap entry naming the test, its wait and the code that drives it.
+
+**Flaky tests are quarantined.** A test that fails in the merge queue and passes on rerun is skipped with a dated reason and a GitHub issue, in the same PR that hits it.
+
+**A pass covers everything it ran.** The runner stamps each green run in `/tmp/audiout-suite-cache` and skips a later run on byte-identical sources that an earlier pass already covered: a green full run satisfies any later filtered run, and a green `--filter A` lets a later `--filter A|B` run only `B` (the runner prints which suites it skipped). This is how a filtered run while coding counts toward Guard 4 at commit. `AUDIOUT_TEST_NO_CACHE=1` turns the cache off for a run; `bash scripts/test-suite-cache.sh` tests the cache itself.
+
+**A full run on the mule runs as several processes.** When a full run goes to the mule, the runner builds once there and then runs the suite as up to three `swift test` processes at the same time, one per free mule permit, so it may take every free mule permit; other sessions' runs fall back to this Mac as they do whenever the mule is full. The split is the one the GitHub `tests` workflow uses, from `scripts/lib/suite-shards.sh`. The workflow runs four shards; a local run of three processes covers list 3's suites in its last process, which skips lists 1 and 2. The runner prints one `Test run with N tests in M suites passed after T seconds` line summed over the shards. `AUDIOUT_TEST_SHARDS=1` runs one process as before; filtered runs, local runs and `AUDIOUT_TEST_MODE=serial` never shard. A shard that finds no free mule permit runs on this Mac by itself. `bash scripts/test-suite-shards.sh` tests it.
+
+**Capacity.** Every compile and test run — local or on the mule — takes one capacity permit from a machine-wide pool. Local pool: `git config audiout.localSlots` (set to 2 on 2026-09-10). Mule pool: `git config audiout.remoteSlots` (set to 2 on 2026-10-04). When the mule is full, work falls back to local immediately (no wait). Which machine a job is offered to first is `git config audiout.testPrefer`: `remote` (set 2026-10-04, owner's call) offers every job to the mule first and runs it here only when every mule permit is held, because this machine also carries the agents, the editor and any app under live test. `permits` (the setting from 2026-09-11) sent each job to whichever Mac had more free permits, which gave this Mac an equal share instead of only the overflow. When the local pool is full, the runner waits up to 1800 seconds, printing progress; if the ceiling is reached, it proceeds uncapped with a loud warning (never refuses a commit). `bash scripts/capacity.sh status` shows who holds which permit on both machines and which setting is active. `bash scripts/test-capacity.sh` tests the permit pool itself. A mule job now dies with the local run that started it — the runner kills its own ssh client as soon as it is gone, and the mule-side job kills itself when its ssh session disappears — so an orphaned run gives its mule permit back within seconds instead of holding it for the 45-minute ceiling. Commands typed in a terminal outside Claude Code bypass the hook but not the permits, which live in the scripts.
 
 The mule runs macOS 26.5 with only the Xcode 27 beta installed, so `remote_run` pins `SDKROOT` explicitly before the toolchain probe; if mule runs start reporting "environment not usable", that pin is the first thing to check.
 
 ## Critical workflow rules
 
-- **`main` is merge-only.** Never `git commit` on `main`. Work in a worktree branch; reach `main` via merge only. Guard 1 enforces this.
+- **`main` accepts nothing but the merge queue.** Never commit or merge into `main` locally (Guard 1 refuses a commit there) and never push to it; GitHub's ruleset refuses anything that does not come through the queue. Work in a worktree branch. Local `main` is a fast-forward mirror of `origin/main`, kept by `scripts/sync-main.sh` on a 2-minute launchd timer (`bash scripts/test-sync-main.sh` self-tests it); never commit on it (Guard 1 still refuses), and cut worktrees from `origin/main` after `git fetch`.
 - **Work in worktrees, not the `main` checkout.** Worktrees live in `.claude/worktrees/<slug>/`. Never edit files in the `main` checkout.
 - **Every worktree branch must have a GitHub counterpart.** When creating a worktree, immediately push the branch to origin:
   ```bash
-  git worktree add .claude/worktrees/<slug> -b claude/<slug>
+  git fetch origin
+  git worktree add .claude/worktrees/<slug> -b claude/<slug> origin/main
   cd .claude/worktrees/<slug>
   git push -u origin claude/<slug>
   ```
-  Commits on the branch are pushed to `origin/<branch>` as work progresses. The branch merges into `main` BOTH as a local `git merge` AND as a GitHub PR — so origin/main and local main stay in sync.
+  Commits on the branch are pushed to `origin/<branch>` as work progresses. When the task is done, end with:
+  ```bash
+  git push -u origin HEAD
+  gh pr create --fill
+  bash scripts/review-branch.sh   # run the passes it prints as subagents, then: bash scripts/review-branch.sh --continue
+  ```
+  **Then stop and ask the owner before merging.** Only after a clear yes, run `gh pr merge --merge --auto`, which queues the PR to land on its own once both checks are green. Never queue a merge unasked; the merge-approval hook asks on `gh pr merge` and on the app's auto-merge switch either way. The two required checks are `tests` (the full suite on GitHub) and `review` (the commit status `--continue` posts, with one PR comment listing the findings). The reviewers run as subagents of your session because headless `claude -p` is refused on this account. Only a HIGH finding fails `review`: fix it, commit, push, and run the script again, which reviews only the fix; a third run refuses. A status belongs to one commit, so run the script after every push: when the push left the branch's own non-Markdown lines unchanged (main merged in, a docs-only commit) it re-posts the last round's status on the new HEAD without using a round; otherwise it is the next round. A PR whose two rounds are used up and whose head then changes needs either a `review` status posted by the owner or the ruleset's owner bypass; that is the intended point where the owner decides.
 - **If you find uncommitted edits in the `main` checkout: stop and ask.** Never stash, reset, or discard them — they belong to another session.
 - **Finished with a worktree (branch merged + live-verified, or abandoned-but-pushed)?** `touch .claude/worktrees/<slug>/.prunable` — `scripts/housekeeping.sh` removes it safely at the next build, and also collects stale build caches — every `.build` in the tree plus Xcode's `iOS DeviceSupport` and `DerivedData` (see AGENTS.md).
 
@@ -177,8 +197,9 @@ Feature usage is tracked through `AudioutCore/Sources/AudioutCore/Analytics.swif
 - **The full event list lives in `audiout-shared`.** `docs/analytics-events.md` in that repository is the one table of every event both this app and the iPhone app send, with properties and allowed values. Add a new event there before sending it from here.
 - **Don't silently break tracking.** When you move, refactor, or delete code containing an `Analytics.capture` call, the call moves with the behavior — same event name, same properties, still success-gated (fire only after the action actually happened, never before its guard). If a feature is removed outright, say so in the task report so the event's dashboard owner knows the stream ends.
 - **New user-facing features get instrumented.** Any new user action (button, toggle, gesture, funnel step) gets an `Analytics.capture` at its choke point, named `category:object_action` in snake_case (e.g. `scene:created`, `bt_sync:wizard_finished`). Grep `Analytics.capture` for the live event list and match its style.
-- **Privacy fence (PRODUCT.md "Data Collection"):** properties never carry speaker/device names, bundle IDs, network identifiers, audio content, license keys, or free-text user input. Counts, enum-like strings, and booleans only.
+- **Privacy fence (PRODUCT.md "Data Collection"):** properties never carry speaker/device names, bundle IDs, network identifiers, audio content, license keys, or free-text user input. The single exception is the expired-trial survey's optional text answer (`survey sent`, property `$survey_response_<question id>` of its open question), owner-approved 2026-10-18, sent only with consent and never joined to a name or key. Counts, enum-like strings, and booleans only.
 - **A failure the user felt goes through `Telemetry.fail(category, event, local:, shared:)`**, never `Telemetry.log` plus `Analytics.captureError` as two calls. It writes the local decision-log line at `level:error` and forwards only `shared` to PostHog error tracking; `local` holds what may not leave the Mac (device ids, error descriptions). Its `event` is the PostHog exception type, so it follows the same `category:object_action` naming and the same external-contract rule. Grep `Telemetry.fail` alongside `Analytics.capture` for the live list.
+- **Internal machines mark themselves.** If `~/Library/Application Support/Audiout/internal` exists, every build on that Mac stamps `internal: true` on its events; PostHog's test-account filter excludes those plus any bundle id other than `com.audiout.Audiout`. Touch that file on any Mac whose production copy must not count as a real user.
 - Consent is on by default from first launch through the trial, and the Settings switch turns it off for good once flipped. A paid user is asked once — the onboarding card for a direct buy, a one-time popover when a trial converts. `Analytics.capture` is always safe to call (no-op without sink + consent) — never wrap it in your own consent checks, and never call `PostHogSDK` directly outside `AppDelegate`.
 
 ## Paddle integration
@@ -210,4 +231,4 @@ Default vocabulary, recorded as a `Status:` line in each ticket file. See `docs/
 
 ### Domain docs
 
-Single-context: `CONTEXT.md` at the root (not yet written) plus `docs/adr/`. See `docs/agents/domain.md`.
+Single-context: `CONTEXT.md` at the root plus `docs/adr/`. See `docs/agents/domain.md`.

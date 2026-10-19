@@ -25,6 +25,8 @@ import AudioutProtocol
 @MainActor
 @Suite(.serialized) struct PopoverControllerTests {
 
+    private let isolation = TestIsolation(owner: "PopoverControllerTests")
+
     private func makePopover(
         appRouting: AppRoutingController? = nil,
         runningAppsProvider: (() -> [RunningAppInfo])? = nil
@@ -35,6 +37,7 @@ import AudioutProtocol
         let controller = GroupController(backend: backend,
                                          store: GroupStore(directory: tempDirectory()),
                                          routingStore: RoutingStore(directory: tempDirectory()),
+                                         settings: AppSettings(defaults: isolation.makeDefaults()),
                                          loadPersisted: false)
         let popover: PopoverController
         switch (appRouting, runningAppsProvider) {
@@ -43,9 +46,9 @@ import AudioutProtocol
         case let (appRouting?, nil):
             popover = PopoverController(appRouting: appRouting)
         case let (nil, provider?):
-            popover = PopoverController(runningAppsProvider: provider)
+            popover = PopoverController(appRouting: tempAppRoutingController(), runningAppsProvider: provider)
         case (nil, nil):
-            popover = PopoverController()
+            popover = PopoverController(appRouting: tempAppRoutingController())
         }
         popover.configure(groupController: controller)
         controller.ensureDefaultSelection()
@@ -75,7 +78,7 @@ import AudioutProtocol
     }
 
     private func tempDirectory() -> URL {
-        let dir = FileManager.default.temporaryDirectory
+        let dir = isolation.scratchDir
             .appendingPathComponent("PopoverControllerTests-\(UUID().uuidString)", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
@@ -120,8 +123,9 @@ import AudioutProtocol
         try await waitForFleet(backend, count: 7)
         let controller = GroupController(backend: backend, store: store,
                                          routingStore: RoutingStore(directory: tempDirectory()),
+                                         settings: AppSettings(defaults: isolation.makeDefaults()),
                                          loadPersisted: true)
-        let popover = PopoverController()
+        let popover = PopoverController(appRouting: tempAppRoutingController())
         popover.configure(groupController: controller)
         controller.ensureDefaultSelection()
         popover.test_isShownOverride = true
@@ -316,7 +320,7 @@ import AudioutProtocol
         let dispatcher = CompanionCommandDispatcher(
             groupController: controller,
             appRouting: tempAppRoutingController(),
-            settings: AppSettings(),
+            settings: AppSettings(defaults: isolation.makeDefaults()),
             isExcluded: { _ in false },
             setLocalPlaybackVolume: { _, _ in },
             applyStartBuffer: { _ in })
@@ -450,19 +454,19 @@ import AudioutProtocol
         _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
         let row = try #require(popover.test_deviceRow(for: "office"))
         #expect(row.isSelectedInSet, "selected after ON")
-        #expect(row.test_isShowingLiveWash == row.test_routeArmed, "the wash follows the armed predicate, not selection")
+        #expect(row.test_rowWash == nil, "a sounding row paints no wash")
         #expect(row.test_isEnabledOn, "switch is ON")
         // The icon is neutral in BOTH states now (2026-07-17 redesign): identity
         // only, no accent-when-selected fill. Selection reads from the switch.
-        #expect(row.test_iconTint == Tokens.Color.secondaryLabel, "icon is always neutral")
+        #expect(row.test_iconTint == Tokens.Color.label2, "icon is always neutral")
 
         // Toggle it OFF — the row must return to the unselected appearance.
         _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: false)
         #expect(!(row.isSelectedInSet), "not selected after OFF")
-        #expect(!(row.test_isShowingLiveWash), "a deselected row is not armed, so no wash")
+        #expect(row.test_rowWash == nil, "a deselected row paints no wash")
         #expect(!(row.test_isHovered), "no stale hover wash after deselect")
         #expect(!(row.test_isEnabledOn), "switch returned to OFF")
-        #expect(row.test_iconTint == Tokens.Color.secondaryLabel, "icon tint stays neutral (always secondary)")
+        #expect(row.test_iconTint == Tokens.Color.label2, "icon tint stays neutral (always secondary)")
     }
 
     /// T-U9a — the last-row sticky-highlight bug. A row hovered by the pointer
@@ -549,8 +553,9 @@ import AudioutProtocol
         let controller = GroupController(backend: backend,
                                          store: GroupStore(directory: tempDirectory()),
                                          routingStore: RoutingStore(directory: tempDirectory()),
+                                         settings: AppSettings(defaults: isolation.makeDefaults()),
                                          loadPersisted: false)
-        let popover = PopoverController()
+        let popover = PopoverController(appRouting: tempAppRoutingController())
         popover.configure(groupController: controller)
         controller.ensureDefaultSelection()
         // A closed popover no longer rebuilds on `update(devices:)` (audit B8);
@@ -717,6 +722,328 @@ import AudioutProtocol
         #expect(popover.test_deviceRow(for: "office") == nil, "row gone with the device")
     }
 
+    // MARK: AirPlay password sheet
+
+    /// `devices` with `office` rewritten by `change`, pushed to the popover
+    /// directly so the connection edges are exact and need no backend timing.
+    private func pushOffice(_ popover: PopoverController, _ backend: MockBackend,
+                            _ change: (inout Device) -> Void) {
+        var devices = backend.devices
+        for i in devices.indices where devices[i].id == "office" { change(&devices[i]) }
+        popover.update(devices: devices)
+    }
+
+    // Dropping the `onEnterPassword` wiring in `mountDiagnosisPanel` turns it red.
+    @Test func passwordPanelButtonOpensTheSheet() async throws {
+        let (popover, _, backend) = try await makePopover()
+        _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
+        pushOffice(popover, backend) { $0.connectionState = .failed(ConnectionFailure(cause: .authRequired)) }
+        let panel = try #require(popover.test_diagnosisPanel(for: "office"))
+        #expect(popover.test_passwordSheet() == nil)
+
+        panel.test_tapRetry()
+        #expect(popover.test_passwordSheet() != nil)
+    }
+
+    // Removing the access check at the end of `deviceRow(_:didToggleEnabled:for:)` turns it red.
+    @Test func joiningAPasswordSpeakerWithNoStoredPasswordOpensTheSheet() async throws {
+        let (popover, _, backend) = try await makePopover()
+        pushOffice(popover, backend) { $0.airPlayAccess = .password }
+        let row = try #require(popover.test_deviceRow(for: "office"))
+        popover.deviceRow(row, didToggleEnabled: true, for: "office")
+        #expect(popover.test_passwordSheet() != nil)
+    }
+
+    /// A protected `office` the user just joined, with the password sheet up.
+    private func popoverWithPasswordSheet() async throws
+        -> (PopoverController, MockBackend, SpeakerPasswordSheetViewController) {
+        let (popover, _, backend) = try await makePopover()
+        pushOffice(popover, backend) {
+            $0.airPlayAccess = .password
+            $0.connectionState = .connecting
+        }
+        let row = try #require(popover.test_deviceRow(for: "office"))
+        popover.deviceRow(row, didToggleEnabled: true, for: "office")
+        return (popover, backend, try #require(popover.test_passwordSheet()))
+    }
+
+    // Dropping the `.connected` dismissal in `handleConnectionTransitions` turns it red.
+    @Test func passwordSheetDismissesWhenTheSpeakerConnects() async throws {
+        let (popover, backend, sheet) = try await popoverWithPasswordSheet()
+        sheet.test_setPasswordText("secret")
+        sheet.test_tapConnect()
+        pushOffice(popover, backend) {
+            $0.airPlayAccess = .password
+            $0.connectionState = .connected
+        }
+        #expect(popover.test_passwordSheet() == nil)
+    }
+
+    // Dropping the `showResult` call on the `.failed` edge in `handleConnectionTransitions` turns it red.
+    @Test func passwordSheetShowsRejectionAfterSubmitFailsOnAuth() async throws {
+        let (popover, backend, sheet) = try await popoverWithPasswordSheet()
+        sheet.test_setPasswordText("wrong")
+        sheet.test_tapConnect()
+        pushOffice(popover, backend) {
+            $0.airPlayAccess = .password
+            $0.connectionState = .failed(ConnectionFailure(cause: .authRequired))
+        }
+        #expect(sheet.test_resultText == "That password didn't work. Check it and try again.")
+        #expect(popover.test_diagnosisPanel(for: "office") == nil)
+        #expect(sheet.test_connectButton.isEnabled)
+        #expect(popover.test_passwordSheet() != nil)
+    }
+
+    // Turns red if the `.failed` edge in `handleConnectionTransitions` shows the password line or the headline for a refused code.
+    @Test func codeSheetShowsTheCodeRejectionAfterSubmitFails() async throws {
+        let (popover, _, backend) = try await makePopover()
+        pushOffice(popover, backend) {
+            $0.airPlayAccess = .onScreenCode
+            $0.connectionState = .awaitingPassword
+        }
+        let row = try #require(popover.test_deviceRow(for: "office"))
+        row.test_clickEnterPassword()
+        let sheet = try #require(popover.test_passwordSheet())
+        sheet.test_typeIntoBox(0, "1234")
+        pushOffice(popover, backend) {
+            $0.airPlayAccess = .onScreenCode
+            $0.connectionState = .failed(ConnectionFailure(cause: .codeRequired))
+        }
+        #expect(sheet.test_resultText == "That code didn't work. Check the screen and try again.")
+        #expect(popover.test_passwordSheet() === sheet)
+    }
+
+    /// The heading text of `sheet`, read off its labels.
+    private func headings(of sheet: SpeakerPasswordSheetViewController) -> [String] {
+        SpeakerPasswordSheetTests.textFields(in: sheet.view).map(\.stringValue)
+    }
+
+    // Turns red if the clicked-join record is not consumed by the first `.awaitingPassword` edge, or if the toggle opens the sheet before the wait.
+    @Test func joiningACodeSpeakerOpensTheCodeSheetWhenTheJoinStartsWaiting() async throws {
+        let (popover, _, backend) = try await makePopover()
+        pushOffice(popover, backend) {
+            $0.airPlayAccess = .onScreenCode
+            $0.connectionState = .off
+        }
+        let row = try #require(popover.test_deviceRow(for: "office"))
+        popover.deviceRow(row, didToggleEnabled: true, for: "office")
+        #expect(popover.test_passwordSheet() == nil)
+
+        pushOffice(popover, backend) {
+            $0.airPlayAccess = .onScreenCode
+            $0.connectionState = .connecting
+        }
+        #expect(popover.test_passwordSheet() == nil)
+
+        pushOffice(popover, backend) {
+            $0.airPlayAccess = .onScreenCode
+            $0.connectionState = .awaitingPassword
+        }
+        let sheet = try #require(popover.test_passwordSheet())
+        #expect(headings(of: sheet).contains("Enter the code shown on “\(row.device.name)”"))
+
+        pushOffice(popover, backend) {
+            $0.airPlayAccess = .onScreenCode
+            $0.connectionState = .awaitingPassword
+        }
+        #expect(popover.test_passwordSheet() === sheet)
+    }
+
+    // Turns red if the `.awaitingPassword` arm opens the code sheet while the popover is hidden, where the retained sheet cannot present and blocks every later link click.
+    @Test func aCodeWaitWhileThePopoverIsHiddenOpensNoSheetAndTheLinkStillWorks() async throws {
+        let (popover, _, backend) = try await makePopover()
+        pushOffice(popover, backend) {
+            $0.airPlayAccess = .onScreenCode
+            $0.connectionState = .off
+        }
+        let row = try #require(popover.test_deviceRow(for: "office"))
+        popover.deviceRow(row, didToggleEnabled: true, for: "office")
+
+        popover.test_isShownOverride = false
+        pushOffice(popover, backend) {
+            $0.airPlayAccess = .onScreenCode
+            $0.connectionState = .awaitingPassword
+        }
+        #expect(popover.test_passwordSheet() == nil)
+
+        popover.test_isShownOverride = true
+        pushOffice(popover, backend) {
+            $0.airPlayAccess = .onScreenCode
+            $0.connectionState = .awaitingPassword
+        }
+        #expect(popover.test_passwordSheet() == nil, "the hidden wait spent the click")
+        try #require(popover.test_deviceRow(for: "office")).test_clickEnterPassword()
+        #expect(popover.test_passwordSheet() != nil)
+    }
+
+    // Turns red if the `.awaitingPassword` arm opens the sheet for a speaker missing from `codeJoinClickedIDs`.
+    @Test func aCodeWaitNobodyClickedHereOpensNoSheet() async throws {
+        let (popover, _, backend) = try await makePopover()
+        pushOffice(popover, backend) {
+            $0.airPlayAccess = .onScreenCode
+            $0.connectionState = .awaitingPassword
+        }
+        #expect(popover.test_passwordSheet() == nil)
+
+        let row = try #require(popover.test_deviceRow(for: "office"))
+        row.test_clickEnterPassword()
+        #expect(popover.test_passwordSheet() != nil)
+    }
+
+    // Turns red if `retryConnection(for:)` stops recording a code speaker's retry in `codeJoinClickedIDs`.
+    @Test func tryAgainOnARefusedCodeReopensTheSheetWhenTheJoinWaits() async throws {
+        let (popover, _, backend) = try await makePopover()
+        _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
+        pushOffice(popover, backend) {
+            $0.airPlayAccess = .onScreenCode
+            $0.connectionState = .failed(ConnectionFailure(cause: .codeRequired))
+        }
+        #expect(popover.test_diagnosisPanel(for: "office") != nil)
+        #expect(popover.test_passwordSheet() == nil)
+
+        popover.test_tapRetry(for: "office")
+        pushOffice(popover, backend) {
+            $0.airPlayAccess = .onScreenCode
+            $0.connectionState = .awaitingPassword
+        }
+        #expect(popover.test_passwordSheet() != nil)
+    }
+
+    // Turns red if `retryConnection(for:)` records a code speaker in `codeJoinClickedIDs` when the retry was refused.
+    @Test func aRefusedTryAgainDoesNotArmTheCodeSheet() async throws {
+        let (popover, controller, backend) = try await makePopover()
+        _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
+        pushOffice(popover, backend) {
+            $0.airPlayAccess = .onScreenCode
+            $0.connectionState = .failed(ConnectionFailure(cause: .codeRequired))
+        }
+        #expect(popover.test_diagnosisPanel(for: "office") != nil)
+        // Another speaker takes the one-speaker limit, so the retry's add is refused.
+        for id in controller.selectedDeviceIDs { _ = controller.setDeviceSelected(id, false) }
+        _ = controller.setDeviceSelected("homepod-bed", true)
+        controller.limitsToOneSpeaker = true
+
+        popover.test_tapRetry(for: "office")
+        #expect(!controller.isSpeakerSelected("office"), "the limit refused the retry")
+        pushOffice(popover, backend) {
+            $0.airPlayAccess = .onScreenCode
+            $0.connectionState = .awaitingPassword
+        }
+        #expect(popover.test_passwordSheet() == nil)
+    }
+
+    // Turns red if `dismissPasswordSheet` leaves the speaker in `codeJoinClickedIDs`, so a later wait reopens a cancelled sheet.
+    @Test func cancellingTheCodeSheetStopsItReopeningByItself() async throws {
+        let (popover, _, backend) = try await makePopover()
+        pushOffice(popover, backend) {
+            $0.airPlayAccess = .onScreenCode
+            $0.connectionState = .awaitingPassword
+        }
+        let row = try #require(popover.test_deviceRow(for: "office"))
+        // A click recorded while the speaker already waits, then the link opens the sheet: only Cancel can drop the record.
+        popover.deviceRow(row, didToggleEnabled: true, for: "office")
+        try #require(popover.test_deviceRow(for: "office")).test_clickEnterPassword()
+        try #require(popover.test_passwordSheet()).test_tapCancel()
+        #expect(popover.test_passwordSheet() == nil)
+
+        pushOffice(popover, backend) {
+            $0.airPlayAccess = .onScreenCode
+            $0.connectionState = .connecting
+        }
+        pushOffice(popover, backend) {
+            $0.airPlayAccess = .onScreenCode
+            $0.connectionState = .awaitingPassword
+        }
+        #expect(popover.test_passwordSheet() == nil)
+    }
+
+    // Dropping the `passwordSheetDeviceID` check around the panel open on the `.failed` edge in `handleConnectionTransitions` turns it red.
+    @Test func passwordSheetHoldsTheDiagnosisPanelUntilCancel() async throws {
+        let (popover, backend, sheet) = try await popoverWithPasswordSheet()
+        pushOffice(popover, backend) {
+            $0.airPlayAccess = .password
+            $0.connectionState = .failed(ConnectionFailure(cause: .authRequired))
+        }
+        #expect(popover.test_diagnosisPanel(for: "office") == nil)
+
+        sheet.test_tapCancel()
+        #expect(popover.test_passwordSheet() == nil)
+        #expect(popover.test_diagnosisPanel(for: "office") != nil)
+    }
+
+    // Turns red if the row stops offering its "Enter Password…" link for `.awaitingPassword` or if `deviceRowDidRequestPasswordEntry` stops opening the sheet.
+    @Test func passwordWaitDrawsTheRowAsConnectingWithItsEnterPasswordLink() async throws {
+        let (popover, backend, sheet) = try await popoverWithPasswordSheet()
+        sheet.test_tapCancel()
+        pushOffice(popover, backend) {
+            $0.airPlayAccess = .password
+            $0.connectionState = .awaitingPassword
+        }
+        let row = try #require(popover.test_deviceRow(for: "office"))
+        #expect(row.test_statusKind == .connecting)
+        #expect(row.test_ringForm == .connecting)
+        #expect(row.test_enterPasswordOffered)
+        #expect(popover.test_diagnosisPanel(for: "office") == nil)
+        #expect(popover.test_passwordSheet() == nil)
+
+        row.test_clickEnterPassword()
+        let reopened = try #require(popover.test_passwordSheet())
+
+        reopened.test_tapCancel()
+        pushOffice(popover, backend) {
+            $0.airPlayAccess = .password
+            $0.connectionState = .failed(ConnectionFailure(cause: .authRequired))
+        }
+        #expect(popover.test_diagnosisPanel(for: "office") != nil)
+        let refusedRow = try #require(popover.test_deviceRow(for: "office"))
+        #expect(!refusedRow.test_enterPasswordOffered)
+    }
+
+    // Dropping the password-wait branch from the row's name click turns it red, and so does putting that branch back on the checkbox action.
+    @Test func clickingTheNameOfAWaitingRowOpensTheSheetAndTheCheckboxRemovesIt() async throws {
+        let (popover, controller, backend) = try await makePopover()
+        pushOffice(popover, backend) {
+            $0.airPlayAccess = .password
+            $0.connectionState = .connecting
+        }
+        let joinRow = try #require(popover.test_deviceRow(for: "office"))
+        popover.deviceRow(joinRow, didToggleEnabled: true, for: "office")
+        try #require(popover.test_passwordSheet()).test_tapCancel()
+        pushOffice(popover, backend) {
+            $0.airPlayAccess = .password
+            $0.connectionState = .awaitingPassword
+        }
+        let row = try #require(popover.test_deviceRow(for: "office"))
+
+        row.test_clickName()
+        #expect(popover.test_passwordSheet() != nil)
+        #expect(controller.isSpeakerSelected("office"))
+
+        try #require(popover.test_passwordSheet()).test_tapCancel()
+        row.test_fireCheckboxAction(settingStateTo: false)
+        #expect(popover.test_passwordSheet() == nil)
+        #expect(!controller.isSpeakerSelected("office"))
+    }
+
+    /// Turns red if entering a password for a speaker only an app route
+    /// targets pulls it into Selected Devices.
+    @Test func passwordSheetForAnUnselectedSpeakerNeverSelectsIt() async throws {
+        let appRouting = tempAppRoutingController()
+        seedRoute(appRouting, bundleID: "com.example.music", displayName: "Music",
+                  destination: .device(id: "office"))
+        let (popover, controller, backend) = try await makePopover(appRouting: appRouting)
+        pushOffice(popover, backend) {
+            $0.airPlayAccess = .password
+            $0.connectionState = .failed(ConnectionFailure(cause: .authRequired))
+        }
+        try #require(popover.test_diagnosisPanel(for: "office")).test_tapRetry()
+        let sheet = try #require(popover.test_passwordSheet())
+        sheet.test_setPasswordText("secret")
+        sheet.test_tapConnect()
+        #expect(!controller.isSpeakerSelected("office"))
+        #expect(popover.test_passwordSheet() != nil)
+    }
+
     /// C1 regression: the auto-expanded panel must actually be attached in the
     /// live view tree, directly under its failed device's row — not merely
     /// recorded in `diagnosisPanelsByID`. `test_diagnosisPanel(for:)` alone can't
@@ -763,7 +1090,10 @@ import AudioutProtocol
         try await waitForConnectionState(backend, id: "office") { $0 == .connected }
         popover.update(devices: backend.devices)
         #expect(popover.test_diagnosisPanel(for: "office") == nil)
-        try await Task.sleep(nanoseconds: 400_000_000)
+        await SuiteWait.until("the panel view to leave the view tree") { panel.superview == nil }
+        // The view leaves the tree before its slide-out fold finishes; settle the
+        // animator so no tick outlives this test and touches layout under the next.
+        FoldAnimator.shared.test_settleNow()
         #expect(panel.superview == nil, "the panel view is detached from the tree on removal, not just forgotten")
     }
 
@@ -881,19 +1211,19 @@ import AudioutProtocol
     }
 
     /// Muting does not un-select anything, so the rail (and the ring) stay —
-    /// what changes is the TONE: both drop from gold to the idle ember.
-    @Test func mutingTheLocalOnlyTargetKeepsTheRingAndDropsItToTheIdleTone() async throws {
+    /// and stay gold: the line has no idle tone (owner's ruling, 2026-10-04).
+    @Test func mutingTheLocalOnlyTargetKeepsTheRingGold() async throws {
         let (popover, controller, backend) = try await makePopover()
         controller.setMainOutMuted(true)
         popover.update(devices: backend.devices)
         #expect(popover.test_mainOutRow.test_ringForm == .resting,
                 "a muted room is still selected — the wire is still drawn, so the ring is too")
         let ink = popover.test_mainOutRow.test_ringStrokeColor?.usingColorSpace(.sRGB)
-        let idle = Tokens.Color.spineTone(armed: false).usingColorSpace(.sRGB)
-        #expect(abs((ink?.redComponent ?? -1) - (idle?.redComponent ?? 0)) <= 0.02
-                && abs((ink?.greenComponent ?? -1) - (idle?.greenComponent ?? 0)) <= 0.02
-                && abs((ink?.blueComponent ?? -1) - (idle?.blueComponent ?? 0)) <= 0.02,
-                "muted ⇒ the idle spine tone on the ring, matching the wire")
+        let gold = Tokens.Color.gold.usingColorSpace(.sRGB)
+        #expect(abs((ink?.redComponent ?? -1) - (gold?.redComponent ?? 0)) <= 0.02
+                && abs((ink?.greenComponent ?? -1) - (gold?.greenComponent ?? 0)) <= 0.02
+                && abs((ink?.blueComponent ?? -1) - (gold?.blueComponent ?? 0)) <= 0.02,
+                "muted ⇒ the ring is still gold, matching the wire")
     }
 
     /// A FAILED room is not reached by the wire, so a mix of nothing but failed
@@ -2587,6 +2917,43 @@ import AudioutProtocol
     // goes back to empty (see `DeviceRowView.apply`'s `liveAppNames` doc for the
     // full precedence rule this exercises end-to-end).
 
+    /// Turns red if the Mac's row stops treating a "This Mac" pick as a live
+    /// routed app: with the Mac outside the main mix it would go back to no
+    /// ring, a dark dot, a locked slider and an empty Source column.
+    @Test func aThisMacPickLightsTheMacRowLikeAnyRoutedSpeaker() async throws {
+        let appRouting = tempAppRoutingController()
+        seedRoute(appRouting, bundleID: "com.example.music", displayName: "Music",
+                  destination: .currentDevice)
+        let (popover, controller, backend) = try await makePopover(appRouting: appRouting,
+                                                                    runningAppsProvider: routedApps)
+        _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)   // drops the Mac
+        #expect(!controller.isMainOutMember("local-mac"))
+        popover.update(devices: backend.devices)
+
+        let row = try #require(popover.test_deviceRow(for: "local-mac"))
+        #expect(row.test_feedText == "Music")
+        #expect(row.test_ringForm == .connected)
+        #expect(row.test_routeArmed)
+        #expect(row.test_isSliderEnabled)
+        #expect(popover.test_isCardHeaderLive(title: PopoverController.outputDevicesCardTitle) == true,
+                "the Devices card header agrees with the row it summarises")
+    }
+
+    /// Turns red if the Mac row stops drawing as connected while it is the
+    /// default main-mix member: the rail node fills but the ring and status
+    /// dot stay off, unlike any other speaker in the mix.
+    @Test func theDefaultMacOnlyMixDrawsTheMacRowConnected() async throws {
+        let (popover, controller, backend) = try await makePopover()
+        #expect(controller.isMainOutMember("local-mac"))
+        popover.update(devices: backend.devices)
+
+        let row = try #require(popover.test_deviceRow(for: "local-mac"))
+        #expect(row.test_ringForm == .connected)
+        #expect(row.test_dotIsShown)
+        #expect(popover.test_isCardHeaderLive(title: PopoverController.outputDevicesCardTitle) == true,
+                "the Devices card header agrees with the Mac row it summarises")
+    }
+
     /// A non-empty `.routedApps` event overrides the intent-based label with
     /// the confirmed live set.
     @Test func applyRoutedAppsOverridesIntentLabelWhenNonEmpty() async throws {
@@ -2863,7 +3230,7 @@ import AudioutProtocol
             }
             return nil
         }
-        let banner = try #require(firstDescendant(SilenceFallbackBannerView.self, in: root),
+        let banner = try #require(firstDescendant(SystemAirPlayNoteBannerView.self, in: root),
                                   "the fallback banner is mounted")
         let anyRow = try #require(popover.test_deviceRow(for: "office"))
 
@@ -2972,7 +3339,9 @@ import AudioutProtocol
         #expect(popover.test_diagnosisPanel(for: "office") == nil,
                 "the panel must not outlive the selection that justified it")
         // The VIEW has to leave the tree too, not just the dictionary entry.
-        try await Task.sleep(nanoseconds: 400_000_000)
+        await SuiteWait.until("the panel view to leave the row's stack") { mounted.superview == nil }
+        // Same reason as the retry test above: the fold outlives the detach.
+        FoldAnimator.shared.test_settleNow()
         #expect(mounted.superview == nil, "the panel view detached from the row's stack")
     }
 
@@ -3001,7 +3370,10 @@ import AudioutProtocol
             popover.update(devices: backend.devices)
             _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: false)
             popover.update(devices: backend.devices)
-            try await Task.sleep(nanoseconds: 350_000_000)   // let the animated detach land
+            await SuiteWait.until("the animated detach to return the card to its baseline") {
+                mountedRowCount() == baselineRows
+                    && popover.test_panelFittingSize.height == baselineHeight
+            }
         }
 
         #expect(mountedRowCount() == baselineRows,
@@ -3036,7 +3408,9 @@ import AudioutProtocol
         // The ✕ path: a removal whose detach is deferred into an animation
         // completion. The size must be republished AFTER the row actually leaves.
         try #require(popover.test_diagnosisPanel(for: "office")).test_tapDismiss()
-        try await Task.sleep(nanoseconds: 400_000_000)
+        await SuiteWait.until("the published height to follow the detached row") {
+            popover.test_preferredContentSize.height == popover.test_panelFittingSize.height
+        }
         #expect(popover.test_preferredContentSize.height == popover.test_panelFittingSize.height,
                 "published height == content height once the row has detached")
     }
@@ -3153,37 +3527,44 @@ import AudioutProtocol
         #expect(popover.test_diagnosisPanel(for: "office") != nil, "the retry failing again re-surfaces the panel")
     }
 
-    // MARK: F1 — Devices "+" footer strip (a menu since BT-UI)
+    // MARK: Speaker management actions
 
-    /// The "+" lives in the card's BOTTOM footer strip, not the header row
-    /// (2026-08-08): no header accessory exists, and the strip is the last row
-    /// of the card — below every subsection.
-    @Test func devicesPlusIsTheCardsLastRowNotAHeaderAccessory() async throws {
-        let (popover, _, _) = try await makePopover()
-        #expect(popover.test_cardAccessoryEnabled(title: "Output Speakers") == nil,
-                "the header row carries no accessory any more")
-        #expect(popover.test_devicesFooterIsLastCardRow,
-                "the + strip is the last row of the Output Devices card")
-        popover.test_tapDevicesFooterAdd()   // headless: the popUp itself is gated
+    // Header collapse must not intercept the native Manage action.
+    @Test func manageSpeakersDispatchesFromTheHeaderWithoutCollapsing() async throws {
+        let (popover, controller, _) = try await makePopover()
+        let button = try #require(popover.test_manageSpeakersButton)
+        #expect(button.title == "Manage speakers…")
+        #expect(button.accessibilityLabel() == button.title)
+        var opened = 0
+        popover.onManageSpeakers = { opened += 1 }
+        let selection = controller.selectedDeviceIDs
+        let collapsed = popover.test_isCardCollapsed(title: "Output Speakers")
+        popover.test_tapManageSpeakers()
+        #expect(opened == 1)
+        #expect(popover.test_isCardCollapsed(title: "Output Speakers") == collapsed)
+        #expect(controller.selectedDeviceIDs == selection)
+        #expect(popover.test_pairBluetoothIsLastCardRow)
     }
 
-    /// The Devices card's "+" fronts a MENU: its save item creates a group
-    /// through real `NSMenu` dispatch, never collapses the card, and the item's
-    /// enabled state tracks `canSaveCurrentSetup` (the "+" itself never
-    /// disables, so "Pair a Bluetooth speaker…" is always reachable).
-    @Test func devicesSaveGroupAccessoryCreatesGroupWithoutCollapsing() async throws {
+    private func saveSceneMenu(_ popover: PopoverController) throws -> NSMenu {
+        popover.refreshMainOutRow()
+        return try #require(popover.test_mainOutRow.test_menuItem(titled: "Save selected speakers as scene")?.menu)
+    }
+
+    // The Main Audio Save action must create a scene and disable after saving it.
+    @Test func mainAudioSaveCreatesSceneWithoutCollapsing() async throws {
         let (popover, controller, _) = try await makePopover()
         _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
-        var menu = popover.test_outputDevicesPlusMenu()
-        #expect(menu.items.first?.isEnabled == true, "a non-empty, not-yet-saved selection ⇒ save item enabled")
+        var menu = try saveSceneMenu(popover)
+        var index = try #require(menu.items.firstIndex { $0.title == "Save selected speakers as scene" })
+        #expect(menu.items[index].isEnabled)
         let wasCollapsed = popover.test_isCardCollapsed(title: "Output Speakers")
-
-        menu.performActionForItem(at: 0)   // real AppKit menu dispatch
-        #expect(controller.groups.count == 1, "the save item created a group")
-        #expect(popover.test_isCardCollapsed(title: "Output Speakers") == wasCollapsed, "the menu action did NOT collapse the card")
-        // The just-saved selection now equals a group ⇒ the save ITEM disables.
-        menu = popover.test_outputDevicesPlusMenu()
-        #expect(menu.items.first?.isEnabled == false, "selection already saved as a group ⇒ save item disables")
+        menu.performActionForItem(at: index)
+        #expect(controller.groups.count == 1)
+        #expect(popover.test_isCardCollapsed(title: "Output Speakers") == wasCollapsed)
+        menu = try saveSceneMenu(popover)
+        index = try #require(menu.items.firstIndex { $0.title == "Save selected speakers as scene" })
+        #expect(!menu.items[index].isEnabled)
     }
 
     // MARK: V14 — keyboard selection movement (host half)
@@ -3294,11 +3675,11 @@ import AudioutProtocol
         #expect(popover.test_mainOutRow.test_ringForm == .resting,
                 "…so the ring the wire curves into is drawn")
         let ink = popover.test_mainOutRow.test_ringStrokeColor?.usingColorSpace(.sRGB)
-        let gold = Tokens.Color.spineTone(armed: true).usingColorSpace(.sRGB)
+        let gold = Tokens.Color.spineTone.usingColorSpace(.sRGB)
         #expect(abs((ink?.redComponent ?? -1) - (gold?.redComponent ?? 0)) <= 0.02
                 && abs((ink?.greenComponent ?? -1) - (gold?.greenComponent ?? 0)) <= 0.02
                 && abs((ink?.blueComponent ?? -1) - (gold?.blueComponent ?? 0)) <= 0.02,
-                "the Mac is audibly playing, so the ring wears the armed spine tone")
+                "the ring wears the spine tone")
 
         popover.setLocalFallbackActive(false)
         popover.test_applyExactFitSize()
@@ -3359,6 +3740,22 @@ import AudioutProtocol
         #expect(!popover.test_structuralRebuildDeferred, "and the debt cleared")
     }
 
+    // Turns red when `refreshSpeakerPresentation()` rebuilds under a live slider drag instead of recording the rebuild as owed.
+    @Test func aSpeakerPresentationRefreshWaitsOutASliderDrag() async throws {
+        let (popover, _, backend) = try await makePopover()
+        let before = popover.test_rebuildCount
+
+        popover.test_setLiveSliderDrag(true)
+        popover.refreshSpeakerPresentation()
+        #expect(popover.test_rebuildCount == before, "no rebuild may run under the user's finger")
+        #expect(popover.test_structuralRebuildDeferred, "the rebuild is owed")
+
+        popover.test_setLiveSliderDrag(false)
+        popover.update(devices: backend.devices)
+        #expect(popover.test_rebuildCount > before, "the next update pays the debt")
+        #expect(!popover.test_structuralRebuildDeferred)
+    }
+
     // MARK: "Save Selected Speakers as group" reports its failures (hardening 11)
 
     /// The success path stays exactly as it was, and reports no failure.
@@ -3367,9 +3764,9 @@ import AudioutProtocol
         _ = controller.setDeviceSelected("office", true)
         #expect(!popover.test_saveGroupFailureReported, "nothing has failed yet")
 
-        let menu = popover.test_outputDevicesPlusMenu()
+        let menu = try saveSceneMenu(popover)
         let index = try #require(menu.items.firstIndex {
-            $0.title == "Save Selected Speakers as scene"
+            $0.title == "Save selected speakers as scene"
         })
         menu.performActionForItem(at: index)
 
@@ -3395,17 +3792,18 @@ import AudioutProtocol
         let controller = GroupController(backend: backend,
                                          store: GroupStore(directory: unwritable),
                                          routingStore: RoutingStore(directory: tempDirectory()),
+                                         settings: AppSettings(defaults: isolation.makeDefaults()),
                                          loadPersisted: false)
-        let popover = PopoverController()
+        let popover = PopoverController(appRouting: tempAppRoutingController())
         popover.configure(groupController: controller)
         controller.ensureDefaultSelection()
         popover.test_isShownOverride = true
         popover.update(devices: backend.devices)
         _ = controller.setDeviceSelected("office", true)
 
-        let menu = popover.test_outputDevicesPlusMenu()
+        let menu = try saveSceneMenu(popover)
         let index = try #require(menu.items.firstIndex {
-            $0.title == "Save Selected Speakers as scene"
+            $0.title == "Save selected speakers as scene"
         })
         menu.performActionForItem(at: index)
 
@@ -3423,8 +3821,9 @@ import AudioutProtocol
         let controller = GroupController(backend: backend,
                                          store: GroupStore(directory: tempDirectory()),
                                          routingStore: RoutingStore(directory: tempDirectory()),
+                                         settings: AppSettings(defaults: isolation.makeDefaults()),
                                          loadPersisted: false)
-        let popover = PopoverController()
+        let popover = PopoverController(appRouting: tempAppRoutingController())
         popover.configure(groupController: controller)
         popover.test_isShownOverride = true
         popover.update(devices: devices)
@@ -3443,8 +3842,8 @@ import AudioutProtocol
         let (popover, _) = makeFleetPopover([localMac()])
         popover.rebuildForOpen()
         #expect(popover.test_speakerSearchStateText == "Looking for speakers…")
-        #expect(popover.test_bluetoothConnectRowShown(),
-                "the Bluetooth affordance still stands beside it")
+        #expect(popover.test_pairBluetoothButton != nil,
+                "pairing remains available below the list")
         #expect(popover.test_subsectionTitles().contains("AirPlay Speakers"),
                 "the state line is grouped under the header that names it")
     }
@@ -3490,9 +3889,8 @@ import AudioutProtocol
         ])
         popover.rebuildForOpen()
         #expect(popover.test_speakerSearchStateText == nil)
-        #expect(popover.test_subsectionTitles()
-                == ["AirPlay Speakers", "Bluetooth Speakers"],
-                "no empty AirPlay header, no missing one (the Mac row is pinned above the subsections)")
+        #expect(popover.test_subsectionTitles() == ["AirPlay Speakers"],
+                "the available AirPlay row has its header; Bluetooth has no empty heading")
     }
 
     // MARK: System-AirPlay guard note (Wave 3 W3-T3)
@@ -3520,22 +3918,29 @@ import AudioutProtocol
         #expect(popover.test_systemAirPlayNoteText == nil, "the note clears once the guard ends")
     }
 
-    /// The unregistered-build note sits at the BOTTOM of the one note slot: it
-    /// is a standing condition, so anything actually happening right now takes
-    /// the slot away from it and hands it back afterwards. Its "Buy…" button is
-    /// the only remedy it can offer, and it routes out to the host.
-    @Test func unregisteredNoteShowsOffersBuyAndYieldsTheSlot() async throws {
+    /// The one-speaker note sits at the BOTTOM of the one note slot: it is a
+    /// standing condition, so anything actually happening right now takes the
+    /// slot away from it and hands it back afterwards. Red if "Buy Audiout" or
+    /// "I have a key" stopped routing out to the host, or the note stopped
+    /// yielding to the double-path note.
+    @Test func trialEndedNoteOffersBuyAndAKeyAndYieldsTheSlot() async throws {
         let (popover, _, _) = try await makePopover()
         var buyTaps = 0
+        var keyTaps = 0
         popover.onBuyAudiout = { buyTaps += 1 }
+        popover.onEnterLicenseKey = { keyTaps += 1 }
 
         #expect(popover.test_systemAirPlayNoteText == nil, "no note by default")
 
-        popover.setUnregisteredNoteActive(true)
-        #expect(popover.test_systemAirPlayNoteText == "Audiout is unregistered. Buying a license keeps it updated and funds the work of improving it.")
-        #expect(popover.test_systemAirPlayNoteHasActionButton, "the note offers Buy…")
+        popover.setUnregisteredNote(.trialEnded)
+        #expect(popover.test_systemAirPlayNoteText
+                == "Your trial has ended. Audiout plays on one speaker at a time until you buy.")
+        #expect(popover.test_systemAirPlayNoteHasActionButton, "the note offers Buy Audiout")
+        #expect(popover.test_systemAirPlayNoteHasTextAction, "the note offers I have a key")
         popover.test_tapSystemAirPlayNoteAction()
-        #expect(buyTaps == 1, "Buy… routes out to the host, which owns the URL")
+        #expect(buyTaps == 1, "Buy Audiout routes out to the host, which owns the URL")
+        popover.test_tapSystemAirPlayNoteTextAction()
+        #expect(keyTaps == 1, "I have a key routes out to the host, which opens the sheet")
 
         // Lowest precedence: the double-path guard takes the slot…
         popover.setSystemAirPlayNoteActive(true)
@@ -3544,10 +3949,149 @@ import AudioutProtocol
 
         // …and hands it straight back when it clears.
         popover.setSystemAirPlayNoteActive(false)
-        #expect(popover.test_systemAirPlayNoteText == "Audiout is unregistered. Buying a license keeps it updated and funds the work of improving it.")
+        #expect(popover.test_systemAirPlayNoteText == PopoverController.unregisteredTrialEndedNoteText)
 
-        popover.setUnregisteredNoteActive(false)
+        popover.setUnregisteredNote(nil)
         #expect(popover.test_systemAirPlayNoteText == nil, "the note clears once a key is in place")
+    }
+
+    /// Red if a refused key were told its trial ended, or the note stopped
+    /// naming the server's reason — a refunded buyer would read "revoked".
+    @Test(arguments: [
+        ("refund", "This key was refunded, so Audiout plays on one speaker at a time."),
+        ("chargeback", "This key\u{2019}s payment was reversed, so Audiout plays on one speaker at a time."),
+        ("manual", "This key was revoked, so Audiout plays on one speaker at a time."),
+        (nil, "This key was revoked, so Audiout plays on one speaker at a time."),
+    ] as [(String?, String)])
+    func keyRefusedNoteNamesTheReason(reason: String?, expected: String) async throws {
+        let (popover, _, _) = try await makePopover()
+        popover.setUnregisteredNote(.keyRefused(reason: reason))
+        #expect(popover.test_systemAirPlayNoteText == expected)
+        #expect(popover.test_systemAirPlayNoteHasTextAction)
+    }
+
+    /// Red if a limited install's note said something untrue about it: a
+    /// mistyped key read "revoked", a Mac with no key and no trial read "Your
+    /// trial has ended", or an ended trial (which the server answers with
+    /// `revoked`) read as a refused key. Driven from stored settings through
+    /// the same resolver the app uses.
+    @Test(arguments: [
+        ("no key, no trial", PopoverController.unregisteredNoKeyNoteText),
+        ("unknown key", PopoverController.unregisteredKeyUnrecognizedNoteText),
+        ("invalid key", PopoverController.unregisteredKeyUnrecognizedNoteText),
+        ("refunded key", "This key was refunded, so Audiout plays on one speaker at a time."),
+        ("ended trial", PopoverController.unregisteredTrialEndedNoteText),
+    ])
+    func eachLimitedStateGetsItsOwnNote(state: String, expected: String) async throws {
+        let settings = AppSettings(defaults: TestIsolation(owner: "PopoverControllerTests").makeDefaults(),
+                                   licenseServerURL: URL(string: "https://license.example.invalid")!)
+        switch state {
+        case "unknown key":
+            settings.licenseKey = "AUDT-AAAAA-BBBBB-CCCCC-DDDDD"
+            settings.licenseStatus = .unknown
+        case "invalid key":
+            settings.licenseKey = "nonsense"
+            settings.licenseStatus = .invalid
+        case "refunded key":
+            settings.licenseKey = "AUDT-AAAAA-BBBBB-CCCCC-DDDDD"
+            settings.licenseStatus = .revoked
+            settings.licenseReason = "refund"
+        case "ended trial":
+            settings.licenseKey = "AUDT-AAAAA-BBBBB-CCCCC-DDDDD"
+            settings.licenseStatus = .revoked
+            settings.licenseReason = "trial_expired"
+        default:
+            break
+        }
+        let (popover, _, _) = try await makePopover()
+        popover.setUnregisteredNote(.resolve(settings: settings))
+        #expect(popover.test_systemAirPlayNoteText == expected)
+    }
+
+    /// Leaves exactly "office" selected with the limit on and the trial-ended
+    /// note standing.
+    private func limitToOffice(_ popover: PopoverController, _ controller: GroupController) {
+        for id in controller.selectedDeviceIDs { _ = controller.setDeviceSelected(id, false) }
+        _ = controller.setDeviceSelected("office", true)
+        controller.limitsToOneSpeaker = true
+        popover.setUnregisteredNote(.trialEnded)
+        popover.rebuild()
+    }
+
+    /// Red if a second speaker refused by the limit said nothing (the click
+    /// would look broken) or offered no way to move the audio; and red if the
+    /// limit text outlived the open it was raised in.
+    @Test func aRefusedSecondSpeakerRaisesTheLimitNoteAndTheSwitchOffer() async throws {
+        let (popover, controller, _) = try await makePopover()
+        limitToOffice(popover, controller)
+        #expect(controller.selectedDeviceIDs == ["office"])
+
+        popover.test_deviceRow(for: "homepod-bed")?.test_fireCheckboxAction(settingStateTo: true)
+
+        #expect(!controller.isSpeakerSelected("homepod-bed"), "the limit refused the second speaker")
+        #expect(popover.test_systemAirPlayNoteText == PopoverController.oneSpeakerLimitNoteText)
+        #expect(popover.test_deviceRow(for: "homepod-bed")?.test_switchOfferOffered == true,
+                "the refused row offers Play here")
+
+        popover.test_simulateOpen()
+        #expect(popover.test_systemAirPlayNoteText == PopoverController.unregisteredTrialEndedNoteText,
+                "a new open goes back to the standing text")
+    }
+
+    /// Red if a refused second speaker were silent to VoiceOver: the click
+    /// changes nothing on screen a screen reader can find, so only the spoken
+    /// note explains it.
+    @Test func aRefusedSecondSpeakerAnnouncesTheNote() async throws {
+        let (popover, controller, _) = try await makePopover()
+        limitToOffice(popover, controller)
+
+        popover.test_deviceRow(for: "homepod-bed")?.test_fireCheckboxAction(settingStateTo: true)
+
+        #expect(popover.test_lastEnergizeAnnouncement == PopoverController.oneSpeakerLimitNoteText)
+    }
+
+    /// Red if a licence landing mid-open left the old limit's leftovers up:
+    /// clicking a stale "Play here" after buying would cut a legal
+    /// multi-speaker selection to one, and the Main Out menu would keep its
+    /// scenes dimmed until the next open.
+    @Test func liftingTheLimitMidOpenRetiresTheOfferAndUndimsTheScenes() async throws {
+        let (popover, controller, _) = try await makePopover()
+        let group = try controller.createGroup(name: "Both",
+                                               memberIDs: ["office", "homepod-bed"]).group
+        limitToOffice(popover, controller)
+        popover.test_deviceRow(for: "homepod-bed")?.test_fireCheckboxAction(settingStateTo: true)
+        #expect(popover.test_deviceRow(for: "homepod-bed")?.test_switchOfferOffered == true)
+        #expect(popover.test_mainOutRow.test_menuItem(for: .group(id: group.id))?.attributedTitle != nil,
+                "dimmed under the limit")
+        let caption = popover.test_mainOutRow.test_menuItem(titled: PopoverController.scenesLimitCaption)
+        #expect(caption?.isEnabled == false, "the limit's caption is read, never picked")
+
+        controller.limitsToOneSpeaker = false
+        popover.setUnregisteredNote(nil)
+
+        #expect(popover.test_deviceRow(for: "homepod-bed")?.test_switchOfferOffered == false,
+                "the offer goes with the limit")
+        #expect(popover.test_mainOutRow.test_menuItem(for: .group(id: group.id))?.attributedTitle == nil,
+                "the scene reads normally again")
+        #expect(popover.test_mainOutRow.test_menuItem(titled: PopoverController.scenesLimitCaption) == nil,
+                "the caption goes with the limit")
+        #expect(popover.test_mainOutRow.test_menuItem(titled: "Scenes") != nil, "the heading stays")
+        #expect(popover.test_systemAirPlayNoteText == nil)
+    }
+
+    /// Red if a group could still be turned on under the limit, or the click
+    /// on it went unanswered.
+    @Test func choosingAGroupUnderTheLimitLeavesMainOutAndRaisesTheNote() async throws {
+        let (popover, controller, _) = try await makePopover()
+        let group = try controller.createGroup(name: "Both",
+                                               memberIDs: ["office", "homepod-bed"]).group
+        limitToOffice(popover, controller)
+        let before = controller.mainOut
+
+        popover.mainOutRow(MainOutRowView(), didSelect: .group(id: group.id))
+
+        #expect(controller.mainOut == before, "the group was not turned on")
+        #expect(popover.test_systemAirPlayNoteText == PopoverController.oneSpeakerLimitNoteText)
     }
 
     // MARK: Trial pill + the two one-time banners (M6)
@@ -3587,7 +4131,7 @@ import AudioutProtocol
         let (popover, _, _) = try await makePopover()
         var buyTaps = 0
         popover.onBuyAudiout = { buyTaps += 1 }
-        popover.setUnregisteredNoteActive(true)
+        popover.setUnregisteredNote(.trialEnded)
 
         _ = wireTrial(popover, daysLeft: 9)
         popover.rebuild()
@@ -3596,6 +4140,9 @@ import AudioutProtocol
         #expect(popover.test_systemAirPlayNoteHasActionButton)
         popover.test_tapSystemAirPlayNoteAction()
         #expect(buyTaps == 1, "the pill opens the purchase page through the host")
+        // Red if the pill lost "I have a key": a trialist who already bought
+        // would have no way to the key sheet from the note.
+        #expect(popover.test_systemAirPlayNoteHasTextAction, "the pill offers I have a key")
     }
 
     /// Red if the pill lost its singular on the last day ("Trial · 1 days
@@ -3608,22 +4155,21 @@ import AudioutProtocol
     }
 
     /// Red if the pill outlived the trial: a Mac that never started one, or one
-    /// whose trial is spent, must fall back to the unregistered note rather
-    /// than count days that no longer exist.
+    /// whose trial is spent, must fall back to the standing note rather than
+    /// count days that no longer exist.
     @Test func noPillWithoutARunningTrial() async throws {
         let (popover, _, _) = try await makePopover()
-        popover.setUnregisteredNoteActive(true)
+        popover.setUnregisteredNote(.trialEnded)
 
         _ = wireTrial(popover, daysLeft: nil)
         popover.rebuild()
-        #expect(popover.test_systemAirPlayNoteText == PopoverController.unregisteredNoteText,
-                "no trial, so the standing unregistered note has the slot")
+        #expect(popover.test_systemAirPlayNoteText == PopoverController.unregisteredTrialEndedNoteText,
+                "no trial, so the standing note has the slot")
 
-        // Expired reads the same way here — the gate, not the popover, is what
-        // a spent trial meets (M3).
+        // An expired trial shows the standing trial-ended note.
         popover.trialStateProvider = { .expired(expiresAt: Date(timeIntervalSinceNow: -86_400)) }
         popover.rebuild()
-        #expect(popover.test_systemAirPlayNoteText == PopoverController.unregisteredNoteText)
+        #expect(popover.test_systemAirPlayNoteText == PopoverController.unregisteredTrialEndedNoteText)
     }
 
     /// A one-time banner outranks the pill, is reported to the host the moment
@@ -3638,6 +4184,7 @@ import AudioutProtocol
         #expect(popover.test_systemAirPlayNoteText
                 == "Your trial ends in 3 days. €30 once keeps everything, including updates.")
         #expect(raised.banners == [.threeDays], "reported as it goes up")
+        #expect(popover.test_systemAirPlayNoteHasTextAction, "the nudge offers I have a key")
 
         popover.update(devices: backend.devices)
         popover.rebuild()
@@ -3660,7 +4207,7 @@ import AudioutProtocol
 
         popover.rebuild()
         #expect(popover.test_systemAirPlayNoteText
-                == "Last day of your trial. Tomorrow Audiout asks for a key.")
+                == "Last day of your trial. From tomorrow Audiout plays on one speaker at a time.")
         #expect(raised.banners == [.lastDay])
     }
 
@@ -3677,7 +4224,7 @@ import AudioutProtocol
 
         popover.setRoutingBlockedNeedsDefault(false)
         #expect(popover.test_systemAirPlayNoteText
-                == "Last day of your trial. Tomorrow Audiout asks for a key.",
+                == "Last day of your trial. From tomorrow Audiout plays on one speaker at a time.",
                 "the banner is handed straight back")
     }
 
@@ -3890,15 +4437,18 @@ import AudioutProtocol
     @Test func cardTitlesTintGoldWhileTheirRowsSound() async throws {
         let (popover, _, backend) = try await makePopover()
         // The fixture opens with only the Mac selected, so Main Out is
-        // local-only armed — sounding, even though no remote ring is lit and
-        // the row's armed dot stays dark.
+        // local-only armed — sounding, and the row's dot is lit gold with it,
+        // even though no remote speaker is connected.
         assertSameRGBA(popover.test_cardHeaderTitleColor(title: "System Audio"),
                        Tokens.Color.goldText, "the Mac alone is still the mix")
-        #expect(popover.test_mainOutRow.test_routeArmed == false)
-        for title in ["Output Speakers", "App Routing"] {
-            assertSameRGBA(popover.test_cardHeaderTitleColor(title: title),
-                           Tokens.Color.label2, "\(title) starts silent")
-        }
+        #expect(popover.test_mainOutRow.test_routeArmed == true)
+        // The Mac's own row draws connected and armed in that mix, so the
+        // Output Speakers title it sits under lights with it.
+        #expect(popover.test_deviceRow(for: "local-mac")?.test_routeArmed == true)
+        assertSameRGBA(popover.test_cardHeaderTitleColor(title: "Output Speakers"),
+                       Tokens.Color.goldText, "the Mac row sounds, so its card does")
+        assertSameRGBA(popover.test_cardHeaderTitleColor(title: "App Routing"),
+                       Tokens.Color.label2, "App Routing starts silent")
 
         _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
         try await waitForConnectionState(backend, id: "office") { $0 == .connected }
@@ -3956,6 +4506,8 @@ extension SerializedSharedState {
     @MainActor
     @Suite struct PopoverConnectionAnalyticsTests {
 
+    private let isolation = TestIsolation(owner: "PopoverConnectionAnalyticsTests")
+
         private final class Captured: @unchecked Sendable {
             private let lock = NSLock()
             private var items: [(String, [String: String])] = []
@@ -3974,7 +4526,7 @@ extension SerializedSharedState {
         }
 
         private func tempDirectory() -> URL {
-            FileManager.default.temporaryDirectory
+            isolation.scratchDir
                 .appendingPathComponent("PopoverConnectionAnalytics-\(UUID().uuidString)",
                                         isDirectory: true)
         }
@@ -4000,8 +4552,10 @@ extension SerializedSharedState {
             let controller = GroupController(backend: backend,
                                              store: GroupStore(directory: tempDirectory()),
                                              routingStore: RoutingStore(directory: tempDirectory()),
+                                             settings: AppSettings(defaults: isolation.makeDefaults()),
                                              loadPersisted: false)
-            let popover = PopoverController()
+            let popover = PopoverController(appRouting: AppRoutingController(
+                store: AppRouteStore(directory: tempDirectory()), loadPersisted: false))
             popover.configure(groupController: controller)
             popover.test_isShownOverride = true
             popover.update(devices: fleet(office: .off))
@@ -4058,5 +4612,403 @@ extension SerializedSharedState {
             #expect(seen.properties(of: "connection:connected")
                     == (intent == .unwanted ? [] : [["kind": "homePod"]]))
         }
+
+        // Turns red when `mixer:reconnect_requested` fires for a name click that reconnects nothing: an AirPlay speaker looked for on the network, or a Bluetooth speaker the backend no longer lists.
+        @Test func aReconnectIsCapturedOnlyWhenABluetoothSpeakerIsAskedToReconnect() throws {
+            let local = Device(id: "local-mac", name: "This Mac", kind: .localMac, isLocalDevice: true)
+            let office = Device(id: "office", name: "Office", kind: .homePod, isAvailable: false)
+            let bt = Device(id: "bt", name: "Desk", kind: .bluetooth, isAvailable: false, supportsAirPlay2: false)
+            let gone = Device(id: "gone", name: "Gone", kind: .bluetooth, isAvailable: false, supportsAirPlay2: false)
+            let backend = MockBackend(fleet: [local, office, bt], staggerDiscovery: false,
+                                      emitsLevels: false, simulatesDropouts: false)
+            backend.start()
+            backend.test_settle()
+            let controller = GroupController(backend: backend,
+                                             store: GroupStore(directory: tempDirectory()),
+                                             routingStore: RoutingStore(directory: tempDirectory()),
+                                             settings: AppSettings(defaults: isolation.makeDefaults()),
+                                             loadPersisted: false)
+            let popover = PopoverController(
+                appRouting: AppRoutingController(store: AppRouteStore(directory: tempDirectory()),
+                                                 loadPersisted: false),
+                speakerRecovery: SpeakerRecoveryController(schedule: { _, _ in {} }))
+            popover.configure(groupController: controller)
+            popover.test_isShownOverride = true
+            popover.bluetoothPermissionProvider = { .granted }
+            var pairings = 0
+            popover.onPairBluetoothSpeaker = { pairings += 1 }
+            popover.update(devices: [local, office, bt, gone])
+            popover.test_speakerLibrary.setVisibility(.always, for: ["office", "bt", "gone"])
+            popover.update(devices: [local, office, bt])
+            for id in ["office", "gone", "bt"] {
+                try #require(popover.test_deviceRow(for: id) != nil, "\(id) has a row to click")
+            }
+
+            let seen = captured {
+                popover.test_deviceRow(for: "office")?.test_clickName()
+                popover.test_deviceRow(for: "gone")?.test_clickName()
+                popover.test_deviceRow(for: "bt")?.test_clickName()
+            }
+            #expect(pairings == 1, "the speaker the backend no longer lists opened pairing")
+            #expect(seen.properties(of: "mixer:reconnect_requested") == [[:]])
+        }
+    }
+}
+
+/// The licence events the popover sends: the thank-you card and the switch
+/// offer. Nested under `SerializedSharedState` because `Analytics.install`
+/// mutates process-global state — the rule in `SerializedSharedStateSuite.swift`.
+extension SerializedSharedState {
+    @MainActor
+    @Suite struct PopoverControllerTests_LicenseAnalytics {
+
+        private final class Captured: @unchecked Sendable {
+            private let lock = NSLock()
+            private var items: [(String, [String: String])] = []
+            func append(_ name: String, _ props: [String: String]) {
+                lock.withLock { items.append((name, props)) }
+            }
+            func names() -> [String] { lock.withLock { items }.map(\.0) }
+        }
+
+        private func tempDirectory() -> URL {
+            FileManager.default.temporaryDirectory
+                .appendingPathComponent("PopoverLicenseAnalytics-\(UUID().uuidString)",
+                                        isDirectory: true)
+        }
+
+        private let fleet = [
+            Device(id: "local-mac", name: "This Mac", kind: .localMac, isLocalDevice: true),
+            Device(id: "office", name: "Office", kind: .homePod),
+            Device(id: "kitchen", name: "Kitchen", kind: .homePod),
+        ]
+
+        private func makePopover() -> (PopoverController, GroupController) {
+            let backend = MockBackend(fleet: fleet, staggerDiscovery: false,
+                                      emitsLevels: false, simulatesDropouts: false)
+            backend.start()
+            backend.test_settle()
+            let controller = GroupController(backend: backend,
+                                             store: GroupStore(directory: tempDirectory()),
+                                             routingStore: RoutingStore(directory: tempDirectory()),
+                                             loadPersisted: false)
+            let popover = PopoverController()
+            popover.configure(groupController: controller)
+            popover.test_isShownOverride = true
+            popover.update(devices: fleet)
+            return (popover, controller)
+        }
+
+        private func captured(_ body: () -> Void) -> Captured {
+            let captured = Captured()
+            Analytics.install(Analytics.Sink(capture: { captured.append($0, $1) },
+                                             captureError: { _, _ in },
+                                             consentChanged: { _ in }), consent: true)
+            defer { Analytics.install(nil, consent: false) }
+            body()
+            return captured
+        }
+
+        /// Wires an owed card whose shown flag behaves like the host's stored one.
+        @MainActor private final class Owed {
+            var owed = true
+            var shownCalls = 0
+            func wire(_ popover: PopoverController) {
+                popover.thankYouCardOwedProvider = { [unowned self] in owed }
+                popover.onThankYouShown = { [unowned self] in shownCalls += 1; owed = false }
+            }
+        }
+
+        /// Red if the card stopped mounting when owed, reported itself more than
+        /// once in an open, or its Close stopped recording it as seen.
+        @Test func theOwedCardMountsReportsOnceAndCloseRecordsIt() {
+            let (popover, _) = makePopover()
+            let owed = Owed()
+            owed.wire(popover)
+            var mounted = false
+            let seen = captured {
+                popover.test_simulateOpen()
+                mounted = popover.test_noteViewIsThankYouCard
+                popover.rebuild()
+                popover.test_thankYouCard?.test_closeButton.performClick(nil)
+            }
+            #expect(mounted, "an owed card takes the empty note slot on open")
+            #expect(seen.names() == ["license:thank_you_shown", "license:thank_you_closed"])
+            #expect(owed.shownCalls == 1, "Close records the card as seen")
+            #expect(!popover.test_noteViewIsThankYouCard, "Close takes the card down")
+        }
+
+        /// Red if a hide with the card up reported a close, or forgot to record
+        /// the card as seen (it would then show again on every open).
+        @Test func hidingWithTheCardUpRecordsItWithoutAClose() {
+            let (popover, _) = makePopover()
+            let owed = Owed()
+            owed.wire(popover)
+            let seen = captured {
+                popover.test_simulateOpen()
+                popover.surfaceDidHide()
+            }
+            #expect(seen.names() == ["license:thank_you_shown"])
+            #expect(owed.shownCalls == 1)
+        }
+
+        /// Red if quitting with the card up (the app calls this from
+        /// `applicationWillTerminate`) forgot to record it seen, or recorded it twice.
+        @Test func retiringTheRaisedCardRecordsItOnce() {
+            let (popover, _) = makePopover()
+            let owed = Owed()
+            owed.wire(popover)
+            popover.test_simulateOpen()
+            popover.retireThankYouCardOnHide()
+            popover.retireThankYouCardOnHide()
+            #expect(owed.shownCalls == 1)
+        }
+
+        /// Red if the card pushed a failure note out of the slot, or reported
+        /// itself shown while hidden behind one.
+        @Test func aCardOutrankedByAFailureNoteIsNotRaised() {
+            let (popover, _) = makePopover()
+            let owed = Owed()
+            owed.wire(popover)
+            popover.setCaptureFailureMessage("Audiout can't capture system audio.")
+            let seen = captured { popover.test_simulateOpen() }
+            #expect(!popover.test_noteViewIsThankYouCard)
+            #expect(seen.names().isEmpty)
+            #expect(owed.shownCalls == 0)
+        }
+
+        /// Defect: a rebuild while hidden raised the card offscreen, and
+        /// quitting then marked it seen. Red too if the guard stops letting
+        /// `rebuildForOpen()` raise it, since every real open rebuilds before
+        /// the popover counts as shown. No window is created.
+        @Test func aRebuildWhileHiddenDoesNotRaiseTheCard() {
+            let (popover, _) = makePopover()
+            let owed = Owed()
+            owed.wire(popover)
+            popover.test_isShownOverride = false
+            let hidden = captured { popover.rebuild() }
+            #expect(hidden.names().isEmpty)
+            #expect(!popover.test_noteViewIsThankYouCard)
+            #expect(owed.shownCalls == 0)
+            let opened = captured { popover.test_simulateOpen() }
+            #expect(opened.names() == ["license:thank_you_shown"])
+            #expect(popover.test_noteViewIsThankYouCard)
+        }
+
+        // MARK: Expired-trial survey invite
+
+        /// Wires an owed survey invite whose done flag behaves like the host's.
+        @MainActor private final class Invite {
+            var owed = true
+            var spentCalls = 0
+            var answered: [ExpiredTrialSurvey] = []
+            /// What the host's unanswered-close count answers; `nil` leaves it unwired.
+            var unansweredIsLast: Bool?
+            var unansweredCalls = 0
+            func wire(_ popover: PopoverController) {
+                popover.surveyInviteProvider = { [unowned self] in owed ? ExpiredTrialSurveyFixture.survey : nil }
+                popover.onSurveyInviteSpent = { [unowned self] in spentCalls += 1; owed = false }
+                popover.onSurveyAnswer = { [unowned self] in answered.append($0) }
+                if let isLast = unansweredIsLast {
+                    popover.onSurveyInviteUnanswered = { [unowned self] in unansweredCalls += 1; return isLast }
+                }
+            }
+        }
+
+        private func trialEndedPopover(invite: Invite?) -> PopoverController {
+            let (popover, _) = makePopover()
+            invite?.wire(popover)
+            popover.setUnregisteredNote(.trialEnded)
+            return popover
+        }
+
+        /// Red if an owed invite stopped taking the trial-ended note's place on
+        /// open, lost its Answer button or Not now link, or reported itself
+        /// shown again on a later rebuild in the same open.
+        @Test func theOwedInviteMountsOnOpenAndReportsOnce() {
+            let invite = Invite()
+            let popover = trialEndedPopover(invite: invite)
+            let seen = StructuredEvents.recording {
+                popover.test_simulateOpen()
+                popover.rebuild()
+            }
+            #expect(popover.test_systemAirPlayNoteText == PopoverController.surveyInviteText)
+            #expect(popover.test_systemAirPlayNoteHasActionButton)
+            #expect(popover.test_systemAirPlayNoteHasTextAction)
+            #expect(seen.names() == ["survey shown"])
+            #expect(invite.spentCalls == 0, "raising the invite does not spend it")
+        }
+
+        /// Red if the invite rung showed (or reported) without a survey from
+        /// the host, replacing the trial-ended note with nothing behind it.
+        @Test func withNoSurveyTheTrialEndedNoteStays() {
+            let popover = trialEndedPopover(invite: nil)
+            let seen = StructuredEvents.recording { popover.test_simulateOpen() }
+            #expect(popover.test_systemAirPlayNoteText == PopoverController.unregisteredTrialEndedNoteText)
+            #expect(seen.names().isEmpty)
+        }
+
+        /// Red if Not now stopped sending `survey dismissed` with no answers,
+        /// stopped marking the invite done, left the invite in the slot, or
+        /// went through the unanswered-close count instead of spending at once.
+        @Test func notNowDismissesSpendsAndRestoresTheTrialNote() {
+            let invite = Invite()
+            invite.unansweredIsLast = false
+            let popover = trialEndedPopover(invite: invite)
+            popover.test_simulateOpen()
+            let seen = StructuredEvents.recording { popover.test_tapSystemAirPlayNoteTextAction() }
+            #expect(seen.names() == ["survey dismissed"])
+            #expect(seen.all.first?.1["$survey_partially_completed"] as? Bool == false)
+            #expect(invite.spentCalls == 1)
+            #expect(invite.unansweredCalls == 0)
+            #expect(popover.test_systemAirPlayNoteText == PopoverController.unregisteredTrialEndedNoteText)
+        }
+
+        /// Red if Answer stopped handing the survey to the host's card, or left
+        /// the invite owed so it would come back on the next open.
+        @Test func answerHandsTheSurveyToTheHostAndSpendsTheInvite() {
+            let invite = Invite()
+            let popover = trialEndedPopover(invite: invite)
+            popover.test_simulateOpen()
+            popover.test_tapSystemAirPlayNoteAction()
+            #expect(invite.answered == [ExpiredTrialSurveyFixture.survey])
+            #expect(invite.spentCalls == 1)
+            #expect(popover.test_systemAirPlayNoteText == PopoverController.unregisteredTrialEndedNoteText)
+        }
+
+        /// Red if the last allowed unanswered close (`onSurveyInviteUnanswered`
+        /// returning true) stopped counting as a decline: no `survey
+        /// dismissed`, or the invite left owed for the next open.
+        @Test func hidingOnTheLastUnansweredLookDismissesAndSpendsItOnce() {
+            let invite = Invite()
+            invite.unansweredIsLast = true
+            let popover = trialEndedPopover(invite: invite)
+            popover.test_simulateOpen()
+            let seen = StructuredEvents.recording {
+                popover.surfaceDidHide()
+                popover.surfaceDidHide()
+            }
+            #expect(seen.names() == ["survey dismissed"])
+            #expect(invite.spentCalls == 1)
+            #expect(invite.unansweredCalls == 1)
+        }
+
+        /// Red if a hide before the last unanswered look (`surfaceDidHide`
+        /// ignoring `onSurveyInviteUnanswered` returning false) spends the
+        /// invite or sends `survey dismissed`, or the invite stops coming back
+        /// on the next open.
+        @Test func hidingBeforeTheLastLookBringsTheInviteBackNextOpen() {
+            let invite = Invite()
+            invite.unansweredIsLast = false
+            let popover = trialEndedPopover(invite: invite)
+            popover.test_simulateOpen()
+            let hidden = StructuredEvents.recording { popover.surfaceDidHide() }
+            #expect(hidden.names().isEmpty)
+            #expect(invite.spentCalls == 0)
+            #expect(invite.unansweredCalls == 1)
+            let reopened = StructuredEvents.recording { popover.test_simulateOpen() }
+            #expect(reopened.names() == ["survey shown"])
+            #expect(popover.test_systemAirPlayNoteText == PopoverController.surveyInviteText)
+        }
+
+        /// Red if the invite pushed a capture-failure note out of the slot, or
+        /// reported itself shown while hidden behind one.
+        @Test func anInviteOutrankedByAFailureNoteIsNotRaised() {
+            let invite = Invite()
+            let popover = trialEndedPopover(invite: invite)
+            popover.setCaptureFailureMessage("Audiout can't capture system audio.")
+            let seen = StructuredEvents.recording { popover.test_simulateOpen() }
+            #expect(popover.test_systemAirPlayNoteText != PopoverController.surveyInviteText)
+            #expect(seen.names().isEmpty)
+            #expect(invite.spentCalls == 0)
+        }
+
+        /// Red if `setUnregisteredNote` stops clearing `raisedSurveyInvite`, or
+        /// clears it through `spendSurveyInvite`: a purchase with the popover
+        /// open would leave the invite up, or mark it done unanswered.
+        @Test func aPurchaseWithTheInviteUpRetiresItUnspent() {
+            let invite = Invite()
+            let popover = trialEndedPopover(invite: invite)
+            popover.test_simulateOpen()
+            #expect(popover.test_systemAirPlayNoteText == PopoverController.surveyInviteText)
+            let seen = StructuredEvents.recording { popover.setUnregisteredNote(nil) }
+            #expect(popover.test_systemAirPlayNoteText != PopoverController.surveyInviteText)
+            #expect(seen.names().isEmpty)
+            #expect(invite.spentCalls == 0)
+        }
+
+        /// Red if raising `limitNoteRaised` stops retiring the invite (its
+        /// `didSet`), or retires it through `spendSurveyInvite`: the limit text
+        /// would stay hidden behind the invite, or the invite marked done.
+        @Test func aLimitHitWithTheInviteUpShowsTheLimitTextUnspent() {
+            let invite = Invite()
+            let (popover, controller) = makePopover()
+            invite.wire(popover)
+            _ = controller.setDeviceSelected("office", true)
+            controller.limitsToOneSpeaker = true
+            popover.setUnregisteredNote(.trialEnded)
+            popover.test_simulateOpen()
+            #expect(popover.test_systemAirPlayNoteText == PopoverController.surveyInviteText)
+            let seen = StructuredEvents.recording {
+                popover.test_deviceRow(for: "kitchen")?.test_fireCheckboxAction(settingStateTo: true)
+            }
+            #expect(popover.test_systemAirPlayNoteText == PopoverController.oneSpeakerLimitNoteText)
+            #expect(seen.names().isEmpty)
+            #expect(invite.spentCalls == 0)
+        }
+
+        /// Red if "Play here" left two speakers selected (the limit
+        /// would then be broken by its own offer) or stopped reporting its use.
+        @Test func theSwitchOfferLeavesOnlyTheClickedSpeaker() {
+            let (popover, controller) = makePopover()
+            _ = controller.setDeviceSelected("office", true)
+            controller.limitsToOneSpeaker = true
+            popover.rebuild()
+            let seen = captured {
+                popover.test_deviceRow(for: "kitchen")?.test_fireCheckboxAction(settingStateTo: true)
+                popover.test_deviceRow(for: "kitchen")?.test_clickSwitchOffer()
+            }
+            #expect(controller.selectedDeviceIDs == ["kitchen"])
+            #expect(seen.names().filter { $0.hasPrefix("license:") }
+                    == ["license:limit_hit", "license:switch_offer_used"])
+        }
+    }
+}
+
+/// A parsed expired-trial survey with question ids `q1`…`q5`, shared by the
+/// invite tests above and the survey card tests in `AppSurfaceControllerTests`.
+enum ExpiredTrialSurveyFixture {
+    static let id = "0190bbbb-0000-0000-0000-000000000002"
+    static let survey: ExpiredTrialSurvey = {
+        let types = ["single_choice", "multiple_choice", "single_choice", "single_choice", "open"]
+        let json: [String: Any] = ["surveys": [[
+            "id": id, "name": "Mac expired trial", "type": "api",
+            "start_date": "2026-01-01T00:00:00Z", "end_date": NSNull(),
+            "current_iteration": NSNull(), "current_iteration_start_date": NSNull(),
+            "questions": types.enumerated().map { ["id": "q\($0.offset + 1)", "type": $0.element, "question": "Question \($0.offset + 1)"] },
+        ]]]
+        let data = try! JSONSerialization.data(withJSONObject: json)
+        return ExpiredTrialSurvey.parse(data, surveyID: id, now: Date(timeIntervalSince1970: 1_800_000_000))!
+    }()
+}
+
+/// Records `Analytics.captureStructured` events. Only for suites nested under
+/// `SerializedSharedState`: it installs the process-global sink.
+final class StructuredEvents: @unchecked Sendable {
+    private let lock = NSLock()
+    private var items: [(String, [String: any Sendable])] = []
+    var all: [(String, [String: any Sendable])] { lock.withLock { items } }
+    func names() -> [String] { all.map(\.0) }
+
+    static func recording(_ body: () -> Void) -> StructuredEvents {
+        let events = StructuredEvents()
+        Analytics.install(Analytics.Sink(capture: { _, _ in }, captureError: { _, _ in },
+                                         consentChanged: { _ in },
+                                         captureStructured: { name, props in
+                                             events.lock.withLock { events.items.append((name, props)) }
+                                         }), consent: true)
+        defer { Analytics.install(nil, consent: false) }
+        body()
+        return events
     }
 }

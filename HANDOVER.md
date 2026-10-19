@@ -213,7 +213,7 @@ a fresh session with `AUDIOUT_TEST_NO_CACHE=1`:
 `WarmFaderCellTests`.
 
 **Flaky, unrelated to this change, seen across three full-suite runs:**
-`CaptureCoordinatorTests` (OwnTone subprocess path), `TCCProbeRunnerTests`,
+`TCCProbeRunnerTests`,
 `CastLiveAudioServerTests`, `BTSyncedSinkTests` — all timing/spawn tests, all
 green in isolation and on the healthy remote test Mac. The shared test
 machine was under heavy load / low disk during most of this session; when

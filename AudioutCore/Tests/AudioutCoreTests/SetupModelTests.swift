@@ -515,11 +515,11 @@ extension SerializedSharedState {
 
     /// `primeBluetooth()`'s decision callback reaches the main actor through a
     /// `Task`, so it lands on a suspension point rather than synchronously.
-    private func waitForChange(_ satisfied: () -> Bool) async {
-        for _ in 0..<1_000 {
-            if satisfied() { return }
-            await Task.yield()
-        }
+    private func waitForChange(
+        sourceLocation: SourceLocation = #_sourceLocation,
+        _ satisfied: () -> Bool
+    ) async {
+        await SuiteWait.until(sourceLocation: sourceLocation, satisfied)
     }
 
     @Test func bluetoothStatusMapsFromTheSilentRead() async {
@@ -1112,7 +1112,6 @@ extension SerializedSharedState {
         // Non-native backends never present, regardless of completion — they
         // don't tap in-process or discover under the app's own identity.
         #expect(!SetupModel.shouldPresentOnLaunch(settings: settings, backendKind: .mock, environment: env))
-        #expect(!SetupModel.shouldPresentOnLaunch(settings: settings, backendKind: .ownTone, environment: env))
 
         // Once completed, even native stops presenting.
         settings.hasCompletedSetup = true

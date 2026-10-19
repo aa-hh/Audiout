@@ -34,6 +34,13 @@ import Testing
         return out
     }
 
+    /// What ``CastFeedStats/peakDBFS`` reports for a block whose loudest sample
+    /// is `amplitude` — the same arithmetic the ring runs, so it compares exact.
+    private func dbfs(amplitude: Double) -> Double { 20 * log10(amplitude / 32768) }
+
+    /// What an all-zero block reports.
+    private let silentDBFS: Double = -120
+
     private func frameValues(_ pcm: Data) -> [Int16] {
         let samples: [Int16] = pcm.withUnsafeBytes { Array($0.bindMemory(to: Int16.self)) }
         return stride(from: 0, to: samples.count, by: 2).map { samples[$0] }
@@ -54,7 +61,8 @@ import Testing
         #expect(ring.render(frames: 882) == block)
         #expect(ring.stats == CastFeedStats(
             achievedDelayMs: 0, droppedBlocks: 0, droppedLockBusy: 0,
-            underrunFrames: 0, feedResets: 0))
+            underrunFrames: 0, feedResets: 0,
+            peakDBFS: dbfs(amplitude: 1000), writes: 1))
     }
 
     // MARK: - Delaying by inserting zeros in FRONT of the ring
@@ -121,7 +129,49 @@ import Testing
 
         _ = ring.render(frames: 88_200)
         _ = ring.render(frames: 441)
-        #expect(ring.stats.underrunFrames == 441, "what the consumer had to invent")
+        let stats = ring.stats
+        #expect(stats.underrunFrames == 441, "what the consumer had to invent")
+        #expect(stats.peakDBFS == silentDBFS, "an invented block is silence, and reads as silence")
+    }
+
+    // MARK: - Was there SOUND in what the server served?
+
+    /// The counters cannot answer it. `underrunFrames` only sees frames the
+    /// ring could not fill, so a leg that is fed and drained on time reads
+    /// perfectly healthy whether it is carrying music or zeros. The peak is
+    /// taken over the bytes that go out, and the arrival count says whether
+    /// the capture tap is still handing anything over at all.
+    @Test func servedAudioReportsItsPeakAndTheBlocksItArrivedIn() {
+        let ring = CastFeedRing()
+        for _ in 0..<3 { ring.push(tone(frames: 882)) }
+        _ = ring.render(frames: 2646)
+
+        let stats = ring.stats
+        #expect(stats.peakDBFS == dbfs(amplitude: 1000))
+        #expect(stats.writes == 3)
+    }
+
+    /// The case that made this worth adding: the receiver is playing, the ring
+    /// is full, nothing underruns, and every byte served is zero because the
+    /// feed gain is at 0. `underrunFrames` stays at 0 through all of it.
+    @Test func aLegMutedByItsFeedGainReadsSilentWithNoUnderrun() {
+        let ring = CastFeedRing()
+        ring.setTargetGain(0)
+        for _ in 0..<3 { ring.push(tone(frames: 882)) }
+        // The first block carries the 882-frame ramp down from unity and is
+        // therefore NOT silent; the one after it is the steady state the
+        // receiver hears for the rest of the session.
+        _ = ring.render(frames: 882)
+        _ = ring.render(frames: 882)
+
+        let stats = ring.stats
+        #expect(stats.underrunFrames == 0, "the ring fed every frame it was asked for")
+        #expect(stats.writes == 3, "and the producer kept arriving")
+        #expect(stats.peakDBFS == silentDBFS, "yet the receiver got silence")
+    }
+
+    @Test func aFeedNobodyPushedToCountsNoArrivals() {
+        #expect(CastFeedRing().stats.writes == 0)
     }
 
     // MARK: - The controller's and the user's terms compose

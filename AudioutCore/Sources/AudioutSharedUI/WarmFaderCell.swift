@@ -30,16 +30,25 @@ import AppKit
 ///   ≈ 10×17 pt) replacing the stock white circle — a `raised` body (1.29:1
 ///   on the dark trough; the flat ground itself in light) read entirely by
 ///   its `rim` edge (3.39:1 on the dark body, 4.78:1 on the light ground). It
-///   slides inside the stock knob rect rather than centring on it, so at the
-///   maximum its trailing edge lands on the track's end and at the minimum its
-///   leading edge lands on the start — no strip of trough past the handle.
+///   is placed along the track, not the stock knob rect, so at the maximum its
+///   trailing edge lands on the track's end and at the minimum its leading
+///   edge lands on the start — no strip of trough past the handle.
+/// - **Halo room** (`haloRoom`): the trough can stop short of the slider's
+///   frame at both ends, so a host that widens its slider by the same amount
+///   keeps the trough in place and gains room for the pending glow's halo.
+/// - **Pending glow** (Cast volume not yet audible, `isPendingApply`): the
+///   thumb lights from inside, with three flat halo rings (1/2/3 pt) and a
+///   body blended toward the light: warm white in dark, `glow` in light. It
+///   breathes on `PendingPulse`'s curve from a timer the cell owns, rises
+///   and goes out when the hold ends, and holds at 0.7 under Reduce Motion.
 ///
 /// Every color goes through `Tokens`, resolved at DRAW time under the
 /// control's effective appearance (AppKit sets the drawing appearance before
 /// calling the cell), so light/dark, Increase Contrast, and the accent dial
 /// (spec §1.3 — `gold`/`ember` remap) all land with no
-/// code here knowing about them. The drawing is steady state — no animation,
-/// no layers — so `cacheDisplay` snapshots are byte-deterministic.
+/// code here knowing about them. Apart from the pending glow's breathing the
+/// drawing is steady state with no layers, so `cacheDisplay` snapshots are
+/// byte-deterministic (and the glow is too under Reduce Motion).
 public final class WarmFaderCell: NSSliderCell {
 
     /// Whether the OWNING row is currently route-armed (spec §3.3) — the exact
@@ -67,13 +76,85 @@ public final class WarmFaderCell: NSSliderCell {
 
     /// Whether the owning row's volume/mute gesture is still pending its
     /// feed-gain apply moment (Cast fixed-volume receivers only — the row
-    /// re-stamps this on every `apply`). While true, the engaged fill draws
-    /// as DASHED gold segments — the app's connecting/"in flight" vocabulary
-    /// — instead of the solid gradient: the "not yet landed" signal.
+    /// re-stamps this on every `apply`). While true, an armed thumb glows
+    /// and breathes: the "not yet landed" signal.
     public var isPendingApply: Bool = false {
         didSet {
-            if isPendingApply != oldValue { controlView?.needsDisplay = true }
+            guard isPendingApply != oldValue else { return }
+            let now = CACurrentMediaTime()
+            if isPendingApply {
+                pulse.begin(at: now)
+            } else {
+                pulse.finish(at: now, reduceMotion: reduceMotion)
+            }
+            reconcilePulseTimer()
+            onPulse?(pulseStrength)
+            controlView?.needsDisplay = true
         }
+    }
+
+    /// Clear space left between the slider's frame and each end of the
+    /// trough, so the pending glow's 3 pt halo is not cut off when the thumb
+    /// sits at 0 % or 100 %. A host that sets it widens its slider by twice
+    /// this, keeping the trough where it was. `DeviceRowView` sets 3; the
+    /// other faders never glow and leave it 0.
+    public var haloRoom: CGFloat = 0 {
+        didSet {
+            if haloRoom != oldValue { controlView?.needsDisplay = true }
+        }
+    }
+
+    /// Drop a pending hold at once, with no arrival: for a surface that is
+    /// going away, where a rise-and-fade nobody sees would only keep the
+    /// timer running.
+    public func cancelPendingHold() {
+        isPendingApply = false
+        pulse = PendingPulse()
+        reconcilePulseTimer()
+        onPulse?(nil)
+        controlView?.needsDisplay = true
+    }
+
+    /// Called with the glow's strength on every pulse tick and on each
+    /// pending edge (`nil` once the light is out), so the row's readout
+    /// breathes in step with the thumb.
+    public var onPulse: ((CGFloat?) -> Void)?
+
+    private var pulse = PendingPulse()
+
+    /// Repaints the glow. Runs while the hold breathes and through its
+    /// arrival; Reduce Motion's static glow needs no frames.
+    private var pulseTimer: Timer?
+
+    deinit { pulseTimer?.invalidate() }
+
+    private func reconcilePulseTimer() {
+        let needsFrames = pulse.isArriving || (isPendingApply && !reduceMotion)
+        guard needsFrames else {
+            pulseTimer?.invalidate()
+            pulseTimer = nil
+            return
+        }
+        guard pulseTimer == nil else { return }
+        let timer = Timer(timeInterval: PendingPulse.frameInterval, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            let strength = self.pulseStrength
+            self.onPulse?(strength)
+            self.controlView?.needsDisplay = true
+            if strength == nil { self.reconcilePulseTimer() }
+        }
+        timer.tolerance = 0.01
+        RunLoop.main.add(timer, forMode: .common)
+        pulseTimer = timer
+    }
+
+    var reduceMotion: Bool {
+        test_reduceMotionOverride ?? NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+    }
+
+    /// The glow's strength right now, or nil when it is out.
+    var pulseStrength: CGFloat? {
+        pulse.value(at: CACurrentMediaTime(), reduceMotion: reduceMotion)
     }
 
     // MARK: Drawing
@@ -91,7 +172,7 @@ public final class WarmFaderCell: NSSliderCell {
         // a 1 px band clipped to the trough along its visual top edge)…
         NSGraphicsContext.current?.saveGraphicsState()
         trough.addClip()
-        Tokens.Color.shadow.withAlphaComponent(Self.insetShadeAlpha).setFill()
+        Tokens.Color.shadow.withAlphaComponent(Tokens.Color.insetShadeAlpha).setFill()
         let topEdgeY = flipped ? track.minY : track.maxY - Self.hairlineWidth
         NSRect(x: track.minX, y: topEdgeY,
                width: track.width, height: Self.hairlineWidth).fill()
@@ -120,38 +201,11 @@ public final class WarmFaderCell: NSSliderCell {
                 let dimEnd = Tokens.Color.ember
                     .blended(withFraction: Self.armedDimEndGoldBlend,
                              of: Tokens.Color.gold) ?? Tokens.Color.ember
-                if isPendingApply {
-                    // Pending Cast feed-gain apply: the level is real but not
-                    // audible yet, so the gold renders in the app's "in
-                    // flight" vocabulary — DASHED, the same form the
-                    // connecting halo ring and bus node already use — until
-                    // the lag elapses and the solid bar returns. Two flat
-                    // tones were tried first and were LIVE-INVISIBLE at this
-                    // 5 pt track size (2026-08-23, mock-window pixel probe):
-                    // the ember-blend is indistinguishable from the gradient,
-                    // and the unarmed neutral is a same-luminance warm fill —
-                    // byte-identical to every unarmed row's fader, so a tint
-                    // swap reads as "no change". A broken bar cannot be
-                    // mistaken for a solid one. Dash phase anchors to the
-                    // TRACK, not the fill, so segments hold still while the
-                    // thumb drags. Static drawing — no animation, so Reduce
-                    // Motion and snapshot determinism are untouched.
-                    let dashes = NSBezierPath()
-                    var x = track.minX
-                    while x < fillRect.maxX {
-                        dashes.appendRect(NSRect(x: x, y: track.minY,
-                                                 width: Self.pendingDashLength,
-                                                 height: track.height))
-                        x += Self.pendingDashLength + Self.pendingDashGap
-                    }
-                    NSBezierPath(rect: fillRect).addClip()
-                    dashes.addClip()
-                    if let gradient = NSGradient(starting: dimEnd,
-                                                 ending: Tokens.Color.gold) {
-                        let leftToRight = fillRect.minX == track.minX
-                        gradient.draw(in: fillRect, angle: leftToRight ? 0 : 180)
-                    }
-                } else if let gradient = NSGradient(starting: dimEnd,
+                // A pending Cast apply keeps this solid fill; the hold shows
+                // on the thumb instead (2026-10-06, owner's call). It used to
+                // dash this fill because flat tints were live-invisible on the
+                // 5 pt track; the 10×17 pt thumb has room to carry a glow.
+                if let gradient = NSGradient(starting: dimEnd,
                                              ending: Tokens.Color.gold) {
                     let leftToRight = fillRect.minX == track.minX
                     gradient.draw(in: fillRect, angle: leftToRight ? 0 : 180)
@@ -194,27 +248,42 @@ public final class WarmFaderCell: NSSliderCell {
     public override func drawKnob(_ knobRect: NSRect) {
         let size = NSSize(width: PopoverColumnGrid.faderThumbWidth,
                           height: PopoverColumnGrid.faderThumbHeight)
-        // The thumb slides INSIDE `knobRect` rather than centring on it. Stock
-        // `knobRect` is `knobThickness` wide (20 pt on a 150 pt regular slider)
-        // and its EDGES already sit flush with the track at both extremes —
-        // 0…20 at the minimum, 130…150 at the maximum. Centring our narrower
-        // 10 pt thumb on that rect leaves 5 pt of trough showing past the
-        // handle at each end; offsetting it by the value's fraction of the
-        // slack lands the thumb's trailing edge on the track's end at the
-        // maximum and its leading edge on the start at the minimum. `knobRect`
-        // itself — the rect `NSSliderCell` maps mouse tracking against — is
-        // untouched, so this moves paint only.
-        let slack = max(0, knobRect.width - size.width)
+        // The thumb is placed on the TRACK, not on `knobRect`: its leading
+        // edge lands on the track's start at the minimum and its trailing
+        // edge on the track's end at the maximum, so no trough shows past the
+        // handle. Stock `knobRect` (20 pt on a 150 pt slider, 0…20 at the
+        // minimum, 130…150 at the maximum) is the rect `NSSliderCell` maps
+        // mouse tracking against and stays untouched; with `haloRoom` the
+        // two differ by that many points at the extremes, in paint only.
+        let track = trackRect(inside: barRect(flipped: controlView?.isFlipped ?? false))
         let offset = (controlView?.userInterfaceLayoutDirection == .rightToLeft)
             ? 1 - valueFraction : valueFraction
-        let thumb = NSRect(x: (knobRect.minX + slack * offset).rounded(),
+        let thumb = NSRect(x: (track.minX + (track.width - size.width) * offset).rounded(),
                            y: (knobRect.midY - size.height / 2).rounded(),
                            width: size.width, height: size.height)
         let radius = PopoverColumnGrid.faderThumbCornerRadius
         let path = NSBezierPath(roundedRect: thumb, xRadius: radius, yRadius: radius)
 
-        // The raised cap body…
-        Tokens.Color.raised.withAlphaComponent(interiorAlpha).setFill()
+        // The raised cap body, lit from inside while a Cast apply is pending
+        // and through its arrival. Flat fills, never an `NSShadow` (folder
+        // rule). The 3 pt outer ring needs a 23 pt slider; `DeviceRowView`
+        // gives its slider 24.
+        var body = Tokens.Color.raised
+        if isRouteArmed && isEnabled, let g = pulseStrength {
+            let appearance = NSAppearance.currentDrawing()
+            let dark = PendingPulse.isDark(appearance)
+            let light = PendingPulse.light(in: appearance)
+            let rings = dark ? Self.pendingHaloAlphasDark : Self.pendingHaloAlphasLight
+            for (index, alpha) in rings.enumerated().reversed() {
+                let outset = CGFloat(index + 1)
+                light.withAlphaComponent(alpha * g).setFill()
+                NSBezierPath(roundedRect: thumb.insetBy(dx: -outset, dy: -outset),
+                             xRadius: radius + outset, yRadius: radius + outset).fill()
+            }
+            let toward = (dark ? Self.pendingBodyBlendDark : Self.pendingBodyBlendLight) * g
+            body = body.blended(withFraction: toward, of: light) ?? body
+        }
+        body.withAlphaComponent(interiorAlpha).setFill()
         path.fill()
 
         // …read by its `rim` edge, the one thing that defines it against both
@@ -258,11 +327,11 @@ public final class WarmFaderCell: NSSliderCell {
     }
 
     /// The recessed trough: `faderTrackHeight` tall, vertically centered in
-    /// the cell's bar rect, full width.
+    /// the cell's bar rect, full width less `haloRoom` at each end.
     private func trackRect(inside rect: NSRect) -> NSRect {
-        NSRect(x: rect.minX,
+        NSRect(x: rect.minX + haloRoom,
                y: rect.midY - PopoverColumnGrid.faderTrackHeight / 2,
-               width: rect.width,
+               width: max(0, rect.width - 2 * haloRoom),
                height: PopoverColumnGrid.faderTrackHeight)
     }
 
@@ -275,18 +344,19 @@ public final class WarmFaderCell: NSSliderCell {
 
     /// 1 px in points at 1x — hairline shading/highlight/outline width.
     private static let hairlineWidth: CGFloat = 1
-    /// Alpha of the trough's inner top shade (`shadow` token over `well`).
-    private static let insetShadeAlpha: CGFloat = 0.18
     /// How far the armed gradient's dim end pre-blends `ember` toward `gold`
     /// (0 = raw ember). At 0.5 the dim end measures 6.96:1 (dark) / 3.97:1
     /// (light) vs `well` — raw ember measured 3.86:1 / 1.98:1, muddy at the
     /// track's low-value end in light.
     private static let armedDimEndGoldBlend: CGFloat = 0.5
-    /// The pending-apply fill's dash geometry: painted / gap run lengths in
-    /// points. 6-on/4-off gives a ~90 pt fill about nine clearly separated
-    /// gold segments — coarse enough to read at the 5 pt track height.
-    private static let pendingDashLength: CGFloat = 6
-    private static let pendingDashGap: CGFloat = 4
+    /// The pending glow's halo alphas at full strength for the rings 1, 2
+    /// and 3 pt out, and how far the body blends toward the light. Light
+    /// mode runs stronger because `glow` on the near-white ground is the
+    /// faintest pairing.
+    private static let pendingHaloAlphasDark: [CGFloat] = [0.34, 0.16, 0.07]
+    private static let pendingHaloAlphasLight: [CGFloat] = [0.50, 0.26, 0.11]
+    private static let pendingBodyBlendDark: CGFloat = 0.85
+    private static let pendingBodyBlendLight: CGFloat = 0.42
 
     // MARK: Test-support hooks
 
@@ -294,11 +364,22 @@ public final class WarmFaderCell: NSSliderCell {
     /// armed ∧ enabled, the exact gate `drawBar` uses, so tests can't drift
     /// from the pixels.
     public var test_isEngagedFill: Bool { isRouteArmed && isEnabled }
-    public var test_isPendingFill: Bool { isPendingApply && isRouteArmed && isEnabled }
+    public var test_isPendingGlow: Bool { isPendingApply && isRouteArmed && isEnabled }
+    /// Stands in for the system Reduce Motion setting; `true` holds the
+    /// glow at 0.7 so a pending render is deterministic.
+    public var test_reduceMotionOverride: Bool? {
+        didSet { reconcilePulseTimer() }
+    }
 
     /// The fill rect `drawBar` would paint for `track`, at the cell's current
     /// `doubleValue`/`minValue`/`maxValue` — same geometry, so a test can
     /// assert the fill reaches the track's real ends without going through
     /// the drawing chain.
     public func test_fillRect(track: NSRect) -> NSRect { fillRect(track: track) }
+
+    /// The trough rect `drawBar` paints, in the slider's coordinates.
+    public var test_trackRect: NSRect {
+        trackRect(inside: barRect(flipped: controlView?.isFlipped ?? false))
+    }
+    public var test_isPulseTimerRunning: Bool { pulseTimer != nil }
 }

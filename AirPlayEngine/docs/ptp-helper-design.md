@@ -178,6 +178,15 @@ substitution so a non-default build's daemon identity is consistent everywhere:
         <true/>
     </dict>                                       <!-- demand-start trigger: launchd launches on first app connect -->
 
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>AUDIOUT_PTP_MACH_SERVICE</key>
+        <string>com.audiout.Audiout.ptphelper</string>
+
+        <key>AUDIOUT_PTP_PEER_REQUIREMENT</key>
+        <string>identifier "com.audiout.Audiout" and anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] and certificate leaf[field.1.2.840.113635.100.6.1.13] and certificate leaf[subject.OU] = "<TEAMID>"</string>
+    </dict>                                       <!-- Team ID substituted from the signing identity; empty on an ad-hoc build -->
+
     <key>AssociatedBundleIdentifiers</key>        <!-- ties the daemon to this app in Login Items -->
     <string>com.audiout.Audiout</string>
 
@@ -346,6 +355,9 @@ decided to give up the ports. This does not change the answer above: shm +
 loopback-UDP remain the only data path, and the release verb is a trigger, not
 a transport — the 15s idle path is still the normal, unsolicited case, this is
 just an accelerator for the one case where the app already knows it's time.
+The verb is honored only from a peer whose code signature matches the
+`AUDIOUT_PTP_PEER_REQUIREMENT` rendered into the launchd plist above; every
+other peer's release request is ignored.
 
 ---
 

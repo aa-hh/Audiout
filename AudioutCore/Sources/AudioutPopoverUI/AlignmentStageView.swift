@@ -29,34 +29,20 @@ import AudioutSharedUI
 /// A custom-drawn instrument by necessity (approved in this target's
 /// AGENTS.md): no stock control renders a probability interval as light.
 /// Deliberately NOT synced to the audible ticks — the AirPlay path buffers
-/// 1–2 s and there is no beat callback, so the stage reacts to ANSWERS only;
-/// a visual metronome would lie.
+/// 1–2 s and there is no beat callback, so a visual metronome would lie and
+/// the stage never draws one. It reacts to answers, and while the mic listens
+/// to three real signals: the live level above the room, each speaker's
+/// heard or missed verdict, and the measured proposal. Only each speaker's
+/// turn window is taken from the play schedule.
 ///
-/// **The lights are LIVING RINGS, ported from the marketing site's emitter
-/// component** (`src/scripts/fields/emitters.js` in the Audiouter Website
-/// repo, at the values `house-bg.js` saves for its cabinet instance:
-/// `wobble` 0.03, `wobbleRate` 0.5, `squash` 1.12, breathe `0.4 + 0.6·u` at
-/// rate `0.1 + 0.028·f`, per-light seed `f·6.13 + 1.7`). Three things carry
-/// over and one deliberately does not. The RADIUS bends — two slow-turning
-/// harmonics, three lobes and five, phased by the light's own seed — so parts
-/// of the ring run ahead and the lead drifts, while the CENTRE never moves
-/// (the centre is data: it marks a millisecond value). The wavefront is
-/// squashed 1.12 in y, so a light reads as a slight oval rather than a clock
-/// face. The breathing swell rides the ring's and halo's OPACITY. What is
-/// dropped is the field itself: no outward propagation, no orbit drift — the
-/// website's rings travel because they are sound leaving a speaker; here the
-/// light IS a reading, and a reading that wanders is a lie.
-///
-/// **The swell modulates WITHIN a rung, never across one.** Brightness is the
-/// look table's certainty signal, so the emitter's ±43 % swell is remapped to
-/// ±`swellDepth` (6 %) around whatever opacity the rung settled on — well
-/// under the ~13 % step between two rungs' halos. **Pinned phase is the
-/// settled model**: with no clock running — Reduce Motion, `HeadlessRuntime`,
-/// off screen, or a rung that does not breathe — the wobble term is zero and
-/// the swell factor is exactly 1, so the ring is a plain squashed ellipse at
-/// the table's own opacity and `cacheDisplay` is byte-deterministic. Only the
-/// TIME-VARYING half of the port is pinned; the squash is a settled property
-/// and is present in every render.
+/// **A light IS the emitter field's settled state** (`SettledLightLayer`),
+/// drawn from the halo layers' live geometry: no outline ring is stroked over
+/// it on any rung. A halo layer draws nothing itself in the live path — it is
+/// an invisible carrier whose animated position, size, opacity, tint and
+/// variant the field reads each frame — and headless, where there is no GPU
+/// layer, it carries the bitmap halo instead so a snapshot still shows a
+/// light. Either way the same rung ladder decides the light's size and its
+/// brightness.
 ///
 /// Layer colors are stamped `CGColor`s, so the view re-stamps on appearance
 /// flips and accessibility-display changes. The accent dial is the third
@@ -67,6 +53,32 @@ import AudioutSharedUI
 /// test seams read the truth rather than a frame. Decorative to
 /// accessibility — the readout caption beside the stage carries the same
 /// information in words.
+/// A light's geometry, animated. It draws nothing in the live path — no
+/// contents, and a border width of 0 so `borderColor` is a tint channel
+/// rather than an edge — and everything the stage scripts on it (position,
+/// bounds, opacity, `borderColor`, `variant`) is what `SettledLightLayer`
+/// reads each frame to draw the light itself. Headless, where there is no
+/// field layer, it carries the bitmap halo in its `contents` instead.
+final class LightCarrierLayer: CALayer {
+    /// Which seed/density/breathe-rate family this light runs — animatable,
+    /// so two lights crossfade into ONE set of maths as they fuse.
+    @NSManaged var variant: CGFloat
+
+    override init() { super.init() }
+
+    override init(layer: Any) {
+        super.init(layer: layer)
+        // @NSManaged storage is not copied into a presentation layer for us.
+        if let source = layer as? LightCarrierLayer { variant = source.variant }
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override class func needsDisplay(forKey key: String) -> Bool {
+        key == "variant" ? true : super.needsDisplay(forKey: key)
+    }
+}
+
 final class AlignmentStageView: NSView {
 
     /// What the stage is showing. Value/interval numbers are in the session's
@@ -74,12 +86,14 @@ final class AlignmentStageView: NSView {
     enum State: Equatable {
         /// Intro: wide open and soft — the run hasn't started.
         case armed(range: ClosedRange<Double>)
+        /// The mic probe is running: nothing believed yet.
+        case measuring(range: ClosedRange<Double>)
         /// A question is live: the lights sit at the interval's ends.
         case question(intervalMs: ClosedRange<Double>, range: ClosedRange<Double>)
-        /// The proposal is playing: fused, concentric, breathing while the
-        /// user listens.
+        /// The proposal is playing: fused into one ring with two edges,
+        /// breathing while the user listens.
         case listening(valueMs: Double, range: ClosedRange<Double>)
-        /// Kept: one crisp ring. The lock sequence fires on the transition in.
+        /// Kept: one light. The lock sequence fires on the transition in.
         case locked(valueMs: Double, range: ClosedRange<Double>)
         /// A bow-out: the stage dims to the plate's rule tone and goes still.
         case dormant
@@ -92,7 +106,7 @@ final class AlignmentStageView: NSView {
     /// span and a breathing tempo all hang off it, so the words and the light
     /// can never disagree.
     enum Rung: Equatable {
-        case armed, open, closing, near, threshold, fused, locked, dormant
+        case armed, measuring, open, closing, near, threshold, fused, locked, dormant
 
         /// Boundaries the STAGE owns. The 250 ms rung boundary is the
         /// session's own `fineTempoHalfWidthMs` (the number that also quickens
@@ -108,13 +122,14 @@ final class AlignmentStageView: NSView {
         var ladderIndex: Int {
             switch self {
             case .armed: return 0
-            case .open: return 1
-            case .closing: return 2
-            case .near: return 3
-            case .threshold: return 4
-            case .fused: return 5
-            case .locked: return 6
-            case .dormant: return 7
+            case .measuring: return 1
+            case .open: return 2
+            case .closing: return 3
+            case .near: return 4
+            case .threshold: return 5
+            case .fused: return 6
+            case .locked: return 7
+            case .dormant: return 8
             }
         }
 
@@ -165,6 +180,7 @@ final class AlignmentStageView: NSView {
         static func resolve(_ state: State, previous: Rung) -> Rung {
             switch state {
             case .armed: return .armed
+            case .measuring: return .measuring
             case .listening: return .fused
             case .locked: return .locked
             case .dormant: return .dormant
@@ -199,9 +215,9 @@ final class AlignmentStageView: NSView {
     struct Look: Equatable {
         let haloDiameter: CGFloat
         let haloOpacity: Float
-        let ringRadius: CGFloat
-        let ringOpacity: Float
-        let ringLineWidth: CGFloat
+        /// The light's core radius, used only as clearance for the wire, the
+        /// ticks and the name stamps.
+        let coreRadius: CGFloat
         let wireOpacity: Float
         let tickHalfHeight: CGFloat
         let tickOpacity: Float
@@ -235,79 +251,87 @@ final class AlignmentStageView: NSView {
     /// moment of the run), and the 1.8× LIGHT SCALE below.
     ///
     /// **The lights are drawn 1.8× the spec's own sizes** (owner ruling
-    /// 2026-08-24, after the living-ring port shipped): the ported wobble is
-    /// ±3 % of the RADIUS, so on the spec's 9–20 pt rings the wavefront's
-    /// whole peak-to-peak travel was 1.1–2.4 Retina pixels — the life that
-    /// had just been ported could not be seen. Radii 36/32/25/20/16 put that
-    /// travel at 1.9–4.3 px, and the ring finally fills its own halo (ring
-    /// diameter ~⅔ of the halo box, where it was ~half and read as a small
-    /// circle adrift in a blob).
+    /// 2026-08-24): at the spec's sizes a light was a small circle adrift in
+    /// its own halo, and the ladder's steps between two rungs were 2–4 pt.
+    /// The halos scale with the lights, which is what forces `stageHeight` up
+    /// to 132, and the ladder's gaps grow with them — adjacent rungs sit
+    /// 4/7/5/4 pt apart. That last part is the constraint: the radius is how
+    /// the ladder encodes certainty, so the steps have to stay legible.
     ///
-    /// Three things move together, and none of them is a free multiply.
-    /// **The halos scale with the rings**, or the halo stops reading as light —
-    /// which is what forces `stageHeight` up to 132. **The line widths rise
-    /// sub-linearly** (×1.25 rather than ×1.8): a stroke that scaled with the
-    /// radius would read as a drawn hoop instead of a lit edge. **And the
-    /// ladder's gaps grow with everything else** — adjacent rungs sit 4/7/5/4
-    /// pt apart where they used to sit 2/4/3/2, so each step is twice as
-    /// legible while its ratio to the wobble at that size is unchanged. That
-    /// last part is the constraint: the radius is how the ladder encodes
-    /// certainty, so a scale that let the wobble catch up with the gap would
-    /// make the instrument lie.
+    /// Brightness is now ONE column. `haloOpacity` is what the field renders
+    /// the light at (the values the outline ring used to carry, since the
+    /// field is the light now), and `coreRadius` has no brightness of its own
+    /// — it is clearance geometry.
     static func look(for rung: Rung) -> Look {
         switch rung {
         case .armed:
-            return Look(haloDiameter: 106, haloOpacity: 0.20, ringRadius: 36,
-                        ringOpacity: 0.18, ringLineWidth: 1.25, wireOpacity: 0.55,
+            return Look(haloDiameter: 106, haloOpacity: 0.55, coreRadius: 36,
+                        wireOpacity: 0.55,
                         tickHalfHeight: 4, tickOpacity: 0.35, spanOpacity: 0.22,
                         spanHeight: 1.5, spanShadowRadius: 3, windowSpanMs: nil,
                         tickStepMs: 250, breathePeriod: 5.2, breatheAmplitude: 1.05,
                         rulerFill: openRulerFill)
+        case .measuring:
+            // The listening screen's resting light: at the range ends, open's
+            // brightness, neutral span, no name stamps. During a speaker's
+            // turn the mic grows that light (`setListeningTurn`); while a
+            // light waits, the quick breath is its "busy" cue — 1.3 s is no
+            // multiple of either click period (3 s or 0.833 s), so it can't
+            // lock step with them.
+            return Look(haloDiameter: listeningRestingDiameter, haloOpacity: 0.65, coreRadius: 32,
+                        wireOpacity: 0.66,
+                        tickHalfHeight: 4.75, tickOpacity: 0.48, spanOpacity: 0.22,
+                        spanHeight: 1.5, spanShadowRadius: 3, windowSpanMs: nil,
+                        tickStepMs: 250, breathePeriod: 1.3, breatheAmplitude: 1.08,
+                        rulerFill: openRulerFill)
         case .open:
-            return Look(haloDiameter: 96, haloOpacity: 0.40, ringRadius: 32,
-                        ringOpacity: 0.30, ringLineWidth: 1.25, wireOpacity: 0.66,
+            return Look(haloDiameter: 96, haloOpacity: 0.65, coreRadius: 32,
+                        wireOpacity: 0.66,
                         tickHalfHeight: 4.75, tickOpacity: 0.48, spanOpacity: 0.42,
                         spanHeight: 2.0, spanShadowRadius: 3.5, windowSpanMs: nil,
                         tickStepMs: 250, breathePeriod: 4.4, breatheAmplitude: 1.045,
                         rulerFill: openRulerFill)
         case .closing:
-            return Look(haloDiameter: 76, haloOpacity: 0.46, ringRadius: 25,
-                        ringOpacity: 0.55, ringLineWidth: 1.6, wireOpacity: 0.78,
+            return Look(haloDiameter: 76, haloOpacity: 0.75, coreRadius: 25,
+                        wireOpacity: 0.78,
                         tickHalfHeight: 5.5, tickOpacity: 0.60, spanOpacity: 0.61,
                         spanHeight: 2.5, spanShadowRadius: 4, windowSpanMs: 640,
                         tickStepMs: 100, breathePeriod: 3.5, breatheAmplitude: 1.04)
         case .near:
-            return Look(haloDiameter: 60, haloOpacity: 0.52, ringRadius: 20,
-                        ringOpacity: 0.78, ringLineWidth: 2.0, wireOpacity: 0.89,
+            return Look(haloDiameter: 60, haloOpacity: 0.85, coreRadius: 20,
+                        wireOpacity: 0.89,
                         tickHalfHeight: 6.25, tickOpacity: 0.73, spanOpacity: 0.81,
                         spanHeight: 3.0, spanShadowRadius: 4.5, windowSpanMs: 200,
                         tickStepMs: 25, breathePeriod: 2.7, breatheAmplitude: 1.035)
         case .threshold:
-            return Look(haloDiameter: 46, haloOpacity: 0.58, ringRadius: 16,
-                        ringOpacity: 1.0, ringLineWidth: 2.5, wireOpacity: 1.0,
+            return Look(haloDiameter: 46, haloOpacity: 1.0, coreRadius: 16,
+                        wireOpacity: 1.0,
                         tickHalfHeight: 7, tickOpacity: 0.85, spanOpacity: 1.0,
                         spanHeight: 3.5, spanShadowRadius: 5, windowSpanMs: 64,
                         tickStepMs: 10, breathePeriod: 2.0, breatheAmplitude: 1.03)
         case .fused:
-            // The span has collapsed INTO the ring, so it carries no opacity
-            // of its own; the reference ring steps out to the outer companion.
-            return Look(haloDiameter: 50, haloOpacity: 0.55, ringRadius: 16,
-                        ringOpacity: 1.0, ringLineWidth: 2.5, wireOpacity: 1.0,
+            // The span has collapsed INTO the light, so it carries no
+            // opacity of its own. The two lights sit on one centre as one
+            // ring with two edges (green inner, blue outer; see
+            // `fusedReferenceScale`), 64 pt so both edges read. The core
+            // radius matches locked's, so the wire's gap fits the ring.
+            return Look(haloDiameter: 64, haloOpacity: 1.0, coreRadius: 20,
+                        wireOpacity: 1.0,
                         tickHalfHeight: 7, tickOpacity: 0.85, spanOpacity: 0,
                         spanHeight: 3.5, spanShadowRadius: 5, windowSpanMs: 64,
                         tickStepMs: 10, breathePeriod: 2.7, breatheAmplitude: 1.03)
         case .locked:
-            // Halo larger and brighter than the table's 40 @ 0.42: the settled
+            // Halo larger than the table's 40: the settled
             // look carries the fusion itself, so a Reduce Motion user who
             // never sees the lock sequence still sees the bloom.
-            return Look(haloDiameter: 74, haloOpacity: 0.55, ringRadius: 20,
-                        ringOpacity: 1.0, ringLineWidth: 2.5, wireOpacity: 1.0,
+            return Look(haloDiameter: 74, haloOpacity: 1.0, coreRadius: 20,
+                        wireOpacity: 1.0,
                         tickHalfHeight: 7, tickOpacity: 0.85, spanOpacity: 0,
                         spanHeight: 3.5, spanShadowRadius: 5, windowSpanMs: 64,
                         tickStepMs: 10, breathePeriod: nil, breatheAmplitude: 1.03)
         case .dormant:
-            return Look(haloDiameter: 0, haloOpacity: 0, ringRadius: 18,
-                        ringOpacity: 0.30, ringLineWidth: 1.25, wireOpacity: 0.55,
+            return Look(haloDiameter: 0, haloOpacity: 0, coreRadius: 18,
+                        wireOpacity: 0.55,
                         tickHalfHeight: 4, tickOpacity: 0.35, spanOpacity: 0,
                         spanHeight: 1.5, spanShadowRadius: 3, windowSpanMs: nil,
                         tickStepMs: 250, breathePeriod: nil, breatheAmplitude: 1.0)
@@ -327,8 +351,10 @@ final class AlignmentStageView: NSView {
         case slide
         /// `armed → open`: the run starts. All together, nothing earned yet.
         case wake
-        /// `threshold → fused`: the span collapses into the ring.
+        /// `threshold → fused`: the span collapses into the light.
         case fuse
+        /// `measuring → fused`: the two rings come together on the centre.
+        case gather
         /// Anything → `dormant`: a bow-out fade.
         case bowOut
         /// Back to `armed` (Try again): pull-back, no settle-breath.
@@ -345,7 +371,7 @@ final class AlignmentStageView: NSView {
     /// 112 until the lights were scaled 1.8× (see `look(for:)`), and the 20 pt
     /// it grew by is the price of that scale rather than a separate decision —
     /// the halo is the tallest thing on the plate, and a halo that did not
-    /// grow with its ring would have stopped reading as a halo. It feeds
+    /// grow with the light would have stopped reading as a halo. It feeds
     /// `BTAlignmentWizardView.chassisHeight` 1:1, so it is also the sheet's
     /// height: every screen gets 20 pt taller, none of them reflows, and the
     /// stage goes from 27 % of the question sheet to 30 % — the ratio the
@@ -375,69 +401,26 @@ final class AlignmentStageView: NSView {
     /// The sticky centre's dead-band: the interval plus this much of the
     /// window's own span on each side must escape before the camera pans.
     private static let stickyMarginFraction: Double = 0.15
+    /// FUSED (the proposal) draws the two lights on one centre as ONE ring
+    /// with two edges: the reference this much wider than the target, each
+    /// light on its own maths. The reference keeps variant 1, whose crest
+    /// sits at 0.486 of its halo radius against the target's (variant 0)
+    /// 0.558, so 1.148 would put both crests on one circle, where the hues
+    /// add to one pale aqua and neither speaker shows. 1.285 puts the blue
+    /// crest half a band outside the green one: at the 64 pt fused size the
+    /// green crest is at 17.9 pt and the blue at 20.0 pt, 2.1 pt apart, about
+    /// half of the ~4.5 pt band, so the bands overlap with no gap between —
+    /// green inner edge, blue outer edge.
+    /// razor: a fixed factor, not derived at runtime — the fused halo size is
+    /// a constant, so the overlap is too; recompute it if
+    /// `Look.fused.haloDiameter`, `SettledLightLayer.crestScale` or
+    /// `.bandNarrow` change.
+    private static let fusedReferenceScale: CGFloat = 1.285
 
     // MARK: - The emitter (ported knobs — see the type comment)
 
-    /// How a light is drawn. `.still` is the pre-port ring, kept as the
-    /// owner's A/B; the app runs `.living`.
-    enum RingStyle { case still, living }
-    var ringStyle: RingStyle = .living {
-        didSet { reconcileBreathing() }
-    }
-
-    /// `emitters.js` `wobble`: the wavefront bends by ±3 % of its radius.
-    /// razor: 0.03 is the website's own value, ported literally, and the
-    /// 1.8× light scale (see `look(for:)`) is what makes it visible — at the
-    /// spec's original 9–20 pt rings the wavefront's peak-to-peak travel was
-    /// 1.1–2.4 Retina pixels. At 16–36 pt it is 1.9–4.3. The tight
-    /// rungs are still the quietest, which is the intent: a belief that has
-    /// narrowed should read calmer than one that has not. If the endgame
-    /// ever needs more life than that, the upgrade path is to raise THIS
-    /// number (the character is the two harmonics, not the amplitude), never
-    /// to reshape the harmonics and never to grow the tight rungs into the
-    /// wide ones' sizes.
-    private static let wobble: CGFloat = 0.03
-    /// `wobbleRate` — rad/s the three-lobe harmonic turns. The five-lobe one
-    /// counter-turns at ×0.73, which is what keeps the lead drifting.
-    private static let wobbleRate: Double = 0.5
-    /// `squash`: y is shortened by this, so the rings read as slight ovals.
-    /// A SETTLED property — present at pinned phase too.
+    /// `squash`: y is shortened by this; `haloBox` wears it.
     private static let squash: CGFloat = 1.12
-    /// The breathing swell, `breatheFloor + breatheDepth · u`, at
-    /// `breatheRate + breatheStep · f` rad/s — a ~63 s period, a slow swell
-    /// rather than a pulse.
-    private static let breatheFloor: Double = 0.4
-    private static let breatheDepth: Double = 0.6
-    private static let breatheRate: Double = 0.1
-    private static let breatheStep: Double = 0.028
-    /// How far the swell is allowed to move a light's opacity, as a fraction
-    /// of the rung's settled value. The emitter's own swing is ±43 %, which
-    /// would carry a light clean across a rung boundary and make the
-    /// instrument lie about its certainty; the smallest gap between two
-    /// rungs' halo opacities is ~13 %, so the modulation is held to half of
-    /// that. This is the ONE ported number that is not the website's.
-    private static let swellDepth: Float = 0.06
-    /// Segments per living ring. At the largest radius the table now asks for
-    /// (36 pt) the chord is 2.4 pt and the sagitta 0.02 pt, so the polygon is
-    /// still an ellipse on any display.
-    private static let ringSegments = 96
-
-    /// `emitters.js`'s per-emitter seed: the reason the two lights never wave
-    /// in step. `f` is the light's index — 0 target, 1 reference.
-    private static func seed(_ f: Double) -> Double { f * 6.13 + 1.7 }
-
-    /// The breathing swell as a MULTIPLIER on a settled opacity: 1 at pinned
-    /// phase, 1 ± `swellDepth` while the clock runs.
-    private static func swellFactor(phase: Double?, index f: Double) -> Float {
-        guard let phase else { return 1 }
-        let rate = breatheRate + breatheStep * f
-        let unit = 0.5 + 0.5 * sin(phase * rate + seed(f) * 2.3)
-        let swell = breatheFloor + breatheDepth * unit
-        // Centre the emitter's [floor, floor + depth] band on its own mean,
-        // then scale that ±1 down to the depth the ladder can afford.
-        let centred = (swell - (breatheFloor + breatheDepth / 2)) / (breatheDepth / 2)
-        return 1 + swellDepth * Float(centred)
-    }
 
     // MARK: - Curves (spec §5)
 
@@ -448,6 +431,106 @@ final class AlignmentStageView: NSView {
     /// Within-rung travel. §5 names the curve but not its control points, so
     /// this is AppKit's own ease-in-ease-out.
     private static let glideCurve = CAMediaTimingFunction(name: .easeInEaseOut)
+
+    // MARK: - Listening (the measuring rung, per light)
+
+    /// Where one speaker's light is in the mic probe: waiting for its turn,
+    /// in its turn (the light follows the mic), checking (turn over, no
+    /// verdict yet), or answered heard or missed. The values below come from
+    /// the wizard ring concept the owner picked ("concept A"), except the
+    /// full-growth and cap sizes, which the owner raised after a live test.
+    enum ListeningPhase: Equatable { case waiting, turn, checking, heard, missed }
+
+    private(set) var listeningPhases: (target: ListeningPhase, reference: ListeningPhase)
+        = (.waiting, .waiting)
+    /// The turn light's growth, 0…1, smoothed toward the mic's live level.
+    private(set) var listeningGrowth: CGFloat = 0
+    private var listeningGrowthUpdatedAt: CFTimeInterval?
+    /// Each light's shimmer as the running field draws it: it rises with its
+    /// target at once and falls on `listeningShimmerRelease`, advanced by the
+    /// display link, so a turn's end or a verdict fades the tremble out.
+    private var listeningShimmerDrawn: (target: Float, reference: Float) = (0, 0)
+    private var listeningShimmerUpdatedAt: CFTimeInterval?
+
+    /// A light at rest on the listening screen (concept A `D_WAIT`).
+    private static let listeningRestingDiameter: CGFloat = 84
+    /// A light at full growth during its turn. Concept A's `D_PEAK` was
+    /// 116 pt; the owner raised it to 126 pt after a live test.
+    private static let listeningFullDiameter: CGFloat = 126
+    /// No light is ever drawn wider than this. Concept A's `D_MAX` was 120 pt;
+    /// raised to 130 pt with the full size. The drawn edge sits at 0.798 of
+    /// the halo radius vertically (`SettledLightLayer.reach` edge 0.894 over
+    /// `squash` 1.12), so at a 65 pt radius it reaches 51.9 pt from the wire:
+    /// on the 132 pt plate with the wire at 66 pt that leaves ~14 pt clear of
+    /// the top and bottom edges.
+    private static let listeningCapDiameter: CGFloat = 130
+    /// Growth at which a turn light starts to shimmer: the ring's own curl
+    /// strengthens and quickens from here (`SettledLightLayer.Light.listening`)
+    /// to its full shimmer at full growth, smoothstep between.
+    private static let listeningShimmerStartGrowth: CGFloat = 0.6
+    /// The shimmer's fall time constant once its light stops listening: the
+    /// breath release's 0.3 s settle.
+    private static let listeningShimmerRelease: CFTimeInterval = 0.3
+    /// A heard or missed light (concept A `D_SEAT`).
+    private static let listeningSeatDiameter: CGFloat = 72
+    /// A heard light sits this far from the centre, target left (concept A `SEAT`).
+    private static let listeningSeatOffset: CGFloat = 40
+    /// A missed light's opacity (concept A, missed).
+    private static let listeningMissedOpacity: Float = 0.35
+    /// How far a missed light's hue moves toward `stageRule` (concept A, missed).
+    private static let listeningMissedTintFraction: CGFloat = 0.8
+    /// The light starts growing this far above the room (concept A `DB_FLOOR`).
+    private static let listeningGrowthFloorDB: Double = 6
+    /// The light is fully grown this far above the room (concept A `DB_FULL`).
+    private static let listeningGrowthFullDB: Double = 24
+    /// Smoothing time constant while the level rises (concept A `ATTACK`).
+    private static let listeningAttack: CFTimeInterval = 0.12
+    /// Smoothing time constant while the level falls (concept A `RELEASE`).
+    private static let listeningRelease: CFTimeInterval = 0.8
+    /// A heard light's glide to its seat, on `ratchetCurve` (concept A `GLIDE`).
+    private static let listeningHeardLeg: Script.Leg = (duration: 0.7, delay: 0)
+    /// A missed light's shrink and fade, on `settleCurve` (concept A, missed).
+    private static let listeningMissedLeg: Script.Leg = (duration: 0.6, delay: 0)
+    /// A light's return home, on `settleCurve` (concept A, retry).
+    private static let listeningHomeLeg: Script.Leg = (duration: 0.8, delay: 0)
+    /// A turn light lets go of its breath, on `settleCurve` (concept A, turn).
+    private static let listeningBreathReleaseLeg: Script.Leg = (duration: 0.3, delay: 0)
+    /// A heard light's slower, deeper breath (concept A, "in the middle").
+    private static let listeningSeatedBreathePeriod: TimeInterval = 3.2
+    private static let listeningSeatedBreatheAmplitude: CGFloat = 1.06
+
+    /// How far a light grows for a level above the room: none at +6 dB, full
+    /// at +24 dB, linear between.
+    static func listeningGrowth(levelAboveRoomDB dB: Double) -> CGFloat {
+        let fraction = (dB - listeningGrowthFloorDB) / (listeningGrowthFullDB - listeningGrowthFloorDB)
+        return CGFloat(Swift.min(Swift.max(fraction, 0), 1))
+    }
+
+    /// How hard a light is listening, 0…1: none below 0.6 growth, full at
+    /// full growth, smoothstep between.
+    static func listeningShimmer(growth: CGFloat) -> Float {
+        let t = Swift.min(Swift.max((growth - listeningShimmerStartGrowth)
+                                    / (1 - listeningShimmerStartGrowth), 0), 1)
+        return Float(t * t * (3 - 2 * t))
+    }
+
+    /// One step of the drawn shimmer: straight up to a higher target (the
+    /// growth is already smoothed), an exponential fall toward a lower one.
+    static func smoothedShimmer(from shimmer: Float, toward target: Float,
+                                dt: CFTimeInterval) -> Float {
+        guard target < shimmer else { return target }
+        guard dt > 0 else { return shimmer }
+        return shimmer + (target - shimmer) * Float(1 - exp(-dt / listeningShimmerRelease))
+    }
+
+    /// One step of the growth's exponential approach: quick while the level
+    /// rises, slow while it falls (concept A's `g += (target − g)(1 − e^(−dt/τ))`).
+    static func smoothedGrowth(from growth: CGFloat, toward target: CGFloat,
+                               dt: CFTimeInterval) -> CGFloat {
+        guard dt > 0 else { return growth }
+        let tau = target > growth ? listeningAttack : listeningRelease
+        return growth + (target - growth) * CGFloat(1 - exp(-dt / tau))
+    }
 
     // MARK: - State
 
@@ -480,21 +563,26 @@ final class AlignmentStageView: NSView {
     /// The wire, in two halves: OUTSIDE the field, because the rail does not
     /// move with the camera — it is the fixed thing the ruler slides under.
     /// Two layers so that, fused and locked, each side can carry its own
-    /// voice up to the ring (green from the left, steel blue from the right)
-    /// instead of one rule running straight through it.
+    /// voice up to the light (green from the left, steel blue from the
+    /// right) instead of one rule running straight through it.
     private let wireLeft = CAShapeLayer()
     private let wireRight = CAShapeLayer()
-    /// Everything the camera moves: ticks, span, halos, rings. Clipped, so a
+    /// Everything the camera moves: ticks, span, lights. Clipped, so a
     /// seeded push-in reads as an iris rather than as content spilling out.
     private let fieldLayer = CALayer()
     private let tickLayer = CAShapeLayer()
     /// The credible interval: a `wireCore → ring` bar between the two
     /// lights, with a low `fuseWhite` bloom (the span's shadow).
     private let spanLayer = CAGradientLayer()
-    private let targetHalo = CALayer()
-    private let targetRing = CAShapeLayer()
-    private let referenceHalo = CALayer()
-    private let referenceRing = CAShapeLayer()
+    private let targetHalo = LightCarrierLayer()
+    private let referenceHalo = LightCarrierLayer()
+    /// The two lights as the emitter field's SETTLED state, under the halos
+    /// (`SettledLightLayer`). `nil` headless or without Metal, and the halo
+    /// layers then carry their bitmap instead — the halos stay in the tree
+    /// either way, because their animated position, size and opacity are
+    /// what drive this layer's frames.
+    private let settledLights = SettledLightLayer.make()
+    private var settledLightsLink: CADisplayLink?
 
     private static let breatheKey = "alignmentStage.breathe"
     /// `CATransition` is filed under this literal reserved key whatever key is
@@ -545,15 +633,12 @@ final class AlignmentStageView: NSView {
         for halo in [targetHalo, referenceHalo] {
             halo.contentsGravity = .resize
         }
-        for ring in [targetRing, referenceRing] {
-            ring.fillColor = nil
-        }
-        // Halos under the span, rings above it, so the fused state reads as
-        // one glowing bead on the wire rather than a bar through a ring.
-        for sub in [tickLayer, targetHalo, referenceHalo,
-                    spanLayer, targetRing, referenceRing] {
+        for sub in [tickLayer, targetHalo, referenceHalo, spanLayer] {
             fieldLayer.addSublayer(sub)
         }
+        // Under everything the camera moves: the field is the light itself,
+        // the halo layers above it are transparent carriers of its geometry.
+        if let settledLights { fieldLayer.insertSublayer(settledLights, at: 0) }
         for sub in [plateLayer, wireLeft, wireRight, fieldLayer] {
             layer?.addSublayer(sub)
         }
@@ -604,6 +689,13 @@ final class AlignmentStageView: NSView {
         state = newState
         rung = newRung
         displayRange = newWindow
+        if newRung != previousRung {
+            listeningPhases = (.waiting, .waiting)
+            listeningGrowth = 0
+            listeningShimmerDrawn = (0, 0)
+            listeningShimmerUpdatedAt = nil
+            listeningGrowthUpdatedAt = nil
+        }
 
         let transition = Self.transition(previousState: previousState,
                                          previousRung: previousRung,
@@ -639,6 +731,12 @@ final class AlignmentStageView: NSView {
         if isFirstApply { return .wake }
         if newRung == .armed { return .rearm }
         if previousRung == .armed && newRung == .open { return .wake }
+        if previousRung == .armed && newRung == .measuring { return .wake }
+        // A failed listen falls back to the questions. It climbs a rung, but
+        // nothing was earned, so it slides — the one script with neither a
+        // detent nor a settle-breath.
+        if previousRung == .measuring && newRung == .open { return .slide }
+        if previousRung == .measuring && newRung == .fused { return .gather }
         if newRung == .fused && previousRung != .fused { return .fuse }
 
         if newRung.ladderIndex > previousRung.ladderIndex {
@@ -658,7 +756,7 @@ final class AlignmentStageView: NSView {
 
     private static func intervalWidth(_ state: State) -> Double? {
         switch state {
-        case .armed(let range): return range.upperBound - range.lowerBound
+        case .armed(let range), .measuring(let range): return range.upperBound - range.lowerBound
         case .question(let interval, _): return interval.upperBound - interval.lowerBound
         case .listening, .locked: return 0
         case .dormant: return nil
@@ -678,7 +776,7 @@ final class AlignmentStageView: NSView {
         let interval: ClosedRange<Double>
         let range: ClosedRange<Double>
         switch state {
-        case .armed(let r):
+        case .armed(let r), .measuring(let r):
             return r
         case .question(let i, let r):
             interval = i
@@ -750,7 +848,7 @@ final class AlignmentStageView: NSView {
     /// past it, whatever the wire maps.
     private var candidateRange: ClosedRange<Double>? {
         switch state {
-        case .armed(let range): return range
+        case .armed(let range), .measuring(let range): return range
         case .question(_, let range), .listening(_, let range), .locked(_, let range): return range
         case .dormant: return nil
         }
@@ -760,7 +858,7 @@ final class AlignmentStageView: NSView {
     /// one point once they have fused.
     private func lightValues() -> (low: Double, high: Double) {
         switch state {
-        case .armed(let range):
+        case .armed(let range), .measuring(let range):
             return (range.lowerBound, range.upperBound)
         case .question(let interval, _):
             return (interval.lowerBound, interval.upperBound)
@@ -785,8 +883,8 @@ final class AlignmentStageView: NSView {
         if case .armed = state { armed = true } else { armed = false }
         let (lowMs, highMs) = lightValues()
         let look = Self.look(for: rung)
-        // Un-flipped view: "under the light" is LOWER y — just below the ring.
-        let ringBottom = wireY - look.ringRadius - Self.nameStampGap
+        // Un-flipped view: "under the light" is LOWER y — just below it.
+        let stampTop = wireY - look.coreRadius - Self.nameStampGap
         let width = (bounds.width - 2 * Self.horizontalInset) / 2 - Self.nameStampGap
         for (label, x, name) in [(targetNameLabel, xFor(lowMs), lightNames.target),
                                  (referenceNameLabel, xFor(highMs), lightNames.reference)] {
@@ -804,7 +902,7 @@ final class AlignmentStageView: NSView {
             let minX = Self.plateCornerRadius
             let maxX = bounds.width - Self.plateCornerRadius - width
             let originX = Swift.min(Swift.max(x - width / 2, minX), maxX)
-            label.frame = NSRect(x: originX.rounded(), y: (ringBottom - height).rounded(),
+            label.frame = NSRect(x: originX.rounded(), y: (stampTop - height).rounded(),
                                  width: width, height: height)
         }
     }
@@ -819,7 +917,9 @@ final class AlignmentStageView: NSView {
         plateLayer.frame = bounds
         fieldLayer.bounds = CGRect(origin: .zero, size: bounds.size)
         fieldLayer.position = .zero
+        settledLights?.fit(to: bounds.size, scale: window?.backingScaleFactor ?? 2)
         CATransaction.commit()
+        drawSettledStill()
     }
 
     // MARK: - Transition scripts
@@ -830,7 +930,6 @@ final class AlignmentStageView: NSView {
         typealias Leg = (duration: TimeInterval, delay: TimeInterval)
         var curve: CAMediaTimingFunction
         var camera: Leg
-        var rings: Leg
         var halos: Leg
         var span: Leg
         var wire: Leg
@@ -845,7 +944,7 @@ final class AlignmentStageView: NSView {
         func scaled(by factor: Double) -> Script {
             guard factor != 1 else { return self }
             func s(_ leg: Leg) -> Leg { (leg.duration * factor, leg.delay * factor) }
-            return Script(curve: curve, camera: s(camera), rings: s(rings),
+            return Script(curve: curve, camera: s(camera),
                           halos: s(halos), span: s(span), wire: s(wire),
                           tickCrossfade: tickCrossfade.map { $0 * factor },
                           detentAt: detentAt.map { $0 * factor },
@@ -856,25 +955,25 @@ final class AlignmentStageView: NSView {
 
     /// Everything at rest, right now — Reduce Motion, headless, a resize.
     private static let instantScript = Script(
-        curve: glideCurve, camera: (0, 0), rings: (0, 0), halos: (0, 0),
+        curve: glideCurve, camera: (0, 0), halos: (0, 0),
         span: (0, 0), wire: (0, 0), tickCrossfade: nil, detentAt: nil,
         settleBreathAt: nil, seedsCamera: false)
 
-    /// **Promotion — 0.62 s, RATCHET.** The push-in leads, the rings follow,
+    /// **Promotion — 0.62 s, RATCHET.** The push-in leads, the span follows,
     /// the halos lag most, and the detent lands as the push-in settles: the
     /// stage banking progress the user just earned.
     private static let promotionScript = Script(
-        curve: ratchetCurve, camera: (0.34, 0), rings: (0.28, 0.06),
+        curve: ratchetCurve, camera: (0.34, 0),
         halos: (0.32, 0.10), span: (0.30, 0.08), wire: (0.34, 0),
         tickCrossfade: 0.28, detentAt: 0.34, settleBreathAt: nil,
         seedsCamera: true)
 
     /// **Demotion — 0.86 s, SETTLE.** Ordering inverted from the promotion:
-    /// the halos SOFTEN first, the camera pulls back over 0.62 s, the rings
-    /// and span follow, the ruler briefly loses focus, and it ends on a
+    /// the halos SOFTEN first, the camera pulls back over 0.62 s, the span
+    /// follows, the ruler briefly loses focus, and it ends on a
     /// settle-breath. Nothing brightens at any frame; there is no detent.
     private static let demotionScript = Script(
-        curve: settleCurve, camera: (0.62, 0), rings: (0.34, 0.10),
+        curve: settleCurve, camera: (0.62, 0),
         halos: (0.34, 0), span: (0.34, 0.12), wire: (0.62, 0),
         tickCrossfade: 0.28, detentAt: nil, settleBreathAt: 0.62,
         seedsCamera: true)
@@ -883,34 +982,44 @@ final class AlignmentStageView: NSView {
     /// compensation and the lights' travel share one duration and one curve,
     /// or they would visibly disagree.
     private static let slideScript = Script(
-        curve: glideCurve, camera: (0.42, 0), rings: (0.42, 0), halos: (0.42, 0),
+        curve: glideCurve, camera: (0.42, 0), halos: (0.42, 0),
         span: (0.42, 0), wire: (0.42, 0), tickCrossfade: nil, detentAt: nil,
         settleBreathAt: nil, seedsCamera: true)
 
     /// **Wake — 0.45 s.** `armed → open`, all together: no stagger and no
     /// detent, because nothing has been earned yet.
     private static let wakeScript = Script(
-        curve: ratchetCurve, camera: (0.45, 0), rings: (0.45, 0), halos: (0.45, 0),
+        curve: ratchetCurve, camera: (0.45, 0), halos: (0.45, 0),
         span: (0.45, 0), wire: (0.45, 0), tickCrossfade: 0.45 / 2, detentAt: nil,
         settleBreathAt: nil, seedsCamera: false)
 
-    /// **Fuse — 0.40 s.** The span collapses into the ring and the reference
-    /// ring steps out to the outer companion.
+    /// **Fuse — 0.40 s.** The span collapses into the light and the two
+    /// lights become one, running the same maths.
     private static let fuseScript = Script(
-        curve: glideCurve, camera: (0.40, 0), rings: (0.40, 0), halos: (0.40, 0),
+        curve: glideCurve, camera: (0.40, 0), halos: (0.40, 0),
         span: (0.40, 0), wire: (0.40, 0), tickCrossfade: 0.20, detentAt: nil,
         settleBreathAt: nil, seedsCamera: true)
 
+    /// **Gather — 0.60 s, SETTLE.** `measuring → fused`, the mic's answer:
+    /// the two rings glide from their seats (or homes) onto the centre and
+    /// become one ring with two edges. No camera seed: a seated ring is not
+    /// at a window position, so a seed would throw it to where its value sat
+    /// on the old wire before the glide.
+    private static let gatherScript = Script(
+        curve: settleCurve, camera: (0.60, 0), halos: (0.60, 0),
+        span: (0.60, 0), wire: (0.60, 0), tickCrossfade: 0.30, detentAt: nil,
+        settleBreathAt: nil, seedsCamera: false)
+
     /// **Bow-out — 0.30 s.** Everything fades to the plate's rule tone.
     private static let bowOutScript = Script(
-        curve: settleCurve, camera: (0.30, 0), rings: (0.30, 0), halos: (0.30, 0),
+        curve: settleCurve, camera: (0.30, 0), halos: (0.30, 0),
         span: (0.30, 0), wire: (0.30, 0), tickCrossfade: nil, detentAt: nil,
         settleBreathAt: nil, seedsCamera: false)
 
     /// **Re-arm — 0.50 s.** Try again: a pull-back to wide open, with no
     /// settle-breath — the run has not given ground, it has been reset.
     private static let rearmScript = Script(
-        curve: settleCurve, camera: (0.50, 0), rings: (0.50, 0), halos: (0.50, 0),
+        curve: settleCurve, camera: (0.50, 0), halos: (0.50, 0),
         span: (0.50, 0), wire: (0.50, 0), tickCrossfade: 0.25, detentAt: nil,
         settleBreathAt: nil, seedsCamera: true)
 
@@ -925,6 +1034,7 @@ final class AlignmentStageView: NSView {
         case .slide: return slideScript
         case .wake: return wakeScript
         case .fuse: return fuseScript
+        case .gather: return gatherScript
         case .bowOut: return bowOutScript
         case .rearm: return rearmScript
         case .lock: return instantScript   // the lock runs its own four beats
@@ -1015,19 +1125,20 @@ final class AlignmentStageView: NSView {
         let fused = rung == .fused
         let locked = rung == .locked
         // Inside threshold the interval still closes from 12 ms to the
-        // run's 6 ms stop — the hardest-clicked stretch. The ring thickens
-        // and the halo brightens with it, so the top rung is not a frozen
-        // frame.
+        // run's 6 ms stop — the hardest-clicked stretch. Threshold is already
+        // at full brightness, so the top rung's inner ramp is the light's
+        // SIZE: 46 grows 4 pt toward the fused look's `haloDiameter`, and the
+        // rung is not a frozen frame.
         let progress = thresholdProgress
-        let ringLineWidth = look.ringLineWidth + 0.5 * progress
-        let haloOpacity = look.haloOpacity + 0.10 * Float(progress)
+        let haloOpacity = look.haloOpacity
+        let haloDiameter = look.haloDiameter + 4 * progress
 
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         tickLayer.frame = CGRect(origin: .zero, size: bounds.size)
-        // Fused/locked: the wire stops short of the ring on both sides, so
+        // Fused/locked: the wire stops short of the light on both sides, so
         // the rule never runs through the one light the run has earned.
-        let gap: CGFloat = fused || locked ? look.ringRadius + 6 : 0
+        let gap: CGFloat = fused || locked ? look.coreRadius + 6 : 0
         let midX = fused || locked ? lowX : bounds.midX
         let left = CGMutablePath()
         left.move(to: CGPoint(x: Self.horizontalInset, y: y))
@@ -1044,8 +1155,8 @@ final class AlignmentStageView: NSView {
                     leg: script.wire, curve: curve)
         }
 
-        layoutTicks(look: look, y: y, lightXs: [lowX, highX],
-                    clearance: look.ringRadius + 3, script: script, curve: curve)
+        layoutTicks(look: look, y: y, lights: tickClearances(look: look, lowX: lowX, highX: highX),
+                    script: script, curve: curve)
 
         // The span: a gradient bar between the lights, invisible once fused.
         let spanWidth = Swift.max(highX - lowX, 0)
@@ -1063,33 +1174,56 @@ final class AlignmentStageView: NSView {
         animate(layer: spanLayer, keyPath: "opacity", to: look.spanOpacity,
                 leg: script.span, curve: curve)
 
-        // The two lights. Fused, the reference ring steps OUT to the outer
-        // companion at reduced weight and its halo hides, so "as one" still
-        // shows both parties; locked, the reference is gone entirely.
-        layoutLight(halo: targetHalo, ring: targetRing,
-                    centre: CGPoint(x: lowX, y: y),
-                    haloDiameter: look.haloDiameter,
-                    haloOpacity: haloOpacity,
-                    ringRadius: look.ringRadius,
-                    ringOpacity: look.ringOpacity,
-                    ringLineWidth: ringLineWidth,
+        // The two lights. Apart, they sit at the interval's ends in their own
+        // voices. FUSED (the proposal) they become one ring with two edges:
+        // one centre, the reference a touch larger than the target so its
+        // band sits half a band outside the target's — each still its own
+        // colour (green inner edge, steel-blue outer edge), both at full
+        // brightness. LOCKED they MERGE to one: the reference fades to nothing
+        // and the lone target ring crosses to warm white.
+        // MEASURING, each light's place, size and brightness come from its
+        // own listening phase (`listeningSettled`).
+        let measuring = rung == .measuring
+        let targetCentre = CGPoint(x: lowX, y: y)
+        let target = measuring ? listeningSettled(.target)
+            : (centre: targetCentre, diameter: haloDiameter, opacity: haloOpacity)
+        layoutLight(halo: targetHalo,
+                    centre: target.centre,
+                    haloDiameter: target.diameter,
+                    haloOpacity: target.opacity,
+                    variant: 0,
                     script: script, curve: curve)
-        layoutLight(halo: referenceHalo, ring: referenceRing,
-                    centre: CGPoint(x: highX, y: y),
-                    haloDiameter: look.haloDiameter,
-                    haloOpacity: fused || locked ? 0 : haloOpacity,
-                    ringRadius: fused ? look.ringRadius + 6 : look.ringRadius,
-                    // ×0.85, not the table's ×0.55: measured against the
-                    // magenta-era ring over the green halo (dusty mauve at
-                    // 0.55). Not re-measured for `ring`, and the risk changed
-                    // with the hue: composited over the GREEN halo, blue moves
-                    // toward the target's own colour, so what to look for is
-                    // the reference ring reading teal and losing whose light
-                    // it is — not mud. Owed eye check.
-                    ringOpacity: locked ? 0 : (fused ? look.ringOpacity * 0.85
-                                                     : look.ringOpacity),
-                    ringLineWidth: ringLineWidth,
-                    script: script, curve: curve)
+        if fused {
+            // One ring with two edges: same centre, the reference
+            // `fusedReferenceScale` wider so its band sits half a band
+            // outside the target's (see the constant). Each light keeps its
+            // own maths (variant 1 here); the lock is where they become one.
+            layoutLight(halo: referenceHalo,
+                        centre: targetCentre,
+                        haloDiameter: haloDiameter * Self.fusedReferenceScale,
+                        haloOpacity: haloOpacity,
+                        variant: 1,
+                        script: script, curve: curve)
+        } else if locked {
+            // Merged to one: the reference fades out riding the halos leg, so
+            // its fused larger box animates DOWN to the merged size rather than
+            // snapping, and only the target ring carries the lock flash.
+            layoutLight(halo: referenceHalo,
+                        centre: targetCentre,
+                        haloDiameter: haloDiameter,
+                        haloOpacity: 0,
+                        variant: 0,
+                        script: script, curve: curve)
+        } else {
+            let reference = measuring ? listeningSettled(.reference)
+                : (centre: CGPoint(x: highX, y: y), diameter: haloDiameter, opacity: haloOpacity)
+            layoutLight(halo: referenceHalo,
+                        centre: reference.centre,
+                        haloDiameter: reference.diameter,
+                        haloOpacity: reference.opacity,
+                        variant: 1,
+                        script: script, curve: curve)
+        }
 
         if let detentAt = script.detentAt { fireDetent(at: detentAt, look: look) }
         if let breathAt = script.settleBreathAt {
@@ -1108,17 +1242,203 @@ final class AlignmentStageView: NSView {
         return CGFloat(Swift.min(Swift.max((entry - halfWidth) / (entry - floor), 0), 1))
     }
 
-    private func layoutLight(halo: CALayer, ring: CAShapeLayer, centre: CGPoint,
-                             haloDiameter: CGFloat, haloOpacity: Float,
-                             ringRadius: CGFloat, ringOpacity: Float,
-                             ringLineWidth: CGFloat,
-                             script: Script, curve: CAMediaTimingFunction) {
-        // The swell modulates AROUND these, so they are recorded rather than
-        // read back off the layer — compounding a factor on a layer's own
-        // value would walk the light's brightness away from its rung.
-        settledOpacity[ObjectIdentifier(halo)] = haloOpacity
-        settledOpacity[ObjectIdentifier(ring)] = ringOpacity
+    private func listeningPhase(_ speaker: BTAlignmentWizardSession.ProbeSpeaker) -> ListeningPhase {
+        speaker == .target ? listeningPhases.target : listeningPhases.reference
+    }
 
+    private func setListeningPhaseValue(_ phase: ListeningPhase,
+                                        for speaker: BTAlignmentWizardSession.ProbeSpeaker) {
+        if speaker == .target { listeningPhases.target = phase } else { listeningPhases.reference = phase }
+    }
+
+    private func halo(for speaker: BTAlignmentWizardSession.ProbeSpeaker) -> LightCarrierLayer {
+        speaker == .target ? targetHalo : referenceHalo
+    }
+
+    /// One light's settled centre, diameter and opacity on the measuring
+    /// rung. Home is its range end; a turn grows it with the mic (under
+    /// Reduce Motion only its brightness rises); checking holds what the turn
+    /// ended on; heard seats it beside the centre; missed shrinks and dims it
+    /// at home.
+    private func listeningSettled(_ speaker: BTAlignmentWizardSession.ProbeSpeaker)
+        -> (centre: CGPoint, diameter: CGFloat, opacity: Float) {
+        let look = Self.look(for: .measuring)
+        let (lowMs, highMs) = lightValues()
+        let isTarget = speaker == .target
+        let home = CGPoint(x: xFor(isTarget ? lowMs : highMs), y: wireY)
+        switch listeningPhase(speaker) {
+        case .waiting:
+            return (home, look.haloDiameter, look.haloOpacity)
+        case .turn:
+            let growth = listeningGrowth
+            let diameter = reduceMotion ? look.haloDiameter
+                : look.haloDiameter + (Self.listeningFullDiameter - look.haloDiameter) * growth
+            return (home, diameter, look.haloOpacity + (1 - look.haloOpacity) * Float(growth))
+        case .checking:
+            let halo = halo(for: speaker)
+            return (home, halo.bounds.width, halo.opacity)
+        case .heard:
+            let offset = isTarget ? -Self.listeningSeatOffset : Self.listeningSeatOffset
+            return (CGPoint(x: bounds.midX + offset, y: wireY), Self.listeningSeatDiameter, 1)
+        case .missed:
+            return (home, Self.listeningSeatDiameter, Self.listeningMissedOpacity)
+        }
+    }
+
+    /// Each light's place on the wire and the gap it cuts in the ruler.
+    /// Measuring, a light moves and resizes with its listening phase, so its
+    /// gap is its core scaled to its settled size; every other rung keeps the
+    /// rung's core at the range ends.
+    private func tickClearances(look: Look, lowX: CGFloat, highX: CGFloat)
+        -> [(x: CGFloat, clearance: CGFloat)] {
+        guard rung == .measuring else { return [lowX, highX].map { ($0, look.coreRadius + 3) } }
+        return [listeningSettled(.target), listeningSettled(.reference)].map {
+            ($0.centre.x, look.coreRadius * $0.diameter / look.haloDiameter + 3)
+        }
+    }
+
+    /// A light's tint: its own hue, or, missed, that hue mixed 80 % toward
+    /// `stageRule`. Resolve under the stage's appearance.
+    private static func listeningHue(_ own: NSColor, phase: ListeningPhase) -> NSColor {
+        guard phase == .missed else { return own }
+        return own.blended(withFraction: listeningMissedTintFraction, of: Tokens.Color.stageRule) ?? own
+    }
+
+    // MARK: - Listening entry points
+
+    /// The mic probe's live feed: whose turn it is (from the play schedule)
+    /// and how far the room is above its measured level. A waiting speaker
+    /// whose turn this is starts its turn; a speaker whose turn is over moves
+    /// to checking; the turn light's size and brightness follow the smoothed
+    /// level. The smoothing is the motion, so no leg is played.
+    func setListeningTurn(_ speaker: BTAlignmentWizardSession.ProbeSpeaker?,
+                          levelAboveRoomDB: Double?, now: CFTimeInterval) {
+        guard rung == .measuring else { return }
+        var phaseChanged = false
+        for each in [BTAlignmentWizardSession.ProbeSpeaker.target, .reference] {
+            let phase = listeningPhase(each)
+            if each == speaker, phase == .waiting {
+                setListeningPhaseValue(.turn, for: each)
+                let halo = halo(for: each)
+                // Let go of the breath from wherever it visibly is, then
+                // drop the breathing: the mic owns the size from here.
+                let motion = !reduceMotion && !HeadlessRuntime.isActive
+                animate(layer: halo, keyPath: "transform.scale", to: CGFloat(1),
+                        leg: motion ? Self.listeningBreathReleaseLeg : (0, 0),
+                        curve: Self.settleCurve)
+                halo.removeAnimation(forKey: Self.breatheKey)
+                listeningGrowth = 0
+                listeningGrowthUpdatedAt = nil
+                phaseChanged = true
+            } else if each != speaker, phase == .turn {
+                setListeningPhaseValue(.checking, for: each)
+                phaseChanged = true
+            }
+        }
+        if phaseChanged { reconcileBreathing() }
+
+        let turnSpeaker: BTAlignmentWizardSession.ProbeSpeaker?
+        if listeningPhases.target == .turn {
+            turnSpeaker = .target
+        } else if listeningPhases.reference == .turn {
+            turnSpeaker = .reference
+        } else {
+            turnSpeaker = nil
+        }
+        guard let turnSpeaker else { return }
+        let dt = listeningGrowthUpdatedAt.map { now - $0 } ?? 0
+        listeningGrowth = Self.smoothedGrowth(
+            from: listeningGrowth,
+            toward: Self.listeningGrowth(levelAboveRoomDB: levelAboveRoomDB ?? 0), dt: dt)
+        listeningGrowthUpdatedAt = now
+        let settled = listeningSettled(turnSpeaker)
+        let halo = halo(for: turnSpeaker)
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        halo.bounds = Self.haloBox(settled.diameter)
+        halo.opacity = settled.opacity
+        CATransaction.commit()
+        if settledLightsLink == nil { drawSettledStill() }
+    }
+
+    /// A verdict, or the return home: `.heard` seats the light beside the
+    /// centre, `.missed` shrinks and greys it at home, `.waiting` sends it
+    /// home. Any other phase is the stage's own and is ignored here.
+    func setListeningPhase(_ phase: ListeningPhase,
+                           for speaker: BTAlignmentWizardSession.ProbeSpeaker,
+                           animated: Bool) {
+        guard [ListeningPhase.heard, .missed, .waiting].contains(phase), rung == .measuring,
+              listeningPhase(speaker) != phase else { return }
+        let wasMissed = listeningPhase(speaker) == .missed
+        setListeningPhaseValue(phase, for: speaker)
+
+        let leg: Script.Leg
+        let curve: CAMediaTimingFunction
+        switch phase {
+        case .heard: (leg, curve) = (Self.listeningHeardLeg, Self.ratchetCurve)
+        case .missed: (leg, curve) = (Self.listeningMissedLeg, Self.settleCurve)
+        default: (leg, curve) = (Self.listeningHomeLeg, Self.settleCurve)
+        }
+        let played = animated && !reduceMotion && !HeadlessRuntime.isActive
+        let applied: Script.Leg = played ? leg : (0, 0)
+        let settled = listeningSettled(speaker)
+        let halo = halo(for: speaker)
+        animate(layer: halo, keyPath: "position", to: NSValue(point: settled.centre),
+                leg: applied, curve: curve)
+        animate(layer: halo, keyPath: "bounds", to: NSValue(rect: Self.haloBox(settled.diameter)),
+                leg: applied, curve: curve)
+        animate(layer: halo, keyPath: "opacity", to: settled.opacity, leg: applied, curve: curve)
+        if phase == .missed || wasMissed {
+            var tint = NSColor.clear.cgColor
+            effectiveAppearance.performAsCurrentDrawingAppearance {
+                let own = speaker == .target ? Tokens.Color.wireCore : Self.referenceLight
+                tint = Self.listeningHue(own, phase: phase).cgColor
+            }
+            animate(layer: halo, keyPath: "borderColor", to: tint, leg: applied, curve: curve)
+        }
+        // The ruler's gaps follow the light: re-cut them, crossfading on the
+        // light's own leg (Reduce Motion's field fade below covers the ticks).
+        if bounds.width > 0 {
+            if applied.duration > 0 {
+                let fade = CATransition()
+                fade.beginTime = CACurrentMediaTime() + applied.delay
+                fade.duration = applied.duration
+                fade.fillMode = .backwards
+                tickLayer.add(fade, forKey: Self.catransitionKey)
+            }
+            let look = Self.look(for: .measuring)
+            let (lowMs, highMs) = lightValues()
+            layoutTicks(look: look, y: wireY,
+                        lights: tickClearances(look: look, lowX: xFor(lowMs), highX: xFor(highMs)),
+                        script: Self.instantScript, curve: curve)
+        }
+        if reduceMotion && !HeadlessRuntime.isActive {
+            let fade = CATransition()
+            fade.duration = 0.12
+            fieldLayer.add(fade, forKey: Self.catransitionKey)
+        }
+        // `stampColors` writes the same tint; with actions off it cannot
+        // replace the tint leg above with an implicit one.
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        stampColors()
+        CATransaction.commit()
+        reconcileBreathing()
+        drawSettledStill()
+    }
+
+    /// Both lights back home and waiting, growth cleared — a retry.
+    func resetListening(animated: Bool) {
+        setListeningPhase(.waiting, for: .target, animated: animated)
+        setListeningPhase(.waiting, for: .reference, animated: animated)
+        listeningGrowth = 0
+        listeningGrowthUpdatedAt = nil
+    }
+
+    private func layoutLight(halo: LightCarrierLayer, centre: CGPoint,
+                             haloDiameter: CGFloat, haloOpacity: Float,
+                             variant: CGFloat,
+                             script: Script, curve: CAMediaTimingFunction) {
         animate(layer: halo, keyPath: "bounds",
                 to: NSValue(rect: Self.haloBox(haloDiameter)),
                 leg: script.halos, curve: curve)
@@ -1126,77 +1446,14 @@ final class AlignmentStageView: NSView {
                 leg: script.halos, curve: curve)
         animate(layer: halo, keyPath: "opacity", to: haloOpacity,
                 leg: script.halos, curve: curve)
-
-        let box = CGRect(x: 0, y: 0, width: ringRadius * 2, height: ringRadius * 2)
-        animate(layer: ring, keyPath: "bounds", to: NSValue(rect: box),
-                leg: script.rings, curve: curve)
-        animate(layer: ring, keyPath: "position", to: NSValue(point: centre),
-                leg: script.rings, curve: curve)
-        animate(layer: ring, keyPath: "lineWidth", to: ringLineWidth,
-                leg: script.rings, curve: curve)
-        // The stroke straddles the path, so the circle is inset by half the
-        // line width — a fixed 1 pt inset made a 2 pt ring overflow its box.
-        animatePath(ring: ring, to: Self.ringPath(in: box, lineWidth: ringLineWidth),
-                    leg: script.rings, curve: curve)
-        animate(layer: ring, keyPath: "opacity", to: ringOpacity,
-                leg: script.rings, curve: curve)
+        // Riding the halos' own leg is what makes the merge a crossfade
+        // between two sets of maths rather than a jump between them.
+        animate(layer: halo, keyPath: "variant", to: variant,
+                leg: script.halos, curve: curve)
     }
 
-    /// `animate`'s typed twin for the one property KVC can't carry: a
-    /// `CGPathRef` is a CF pointer, so it is read and written directly and
-    /// only the ANIMATION takes it as a value.
-    private func animatePath(ring: CAShapeLayer, to path: CGPath,
-                             leg: Script.Leg, curve: CAMediaTimingFunction) {
-        let from = (ring.presentation() ?? ring).path
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        ring.path = path
-        CATransaction.commit()
-        guard leg.duration > 0 else { return }
-        let animation = CABasicAnimation(keyPath: "path")
-        animation.fromValue = from
-        animation.toValue = path
-        animation.beginTime = CACurrentMediaTime() + leg.delay
-        animation.duration = leg.duration
-        animation.timingFunction = curve
-        animation.fillMode = .backwards
-        ring.add(animation, forKey: "path")
-    }
-
-    /// One light's wavefront. At PINNED phase this is the settled model — a
-    /// plain ellipse, squashed in y — and every existing caller gets it by
-    /// default. Given a phase, the radius is bent by the emitter's two
-    /// harmonics, phased by the light's own seed.
-    private static func ringPath(in box: CGRect, lineWidth: CGFloat,
-                                 phase: Double? = nil, index f: Double = 0) -> CGPath {
-        let inset = box.insetBy(dx: lineWidth / 2, dy: lineWidth / 2)
-        let squashed = CGRect(x: inset.midX - inset.width / 2,
-                              y: inset.midY - inset.height / squash / 2,
-                              width: inset.width, height: inset.height / squash)
-        guard let phase, wobble > 0 else {
-            return CGPath(ellipseIn: squashed, transform: nil)
-        }
-        // The GLSL measures r in SQUASHED space and takes θ there too, so the
-        // bend is applied to the circle and the squash lands on the result.
-        let radius = inset.width / 2
-        let seed = self.seed(f)
-        let path = CGMutablePath()
-        for step in 0..<ringSegments {
-            let theta = Double(step) / Double(ringSegments) * 2 * .pi
-            let bend = (sin(3 * theta + phase * wobbleRate + seed)
-                        + 0.5 * sin(5 * theta - phase * wobbleRate * 0.73 + seed * 1.3)) / 1.5
-            let r = radius * (1 + wobble * CGFloat(bend))
-            let point = CGPoint(x: inset.midX + r * CGFloat(cos(theta)),
-                                y: inset.midY + r * CGFloat(sin(theta)) / squash)
-            if step == 0 { path.move(to: point) } else { path.addLine(to: point) }
-        }
-        path.closeSubpath()
-        return path
-    }
-
-    /// A halo's box. The halo is bitmap contents, so it wears the emitter's
-    /// squash in its BOUNDS rather than in a path — same oval, other
-    /// mechanism.
+    /// A light's box. The light wears the emitter's squash in its BOUNDS —
+    /// the field reads the box, and headless the bitmap halo fills it.
     private static func haloBox(_ diameter: CGFloat) -> CGRect {
         CGRect(x: 0, y: 0, width: diameter, height: diameter / squash)
     }
@@ -1204,7 +1461,7 @@ final class AlignmentStageView: NSView {
     /// Scale ticks along the wire. The step is the RUNG's, so every rung
     /// change re-gears the ruler; a step change crossfades so it reads as
     /// re-gearing rather than as jumping.
-    private func layoutTicks(look: Look, y: CGFloat, lightXs: [CGFloat], clearance: CGFloat,
+    private func layoutTicks(look: Look, y: CGFloat, lights: [(x: CGFloat, clearance: CGFloat)],
                              script: Script, curve: CAMediaTimingFunction) {
         let window = mappedRange
         let span = window.upperBound - window.lowerBound
@@ -1219,8 +1476,8 @@ final class AlignmentStageView: NSView {
             defer { ms += step }
             if let range = candidateRange, !range.contains(ms) { continue }
             let x = xFor(ms)
-            // A tick under a light would cross its ring.
-            if lightXs.contains(where: { abs($0 - x) < clearance }) { continue }
+            // A tick under a light would cross its core.
+            if lights.contains(where: { abs($0.x - x) < $0.clearance }) { continue }
             path.move(to: CGPoint(x: x, y: y - look.tickHalfHeight))
             path.addLine(to: CGPoint(x: x, y: y + look.tickHalfHeight))
         }
@@ -1266,6 +1523,14 @@ final class AlignmentStageView: NSView {
 
     /// A transient that rides over the settled model and leaves it untouched:
     /// out to `peak` and back to the value the layer already holds.
+    ///
+    /// Only for a keypath no leg animates and whose `settled` is read live off
+    /// the model — the detent's shadow COLOUR is the one such pulse left, and
+    /// a colour has no delta to add. Everything else goes through
+    /// `pulseDelta`: a keyframe that is not additive REPLACES the property
+    /// while it runs and exposes its own `settled` value the moment it is
+    /// removed, which is wrong the instant a leg is still gliding or the
+    /// applied value is not the plain settled one.
     private func pulse(layer: CALayer, keyPath: String, peak: Any, settled: Any,
                        at begin: TimeInterval, duration: TimeInterval,
                        key: String) {
@@ -1275,15 +1540,58 @@ final class AlignmentStageView: NSView {
         keyframe.beginTime = CACurrentMediaTime() + begin
         keyframe.duration = duration
         keyframe.timingFunction = Self.glideCurve
-        keyframe.fillMode = .backwards
+        // NO backwards fill: `settled` is where the pulse RETURNS to, not
+        // where the layer sits before it. Filling backwards parks that value
+        // from t=0 and overrides whatever the layer holds before the pulse.
         layer.add(keyframe, forKey: key)
+    }
+
+    /// The same transient, expressed as a DELTA and composited ADDITIVELY: it
+    /// rides on top of whatever the model or an in-flight leg holds, out by
+    /// `delta` and back to nothing.
+    ///
+    /// Additive is the whole point. A plain keyframe on `bounds` substitutes
+    /// its own settled value for the duration and leaves it standing when it
+    /// is removed, which broke three flourishes at once: the lock's collide
+    /// pulled the light back to the fused size while the merge leg was
+    /// gliding it from the fused size to the locked one,
+    /// the promotion's detent (0.34) took the halo's box over while the halos
+    /// leg (0.10–0.42) was still moving it, and inside the threshold rung —
+    /// where the applied diameter is `haloDiameter + 4 * progress`, not
+    /// `haloDiameter` — the detent and the settle-breath both returned the
+    /// light to 46 and let it snap up again. As a delta none of that can
+    /// happen, and a pulse may freely overlap the leg it decorates: the
+    /// detent's timing no longer has to match the leg's end.
+    private func pulseDelta(layer: CALayer, keyPath: String, delta: Any, zero: Any,
+                            at begin: TimeInterval, duration: TimeInterval,
+                            key: String) {
+        let keyframe = CAKeyframeAnimation(keyPath: keyPath)
+        keyframe.values = [zero, delta, zero]
+        keyframe.keyTimes = [0, 0.5, 1]
+        keyframe.isAdditive = true
+        keyframe.beginTime = CACurrentMediaTime() + begin
+        keyframe.duration = duration
+        keyframe.timingFunction = Self.glideCurve
+        layer.add(keyframe, forKey: key)
+    }
+
+    /// A light's size transient: the delta between two `haloBox` sizes, added
+    /// to the layer's own `bounds.size`.
+    private func pulseHalo(layer: CALayer, peak: CGRect, settled: CGRect,
+                           at begin: TimeInterval, duration: TimeInterval,
+                           key: String) {
+        let delta = CGSize(width: peak.width - settled.width,
+                           height: peak.height - settled.height)
+        pulseDelta(layer: layer, keyPath: "bounds.size",
+                   delta: NSValue(size: delta), zero: NSValue(size: .zero),
+                   at: begin, duration: duration, key: key)
     }
 
     // MARK: - Flourishes
 
     /// The promotion's DETENT: the notch the push-in lands in. The span's
-    /// bloom swells WIDER and, above all, BRIGHTER, and the target ring
-    /// overshoots its new weight by a hair. Span shadow only — the identity
+    /// bloom swells WIDER and, above all, BRIGHTER, and the target light
+    /// overshoots its new size by a hair. Span shadow only — the identity
     /// hues never move.
     ///
     /// The brightness has to come from the OPACITY, because the colour move
@@ -1295,18 +1603,22 @@ final class AlignmentStageView: NSView {
     /// gold on the CTA plate.
     private func fireDetent(at begin: TimeInterval, look: Look) {
         guard window != nil else { return }
-        pulse(layer: spanLayer, keyPath: "shadowRadius", peak: CGFloat(7),
-              settled: look.spanShadowRadius, at: begin, duration: 0.2,
-              key: "detent.shadowRadius")
-        pulse(layer: spanLayer, keyPath: "shadowOpacity",
-              peak: Self.detentPeakShadowOpacity, settled: spanLayer.shadowOpacity,
-              at: begin, duration: 0.2, key: "detent.shadowOpacity")
+        // The span's shadow radius is on the span leg (0.08–0.38) and the
+        // detent lands at 0.34, inside it — so this one is a delta too.
+        pulseDelta(layer: spanLayer, keyPath: "shadowRadius",
+                   delta: CGFloat(7) - look.spanShadowRadius, zero: CGFloat(0),
+                   at: begin, duration: 0.2, key: "detent.shadowRadius")
+        pulseDelta(layer: spanLayer, keyPath: "shadowOpacity",
+                   delta: Self.detentPeakShadowOpacity - spanLayer.shadowOpacity,
+                   zero: Float(0), at: begin, duration: 0.2,
+                   key: "detent.shadowOpacity")
         pulse(layer: spanLayer, keyPath: "shadowColor", peak: resolvedDetentAccent,
               settled: resolvedSpanGlow, at: begin, duration: 0.1,
               key: "detent.shadowColor")
-        pulse(layer: targetRing, keyPath: "lineWidth",
-              peak: look.ringLineWidth + 0.4, settled: look.ringLineWidth,
-              at: begin, duration: 0.2, key: "detent.lineWidth")
+        pulseHalo(layer: targetHalo,
+                  peak: Self.haloBox(look.haloDiameter * 1.03),
+                  settled: Self.haloBox(look.haloDiameter),
+                  at: begin, duration: 0.2, key: "detent.bounds")
     }
 
     /// The demotion's closing exhale — the halo swells a touch and comes back
@@ -1322,9 +1634,8 @@ final class AlignmentStageView: NSView {
         let settled = Self.haloBox(look.haloDiameter)
         let swelled = Self.haloBox(look.haloDiameter * 1.04)
         for halo in [targetHalo, referenceHalo] {
-            pulse(layer: halo, keyPath: "bounds", peak: NSValue(rect: swelled),
-                  settled: NSValue(rect: settled), at: begin, duration: 0.24,
-                  key: "settleBreath")
+            pulseHalo(layer: halo, peak: swelled, settled: settled,
+                      at: begin, duration: 0.24, key: "settleBreath")
         }
     }
 
@@ -1338,17 +1649,17 @@ final class AlignmentStageView: NSView {
         let (value, _) = lightValues()
         let centre = CGPoint(x: xFor(value), y: wireY)
 
-        // Beat 1 — merge (0.14–0.70): the reference ring contracts onto the
-        // target's radius and both reach full weight; once they are
-        // pixel-identical the reference is removed invisibly.
+        // Beat 1 — merge (0.14–0.70): the reference light fades out as it rides
+        // onto the target — its fused larger box animating down to the merged
+        // size — leaving the lone target ring to become the kept white light.
+        // The halos take the merge leg too — they ARE the light now, and beat 3
+        // pulses the target.
         let mergeLeg: Script.Leg = (duration: 0.56, delay: 0.14)
         let script = Script(curve: Self.settleCurve, camera: (0, 0),
-                            rings: mergeLeg, halos: (0.42, 0.78),
+                            halos: mergeLeg,
                             span: mergeLeg, wire: mergeLeg, tickCrossfade: nil,
                             detentAt: nil, settleBreathAt: nil, seedsCamera: false)
         applyGeometry(script)
-        animate(layer: referenceRing, keyPath: "opacity", to: Float(0),
-                leg: (duration: 0.02, delay: 0.70), curve: Self.settleCurve)
 
         guard window != nil else {
             onLockedSettled?()
@@ -1374,36 +1685,43 @@ final class AlignmentStageView: NSView {
         ticksQuiet.timingFunction = Self.glideCurve
         tickLayer.add(ticksQuiet, forKey: "lock.intake")
 
-        // Beat 1's soft collision: the two rings meeting is felt, not heard.
-        pulse(layer: targetRing, keyPath: "lineWidth", peak: CGFloat(2.6),
-              settled: CGFloat(2.0), at: 0.56, duration: 0.28, key: "lock.collide")
-        pulse(layer: targetHalo, keyPath: "opacity", peak: Float(0.68),
-              settled: Float(0.55), at: 0.56, duration: 0.28, key: "lock.collideHalo")
+        // Beat 1's soft collision: the two lights meeting is felt, not
+        // heard. It is an 8%-of-the-fused-size swell ADDED to the merge leg's
+        // own fused → locked glide, which is still running underneath it
+        // (0.14–0.70), so the light keeps growing through the collision
+        // instead of being yanked back to the fused size and jumping to the
+        // locked one when the pulse is removed. It is over by 0.76, before
+        // beat 3 adds its own delta.
+        let fusedDiameter = Self.look(for: .fused).haloDiameter
+        pulseHalo(layer: targetHalo,
+                  peak: Self.haloBox(fusedDiameter * 1.08), settled: Self.haloBox(fusedDiameter),
+                  at: 0.56, duration: 0.20, key: "lock.collide")
 
         // Beat 2 — gather (0.30–0.90).
-        fireGatherBars(centre: centre, ringRadius: look.ringRadius)
+        fireGatherBars(centre: centre, coreRadius: look.coreRadius)
 
-        // Beat 3 — contract + bloom (0.78–1.34): the ring draws breath before
-        // it releases, and ONE `fuseWhite` bloom leaves it.
-        let contracted = CGRect(x: 0, y: 0, width: 9.4 * 2, height: 9.4 * 2)
-        let settledBox = CGRect(x: 0, y: 0, width: look.ringRadius * 2,
-                                height: look.ringRadius * 2)
-        pulse(layer: targetRing, keyPath: "bounds",
-              peak: NSValue(rect: contracted), settled: NSValue(rect: settledBox),
-              at: 0.78, duration: 0.56, key: "lock.contractBounds")
-        pulse(layer: targetRing, keyPath: "path",
-              peak: Self.ringPath(in: contracted, lineWidth: look.ringLineWidth),
-              settled: Self.ringPath(in: settledBox, lineWidth: look.ringLineWidth),
-              at: 0.78, duration: 0.56, key: "lock.contractPath")
-        fireLockBloom(at: 0.78, centre: centre, radius: look.ringRadius,
-                      lineWidth: look.ringLineWidth)
+        // Beat 3 — contract + bloom (0.78–1.34): the light draws breath
+        // before it releases, and ONE `fuseWhite` bloom leaves it. The
+        // contraction is the old ring's 20 → 9.4 pt, taken on the light's own
+        // box so the whole light draws in rather than a stroke inside it.
+        pulseHalo(layer: targetHalo,
+                  peak: Self.haloBox(look.haloDiameter * 9.4 / 20),
+                  settled: Self.haloBox(look.haloDiameter),
+                  at: 0.78, duration: 0.56, key: "lock.contract")
+        fireLockBloom(at: 0.78, centre: centre, diameter: look.haloDiameter)
         // The fusion itself: the settled colour is already `fuseWhite`
         // (stamped for `.locked`); hold the target's green until the bloom
         // releases it, then cross to white with it.
-        let crosses: [(layer: CALayer, keyPath: String, from: Any?)] = [
-            (targetRing, "strokeColor", resolvedTargetLight),
-            (targetHalo, "contents", Self.haloImage(color: Tokens.Color.wireCore)),
+        var crosses: [(layer: CALayer, keyPath: String, from: Any?)] = [
+            (targetHalo, "borderColor", resolvedTargetLight),
         ]
+        // Only headless-style, where the bitmap halo is what draws: with the
+        // field up, `contents` is nil and the cross would park a green blob
+        // over the light for 0.44 s.
+        if settledLights == nil {
+            crosses.append((targetHalo, "contents",
+                            Self.haloImage(color: Tokens.Color.wireCore)))
+        }
         for (layer, keyPath, from) in crosses {
             let cross = CABasicAnimation(keyPath: keyPath)
             cross.fromValue = from
@@ -1425,22 +1743,22 @@ final class AlignmentStageView: NSView {
         }
     }
 
-    /// Beat 2: two bars sweep the wire's light into the ring — green from the
-    /// left, steel blue from the right, each keeping its own hue as it
-    /// arrives.
+    /// Beat 2: two bars sweep the wire's light into the kept light — green
+    /// from the left, steel blue from the right, each keeping its own hue as
+    /// it arrives.
     ///
-    /// The fixed edge is the one AT THE RING, so the bar collapses INTO it —
+    /// The fixed edge is the INNER one, so the bar collapses INTO the light —
     /// the beat is a GATHER, and light draining outward would read as the
     /// opposite. (§5's line reads "anchored at the outer ends"; the same
-    /// sentence says the light sweeps INTO the ring, and that is the sense
-    /// the beat is named for.)
-    private func fireGatherBars(centre: CGPoint, ringRadius: CGFloat) {
+    /// sentence says the light sweeps INTO the kept light, and that is the
+    /// sense the beat is named for.)
+    private func fireGatherBars(centre: CGPoint, coreRadius: CGFloat) {
         let height: CGFloat = 2.5
         let sides: [(isLeft: Bool, color: CGColor)] = [
             (true, resolvedTargetLight), (false, resolvedReferenceLight)
         ]
         for side in sides {
-            let innerX = side.isLeft ? centre.x - ringRadius : centre.x + ringRadius
+            let innerX = side.isLeft ? centre.x - coreRadius : centre.x + coreRadius
             let outerX = side.isLeft ? Self.horizontalInset
                                      : bounds.width - Self.horizontalInset
             let width = abs(innerX - outerX)
@@ -1475,20 +1793,17 @@ final class AlignmentStageView: NSView {
         }
     }
 
-    /// The kept moment: ONE contained `fuseWhite` bloom — a copy of the target
-    /// ring that starts on the circumference and expands as it fades. A
-    /// transient over the settled model (`HaloRingView`'s acknowledgment
-    /// pattern).
+    /// The kept moment: ONE contained `fuseWhite` bloom — a soft glow the
+    /// size of the light that expands as it fades. A transient over the
+    /// settled model (`HaloRingView`'s acknowledgment pattern). A glow, not a
+    /// stroke: nothing on this stage draws an outline any more.
     private func fireLockBloom(at begin: TimeInterval, centre: CGPoint,
-                               radius: CGFloat, lineWidth: CGFloat) {
-        let box = CGRect(x: 0, y: 0, width: radius * 2, height: radius * 2)
-        let bloom = CAShapeLayer()
-        bloom.bounds = box
+                               diameter: CGFloat) {
+        let bloom = CALayer()
+        bloom.bounds = Self.haloBox(diameter)
         bloom.position = centre
-        bloom.path = Self.ringPath(in: box, lineWidth: lineWidth)
-        bloom.fillColor = nil
-        bloom.lineWidth = lineWidth
-        bloom.strokeColor = resolvedFuse
+        bloom.contents = Self.haloImage(color: Tokens.Color.fuseWhite)
+        bloom.contentsGravity = .resize
         bloom.opacity = 0
         fieldLayer.addSublayer(bloom)
         transientLayers.append(bloom)
@@ -1505,7 +1820,7 @@ final class AlignmentStageView: NSView {
         group.duration = 0.44
         group.timingFunction = CAMediaTimingFunction(name: .easeOut)
         // NO backwards fill — see `fireGatherBars`: it would park the bloom's
-        // `fromValue` (a fully drawn ring at 0.9) on screen for the whole
+        // `fromValue` (a fully drawn glow at 0.9) on screen for the whole
         // 0.78 s delay. The settled model opacity of 0 keeps it invisible
         // until beat 3 releases it.
         bloom.add(group, forKey: "lock.bloom")
@@ -1537,7 +1852,7 @@ final class AlignmentStageView: NSView {
         transientGeneration &+= 1
         removeTransients()
         for sub in [plateLayer, wireLeft, wireRight, fieldLayer, tickLayer, spanLayer,
-                    targetHalo, targetRing, referenceHalo, referenceRing] {
+                    targetHalo, referenceHalo] {
             sub.removeAllAnimations()
         }
     }
@@ -1554,94 +1869,53 @@ final class AlignmentStageView: NSView {
     /// claiming to pulse on the beat. Stops when the rung doesn't breathe, off
     /// screen, headless, or Reduce Motion is on.
     ///
-    /// The living ring's clock rides the SAME gate, deliberately: a rung that
-    /// does not breathe is a rung at rest — `locked` above all, where
-    /// stillness IS the reward — so one condition governs both, and there is
-    /// no second lifecycle to keep in step.
+    /// Measuring, each light breathes by its own listening phase: a turn
+    /// light is the mic's and a missed one is still; a heard one breathes
+    /// slower and deeper beside the centre; a waiting or checking one keeps
+    /// the rung's quick breath, its swell held under the 130 pt cap.
     private func reconcileBreathing() {
         let look = Self.look(for: rung)
-        guard let period = look.breathePeriod, !reduceMotion,
-              !HeadlessRuntime.isActive, window != nil else {
-            targetHalo.removeAnimation(forKey: Self.breatheKey)
-            referenceHalo.removeAnimation(forKey: Self.breatheKey)
-            stopLivingRing()
-            return
+        let motionAllowed = !reduceMotion && !HeadlessRuntime.isActive && window != nil
+        func breath(_ halo: LightCarrierLayer, _ phase: ListeningPhase)
+            -> (period: TimeInterval, amplitude: CGFloat)? {
+            guard let period = look.breathePeriod else { return nil }
+            guard rung == .measuring else { return (period, look.breatheAmplitude) }
+            switch phase {
+            case .turn, .missed:
+                return nil
+            case .heard:
+                return (Self.listeningSeatedBreathePeriod, Self.listeningSeatedBreatheAmplitude)
+            case .waiting, .checking:
+                let diameter = halo.bounds.width
+                let capped = diameter > 0 ? Self.listeningCapDiameter / diameter : look.breatheAmplitude
+                return (period, Swift.min(look.breatheAmplitude, capped))
+            }
         }
-        startLivingRing()
-        for (halo, phase) in [(targetHalo, 0.0), (referenceHalo, 0.5)] {
-            // Re-add only when absent or the tempo class changed.
-            if let existing = halo.animation(forKey: Self.breatheKey),
-               existing.duration == period { continue }
+        for (halo, listening, offset) in [(targetHalo, listeningPhases.target, 0.0),
+                                          (referenceHalo, listeningPhases.reference, 0.5)] {
+            guard motionAllowed, let wanted = breath(halo, listening) else {
+                halo.removeAnimation(forKey: Self.breatheKey)
+                continue
+            }
+            let (period, amplitude) = wanted
+            // Re-add only when absent or the tempo or depth changed.
+            if let existing = halo.animation(forKey: Self.breatheKey) as? CABasicAnimation,
+               existing.duration == period,
+               let depth = existing.toValue as? CGFloat, abs(depth - amplitude) < 0.0001 { continue }
             let breathe = CABasicAnimation(keyPath: "transform.scale")
             breathe.fromValue = 1.0
-            breathe.toValue = look.breatheAmplitude
+            breathe.toValue = amplitude
             breathe.duration = period
             breathe.autoreverses = true
             breathe.repeatCount = .infinity
             breathe.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-            breathe.timeOffset = period * phase
+            breathe.timeOffset = period * offset
             halo.add(breathe, forKey: Self.breatheKey)
         }
     }
 
-    // MARK: - The living ring's clock
-
-    private var livingRingLink: CADisplayLink?
-    private var livingRingEpoch: CFTimeInterval = 0
-    /// The rung's opacity for each light layer, written by `layoutLight`.
-    private var settledOpacity: [ObjectIdentifier: Float] = [:]
-
-    private func startLivingRing() {
-        guard ringStyle == .living else { stopLivingRing(); return }
-        guard livingRingLink == nil else { return }
-        let link = displayLink(target: self, selector: #selector(livingRingTick))
-        // 30 fps: a ±3 % bend turning at 0.5 rad/s has nothing to say at 120.
-        link.preferredFrameRateRange = CAFrameRateRange(minimum: 15, maximum: 30,
-                                                        preferred: 30)
-        livingRingEpoch = CACurrentMediaTime()
-        link.add(to: .main, forMode: .common)
-        livingRingLink = link
-    }
-
-    /// Invalidating leaves the last frame's wobble on the layers, so the stop
-    /// writes the PINNED model back — the settled ellipse at the table's own
-    /// opacity. Model values only, so a transition mid-flight is untouched.
-    private func stopLivingRing() {
-        guard livingRingLink != nil else { return }
-        livingRingLink?.invalidate()
-        livingRingLink = nil
-        drawLights(phase: nil)
-    }
-
-    @objc private func livingRingTick(_ link: CADisplayLink) {
-        drawLights(phase: link.targetTimestamp - livingRingEpoch)
-    }
-
-    /// One path and two opacities per light. Everything it needs is already on
-    /// the layers (radius, line width) or in `settledOpacity`, so a frame
-    /// never re-derives the look table and never allocates beyond the two
-    /// paths it draws.
-    private func drawLights(phase: Double?) {
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        for (index, halo, ring) in [(0.0, targetHalo, targetRing),
-                                    (1.0, referenceHalo, referenceRing)] {
-            ring.path = Self.ringPath(in: ring.bounds, lineWidth: ring.lineWidth,
-                                      phase: phase, index: index)
-            let factor = Self.swellFactor(phase: phase, index: index)
-            if let base = settledOpacity[ObjectIdentifier(ring)] {
-                ring.opacity = base * factor
-            }
-            if let base = settledOpacity[ObjectIdentifier(halo)] {
-                halo.opacity = base * factor
-            }
-        }
-        CATransaction.commit()
-    }
-
     // MARK: - Colors
 
-    private var resolvedFuse: CGColor = NSColor.clear.cgColor
     private var resolvedDetentAccent: CGColor = NSColor.clear.cgColor
     private var resolvedSpanGlow: CGColor = NSColor.clear.cgColor
     private var resolvedTargetLight: CGColor = NSColor.clear.cgColor
@@ -1682,12 +1956,12 @@ final class AlignmentStageView: NSView {
     private func stampColors() {
         effectiveAppearance.performAsCurrentDrawingAppearance {
             let dormant = rung == .dormant
-            // Fused: the wire carries each voice up to the ring. Locked: the
-            // voices are gone INTO the ring — a two-toned wire under a white
-            // ring would say they never met.
+            // Fused: the wire carries each voice up to the light. Locked:
+            // the voices are gone INTO the light — a two-toned wire under a
+            // white light would say they never met.
             let asOne = rung == .fused
             // Armed: no belief yet, so no identity on the span either.
-            let neutralSpan = dormant || rung == .armed
+            let neutralSpan = dormant || rung == .armed || rung == .measuring
             let rule = Tokens.Color.stageRule
             let target = Tokens.Color.wireCore
             let reference = Self.referenceLight
@@ -1702,7 +1976,7 @@ final class AlignmentStageView: NSView {
             plateLayer.borderColor = Self.plateEdge
                 .withAlphaComponent(isDark ? 0.35 : 0.9).cgColor
             // Fused/locked, the two halves of the wire carry their own voice
-            // up to the ring; otherwise one rule.
+            // up to the light; otherwise one rule.
             wireLeft.strokeColor = (asOne ? target.withAlphaComponent(0.5) : rule).cgColor
             wireRight.strokeColor = (asOne ? reference.withAlphaComponent(0.5) : rule).cgColor
             tickLayer.strokeColor = rule.cgColor
@@ -1719,14 +1993,22 @@ final class AlignmentStageView: NSView {
             spanLayer.shadowColor = fuse.cgColor
             spanLayer.shadowOpacity = neutralSpan ? 0 : 0.35
 
-            // Locked, the target light IS the fused pair: warm white.
-            let targetHue = dormant ? rule : (rung == .locked ? fuse : target)
-            targetRing.strokeColor = targetHue.cgColor
-            referenceRing.strokeColor = (dormant ? rule : reference).cgColor
-            targetHalo.contents = Self.haloImage(color: targetHue)
-            referenceHalo.contents = Self.haloImage(color: dormant ? rule : reference)
+            // Locked, the target light IS the fused pair: warm white. A
+            // missed light leans to the rule; the phases reset to waiting
+            // whenever the rung changes, so leaving the rung restores the hue.
+            let targetHue = dormant ? rule : (rung == .locked ? fuse
+                : Self.listeningHue(target, phase: listeningPhases.target))
+            let referenceHue = dormant ? rule
+                : Self.listeningHue(reference, phase: listeningPhases.reference)
+            // The tint rides the carrier's own `borderColor` — border width
+            // is 0, so it draws nothing and the field reads it each frame.
+            targetHalo.borderColor = targetHue.cgColor
+            referenceHalo.borderColor = referenceHue.cgColor
+            if settledLights == nil {
+                targetHalo.contents = Self.haloImage(color: targetHue)
+                referenceHalo.contents = Self.haloImage(color: referenceHue)
+            }
 
-            resolvedFuse = fuse.cgColor
             resolvedSpanGlow = fuse.cgColor
             resolvedTargetLight = target.cgColor
             resolvedReferenceLight = reference.cgColor
@@ -1763,11 +2045,18 @@ final class AlignmentStageView: NSView {
         super.viewDidChangeEffectiveAppearance()
         stampColors()
         needsLayout = true
+        drawSettledStill()
     }
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         reconcileBreathing()
+        reconcileSettledLights()
+    }
+
+    override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        needsLayout = true
     }
 
     @objc private func accessibilityDisplayOptionsDidChange() {
@@ -1777,6 +2066,90 @@ final class AlignmentStageView: NSView {
         stampColors()
         applyGeometry(Self.instantScript)
         reconcileBreathing()
+        reconcileSettledLights()
+    }
+
+    // MARK: - The settled field's clock
+
+    /// Loop in a window with motion allowed; otherwise hold one still. The
+    /// gate is the breathing's, minus the rung: a light at rest still rolls
+    /// over itself — that is what the settled state IS — and `dormant` puts
+    /// its opacity to 0 anyway.
+    private func reconcileSettledLights() {
+        guard let settledLights else { return }
+        guard window != nil, !reduceMotion else {
+            settledLightsLink?.invalidate()
+            settledLightsLink = nil
+            drawSettledStill()
+            return
+        }
+        guard settledLightsLink == nil else { return }
+        let link = displayLink(target: self, selector: #selector(settledLightsTick))
+        // 30 fps: the field breathes over seconds (the licence gate's own rate).
+        link.preferredFrameRateRange = CAFrameRateRange(minimum: 15, maximum: 30,
+                                                        preferred: 30)
+        settledLights.resetClock()
+        link.add(to: .main, forMode: .common)
+        settledLightsLink = link
+    }
+
+    @objc private func settledLightsTick(_ link: CADisplayLink) {
+        let now = link.targetTimestamp
+        let dt = listeningShimmerUpdatedAt.map { now - $0 } ?? 0
+        listeningShimmerDrawn = (
+            Self.smoothedShimmer(from: listeningShimmerDrawn.target,
+                                 toward: listeningShimmerTarget(listeningPhases.target), dt: dt),
+            Self.smoothedShimmer(from: listeningShimmerDrawn.reference,
+                                 toward: listeningShimmerTarget(listeningPhases.reference), dt: dt))
+        listeningShimmerUpdatedAt = now
+        settledLights?.render(lights: currentLights(), now: now)
+    }
+
+    /// Only a turn light under motion shimmers, by its growth.
+    private func listeningShimmerTarget(_ phase: ListeningPhase) -> Float {
+        phase == .turn && !reduceMotion ? Self.listeningShimmer(growth: listeningGrowth) : 0
+    }
+
+    /// A frame at the clock's current value — for Reduce Motion, a resize
+    /// while paused, a colour flip.
+    private func drawSettledStill() {
+        guard let settledLights, settledLightsLink == nil, window != nil else { return }
+        settledLights.render(lights: currentLights(), now: nil)
+    }
+
+    /// The lights as they are ON SCREEN this frame: the halo layers'
+    /// presentation values, so an in-flight transition, the breathe scale and
+    /// the swell all reach the field with no second script.
+    private func currentLights() -> [SettledLightLayer.Light] {
+        func light(_ halo: LightCarrierLayer, _ phase: ListeningPhase,
+                   _ drawn: Float) -> SettledLightLayer.Light {
+            let p = (halo.presentation() as? LightCarrierLayer) ?? halo
+            let scale = CGFloat(p.transform.m11)
+            // The running field draws the faded shimmer; a still (Reduce
+            // Motion, headless, paused) draws the target. The shimmer moves
+            // the crest inside the shader's `reach` mask, so the cap holds.
+            let listening = settledLightsLink == nil ? listeningShimmerTarget(phase) : drawn
+            // The 130 pt cap's backstop: whatever stacks on a light, it stays
+            // ~14 pt clear of the plate's top and bottom edges.
+            return SettledLightLayer.Light(centre: p.position,
+                                           radius: Swift.min(p.bounds.width / 2 * scale,
+                                                             Self.listeningCapDiameter / 2),
+                                           opacity: p.opacity,
+                                           variant: Float(p.variant),
+                                           color: Self.shaderTint(p.borderColor),
+                                           listening: listening)
+        }
+        return [light(targetHalo, listeningPhases.target, listeningShimmerDrawn.target),
+                light(referenceHalo, listeningPhases.reference, listeningShimmerDrawn.reference)]
+    }
+
+    static func shaderTint(_ color: CGColor?) -> SIMD3<Float> {
+        guard let srgb = CGColorSpace(name: CGColorSpace.sRGB),
+              let converted = color?.converted(to: srgb, intent: .defaultIntent,
+                                               options: nil),
+              let c = converted.components, c.count >= 3
+        else { return .zero }
+        return SIMD3(Float(c[0]), Float(c[1]), Float(c[2]))
     }
 
     private var reduceMotion: Bool {
@@ -1796,24 +2169,56 @@ final class AlignmentStageView: NSView {
         (targetHalo.position, referenceHalo.position)
     }
     var test_spanFrame: CGRect { spanLayer.frame }
-    /// The target light's SETTLED geometry — the pinned-phase truth the
-    /// renders and the goldens rest on: a squashed ellipse at the rung's own
-    /// opacity, with no wobble and no swell in it.
-    var test_targetLight: (ring: CGRect, halo: CGRect, ringOpacity: Float) {
-        (targetRing.path?.boundingBox ?? .zero, targetHalo.bounds, targetRing.opacity)
+    /// The target light's SETTLED geometry — the truth the renders rest on:
+    /// the carrier's squashed box at the rung's own brightness, with no
+    /// transient in it.
+    var test_targetLight: (halo: CGRect, opacity: Float) {
+        (targetHalo.bounds, targetHalo.opacity)
     }
-    /// The target ring's settled stroke — `fuseWhite` once locked.
-    var test_targetRingColor: NSColor? { targetRing.strokeColor.map(NSColor.init(cgColor:)) ?? nil }
-    /// The reference ring's settled stroke — `ring`'s dark hex in both appearances.
-    var test_referenceRingColor: NSColor? {
-        referenceRing.strokeColor.map(NSColor.init(cgColor:)) ?? nil
+    /// The reference light's SETTLED geometry — its halo box is the seam the
+    /// fused test reads against the target's (fused: larger).
+    var test_referenceLight: (halo: CGRect, opacity: Float) {
+        (referenceHalo.bounds, referenceHalo.opacity)
     }
+    /// The target light's settled tint — `fuseWhite` once locked.
+    var test_targetLightColor: NSColor? {
+        targetHalo.borderColor.map(NSColor.init(cgColor:)) ?? nil
+    }
+    /// The reference light's settled tint — `ring`'s dark hex in both appearances.
+    var test_referenceLightColor: NSColor? {
+        referenceHalo.borderColor.map(NSColor.init(cgColor:)) ?? nil
+    }
+    /// Which maths family the reference light runs: 1 apart, 0 once merged
+    /// onto the target's.
+    var test_referenceVariant: CGFloat { referenceHalo.variant }
+    /// The reference light's settled opacity — 0 would mean it is hidden;
+    /// fused/locked it sits at the target's own opacity so both lights show.
+    var test_referenceLightOpacity: Float { referenceHalo.opacity }
     /// The colour the promotion detent pulses the span's shadow to.
     var test_detentAccent: NSColor? { NSColor(cgColor: resolvedDetentAccent) }
     /// The detent's brightness swing: what the span's shadow opacity rests at,
     /// and what the detent takes it to.
     var test_detentShadowOpacity: (settled: Float, peak: Float) {
         (spanLayer.shadowOpacity, Self.detentPeakShadowOpacity)
+    }
+    /// Each light's listening phase on the measuring rung.
+    var test_listeningPhases: (target: ListeningPhase, reference: ListeningPhase) {
+        listeningPhases
+    }
+    /// The turn light's smoothed growth, 0…1.
+    var test_listeningGrowth: CGFloat { listeningGrowth }
+    /// Each light's shimmer as handed to the field this frame, 0…1.
+    var test_listeningShimmer: (target: Float, reference: Float) {
+        let lights = currentLights()
+        return (lights[0].listening, lights[1].listening)
+    }
+    /// The x of every tick the ruler draws.
+    var test_tickXs: [CGFloat] {
+        var xs: [CGFloat] = []
+        tickLayer.path?.applyWithBlock { element in
+            if element.pointee.type == .moveToPoint { xs.append(element.pointee.points[0].x) }
+        }
+        return xs
     }
     var test_isBreathing: Bool {
         targetHalo.animation(forKey: Self.breatheKey) != nil

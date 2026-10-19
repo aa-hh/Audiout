@@ -18,9 +18,10 @@
 //      resumes the stored continuation with the terminal OutputState.
 //
 // A @convention(c) function pointer can't capture Swift state, so the hook reads
-// a process-wide registry (there is one engine instance per process in practice;
-// the registry is keyed by callback_id which the vendored dispatcher guarantees
-// unique-in-flight).
+// a process-wide registry (one engine instance per process is the invariant;
+// `install()` logs a fault and returns false when a second live registry breaks
+// it; the registry is keyed by callback_id which the vendored dispatcher
+// guarantees unique-in-flight).
 
 import Foundation
 import CAirPlayEngine
@@ -84,11 +85,20 @@ final class CompletionRegistry: @unchecked Sendable {
 
     /// Install this registry as the process-wide target and wire the C hook.
     /// Called once, on the engine thread, right after `evbase_player` is set.
-    func install() {
+    /// Returns `false` when it displaced another live registry (a second engine
+    /// instance in the process); the hook is still taken over.
+    @discardableResult
+    func install() -> Bool {
+        let displaced = CompletionRegistry.shared.map { $0 !== self } ?? false
+        if displaced {
+            Logger(subsystem: "com.airplayengine", category: "completion")
+                .fault("CompletionRegistry.install: a second registry is replacing a live one; the first engine's in-flight ops will now only resolve by timeout")
+        }
         CompletionRegistry.shared = self
         outputs_engine_completion_set({ callbackId, _, state, _ in
             CompletionRegistry.shared?.deliver(callbackId: callbackId, state: state)
         }, nil)
+        return !displaced
     }
 
     /// Tear down the hook (on stop). CANCELS every still-armed waiter so no

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+import AirPlayEngine
 import Foundation
 
 /// How the app resolves its light/dark appearance (Settings › Appearance).
@@ -60,6 +61,7 @@ public struct AppSettings {
     private let defaults: UserDefaults
     private let licenseServerURLOverride: URL?
     private let buyURLOverride: URL?
+    private let secrets: SecretStoring
 
     /// - Parameters:
     ///   - licenseServerURL: overrides the bundle-supplied license server (see
@@ -70,12 +72,61 @@ public struct AppSettings {
     ///   Info.plist, and under `swift test` `Bundle.main` is the test
     ///   runner — there is no other way to exercise a build that HAS a license
     ///   server. The app always passes neither.
+    ///   - secrets: where ``licenseKey`` and ``companionToken`` live. `nil`
+    ///     picks the login keychain in a real app run and `defaults` under
+    ///     `swift test` / headless tools (``HeadlessRuntime``), so the suites
+    ///     that set a key through a throwaway suite keep working unchanged.
     public init(defaults: UserDefaults = .standard,
                 licenseServerURL: URL? = nil,
-                buyURL: URL? = nil) {
+                buyURL: URL? = nil,
+                secrets: SecretStoring? = nil) {
         self.defaults = defaults
         self.licenseServerURLOverride = licenseServerURL
         self.buyURLOverride = buyURL
+        self.secrets = secrets ?? (HeadlessRuntime.isActive ? DefaultsSecretStore(defaults) : KeychainSecretStore())
+    }
+
+    /// Reads a secret. A value an older build left in `defaults` moves to
+    /// `secrets` on the first read that finds the store empty, and leaves
+    /// `defaults` only once the store has taken it; a refused move keeps the
+    /// value in `defaults` and is tried again on the next read. A `defaults`
+    /// copy beside a stored value was left by a refused write, so it is the
+    /// newer one: it wins, and moves into the store the same way. A read the
+    /// store refused moves and deletes nothing: it answers with the `defaults`
+    /// copy, if any, and says it was refused.
+    private func readSecretNotingRefusal(_ key: String) -> (value: String?, refused: Bool) {
+        switch secrets.read(key) {
+        case .value(let value):
+            guard !(secrets is DefaultsSecretStore), let newer = defaults.string(forKey: key) else {
+                return (value, false)
+            }
+            if secrets.write(newer, for: key) { defaults.removeObject(forKey: key) }
+            return (newer, false)
+        case .refused:
+            return (defaults.string(forKey: key), true)
+        case .missing:
+            guard let legacy = defaults.string(forKey: key) else { return (nil, false) }
+            if secrets.write(legacy, for: key) { defaults.removeObject(forKey: key) }
+            return (legacy, false)
+        }
+    }
+
+    private func readSecret(_ key: String) -> String? {
+        readSecretNotingRefusal(key).value
+    }
+
+    /// Writes a secret. Once the store has it, any copy still in `defaults`
+    /// goes too (unless `defaults` IS the store), or the next read would migrate
+    /// a cleared value back. A value the store refuses lands in `defaults`
+    /// instead, so a locked keychain never loses the licence key.
+    private func writeSecret(_ value: String?, for key: String) {
+        let stored = secrets.write(value, for: key)
+        guard !(secrets is DefaultsSecretStore) else { return }
+        if stored {
+            defaults.removeObject(forKey: key)
+        } else {
+            defaults.set(value, forKey: key)
+        }
     }
 
     private enum Keys {
@@ -90,7 +141,9 @@ public struct AppSettings {
         static let connectVolume = "audio.connectVolume"
         static let mainOutVolume = "audio.mainOutVolume"
         static let syncOffsetMs = "audio.syncOffsetMs"
+        static let btKeepAliveMinutes = "audio.btKeepAliveMinutes"
         static let allowRemoteControl = "companion.allowRemoteControl"
+        static let licenseGatePresentation = "dev.licenseGatePresentation"
         static let surfacePinned = "surface.pinned"
         static let eqAdvancedExpanded = "eq.advancedExpanded"
         static let licenseKey = "license.key"
@@ -100,6 +153,8 @@ public struct AppSettings {
         static let licenseMaxMajor = "license.maxMajor"
         static let licenseReason = "license.reason"
         static let companionToken = "license.companionToken"
+        static let remoteConfigData = "remoteConfig.data"
+        static let remoteConfigFetchedAt = "remoteConfig.fetchedAt"
         static let companionServerID = "companion.serverID"
         static let trialStartedAt = "trial.startedAt"
         static let trialExpiresAt = "trial.expiresAt"
@@ -109,10 +164,28 @@ public struct AppSettings {
         static let telemetryOptIn = "telemetry.optIn"
         static let telemetryAsked = "telemetry.asked"
         static let telemetryConversionAskShown = "telemetry.conversionAskShown"
+        static let licenseThankYouShown = "license.thankYouShown"
+        static let trialEndedStreamingDays = "survey.trialEndedStreamingDays"
+        static let expiredTrialSurveyDone = "survey.expiredTrialDone"
+        static let expiredTrialUnansweredLooks = "survey.expiredTrialUnansweredLooks"
         static let telemetryDailyActiveDay = "telemetry.dailyActiveDay"
         static let touchBarControls = "general.touchBarControls"
         static let mixerMembershipHintDismissed = "mixer.membershipHintDismissed"
         static let installMoveUnreported = "install.moveUnreported"
+        static let engineInstallSeed = "engine.installSeed"
+    }
+
+    /// The AirPlay engine's per-install seed, stable across launches so a
+    /// receiver that remembers this sender keeps recognising it. Stored as 16
+    /// hex digits; generated and stored on first read.
+    public var engineInstallSeed: UInt64 {
+        if let stored = defaults.string(forKey: Keys.engineInstallSeed),
+           stored.count == 16, let seed = UInt64(stored, radix: 16) {
+            return seed
+        }
+        let seed = SystemRandomNumberGenerator.freshInstallSeed()
+        defaults.set(String(format: "%016llx", seed), forKey: Keys.engineInstallSeed)
+        return seed
     }
 
     /// The user-selectable sender start-buffer options in ms (Settings › Audio
@@ -232,6 +305,29 @@ public struct AppSettings {
         nonmutating set { defaults.set(newValue, forKey: Keys.wakeRestoreMinutes) }
     }
 
+    /// Bluetooth silence keep-alive window in MINUTES (roadmap 085 decision 4):
+    /// after the program goes quiet, BT sinks keep flagging their zeroed
+    /// cycles as audio for this long so the A2DP transport never restarts —
+    /// a restart rolls a fresh 20–90 ms latency and voids the alignment.
+    /// `0` means "off". Same bare-number option style as
+    /// ``wakeRestoreMinuteOptions``.
+    public static let btKeepAliveMinuteOptions: [Int] = [0, 5, 10, 30]
+
+    /// On by default: 10 minutes covers between-album gaps without keeping a
+    /// battery speaker awake all night.
+    public static let defaultBTKeepAliveMinutes = 10
+
+    public var btKeepAliveMinutes: Int {
+        get {
+            guard defaults.object(forKey: Keys.btKeepAliveMinutes) != nil else {
+                return Self.defaultBTKeepAliveMinutes
+            }
+            let stored = defaults.integer(forKey: Keys.btKeepAliveMinutes)
+            return Self.btKeepAliveMinuteOptions.contains(stored) ? stored : Self.defaultBTKeepAliveMinutes
+        }
+        nonmutating set { defaults.set(newValue, forKey: Keys.btKeepAliveMinutes) }
+    }
+
     /// The default starting volume (percent) a speaker gets the moment it joins
     /// the output set (Settings › Audio "Volume when connecting a speaker"). A
     /// MODERATE 35% by deliberate product decision (G1-N1): the seed used to be
@@ -334,25 +430,68 @@ public struct AppSettings {
     }
 
     /// Whether the iPhone companion app may connect to and control this Mac
-    /// (Settings › General "Allow control from iPhone on this network").
-    /// Defaults to **`true`** when unset (T22 flip, the owner's call
+    /// (Settings › Audiout Remote "Allow control from iPhone on this network").
+    /// On a shipping build it defaults to **`true`** when unset (T22 flip, the owner's call
     /// 2026-08-06): the phone app ships alongside the Mac app now, and the
     /// per-phone approval gate (T24) means an enabled listener still admits
-    /// nobody the user hasn't explicitly approved. Unchecking the Settings ›
-    /// General checkbox stores `false` and wins. See
-    /// ``resolvedAllowRemoteControl(explicit:environment:)``
-    /// for the env-var override AppDelegate actually reads at launch.
+    /// nobody the user hasn't explicitly approved. A dev build
+    /// (``isDevBuild``) defaults to `false`, so it listens only once its
+    /// owner turns the switch on. Unchecking the switch stores `false` and wins. See
+    /// ``resolvedAllowRemoteControl(explicit:environment:offered:settings:)``
+    /// for the env-var override and the ``remoteAppIsOffered`` build switch
+    /// that sit above it, which is what AppDelegate actually reads at launch.
     public var allowRemoteControl: Bool {
         get {
-            guard defaults.object(forKey: Keys.allowRemoteControl) != nil else { return true }
+            guard defaults.object(forKey: Keys.allowRemoteControl) != nil else {
+                return Self.defaultAllowRemoteControl(isDevBuild: Self.isDevBuild)
+            }
             return defaults.bool(forKey: Keys.allowRemoteControl)
         }
         nonmutating set { defaults.set(newValue, forKey: Keys.allowRemoteControl) }
     }
 
+    /// ``allowRemoteControl`` when nothing is stored: on for the shipping app,
+    /// off for a dev build until its owner turns the switch on.
+    static func defaultAllowRemoteControl(isDevBuild: Bool) -> Bool { !isDevBuild }
+
     /// The env var that force-overrides ``allowRemoteControl`` for one launch,
     /// mirroring `BackendKind.environmentVariableName`'s dev-convenience idiom.
     public static let allowRemoteControlEnvironmentVariableName = "AUDIOUT_COMPANION"
+
+    /// Whether this build offers the iPhone companion at all: `false` for the
+    /// shipping app until Audiout Remote is approved and on the App Store,
+    /// `true` for every dev build (``isDevBuild``).
+    ///
+    /// Every surface that mentions the phone app is an invitation to download
+    /// it, and until it exists each one is a dead end: the Setup window's
+    /// iPhone card, the Settings › General switch with its QR row and phone
+    /// list, and the alignment wizard's "Measure with your iPhone" panel all
+    /// read this and stay off the screen. The companion server does not start
+    /// either — there is nothing on any phone to connect with.
+    ///
+    /// Return `true` here on the release that follows the phone app's
+    /// approval; nothing else moves. `AUDIOUT_COMPANION` still wins over it.
+    public static var remoteAppIsOffered: Bool { isDevBuild }
+
+    /// Dev builds only: the Settings › General › Developer "Licence gate"
+    /// popup. ``LicenseGatePresentation/resolved(environment:settings:isDevBuild:)``
+    /// reads it only when ``isDevBuild``; a shipping build never does.
+    public var licenseGatePresentation: LicenseGatePresentation {
+        get {
+            defaults.string(forKey: Keys.licenseGatePresentation)
+                .flatMap(LicenseGatePresentation.init(rawValue:)) ?? .auto
+        }
+        nonmutating set { defaults.set(newValue.rawValue, forKey: Keys.licenseGatePresentation) }
+    }
+
+    /// Whether this process is a dev build: the shipping id plus a suffix
+    /// (`.dev`, `.staging`, a fresh handover id). The shipping app and the
+    /// test runner never match.
+    public static var isDevBuild: Bool { isDevBundleID(Bundle.main.bundleIdentifier) }
+
+    static func isDevBundleID(_ id: String?) -> Bool {
+        id?.hasPrefix("com.audiout.Audiout.") ?? false
+    }
 
     /// What decided a ``resolvedAllowRemoteControlWithSource(explicit:environment:settings:)``
     /// call — carried alongside the resolved value so a caller that needs to
@@ -370,11 +509,19 @@ public struct AppSettings {
         /// this value for the current process launch. The persisted setting
         /// still exists underneath but cannot change what's running.
         case forced(Bool)
+        /// This build does not carry the companion at all
+        /// (``remoteAppIsOffered`` is `false`). Distinct from `.setting(false)`
+        /// and `.forced(false)` because those two are a feature turned off,
+        /// which a UI shows as a switch the user may turn back on, and this
+        /// one is a feature that is not here: every surface naming the phone
+        /// app is absent rather than off.
+        case unoffered
 
         /// The resolved value, regardless of what decided it.
         public var value: Bool {
             switch self {
             case .setting(let value), .forced(let value): return value
+            case .unoffered: return false
             }
         }
 
@@ -384,29 +531,45 @@ public struct AppSettings {
             if case .forced = self { return true }
             return false
         }
+
+        /// Whether the companion is missing from this build entirely. A caller
+        /// deciding whether to MOUNT a companion surface asks this, not
+        /// ``value``: an off switch is a promise the feature exists.
+        public var isUnoffered: Bool { self == .unoffered }
     }
 
     /// Resolve whether the companion server should run, in priority order: an
     /// explicit argument → the `AUDIOUT_COMPANION` env var (`1`/`0` or
-    /// `on`/`off`, case-insensitive) → the persisted ``allowRemoteControl``
-    /// setting — same priority ``resolvedAllowRemoteControl(explicit:environment:settings:)``
+    /// `on`/`off`, case-insensitive) → ``remoteAppIsOffered`` → the persisted
+    /// ``allowRemoteControl`` setting — same priority
+    /// ``resolvedAllowRemoteControl(explicit:environment:offered:settings:)``
     /// uses, but returned alongside ``RemoteControlResolution`` so a UI can
     /// render the override honestly instead of just reading the raw setting.
     ///
+    /// The two overrides sit ABOVE `offered` on purpose: `AUDIOUT_COMPANION`
+    /// forces the companion on or off for one launch whatever the build
+    /// offers.
+    ///
     /// This is an explicit knob, never a silent fallback (mirrors
-    /// `BackendKind.resolved`'s policy, OwnToneBackend.swift): an unrecognized
+    /// `BackendKind.resolved`'s policy, OutputBackend.swift): an unrecognized
     /// env value is treated as absent — it falls back to the setting and
     /// prints one warning to stderr rather than silently guessing which way
     /// to go.
+    ///
+    /// - Parameter offered: whether this build carries the companion at all.
+    ///   Injectable so a test pins it instead of inheriting the value worked
+    ///   out from this process's bundle id, the way `SetupModel` takes
+    ///   `remoteAppAvailable`.
     public static func resolvedAllowRemoteControlWithSource(
         explicit: Bool? = nil,
         environment: [String: String] = ProcessInfo.processInfo.environment,
+        offered: Bool = remoteAppIsOffered,
         settings: AppSettings
     ) -> RemoteControlResolution {
         if let explicit { return .forced(explicit) }
 
         guard let raw = environment[allowRemoteControlEnvironmentVariableName] else {
-            return .setting(settings.allowRemoteControl)
+            return offered ? .setting(settings.allowRemoteControl) : .unoffered
         }
         switch raw.lowercased() {
         case "1", "on":  return .forced(true)
@@ -415,19 +578,21 @@ public struct AppSettings {
             FileHandle.standardError.write(
                 Data("warning: unrecognized \(allowRemoteControlEnvironmentVariableName) value \"\(raw)\" — falling back to the setting\n".utf8)
             )
-            return .setting(settings.allowRemoteControl)
+            return offered ? .setting(settings.allowRemoteControl) : .unoffered
         }
     }
 
-    /// Convenience over ``resolvedAllowRemoteControlWithSource(explicit:environment:settings:)``
+    /// Convenience over ``resolvedAllowRemoteControlWithSource(explicit:environment:offered:settings:)``
     /// for callers that only need the resolved value (`AppDelegate`, which
     /// only starts/stops the server and never has to explain the source).
     public static func resolvedAllowRemoteControl(
         explicit: Bool? = nil,
         environment: [String: String] = ProcessInfo.processInfo.environment,
+        offered: Bool = remoteAppIsOffered,
         settings: AppSettings
     ) -> Bool {
-        resolvedAllowRemoteControlWithSource(explicit: explicit, environment: environment, settings: settings).value
+        resolvedAllowRemoteControlWithSource(explicit: explicit, environment: environment,
+                                             offered: offered, settings: settings).value
     }
 
     /// Whether this Mac's sync trim has an ENTRY at all — the honest answer to
@@ -478,14 +643,15 @@ public struct AppSettings {
     /// General, roadmap 054). `nil` when unset — Audiout is fully functional
     /// without one (the Ardour model: the binary is what's sold, never a
     /// software lock — GPL forbids one). Setting `nil` removes the stored value
-    /// AND clears ``licenseStatus``: a verdict about a key the user has deleted
-    /// is not a verdict about anything. It clears the trial fields for the same
-    /// reason — a trial IS a licence key, so a deleted key leaves no trial
-    /// behind to be on day 9 of.
+    /// (unless the secret store refuses the delete, which leaves its copy for
+    /// a later read) AND clears ``licenseStatus``: a verdict about a key the
+    /// user has deleted is not a verdict about anything. It clears the trial
+    /// fields for the same reason — a trial IS a licence key, so a deleted key
+    /// leaves no trial behind to be on day 9 of.
     public var licenseKey: String? {
-        get { defaults.string(forKey: Keys.licenseKey) }
+        get { readSecret(Keys.licenseKey) }
         nonmutating set {
-            defaults.set(newValue, forKey: Keys.licenseKey)
+            writeSecret(newValue, for: Keys.licenseKey)
             if newValue == nil {
                 licenseStatus = nil
                 licenseReason = nil
@@ -493,6 +659,16 @@ public struct AppSettings {
                 clearTrial()
             }
         }
+    }
+
+    /// Whether a licence key is stored, counting one the secret store would
+    /// not hand over (a locked login keychain) when a verdict is on record,
+    /// since only a stored key ever gets one: that Mac keeps its verdict
+    /// instead of reading as unregistered. A refused read with no verdict and
+    /// no `defaults` copy counts as no key.
+    public var hasLicenseKey: Bool {
+        let read = readSecretNotingRefusal(Keys.licenseKey)
+        return (read.refused && licenseStatus != nil) || !(read.value ?? "").isEmpty
     }
 
     /// What the server last said about ``licenseKey`` (``LicenseValidator``).
@@ -514,7 +690,7 @@ public struct AppSettings {
     /// because a build run from source hides the whole surface rather than
     /// calling anyone unregistered.
     public var licenseUnregistered: Bool {
-        if (licenseKey ?? "").isEmpty { return true }
+        if !hasLicenseKey { return true }
         switch licenseStatus {
         case .unknown, .invalid, .revoked: return true
         case .active, nil: return false
@@ -534,8 +710,9 @@ public struct AppSettings {
     /// Why the server gave the verdict it gave, in the server's own words —
     /// `nil` unless the answer carried one. `trial_expired` is the only value
     /// the server sends today, and it is what separates a trial that ran out
-    /// from a key that was refunded: both come back `revoked`, and the gate
-    /// has different words for them. Read through
+    /// from a key that was refunded: both come back `revoked`, and the
+    /// popover's standing note (`PopoverController.unregisteredNote`) and
+    /// `LicenseCopy.statusLine` have different words for them. Read through
     /// ``TrialClock/hasEnded(settings:now:)``: this is the server's half of
     /// that question, ``trialExpiresAt`` the local half, and a Mac whose
     /// stored dates are gone has only this one. Written on every verified
@@ -550,8 +727,21 @@ public struct AppSettings {
     /// Written only by ``LicenseValidator``. `nil` when never issued, or
     /// cleared alongside ``licenseKey``/``licenseStatus``.
     public var companionToken: String? {
-        get { defaults.string(forKey: Keys.companionToken) }
-        nonmutating set { defaults.set(newValue, forKey: Keys.companionToken) }
+        get { readSecret(Keys.companionToken) }
+        nonmutating set { writeSecret(newValue, for: Keys.companionToken) }
+    }
+
+    /// The last valid `app-config.json` body from the website, byte for byte.
+    /// Written only by ``RemoteAppConfigFetcher``.
+    public var remoteConfigData: Data? {
+        get { defaults.data(forKey: Keys.remoteConfigData) }
+        nonmutating set { defaults.set(newValue, forKey: Keys.remoteConfigData) }
+    }
+
+    /// When ``remoteConfigData`` was fetched. `nil` when never fetched.
+    public var remoteConfigFetchedAt: Date? {
+        get { defaults.object(forKey: Keys.remoteConfigFetchedAt) as? Date }
+        nonmutating set { defaults.set(newValue, forKey: Keys.remoteConfigFetchedAt) }
     }
 
     /// The two trial dates are stored as ISO 8601 text. No other setting here
@@ -656,28 +846,44 @@ public struct AppSettings {
         licenseServerURLOverride ?? Self.bundleURL(forInfoDictionaryKey: "AudioutLicenseServerURL")
     }
 
-    /// Where "Buy Audiout…" sends the user, from the bundle's
+    /// Where "Buy Audiout" sends the user, from the bundle's
     /// `AudioutBuyURL` (written by `scripts/make-app.sh` from
     /// `AUDIOUT_BUY_URL`). `nil` in a build that carries no such key, which
     /// is what hides every buy affordance — the Settings button and the
     /// Mixer note's action alike read this one value.
     ///
-    /// While a trial is running it carries `?t=<trial key>`, which is what lets
-    /// the checkout mark that trial converted and activate this Mac without
-    /// anyone pasting a key. It is added HERE, not at the four places that open
-    /// the page, so no call site can forget it. Two cases deliberately get the
-    /// plain page: a trial that has not registered yet holds no key, and an
-    /// invented `t` would name nothing; and a trial that is over is no longer
-    /// converting, so its expired key has nothing to say to the checkout.
+    /// While a trial is running, and after it has ended, it carries
+    /// `?t=<trial key>`, which is what lets the checkout mark that trial
+    /// converted and activate this Mac without anyone pasting a key. It is added
+    /// HERE, not at the places that open the page, so no call site can forget
+    /// it. Two cases deliberately get the plain page: a trial that has not
+    /// registered yet holds no key, and an invented `t` would name nothing; and
+    /// a converted trial (state `.none`) holds a paid key, not a trial id.
+    ///
+    /// Every Buy link also carries `?s=mac-app`, the website's source tag
+    /// (`src/AGENTS.md` "Attribution rides the URL" in the site repo), so the
+    /// site's analytics and the Paddle sale itself say the buyer came from
+    /// the app rather than from a page on the site.
     public var buyURL: URL? {
-        guard let page = buyPageURL else { return nil }
-        guard case .active = TrialClock.state(settings: self),
-              let key = licenseKey, !key.isEmpty,
+        guard let page = buyPageURL,
               var components = URLComponents(url: page, resolvingAgainstBaseURL: false)
-        else { return page }
-        components.queryItems = (components.queryItems ?? []) + [URLQueryItem(name: "t", value: key)]
+        else { return buyPageURL }
+        var items = (components.queryItems ?? []) + [URLQueryItem(name: "s", value: Self.buySourceTag)]
+        let trialHoldsKey: Bool
+        switch TrialClock.state(settings: self) {
+        case .active, .expired: trialHoldsKey = true
+        case .none: trialHoldsKey = false
+        }
+        if trialHoldsKey, let key = licenseKey, !key.isEmpty {
+            items.append(URLQueryItem(name: "t", value: key))
+        }
+        components.queryItems = items
         return components.url ?? page
     }
+
+    /// The `s` value on every Buy link. Must match the site's tag shape,
+    /// `^[a-z0-9-]{1,32}$`, or the site ignores it.
+    public static let buySourceTag = "mac-app"
 
     /// The purchase page as configured, before the trial id is added.
     private var buyPageURL: URL? {
@@ -749,7 +955,7 @@ public struct AppSettings {
     /// key with no trial expiry, which is a paid install — those are asked
     /// before anything is collected.
     public var telemetryDefaultOn: Bool {
-        (licenseKey ?? "").isEmpty || trialExpiresAt != nil
+        !hasLicenseKey || trialExpiresAt != nil
     }
 
     /// Whether usage analytics may be sent right now. The user's own answer
@@ -765,6 +971,36 @@ public struct AppSettings {
     public var telemetryConversionAskShown: Bool {
         get { defaults.bool(forKey: Keys.telemetryConversionAskShown) }
         nonmutating set { defaults.set(newValue, forKey: Keys.telemetryConversionAskShown) }
+    }
+
+    /// Whether the one-time thank-you card after a trial converts has been
+    /// seen. Written when the card is closed or the popover closes with it
+    /// showing. Defaults to `false`.
+    public var licenseThankYouShown: Bool {
+        get { defaults.bool(forKey: Keys.licenseThankYouShown) }
+        nonmutating set { defaults.set(newValue, forKey: Keys.licenseThankYouShown) }
+    }
+
+    /// The distinct local days audio reached a speaker after the trial ended.
+    /// Defaults to 0.
+    public var trialEndedStreamingDays: Int {
+        get { defaults.integer(forKey: Keys.trialEndedStreamingDays) }
+        nonmutating set { defaults.set(newValue, forKey: Keys.trialEndedStreamingDays) }
+    }
+
+    /// How many times the popover closed with the expired-trial survey invite
+    /// up and neither button clicked. Defaults to 0.
+    public var expiredTrialUnansweredLooks: Int {
+        get { defaults.integer(forKey: Keys.expiredTrialUnansweredLooks) }
+        nonmutating set { defaults.set(newValue, forKey: Keys.expiredTrialUnansweredLooks) }
+    }
+
+    /// Whether the expired-trial survey invite was answered, declined, or
+    /// closed unanswered on its last allowed open; never shown again.
+    /// Defaults to `false`.
+    public var expiredTrialSurveyDone: Bool {
+        get { defaults.bool(forKey: Keys.expiredTrialSurveyDone) }
+        nonmutating set { defaults.set(newValue, forKey: Keys.expiredTrialSurveyDone) }
     }
 
     /// The local-calendar day (`yyyy-MM-dd`) the `streaming:daily_active` event

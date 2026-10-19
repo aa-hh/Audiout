@@ -4,59 +4,18 @@ import AppKit
 import AudioutCore
 import AudioutSharedUI
 
-/// A single device row in a **membership checklist** — the group-creation
-/// sheet's device list and the group editor's membership pane (design revamp:
-/// the Groups window becomes CONFIGURATION-ONLY, so this row only ever edits
-/// *membership*, never routing/activation). Composition is stock AppKit: a
-/// checkbox `NSButton`, the device's SF Symbol in an `NSImageView` tinted
-/// identity-neutral like the sidebar's `makeIconLabel`, and an `NSTextField`
-/// name label.
-///
-/// Deliberately NOT `DeviceRowView` (`../AudioutSharedUI/DeviceRowView.swift`):
-/// that row's primary control is "Selected Speakers" / live routing membership
-/// and it carries a volume slider + mute button + connection-status badge —
-/// all routing/activation concerns this window must never expose (activation
-/// lives in the popover only, per the revamp). This row's checkbox means
-/// "is a member of THIS group", an unrelated set from `GroupController`'s
-/// Selected Devices.
-///
-/// **Visibility policy lives in the hosts, not here.** An unavailable device
-/// still renders and is still checkable/uncheckable — a host only includes an
-/// unavailable device in its list at all when it is already a member (so the
-/// user can see and remove it), never to offer joining an unreachable device.
+/// A speaker's membership control, glyph and name on the scene page or creation sheet.
+/// The page draws a node over the real checkbox; the sheet uses the stock checkbox.
+/// Hosts decide which speakers appear, including unavailable saved members.
 public final class MembershipRowView: NSView {
 
-    /// Which host surface this row is drawn on — the one input that decides
-    /// whether it wears the Warm Signal v4 rail/node language or stays a plain
-    /// stock checkbox row (owner's call, Q6 2026-07-25).
-    ///
-    /// The row has exactly TWO hosts and they are visually different surfaces:
-    /// the Groups editor is the app's own themed pane, while "Add scene" is a
-    /// standard AppKit sheet on the system's own white/grey. `ember` measures
-    /// ~2.34–2.48:1 on that white — the gold node would be near-invisible
-    /// there — so the rail is pane-only and the sheet keeps plain stock rows.
-    /// Do NOT warm the Apple sheet, and do NOT introduce a second, darker
-    /// gold to make the node survive on white.
+    /// The scene page uses the app's node; the system sheet keeps its stock control
+    /// because the node's edge cannot meet contrast on the sheet's white ground.
     public enum Surface: Equatable {
-        /// The Groups window's group editor: invisible checkbox cell + a gold
-        /// `MembershipBusView` node, threaded by the pane-level rail overlay.
+        /// The scene page: an invisible checkbox cell under a membership node.
         case warmPane
         /// The stock "Add scene" sheet: an ordinary AppKit checkbox row.
         case systemSheet
-    }
-
-    /// Whether this row's rail node renders ARMED (gold — the group is the
-    /// active Main Out, audio flows through these members) or idle (`ember` —
-    /// pure configuration, nothing moving). Gold means LIVE everywhere in
-    /// Audiout, so an editor showing an inactive group must not fill its
-    /// member discs gold. Host-set; `.systemSheet` rows have no node and ignore
-    /// it.
-    public var railArmed: Bool = true {
-        didSet {
-            guard railArmed != oldValue else { return }
-            applyInk()
-            updateBus()
-        }
     }
 
     /// Fired whenever the user toggles the row's checkbox.
@@ -71,13 +30,19 @@ public final class MembershipRowView: NSView {
     /// node, because ``setCheckboxEnabled(_:tooltip:)`` has to re-decide whether
     /// that hover may still be SHOWN after the checkbox's enablement changes
     /// under a stationary pointer.
-    private var rowHovered = false
+    private var rowHovered: Bool { hoverTracker.isHovered }
+    private lazy var hoverTracker = HoverTracker(view: self) { [weak self] _ in
+        self?.applyHoverToNode()
+    }
 
     private let checkbox = NSButton()
     private let iconView = NSImageView()
     private let nameLabel = NSTextField(labelWithString: "")
-    /// Small secondary annotation shown only for an unavailable member
-    /// ("Unavailable") — never a routing/status claim, just presence.
+    private var presentation: SpeakerPresentationRecord?
+    /// The trailing caption, never a routing claim. Without a presentation
+    /// record it shows only "Unavailable"/"Not connected" for an unavailable
+    /// member (`apply`); with a record it always shows the status line (when
+    /// unavailable) plus the Mixer-visibility context (`applyPresentation`).
     private let unavailableLabel = NSTextField(labelWithString: "")
 
     /// The checkbox's DRAWN skin on `.warmPane` (Warm Signal v4 §Call-1): a
@@ -164,7 +129,11 @@ public final class MembershipRowView: NSView {
         unavailableLabel.translatesAutoresizingMaskIntoConstraints = false
         unavailableLabel.font = Tokens.Font.caption
         unavailableLabel.stringValue = "Unavailable"
-        unavailableLabel.setContentHuggingPriority(.required, for: .horizontal)
+        unavailableLabel.maximumNumberOfLines = 2
+        unavailableLabel.alignment = .right
+        unavailableLabel.lineBreakMode = .byTruncatingTail
+        unavailableLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        unavailableLabel.setContentHuggingPriority(.defaultHigh, for: .horizontal)
 
         addSubview(checkbox)
         addSubview(iconView)
@@ -210,11 +179,6 @@ public final class MembershipRowView: NSView {
     /// starts at `firstElementLeading`, which reserves that gutter plus
     /// `busNodeClearance` of clear space so the node never crowds the glyph.
     ///
-    /// The row's leading edge must line up with the rail overlay's leading edge:
-    /// `BusRailOverlayView` draws the spine at the literal `railGutterCenterX`
-    /// in its OWN coordinate space, so the host is responsible for pinning the
-    /// two to the same x (`GroupEditorViewController`, asserted by
-    /// `test_nodeCenterXInOverlaySpace`).
     private func buildWarmPaneLeadingColumns() {
         busView.translatesAutoresizingMaskIntoConstraints = false
         // Added BELOW the checkbox in z-order is not required — the bus view
@@ -240,11 +204,10 @@ public final class MembershipRowView: NSView {
     /// together from one decision, because every path that can change them
     /// (a host refresh, an arming flip, a toggle) can change all three.
     ///
-    /// ONE unavailable tone, and all three elements take it together: each
-    /// states the same fact, so splitting them across tones makes the row
-    /// argue with itself. On the warm pane that tone is `labelCool2` —
-    /// authored, all four variants, 4.59:1 on dark `raised` and 5.30:1 on the
-    /// light ground.
+    /// An unavailable speaker takes the sidebar's ink, so the same fact reads
+    /// the same on both sides of the window: the name in `labelCool`, the
+    /// glyph and the "Unavailable" word in `labelCool2` — authored, all four
+    /// variants, 4.59:1 on dark `raised` and 5.30:1 on the light ground.
     ///
     /// NOT `.disabledControlTextColor`: it is black at 24.7% alpha, so it
     /// composites against its ground to 1.80:1 on `raised` — under half the
@@ -254,46 +217,35 @@ public final class MembershipRowView: NSView {
     /// Still fully interactive: an unavailable device stays
     /// checkable/uncheckable so an existing member can be removed offline.
     ///
-    /// Warm on the warm pane means the audio is genuinely reaching this member
-    /// — the group is armed AND the device is in it (C5). Everything else is
-    /// cool. The system sheet's branch takes the neutral ink ladder — label,
-    /// label2, label3 — with no temperature split.
+    /// Page names and glyphs use warm ink when available; unavailable speakers use cool ink.
+    private var isAvailable: Bool { presentation?.isAvailable ?? device.isAvailable }
+
     private func applyInk() {
         switch surface {
         case .warmPane:
-            guard device.isAvailable else {
-                nameLabel.textColor = Tokens.Color.labelCool2
+            guard isAvailable else {
+                nameLabel.textColor = Tokens.Color.labelCool
                 iconView.contentTintColor = Tokens.Color.labelCool2
                 unavailableLabel.textColor = Tokens.Color.labelCool2
                 return
             }
-            let live = railArmed && checked
-            nameLabel.textColor = live ? Tokens.Color.label : Tokens.Color.labelCool
-            iconView.contentTintColor = live ? Tokens.Color.label2 : Tokens.Color.labelCool2
+            nameLabel.textColor = Tokens.Color.label
+            iconView.contentTintColor = Tokens.Color.label2
             unavailableLabel.textColor = Tokens.Color.labelCool2
         case .systemSheet:
-            nameLabel.textColor = device.isAvailable ? Tokens.Color.label : Tokens.Color.label3
-            iconView.contentTintColor = device.isAvailable ? Tokens.Color.label2 : Tokens.Color.label3
+            nameLabel.textColor = isAvailable ? Tokens.Color.label : Tokens.Color.label3
+            iconView.contentTintColor = isAvailable ? Tokens.Color.label2 : Tokens.Color.label3
             unavailableLabel.textColor = Tokens.Color.label3
         }
     }
 
-    /// Re-derive the drawn node from the current membership state. The node
-    /// vocabulary here is deliberately BINARY — filled gold `.member` when
-    /// checked, hollow `.nonMember` when not — because this checklist edits
-    /// *membership*, which has no connection/energize states to report (the
-    /// popover's `DeviceRowView` owns those). In particular the pinned sole
-    /// member (`setCheckboxEnabled(false)`) still renders `.member`: it IS a
-    /// member, and `.blocked`'s greyed hollow node would wrongly read as "not
-    /// in this group". No-op on `.systemSheet`, which mounts no node at all.
+    /// A checked speaker draws a gold member node, an unchecked speaker a hollow node.
+    /// The pinned sole member keeps its filled node; the sheet mounts no node.
     private func updateBus() {
         guard surface == .warmPane else { return }
-        // The node dims with the rest of the row — fill only: an unavailable
-        // member keeps its seat and rim on the rail and goes grey where it
-        // would be gold, so it still reads as "in this group, not playing".
         busView.apply(node: checked ? .member : .nonMember,
-                      dimmed: !device.isAvailable,
-                      armed: railArmed)
+                      dimmed: !isAvailable,
+                      armed: true)
     }
 
     // MARK: Model
@@ -312,14 +264,13 @@ public final class MembershipRowView: NSView {
         // view property. The row's own a11y label (below) already speaks the
         // device name, so the glyph carries no description of its own.
         let symbolName = DeviceIcon.resolve(iconSymbolName, default: device.kind.symbolName)
-        iconView.image = DeviceIcon.image(symbolName,
-                                          pointSize: PopoverColumnGrid.iconGlyphPointSize,
-                                          weight: .regular)
+        iconView.image = DeviceIcon.rowGlyph(symbolName)
 
         nameLabel.stringValue = device.name
         applyInk()
 
         unavailableLabel.isHidden = device.isAvailable
+        unavailableLabel.stringValue = device.kind == .bluetooth ? "Not connected" : "Unavailable"
 
         setAccessibilityLabel(
             "\(device.name)\(device.isAvailable ? "" : ", unavailable")")
@@ -328,6 +279,25 @@ public final class MembershipRowView: NSView {
         updateBus()
     }
 
+    public func applyPresentation(_ record: SpeakerPresentationRecord?) {
+        presentation = record
+        applyInk()
+        updateBus()
+        guard let record else { return }
+        let status = record.isAvailable ? "" : record.status.text
+        unavailableLabel.stringValue = status
+        unavailableLabel.isHidden = status.isEmpty
+        unavailableLabel.toolTip = unavailableLabel.stringValue
+        nameLabel.toolTip = record.secondaryText
+        if record.kind == nil {
+            iconView.image = DeviceIcon.image("speaker")
+        }
+        setAccessibilityLabel(record.accessibilityIdentity + (record.isAvailable ? "" : ", " + record.status.text))
+        updateCheckboxAccessibilityLabel()
+    }
+
+    public var test_presentationText: String { unavailableLabel.stringValue }
+
     /// Re-announce the checkbox's VERB from the CURRENT membership state. It
     /// used to be written once in ``apply(device:checked:iconSymbolName:)`` and
     /// never again, so a row toggled in place kept telling VoiceOver to "Add"
@@ -335,7 +305,7 @@ public final class MembershipRowView: NSView {
     /// this.
     private func updateCheckboxAccessibilityLabel() {
         checkbox.setAccessibilityLabel(
-            checked ? "Remove \(device.name) from scene" : "Add \(device.name) to scene")
+            checked ? "Remove \(presentation?.accessibilityIdentity ?? device.name) from scene" : "Add \(presentation?.accessibilityIdentity ?? device.name) to scene")
     }
 
     /// Enable or disable the membership checkbox, with an optional tooltip
@@ -361,16 +331,14 @@ public final class MembershipRowView: NSView {
     /// sole member's "why is this disabled" explanation must be announced too).
     public var test_checkboxAccessibilityHelp: String? { checkbox.accessibilityHelp() }
 
-    /// Whether this row's node renders in the armed (gold) tone; always the
-    /// host-set ``railArmed`` value, read back through the drawn node itself.
-    public var test_railArmed: Bool {
-        surface == .warmPane ? busView.test_armed : railArmed
+    /// Whether the drawn node uses its armed membership tone.
+    public var test_nodeArmed: Bool {
+        surface == .warmPane ? busView.test_armed : true
     }
 
     // MARK: The glyph tile (warm pane only)
 
-    /// A 24 pt recess under the member's glyph, the Mac reading of the iPhone
-    /// editor's member row (audiout-remote DESIGN.md:940-943). Drawn, not a
+    /// A 30 pt rounded-square recess under the member's glyph. Drawn, not a
     /// layer colour, so both tokens re-resolve per appearance flip and
     /// Increase Contrast on every paint.
     ///
@@ -378,19 +346,22 @@ public final class MembershipRowView: NSView {
     /// and `well` against the `raised` checklist card behind it is 1.292:1
     /// dark / 1.154:1 light, which is why the tile carries an edge at all.
     ///
-    /// The tile is centred INSIDE the 26 pt icon view's frame, 1 pt in on each
-    /// side, so nothing about the row's layout moves. The system sheet is
-    /// Apple's and gets no tile.
-    private static let glyphTileSide: CGFloat = 24
+    /// The tile extends 2 pt beyond the 26 pt icon view on each side, keeping
+    /// the glyph and name in place. The system sheet gets no tile.
+    private static let glyphTileSide: CGFloat = 30
+    private static let glyphTileCornerRadius: CGFloat = 6
 
     public override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
         guard surface == .warmPane else { return }
+        if hoverTracker.isHovered && checkbox.isEnabled {
+            PopoverColumnGrid.fillRowWash(in: bounds, alpha: PopoverColumnGrid.rowHoverWashAlpha)
+        }
         let tile = NSRect(x: iconView.frame.midX - Self.glyphTileSide / 2,
                           y: iconView.frame.midY - Self.glyphTileSide / 2,
                           width: Self.glyphTileSide,
                           height: Self.glyphTileSide).insetBy(dx: 0.5, dy: 0.5)
-        let radius = Tokens.Layout.Radius.control
+        let radius = Self.glyphTileCornerRadius
         let path = NSBezierPath(roundedRect: tile, xRadius: radius, yRadius: radius)
         Tokens.Color.well.setFill()
         path.fill()
@@ -458,33 +429,12 @@ public final class MembershipRowView: NSView {
 
     /// One tracking area over the WHOLE row, not just the gutter: now that the
     /// body toggles, the ring has to answer a pointer anywhere on the row.
-    /// `.inVisibleRect` keeps the rect live, so no geometry is cached here.
+    /// The tracker re-reads the pointer when the area is rebuilt: every
+    /// membership toggle rebuilds this list under a stationary pointer, and no
+    /// `mouseEntered`/`mouseExited` follows that.
     public override func updateTrackingAreas() {
         super.updateTrackingAreas()
-        guard surface == .warmPane else { return }
-        trackingAreas.forEach(removeTrackingArea)
-        addTrackingArea(NSTrackingArea(
-            rect: bounds,
-            options: [.mouseEnteredAndExited, .activeInActiveApp, .inVisibleRect],
-            owner: self))
-        // Re-tracking means the row was rebuilt or moved UNDER a stationary
-        // pointer (every membership toggle rebuilds this list), and no
-        // `mouseEntered`/`mouseExited` follows that — so read the pointer's real
-        // position rather than wait for the next move.
-        refreshHoverFromPointer()
-    }
-
-    private func refreshHoverFromPointer() {
-        guard let window else { return setRowHovered(false) }
-        setRowHovered(bounds.contains(convert(window.mouseLocationOutsideOfEventStream, from: nil)))
-    }
-
-    public override func mouseEntered(with event: NSEvent) { setRowHovered(true) }
-    public override func mouseExited(with event: NSEvent) { setRowHovered(false) }
-
-    private func setRowHovered(_ hovered: Bool) {
-        rowHovered = hovered
-        applyHoverToNode()
+        hoverTracker.update(active: surface == .warmPane)
     }
 
     /// Push the hover into the node — but only from a row whose checkbox is
@@ -495,6 +445,7 @@ public final class MembershipRowView: NSView {
     private func applyHoverToNode() {
         guard surface == .warmPane else { return }
         busView.setHovered(rowHovered && checkbox.isEnabled)
+        needsDisplay = true
     }
 
     // MARK: Actions
@@ -544,7 +495,7 @@ public final class MembershipRowView: NSView {
     /// Drive the row's pointer state headlessly — the same path the tracking
     /// area's `mouseEntered`/`mouseExited` take.
     public func test_setHovered(_ hovered: Bool) {
-        setRowHovered(hovered)
+        hoverTracker.setHovered(hovered)
     }
 
     /// Whether the node is previewing its post-click size — grown or shrunk
@@ -558,7 +509,7 @@ public final class MembershipRowView: NSView {
     public var test_nameText: String { nameLabel.stringValue }
 
     /// Whether the row is currently rendered dimmed (unavailable device).
-    public var test_isDimmed: Bool { !device.isAvailable }
+    public var test_isDimmed: Bool { surface == .warmPane ? busView.test_dimmed : !isAvailable }
 
     /// The surface this row was built for.
     public var test_surface: Surface { surface }
@@ -586,17 +537,4 @@ public final class MembershipRowView: NSView {
     /// The checkbox's own VoiceOver label (the membership verb), asserted
     /// unchanged across the surface split.
     public var test_checkboxAccessibilityLabel: String? { checkbox.accessibilityLabel() }
-}
-
-// MARK: - Continuous rail contribution (Warm Signal v4 §Call-1)
-
-/// The warm pane's rail is drawn ONCE at pane level (`BusRailOverlayView`), not
-/// per row: the row contributes its node kind and the frame the node is centred
-/// on. A `.systemSheet` row reports `nil`, so the same type can sit in an
-/// overlay's `deviceRows` and contribute nothing.
-extension MembershipRowView: RailNodeProviding {
-    public var railNode: MembershipBusView.Node? { test_busNode }
-    public var railDeviceID: String? { device.id }
-    public var railNodeView: NSView { self }
-    public var railNodeBounds: NSRect { bounds }
 }

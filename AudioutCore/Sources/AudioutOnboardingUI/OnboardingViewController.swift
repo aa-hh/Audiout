@@ -85,6 +85,11 @@ public final class OnboardingViewController: NSViewController {
     /// test and the snapshot renderers replace it so nothing launches one.
     public var openURL: (URL) -> Void = { NSWorkspace.shared.open($0) }
 
+    /// Fired each time the iPhone card comes on screen. The app opens a
+    /// pairing window then, so a phone that scans the card's code may ask to
+    /// pair with this Mac.
+    public var onRemoteInviteShown: (() -> Void)?
+
     /// Called on every edge of "a system permission dialog this flow raised is
     /// still unanswered". The window controller goes quiet while it is true —
     /// see ``isPromptInFlight``.
@@ -449,10 +454,8 @@ public final class OnboardingViewController: NSViewController {
         tile.translatesAutoresizingMaskIntoConstraints = false
 
         titleLabel = NSTextField(labelWithString: "")
-        // The window's own heading, so VoiceOver's rotor can find it. The raw
-        // AX string, not `NSAccessibilityHeadingRole`: that constant is macOS 26+
-        // and this app installs on 14.2.
-        titleLabel.setAccessibilityRole(NSAccessibility.Role(rawValue: "AXHeading"))
+        // The window's own heading, so VoiceOver's rotor can find it.
+        titleLabel.setAccessibilityHeading()
         titleLabel.font = Tokens.Font.display
         titleLabel.lineBreakMode = .byWordWrapping
         titleLabel.maximumNumberOfLines = 2
@@ -652,6 +655,10 @@ public final class OnboardingViewController: NSViewController {
     /// (the daemon isn't in the bundle — it cannot heal itself, so waiting for
     /// it would be a timer running forever).
     private func startPTPHelperPoll() {
+        // A headless run drives the status itself; a wall-clock tick there
+        // races the test's own status flips, and its read can land `.enabled`
+        // ahead of the return's re-register.
+        guard !HeadlessRuntime.isActive else { return }
         guard ptpHelperPoll == nil else { return }
         guard !Self.ptpPollIsSettled(model.ptpHelperStatus) else { return }
         ptpHelperPoll = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] timer in
@@ -813,10 +820,12 @@ public final class OnboardingViewController: NSViewController {
                 whyLine: "Audiout Remote listens from where you sit and sets each "
                     + "speaker's timing in seconds. Scan to get it.",
                 // The one card whose primary button is not the completion: a
-                // phone connecting is. It exists so a person who would rather
-                // read on the Mac can, and so the ribbon keeps its shape.
-                allowTitle: "Open \(RemoteInviteView.pageAddress)",
-                isSkippable: true,
+                // phone connecting is. The primary moves setup on rather than
+                // sending anyone out of it (owner decision 2026-09-12); the
+                // page stays one quiet link away. Continue IS the skip, so no
+                // second Skip button beside it.
+                allowTitle: "Continue",
+                isSkippable: false,
                 spineAskTitle: "iPhone remote",
                 spineDoneTitle: "iPhone remote")
         case .usageStats:
@@ -934,6 +943,7 @@ public final class OnboardingViewController: NSViewController {
             lastHeroDisplayedStep = displayedStep
             if displayedStep == .audioutRemote {
                 Analytics.capture("remote_invite:setup_card_shown")
+                onRemoteInviteShown?()
             }
         }
         if let browsed = browseStep {
@@ -1157,11 +1167,11 @@ public final class OnboardingViewController: NSViewController {
     private func demoMode(for step: SetupStep?) -> DemoMode {
         guard let step else { return .settled }
         // Usage Statistics wears the privacy card's two-button SHAPE — the
-        // decision has that shape — but the card is ours, so the frame drops
-        // its macOS caption (see `previewFrameLabel(for:)`).
-        // Two cards raise no macOS dialog at all: one draws its own consent
-        // card, the other the QR the user scans. Both rehearse as `.prompt` —
-        // the surface the click leads to, drawn at life size.
+        // decision has that shape — but the card is ours, which is what its
+        // caption says (see `previewFrameLabel(for:)`).
+        // Two cards raise no macOS dialog at all: one draws our own consent
+        // card, the other the QR the user scans at life size. Both rehearse as
+        // `.prompt` — the surface the click leads to.
         if step == .usageStats || step == .audioutRemote { return .prompt }
         // Speaker Sync has no prompt at all — Login Items is the only surface
         // it ever shows the user.
@@ -1381,16 +1391,21 @@ public final class OnboardingViewController: NSViewController {
     /// whole ribbon line on ("This is what macOS will ask you next."), said by
     /// the frame instead.
     static let previewFrameLabel = "You'll see this from macOS"
+    /// The same sentence for the one ask whose surface Audiout raises itself.
+    static let audioutPreviewFrameLabel = "You'll see this from Audiout"
     /// The frame's caption, per step. Its whole job is to say WHOSE surface is
-    /// inside it, so Usage Statistics gets NONE: that card wears the privacy
-    /// dialog's two-button shape because the decision has that shape, but macOS
-    /// raises nothing here and captioning it "You'll see this from macOS" would
-    /// be a claim we can't back. Same rule the finale already follows — its own
-    /// card is ours, so it is uncaptioned too.
+    /// inside it, and both answers are now sayable: macOS for the permission
+    /// dialogs, Audiout for the usage-statistics sheet, which the stage draws
+    /// as a mock like every other rehearsal. Audiout Remote is the one step
+    /// with no caption at all — what is inside its frame is a code for the
+    /// user's phone, not a preview of a surface. The finale follows the same
+    /// rule from elsewhere: it is a moment, not a preview, so it is bare.
     static func previewFrameLabel(for step: SetupStep) -> String? {
-        // Neither card shows a macOS surface: one is our own consent card,
-        // the other a code for the user's phone.
-        (step == .usageStats || step == .audioutRemote) ? nil : previewFrameLabel
+        switch step {
+        case .usageStats: return audioutPreviewFrameLabel
+        case .audioutRemote: return nil
+        default: return previewFrameLabel
+        }
     }
     /// What VoiceOver hears in place of that caption on Remote Control's first
     /// ask — the one rehearsal whose two surfaces and ghosted Deny ARE the
@@ -1544,6 +1559,7 @@ public final class OnboardingViewController: NSViewController {
         content.primary = (copy.allowTitle, .prominent)
         content.showsSkip = copy.isSkippable
         content.skipTitle = Self.skipTitle(for: step)
+        if step == .audioutRemote { content.quietLink = "Open \(RemoteInviteView.pageAddress)" }
         return content
     }
 
@@ -1600,7 +1616,7 @@ public final class OnboardingViewController: NSViewController {
         // where it really lives rather than a System Settings pane.
         case .audioutRemote:
             return "Audiout Remote is connected. Manage iPhones in Audiout's "
-                + "settings, under General."
+                + "settings, under Audiout Remote."
         }
     }
 
@@ -1889,6 +1905,9 @@ public final class OnboardingViewController: NSViewController {
         // would have left the button on screen doing nothing.
         if flow.isDoneAvailable { doneTapped(); return }
         guard let step = displayedActiveStep else { return }
+        // Continue: the card completes only when a phone connects, so moving
+        // on is a skip.
+        if step == .audioutRemote { skipTapped(step); return }
         allowTapped(step)
     }
 
@@ -1903,6 +1922,7 @@ public final class OnboardingViewController: NSViewController {
     private func ribbonQuietLinkTapped() {
         if let browsed = browseStep { openSettings(for: browsed); return }
         guard let step = displayedActiveStep else { return }
+        if step == .audioutRemote { openDestination(.remotePage); return }
         settingsLinkTapped(step)
     }
 
@@ -2027,13 +2047,11 @@ public final class OnboardingViewController: NSViewController {
     /// Audiout's own Share / Don't Share sheet — the surface this step's ask
     /// raises, exactly as every other step's ask raises one of macOS's.
     ///
-    /// It is ``UsageStatsConsentCard`` — the SAME view the rehearsal on the
-    /// stage draws, with its buttons live instead of switched off. An `NSAlert`
-    /// was the first attempt and was wrong for exactly the reason this window
-    /// exists: the stage promises "this is what you'll see", and a stock alert
-    /// is not what the stage was showing (owner: "why can't you make it look
-    /// exactly like your mock-up"). One card, two hosts, nothing to keep in
-    /// step.
+    /// It is ``UsageStatsConsentCard``, the surface the stage's rehearsal is a
+    /// drawing OF. An `NSAlert` was the first attempt and was wrong for exactly
+    /// the reason this window exists: the stage promises "this is what you'll
+    /// see", and a stock alert is not what the stage was showing (owner: "why
+    /// can't you make it look exactly like your mock-up").
     ///
     /// This is NOT the `NSAlert` that was deleted from `AppDelegate`. That one
     /// ambushed the first menu-bar click, with nothing on screen to explain it;
@@ -2356,10 +2374,10 @@ public final class OnboardingViewController: NSViewController {
     }
 
     /// Whether the gate button is the gold prominent CTA — a `ProminentButton`
-    /// carrying the gold fill, not a plain bezel. Compared by RESOLVED
-    /// sRGB components: two accesses of a provider-backed token are distinct
-    /// `NSColor` instances, and their `isEqual` is not documented to see
-    /// through the provider.
+    /// carrying the gold fill (pinned to `gold`'s dark value), not a plain bezel.
+    /// Compared by RESOLVED sRGB components: two accesses of a provider-backed
+    /// token are distinct `NSColor` instances, and their `isEqual` is not
+    /// documented to see through the provider.
     public var test_doneIsGoldProminent: Bool {
         _ = view
         guard ribbon.test_primaryIsCTA,

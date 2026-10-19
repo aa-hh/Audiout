@@ -46,6 +46,17 @@ import AppKit
                 "a destination-switch handshake shows the pending (dashed) ring (spec §6)")
     }
 
+    // Turns red if the connecting branch starts honouring `joinsSpine` or returns to `ember`.
+    @Test func connectingRingIsRimNotSpineTone() {
+        let row = MainOutRowView()
+        row.apply(options: makeOptions(), current: .selectedDevices, master: 50,
+                  connectionState: .connecting)
+        #expect(sameInk(row.test_ringStrokeColor, Tokens.Color.rim),
+                "a connecting Main Audio ring strokes rim")
+        #expect(!sameInk(row.test_ringStrokeColor, Tokens.Color.spineTone),
+                "…not the spine tone")
+    }
+
     @Test func connectedRingWhenTargetLive() {
         let row = MainOutRowView()
         row.apply(options: makeOptions(), current: .selectedDevices, master: 50,
@@ -73,21 +84,21 @@ import AppKit
         // The rail curving into this ring is gold here, so the ring is gold too:
         // a grey `rim` rimmed ring under a gold wire read as two unrelated
         // things touching.
-        #expect(sameInk(row.test_ringStrokeColor, Tokens.Color.spineTone(armed: true)),
+        #expect(sameInk(row.test_ringStrokeColor, Tokens.Color.spineTone),
                 "the resting ring wears the rail's own ink, never the grey rim")
     }
 
     /// A rail that exists but is not armed (speakers selected, none connected,
-    /// nothing playing locally) rests in the wire's IDLE tone — still never the
-    /// grey rim.
-    @Test func restingRingWearsTheIdleToneWhenTheRailIsNotArmed() {
+    /// nothing playing locally) is still gold — the line has no idle tone
+    /// (owner's ruling, 2026-10-04) — and never the grey rim.
+    @Test func restingRingStaysGoldWhenTheRailIsNotArmed() {
         let row = MainOutRowView()
         row.setRailLive(true)
         row.apply(options: makeOptions(), current: .selectedDevices, master: 50,
                   connectionState: .off)
         #expect(row.test_ringForm == .resting, "a live rail always has a ring to land on")
-        #expect(sameInk(row.test_ringStrokeColor, Tokens.Color.spineTone(armed: false)),
-                "an idle rail's ring is the idle spine tone")
+        #expect(sameInk(row.test_ringStrokeColor, Tokens.Color.gold),
+                "an unarmed rail's ring is still gold")
     }
 
     @Test func noRingWhileThereIsNoRail() {
@@ -135,7 +146,7 @@ import AppKit
     /// its attributed string carries the tail-truncating paragraph style — an
     /// `attributedTitle` makes the cell ignore its own `lineBreakMode`, so a
     /// long group name would otherwise clip mid-word with no ellipsis.
-    @Test func pickerTitleIsTheButtonTitleAndTruncatesByTail() {
+    @Test func pickerTitleIsTheButtonTitleAndTruncatesByTail() throws {
         let row = MainOutRowView()
         let longName = "The Extremely Long Upstairs Bedroom Speaker Group"
         row.apply(options: [
@@ -144,8 +155,8 @@ import AppKit
         ], current: .group(id: "g1"), master: 50)
         #expect(row.test_buttonTitle == "→ \(longName)")
 
-        let attributed = try? #require(row.test_buttonAttributedTitle)
-        let style = attributed?.attribute(.paragraphStyle, at: 0, effectiveRange: nil)
+        let attributed = try #require(row.test_buttonAttributedTitle)
+        let style = attributed.attribute(.paragraphStyle, at: 0, effectiveRange: nil)
             as? NSParagraphStyle
         #expect(style?.lineBreakMode == .byTruncatingTail)
     }

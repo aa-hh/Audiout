@@ -71,9 +71,9 @@ public final class GroupCreationSheetController: NSViewController {
     private static let iconWellSize: CGFloat = 32
 
     /// Pencil badge diameter, scaled down from `DeviceIconWellView`'s 22pt (at
-    /// its 64pt well) to this sheet's smaller 32pt well — same proportion,
-    /// smaller stage. Corner-badge overlay, not a second custom control: see
-    /// `iconWellPencilBadge`.
+    /// its 48pt well, `DeviceIconWellView.size`) to this sheet's smaller 32pt
+    /// well — same proportion, smaller stage. Corner-badge overlay, not a
+    /// second custom control: see `iconWellPencilBadge`.
     private static let pencilBadgeDiameter: CGFloat = 14
 
     private let nameField = NSTextField(string: "")
@@ -447,13 +447,10 @@ public final class GroupCreationSheetController: NSViewController {
             return
         }
         let memberIDs = candidateDevices.map(\.id).filter { checkedIDs.contains($0) }
-        let memberVolumes = Dictionary(uniqueKeysWithValues: memberIDs.compactMap { id -> (String, Int)? in
-            candidateDevices.first(where: { $0.id == id }).map { (id, $0.volume) }
-        })
         let result: GroupController.CreateResult
         do {
             result = try groupController.createGroup(
-                name: name, memberIDs: memberIDs, memberVolumes: memberVolumes,
+                name: name, memberIDs: memberIDs,
                 iconSymbolName: selectedIconSymbolName)
         } catch {
             // REPORTED, never swallowed (the editor's `saveOrReport` contract,
@@ -661,12 +658,6 @@ public final class GroupCreationSheetController: NSViewController {
     /// Contrast and no repaint moves them, so this is how a test sees a
     /// mid-session toggle actually reach the badge.
     public var test_pencilBadgeRestampCount: Int { iconWellPencilBadge.test_restampCount }
-}
-
-/// A flipped document view so the checklist scrolls from the top rather than
-/// bottom-gravitating with dead space above the rows. File-scoped on purpose.
-private final class FlippedView: NSView {
-    override var isFlipped: Bool { true }
 }
 
 /// The creation sheet's icon-well corner pencil — a cosmetic echo of

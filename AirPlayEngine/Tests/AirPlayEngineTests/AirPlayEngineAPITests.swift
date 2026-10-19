@@ -169,6 +169,82 @@ extension SerializedEngineState {
             }
         }
 
+        // MARK: - authorize: pair-setup with an on-screen code.
+
+        // Turns red if authorize returns before the completion or stops reading
+        // the key the device holds after a STOPPED completion.
+        @Test func authorizeReturnsTheKeyTheDeviceEarned() async throws {
+            let id = OutputID(rawValue: 0xA4)
+            makeRegistryDevice(id: id.rawValue)
+            let engine = AirPlayEngine()
+            await engine.enterHeadlessTestMode(issue: { device, _ in
+                device.pointee.auth_key = strdup("AB12")
+                return 1
+            })
+            await engine.registerKnownOutputForTest(id)
+
+            async let key = engine.authorize(id, pin: "1234")
+            try await fireWhenArmed(id: id.rawValue, state: OUTPUT_STATE_STOPPED, engine: engine)
+
+            #expect(try await key == "AB12")
+        }
+
+        // Turns red if authorize maps a refused code (PASSWORD terminal) to anything
+        // but passwordRequired.
+        @Test func authorizeWrongCodeThrowsPasswordRequired() async throws {
+            let id = OutputID(rawValue: 0xA5)
+            makeRegistryDevice(id: id.rawValue)
+            let engine = AirPlayEngine()
+            await engine.enterHeadlessTestMode(issue: { _, _ in 1 })
+            await engine.registerKnownOutputForTest(id)
+
+            async let key = engine.authorize(id, pin: "9999")
+            try await fireWhenArmed(id: id.rawValue, state: OUTPUT_STATE_PASSWORD, engine: engine)
+
+            do {
+                _ = try await key
+                Issue.record("expected passwordRequired")
+            } catch AirPlayEngineError.passwordRequired {
+                // expected
+            }
+        }
+
+        // Turns red if authorize treats a STOPPED terminal with no key on the
+        // device as success.
+        @Test func authorizeWithNoSessionThrowsSessionFailed() async throws {
+            let id = OutputID(rawValue: 0xA6)
+            makeRegistryDevice(id: id.rawValue)
+            let engine = AirPlayEngine()
+            await engine.enterHeadlessTestMode(issue: { _, _ in 0 })
+            await engine.registerKnownOutputForTest(id)
+
+            do {
+                _ = try await engine.authorize(id, pin: "1234")
+                Issue.record("expected sessionFailed")
+            } catch AirPlayEngineError.sessionFailed {
+                // expected
+            }
+        }
+
+        // Turns red if feedDescriptor stops writing the descriptor's pairing key
+        // onto the vendored device, or leaves a stale key when a later feed carries none.
+        @Test func feedInstallsAndClearsTheDescriptorsPairingKey() async {
+            let raw: UInt64 = 0xAABBCCDDEE01
+            makeRegistryDevice(id: raw)
+            let engine = AirPlayEngine()
+
+            var tv = DeviceDescriptor(
+                name: "Teevee", address: "192.168.1.53", family: .ipv4, port: 7000,
+                txtRecord: ["deviceid": "AA:BB:CC:DD:EE:01"], authKey: "KEY1"
+            )
+            _ = await engine.feedDescriptorForTest(tv)
+            #expect(outputs_device_get(raw)!.pointee.auth_key.map { String(cString: $0) } == "KEY1")
+
+            tv.authKey = nil
+            _ = await engine.feedDescriptorForTest(tv)
+            #expect(outputs_device_get(raw)!.pointee.auth_key == nil)
+        }
+
         // MARK: - setVolume: awaits a completion, records volume on the C device.
 
         @Test func setVolumeDrivesDeviceAndCompletes() async throws {
@@ -223,6 +299,45 @@ extension SerializedEngineState {
                 async let op: Void = engine.setVolume(id, normalized)
                 try await fireWhenArmed(id: id.rawValue, state: OUTPUT_STATE_STREAMING, engine: engine)
                 try await op
+            }
+        }
+
+        // MARK: - setVolume: the AirPlay 1 true-mute sentinel survives normalization.
+        //
+        // DEFECT THIS NAMES: `setVolume` clamped its input with
+        // `max(0.0, min(1.0, volume))`, so the -1.0 the host sends for an AirPlay 1
+        // nonparticipant arrived at `applyVolumeOnDevice` as 0.0 and wrote
+        // `device->volume = 0`. On a RAOP receiver that is
+        // raop_volume_from_pct(0) = -30 dB — quiet, not silent — so a speaker the
+        // wizard holds out of an audition still plays. Only EXACTLY -1.0 passes
+        // through; any other negative still clamps to 0.
+        //
+        // LIMIT: this reaches the C `device->volume` field through the real
+        // `setVolume` path. What the receiver does with the resulting
+        // SET_PARAMETER is a live-speaker check, not a headless one.
+        @Test func setVolumeSentinelReachesTheRaopDeviceOnlyForExactlyMinusOne() async throws {
+            let cases: [(Double, Int32)] = [(-1.0, -1), (-0.5, 0), (-2.0, 0), (0.0, 0), (0.75, 75)]
+            for (input, expected) in cases {
+                outputs_dispatcher_reset(); drainRegistry()
+                let id = OutputID(rawValue: 0xB7)
+                makeRegistryDevice(id: id.rawValue)
+                // An AirPlay 1 output, as discovery would register it: the -144 dB
+                // out-of-range mapping is raop.c's, not airplay.c's.
+                outputs_device_get(id.rawValue)!.pointee.type = OUTPUT_TYPE_RAOP
+
+                let engine = AirPlayEngine()
+                await engine.enterHeadlessTestMode(issue: { device, _ in
+                    #expect(device.pointee.volume == expected,
+                            "normalized \(input) must reach device->volume \(expected)")
+                    return 1
+                })
+                await engine.registerKnownOutputForTest(id)
+
+                async let op: Void = engine.setVolume(id, input)
+                try await fireWhenArmed(id: id.rawValue, state: OUTPUT_STATE_STREAMING, engine: engine)
+                try await op
+
+                #expect(outputs_device_get(id.rawValue)?.pointee.volume == expected)
             }
         }
 
@@ -403,6 +518,42 @@ extension SerializedEngineState {
             // the gated live run.
             let mappedID = await engine.feedDescriptorForTest(desc)
             #expect(mappedID?.rawValue == 0x112233445566)
+        }
+
+        private func storedPassword(_ key: String) -> String? {
+            cfg_gettsec(cfg, "airplay", key).flatMap { cfg_getstr($0, "password") }.map { String(cString: $0) }
+        }
+
+        // Turns red if feedDescriptor stops keying a RAOP password on the part of
+        // the name after '@', which is what raop_device_cb looks up.
+        @Test func raopFeedStoresPasswordUnderNameAfterAt() async {
+            defer { conffile_set_device_password("Kitchen", nil) }
+            let engine = AirPlayEngine()
+
+            _ = await engine.feedDescriptorForTest(DeviceDescriptor(
+                name: "112233445566@Kitchen", address: "192.168.1.51", family: .ipv4, port: 5000,
+                kind: .raop, txtRecord: ["deviceid": "11:22:33:44:55:66"], password: "secret"
+            ))
+            #expect(storedPassword("Kitchen") == "secret")
+        }
+
+        // Turns red if feedDescriptor stops keying an AirPlay 2 password on the
+        // whole name, or stops clearing it when a later feed carries none.
+        @Test func airplayFeedStoresPasswordUnderWholeNameAndClearsIt() async {
+            defer { conffile_set_device_password("Loft", nil) }
+            let engine = AirPlayEngine()
+
+            let loft = DeviceDescriptor(
+                name: "Loft", address: "192.168.1.52", family: .ipv4, port: 7000,
+                txtRecord: ["deviceid": "AA:BB:CC:DD:EE:01"], password: "attic"
+            )
+            _ = await engine.feedDescriptorForTest(loft)
+            #expect(storedPassword("Loft") == "attic")
+
+            var cleared = loft
+            cleared.password = nil
+            _ = await engine.feedDescriptorForTest(cleared)
+            #expect(cfg_gettsec(cfg, "airplay", "Loft") == nil)
         }
 
         @Test func descriptorWithoutDeviceIDIsInvalid() {

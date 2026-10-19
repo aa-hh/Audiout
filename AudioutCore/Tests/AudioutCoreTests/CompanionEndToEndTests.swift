@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+import CryptoKit
 import Foundation
 import Testing
 import Network
@@ -15,12 +16,13 @@ import AudioutProtocol
 /// whole stack through two loopback WebSocket clients.
 ///
 /// The loopback harness (`LoopbackHub`/`connectClient`/`sendHello`) is copied
-/// from `CompanionServerTests`, including its two load-bearing traps:
+/// from `CompanionServerTests` (TLS left out: the rig hands connections to
+/// `accept(_:)` directly), including its two load-bearing traps:
 /// - a WebSocket **client** must dial a `ws://` URL, not a bare host/port
 ///   endpoint, or the upgrade handshake aborts (ECONNABORTED);
 /// - the listener is pinned to `127.0.0.1` via `requiredLocalEndpoint`, and
 ///   connections are handed to the internal `accept(_:)` seam rather than
-///   `CompanionServer.start(name:)`'s own all-interfaces, Bonjour-advertising
+///   `CompanionServer.start(identity:)`'s own all-interfaces, Bonjour-advertising
 ///   listener — which is exactly what trips macOS's Application Firewall
 ///   prompt for the `xctest` process under `swift test`.
 @MainActor
@@ -42,13 +44,21 @@ import AudioutProtocol
     private final class Rig: @unchecked Sendable {
         static let serverName = "TestMac"
 
-        /// The phone identity every test client hellos with. Pre-APPROVED in
-        /// the rig's `CompanionApprovalStore` fixture (T24): these scenarios
-        /// exercise the command/broadcast stack, not the approval gate — the
-        /// gate has its own suites (`CompanionServerTests`,
+        /// The private key every test client signs its hello with: a fixed
+        /// scalar, so the phone's id is a constant. That id is pre-APPROVED
+        /// in the rig's `CompanionApprovalStore` fixture (T24): these
+        /// scenarios exercise the command/broadcast stack, not the approval
+        /// gate — the gate has its own suites (`CompanionServerTests`,
         /// `CompanionApprovalStoreTests`) — so the store fixture stands in
         /// for a user who already answered "Allow".
-        static let approvedClientID = "6A3B84E4-4E0E-4B37-9D25-8E4CE9B0B2C1"
+        static let phoneKeyRaw = Data(repeating: 0x22, count: 32)
+        static var approvedClientID: String {
+            let key = try! P256.Signing.PrivateKey(rawRepresentation: phoneKeyRaw)
+            return CompanionPairing.clientID(forPublicKey: key.publicKey.rawRepresentation)
+        }
+        /// The certificate fingerprint the rig's server claims and the test
+        /// phones sign over.
+        static let fingerprint = Data(repeating: 0xAB, count: 32)
 
         let backend: MockBackend
         let groupController: GroupController
@@ -82,7 +92,8 @@ import AudioutProtocol
                 lastKnownName: "test phone",
                 decision: .approved,
                 firstSeen: .distantPast,
-                lastSeen: .distantPast)])
+                // Recent: an approval unseen for a month lapses.
+                lastSeen: Date())])
             approvals = CompanionApprovalController(store: approvalStore)
 
             let excluded = excludedApps
@@ -112,9 +123,11 @@ import AudioutProtocol
             // T24 gate, wired the way AppDelegate wires it: server queue →
             // main-actor hop → the approval controller (which answers from
             // the pre-approved fixture with no prompt).
-            server.onApprovalRequest = { [self] clientID, clientName, decide in
+            server.localCertificateSHA256 = Self.fingerprint
+            server.onApprovalRequest = { [self] clientID, clientName, pairingCode, _, _, decide in
                 Task { @MainActor in
-                    self.approvals.handleRequest(clientID: clientID, clientName: clientName, decide: decide)
+                    self.approvals.handleRequest(clientID: clientID, clientName: clientName,
+                                                 pairingCode: pairingCode, decide: decide)
                 }
             }
 
@@ -240,12 +253,12 @@ import AudioutProtocol
     /// second deadline was measuring the code for. `CompanionServerTests`'
     /// twin helper got this fix in 46897218; this copy was missed. An
     /// explicit `timeout:` still means "I meant this expiry".
-    nonisolated private func waitUntil(timeout: TimeInterval = SuiteWait.timeout, _ condition: () -> Bool) async -> Bool {
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            if condition() { return true }
-            try? await Task.sleep(nanoseconds: 5_000_000)
-        }
+    nonisolated private func waitUntil(
+        timeout: TimeInterval? = nil,
+        sourceLocation: SourceLocation = #_sourceLocation,
+        _ condition: () -> Bool
+    ) async -> Bool {
+        await SuiteWait.until(timeout: timeout, sourceLocation: sourceLocation, condition)
         return condition()
     }
 
@@ -345,8 +358,22 @@ import AudioutProtocol
         client.send(content: data, contentContext: context, isComplete: true, completion: .contentProcessed { _ in })
     }
 
-    nonisolated private func sendHello(over client: NWConnection, name: String = "phone") throws {
-        sendText(try CompanionEnvelope(message: .hello(clientID: Rig.approvedClientID, clientName: name, protoVersion: CompanionProto.version)).encoded(), over: client)
+    /// Wait for this connection's challenge, then sign it with the rig's
+    /// phone key and send the version 2 hello.
+    nonisolated private func sendHello(over client: NWConnection, log: MessageLog, name: String = "phone") async throws {
+        func nonce() -> Data? {
+            for case .challenge(let text) in log.messages { return Data(base64Encoded: text) }
+            return nil
+        }
+        try #require(await waitUntil { nonce() != nil }, "the server never sent its challenge")
+        let key = try P256.Signing.PrivateKey(rawRepresentation: Rig.phoneKeyRaw)
+        let signature = try key.signature(for: CompanionPairing.authenticationMessage(
+            serverNonce: try #require(nonce()), serverCertificateSHA256: Rig.fingerprint))
+        sendText(try CompanionEnvelope(message: .hello(
+            clientKey: key.publicKey.rawRepresentation.base64EncodedString(),
+            clientName: name,
+            protoVersion: CompanionProto.version,
+            signature: signature.rawRepresentation.base64EncodedString())).encoded(), over: client)
     }
 
     nonisolated private func sendCommand(_ command: CompanionCommand, requestID: String, over client: NWConnection) throws {
@@ -357,7 +384,7 @@ import AudioutProtocol
     /// setup every scenario below starts from.
     nonisolated private func connectAndWelcome(via hub: LoopbackHub, to server: CompanionServer, name: String) async throws -> (client: NWConnection, log: MessageLog) {
         let (client, log) = try await connectClient(via: hub, to: server)
-        try sendHello(over: client, name: name)
+        try await sendHello(over: client, log: log, name: name)
         try #require(await waitUntil { log.messages.contains { if case .welcome = $0 { return true } else { return false } } },
                      "\(name) was never welcomed")
         return (client, log)

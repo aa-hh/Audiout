@@ -9,7 +9,9 @@ the model, never the reverse.
 ## Rules
 
 - `scripts/run-tests.sh --filter <Suite>` for the inner loop, never a bare `swift test`.
-- Tests must stay invisible: nothing a test does may reach the screen.
+- Tests must stay invisible: nothing a test does may reach the screen. Guard 9 blocks a commit whose new lines present anything.
+- A titled window is NOT parked off screen by its `contentRect`; `.borderless` is. A titled one needs `constrainFrameRect(_:to:)` overridden AND `setFrameOrigin` after init — `makeParkedWindow` in `Tests/AudioutCoreTests/SurfaceToolbarTests.swift`.
+- Tests must stay silent too: `TestKeySilencer` (test-only target) mutes AppKit's beep for a key press nothing handles. Never link it into an app or tool target.
 - This Mac's own AirPlay receiver is never surfaced as a device (2026-08-07).
 - `.passwordRequired` never flattens to `.unknown`; keep the auth cause and its honest copy.
 - Every `show*()` entry gates on-screen presentation behind `HeadlessRuntime.isActive`.
@@ -17,9 +19,10 @@ the model, never the reverse.
 - Scope arbiter: whole-system routing always wins a contested device, per-app yields.
 - Bundle-ID resolution must reach every Core Audio process, never a single pid.
 - `AppRouteDestination` is four cases; `isDeviceRoute` is `.device` only, `isRoutedAway` adds `.group`.
+- A device meter counts every app whose route reaches it: a `.device` route or membership of a routed `.group`; both meter sites ask `meterTargetsLocked`.
 - A per-app Bluetooth destination is fed by UID and reads the room's timing, never sets it.
 - Every real (re)connect reseeds the engine volume, or the stream is inaudible.
-- Never touch IOBluetooth outside `BTDeviceEnumerator`'s gate; an ungated call kills the process.
+- Never touch IOBluetooth outside the authorization gates in `BTDeviceEnumerator` and `BTAbsoluteVolumeSDP`; an ungated call kills the process.
 - `TCCAccessPreflight` is cached for the process lifetime; read grants through `TCCProbeRunner`.
 - `CompanionSnapshotBuilder` fields never come from `Device` state; use the UI's selection.
 - Use `IsolatedSuite` for shared state; concurrent suites sharing defaults flake.
@@ -31,7 +34,7 @@ the model, never the reverse.
 - [AudioutCore](Sources/AudioutCore/AGENTS.md) → model and backends
 - [AudioutSharedUI](Sources/AudioutSharedUI/AGENTS.md) → shared row views
 - [AudioutPopoverUI](Sources/AudioutPopoverUI/AGENTS.md) → menu-bar popover
-- [AudioutWindowUI](Sources/AudioutWindowUI/AGENTS.md) → Groups screen
+- [AudioutWindowUI](Sources/AudioutWindowUI/AGENTS.md) → Scenes, Speakers
 - [AudioutSettingsUI](Sources/AudioutSettingsUI/AGENTS.md) → Settings screen
 - [AudioutOnboardingUI](Sources/AudioutOnboardingUI/AGENTS.md) → Setup window
 - [AudioutApp](Sources/AudioutApp/AGENTS.md) → shipping executable

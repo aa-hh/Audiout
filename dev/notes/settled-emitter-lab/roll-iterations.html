@@ -1,0 +1,265 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Self-Rolling Ring Lab</title>
+<style>
+  body { margin: 0; background: #171411; color: #e8dfd2; font: 14px/1.45 -apple-system, system-ui, sans-serif; }
+  header { padding: 20px 24px 4px; }
+  h1 { font-size: 17px; margin: 0 0 4px; font-weight: 600; }
+  header p { margin: 0; color: #a99c88; max-width: 72ch; }
+  .bar { display: flex; gap: 14px; align-items: center; padding: 10px 24px 0; }
+  button { background: #2a251f; color: #e8dfd2; border: 1px solid #4a4137; border-radius: 6px; padding: 5px 14px; font: inherit; cursor: pointer; }
+  button:hover { border-color: #8a7a63; }
+  #copied { color: #8dbf6a; font-size: 12.5px; opacity: 0; transition: opacity 0.3s; }
+  .layout { display: flex; align-items: flex-start; gap: 18px; padding: 12px 24px 32px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 18px; flex: 1; }
+  #pane { width: 270px; flex-shrink: 0; position: sticky; top: 12px; }
+  .panel { background: #1d1915; border: 1px solid #2e2822; border-radius: 10px; overflow: hidden; }
+  .panel canvas { display: block; width: 100%; aspect-ratio: 1; }
+  .panel .meta { padding: 10px 14px 12px; }
+  .panel h2 { font-size: 14px; margin: 0 0 3px; font-weight: 600; color: #e8b84b; }
+  .panel h2 .tag { color: #6f6455; font-weight: 400; }
+  .panel p { margin: 0; font-size: 12.5px; color: #a99c88; }
+  @media (max-width: 760px) { .layout { flex-direction: column; } #pane { width: 100%; position: static; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>Self-rolling rings</h1>
+  <p>Round 3. First panel is last round’s C2 for reference (its curl travels around the circle). The other three make the ring roll over itself: the curl churns radially through each crest like a spinning tube, and in R2/R3 a swell grows as it moves along the ring and the rolling is strongest inside it. Tune on the right; Copy settings puts the exact values on your clipboard and in the URL.</p>
+</header>
+<div class="bar">
+  <button id="pause">Pause</button>
+  <button id="copy">Copy settings</button>
+  <span id="copied">copied</span>
+</div>
+<div class="layout">
+  <div class="grid" id="grid"></div>
+  <div id="pane"></div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/tweakpane@3.1.10/dist/tweakpane.min.js"></script>
+<script>
+const RAMP = { lo: [0.243,0.184,0.086], mid: [0.91,0.722,0.294], peak: [1.0,0.851,0.478] };
+
+/* Defaults = Alec's picked R2 settings (2026-09-13), breathing calmed. */
+const DEFAULTS = {
+  speed:     2.5,   /* clock multiplier */
+  rollAmp:   1.3,   /* orbiting compression lobe strength */
+  rollRate:  0.07,  /* lobe orbit speed */
+  taper:     0.7,   /* centre calm radius (the clip fix) */
+  curlAmp:   0.15,  /* how far each crest leans as it rolls */
+  curlRate:  1.55,  /* how fast the crest churns over itself */
+  envRate:   0.95,  /* how fast the swell travels along the ring */
+  envSharp:  4.0,   /* how localised the swell is (higher = tighter bump) */
+  envFloor:  0.33,  /* rolling that continues outside the swell */
+  flowRate:  3.5,   /* tube-flow drift speed (R3) */
+  flowDepth: 0.08,  /* tube-flow strength (R3) */
+  breatheFloor: 0.85, /* dimmest the whole field ever gets (field.json: 0.4) */
+  breatheDepth: 0.15, /* size of the brightness swell (field.json: 0.6) */
+};
+const RANGES = {
+  speed:     [0.1, 2.5, 0.05],
+  rollAmp:   [0, 3.2, 0.05],
+  rollRate:  [0, 0.6, 0.01],
+  taper:     [0.05, 0.8, 0.01],
+  curlAmp:   [0, 2.0, 0.05],
+  curlRate:  [0, 3.0, 0.05],
+  envRate:   [0, 1.5, 0.01],
+  envSharp:  [1, 8, 0.1],
+  envFloor:  [0, 1, 0.02],
+  flowRate:  [0, 4, 0.05],
+  flowDepth: [0, 0.6, 0.02],
+  breatheFloor: [0, 1, 0.01],
+  breatheDepth: [0, 1, 0.01],
+};
+
+/* Settings live in the URL hash, so a tuned look is a bookmarkable link. */
+const state = { ...DEFAULTS };
+try {
+  const h = JSON.parse(decodeURIComponent(location.hash.slice(1) || '{}'));
+  for (const k in DEFAULTS) if (typeof h[k] === 'number') state[k] = h[k];
+} catch (e) {}
+
+const COMMON = `
+precision highp float;
+uniform float u_t;
+uniform vec2 u_res;
+uniform float u_rollAmp, u_rollRate, u_taper, u_curlAmp, u_curlRate,
+              u_envRate, u_envSharp, u_envFloor, u_flowRate, u_flowDepth,
+              u_breatheFloor, u_breatheDepth;
+
+vec3 ramp(float x) {
+  vec3 bg = vec3(0.078, 0.070, 0.062);
+  vec3 col = mix(bg, vec3(${RAMP.lo.join(',')}), smoothstep(0.0, 0.35, x));
+  col = mix(col, vec3(${RAMP.mid.join(',')}), smoothstep(0.25, 0.72, x));
+  col = mix(col, vec3(${RAMP.peak.join(',')}), smoothstep(0.65, 1.05, x));
+  return col;
+}
+float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+
+#define PRELUDE \
+  float seed = 1.7; \
+  vec2 c = 0.03 * vec2(sin(u_t*0.030 + seed), cos(u_t*0.026 + seed*1.7)); \
+  vec2 dv = uv - c; \
+  float r = length(dv * vec2(1.0, 1.12)); \
+  float th = atan(dv.y, dv.x); \
+  float taperF = smoothstep(0.0, u_taper, r); \
+  float roll = (u_rollAmp * cos(th - u_t*u_rollRate - seed) \
+             + u_rollAmp * 0.35 * cos(2.0*th + u_t*u_rollRate*0.61 + seed*1.3)) * taperF; \
+  float ph = r*17.0 + seed - roll; \
+  float fall = exp(-r*1.5); \
+  float swell = u_breatheFloor + u_breatheDepth*(0.5 + 0.5*sin(u_t*0.1 + seed*2.3));
+
+float field(vec2 uv);
+
+void main() {
+  vec2 uv = (gl_FragCoord.xy / u_res - 0.5) * 2.9;
+  float l = field(uv);
+  l += (hash(gl_FragCoord.xy) - 0.5) * 0.02;
+  gl_FragColor = vec4(ramp(clamp(l, 0.0, 1.0)), 1.0);
+}
+`;
+
+const VARIANTS = [
+{
+  name: "C2 · Last round",
+  tag: "curl circles the ring — reference",
+  desc: "The version you critiqued: the curl travels around the circumference instead of the ring turning over itself.",
+  glsl: `
+float field(vec2 uv) {
+  PRELUDE
+  float ph2 = ph + u_curlAmp * sin(ph - u_t*u_curlRate + th) * taperF;
+  float rings = pow(0.5 + 0.5*sin(ph2), 4.0);
+  return rings * fall * swell * 0.65;
+}`
+},
+{
+  name: "R1 · Rolls in place",
+  tag: "the whole ring churns over itself",
+  desc: "The θ term is gone: the curl phase runs radially through each crest, so every point of the ring leans, folds under, and comes back over — a tube spinning about its own axis, everywhere at once.",
+  glsl: `
+float field(vec2 uv) {
+  PRELUDE
+  float ph2 = ph + u_curlAmp * sin(ph - u_t*u_curlRate) * taperF;
+  float rings = pow(0.5 + 0.5*sin(ph2), 4.0);
+  return rings * fall * swell * 0.65;
+}`
+},
+{
+  name: "R2 · Growing swell",
+  tag: "a bump travels the ring; rolling peaks inside it",
+  desc: "R1's self-rolling, but its strength is an envelope that moves along the ring: the wave builds as it comes around, curls over hardest at its peak, and relaxes behind — with a floor of rolling everywhere.",
+  glsl: `
+float field(vec2 uv) {
+  PRELUDE
+  float env = u_envFloor + (1.0 - u_envFloor)
+            * pow(0.5 + 0.5*sin(th - u_t*u_envRate + seed), u_envSharp);
+  float ph2 = ph + u_curlAmp * env * sin(ph - u_t*u_curlRate) * taperF;
+  float rings = pow(0.5 + 0.5*sin(ph2), 4.0);
+  return rings * fall * swell * 0.65;
+}`
+},
+{
+  name: "R3 · Swell + tube flow",
+  tag: "R2 plus texture wrapping across the ring",
+  desc: "R2 with the fine through-band drift on top: material seems to flow across each ring's width and wrap under while the swell carries the big roll around.",
+  glsl: `
+float field(vec2 uv) {
+  PRELUDE
+  float env = u_envFloor + (1.0 - u_envFloor)
+            * pow(0.5 + 0.5*sin(th - u_t*u_envRate + seed), u_envSharp);
+  float ph2 = ph + u_curlAmp * env * sin(ph - u_t*u_curlRate) * taperF;
+  float rings = pow(0.5 + 0.5*sin(ph2), 4.0);
+  float fine = 0.5 + 0.5*sin(3.0*ph2 - u_t*u_flowRate);
+  rings *= (1.0 - u_flowDepth) + u_flowDepth * 2.0 * fine;
+  return rings * fall * swell * 0.65;
+}`
+}];
+
+/* Tweakpane: sliders auto-generated from the state object. */
+const pane = new Tweakpane.Pane({ container: document.getElementById('pane'), title: 'Knobs' });
+for (const k in DEFAULTS) {
+  const [min, max, step] = RANGES[k];
+  pane.addInput(state, k, { min, max, step });
+}
+pane.addButton({ title: 'Reset to defaults' }).on('click', () => {
+  Object.assign(state, DEFAULTS);
+  pane.refresh();
+});
+let hashTimer;
+pane.on('change', () => {
+  clearTimeout(hashTimer);
+  hashTimer = setTimeout(() => {
+    history.replaceState(null, '', '#' + encodeURIComponent(JSON.stringify(state)));
+  }, 300);
+});
+
+document.getElementById('copy').onclick = async () => {
+  const json = JSON.stringify(state, null, 2);
+  history.replaceState(null, '', '#' + encodeURIComponent(JSON.stringify(state)));
+  try { await navigator.clipboard.writeText(json + '\n' + location.href); } catch (e) {}
+  const el = document.getElementById('copied');
+  el.style.opacity = 1;
+  setTimeout(() => el.style.opacity = 0, 1500);
+};
+
+/* Panels */
+const grid = document.getElementById('grid');
+const panels = [];
+const UNIFORMS = ['rollAmp','rollRate','taper','curlAmp','curlRate','envRate','envSharp','envFloor','flowRate','flowDepth','breatheFloor','breatheDepth'];
+
+for (const v of VARIANTS) {
+  const el = document.createElement('div');
+  el.className = 'panel';
+  el.innerHTML = `<canvas></canvas><div class="meta"><h2>${v.name} <span class="tag">— ${v.tag}</span></h2><p>${v.desc}</p></div>`;
+  grid.appendChild(el);
+  const canvas = el.querySelector('canvas');
+  const gl = canvas.getContext('webgl', { antialias: false });
+  const prog = gl.createProgram();
+  const compile = (type, src) => {
+    const s = gl.createShader(type);
+    gl.shaderSource(s, src);
+    gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) console.error(v.name, gl.getShaderInfoLog(s));
+    gl.attachShader(prog, s);
+  };
+  compile(gl.VERTEX_SHADER, 'attribute vec2 p; void main(){ gl_Position = vec4(p, 0.0, 1.0); }');
+  compile(gl.FRAGMENT_SHADER, COMMON.replace('float field(vec2 uv);', v.glsl));
+  gl.linkProgram(prog);
+  gl.useProgram(prog);
+  gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer());
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 3,-1, -1,3]), gl.STATIC_DRAW);
+  const loc = gl.getAttribLocation(prog, 'p');
+  gl.enableVertexAttribArray(loc);
+  gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+  const u = { t: gl.getUniformLocation(prog, 'u_t'), res: gl.getUniformLocation(prog, 'u_res') };
+  for (const n of UNIFORMS) u[n] = gl.getUniformLocation(prog, 'u_' + n);
+  panels.push({ gl, canvas, u });
+}
+
+let t = 20, running = true, last = performance.now();
+const pauseBtn = document.getElementById('pause');
+pauseBtn.onclick = () => { running = !running; pauseBtn.textContent = running ? 'Pause' : 'Play'; };
+
+function frame(now) {
+  const dt = Math.min(0.1, (now - last) / 1000);
+  last = now;
+  if (running) t += dt * state.speed;
+  for (const p of panels) {
+    const w = p.canvas.clientWidth * devicePixelRatio;
+    if (p.canvas.width !== w) { p.canvas.width = w; p.canvas.height = w; }
+    p.gl.viewport(0, 0, w, w);
+    p.gl.uniform1f(p.u.t, t);
+    p.gl.uniform2f(p.u.res, w, w);
+    for (const n of UNIFORMS) p.gl.uniform1f(p.u[n], state[n]);
+    p.gl.drawArrays(p.gl.TRIANGLES, 0, 3);
+  }
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

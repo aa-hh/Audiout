@@ -149,6 +149,13 @@ airplay_test_master_session_stream_id(const void *ams);
  * API. See airplay.c for the full rationale. */
 uint32_t
 airplay_test_master_session_input_buffer_samples(const void *ams);
+/* [AirPlayEngine vendored change 2026-09-15] TEST SEAM: this master session's
+ * RTP write position, which packets_send advances by samples_per_packet only
+ * after a successful alac_encode. Read the DELTA across a run -- the position
+ * is seeded randomly at session creation. Lets the 16-stream encode benchmark
+ * prove the ALAC encoder really ran. See airplay.c for the full rationale. */
+uint32_t
+airplay_test_master_session_rtp_pos(const void *ams);
 int
 airplay_test_master_session_count(void);
 void

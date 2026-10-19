@@ -70,18 +70,27 @@ final class Run {
     private let trueOffsetMs: Double
 
     init(referenceOptions: [BTAlignmentWizardView.ReferenceOption],
-         trueOffsetMs: Double = wizard_snapshot.trueOffsetMs) {
+         trueOffsetMs: Double = wizard_snapshot.trueOffsetMs,
+         openingProposalMs: Double? = nil,
+         listens: Bool = false) {
         self.trueOffsetMs = trueOffsetMs
         let level = self.level
         session = BTAlignmentWizardSession(
             deviceID: "kitchen",
             targetName: "Kitchen HomePod",
             reference: referenceOptions.first.map { .init(id: $0.id, name: $0.name) },
+            // A listening run needs the two sides to make DIFFERENT sounds,
+            // which is what the mic tells apart.
+            targetIsBluetooth: listens,
             baseValueMs: 0,
             invertsEstimate: true,
+            openingProposalMs: openingProposalMs,
             applyPreviewTrim: { ms, _ in level.ms = ms },
             endPreview: { _ in },
             setTick: { _ in })
+        // No probe here: the host grants and the screen stands, which is what
+        // there is to look at.
+        if listens { session.requestListening = { $0(true) } }
         view = BTAlignmentWizardView(session: session)
         view.referenceOptions = referenceOptions
         controller = AlignmentWizardViewController(wizardView: view)
@@ -152,6 +161,18 @@ func run() -> Int32 {
     // 1 · intro (armed stage, reference row, Start).
     shoot(main, "1-intro", light: true)
 
+    // 1b–1d · the listening screen, and the intro's right panel leading with
+    // the automatic measurement (`listeningIsPossible`), by-ear as the fallback.
+    let listeningFirst = Run(referenceOptions: twoOptions, listens: true)
+    shoot(listeningFirst, "1b-intro-auto", light: true)
+    listeningFirst.session.start()
+    shoot(listeningFirst, "1c-listening-first", light: true)
+
+    let listeningRealign = Run(referenceOptions: twoOptions,
+                               openingProposalMs: 247, listens: true)
+    listeningRealign.session.start()
+    shoot(listeningRealign, "1d-listening-realign", light: true)
+
     // 2 · first question — wide open.
     main.session.start()
     shoot(main, "2-question-open")
@@ -184,7 +205,37 @@ func run() -> Int32 {
         fputs("run never proposed (screen: \(main.session.screen))\n", stderr)
     }
 
-    // 7 · unsettled (dormant stage) — a fresh run rejected until it gives up.
+    // 5b · the proposal RECALLED from a previous run — reached when the mic
+    // never listened, so the stored number is put as a question.
+    let recalled = Run(referenceOptions: twoOptions, openingProposalMs: 247)
+    recalled.session.start()
+    if case .proposal = recalled.session.screen {
+        shoot(recalled, "5b-proposal-recalled", light: true)
+    } else {
+        fputs("recalled run never proposed (screen: \(recalled.session.screen))\n", stderr)
+    }
+
+    // 5c/5d · a MEASURED proposal's escalating reject: the first reads "Try
+    // again" (listens once more), the second "Align by ear" (the questions).
+    let measured = Run(referenceOptions: twoOptions, listens: true)
+    measured.session.start()
+    measured.session.offerMeasuredProposal(valueMs: 247)
+    if case .proposal = measured.session.screen {
+        shoot(measured, "5c-proposal-measured", light: true)
+        measured.session.rejectProposal()
+        measured.session.offerMeasuredProposal(valueMs: 247)
+        if case .proposal = measured.session.screen {
+            shoot(measured, "5d-proposal-measured-second", light: true)
+        } else {
+            fputs("measured retry never proposed (screen: \(measured.session.screen))\n", stderr)
+        }
+    } else {
+        fputs("measured run never proposed (screen: \(measured.session.screen))\n", stderr)
+    }
+
+    // 7 · unsettled (dormant stage) — a fresh run answered until the answer
+    // budget runs out; a rejected proposal no longer ends a run, so the loop
+    // rejects and keeps answering (72 iterations here, under the guard).
     let unsettled = Run(referenceOptions: twoOptions)
     unsettled.session.start()
     var guard3 = 0

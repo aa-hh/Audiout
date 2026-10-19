@@ -327,11 +327,11 @@ import Testing
     /// Wait for something a background timeout will make true. A fixed sleep is a
     /// flake here: the main actor is shared with every other test in the run, so
     /// how soon that work lands is not this test's to decide.
-    private func waitUntil(_ satisfied: () -> Bool) async {
-        for _ in 0..<600 {                                   // ≤3 s, then give up
-            if satisfied() { return }
-            try? await Task.sleep(nanoseconds: 5_000_000)
-        }
+    private func waitUntil(
+        sourceLocation: SourceLocation = #_sourceLocation,
+        _ satisfied: () -> Bool
+    ) async {
+        await SuiteWait.until(sourceLocation: sourceLocation, satisfied)
     }
 
     // MARK: Sequencing
@@ -835,6 +835,7 @@ import Testing
     @Test func theRibbonNamesBothHalvesOfTheLocalNetworkWait() async {
         let net = SteppedLocalNetwork(found: 2)
         let vc = makeVC(model: makeModel(audio: .granted, localNetwork: net))
+        vc.test_ribbonReduceMotionOverride = false
         await vc.test_tapAllow(.audio)
 
         let priming = Task { await vc.test_tapAllow(.localNetwork) }
@@ -917,6 +918,7 @@ import Testing
         let model = makeModel(audio: .granted, foundSpeakers: 2,
                               bluetoothPrimer: NeverDecidingBluetooth())
         let vc = makeVC(model: model)
+        vc.test_ribbonReduceMotionOverride = false
         await vc.test_allow([.audio, .localNetwork])
         #expect(vc.test_activeStep == .bluetooth)
 
@@ -935,6 +937,7 @@ import Testing
                               bluetoothPrimer: NeverDecidingBluetooth(),
                               bluetoothPromptTimeout: 0.05)
         let vc = makeVC(model: model)
+        vc.test_ribbonReduceMotionOverride = false
         await vc.test_allow([.audio, .localNetwork])
         await vc.test_tapAllow(.bluetooth)
         #expect(vc.test_ribbonIsWaiting)
@@ -1210,6 +1213,7 @@ import Testing
         let model = makeModel(audio: .granted, foundSpeakers: 2,
                               bluetoothPrimer: NeverDecidingBluetooth())
         let vc = makeVC(model: model)
+        vc.test_ribbonReduceMotionOverride = false
         await vc.test_awaitInitialStatuses()   // announcements start once the opening state is known
         await vc.test_allow([.audio, .localNetwork])
 
@@ -1490,27 +1494,39 @@ import Testing
     /// Defect this names: the card asking for something macOS raises (a
     /// caption promising a system dialog, a Settings deep link), or drawing
     /// anything other than the invitation the other two hosts mount.
+    /// Also turns red if the card stops firing `onRemoteInviteShown` once as
+    /// it comes on screen: the app opens a pairing window on it, and without
+    /// one a phone that scans the card is refused.
     @Test func theIPhoneCardStagesTheInvitationAndOpensThePage() async {
         var opened: [URL] = []
+        var invitesShown = 0
         let vc = makeVC(model: makeModel(audio: .granted, foundSpeakers: 3,
                                          remoteAppAvailable: true,
                                          ptpHelper: FakePTPHelper(status: .enabled)))
         vc.openURL = { opened.append($0) }
+        vc.onRemoteInviteShown = { invitesShown += 1 }
         await vc.test_allow([.audio, .localNetwork])
         vc.test_tapSkip(.bluetooth)
+        #expect(invitesShown == 0, "no pairing window before the card is up")
         vc.test_tapSkip(.remoteControl)
 
         #expect(vc.test_activeStep == .audioutRemote)
+        #expect(invitesShown == 1, "the card coming on screen opens one pairing window")
         #expect(vc.test_heroHeadline == "Measure with your iPhone")
         #expect(vc.test_previewFrameLabel == nil,
                 "macOS raises nothing here, so nothing may claim it does")
         #expect(vc.test_demoRemoteInvite?.test_tileSide == RemoteInviteView.setupTileSide)
-        #expect(vc.test_ribbonButtonTitles.contains("Open audiout.app/remote"))
+        #expect(vc.test_ribbonButtonTitles == ["Open audiout.app/remote", "Continue"],
+                "Continue is the skip, so no separate Skip button")
 
-        await vc.test_tapAllow(.audioutRemote)
+        vc.test_ribbonTapQuietLink()
         #expect(opened.map(\.absoluteString) == [RemoteInviteView.pageURLString])
         #expect(vc.test_activeStep == .audioutRemote,
                 "opening the page is not the completion — a phone connecting is")
+
+        await vc.test_ribbonTapPrimary()
+        #expect(opened.count == 1, "Continue must not leave setup")
+        #expect(vc.test_activeStep != .audioutRemote, "Continue moves setup past the card")
     }
 
     /// Defect this names: the seventh row pushing the spine out of the fixed
@@ -2400,6 +2416,7 @@ import Testing
             DemoSettingsMockView(step: .localNetwork, metricScale: 1.35),
             DemoSettingsHandoffMockView(step: .remoteControl),
             DemoSystemAlertMockView(step: .remoteControl),
+            DemoConsentCardMockView(),
         ]
         for mock in mocks {
             mock.layoutSubtreeIfNeeded()

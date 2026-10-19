@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+import AppKit
 import Foundation
 import Testing
 @testable import AudioutCore
 @testable import AudioutOnboardingUI
+@testable import AudioutSharedUI
 
 /// The sixth Setup card — usage statistics — which is the only one that is not
 /// a macOS permission: no prompt, no probe, no System Settings pane. The answer
@@ -209,36 +211,87 @@ extension SerializedSharedState {
         return vc
     }
 
-    /// The first ask: the privacy card's two-button shape, UNcaptioned (macOS
-    /// raises nothing here, so the shared "You'll see this from macOS" would be
-    /// a claim we can't back), and a decline that says what it really is.
-    @Test func theFirstAskWearsTheDialogShapeUncaptioned() async {
+    /// The first ask: the privacy card's two-button shape, and a caption naming
+    /// the surface's real owner. macOS raises nothing here, so the shared
+    /// "You'll see this from macOS" would be a claim we can't back.
+    @Test func theFirstAskWearsTheDialogShapeCaptionedAsOurs() async {
         let setup = makeSetup()
         let vc = makeViewController(setup)
         await vc.test_refreshStatuses()
         await vc.test_allow([.audio, .localNetwork])
 
         #expect(vc.test_demoMode == .prompt)
-        #expect(vc.test_previewFrameLabel == nil,
-                "the card is Audiout's, so the frame claims no macOS surface")
+        #expect(vc.test_previewFrameLabel == "You'll see this from Audiout",
+                "the card is Audiout's, and the band says so rather than nothing")
         #expect(vc.test_ribbonButtonTitles == ["No Thanks", "Share Usage Counts"],
                 "asked once means the pass is an answer, not a 'Skip for now'")
     }
 
-    /// The rehearsal is not a DRAWING of the sheet — it is the same view, built
-    /// by the same initialiser. That is what makes "looks exactly like the
-    /// mock-up" true by construction rather than by careful copying.
-    @Test func theStageDrawsTheRealConsentCard() {
+    /// Resolve a dynamic token to comparable components: two accesses of a
+    /// provider-backed colour are distinct instances whose `isEqual` is not
+    /// documented to see through the provider.
+    private func resolvedSRGB(_ color: NSColor?) -> NSColor? {
+        guard let color else { return nil }
+        var resolved: NSColor?
+        NSAppearance(named: .darkAqua)?.performAsCurrentDrawingAppearance {
+            resolved = color.usingColorSpace(.sRGB)
+        }
+        return resolved
+    }
+
+    /// The rehearsal is a DRAWING of the sheet, never the sheet itself (owner
+    /// ruling 2026-09-12): a preview carrying the verbatim promise reads as the
+    /// ask, and the button then raises a second, identical-looking surface.
+    ///
+    /// So: no ``UsageStatsConsentCard`` inside it, and not one word of the
+    /// promise. The two things a rehearsal must still teach — the question and
+    /// the button to press — stay real.
+    @Test func theStageDrawsAMockRatherThanTheSheetItself() throws {
         let stage = DemoConsentCardMockView()
         stage.layoutSubtreeIfNeeded()
 
-        #expect(stage.test_card.shareButton.title == "Share")
-        #expect(stage.test_card.declineButton.title == "Don't Share")
-        // Inert, but NOT disabled — a disabled button greys its own title
-        // whatever alpha it is drawn at, and the whole point is that the
-        // rehearsal looks like the surface that is about to appear.
-        #expect(stage.test_card.shareButton.isEnabled)
-        #expect(stage.hitTest(NSPoint(x: 10, y: 10)) == nil, "and it takes no clicks")
+        let views = [stage] + stage.subviewsRecursively
+        #expect(!views.contains(where: { $0 is UsageStatsConsentCard }),
+                "the sheet's own view must not be on the rehearsal stage")
+
+        let words = views.compactMap { ($0 as? NSTextField)?.stringValue }
+        #expect(!words.contains(UsageStatsConsentCard.bodyText),
+                "the promise is greeked here — verbatim, it reads as the ask")
+        #expect(words.contains(UsageStatsConsentCard.headlineText),
+                "the question stays real: a greeked question asks nothing")
+
+        #expect(stage.test_demoButtonTitles == [UsageStatsConsentCard.declineTitle,
+                                                UsageStatsConsentCard.shareTitle])
+        #expect(stage.test_demoMarkedButtonTitle == UsageStatsConsentCard.shareTitle,
+                "and the rehearsal says which of the two to press")
+
+        // In the real button's GOLD, not the grey the macOS mocks mark with.
+        // That grey exists to correct a system dialog's emphasis; this sheet is
+        // ours, its Share is a `ProminentButton`, and a grey miniature would
+        // drop the card's one identity cue.
+        let marked = try #require(views.compactMap { $0 as? DemoPushButtonView }
+            .first { $0.isMarked })
+        #expect(resolvedSRGB(marked.test_fill) == resolvedSRGB(Tokens.Color.gold))
+        #expect(stage.hitTest(NSPoint(x: 10, y: 10)) == nil, "it takes no clicks")
+
+        // And the question FITS. It is the one line of real text on a card
+        // narrowed to 280 pt; the drawing is not free to truncate it, and a
+        // longer headline or a wider font would have to widen the card.
+        let title = try #require(views.compactMap { $0 as? NSTextField }
+            .first { $0.stringValue == UsageStatsConsentCard.headlineText })
+        #expect(title.frame.width >= title.intrinsicContentSize.width,
+                "the headline is drawn on one line, uncropped")
+    }
+
+    /// The pointer's glide has to END on Share. It is the whole gesture the
+    /// stage rehearses, and it is measured from resolved frames — a layout
+    /// change that moved the button without moving the travel would leave the
+    /// press landing on nothing.
+    @Test func thePointerPressLandsOnTheShareButton() {
+        let stage = DemoConsentCardMockView()
+        stage.layoutSubtreeIfNeeded()
+
+        #expect(stage.test_shareButtonFrame.contains(stage.test_pressPoint))
     }
 
     /// The card is the ONLY place the app states what it sends, so it is held

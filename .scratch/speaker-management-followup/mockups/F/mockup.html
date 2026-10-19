@@ -1,0 +1,251 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Speakers Lineup Mockup</title>
+<style>
+:root{
+  --canvas:#FAFAFB; --panel:#FAFAFB; --well:#E9EAEC;
+  --label:#1D1D1F; --label2:#6B5F4E; --labelCool:#4E5A63; --labelCool2:#5F6A73;
+  --hairline:#CBCED4; --containerEdge:#AEB3BB; --rim:#66717A;
+  --goldText:#825E0F; --gold:#E8B84B;
+  --sidebar:#EEEEEF; --toolbar:#F4F4F5; --selWash:rgba(0,0,0,.075); --hoverWash:rgba(0,0,0,.04);
+  --popFill:#FFFFFF; --popEdge:rgba(0,0,0,.14); --popShadow:0 .5px 1px rgba(0,0,0,.12);
+  --sideSel:#DCDCDE; --page:#E4E5E8; --frame:rgba(0,0,0,.18);
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --canvas:#0A0A0C; --panel:#15171A; --well:#050507;
+    --label:#F2F2F3; --label2:#B7AC95; --labelCool:#A9B3BB; --labelCool2:#818C94;
+    --hairline:#2A2E33; --containerEdge:#3D4247; --rim:#6B767D;
+    --goldText:#E8B84B; --gold:#E8B84B;
+    --sidebar:#222326; --toolbar:#18191C; --selWash:rgba(255,255,255,.08); --hoverWash:rgba(255,255,255,.04);
+    --popFill:rgba(255,255,255,.12); --popEdge:rgba(255,255,255,.10); --popShadow:none;
+    --sideSel:#3A3B3F; --page:#050507; --frame:rgba(255,255,255,.16);
+  }
+}
+:root[data-theme="dark"]{
+  --canvas:#0A0A0C; --panel:#15171A; --well:#050507;
+  --label:#F2F2F3; --label2:#B7AC95; --labelCool:#A9B3BB; --labelCool2:#818C94;
+  --hairline:#2A2E33; --containerEdge:#3D4247; --rim:#6B767D;
+  --goldText:#E8B84B; --gold:#E8B84B;
+  --sidebar:#222326; --toolbar:#18191C; --selWash:rgba(255,255,255,.08); --hoverWash:rgba(255,255,255,.04);
+  --popFill:rgba(255,255,255,.12); --popEdge:rgba(255,255,255,.10); --popShadow:none;
+  --sideSel:#3A3B3F; --page:#050507; --frame:rgba(255,255,255,.16);
+}
+*{box-sizing:border-box}
+html,body{margin:0}
+body{background:var(--page);color:var(--label);font:13px/1.25 -apple-system,BlinkMacSystemFont,"SF Pro Text","Helvetica Neue",sans-serif;padding:24px 16px 64px;-webkit-font-smoothing:antialiased}
+::selection{background:color-mix(in srgb,var(--gold) 35%,transparent)}
+.bar{max-width:1306px;margin:0 auto 16px;display:flex;align-items:center;justify-content:space-between;gap:12px;color:var(--label2)}
+.bar h1{font-size:13px;font-weight:600;margin:0;color:var(--label)}
+.bar button{font:inherit;color:var(--label);background:var(--popFill);border:1px solid var(--popEdge);border-radius:6px;padding:4px 10px;cursor:pointer}
+.bar button:focus-visible{outline:2px solid var(--gold);outline-offset:2px}
+svg.i{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.3;stroke-linecap:round;stroke-linejoin:round;flex:none}
+
+/* window */
+.win{position:relative;width:653px;height:669px;border-radius:12px;overflow:hidden;background:var(--panel);box-shadow:0 0 0 .5px var(--frame),0 12px 40px rgba(0,0,0,.18)}
+.tb{position:absolute;inset:0 0 auto 0;height:62px;background:var(--toolbar);border-bottom:.5px solid var(--hairline)}
+.seg{position:absolute;left:30px;top:19px;width:150px;height:34px;border-radius:17px;border:1px solid var(--containerEdge);display:flex;align-items:center;padding:0 3px;gap:2px;color:var(--label)}
+.seg .s{height:28px;display:flex;align-items:center;justify-content:center;width:30px;color:var(--label2)}
+.seg .on{width:82px;border-radius:14px;background:var(--sideSel);gap:6px;color:var(--label2);font-size:11px}
+.seg .on span{color:var(--labelCool2)}
+.tb .title{position:absolute;left:0;right:0;top:20px;text-align:center;font-size:17px;font-weight:700;color:var(--label2);letter-spacing:.2px}
+.tb .pin{position:absolute;right:18px;top:24px;color:var(--label2)}
+.side{position:absolute;left:0;top:62px;bottom:0;width:210px;background:var(--sidebar);border-right:.5px solid var(--hairline)}
+.scenesBtn{position:absolute;left:10px;top:10px;width:190px;height:36px;border:1px solid var(--containerEdge);border-radius:10px;background:var(--panel);display:flex;align-items:center;padding:0 10px 0 16px;gap:10px;font-size:13px}
+.scenesBtn .grow{flex:1}
+.sh{position:absolute;left:14px;top:66px;font-size:11px;font-weight:600;color:var(--labelCool2);opacity:.85}
+.si{position:absolute;left:10px;width:190px;display:flex;align-items:center;gap:10px;padding:0 0 0 18px;font-size:13px}
+.si.sel{background:var(--sideSel);border-radius:6px;height:28px;padding-left:15px;font-weight:600;color:var(--label2);font-size:13px}
+.ss{position:absolute;left:38px;width:166px;display:flex;align-items:center;gap:11px}
+.ss .t{min-width:0}
+.ss .n{font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:120px}
+.ss .st{font-size:11px;color:var(--label2)}
+.ss.dim .n{color:var(--labelCool2)}
+.ss .ic{color:var(--labelCool);width:20px;display:flex;justify-content:center}
+.add{position:absolute;left:0;right:0;bottom:0;height:28px;display:flex;align-items:center;gap:6px;padding-left:10px;font-size:13px;color:var(--label);border-top:.5px solid var(--hairline);background:var(--sidebar)}
+.content{position:absolute;left:210px;top:62px;right:0;bottom:0;background:var(--panel)}
+.foot{position:absolute;left:0;right:0;bottom:12px;text-align:center;font-size:11px;color:var(--label2)}
+
+.stage{zoom:2;max-width:none;width:653px;margin:0 auto}
+.panels{max-width:1306px;margin:56px auto 0;display:flex;flex-wrap:wrap;gap:32px;zoom:1.3}
+.panel{width:443px}
+.panel h2{font-size:13px;font-weight:600;margin:0 0 6px;color:var(--label)}
+.panel p{margin:0 0 10px;font-size:11px;line-height:15px;color:var(--label2)}
+.panel .frame{width:443px;border-radius:10px;overflow:hidden;background:var(--panel);box-shadow:0 0 0 .5px var(--frame);padding:4px 0 10px}
+
+.pane{width:443px;padding:20px 0 0}
+.ph{padding:0 14px;font-size:16px;font-weight:600;color:var(--label)}
+.pn{padding:3px 14px 0;font-size:11px;line-height:15px;color:var(--label2)}
+.sec{display:flex;align-items:flex-end;height:30px;padding:0 14px 4px;margin-top:10px}
+.sec .t{font-size:13px;font-weight:600;color:var(--goldText)}
+.sec .c{margin-left:6px;font-size:11px;color:var(--label2);font-variant-numeric:tabular-nums}
+.sec .sp{flex:1}
+.sec .col{width:74px;text-align:center;font-size:10px;font-weight:600;color:var(--label2);line-height:12px;margin-right:58px}
+.rows{border-top:.5px solid var(--hairline)}
+.r{position:relative;display:flex;align-items:center;height:40px;padding:0 14px}
+.r::before{content:"";position:absolute;inset:2px 6px;border-radius:7px;pointer-events:none}
+.r:hover::before{background:var(--hoverWash)}
+.r.sel::before{background:var(--selWash)}
+.r>*{position:relative}
+.r .ic{width:26px;display:flex;justify-content:center;color:var(--labelCool)}
+.r .ic svg{width:19px;height:19px}
+.r .tx{margin-left:8px;flex:1;min-width:0}
+.r .n{font-size:13px;color:var(--label);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.r .s{font-size:11px;color:var(--label2);margin-top:1px;white-space:nowrap}
+.r .s b{font-weight:400;color:var(--goldText)}
+.r.away .n,.r.away .ic{color:var(--labelCool2)}
+.r.away .s{color:var(--labelCool2)}
+.cb{width:74px;display:flex;justify-content:center}
+.box{width:14px;height:14px;border-radius:3.5px;background:var(--popFill);box-shadow:0 0 0 .5px var(--popEdge),var(--popShadow);display:flex;align-items:center;justify-content:center}
+.box.on{background:var(--gold);box-shadow:none}
+.box.on svg{width:10px;height:10px;stroke:#171104;stroke-width:2}
+.box.dis{opacity:.45}
+.btn{width:52px;margin-left:6px;height:20px;border-radius:5px;background:var(--popFill);box-shadow:0 0 0 .5px var(--popEdge),var(--popShadow);font:inherit;font-size:11px;color:var(--label);border:0;display:flex;align-items:center;justify-content:center;cursor:default}
+.btn:focus-visible{outline:2px solid var(--gold);outline-offset:1px}
+.fixed{width:52px;margin-left:6px;text-align:center;font-size:10px;color:var(--labelCool2)}
+.hint{padding:6px 14px 0 48px;font-size:11px;line-height:15px;color:var(--label2)}
+.bt{display:flex;gap:8px;padding:8px 14px 0 14px;align-items:flex-start}
+.bt .ic{width:26px;display:flex;justify-content:center;color:var(--labelCool2);padding-top:1px}
+.bt .ic svg{width:16px;height:16px}
+.bt .tx{font-size:11px;line-height:15px;color:var(--label2)}
+.link{display:inline-block;margin-top:2px;padding:0;border:0;background:none;font:inherit;font-size:11px;font-weight:600;color:var(--goldText);cursor:pointer}
+.link:hover{text-decoration:underline;text-underline-offset:2px}
+.link:focus-visible{outline:2px solid var(--gold);outline-offset:2px;border-radius:2px}
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="laptop" viewBox="0 0 20 20"><rect x="4" y="5" width="12" height="8" rx="1"/><path d="M2 15h16"/></symbol>
+  <symbol id="hifi" viewBox="0 0 20 20"><rect x="5.5" y="2.5" width="9" height="15" rx="1.5"/><circle cx="10" cy="6" r="1"/><circle cx="10" cy="12" r="2.6"/></symbol>
+  <symbol id="radio" viewBox="0 0 20 20"><rect x="2.5" y="7" width="15" height="10" rx="1.5"/><path d="M5 7l9-4"/><circle cx="7.5" cy="12" r="2.4"/><path d="M12.5 10.5h2.5M12.5 13.5h2.5"/></symbol>
+  <symbol id="tv" viewBox="0 0 20 20"><rect x="2" y="4" width="12" height="9" rx="1"/><path d="M6 16h5"/><rect x="12.5" y="9" width="5" height="8" rx="1"/><circle cx="15" cy="14.5" r="1"/></symbol>
+  <symbol id="homepod" viewBox="0 0 20 20"><path d="M5.5 5.5c0-1.4 2-2 4.5-2s4.5.6 4.5 2v9c0 1.4-2 2-4.5 2s-4.5-.6-4.5-2z"/><path d="M5.5 5.5c0 1.2 2 1.8 4.5 1.8s4.5-.6 4.5-1.8"/></symbol>
+  <symbol id="speaker" viewBox="0 0 20 20"><path d="M4 8h3l4-3.5v11L7 12H4z"/></symbol>
+  <symbol id="main" viewBox="0 0 20 20"><rect x="6" y="2.5" width="9" height="15" rx="1.5"/><path d="M2 11h8M7.5 8.5L10 11l-2.5 2.5"/></symbol>
+  <symbol id="cdown" viewBox="0 0 12 12"><path d="M2.5 4.5L6 8l3.5-3.5"/></symbol>
+  <symbol id="cright" viewBox="0 0 10 12"><path d="M3 2l4 4-4 4"/></symbol>
+  <symbol id="updown" viewBox="0 0 10 12"><path d="M2.5 4.5L5 2l2.5 2.5M2.5 7.5L5 10l2.5-2.5"/></symbol>
+  <symbol id="plus" viewBox="0 0 12 12"><path d="M6 1.5v9M1.5 6h9"/></symbol>
+  <symbol id="wave" viewBox="0 0 20 20"><path d="M3 8v4M6 5v10M9 3v14M12 6v8M15 4v12M18 8v4"/></symbol>
+  <symbol id="scenes" viewBox="0 0 20 20"><rect x="2" y="3" width="10" height="14" rx="1.5"/><rect x="9" y="6" width="9" height="12" rx="1.5"/><circle cx="13.5" cy="13" r="2"/><circle cx="13.5" cy="9" r=".8"/></symbol>
+  <symbol id="gear" viewBox="0 0 20 20"><circle cx="10" cy="10" r="2.6"/><path d="M10 2.5v2M10 15.5v2M2.5 10h2M15.5 10h2M4.7 4.7l1.4 1.4M13.9 13.9l1.4 1.4M4.7 15.3l1.4-1.4M13.9 6.1l1.4-1.4"/><circle cx="10" cy="10" r="5.6"/></symbol>
+  <symbol id="pin" viewBox="0 0 20 20"><path d="M6 3h8M7.5 3v6L5 12h10l-2.5-3V3M10 12v6"/></symbol>
+  <symbol id="cards" viewBox="0 0 20 20"><rect x="2" y="4" width="7" height="5" rx="1"/><rect x="2" y="11" width="7" height="5" rx="1"/><rect x="11" y="4" width="7" height="12" rx="1"/></symbol>
+  <symbol id="check" viewBox="0 0 10 10"><path d="M2 5.2l2 2 4-4.4" fill="none"/></symbol>
+  <symbol id="bt" viewBox="0 0 20 20"><path d="M6 6.5l8 7-4 3.5v-14l4 3.5-8 7"/></symbol>
+</svg>
+
+<div class="bar">
+  <h1>Direction F: two lists, one button per speaker</h1>
+  <button id="theme" type="button" aria-label="Switch appearance">Appearance: System</button>
+</div>
+
+<div class="stage">
+  <div class="win" role="img" aria-label="Scenes window, Speakers page, normal state">
+    <div class="tb">
+      <div class="seg">
+        <div class="s"><svg class="i"><use href="#wave"/></svg></div>
+        <div class="s on"><svg class="i"><use href="#scenes"/></svg><span>Scenes</span></div>
+        <div class="s"><svg class="i"><use href="#gear"/></svg></div>
+      </div>
+      <div class="title">Audiout</div>
+      <div class="pin"><svg class="i"><use href="#pin"/></svg></div>
+    </div>
+    <div class="side">
+      <div class="scenesBtn"><svg class="i"><use href="#cards"/></svg><span class="grow">Scenes</span><svg class="i" style="width:10px"><use href="#cright"/></svg></div>
+      <div class="sh">System Audio</div>
+      <div class="si" style="top:84px;height:28px"><svg class="i"><use href="#main"/></svg>Main Audio</div>
+      <div class="si sel" style="top:114px">Speakers</div>
+      <div id="sideSpeakers"></div>
+      <div class="add"><svg class="i" style="width:12px"><use href="#plus"/></svg>Add scene</div>
+    </div>
+    <div class="content">
+      <div id="mainPane"></div>
+      <div class="foot">Set up scenes here, then switch to the Mixer to play</div>
+    </div>
+  </div>
+</div>
+
+<div class="panels">
+  <div class="panel">
+    <h2>Mid-gesture: Hide clicked on TV while it plays</h2>
+    <p>TV drops into the hidden list and stays selected, so Show or Edit › Undo is under the pointer. Gold text says the one thing that has not changed yet: the Mixer keeps TV until it stops playing.</p>
+    <div class="frame" id="midPane"></div>
+  </div>
+  <div class="panel">
+    <h2>Bluetooth access denied</h2>
+    <p>Sonos Move cannot be listed while it is not connected, so it is gone from both lists. One line under the lists says why and opens the right Privacy pane. Onkyo is connected, so macOS still reports it as an output.</p>
+    <div class="frame" id="deniedPane"></div>
+  </div>
+</div>
+
+<script>
+// v: whenAvailable | always | hideWhenNotInUse  (SpeakerMixerVisibility)
+const S = [
+  {id:"mac",  n:"MacBook Pro Speakers", ic:"laptop",  st:"This Mac",                  v:"always", mac:true},
+  {id:"move", n:"Move 2",               ic:"hifi",    st:"AirPlay · Available",       v:"whenAvailable"},
+  {id:"tv",   n:"TV",                   ic:"tv",      st:"Cast · Connected · <b>Playing now</b>", v:"whenAvailable"},
+  {id:"bed",  n:"Bedroom",              ic:"homepod", st:"AirPlay · Unavailable",     v:"always", away:true},
+  {id:"sonos",n:"Sonos Move",           ic:"radio",   st:"Bluetooth · Not connected", v:"always", away:true, btIdle:true},
+  {id:"miss", n:"Missing speaker",      ic:"speaker", st:"Not found on this network", v:"always", away:true},
+  {id:"onk",  n:"Onkyo TX-8220",        ic:"radio",   st:"Bluetooth · Connected",     v:"hideWhenNotInUse"},
+];
+const icon = id => `<svg class="i"><use href="#${id}"/></svg>`;
+const box = (on,dis,name) => `<div class="cb"><div class="box${on?" on":""}${dis?" dis":""}" role="checkbox" aria-checked="${on}" aria-label="Keep ${name} in the Mixer when away"${dis?' aria-disabled="true"':""}>${on?'<svg><use href="#check"/></svg>':""}</div></div>`;
+
+function row(s, shown, o){
+  const cls = ["r", s.away?"away":"", (o.sel||[]).includes(s.id)?"sel":"", o.moved===s.id?"moved":""].join(" ");
+  const st = o.st && o.st[s.id] || s.st;
+  const trail = s.mac
+    ? `${box(true,true,s.n)}<div class="fixed">Always</div>`
+    : shown
+      ? `${box(s.v==="always",false,s.n)}<button class="btn" type="button">Hide</button>`
+      : `<div class="cb"></div><button class="btn" type="button">Show</button>`;
+  return `<div class="${cls}"><span class="ic">${icon(s.ic)}</span><div class="tx"><div class="n">${s.n}</div><div class="s">${st}</div></div>${trail}</div>`;
+}
+
+function pane(o = {}){
+  const list = S.filter(s => !(o.denied && s.btIdle)).map(s => ({...s, ...(o.set&&o.set[s.id]||{})}));
+  const shown = list.filter(s => s.v !== "hideWhenNotInUse");
+  const hidden = list.filter(s => s.v === "hideWhenNotInUse");
+  return `<div class="pane">
+    ${o.head===false?"":`<div class="ph">Speakers</div>
+    <div class="pn">Pick what the Mixer lists. This applies in every scene.</div>`}
+    <div class="sec"><span class="t">In the Mixer</span><span class="c">${shown.length}</span><span class="sp"></span><span class="col">Keep when<br>away</span></div>
+    <div class="rows">${shown.map(s => row(s,true,o)).join("")}</div>
+    <div class="sec"><span class="t">Hidden from the Mixer</span><span class="c">${hidden.length}</span><span class="sp"></span></div>
+    <div class="rows">${hidden.map(s => row(s,false,o)).join("") || `<div class="hint" style="padding-left:14px">Nothing hidden. Click Hide on a speaker above to take it out of the Mixer.</div>`}</div>
+    <div class="hint">A hidden speaker still shows in the Mixer while it plays.</div>
+    ${o.denied?`<div class="bt"><span class="ic">${icon("bt")}</span><div class="tx">Audiout can't list Bluetooth speakers that aren't connected.<br><button class="link" type="button">Open Bluetooth Privacy…</button></div></div>`:""}
+  </div>`;
+}
+
+document.getElementById("mainPane").innerHTML = pane();
+document.getElementById("midPane").innerHTML = pane({head:false, sel:["tv"], moved:"tv",
+  set:{tv:{v:"hideWhenNotInUse"}}, st:{tv:"Cast · <b>Playing, stays in the Mixer until it stops</b>"}});
+document.getElementById("deniedPane").innerHTML = pane({head:false, denied:true});
+
+const side = [
+  ["laptop","MacBook Pro Spe…","Available"],["hifi","Move 2","Available"],["radio","Onkyo TX-8220","Connected"],
+  ["tv","TV","Connected"],["homepod","Bedroom","Unavailable",1],["speaker","Missing speaker","Missing speaker",1],["radio","Sonos Move","Not connected",1]];
+document.getElementById("sideSpeakers").innerHTML = side.map((s,i) =>
+  `<div class="ss${s[3]?" dim":""}" style="top:${148+i*44}px"><span class="ic">${icon(s[0])}</span><span class="t"><div class="n">${s[1]}</div><div class="st">${s[2]}</div></span></div>`).join("");
+
+const modes = ["system","light","dark"]; let m = 0;
+try { const saved = localStorage.getItem("f-theme"); if (saved) m = Math.max(0, modes.indexOf(saved)); } catch(e) {}
+const btn = document.getElementById("theme");
+function apply(){
+  const mode = modes[m];
+  if (mode === "system") document.documentElement.removeAttribute("data-theme");
+  else document.documentElement.setAttribute("data-theme", mode);
+  btn.textContent = "Appearance: " + mode[0].toUpperCase() + mode.slice(1);
+  try { localStorage.setItem("f-theme", mode); } catch(e) {}
+}
+btn.addEventListener("click", () => { m = (m + 1) % 3; apply(); });
+apply();
+</script>
+</body>
+</html>

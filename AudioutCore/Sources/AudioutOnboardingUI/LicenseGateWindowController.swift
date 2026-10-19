@@ -5,9 +5,14 @@ import AudioutCore
 
 /// The first-open licence gate window (owner decision 2026-08-30): on a
 /// purchased build (`AudioutLicenseServerURL` present — see `LicenseGate`),
-/// the app's first act is this window, and nothing else starts until it
-/// opens. It is the welcome: brand mark and key field over the live emitter
-/// field, ahead of Setup, the backend, and the menu-bar surface's first use.
+/// this window is the first thing the user sees. It is the welcome: brand
+/// mark and key field over the live emitter field, and the deferred
+/// first-run block — Setup, the backend, the menu-bar surface's first use —
+/// waits on it. The status item, analytics and, when remote control is on,
+/// the companion server already run underneath it, which is why a phone-sent
+/// key does not wait for this window to close: `CompanionLicenseActivation`
+/// validates it, and the gate is then opened through `passWithStoredKey()`.
+/// `submit(key:)` remains the deep-link entry.
 ///
 /// **Dismissal contract:** `onPassed` fires exactly once when a key is
 /// accepted (verified active, or saved-unverified while the server is
@@ -84,6 +89,13 @@ public final class LicenseGateWindowController: NSWindowController, NSWindowDele
     /// The deep-link landing while the gate is up: `audiout://register?key=…`
     /// submits straight into the gate's own field.
     public func submit(key: String) { contentVC.submit(key: key) }
+
+    /// True while the gate's own Register check is waiting on the licence server.
+    public var isChecking: Bool { contentVC.isChecking }
+
+    /// The key was validated and stored by the companion path, so the gate
+    /// opens as its own Register would.
+    public func passWithStoredKey() { finish(passed: true) }
 
     private func finish(passed: Bool) {
         guard !didFinish else { return }

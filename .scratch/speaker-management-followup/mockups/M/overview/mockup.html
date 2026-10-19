@@ -1,0 +1,282 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Speakers Overview, M</title>
+<style>
+/* Tokens: L's set (DESIGN.md + Tokens.swift) plus meter (Tokens.swift:327) for the empty slot.
+   glint = meter blended toward white: 70 % light, 30 % dark (NSColor.blended(withFraction:of:)). */
+:root{
+  --canvas:#FAFAFB; --panel:#FAFAFB; --raised:#FAFAFB; --well:#E9EAEC;
+  --label:#1D1D1F; --label2:#6B5F4E; --label3:#6B6459; --labelCool:#4E5A63;
+  --hairline:#CBCED4; --containerEdge:#AEB3BB; --rim:#66717A;
+  --meter:#C6C9CE; --glint:#EEEFF0;
+  --sidebar:#EEEEEF; --toolbar:#F4F4F5; --sideSel:#DCDCDE;
+  --popFill:#FFFFFF; --popEdge:rgba(0,0,0,.16); --popShadow:0 .5px 1px rgba(0,0,0,.12);
+  --page:#E4E5E8; --frame:rgba(0,0,0,.18); --note:#5F6A73;
+  color-scheme:light;
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    --canvas:#0A0A0C; --panel:#15171A; --raised:#1F232A; --well:#050507;
+    --label:#F2F2F3; --label2:#B7AC95; --label3:#9E947F; --labelCool:#A9B3BB;
+    --hairline:#2A2E33; --containerEdge:#3D4247; --rim:#6B767D;
+    --meter:#464C55; --glint:#7E8288;
+    --sidebar:#1B1C1F; --toolbar:#18191C; --sideSel:#3A3B3F;
+    --popFill:rgba(255,255,255,.12); --popEdge:rgba(255,255,255,.10); --popShadow:none;
+    --page:#050507; --frame:rgba(255,255,255,.16); --note:#818C94;
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --canvas:#0A0A0C; --panel:#15171A; --raised:#1F232A; --well:#050507;
+  --label:#F2F2F3; --label2:#B7AC95; --label3:#9E947F; --labelCool:#A9B3BB;
+  --hairline:#2A2E33; --containerEdge:#3D4247; --rim:#6B767D;
+  --meter:#464C55; --glint:#7E8288;
+  --sidebar:#1B1C1F; --toolbar:#18191C; --sideSel:#3A3B3F;
+  --popFill:rgba(255,255,255,.12); --popEdge:rgba(255,255,255,.10); --popShadow:none;
+  --page:#050507; --frame:rgba(255,255,255,.16); --note:#818C94;
+  color-scheme:dark;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{background:var(--page)}
+body{font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","Helvetica Neue",sans-serif;font-size:13px;color:var(--label);-webkit-font-smoothing:antialiased;padding:16px}
+::selection{background:var(--sideSel)}
+svg.i{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.4;stroke-linecap:round;stroke-linejoin:round;flex:none}
+.layout{display:flex;gap:24px;justify-content:center;align-items:flex-start}
+.colL{width:653px;display:flex;flex-direction:column}
+h2{font-size:12px;font-weight:600;color:var(--label2);margin:0 0 8px 2px}
+h2 span{font-weight:400;color:var(--note)}
+.gap{height:22px}
+
+/* window chrome, as shipped (653 pt wide, 210 pt sidebar) */
+.win{width:653px;border-radius:12px;overflow:hidden;background:var(--canvas);box-shadow:0 0 0 .5px var(--frame),0 18px 40px rgba(0,0,0,.18)}
+.tb{height:52px;background:var(--toolbar);border-bottom:1px solid var(--hairline);display:flex;align-items:center;padding:0 14px;position:relative}
+.dotR{width:12px;height:12px;border-radius:50%;background:#FF5F57;margin-right:14px}
+.seg{display:flex;align-items:center;gap:2px;padding:3px;border-radius:999px;border:1px solid var(--containerEdge)}
+.seg span{display:flex;align-items:center;gap:6px;height:26px;padding:0 9px;border-radius:999px;color:var(--label2);font-size:12px}
+.seg span.on{background:var(--sideSel);color:var(--label)}
+.seg svg{width:17px;height:17px}
+.tb .title{position:absolute;left:0;right:0;text-align:center;font-weight:700;font-size:17px;color:var(--label2);pointer-events:none}
+.tb .pin{margin-left:auto;color:var(--label2)}
+.body{display:grid;grid-template-columns:210px 443px;height:452px}
+
+.sb{background:var(--sidebar);border-right:1px solid var(--hairline);display:flex;flex-direction:column;overflow:hidden;position:relative}
+.sbList{flex:1;padding:12px 10px 0;overflow:hidden}
+.hdr{font-size:11px;font-weight:600;color:var(--label3);height:24px;padding:6px 0 0 4px}
+.plate{display:flex;align-items:center;gap:9px;height:34px;padding:0 10px 0 12px;border-radius:10px;background:var(--sideSel);font-size:13px;margin:6px 0 8px}
+.plate .chev{margin-left:auto;color:var(--label2);display:flex}
+.plate .chev svg{width:11px;height:11px}
+.row{display:flex;align-items:center;gap:8px;height:26px;padding:0 6px;color:var(--label2)}
+.row .n{font-size:13px;color:var(--label);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;min-width:0}
+.row.away .n{color:var(--labelCool)}
+.nd{width:9px;height:9px;border-radius:50%;flex:none;display:inline-block}
+.nd.on{background:var(--rim)}
+.nd.away{border:1.5px solid var(--rim)}
+.nd.no{visibility:hidden}
+.winNote{font-size:10.5px;color:var(--note);line-height:1.45;margin-top:8px}
+
+/* content pane: top-aligned column; card ends at its last row */
+.ct{background:var(--panel)}
+.pane{padding:44px 28px 20px;position:relative}
+.ph{display:flex;align-items:center;gap:12px}
+.idw{width:48px;height:48px;border-radius:14px;border:1px solid var(--containerEdge);display:grid;place-items:center;color:var(--label2);flex:none;background:var(--raised)}
+.idw svg{width:26px;height:26px;stroke-width:1.3}
+.ph h1{font-size:16px;font-weight:600;line-height:20px}
+.sub{font-size:11px;color:var(--label2);margin-top:2px;display:flex;align-items:center;gap:4px;white-space:nowrap;height:14px}
+
+/* the one card: GroupedSectionView .card; in-card dividers containerEdge (GroupedSectionView.swift:170) */
+.card{border:1px solid var(--containerEdge);background:var(--raised);border-radius:26px;margin:36px -14px 0;overflow:hidden}
+.kinds{display:flex;padding:12px 10px 11px 18px}
+.kinds .k{flex:1;min-width:0}
+.kinds .k.away{border-left:1px solid var(--containerEdge);padding-left:14px;margin:2px 0}
+.kinds .k.away .top{margin-top:-2px}
+.kinds .top{display:flex;align-items:center;gap:6px;color:var(--label2);height:20px}
+.kinds .num{font-size:16px;font-weight:600;color:var(--label);font-variant-numeric:tabular-nums;line-height:20px}
+.kinds .num.zero{color:var(--label3)}
+.kinds .lab{font-size:11px;color:var(--label2);margin-top:1px;white-space:nowrap}
+.gl{width:16px;height:16px;display:grid;place-items:center;flex:none}
+.li{display:flex;align-items:center;gap:10px;height:44px;padding:0 16px 0 0;margin-left:18px;border-top:1px solid var(--containerEdge)}
+.li .t{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.li .g{color:var(--label2);display:flex}
+.li .go{color:var(--label2);display:flex}
+.li .go svg{width:12px;height:12px;stroke-width:1.8}
+.btn{font:inherit;font-size:12px;height:22px;padding:0 10px;border-radius:6px;background:var(--popFill);border:.5px solid var(--popEdge);box-shadow:var(--popShadow);display:inline-flex;align-items:center;color:var(--label);white-space:nowrap;flex:none}
+
+/* the empty slot a number will land in, and the one band that sweeps the pane */
+.slot{display:inline-block;width:20px;height:12px;border-radius:3px;background:var(--meter);position:relative;overflow:hidden;flex:none}
+.slot.sm{width:16px;height:8px;border-radius:2.5px;margin-right:1px}
+.slot::after{content:"";position:absolute;top:0;bottom:0;left:0;width:44px;
+  background:linear-gradient(90deg,transparent,var(--glint) 50%,transparent);
+  transform:translateX(calc(-44px - var(--x,0px)));
+  animation:sweep 1.6s infinite;animation-delay:var(--d,0s)}
+@keyframes sweep{
+  0%{transform:translateX(calc(-44px - var(--x,0px)));animation-timing-function:cubic-bezier(.45,0,.55,1)}
+  68.75%{transform:translateX(calc(var(--w,443px) - var(--x,0px)))}
+  100%{transform:translateX(calc(var(--w,443px) - var(--x,0px)))}
+}
+.capture .slot::after{animation:none;transform:translateX(calc(var(--pos,-99px) - var(--x,0px)))}
+.rm .slot::after{display:none}
+@media (prefers-reduced-motion:reduce){.slot::after{display:none}}
+.num.in,.sub .tot.in{animation:arrive 180ms cubic-bezier(.16,1,.3,1)}
+@keyframes arrive{from{opacity:0}to{opacity:1}}
+
+/* right column: content pane only, cropped */
+.side{display:flex;flex-direction:column;gap:16px;width:443px}
+.crop{width:443px;border-radius:10px;overflow:hidden;background:var(--panel);box-shadow:0 0 0 .5px var(--frame),0 8px 20px rgba(0,0,0,.12)}
+.crop .pane{padding:22px 28px 22px}
+.note{font-size:10.5px;color:var(--note);line-height:1.45;margin-top:6px}
+.note b{color:var(--label2);font-weight:600}
+
+/* timeline: the card's first row alone, at real width */
+.tl{display:flex;flex-direction:column;gap:8px}
+.tlr{display:grid;grid-template-columns:200px 415px;gap:14px;align-items:center}
+.tlr .when{font-size:10.5px;color:var(--note);line-height:1.4}
+.tlr .when b{display:block;font-size:12px;color:var(--label);font-weight:600;font-variant-numeric:tabular-nums}
+.tlr .when .hd{display:flex;align-items:center;gap:4px;margin-top:3px;color:var(--label2);font-size:11px}
+.mini{position:relative}
+.mini .card{margin:0}
+.replay{align-self:flex-start;margin-top:8px;font:inherit;font-size:11px;color:var(--label2);background:none;border:none;cursor:pointer;padding:0 2px;text-decoration:underline;text-underline-offset:2px}
+.replay:focus-visible{outline:2px solid var(--rim);outline-offset:2px;border-radius:3px}
+</style>
+</head>
+<body>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+ <defs>
+  <symbol id="laptop" viewBox="0 0 24 24"><rect x="4.5" y="6" width="15" height="10" rx="1.2"/><path d="M2.5 18.5h19"/></symbol>
+  <symbol id="spk" viewBox="0 0 24 24"><rect x="7" y="3" width="10" height="18" rx="2"/><circle cx="12" cy="14.5" r="3"/><circle cx="12" cy="7.2" r="1.2"/></symbol>
+  <symbol id="radio" viewBox="0 0 24 24"><rect x="3.5" y="8" width="17" height="11.5" rx="2"/><path d="M7 8 16 4"/><circle cx="9" cy="13.8" r="2.6"/><path d="M15 12h3M15 15.5h3"/></symbol>
+  <symbol id="tv" viewBox="0 0 24 24"><rect x="2.5" y="5" width="14" height="10" rx="1.2"/><path d="M6 18h7"/><rect x="15.5" y="10" width="6" height="9.5" rx="1.2"/><circle cx="18.5" cy="16.5" r="1.4"/></symbol>
+  <symbol id="atv" viewBox="0 0 24 24"><rect x="3" y="6" width="18" height="12" rx="2.5"/><path d="M8 12h2M13 10.5v3M15 10.5l1.2 3 1.2-3"/></symbol>
+  <symbol id="phones" viewBox="0 0 24 24"><path d="M4 15v-3a8 8 0 0 1 16 0v3"/><rect x="3.5" y="14" width="4" height="6.5" rx="1.5"/><rect x="16.5" y="14" width="4" height="6.5" rx="1.5"/></symbol>
+  <symbol id="buds" viewBox="0 0 24 24"><circle cx="7" cy="7" r="3"/><path d="M8 10v9"/><circle cx="17" cy="7" r="3"/><path d="M16 10v9"/></symbol>
+  <symbol id="spkOut" viewBox="0 0 24 24"><path d="M5 9.5h3l5-4v13l-5-4H5z"/></symbol>
+  <symbol id="airplay" viewBox="0 0 24 24"><path d="M6.4 17.2a8 8 0 1 1 11.2 0"/><path d="M9.2 14.4a4 4 0 1 1 5.6 0"/><path d="M12 14.6 16 20H8z"/></symbol>
+  <symbol id="scenes" viewBox="0 0 24 24"><rect x="3" y="5" width="8" height="14" rx="1.4"/><rect x="13" y="5" width="8" height="14" rx="1.4"/></symbol>
+  <symbol id="main" viewBox="0 0 24 24"><rect x="9" y="3.5" width="9" height="17" rx="1.6"/><path d="M3 12h9M9.5 9l3 3-3 3"/></symbol>
+  <symbol id="speakers" viewBox="0 0 24 24"><rect x="4" y="4" width="8" height="16" rx="1.6"/><circle cx="8" cy="14" r="2.2"/><rect x="14" y="7" width="6" height="13" rx="1.4"/><circle cx="17" cy="15.5" r="1.4"/></symbol>
+  <symbol id="chev" viewBox="0 0 24 24"><path d="m9 5 7 7-7 7"/></symbol>
+  <symbol id="plus" viewBox="0 0 24 24"><path d="M12 4v16M4 12h16"/></symbol>
+  <symbol id="plusC" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 8v8M8 12h8"/></symbol>
+  <symbol id="pinS" viewBox="0 0 24 24"><path d="M8 3h8M9 3v6l-3 4h12l-3-4V3M12 13v8"/></symbol>
+  <symbol id="bars" viewBox="0 0 24 24"><path d="M4 9v6M8 6v12M12 4v16M16 7v10M20 10v4"/></symbol>
+  <symbol id="gear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 3.5l1.6 2.3 2.7-.8.6 2.8 2.7.9-.8 2.7 2.3 1.6-2.3 1.6.8 2.7-2.7.9-.6 2.8-2.7-.8L12 20.5l-1.6-2.3-2.7.8-.6-2.8-2.7-.9.8-2.7L2.9 12l2.3-1.6-.8-2.7 2.7-.9.6-2.8 2.7.8z"/></symbol>
+ </defs>
+</svg>
+
+<div class="layout">
+ <div class="colL">
+  <h2>Mid-search, 1.5 s after launch <span>(This Mac, Bluetooth and AirPlay known; Cast, Away and the total still counting)</span></h2>
+  <div class="win" id="mainwin"></div>
+  <p class="winNote">Sidebar drawn for context only; its own brief owns it (dots per the 2026-10-04 ruling: filled = reachable, ring = not). The TV has not answered yet, so Cast is still counting even though two Cast speakers already show as reachable.</p>
+  <button class="replay" type="button" id="replay">Replay a launch in the window above</button>
+
+  <div class="gap"></div>
+  <h2>How the numbers fill in <span>(one launch, the owner's 20 speakers; each number on its own)</span></h2>
+  <div class="tl" id="tl"></div>
+
+  <div class="gap"></div>
+  <h2>Reduce Motion <span>(the same 1.5 s moment: placeholders hold still, no moving highlight)</span></h2>
+  <div class="tl rm" id="rmrow"></div>
+ </div>
+
+ <div class="side">
+  <div><h2>Done, some not reachable <span>(the owner's 20 speakers)</span></h2><div class="crop" id="s1"></div>
+   <p class="note"><b>4 + 0 + 3 + 1 + 12 = 20</b>, the header. Away holds every speaker not reachable now, whatever the reason. Six of them have not appeared since Audiout opened (five AirPlay, one whose kind was never saved), so Forget offers those six; the six paired Bluetooth speakers are switched off but listed by macOS, so Forget leaves them.</p></div>
+  <div><h2>Done, every speaker reachable</h2><div class="crop" id="s2"></div>
+   <p class="note">Away reads 0 in the quieter ink. No success line: the zero is the answer.</p></div>
+  <div><h2>First launch, nothing on the network</h2><div class="crop" id="s3"></div>
+   <p class="note">Shown once the search ends (0.5&nbsp;s with no change, or the 10&nbsp;s ceiling). Zeros, no extra row.</p></div>
+  <div><h2>Bluetooth access off</h2><div class="crop" id="s4"></div>
+   <p class="note">Without access the Mac sees only connected Bluetooth speakers. The two paired ones it can't list count in Away but stay out of Forget, so access being off never offers to forget a speaker.</p></div>
+ </div>
+</div>
+
+<script>
+var u=function(id){return '<svg class="i"><use href="#'+id+'"/></svg>'};
+var RING='<span class="gl"><span class="nd away"></span></span>';
+var KINDS=[['airplay','AirPlay'],['radio','Bluetooth'],['tv','Cast'],['laptop','This Mac']];
+/* c = [airplay, bluetooth, cast, mac, away]; null = still counting */
+function num(n,arrive){return n==null?'<span class="slot"></span>':'<span class="num'+(n===0?' zero':'')+(arrive?' in':'')+'">'+n+'</span>'}
+function kinds(c,arrive){
+  arrive=arrive||[];
+  var h=KINDS.map(function(k,i){return '<div class="k"><div class="top"><span class="gl">'+u(k[0])+'</span>'+num(c[i],arrive[i])+'</div><div class="lab">'+k[1]+'</div></div>'}).join('');
+  h+='<div class="k away"><div class="top">'+RING+num(c[4],arrive[4])+'</div><div class="lab">Away</div></div>';
+  return '<div class="kinds">'+h+'</div>'}
+function total(t,arrive){return t==null?'<span class="slot sm"></span>speakers':'<span class="tot'+(arrive?' in':'')+'">'+t+(t==1?' speaker':' speakers')+'</span>'}
+var PAIR='<div class="li"><span class="g">'+u('plusC')+'</span><span class="t">Pair Bluetooth speaker…</span><span class="go">'+u('chev')+'</span></div>';
+function forget(n){return '<div class="li"><span class="g">'+RING+'</span><span class="t">Not seen since Audiout opened</span><button class="btn" type="button">Forget '+(n==1?'1 speaker':n+' speakers')+'…</button></div>'}
+var BTOFF='<div class="li"><span class="g">'+u('radio')+'</span><span class="t">Bluetooth access is off</span><button class="btn" type="button">Open Privacy Settings…</button></div>';
+function pane(t,card,arrive){return '<div class="pane"><div class="ph"><div class="idw">'+u('speakers')+'</div><div><h1>Speakers</h1><div class="sub">'+total(t,arrive)+'</div></div></div><div class="card">'+card+'</div></div>'}
+
+/* sidebar for context: the owner's 20 rows; dots per the 2026-10-04 ruling (filled rim = reachable, rim ring = not) */
+var rows=[['on','laptop','MacBook Pro Speakers'],['away','phones','A AirPods Max'],['away','buds','AirPods Pro'],['away','buds','Alec’s AirPods Pro'],['on','spk','Alec’s MacBook Pro'],['on','atv','casty'],['on','tv','casty'],['on','spk','Fancyy'],['away','phones','ION Speaker'],['away','radio','isaac'],['away','radio','JBL Flip 5'],['on','tv','Mac Cast Receiver'],['away','spkOut','Missing speaker'],['away','radio','Move 2 (SONOS B…'],['away','phones','Onkyo TX-8220'],['on','spk','Sonos Move'],['away','radio','Sonos Move (SON…'],['away','spk','teevee'],['away','tv','TV'],['away','phones','WH-1000XM3']];
+var sb=rows.map(function(r){return '<div class="row'+(r[0]=='on'?'':' away')+'"><span class="nd '+r[0]+'"></span>'+u(r[1])+'<span class="n">'+r[2]+'</span></div>'}).join('');
+
+/* the owner's fleet over one launch */
+var STEPS=[
+ {t:0,   c:[null,null,null,1,null], tot:null},
+ {t:600, c:[null,0,null,1,null],    tot:null},
+ {t:1500,c:[4,0,null,1,null],       tot:null},
+ {t:2100,c:[4,0,3,1,12],            tot:20}];
+var MID=STEPS[2];
+function mainCard(s,arr,tArr){return pane(s.tot,kinds(s.c,arr)+(s.tot!=null?forget(6):'')+PAIR,tArr)}
+function renderMain(s,arr,tArr){
+ document.getElementById("mainwin").innerHTML=
+ '<div class="tb"><span class="dotR"></span><div class="seg"><span>'+u('bars')+'</span><span>'+u('scenes')+'</span><span class="on">'+u('speakers')+'Speakers</span><span>'+u('gear')+'</span></div><div class="title">Audiout</div><div class="pin">'+u('pinS')+'</div></div>'+
+ '<div class="body"><aside class="sb"><div class="sbList"><div class="hdr">System Audio</div><div class="row"><span class="nd no"></span>'+u('main')+'<span class="n">Main Audio</span></div>'+
+ '<div class="plate">'+u('speakers')+'Speakers<span class="chev">'+u('chev')+'</span></div><div class="hdr">In the Mixer</div>'+sb+
+ '</div></aside><section class="ct">'+mainCard(s,arr,tArr)+'</section></div>';
+ placeSlots();
+}
+
+var WHEN=[
+ ['0.0 s','This Mac: in the device list before any search starts.'],
+ ['0.6 s','Bluetooth: macOS lists it in one pass; known after 0.5&nbsp;s with no change. 0 of 6 connected.'],
+ ['1.5 s','AirPlay: no new AirPlay speaker for 0.5&nbsp;s.'],
+ ['2.1 s','Cast: no new Cast speaker for 0.5&nbsp;s. That was the last change anywhere, so the search is done: Away and the header total fill in.']];
+document.getElementById('tl').innerHTML=STEPS.map(function(s,i){
+ return '<div class="tlr"><div class="when"><b>'+WHEN[i][0]+'</b>'+WHEN[i][1]+'<span class="hd">Header: '+total(s.tot)+'</span></div><div class="mini"><div class="card">'+kinds(s.c)+'</div></div></div>'}).join('');
+document.getElementById('rmrow').innerHTML='<div class="tlr"><div class="when"><b>1.5 s</b>Same placeholders, no moving highlight. Each number still fades in over 180 ms.<span class="hd">Header: '+total(null)+'</span></div><div class="mini"><div class="card">'+kinds(MID.c)+'</div></div></div>';
+
+document.getElementById('s1').innerHTML=pane(20,kinds([4,0,3,1,12])+forget(6)+PAIR);
+document.getElementById('s2').innerHTML=pane(12,kinds([7,2,2,1,0])+PAIR);
+document.getElementById('s3').innerHTML=pane(1,kinds([0,0,0,1,0])+PAIR);
+document.getElementById('s4').innerHTML=pane(14,kinds([6,1,2,1,4])+forget(2)+BTOFF+PAIR);
+
+/* every slot reads the band in its container's coordinates, so one wave crosses the strip */
+function placeSlots(){
+ document.querySelectorAll('.slot').forEach(function(el){
+  var box=el.closest('.pane')||el.closest('.tlr');
+  var host=el.closest('.mini');
+  var ref=(host||box).getBoundingClientRect();
+  el.style.setProperty('--x',(el.getBoundingClientRect().left-ref.left)+'px');
+  el.style.setProperty('--w',ref.width+'px');
+  /* the PNG freezes this frame: band centred near x = 225 pt */
+  el.style.setProperty('--d','-0.556s');
+ });
+ /* PNG only: park the band 7 px into the second slot of each strip so a still frame shows it */
+ document.querySelectorAll('.pane .card, .mini').forEach(function(c){
+  var slots=c.querySelectorAll('.slot'); if(!slots.length) return;
+  var t=slots[Math.min(1,slots.length-1)];
+  var pos=parseFloat(t.style.getPropertyValue('--x'))+7-22;
+  (c.closest('.pane')||c).querySelectorAll('.slot').forEach(function(el){el.style.setProperty('--pos',pos+'px')});
+ });
+}
+renderMain(MID);
+
+document.getElementById('replay').addEventListener('click',function(){
+ var prev=STEPS[0]; renderMain(prev);
+ STEPS.slice(1).forEach(function(s){
+  setTimeout(function(){
+   var arr=s.c.map(function(v,i){return v!=null&&prev.c[i]==null});
+   var tArr=s.tot!=null&&prev.tot==null;
+   renderMain(s,arr,tArr); prev=s;
+  },s.t);
+ });
+});
+</script>
+</body>
+</html>

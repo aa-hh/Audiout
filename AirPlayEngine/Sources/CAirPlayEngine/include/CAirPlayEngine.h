@@ -4,22 +4,11 @@
 // C target. See AirPlayEngine/README.md and AirPlayEngine/docs/seam-map.md
 // for the full extraction blueprint.
 //
-// T-PKG-1 (scaffold only): this header currently exposes only the shim
-// surfaces (which compile as standalone declarations). The vendored sender
-// sources (sender/airplay.c etc.) are NOT yet wired to build cleanly against
-// these shims — that is T-BUILD-1 (compile) + T-SHIM-1 (implement the .c
-// shim bodies). Once those land, this umbrella should also expose the
-// engine's public C entry points that T-API-1's Swift wrapper calls
-// (session start/stop, addOutput/removeOutput, writePCM, setVolume,
-// clockStatus, pairing) — currently airplay.c's own outputs.h-shaped
-// surface (shims/outputs.h) stands in for that.
-//
-// TODO(T-BUILD-1): confirm every header below actually compiles standalone
-// against brew include paths (event2/, gcrypt.h, sodium.h, plist/plist.h)
-// once Package.swift's unsafeFlags are filled in.
-// TODO(T-SHIM-1): once shim .c files exist, this umbrella may need to add
-// a narrower "public" vs "internal" split so Swift only sees the intended
-// session API, not every OwnTone-shaped internal shim type.
+// What Swift sees through this umbrella: the shim headers below, plus
+// engine_bridge.h (the non-static bridge the Swift layer calls) and
+// engine_workgroup.h. The vendored sender, pairing, RTSP and PTP sources
+// include their own headers through the target's header search paths, not
+// through this file — so nothing vendored is exposed here.
 
 #ifndef CAIRPLAYENGINE_H
 #define CAIRPLAYENGINE_H
@@ -52,12 +41,6 @@
  * - evrtsp/   BSD-3-Clause      (Provos 2002-2006, Blache 2010)
  * - pair_ap/  MIT               (AirPlay 2 pairing)
  * - libairptp/ MIT              (PTP clock library)
- *
- * TODO(T-BUILD-1): these are NOT included here yet — airplay.c etc. include
- * their OwnTone-relative headers directly (e.g. "evrtsp/evrtsp.h",
- * "pair_ap/pair.h", "rtp_common.h"); T-BUILD-1 resolves those via this
- * target's HeaderSearchPath settings in Package.swift rather than through
- * this umbrella header.
  */
 
 #endif /* CAIRPLAYENGINE_H */

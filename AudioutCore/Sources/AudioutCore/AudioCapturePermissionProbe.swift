@@ -7,7 +7,6 @@ import AudioToolbox
 import AVFoundation
 import CoreGraphics
 import Darwin   // dlopen/dlsym for the private TCC audio-capture status read
-import Security // SecCodeCopySelfSigningInformation — public code-identity read
 #endif
 
 /// Constructs the production ``AudioCapturePermissionProbing`` for this OS.
@@ -230,32 +229,16 @@ public final class CoreAudioTonePermissionProbe: AudioCapturePermissionProbing, 
         return storedIdentity != currentIdentity
     }
 
-    /// A stable fingerprint for the CURRENTLY RUNNING binary's code identity,
-    /// via the public `SecCodeCopySelf` + `SecCodeCopyStaticCode` +
-    /// `SecCodeCopySigningInformation` (ordinary, App-Store-safe
-    /// Security.framework calls — not the private TCC symbol
-    /// `SystemAudioCaptureTCC` uses). The fingerprint is `kSecCodeInfoUnique`:
-    /// per Apple's own doc it's "a binary identifier that uniquely identifies
-    /// the static code in question… for any existing signature, the value is
-    /// stable" — i.e. the cdhash, the same identity macOS pins a TCC grant to
-    /// (see the "TCC grants cdhash-pinned on ad-hoc builds" note this bug
-    /// matches). It is static per signed binary and changes across a rebuild,
-    /// which is exactly the signal needed to detect "TCC's cached grant no
-    /// longer matches what's actually running." `nil` on any failure (unsigned
-    /// build, API error): callers treat that the same as "no proof yet" and
-    /// fall through to the functional probe.
+    /// A stable fingerprint for the CURRENTLY RUNNING binary's code identity:
+    /// the cdhash, the same identity macOS pins a TCC grant to (see the "TCC
+    /// grants cdhash-pinned on ad-hoc builds" note this bug matches). It is
+    /// static per signed binary and changes across a rebuild, which is exactly
+    /// the signal needed to detect "TCC's cached grant no longer matches
+    /// what's actually running." `nil` on any failure (unsigned build, API
+    /// error): callers treat that the same as "no proof yet" and fall through
+    /// to the functional probe. The read itself lives in ``CodeSignature``.
     static func currentCodeIdentity() -> String? {
-        var selfCode: SecCode?
-        guard SecCodeCopySelf(SecCSFlags(rawValue: 0), &selfCode) == errSecSuccess,
-              let selfCode else { return nil }
-        var staticCode: SecStaticCode?
-        guard SecCodeCopyStaticCode(selfCode, SecCSFlags(rawValue: 0), &staticCode) == errSecSuccess,
-              let staticCode else { return nil }
-        var info: CFDictionary?
-        guard SecCodeCopySigningInformation(staticCode, SecCSFlags(rawValue: kSecCSSigningInformation), &info) == errSecSuccess,
-              let info = info as? [String: Any],
-              let unique = info[kSecCodeInfoUnique as String] as? Data else { return nil }
-        return unique.map { String(format: "%02x", $0) }.joined()
+        CodeSignature.currentIdentity()
     }
 
     /// Fire the prompt (creating the tap does that) and then WATCH for our known

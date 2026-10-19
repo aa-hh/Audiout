@@ -565,6 +565,62 @@ import Testing
         #expect(sink.isEmpty)
     }
 
+    /// Lets a test hold the mixer's state queue inside `makeConverter`: while
+    /// the gate is closed the converter build signals `entered` and parks on
+    /// `release`, so the queue stays held for as long as the test wants.
+    private final class ConverterGate: @unchecked Sendable {
+        private let lock = NSLock()
+        private var isOpen = true
+        let entered = DispatchSemaphore(value: 0)
+        let release = DispatchSemaphore(value: 0)
+        func close() { lock.lock(); isOpen = false; lock.unlock() }
+        func passThrough() {
+            lock.lock(); let open = isOpen; lock.unlock()
+            guard !open else { return }
+            entered.signal()
+            release.wait()
+        }
+    }
+
+    /// Turns red if `handleBuffer` takes the mixer's state queue again, because
+    /// a state or route edit holding that queue then parks the tap delivery
+    /// thread for the edit's whole duration.
+    @Test func handleBufferDoesNotParkBehindAStateEditHoldingTheQueue() {
+        let gate = ConverterGate()
+        let m = AppRouteMixer(makeConverter: { _ in
+            gate.passThrough()
+            return IdentityConverter()
+        })
+        let sink = Sink()
+        m.updateRoutes([route("a", to: "dev1")])
+        m.handleStateChange(bundleID: "a", state: capturing())
+        m.onMixedBuffer = { sink.append($0) }
+
+        // From here the converter build for "b" holds the state queue.
+        gate.close()
+        let capturingState = capturing()
+        let finished = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            m.handleStateChange(bundleID: "b", state: capturingState)
+            finished.signal()
+        }
+        gate.entered.wait()
+
+        let buffer = s16Buffer(frames: [(7, 7)], atSecond: 1)
+        let returned = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            m.handleBuffer(bundleID: "a", buffer: buffer)
+            returned.signal()
+        }
+        // 10 s is a hang-stop, not a speed claim.
+        #expect(returned.wait(timeout: .now() + 10) == .success,
+                "delivery must not wait on the state queue a converter build holds")
+
+        gate.release.signal()
+        finished.wait()
+        #expect(sink.all.count == 1, "the buffer was mixed from the last published snapshot")
+    }
+
     // MARK: - 6. Per-app POST-volume metering (T2)
 
     /// Single-contributor helper: routes "a" alone to "dev1" at `volume`,

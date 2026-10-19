@@ -1322,8 +1322,8 @@ public final class SetupModel {
     /// The `AIRPLAY_SETUP` override wins first (testing knob — `skip` never shows,
     /// `force` always shows). Otherwise the default gate: only on the native
     /// backend (the sole path that taps audio in-process under the app's own
-    /// identity and discovers over the local network — the mock/OwnTone paths
-    /// don't need these grants) and only until the user completes it once.
+    /// identity and discovers over the local network — the mock path doesn't
+    /// need these grants) and only until the user completes it once.
     public static func shouldPresentOnLaunch(
         settings: AppSettings,
         backendKind: BackendKind,

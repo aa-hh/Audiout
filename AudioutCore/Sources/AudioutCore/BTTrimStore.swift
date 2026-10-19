@@ -143,6 +143,7 @@ public struct BTTrimStore: Sendable {
     /// Load the saved trims. Missing file → `nil` (first run — no trims). A
     /// file from a newer schema is treated as missing rather than crashing an
     /// older build.
+    /// The file is moved aside first (`StoreRecovery.quarantine`) so the next save cannot overwrite a file this build cannot read.
     public func load() throws -> [String: Double]? {
         try loadEnvelope()?.trims
     }
@@ -220,7 +221,10 @@ public struct BTTrimStore: Sendable {
             StoreRecovery.quarantine(fileURL)
             throw error
         }
-        guard envelope.schemaVersion <= Self.currentSchemaVersion else { return nil }
+        guard envelope.schemaVersion <= Self.currentSchemaVersion else {
+            StoreRecovery.quarantine(fileURL)
+            return nil
+        }
         return envelope
     }
 

@@ -20,8 +20,9 @@ RTSP, no audio, nothing else belongs here.
 - No daemonize call: launchd owns backgrounding, and the main thread only polls for idleness.
 - Idleness is not measured until a peer has appeared or the startup grace expires.
 - The clock-id seed is derived from `gethostuuid()`, never hardcoded, so it is stable per host.
-- Info.plist is embedded through a linker section from a `__BUNDLE_ID__` template, so `CFBundleIdentifier` equals the launchd label; never hardcode it (2026-09-07).
+- Info.plist is a `__BUNDLE_ID__` template matching the launchd label; never hardcode `CFBundleIdentifier` (2026-09-07).
 - The launchd label is derived from the bundle id, so side-by-side dev builds stay independent.
+- `release` needs a peer matching `AUDIOUT_PTP_PEER_REQUIREMENT`; empty (ad-hoc) refuses every release (2026-09-20).
 - Long-form traps, dated decisions and the changelog: [AGENTS-HISTORY.md](AGENTS-HISTORY.md). Grep it before debugging anything here.
 
 ## Map

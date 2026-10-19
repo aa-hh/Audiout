@@ -126,7 +126,7 @@ public func usage() -> String {
       --features <str>        TXT features string         (default AP2 audio)
       --model <str>           TXT model                   (default HomePod-like)
       --ipv6                  Treat this device's --address as IPv6
-      --password <str>        RTSP password, if required
+      --password <str>        AirPlay password, sent to the receiver
       --raop                  Target this device over AirPlay 1 / RAOP
                                (output_raop) instead of AirPlay 2
                                (output_airplay). Ignores --features/--model

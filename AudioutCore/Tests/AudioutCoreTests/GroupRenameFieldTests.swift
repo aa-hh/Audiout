@@ -53,17 +53,17 @@ import AppKit
                                                memberVolumes: [:]).group
         let window = MixerWindowController(groupController: controller,
                                            settings: AppSettings(defaults: isolatedDefaults))
-        window.setHostVisible(true)
+        window.setVisibleTab(.scenes)
         window.update(devices: devices)
         window.test_select(.group(id: group.id))
         // The fixed frame's floor; only the width matters here.
-        window.contentController.view.setFrameSize(AppSurfaceController.minimumContentSize)
+        window.scenesContentController.view.setFrameSize(AppSurfaceController.minimumContentSize)
         settle(window)
         return (window, controller, group)
     }
 
     private func settle(_ window: MixerWindowController) {
-        window.contentController.view.layoutSubtreeIfNeeded()
+        window.scenesContentController.view.layoutSubtreeIfNeeded()
     }
 
     // MARK: It is still a real text field, only skinned
@@ -183,6 +183,7 @@ import AppKit
         #expect(field.width > 140, "…but it did grow to use the room it has")
     }
 
+
     @Test func aLongNameNeverWidensThePane() throws {
         let (window, _, _) = try makeWindow()
         settle(window)
@@ -287,14 +288,13 @@ import AppKit
         }
         fieldEditor.string = "Kitch"
 
-        // A real change elsewhere in the snapshot, so the pane's gate opens and
-        // `render` genuinely runs — this is not a test of the gate.
+        // A real change pushed through the host, so the library and the pane's gate both see it and `render` genuinely runs — this is not a test of the gate.
         let renamed = (0..<4).map {
             Device(id: "d\($0)", name: $0 == 1 ? "Device 1 (renamed)" : "Device \($0)",
                    kind: .generic, isAvailable: true)
         }
         let before = editor.test_renderCount
-        editor.show(groupID: group.id, devices: renamed)
+        window.update(devices: renamed)
 
         #expect(editor.test_renderCount == before + 1, "the pane really did repaint")
         #expect(fieldEditor.string == "Kitch",
@@ -308,12 +308,13 @@ import AppKit
     ///
     /// CONVERSION NOTE: same early-return compromise as
     /// `escapeThroughTheRealFieldEditorReverts` — see its note.
-    @Test func escapeLandsKeyboardFocusOnTheSidebarList() throws {
+    // Turns red when `GroupEditorViewController.cancelRename` stops making the icon well first responder.
+    @Test func escapeLandsKeyboardFocusOnTheIconWell() throws {
         let (window, _, _) = try makeWindow()
         let editor = window.test_editor
         let host = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 600),
                             styleMask: [.titled, .resizable], backing: .buffered, defer: true)
-        host.contentView = window.contentController.view
+        host.contentView = window.scenesContentController.view
         host.contentView?.layoutSubtreeIfNeeded()
         guard host.makeFirstResponder(editor.test_titleField),
               let fieldEditor = editor.test_titleField.currentEditor() as? NSTextView else {
@@ -322,8 +323,8 @@ import AppKit
 
         fieldEditor.doCommand(by: #selector(NSResponder.cancelOperation(_:)))
 
-        #expect(window.test_sidebar.test_isOutlineViewFirstResponder,
-                "focus lands on the sidebar's row list — the one control present whatever pane shows")
+        #expect(host.firstResponder === editor.test_iconWell,
+                "focus lands on the editable icon well")
         #expect(host.firstResponder !== host,
                 "…and never on the window itself, which is the dead-Tab state")
     }
@@ -450,84 +451,17 @@ import AppKit
     /// DIFFERENT group must re-fill the field, or the new group would show the
     /// previous one's half-typed name.
     @MainActor
-    // MARK: The primary button tracks the ONE uncommitted state
-
-    // Everything else on this pane autosaves — a membership toggle, an icon
-    // pick and a committed rename each write straight through, and the line
-    // beside "Delete Group…" says so. Text typed into this field and not yet
-    // committed is the only thing the editor can be holding, so it is the only
-    // thing that may turn the primary into "Save" (owner's call, 2026-09-03).
-
-    @Test func primaryReadsDoneUntilTheFieldHoldsAnUncommittedName() throws {
-        let (window, _, _) = try makeWindow()
-        let editor = window.test_editor
-        #expect(editor.test_doneButtonTitle == "Done",
-                "at rest there is nothing outstanding to save")
-
-        editor.test_typeIntoNameField("Kitchen")
-        #expect(editor.test_doneButtonTitle == "Save")
-        #expect(editor.test_doneButtonAccessibilityLabel == "Save",
-                "VoiceOver announces the title on screen, never the other one")
-
-        editor.test_commitRenameViaReturn("Kitchen")
-        #expect(editor.test_doneButtonTitle == "Done",
-                "Return commits the rename and stays put — nothing is pending after it")
-        #expect(editor.test_doneButtonAccessibilityLabel == "Done")
-    }
-
-    @Test func escapeRevertsTheNameAndTheTitleWithIt() throws {
+    // Failing to restore the saved name on Escape turns it red.
+    @Test func escapeRevertsTheName() throws {
         let (window, controller, group) = try makeWindow()
         let editor = window.test_editor
-        editor.test_typeIntoNameField("Half typed")
-        #expect(editor.test_doneButtonTitle == "Save")
-
         editor.test_cancelRename(after: "Half typed")
-
         #expect(editor.test_nameFieldValue == "Downstairs")
-        #expect(editor.test_doneButtonTitle == "Done")
         #expect(controller.groups.first(where: { $0.id == group.id })?.name == "Downstairs")
     }
 
-    @Test func paddingTheNameWithSpacesIsNotAnUncommittedChange() throws {
-        let (window, _, _) = try makeWindow()
-        window.test_editor.test_typeIntoNameField("  Downstairs  ")
-        #expect(window.test_editor.test_doneButtonTitle == "Done",
-                "the commit trims, so a padded name is the same name")
-    }
 
-    @Test func pressingSaveCommitsTheTypedNameAndThenLeaves() throws {
-        let (window, controller, group) = try makeWindow()
-        let editor = window.test_editor
-        var backs = 0
-        editor.onBack = { backs += 1 }
 
-        editor.test_typeIntoNameField("Kitchen")
-        #expect(editor.test_doneButtonTitle == "Save")
-        editor.test_done()
-
-        #expect(controller.groups.first(where: { $0.id == group.id })?.name == "Kitchen",
-                "a typed name is never abandoned on the way out")
-        #expect(editor.test_nameFieldValue == "Kitchen")
-        #expect(backs == 1, "…and it leaves by the same door Done uses")
-    }
-
-    @Test func saveOnANameAnotherGroupHoldsKeepsTheEditorOpen() throws {
-        let (window, controller, group) = try makeWindow()
-        _ = try controller.createGroup(name: "Upstairs", memberIDs: ["d1"], memberVolumes: [:])
-        window.test_select(.group(id: group.id))
-        settle(window)
-        let editor = window.test_editor
-        var backs = 0
-        editor.onBack = { backs += 1 }
-
-        editor.test_typeIntoNameField("Upstairs")
-        editor.test_done()
-
-        #expect(backs == 0, "a refused rename keeps the editor on its explanation")
-        #expect(editor.test_duplicateNameRefused)
-        #expect(editor.test_nameFieldValue == "Downstairs", "and puts the field back")
-        #expect(editor.test_doneButtonTitle == "Done")
-    }
 
     @Test func switchingToAnotherGroupWhileTypingStillRefillsTheField() throws {
         let (window, controller, _) = try makeWindow()

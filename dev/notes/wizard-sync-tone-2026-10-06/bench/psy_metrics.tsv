@@ -1,0 +1,12 @@
+id	part	SPL_dB	loudness_N5_sone	sharpness_acum	roughness_asper	annoyance_PA	one_band_share_pct	energy_150_1500_pct	energy_above_2k_pct
+today	mix as shipped (both at once)	76.3	25.12	3.19	0.015	39.08	80	17	80.0
+today	Bluetooth lane alone	75.4	17.66	4.40	0.007	34.55	100	0	100.0
+today	Mac lane alone	69.4	8.84	1.07	0.009	8.89	98	83	0.0
+D1	Bluetooth window	63.6	11.06	0.65	0.062	11.40	46	100	0.0
+D1	Mac window	51.6	4.94	0.64	0.018	5.00	46	100	0.0
+D2	Bluetooth window	70.8	11.73	0.56	0.023	11.86	88	94	0.0
+D2	Mac window	58.8	5.01	0.56	0.008	5.04	88	94	0.0
+D3	Bluetooth window	63.7	11.71	0.59	0.031	11.89	42	100	0.0
+D3	Mac window	51.7	5.28	0.58	0.013	5.33	42	100	0.0
+D4	Bluetooth window	74.8	16.19	0.62	0.020	16.33	86	100	0.0
+D4	Mac window	62.8	7.29	0.62	0.009	7.33	86	100	0.0

@@ -131,6 +131,7 @@ public struct GroupStore: Sendable {
     /// - Throws: `DecodingError` / file-system errors for a file that exists,
     ///   claims a version we support (or older), and still fails to parse —
     ///   that's a real corruption we don't want to hide.
+    /// The file is moved aside first (`StoreRecovery.quarantine`) so the next save cannot overwrite a file this build cannot read.
     public func load() throws -> [Group] {
         guard FileManager.default.fileExists(atPath: fileURL.path) else { return [] }
         let data = try Data(contentsOf: fileURL)
@@ -141,7 +142,10 @@ public struct GroupStore: Sendable {
             StoreRecovery.quarantine(fileURL)
             throw error
         }
-        guard envelope.schemaVersion <= Self.currentSchemaVersion else { return [] }
+        guard envelope.schemaVersion <= Self.currentSchemaVersion else {
+            StoreRecovery.quarantine(fileURL)
+            return []
+        }
         return envelope.groups
     }
 

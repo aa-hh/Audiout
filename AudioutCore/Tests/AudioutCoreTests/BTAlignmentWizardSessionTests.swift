@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import ProbeKit
 @testable import AudioutCore
 
 private final class Recorder {
@@ -468,8 +469,9 @@ private func proposalValue(_ session: BTAlignmentWizardSession) -> Double? {
     }
 
     /// The two tick timbres are split by TRANSPORT (the Bluetooth fan-out gets
-    /// the bright click, the engine feed the low knock), so whether the pair
-    /// sounds different is a fact about the two speakers' transports — and it
+    /// the higher (660 Hz) mallet note, the engine feed the lower (440 Hz)
+    /// one), so whether the pair sounds different is a fact about the two
+    /// speakers' transports — and it
     /// follows the reference the user can still swap mid-run.
     @Test func thePairSoundsDifferOnlyAcrossTransports() {
         let recorder = Recorder()
@@ -522,6 +524,384 @@ private func proposalValue(_ session: BTAlignmentWizardSession) -> Double? {
         session.cancel()
     }
 
+    // MARK: Listening
+
+    /// The mic measurement had no screen: the run opened straight on the
+    /// questions while the probe ran underneath it.
+    @Test func startListensWhenTheHostGrantsTheMic() {
+        let recorder = Recorder()
+        let session = recorder.makeSession(targetIsBluetooth: true)
+        session.requestListening = { $0(true) }
+        session.start()
+        #expect(session.screen == .listening(isRealignment: false), "got \(session.screen)")
+        #expect(recorder.ticks == [true])
+        #expect(recorder.previews == [0], "the probe measures at the stored value")
+
+        session.offerMeasuredProposal(valueMs: 300)
+        #expect(session.screen == .proposal(valueMs: 300), "got \(session.screen)")
+        #expect(session.proposalIsRecalled == false, "measured, not recalled")
+        session.cancel()
+    }
+
+    /// Turns red if the bar is sized from the lane layout alone.
+    @Test func theProbeStartSizesTheListenFromThePipelineDelay() {
+        let recorder = Recorder()
+        let session = recorder.makeSession(targetIsBluetooth: true)
+        session.requestListening = { $0(true) }
+        session.start()
+        session.probeDidStart(pipelineDelaySeconds: 5)
+        #expect(session.probeListeningSeconds == MicProbeSession.probeLeadSeconds
+                + SyncProbe.Layout.totalSeconds
+                + MicProbeSession.listeningTailSeconds(pipelineDelaySeconds: 5))
+
+        session.offerMeasuredProposal(valueMs: 300)
+        session.rejectProposal()
+        #expect(session.screen == .listening(isRealignment: false), "got \(session.screen)")
+        #expect(session.probeListeningSeconds == nil, "the next listen starts unsized")
+        session.cancel()
+    }
+
+    /// Turns red if the turn windows stop following the lane layout, the room delay, the transport mapping, or the per-listen reset.
+    @Test func theTurnScheduleFollowsTheLaneLayoutAndTheRoomDelay() {
+        let recorder = Recorder()
+        let session = recorder.makeSession(targetIsBluetooth: true)
+        session.requestListening = { $0(true) }
+        session.start()
+        #expect(session.probeSpeakerPlaying(at: 3.0) == nil, "no schedule before the probe starts")
+        session.probeDidStart(pipelineDelaySeconds: 2)
+        #expect(session.probeSpeakerPlaying(at: 2.4) == nil)
+        #expect(session.probeSpeakerPlaying(at: 2.5) == .target)
+        #expect(session.probeSpeakerPlaying(at: 6.49) == .target)
+        #expect(session.probeSpeakerPlaying(at: 6.5) == nil)
+        #expect(session.probeSpeakerPlaying(at: 7.0) == .reference)
+        #expect(session.probeSpeakerPlaying(at: 10.99) == .reference)
+        #expect(session.probeSpeakerPlaying(at: 11.0) == nil)
+
+        session.offerMeasuredProposal(valueMs: 300)
+        session.rejectProposal()
+        #expect(session.probePipelineDelaySeconds == nil, "the next listen starts unscheduled")
+        #expect(session.probeSpeakerPlaying(at: 3.0) == nil)
+        session.cancel()
+
+        let macTarget = recorder.makeSession(targetIsBluetooth: false)
+        macTarget.requestListening = { $0(true) }
+        macTarget.start()
+        macTarget.probeDidStart(pipelineDelaySeconds: 2)
+        #expect(macTarget.probeSpeakerPlaying(at: 2.5) == .reference, "the Bluetooth lane is the reference's")
+        #expect(macTarget.probeSpeakerPlaying(at: 7.0) == .target)
+        macTarget.cancel()
+    }
+
+    /// A host that cannot listen still gets the zero-click path — and the
+    /// panel has to be able to tell that proposal apart from a measured one,
+    /// which it could not while the flag outlived the rejection.
+    @Test func aRealignmentWithoutTheMicShowsTheRecalledProposal() {
+        let recorder = Recorder()
+        let session = recorder.makeSession(baseTrimMs: 244,
+                                           candidateRangeMs: -500...1_500,
+                                           invertsEstimate: true,
+                                           openingProposalMs: 244,
+                                           targetIsBluetooth: true)
+        session.requestListening = { $0(false) }
+        session.start()
+        #expect(session.screen == .proposal(valueMs: 244), "got \(session.screen)")
+        #expect(session.proposalIsRecalled, "the stored value, unjudged")
+
+        session.rejectProposal()
+        guard case .question = session.screen else {
+            Issue.record("expected the questions, got \(session.screen)")
+            return
+        }
+        #expect(session.proposalIsRecalled == false)
+        #expect(session.proposalIsMeasured == false)
+        session.cancel()
+    }
+
+    /// The mic tried twice and could not confirm the stored value, so
+    /// proposing it anyway would lean on the one thing that was just checked
+    /// and failed.
+    @Test func aFailedListenOnARealignmentGoesToTheQuestions() {
+        let recorder = Recorder()
+        let session = recorder.makeSession(baseTrimMs: 244,
+                                           candidateRangeMs: -500...1_500,
+                                           invertsEstimate: true,
+                                           openingProposalMs: 244,
+                                           targetIsBluetooth: true)
+        session.requestListening = { $0(true) }
+        session.start()
+        #expect(session.screen == .listening(isRealignment: true), "got \(session.screen)")
+
+        session.endListening()
+        #expect(session.screen == .listening(isRealignment: true), "got \(session.screen)")
+        session.endListening()
+        guard case .question = session.screen else {
+            Issue.record("expected the questions, got \(session.screen)")
+            return
+        }
+        #expect(recorder.ends.isEmpty, "the run is still live")
+        #expect(recorder.ticks == [true, false, true])
+        session.cancel()
+    }
+
+    /// THE DEFECT (live, a freshly connected Bluetooth speaker): the first
+    /// sweeps land while the speaker is still waking, the mic hears nothing,
+    /// and the run went straight to the by-ear questions although a second
+    /// pass would have been heard. A failed first listen replays the sweeps
+    /// once — through a fresh injector, with the host asked to stage the
+    /// probe again — and a measurement from that pass is proposed as usual.
+    @Test func aFailedFirstListenPlaysTheSweepsOnceMore() {
+        let recorder = Recorder()
+        let session = recorder.makeSession(targetIsBluetooth: true)
+        var listenCalls = 0
+        session.requestListening = { proceed in
+            listenCalls += 1
+            proceed(true)
+        }
+        session.start()
+        #expect(session.micAttempts == 1)
+
+        session.endListening()
+        #expect(session.screen == .listening(isRealignment: false), "got \(session.screen)")
+        #expect(listenCalls == 2, "the host re-stages the probe")
+        #expect(session.micAttempts == 2)
+        #expect(recorder.ticks == [true, false, true], "a fresh injector replays the sweeps")
+        #expect(recorder.ends.isEmpty, "the run is still live")
+
+        session.offerMeasuredProposal(valueMs: 300)
+        #expect(session.screen == .proposal(valueMs: 300), "got \(session.screen)")
+        #expect(session.rejectReRunsMic == false, "the retry spent the mic budget")
+        session.cancel()
+    }
+
+    /// A host that refuses the second listen ends it the ordinary way.
+    @Test func aRefusedRetryFallsToTheQuestions() {
+        let recorder = Recorder()
+        let session = recorder.makeSession(targetIsBluetooth: true)
+        var grant = true
+        session.requestListening = { proceed in proceed(grant) }
+        session.start()
+        grant = false
+        session.endListening()
+        guard case .question = session.screen else {
+            Issue.record("expected the questions, got \(session.screen)")
+            return
+        }
+        session.cancel()
+    }
+
+    /// Turns red if the lane-to-speaker mapping or the per-listen reset breaks.
+    @Test func aBluetoothTargetsLaneVerdictsLandOnItsSpeakers() {
+        let recorder = Recorder()
+        let session = recorder.makeSession(targetIsBluetooth: true)
+        var checked: [(BTAlignmentWizardSession.ProbeSpeaker, Bool)] = []
+        session.onProbeSpeakerChecked = { checked.append(($0, $1)) }
+        session.requestListening = { $0(true) }
+        session.start()
+        session.probeLaneChecked(.bluetooth, heard: true)
+        session.probeLaneChecked(.engine, heard: false)
+        #expect(checked.map(\.0) == [.target, .reference])
+        #expect(checked.map(\.1) == [true, false])
+        #expect(session.probeSpeakerVerdicts == [.target: true, .reference: false])
+
+        session.endListening()
+        #expect(session.screen == .listening(isRealignment: false), "the retry listen, got \(session.screen)")
+        #expect(session.probeSpeakerVerdicts.isEmpty, "the retry starts with no verdicts")
+        session.cancel()
+    }
+
+    /// Turns red if the mapping stops following the transport.
+    @Test func aMacTargetHearsItsBluetoothReferenceOnTheFirstLane() {
+        let recorder = Recorder()
+        let session = recorder.makeSession(reference: .init(id: "move", name: "Move 2", isBluetooth: true),
+                                           targetIsBluetooth: false)
+        session.requestListening = { $0(true) }
+        session.start()
+        session.probeLaneChecked(.bluetooth, heard: false)
+        session.probeLaneChecked(.engine, heard: true)
+        #expect(session.probeSpeakerVerdicts == [.reference: false, .target: true])
+        session.cancel()
+    }
+
+    /// The permission prompt is modal and slow: closing the sheet under it
+    /// once let the grant come back and start the ticks on a dead run.
+    @Test func stopDuringThePermissionPromptNeverStartsTheRun() {
+        let recorder = Recorder()
+        let session = recorder.makeSession(targetIsBluetooth: true)
+        var proceed: ((Bool) -> Void)?
+        session.requestListening = { proceed = $0 }
+        session.start()
+        #expect(session.screen == .intro, "still waiting on the mic")
+
+        session.cancel()
+        proceed?(true)
+        #expect(session.screen == .intro, "got \(session.screen)")
+        #expect(recorder.ticks == [false], "no audio on a closed sheet")
+    }
+
+    /// A rejected measurement listens ONCE more, then falls to the questions —
+    /// it neither dropped straight to the questions nor ran the mic a third
+    /// time. Reddens if `rejectProposal` stops re-listening on a measured
+    /// proposal, or keeps re-listening past `maxMicAttempts`.
+    @Test func aRejectedMeasurementListensAgainThenFallsToTheQuestions() {
+        let recorder = Recorder()
+        let session = recorder.makeSession(targetIsBluetooth: true)
+        var listenCalls = 0
+        session.requestListening = { proceed in
+            listenCalls += 1
+            proceed(true)
+        }
+        session.start()
+        #expect(session.screen == .listening(isRealignment: false), "got \(session.screen)")
+        #expect(session.micAttempts == 1)
+
+        session.offerMeasuredProposal(valueMs: 300)
+        #expect(session.screen == .proposal(valueMs: 300), "got \(session.screen)")
+        #expect(session.proposalIsMeasured)
+        #expect(session.rejectReRunsMic)
+
+        session.rejectProposal()
+        #expect(session.screen == .listening(isRealignment: false), "got \(session.screen)")
+        #expect(listenCalls == 2)
+        #expect(session.micAttempts == 2)
+        #expect(recorder.ticks == [true, false, true], "a fresh injector replays the sweeps")
+        #expect(recorder.previews.last == 0, "the probe re-measures at the stored value")
+        #expect(recorder.ends.isEmpty, "the run is still live")
+
+        session.offerMeasuredProposal(valueMs: 320)
+        #expect(session.screen == .proposal(valueMs: 320), "got \(session.screen)")
+        #expect(session.proposalIsMeasured)
+        #expect(session.rejectReRunsMic == false, "the mic budget is spent")
+
+        session.rejectProposal()
+        guard case .question = session.screen else {
+            Issue.record("expected the questions, got \(session.screen)")
+            return
+        }
+        #expect(listenCalls == 2, "no third listen")
+        #expect(recorder.ticks == [true, false, true])
+        #expect(recorder.ends.isEmpty)
+        session.cancel()
+    }
+
+    /// An implausible mic reading's Try again listens once more instead of
+    /// dropping to the by-ear questions; a second implausible reading does
+    /// drop to them, with no third listen. Reddens if `tryAgain` stops
+    /// re-listening from `.macIsLate`, or keeps re-listening past
+    /// `maxMicAttempts`.
+    @Test func anImplausibleReadingsTryAgainListensOnceMoreThenFallsToTheQuestions() {
+        let recorder = Recorder()
+        let session = recorder.makeSession(candidateRangeMs: -500...1_500,
+                                           invertsEstimate: true,
+                                           targetIsBluetooth: true)
+        var listenCalls = 0
+        session.requestListening = { proceed in
+            listenCalls += 1
+            proceed(true)
+        }
+        session.start()
+        session.offerMeasuredProposal(valueMs: -60)
+        #expect(session.screen == .macIsLate, "got \(session.screen)")
+        #expect(recorder.ticks == [true, false])
+        #expect(recorder.ends == [nil])
+
+        session.tryAgain()
+        #expect(session.screen == .listening(isRealignment: false), "got \(session.screen)")
+        #expect(listenCalls == 2)
+        #expect(session.micAttempts == 2)
+        #expect(recorder.ticks == [true, false, true], "a fresh injector replays the sweeps")
+        #expect(recorder.previews.last == 0, "the probe re-measures at the stored value")
+        #expect(recorder.ends == [nil], "the bow-out already restored; no second restore")
+
+        session.offerMeasuredProposal(valueMs: -60)
+        #expect(session.screen == .macIsLate, "got \(session.screen)")
+
+        session.tryAgain()
+        guard case .question = session.screen else {
+            Issue.record("expected the questions, got \(session.screen)")
+            return
+        }
+        #expect(listenCalls == 2, "no third listen")
+        #expect(session.micAttempts == 2)
+        session.cancel()
+    }
+
+    /// THE DEFECT this pins: a silent first listen's replay and an implausible
+    /// reading's Try again each counting against their own allowance, so one
+    /// run listens three times. They share `maxMicAttempts`, so a Try again
+    /// after the replay goes to the questions.
+    @Test func aSilentFirstListensReplaySpendsTheImplausibleReadingsTryAgain() {
+        let recorder = Recorder()
+        let session = recorder.makeSession(candidateRangeMs: -500...1_500,
+                                           invertsEstimate: true,
+                                           targetIsBluetooth: true)
+        var listenCalls = 0
+        session.requestListening = { proceed in
+            listenCalls += 1
+            proceed(true)
+        }
+        session.start()
+        session.endListening()
+        #expect(listenCalls == 2, "the silent first listen replays once")
+
+        session.offerMeasuredProposal(valueMs: -60)
+        #expect(session.screen == .macIsLate, "got \(session.screen)")
+        session.tryAgain()
+        guard case .question = session.screen else {
+            Issue.record("expected the questions, got \(session.screen)")
+            return
+        }
+        #expect(listenCalls == 2, "no third listen")
+        #expect(session.micAttempts == 2)
+        session.cancel()
+    }
+
+    /// The bands `bt_sync:listening_ended` reports in place of a raw value.
+    /// Reddens on any boundary moving or label changing.
+    @Test func valueBucketsSplitAtTheirBoundaries() {
+        let cases: [(Double, String)] = [
+            (-5, "below_-4"), (-4, "-4_to_0"), (-0.5, "-4_to_0"), (0, "0-9"),
+            (9, "0-9"), (10, "10-39"), (39, "10-39"), (40, "40-99"),
+            (99, "40-99"), (100, "100-199"), (199, "100-199"), (200, "200+"),
+        ]
+        for (valueMs, bucket) in cases {
+            #expect(BTAlignmentWizardSession.valueMsBucket(valueMs) == bucket, "\(valueMs)")
+        }
+    }
+
+    /// The measured flag must not outlive its measurement: after a failed
+    /// retry, a proposal the run then EARNS from answers reads "Still off", not
+    /// "Try again". Reddens if `presentEstimatorPhase` leaves
+    /// `proposalCameFromMic` set on an earned proposal.
+    @Test func anEarnedProposalAfterAFailedRetryIsNotMeasured() {
+        let recorder = Recorder()
+        let session = recorder.makeSession(targetIsBluetooth: true)
+        session.requestListening = { $0(true) }
+        session.start()
+        session.offerMeasuredProposal(valueMs: 300)
+        session.rejectProposal()
+        #expect(session.screen == .listening(isRealignment: false), "got \(session.screen)")
+
+        session.endListening()
+        guard case .question = session.screen else {
+            Issue.record("expected the questions, got \(session.screen)")
+            return
+        }
+        driveLatencyRun(session, recorder, trueLatencyMs: 200)
+        guard case .proposal = session.screen else {
+            Issue.record("expected a proposal, got \(session.screen)")
+            return
+        }
+        #expect(session.proposalIsMeasured == false)
+        #expect(session.rejectReRunsMic == false)
+
+        session.rejectProposal()
+        guard case .question = session.screen else {
+            Issue.record("expected the questions, got \(session.screen)")
+            return
+        }
+        session.cancel()
+    }
+
     // MARK: Zero-click
 
     /// A speaker measured before opens on the PROPOSAL at its stored value —
@@ -556,6 +936,32 @@ private func proposalValue(_ session: BTAlignmentWizardSession) -> Double? {
         }
         #expect(recorder.ends.isEmpty, "nothing restored — the run is still live")
         session.cancel()
+    }
+
+    /// `offerMeasuredProposal` guarded on `.question`, so a measurement
+    /// landing on the opening proposal was dropped and the user judged the
+    /// stale stored value.
+    @Test func aMeasurementLandingOnTheOpeningProposalReplacesIt() {
+        let recorder = Recorder()
+        let session = recorder.makeSession(baseTrimMs: 424,
+                                           candidateRangeMs: -500...1_500,
+                                           invertsEstimate: true,
+                                           openingProposalMs: 424)
+        session.start()
+
+        session.offerMeasuredProposal(valueMs: 459.86)
+        #expect(session.screen == .proposal(valueMs: 460), "got \(session.screen)")
+        #expect(recorder.previews == [424, 460], "what the user hears follows the number")
+        #expect(recorder.ticks == [true])
+
+        session.offerMeasuredProposal(valueMs: 300)
+        #expect(session.screen == .proposal(valueMs: 460),
+                "the replacement is judged like any other proposal")
+        #expect(recorder.previews == [424, 460])
+
+        session.acceptProposal()
+        #expect(session.screen == .kept(valueMs: 460))
+        #expect(recorder.ends == [460])
     }
 
     /// Try again means "that value was wrong", so a restart must never
@@ -639,14 +1045,14 @@ extension SerializedSharedState {
             /// synchronous read races the flush — poll, like the BTSyncedSink
             /// capture does.
             func pollForLines(evt: String, containing needle: String, count: Int,
-                              timeout: TimeInterval = 3) async -> [String] {
-                let deadline = Date().addingTimeInterval(timeout)
-                while Date() < deadline {
-                    let hits = lines(evt: evt).filter { $0.contains(needle) }
-                    if hits.count >= count { return hits }
-                    try? await Task.sleep(nanoseconds: 5_000_000)
+                              timeout: TimeInterval = 3,
+                              sourceLocation: SourceLocation = #_sourceLocation) async -> [String] {
+                func hits() -> [String] { lines(evt: evt).filter { $0.contains(needle) } }
+                await SuiteWait.until("\(count) \(evt) line(s) carrying \(needle)",
+                                      timeout: timeout, sourceLocation: sourceLocation) {
+                    hits().count >= count
                 }
-                return lines(evt: evt).filter { $0.contains(needle) }
+                return hits()
             }
         }
 
@@ -685,6 +1091,97 @@ extension SerializedSharedState {
             #expect(lines[0].contains("\"halfWidthMs\""), "\(lines[0])")
             #expect(lines[0].contains("\"answers\""), "\(lines[0])")
             #expect(lines[1].contains("\"accepted\":\"true\""), "\(lines[1])")
+        }
+
+        /// Collects the `Analytics.capture` calls a run makes.
+        ///
+        /// The sink is process-global, and suites outside the serialized
+        /// parent (the parallel half of this file, the popover wizard tests)
+        /// fire the very same `bt_sync:` events while it is installed.
+        /// `capture` calls the sink on the caller's thread and these tests
+        /// are synchronous, so only events from the thread that made this
+        /// capture are this test's own.
+        private final class AnalyticsCapture: @unchecked Sendable {
+            private let lock = NSLock()
+            private let thread = Thread.current
+            private var items: [(String, [String: String])] = []
+            func append(_ name: String, _ props: [String: String]) {
+                guard Thread.current == thread else { return }
+                lock.withLock { items.append((name, props)) }
+            }
+            func btSyncEvents() -> [(String, [String: String])] {
+                lock.withLock { items.filter { $0.0.hasPrefix("bt_sync:") } }
+            }
+        }
+
+        /// The three mic-measurement events, in order, with the exact names
+        /// and properties `docs/analytics-events.md` promises. Reddens on any
+        /// event name or property string drifting from that table, or a
+        /// capture moving off its screen edge.
+        @Test func micEventsFireAtTheirScreenEdges() {
+            let captured = AnalyticsCapture()
+            Analytics.install(Analytics.Sink(capture: { captured.append($0, $1) },
+                                             captureError: { _, _ in },
+                                             consentChanged: { _ in }), consent: true)
+            defer { Analytics.install(nil, consent: false) }
+
+            let recorder = Recorder()
+            let session = recorder.makeSession(targetIsBluetooth: true)
+            session.requestListening = { $0(true) }
+            session.start()
+            session.offerMeasuredProposal(valueMs: 300)
+            session.rejectProposal()
+            session.endListening()
+            session.cancel()
+
+            let events = captured.btSyncEvents()
+            guard events.count == 4 else {
+                Issue.record("expected 4 bt_sync events, got \(events)")
+                return
+            }
+            #expect(events[0].0 == "bt_sync:mic_permission_answered")
+            #expect(events[0].1 == ["granted": "true"])
+            #expect(events[1].0 == "bt_sync:listening_ended")
+            #expect(events[1].1 == ["outcome": "measured", "attempt": "1", "value_ms_bucket": "200+", "probe_sound": "glide_chord"])
+            #expect(events[2].0 == "bt_sync:mic_retried")
+            #expect(events[2].1 == [:])
+            #expect(events[3].0 == "bt_sync:listening_ended")
+            #expect(events[3].1 == ["outcome": "failed", "attempt": "2", "probe_sound": "glide_chord"])
+        }
+
+        /// An implausible reading's Try again reports as a retry, and both
+        /// listens carry their attempt number and band. Reddens if the
+        /// re-listen stops firing `mic_retried` or the second listen never
+        /// happens.
+        @Test func anImplausibleReadingsRetryIsReported() {
+            let captured = AnalyticsCapture()
+            Analytics.install(Analytics.Sink(capture: { captured.append($0, $1) },
+                                             captureError: { _, _ in },
+                                             consentChanged: { _ in }), consent: true)
+            defer { Analytics.install(nil, consent: false) }
+
+            let recorder = Recorder()
+            let session = recorder.makeSession(candidateRangeMs: -500...1_500,
+                                               invertsEstimate: true,
+                                               targetIsBluetooth: true)
+            session.requestListening = { $0(true) }
+            session.start()
+            session.offerMeasuredProposal(valueMs: -60)
+            session.tryAgain()
+            session.offerMeasuredProposal(valueMs: -2)
+            session.cancel()
+
+            let events = captured.btSyncEvents()
+            guard events.count == 4 else {
+                Issue.record("expected 4 bt_sync events, got \(events)")
+                return
+            }
+            #expect(events[1].0 == "bt_sync:listening_ended")
+            #expect(events[1].1 == ["outcome": "implausible", "attempt": "1", "value_ms_bucket": "below_-4", "probe_sound": "glide_chord"])
+            #expect(events[2].0 == "bt_sync:mic_retried")
+            #expect(events[2].1 == [:])
+            #expect(events[3].0 == "bt_sync:listening_ended")
+            #expect(events[3].1 == ["outcome": "measured", "attempt": "2", "value_ms_bucket": "-4_to_0", "probe_sound": "glide_chord"])
         }
     }
 }

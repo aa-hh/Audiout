@@ -10,15 +10,17 @@
 // writing a PNG to `dev/notes/settings-snapshots/` in both light and dark
 // appearances.
 //
-// Settings is SIDEBAR content (General / Appearance / Audio sections, one
-// pane) hosted on the one-surface shell. Each render below is the PANE only —
+// Settings is SIDEBAR content (General / Audiout Remote / Appearance / Audio /
+// License sections, one pane) hosted on the one-surface shell. Each render below is the PANE only —
 // the sidebar and the surface's chrome are deliberately absent. These goldens
 // verify each pane's own layout and dark-mode appearance; the sidebar itself
 // (labels, symbols, selection) is covered by the `SettingsRootViewController`
 // tests, not a pixel snapshot.
 //
-// One PNG per (tab × appearance) — six total:
-//   settings-{general,appearance,audio}-{light,dark}.png
+// One PNG per (section × appearance) — eight total, ten in a build that
+// carries the iPhone companion:
+//   settings-{general,audiout-remote,appearance,audio,license}-{light,dark}.png
+// (`audiout-remote` only when `RemoteSettingsViewController.isOffered`).
 //
 // Run: `swift run settings-snapshot [output-dir]`.
 
@@ -59,8 +61,12 @@ func tempDir() -> URL {
 /// makes the resolution deterministic regardless of what's driving the run.
 let snapshotBackingScale: CGFloat = 2
 
+/// Set on any renderPNG failure so a run that wrote no PNG still exits non-zero.
+var renderFailed = false
+
 @MainActor
-func renderPNG(view: NSView, to url: URL) {
+@discardableResult
+func renderPNG(view: NSView, to url: URL) -> Bool {
     view.layoutSubtreeIfNeeded()
     let bounds = view.bounds
     let pixelsWide = Int((bounds.width * snapshotBackingScale).rounded())
@@ -70,7 +76,8 @@ func renderPNG(view: NSView, to url: URL) {
                                       samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
                                       colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0) else {
         print("  FAIL  could not make bitmap rep for \(url.lastPathComponent)")
-        return
+        renderFailed = true
+        return false
     }
     rep.size = bounds.size
     // `NSBitmapImageRep(bitmapDataPlanes:...)` doesn't guarantee a zeroed
@@ -84,13 +91,17 @@ func renderPNG(view: NSView, to url: URL) {
 
     guard let data = rep.representation(using: .png, properties: [:]) else {
         print("  FAIL  could not encode PNG for \(url.lastPathComponent)")
-        return
+        renderFailed = true
+        return false
     }
     do {
         try data.write(to: url)
         print("  WROTE \(url.path)  (\(Int(bounds.width))x\(Int(bounds.height)))")
+        return true
     } catch {
         print("  FAIL  write \(url.lastPathComponent): \(error)")
+        renderFailed = true
+        return false
     }
 }
 
@@ -121,9 +132,9 @@ func makeSnapshotDefaults() -> UserDefaults {
 @MainActor
 func makeRoot() -> SettingsRootViewController {
     // Seed the two URLs the app normally reads from its Info.plist: under a
-    // bare `swift run` there is no such bundle, so without these the General
-    // pane's whole license section — status line, Enter License…, Buy — never
-    // renders and the golden records a build that cannot be licensed.
+    // bare `swift run` there is no such bundle, so without these the License
+    // section — status line, Enter License…, Buy — never renders and the
+    // golden records a build that cannot be licensed.
     let settings = AppSettings(defaults: makeSnapshotDefaults(),
                                licenseServerURL: URL(string: "https://license.audiout.app"),
                                buyURL: URL(string: "https://audiout.app/buy"))
@@ -143,18 +154,28 @@ func makeRoot() -> SettingsRootViewController {
         apply: { _ in (0, 0) })
 
     // Section order/labels/symbols mirror the app's own assembly
-    // (`AppDelegate.makeSettingsRoot`) exactly.
-    return SettingsRootViewController(sections: [
+    // (`AppDelegate.makeSettingsRoot`) exactly. The settings above carry a
+    // licence server, so License is always built here.
+    var sections: [SettingsRootViewController.Section] = [
         .init(title: "General", symbolName: "gearshape",
               viewController: GeneralSettingsViewController(loginItem: SnapshotLoginItem(),
                                                             settings: settings)),
+    ]
+    let remote = RemoteSettingsViewController(settings: settings)
+    if remote.isOffered {
+        sections.append(.init(title: "Audiout Remote", symbolName: "iphone", viewController: remote))
+    }
+    sections += [
         .init(title: "Appearance", symbolName: "paintpalette",
               viewController: AppearanceSettingsViewController(settings: settings)),
         .init(title: "Audio", symbolName: "speaker.wave.2",
               viewController: AudioSettingsViewController(excluded: excludedApps,
                                                           runningAppsProvider: { [] },
                                                           latency: latency)),
-    ])
+        .init(title: "License", symbolName: "key",
+              viewController: LicenseSettingsViewController(settings: settings)),
+    ]
+    return SettingsRootViewController(sections: sections)
 }
 
 /// Resolve every wrapping label's `preferredMaxLayoutWidth` from the width it
@@ -277,17 +298,15 @@ func run() -> Int32 {
     // Superseded single-pane goldens from the one-screen (pre-tab) design —
     // the tabbed window has no single "the content" view, so these no longer
     // represent any real screen. Remove them so a stale golden can't linger
-    // next to the six per-tab ones below.
+    // next to the per-section ones below.
     for stale in ["settings-light.png", "settings-dark.png"] {
         try? FileManager.default.removeItem(at: outDir.appendingPathComponent(stale))
     }
 
-    // Tab order/labels mirror `makeRoot()`'s tabs literal exactly.
-    let tabs: [(index: Int, label: String)] = [
-        (0, "general"),
-        (1, "appearance"),
-        (2, "audio"),
-    ]
+    // One render per section `makeRoot()` builds, labelled by its title.
+    let tabs: [(index: Int, label: String)] = makeRoot().sectionTitles.enumerated().map {
+        ($0.offset, $0.element.lowercased().replacingOccurrences(of: " ", with: "-"))
+    }
     let appearances: [(name: NSAppearance.Name, label: String)] = [
         (.aqua, "light"),
         (.darkAqua, "dark"),
@@ -302,7 +321,7 @@ func run() -> Int32 {
     }
 
     print("Done.")
-    return 0
+    return renderFailed ? 1 : 0
 }
 
 exit(MainActor.assumeIsolated { run() })

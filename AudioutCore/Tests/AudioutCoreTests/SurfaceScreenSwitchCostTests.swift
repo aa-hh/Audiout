@@ -42,6 +42,12 @@ extension SerializedSharedState {
                                                width: SurfaceLayout.width, height: 464))
                 return vc
             },
+            speakersContent: {
+                let vc = NSViewController()
+                vc.view = NSView(frame: NSRect(x: 0, y: 0,
+                                               width: SurfaceLayout.width, height: 464))
+                return vc
+            },
             settingsContent: {
                 SettingsRootViewController(sections: [
                     .init(title: "General", symbolName: "gearshape",
@@ -53,13 +59,14 @@ extension SerializedSharedState {
 
     // MARK: The cut — building off the click path
 
-    /// Opening the surface builds Groups and Settings a turn later, so the
+    /// Opening the surface builds Scenes, Speakers and Settings a turn later, so the
     /// click that selects one has nothing left to construct. Drop the prewarm
-    /// and this fails: both screens stay nil until their tab is clicked, which
+    /// and this fails: the screens stay nil until their tab is clicked, which
     /// is what put a 56 ms build inside the click.
     @Test func openingTheSurfaceBuildsTheOtherScreensBeforeTheyAreClicked() async throws {
         let surface = makeSurface()
         #expect(surface.test_groupsScreen == nil, "nothing is built before the open")
+        #expect(surface.test_speakersScreen == nil)
 
         surface.show(anchorRect: nil)
         if surface.test_isRevealPending { surface.test_fireRevealCeiling() }
@@ -70,14 +77,16 @@ extension SerializedSharedState {
         // arrives on a main-actor hop — pumping the run loop instead never
         // advances it, which is the distinction `SuiteWait` documents.
         await SuiteWait.until("the prewarmed screens to be built") {
-            surface.test_groupsScreen != nil && surface.test_settingsScreen != nil
+            surface.test_groupsScreen != nil && surface.test_speakersScreen != nil
+                && surface.test_settingsScreen != nil
         }
 
-        #expect(surface.test_groupsScreen != nil, "Groups is already built")
+        #expect(surface.test_groupsScreen != nil, "Scenes is already built")
+        #expect(surface.test_speakersScreen != nil, "so is Speakers")
         #expect(surface.test_settingsScreen != nil, "and so is Settings")
     }
 
-    /// The Groups screen's three swapped panes have their view trees built when
+    /// The Scenes and Speakers screens' swapped panes have their view trees built when
     /// the controller is, not when a swap first shows one. Remove the eager
     /// load and the Mixer row's Equalizer door pays the detail pane's build
     /// inside the click again (measured at 31 ms, cut to 23 ms).

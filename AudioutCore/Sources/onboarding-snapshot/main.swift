@@ -177,10 +177,16 @@ func makeViewController(_ world: SnapshotWorld) -> OnboardingViewController {
                            bluetoothPrimer: bluetooth,
                            settings: AppSettings(defaults: suite),
                            usageStatsAvailable: world.usageStatsAvailable)
-    return OnboardingViewController(model: model,
-                                    reason: world.reason,
-                                    onOpenSettings: { _ in },
-                                    onDone: {})
+    let controller = OnboardingViewController(model: model,
+                                              reason: world.reason,
+                                              onOpenSettings: { _ in },
+                                              onDone: {})
+    // The consent sheet needs an on-screen window the fixture window is not,
+    // so its Allow silently no-ops headless and the walk never gets past the
+    // usage-counts card. Answer yes through the seam instead, the same way
+    // the tests do.
+    controller.presentUsageStatsConsent = { deliver in deliver(true) }
+    return controller
 }
 
 /// Fixed backing scale for every snapshot PNG (visual.md M1). Letting the OS
@@ -191,8 +197,12 @@ func makeViewController(_ world: SnapshotWorld) -> OnboardingViewController {
 /// makes the resolution deterministic regardless of what's driving the run.
 let snapshotBackingScale: CGFloat = 2
 
+/// Set on any renderPNG failure so a run that wrote no PNG still exits non-zero.
+var renderFailed = false
+
 @MainActor
-func renderPNG(view: NSView, to url: URL) {
+@discardableResult
+func renderPNG(view: NSView, to url: URL) -> Bool {
     view.layoutSubtreeIfNeeded()
     let bounds = view.bounds
     let pixelsWide = Int((bounds.width * snapshotBackingScale).rounded())
@@ -202,7 +212,8 @@ func renderPNG(view: NSView, to url: URL) {
                                       samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
                                       colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0) else {
         print("  FAIL  could not make bitmap rep for \(url.lastPathComponent)")
-        return
+        renderFailed = true
+        return false
     }
     rep.size = bounds.size
     // `NSBitmapImageRep(bitmapDataPlanes:...)` doesn't guarantee a zeroed
@@ -216,13 +227,17 @@ func renderPNG(view: NSView, to url: URL) {
 
     guard let data = rep.representation(using: .png, properties: [:]) else {
         print("  FAIL  could not encode PNG for \(url.lastPathComponent)")
-        return
+        renderFailed = true
+        return false
     }
     do {
         try data.write(to: url)
         print("  WROTE \(url.path)  (\(Int(bounds.width))x\(Int(bounds.height)))")
+        return true
     } catch {
         print("  FAIL  write \(url.lastPathComponent): \(error)")
+        renderFailed = true
+        return false
     }
 }
 
@@ -290,7 +305,8 @@ let completeWorld = SnapshotWorld(audio: .granted,
                                   remoteControlTrusted: true,
                                   bluetooth: .granted,
                                   ptpHelper: .enabled,
-                                  allow: [.audio, .localNetwork, .usageStats])
+                                  allow: [.audio, .localNetwork, .usageStats],
+                                  skip: [.audioutRemote])
 
 @MainActor
 func run() async -> Int32 {
@@ -366,25 +382,27 @@ func run() async -> Int32 {
                        world: SnapshotWorld(allow: [.audio, .localNetwork],
                                             skip: [.bluetooth], press: .bluetooth),
                        outDir: outDir)
-        // Every card decided, the sixth row's automatic check still running:
+        // Every card decided, the network row's automatic check still running:
         // no CTA, no finale yet — the beat the redesign exists to show.
         await snapshot(appearanceName: name, label: "\(tag)-checking",
                        world: SnapshotWorld(remoteControlTrusted: true,
                                             bluetooth: .granted,
                                             ptpHelper: .enabled,
                                             allow: [.audio, .localNetwork, .usageStats],
-                                            waitingOnFinalCheck: true),
+                                            waitingOnFinalCheck: true,
+                                            skip: [.audioutRemote]),
                        outDir: outDir)
-        // The sixth card: the one stage that is not a rehearsal of a macOS
-        // surface, because this step raises none. The frame carries the LEDGER
-        // — what a yes would send, over what it never sends, each of those
-        // struck through — and the bar offers "No Thanks" rather than the
-        // shared "Skip for now", since this answer is final.
-        await snapshot(appearanceName: name, label: "\(tag)-step6-usagestats",
+        // The usage-counts card: this step raises no macOS surface, so the
+        // stage is a drawn miniature of Audiout's own consent sheet — real
+        // headline and button titles, greeked body — and the bar offers
+        // "No Thanks" rather than the shared "Skip for now", since this
+        // answer is final.
+        await snapshot(appearanceName: name, label: "\(tag)-step7-usagestats",
                        world: SnapshotWorld(remoteControlTrusted: true,
                                             bluetooth: .granted,
                                             ptpHelper: .enabled,
-                                            allow: [.audio, .localNetwork]),
+                                            allow: [.audio, .localNetwork],
+                                            skip: [.audioutRemote]),
                        outDir: outDir)
         await snapshot(appearanceName: name, label: "\(tag)-complete",
                        world: completeWorld, outDir: outDir)
@@ -397,7 +415,7 @@ func run() async -> Int32 {
     }
 
     print("Done.")
-    return 0
+    return renderFailed ? 1 : 0
 }
 
 // Headless: no window ever reaches the screen, and every animated instrument

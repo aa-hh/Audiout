@@ -37,8 +37,10 @@ import AppKit
         let groups = GroupController(backend: backend,
                                      store: GroupStore(directory: tempDirectory()),
                                      routingStore: RoutingStore(directory: tempDirectory()),
+                                     settings: AppSettings(defaults: makeDefaults()),
                                      loadPersisted: false)
-        let popover = PopoverController()
+        let popover = PopoverController(appRouting: AppRoutingController(
+            store: AppRouteStore(directory: tempDirectory()), loadPersisted: false))
         popover.configure(groupController: groups)
         groups.ensureDefaultSelection()
         popover.test_isShownOverride = true
@@ -47,9 +49,8 @@ import AppKit
         // empty list, and every row assertion below then measures the "Looking
         // for speakers…" placeholder instead of the speakers.
         backend.start()
-        let deadline = Date().addingTimeInterval(5)
-        while Date() < deadline && backend.devices.count < deviceCount {
-            RunLoop.current.run(until: Date().addingTimeInterval(0.005))
+        SuiteWait.untilOnRunLoop("the fleet has \(deviceCount) devices") {
+            backend.devices.count >= deviceCount
         }
         popover.update(devices: backend.devices)
         popover.test_panelView.layoutSubtreeIfNeeded()
@@ -161,11 +162,14 @@ import AppKit
         let popover = makePopover(deviceCount: 24)
         popover.test_applyContentHeightLimit(.greatestFiniteMagnitude)
         let panel = popover.test_panelView
+        // Moving Manage into the scrolling body would make it disappear with the rows.
+        let manage = try #require(popover.test_manageSpeakersButton)
 
         func chromeFrames() -> [NSRect] {
             panel.layoutSubtreeIfNeeded()
             return [popover.test_mainOutRow.convert(popover.test_mainOutRow.bounds, to: panel),
-                    devicesHeader(popover, panel: panel)]
+                    devicesHeader(popover, panel: panel),
+                    manage.convert(manage.bounds, to: panel)]
         }
 
         let before = chromeFrames()

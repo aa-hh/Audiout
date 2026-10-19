@@ -23,6 +23,27 @@ public protocol CastPCMSource: AnyObject {
     var bufferedFrames: Int? { get }
 }
 
+/// Monotonic seconds since boot.
+public typealias CastUptimeClock = @Sendable () -> TimeInterval
+
+/// Runs `work` on `queue` once `delaySeconds` have passed. Cancelling `work`
+/// stops it.
+public typealias CastDelayClock = @Sendable (_ delaySeconds: Double,
+                                             _ queue: DispatchQueue,
+                                             _ work: DispatchWorkItem) -> Void
+
+/// The shipping time source: `DispatchTime.now().uptimeNanoseconds` in seconds.
+/// Only tests pass anything else, so a lead or a stall can be stepped instead
+/// of waited out.
+public let castDispatchUptimeClock: CastUptimeClock = {
+    Double(DispatchTime.now().uptimeNanoseconds) / 1_000_000_000
+}
+
+/// The shipping delay: `asyncAfter` on the wall clock.
+public let castDispatchDelayClock: CastDelayClock = { delaySeconds, queue, work in
+    queue.asyncAfter(deadline: .now() + delaySeconds, execute: work)
+}
+
 public extension CastPCMSource {
     var bufferedFrames: Int? { nil }
 }
@@ -82,6 +103,14 @@ public final class CastLiveAudioServer: @unchecked Sendable {
     private let primeMilliseconds: Int
     /// Every request head the receiver sends, for the spike log.
     public var onRequest: ((String) -> Void)?
+    /// Every connection ``accept(_:)`` turned away: why (`wrong_peer`,
+    /// `max_connections` or `idle_timeout`) and the peer it arrived from. All
+    /// three used to cancel the socket in silence, which made a wrongly
+    /// refused GET from the receiver's own address look exactly like a
+    /// receiver that never fetched (live failure, 2026-09-20), and still makes
+    /// a receiver that connects and then asks for nothing look like one that
+    /// never connected.
+    public var onRefused: ((String, String) -> Void)?
     private let queue = DispatchQueue(label: "CastLiveAudioServer")
 
     /// Lock-guarded for the same reason ``CastChannel``'s accessors are: the
@@ -94,11 +123,33 @@ public final class CastLiveAudioServer: @unchecked Sendable {
     private var listener: NWListener?
     private var connections: [ObjectIdentifier: NWConnection] = [:]
     private var timers: [ObjectIdentifier: DispatchSourceTimer] = [:]
+    private var idleTimeouts: [ObjectIdentifier: DispatchWorkItem] = [:]
 
-    public init(source: CastPCMSource, loopbackOnly: Bool, primeMilliseconds: Int = 0) {
+    /// The receiver's own address, from the control connection
+    /// (``CastChannel/remoteIPv4Address``). Nil admits any peer — see
+    /// ``accept(_:)`` for why that's the safe default, not a hole.
+    private let allowedPeer: String?
+    private let maxConnections: Int
+    private let idleDeadline: TimeInterval
+    /// What the pacing clock reads.
+    private let uptimeClock: CastUptimeClock
+
+    public init(
+        source: CastPCMSource,
+        loopbackOnly: Bool,
+        primeMilliseconds: Int = 0,
+        allowedPeer: String? = nil,
+        maxConnections: Int = 32,
+        idleDeadline: TimeInterval = 30,
+        uptimeClock: @escaping CastUptimeClock = castDispatchUptimeClock
+    ) {
         self.source = source
         self.loopbackOnly = loopbackOnly
         self.primeMilliseconds = primeMilliseconds
+        self.allowedPeer = allowedPeer
+        self.maxConnections = maxConnections
+        self.idleDeadline = idleDeadline
+        self.uptimeClock = uptimeClock
     }
 
     public var port: UInt16 { portLock.withLock { _port } }
@@ -161,6 +212,8 @@ public final class CastLiveAudioServer: @unchecked Sendable {
             listener = nil
             for (_, timer) in timers { timer.cancel() }
             timers.removeAll()
+            for (_, idleWork) in idleTimeouts { idleWork.cancel() }
+            idleTimeouts.removeAll()
             for (_, connection) in connections { connection.cancel() }
             connections.removeAll()
         }
@@ -168,8 +221,49 @@ public final class CastLiveAudioServer: @unchecked Sendable {
 
     // MARK: - One client
 
+    // `allowedPeer` is nil when the manager never learned the receiver's
+    // IPv4 address — the control connection can ride IPv6 on the owner's
+    // own network (live failure, 2026-08-23), and refusing on nil would
+    // strand every such session, so nil means "no peer check" rather
+    // than "refuse everyone". An unparseable address is the same bind:
+    // nothing to compare against is not grounds to refuse the receiver.
+    //
+    // Addresses compare by value, never by description. The real listener
+    // binds every interface and is therefore dual-stack, so the receiver's
+    // GET is accepted as an IPv4-mapped IPv6 peer, and a description can
+    // carry an interface scope (`192.168.4.54%en0`) that the control
+    // channel's address does not. Comparing the printed forms refused the
+    // receiver's own fetch and cancelled it silently, which stalled every
+    // Cast session until the 20 s play deadline (live failure, 2026-09-20).
+    static func peerMatches(_ endpoint: NWEndpoint, allowedPeer: String?) -> Bool {
+        guard let allowedPeer, let expected = IPv4Address(allowedPeer) else { return true }
+        guard case .hostPort(let host, _) = endpoint else { return false }
+        switch host {
+        case .ipv4(let address):
+            return address.rawValue == expected.rawValue
+        case .ipv6(let v6):
+            guard let v4 = v6.asIPv4 else { return false }
+            return v4.rawValue == expected.rawValue
+        case .name:
+            return false
+        @unknown default:
+            return false
+        }
+    }
+
     private func accept(_ connection: NWConnection) {
-        connections[ObjectIdentifier(connection)] = connection
+        guard Self.peerMatches(connection.endpoint, allowedPeer: allowedPeer) else {
+            onRefused?("wrong_peer", "\(connection.endpoint)")
+            connection.cancel()
+            return
+        }
+        guard connections.count < maxConnections else {
+            onRefused?("max_connections", "\(connection.endpoint)")
+            connection.cancel()
+            return
+        }
+        let key = ObjectIdentifier(connection)
+        connections[key] = connection
         connection.stateUpdateHandler = { [weak self] state in
             switch state {
             case .failed, .cancelled:
@@ -180,11 +274,24 @@ public final class CastLiveAudioServer: @unchecked Sendable {
         }
         connection.start(queue: queue)
         readRequest(connection, buffer: Data())
+
+        // Only a connection still held here was dropped for idleness:
+        // ``respond(to:on:)`` cancels this deadline the moment a complete
+        // request head arrives, and ``drop(_:)`` cancels it when the socket
+        // goes away, so a served GET must never be reported as a refusal.
+        let idleWork = DispatchWorkItem { [weak self] in
+            guard let self, let idle = self.connections[key] else { return }
+            self.onRefused?("idle_timeout", "\(idle.endpoint)")
+            idle.cancel()
+        }
+        idleTimeouts[key] = idleWork
+        queue.asyncAfter(deadline: .now() + idleDeadline, execute: idleWork)
     }
 
     private func drop(_ connection: NWConnection) {
         let key = ObjectIdentifier(connection)
         timers.removeValue(forKey: key)?.cancel()
+        idleTimeouts.removeValue(forKey: key)?.cancel()
         if connections.removeValue(forKey: key) != nil { connection.cancel() }
     }
 
@@ -206,6 +313,10 @@ public final class CastLiveAudioServer: @unchecked Sendable {
     }
 
     private func respond(to head: String, on connection: NWConnection) {
+        // A complete request head means the connection is no longer idle;
+        // cancel its deadline before it can fire against a request already
+        // in flight.
+        idleTimeouts.removeValue(forKey: ObjectIdentifier(connection))?.cancel()
         let method = head.split(separator: "\r\n").first?.split(separator: " ").first.map(String.init) ?? ""
         onRequest?(head)
         switch method {
@@ -260,21 +371,20 @@ public final class CastLiveAudioServer: @unchecked Sendable {
         // GET. A buffering source is empty at this point — the ring was reset
         // to the live edge moments ago — so starting here means demanding
         // audio nobody has produced yet, forever.
-        var startedAt: DispatchTime?
+        var startedAt: TimeInterval?
         var streamedFrames = 0
-        let waitingSince = DispatchTime.now()
+        let waitingSince = uptimeClock()
         timer.setEventHandler { [weak self] in
             guard let self else { return }
             guard let clockStart = startedAt else {
-                let waited = Double(DispatchTime.now().uptimeNanoseconds
-                    - waitingSince.uptimeNanoseconds) / 1_000_000_000
+                let waited = self.uptimeClock() - waitingSince
                 if waited < Self.cushionDeadline,
                    let buffered = self.source.bufferedFrames,
                    buffered < Self.cushionFrames { return }
-                startedAt = DispatchTime.now()
+                startedAt = self.uptimeClock()
                 return
             }
-            let elapsed = Double(DispatchTime.now().uptimeNanoseconds - clockStart.uptimeNanoseconds) / 1_000_000_000
+            let elapsed = self.uptimeClock() - clockStart
             let due = Int(elapsed * Double(Self.sampleRate)) - streamedFrames
             guard due > 0 else { return }
             self.sendChunk(self.source.render(frames: due), on: connection)

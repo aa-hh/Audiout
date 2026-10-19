@@ -32,7 +32,16 @@
      always-on root process for a feature the user may never invoke this
      session. EnvironmentVariables hands the helper that same service name
      (AUDIOUT_PTP_MACH_SERVICE) so it knows which name to check in on; unset
-     (dev path, run outside launchd) means no check-in at all. -->
+     (dev path, run outside launchd) means no check-in at all.
+
+     AUDIOUT_PTP_PEER_REQUIREMENT carries a second placeholder token (TEAM
+     underscore ID, doubled underscores each side), alongside the bundle-id
+     one above: make-app.sh derives it from the Developer ID signing
+     identity's Team ID and substitutes both into the requirement string
+     below, which is the app's own designated requirement. An ad-hoc build
+     (no Developer ID identity, so no Team ID) renders this value as an
+     empty string, which makes the helper refuse every release request and
+     rely on idle exit alone. -->
 <plist version="1.0">
 <dict>
     <key>Label</key>
@@ -57,6 +66,9 @@
     <dict>
         <key>AUDIOUT_PTP_MACH_SERVICE</key>
         <string>__BUNDLE_ID__.ptphelper</string>
+
+        <key>AUDIOUT_PTP_PEER_REQUIREMENT</key>
+        <string>identifier "__BUNDLE_ID__" and anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] and certificate leaf[field.1.2.840.113635.100.6.1.13] and certificate leaf[subject.OU] = "__TEAM_ID__"</string>
     </dict>
 
     <key>AssociatedBundleIdentifiers</key>

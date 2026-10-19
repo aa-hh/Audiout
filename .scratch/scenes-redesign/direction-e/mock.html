@@ -1,0 +1,261 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Scenes E mock</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #2B2C2F; font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+         -webkit-font-smoothing: antialiased; padding: 36px 40px 40px; width: 1554px; color: #EDEDEF; }
+  h1 { font-size: 20px; font-weight: 700; margin-bottom: 4px; }
+  .lead { color: #A3A4A9; font-size: 13px; line-height: 18px; margin-bottom: 26px; max-width: 1200px; }
+  .grid { display: grid; grid-template-columns: 713px 713px; column-gap: 48px; row-gap: 34px; align-items: start; }
+  .label { color: #EDEDEF; font-size: 13px; font-weight: 600; margin-bottom: 3px; }
+  .note { color: #A3A4A9; font-size: 12px; line-height: 16px; margin-bottom: 10px; min-height: 32px; }
+  .shell { position: relative; width: 713px; border-radius: 12px; overflow: hidden; }
+  .abs { position: absolute; white-space: nowrap; }
+  .ell { overflow: hidden; text-overflow: ellipsis; }
+  svg.layer { position: absolute; left: 0; top: 0; pointer-events: none; }
+  .pill { display: inline-flex; align-items: center; height: 18px; padding: 0 7px; border-radius: 9px;
+          font-size: 11px; margin-right: 4px; border: 1px solid; }
+  .legend { font-size: 11px; font-weight: 500; }
+  .text { color: #C9C9CE; font-size: 12px; line-height: 17px; }
+  .text p { margin-bottom: 8px; }
+  .text b { color: #EDEDEF; }
+</style>
+</head>
+<body>
+<h1>Scenes, direction E: one list of scenes that open in place</h1>
+<div class="lead">One column of Mixer rows under one card header. A scene row carries the group's glyph with its magenta glow in the icon column, the member names under the name, the count in the readout column and the Mixer's own feed pills in the Source column. Clicking a scene opens it in place: the fleet folds out beneath it, in the Mixer's order under the Mixer's subsection headers, on the editor's membership rail hanging from the scene's seat. One scene open at a time, one rail. Surface 713 pt at 1 pt = 1 px.</div>
+<div class="grid" id="grid"></div>
+<script>
+const T = {
+  dark: { shell:'#15171A', label:'#E8E8EA', label2:'#B7AC95', label3:'#9E947F',
+    cool:'#A9B3BB', cool2:'#818C94', hair:'#2A2E33', edge:'#3D4247', rim:'#6B767D',
+    gold:'#E8B84B', goldText:'#E8B84B', ember:'#8A6A2F', emberText:'#A98341',
+    magenta:'#FF90E9', glowA:0.22, socket:'#2A2E33', well:'#050507', raised:'#1F232A',
+    wash06:'rgba(232,232,234,0.06)', wash10:'rgba(232,232,234,0.10)', wash18:'rgba(232,232,234,0.18)',
+    btn:'#3A3C40', btnEdge:'#4A4C50', discEdge:null },
+  light: { shell:'#FAFAFB', label:'#1D1D1F', label2:'#6B5F4E', label3:'#6B6459',
+    cool:'#4E5A63', cool2:'#5F6A73', hair:'#CBCED4', edge:'#AEB3BB', rim:'#66717A',
+    gold:'#E8B84B', goldText:'#825E0F', ember:'#7A5E2A', emberText:'#7A5A22',
+    magenta:'#752C68', glowA:0.10, socket:'#DFE1E4', well:'#E9EAEC', raised:'#FAFAFB',
+    wash06:'rgba(29,29,31,0.06)', wash10:'rgba(29,29,31,0.10)', wash18:'rgba(29,29,31,0.18)',
+    btn:'#FFFFFF', btnEdge:'#C9CBD0', discEdge:'#7A5E2A' },
+};
+
+// The column grid (PopoverColumnGrid, read off the Mixer snapshot): rail gutter
+// centre 20, icon centre 56, name 81, readout column 453–493, trailing column
+// 499–699, trailing inset 14. Indented rows (indentedLeadingInset) sit 16 further in.
+const G = { gutter:20, icon:56, name:81, readoutL:453, readoutR:493, source:499, right:699, indent:16,
+            row:42, header:28, sub:22, strip:34 };
+
+// Glyphs: simple line drawings standing in for SF Symbols, 1.5 pt stroke.
+const ICON = {
+  laptop: (c)=>`<rect x="3" y="4" width="12" height="8" rx="1" fill="none" stroke="${c}" stroke-width="1.5"/><path d="M1 14h16" stroke="${c}" stroke-width="1.5" stroke-linecap="round"/>`,
+  homepod: (c)=>`<rect x="5" y="2" width="8" height="14" rx="3" fill="none" stroke="${c}" stroke-width="1.5"/><path d="M7 6h4M7 9h4" stroke="${c}" stroke-width="1.2" stroke-linecap="round"/>`,
+  tv: (c)=>`<rect x="2" y="3" width="14" height="10" rx="1.5" fill="none" stroke="${c}" stroke-width="1.5"/><path d="M6 16h6" stroke="${c}" stroke-width="1.5" stroke-linecap="round"/>`,
+  express: (c)=>`<rect x="2" y="9" width="14" height="6" rx="1.5" fill="none" stroke="${c}" stroke-width="1.5"/><path d="M6 6a4 4 0 0 1 6 0M4 3.5a7 7 0 0 1 10 0" fill="none" stroke="${c}" stroke-width="1.3" stroke-linecap="round"/>`,
+  speaker: (c)=>`<rect x="4" y="2" width="10" height="14" rx="1.5" fill="none" stroke="${c}" stroke-width="1.5"/><circle cx="9" cy="6" r="1.4" fill="${c}"/><circle cx="9" cy="11.5" r="2.2" fill="none" stroke="${c}" stroke-width="1.3"/>`,
+  stairs: (c)=>`<path d="M2 15h4v-4h4V7h4V3h2" fill="none" stroke="${c}" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>`,
+  sparkles: (c)=>`<path d="M7 2l1.6 4.4L13 8l-4.4 1.6L7 14l-1.6-4.4L1 8l4.4-1.6zM14 11l.8 2.2 2.2.8-2.2.8-.8 2.2-.8-2.2-2.2-.8 2.2-.8z" fill="${c}"/>`,
+  house: (c)=>`<path d="M2 9l7-6 7 6M4 8v7h10V8" fill="none" stroke="${c}" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/><rect x="7.5" y="10.5" width="3" height="4.5" fill="${c}"/>`,
+  group: (c)=>`<rect x="2" y="3" width="6" height="4" rx="1" fill="none" stroke="${c}" stroke-width="1.5"/><rect x="2" y="10" width="6" height="4" rx="1" fill="none" stroke="${c}" stroke-width="1.5"/><rect x="10" y="3" width="6" height="11" rx="1" fill="none" stroke="${c}" stroke-width="1.5"/>`,
+  plus: (c)=>`<path d="M9 3v12M3 9h12" stroke="${c}" stroke-width="1.6" stroke-linecap="round"/>`,
+  mixer: (c)=>`<path d="M2 5h14M2 10h14M2 15h14" stroke="${c}" stroke-width="1.5" stroke-linecap="round"/><circle cx="6" cy="5" r="1.8" fill="${c}"/><circle cx="12" cy="10" r="1.8" fill="${c}"/><circle cx="8" cy="15" r="1.8" fill="${c}"/>`,
+  hifi: (c)=>`<rect x="4" y="2" width="10" height="14" rx="1.5" fill="none" stroke="${c}" stroke-width="1.5"/><circle cx="9" cy="6" r="1.3" fill="${c}"/><circle cx="9" cy="11.5" r="2.3" fill="none" stroke="${c}" stroke-width="1.3"/>`,
+  gear: (c)=>`<circle cx="9" cy="9" r="3" fill="none" stroke="${c}" stroke-width="1.5"/><path d="M9 1.5v2.5M9 14v2.5M1.5 9h2.5M14 9h2.5M3.7 3.7l1.8 1.8M12.5 12.5l1.8 1.8M3.7 14.3l1.8-1.8M12.5 5.5l1.8-1.8" stroke="${c}" stroke-width="1.5" stroke-linecap="round"/>`,
+  pin: (c)=>`<path d="M9 16v-5M5 11h8l-1-3V4h1V2H5v2h1v4z" fill="none" stroke="${c}" stroke-width="1.5" stroke-linejoin="round"/>`,
+  pencil: (c)=>`<path d="M3 13l1-3 7-7 2 2-7 7z" fill="none" stroke="${c}" stroke-width="1.3" stroke-linejoin="round"/>`,
+  chevR: (c)=>`<path d="M4 2l5 5-5 5" fill="none" stroke="${c}" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>`,
+  chevD: (c)=>`<path d="M2 4l5 5 5-5" fill="none" stroke="${c}" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>`,
+};
+const svg = (name, c, size, x, y, cls='') =>
+  `<svg class="abs ${cls}" style="left:${x}px;top:${y}px" width="${size}" height="${size}" viewBox="0 0 18 18">${ICON[name](c)}</svg>`;
+
+// The demo fleet (MockBackend.demoFleet), in the Mixer's order. Bedroom HomePod is
+// drawn unavailable to show those states (assumption; the fixture marks all available).
+const FLEET = [
+  { id:'mac', name:'MacBook Pro Speakers', icon:'laptop', section:null },
+  { id:'homepod-bed', name:'Bedroom HomePod', icon:'homepod', section:'AirPlay Speakers', unavailable:true },
+  { id:'appletv-lr', name:'Living Room TV', icon:'tv', section:'AirPlay Speakers' },
+  { id:'airport-mixer', name:'Mixer', icon:'express', section:'AirPlay Speakers' },
+  { id:'sonos-move-2', name:'Move 2', icon:'speaker', section:'AirPlay Speakers' },
+  { id:'office', name:'Office', icon:'speaker', section:'AirPlay Speakers' },
+  { id:'sonos-move', name:'Sonos Move', icon:'speaker', section:'AirPlay Speakers' },
+];
+const byId = Object.fromEntries(FLEET.map(d => [d.id, d]));
+const SCENES = [
+  { id:'downstairs', name:'Downstairs', icon:'stairs', members:['office','sonos-move'], playing:true, apps:[] },
+  { id:'party', name:'Party', icon:'sparkles', members:['homepod-bed','office','sonos-move'], apps:['Music'] },
+  { id:'whole', name:'Whole House', icon:'house', members:FLEET.map(d=>d.id), apps:[] },
+];
+
+function captionFor(s) {
+  const members = s.members.map(id => byId[id]);
+  const un = members.filter(d => d.unavailable);
+  const ok = members.filter(d => !d.unavailable).map(d => d.name);
+  let head = '';
+  if (un.length === 1) head = `${un[0].name} unavailable · `;
+  else if (un.length > 1) head = `${un.length} unavailable · `;
+  return head + ok.join(', ');
+}
+
+function frame(theme, opts) {
+  const t = T[theme];
+  const open = opts.open || null;
+  const scenes = opts.empty ? [] : SCENES;
+  const isLight = theme === 'light';
+  let h = '';
+  let y = 0;
+  let rail = '';     // SVG path/node markup for the open scene's rail
+
+  // Surface header strip: tabs capsule, brand, Pin (shared chrome, drawn for context).
+  h += `<div class="abs" style="left:0;top:0;width:713px;height:${G.strip}px;background:${t.shell}"></div>`;
+  h += `<div class="abs" style="left:14px;top:3px;width:168px;height:28px;border-radius:14px;background:${t.wash06}"></div>`;
+  h += svg('mixer', t.label2, 15, 24, 9.5);
+  h += `<div class="abs" style="left:50px;top:3px;width:84px;height:28px;border-radius:14px;background:${t.wash18}"></div>`;
+  h += svg('group', t.label, 15, 60, 9.5);
+  h += `<div class="abs" style="left:83px;top:10px;font-size:11px;font-weight:500;color:${t.label}">Scenes</div>`;
+  h += svg('hifi', t.label2, 15, 142, 9.5);
+  h += svg('gear', t.label2, 15, 164, 9.5);
+  h += `<div class="abs" style="left:0;top:9px;width:713px;text-align:center;font-size:13px;font-weight:600;color:${t.label2}">Audiout</div>`;
+  h += svg('pin', t.label2, 15, 684, 9.5);
+  h += `<div class="abs" style="left:0;top:${G.strip}px;width:713px;height:1px;background:${t.hair}"></div>`;
+  y = G.strip + 8;
+
+  // Card header, the Mixer's 28 pt rank: title at the name column, legends over their columns.
+  h += `<div class="abs" style="left:${G.name}px;top:${y+8}px;font-size:11px;font-weight:600;color:${t.label2}">Scenes</div>`;
+  if (!opts.empty) {
+    h += `<div class="abs legend" style="left:${G.readoutL}px;top:${y+8}px;width:40px;text-align:center;color:${t.label2}">Speakers</div>`;
+    h += `<div class="abs legend" style="left:${G.source}px;top:${y+8}px;width:120px;text-align:center;color:${t.label2}">Source</div>`;
+  }
+  y += G.header;
+
+  if (opts.empty) {
+    // CardMessageRow: message in menuItem/label2, hint in captionMedium/label2.
+    h += `<div class="abs" style="left:${G.name}px;top:${y+6}px;font-size:13px;color:${t.label2}">No scenes yet</div>`;
+    h += `<div class="abs" style="left:${G.name}px;top:${y+25}px;font-size:11px;font-weight:500;color:${t.label2}">Save a set of speakers as a scene, then switch to it in two clicks from the menu bar.</div>`;
+    y += 46;
+  }
+
+  for (const s of scenes) {
+    const isOpen = open === s.id;
+    const live = s.playing;
+    const ink = live ? t.label : t.cool;
+    const yc = y + G.row / 2;
+    const rowTop = y;
+    if (opts.hover === s.id) h += `<div class="abs" style="left:5px;top:${y+2}px;width:703px;height:38px;border-radius:10px;background:${t.wash10}"></div>`;
+    // Identity: glow behind the seat, then the glyph. No ring.
+    h += `<div class="abs" style="left:${G.icon-30}px;top:${yc-30}px;width:60px;height:60px;border-radius:30px;background:radial-gradient(circle, rgba(${hex(t.magenta)},${t.glowA}) 0%, rgba(${hex(t.magenta)},0) 70%)"></div>`;
+    h += svg(s.icon, ink, 18, G.icon-9, yc-9);
+    if (isOpen) {
+      // The editor's rename field (WarmNameFieldCell): filled, bordered, trailing pencil.
+      h += `<div class="abs" style="left:${G.name-6}px;top:${y+4}px;width:190px;height:22px;border-radius:6px;background:${t.raised};border:1px solid ${t.edge}"></div>`;
+      h += `<div class="abs ell" style="left:${G.name}px;top:${y+7}px;width:150px;font-size:13px;color:${ink}">${s.name}</div>`;
+      h += svg('pencil', t.label2, 13, G.name+168, y+8.5);
+      h += `<div class="abs" style="left:${G.name+196}px;top:${y+7}px;font-size:13px;color:${t.label2}">Change icon…</div>`;
+    } else {
+      h += `<div class="abs ell" style="left:${G.name}px;top:${y+6}px;width:360px;font-size:13px;color:${ink}">${s.name}</div>`;
+    }
+    h += `<div class="abs ell" style="left:${G.name}px;top:${y+24}px;width:360px;font-size:11px;color:${t.cool}">${captionFor(s)}</div>`;
+    // Readout: the count, label on the playing scene, labelCool otherwise.
+    h += `<div class="abs" style="left:${G.readoutL}px;top:${yc-7}px;width:40px;text-align:center;font-size:11px;font-weight:600;font-variant-numeric:tabular-nums;color:${ink}">${s.members.length}</div>`;
+    // Source: the Mixer's feed pills, read-only.
+    let pills = '';
+    if (live) pills += `<span class="pill" style="background:${t.well};border-color:${t.rim};color:${t.goldText}">System</span>`;
+    for (const a of s.apps) pills += `<span class="pill" style="background:${t.well};border-color:${t.rim};color:${t.cool}">${a}</span>`;
+    h += `<div class="abs" style="left:${G.source}px;top:${yc-9}px">${pills}</div>`;
+    h += svg(isOpen ? 'chevD' : 'chevR', t.cool2, 13, G.right-13, yc-6.5);
+    y += G.row;
+
+    if (isOpen) {
+      const tone = live ? t.gold : t.ember;
+      const nodes = [];       // {y, kind}
+      let section = null;
+      for (const d of FLEET) {
+        if (d.section && d.section !== section) {
+          section = d.section;
+          // Mixer subsection header: chevron + title in captionMedium/label3, indented.
+          h += svg('chevD', t.label3, 11, 68 + G.indent, y + 6);
+          h += `<div class="abs" style="left:${82+G.indent}px;top:${y+4}px;font-size:11px;font-weight:500;color:${t.label3}">${section}</div>`;
+          y += G.sub;
+        }
+        const member = s.members.includes(d.id);
+        const ryc = y + G.row / 2;
+        const nameInk = d.unavailable ? t.cool : t.label;
+        const iconInk = d.unavailable ? t.cool2 : t.label;
+        if (opts.hover === d.id) h += `<div class="abs" style="left:5px;top:${y+2}px;width:703px;height:38px;border-radius:10px;background:${t.wash10}"></div>`;
+        h += svg(d.icon, iconInk, 18, G.icon + G.indent - 9, ryc - 9);
+        h += `<div class="abs ell" style="left:${G.name+G.indent}px;top:${ryc-8}px;width:400px;font-size:13px;color:${nameInk}">${d.name}</div>`;
+        if (d.unavailable) h += `<div class="abs" style="left:${G.right-120}px;top:${ryc-7}px;width:120px;text-align:right;font-size:11px;color:${t.cool2}">Unavailable</div>`;
+        nodes.push({ y: ryc, kind: member ? (d.unavailable ? 'dim' : 'member') : 'none' });
+        y += G.row;
+      }
+      // Closing CardMessageRow: one small button and the saved-as-you-go line.
+      h += `<div class="abs" style="left:${G.name+G.indent}px;top:${y+11}px;height:20px;padding:0 9px;border-radius:5px;background:${t.btn};border:1px solid ${t.btnEdge};font-size:11px;line-height:18px;color:${t.label}">Delete scene…</div>`;
+      h += `<div class="abs" style="left:${G.name+G.indent+108}px;top:${y+14}px;font-size:11px;color:${t.label2}">${live ? 'Changes are saved as you go. They don’t change what’s playing now.' : 'Changes are saved as you go.'}</div>`;
+      y += G.row;
+
+      // The rail: hooks out of the seat, runs down the gutter, ends at the last member.
+      const lastMember = Math.max(...nodes.map((n, i) => n.kind !== 'none' ? i : -1));
+      const endY = nodes[lastMember].y;
+      let d = `M ${G.icon-11} ${yc} C ${G.icon-21} ${yc} ${G.gutter} ${yc+4} ${G.gutter} ${yc+16}`;
+      nodes.forEach((n, i) => {
+        if (i > lastMember) return;
+        if (n.kind === 'none') {
+          // Detour arc around a non-member's hollow node.
+          d += ` L ${G.gutter} ${n.y-11} C ${G.gutter} ${n.y-5} ${G.gutter-9} ${n.y-6} ${G.gutter-9} ${n.y} C ${G.gutter-9} ${n.y+6} ${G.gutter} ${n.y+5} ${G.gutter} ${n.y+11}`;
+        } else {
+          d += ` L ${G.gutter} ${n.y}`;
+        }
+      });
+      rail += `<path d="${d}" fill="none" stroke="${tone}" stroke-width="2" stroke-linecap="round"/>`;
+      for (const n of nodes) {
+        if (n.kind === 'member') rail += `<circle cx="${G.gutter}" cy="${n.y}" r="7.5" fill="${tone}" ${isLight && live ? `stroke="${t.discEdge}" stroke-width="1"` : ''}/>`;
+        else if (n.kind === 'dim') rail += `<circle cx="${G.gutter}" cy="${n.y}" r="6" fill="${t.socket}" stroke="${tone}" stroke-width="3"/>`;
+        else rail += `<circle cx="${G.gutter}" cy="${n.y}" r="5.5" fill="${t.shell}" stroke="${tone}" stroke-width="1.6"/>`;
+      }
+    }
+  }
+
+  // "Add scene", built like the Mixer's Pair Bluetooth row.
+  if (opts.hover === 'add') h += `<div class="abs" style="left:5px;top:${y+2}px;width:703px;height:38px;border-radius:10px;background:${t.wash10}"></div>`;
+  h += svg('plus', t.label2, 16, G.icon-8, y + G.row/2 - 8);
+  h += `<div class="abs" style="left:${G.name}px;top:${y+G.row/2-8}px;font-size:13px;color:${t.label2}">Add scene</div>`;
+  y += G.row;
+
+  // Host footer.
+  y += 6;
+  h += `<div class="abs" style="left:0;top:${y}px;width:713px;text-align:center;font-size:11px;color:${t.label2}">Set up scenes here, then switch to the Mixer to play</div>`;
+  y += 13 + 8;
+
+  return `<div class="shell" style="height:${y}px;background:${t.shell}">${h}<svg class="layer" width="713" height="${y}">${rail}</svg></div>`;
+}
+function hex(c) { return `${parseInt(c.slice(1,3),16)},${parseInt(c.slice(3,5),16)},${parseInt(c.slice(5,7),16)}`; }
+
+const cells = [
+  { label:'Overview · dark', note:'Every scene folded. Downstairs is what Main Audio plays to: label ink, a gold "System" pill, nothing else. Party is fed by Music; its unreachable member is named first so truncation can never hide it. No rail: nothing is open.', theme:'dark', opts:{ hover:'party' } },
+  { label:'Overview · light', note:'The same list on the flat ground. The magenta glow drops to 10 %; the "System" pill’s text is the darker text gold.', theme:'light', opts:{} },
+  { label:'Editor · dark: Party opened in place', note:'The fleet folds out under Party in the Mixer’s order, under the Mixer’s own subsection header. The rail is ember (a saved scene), hooks out of the seat, bows around non-members and ends at the last member. Bedroom HomePod is a member the Mac can’t reach: dimmed node, line passing through. The name is the editor’s rename field.', theme:'dark', opts:{ open:'party', hover:'sonos-move-2' } },
+  { label:'Editor · light: Downstairs (playing) opened in place', note:'Same anatomy, gold rail. In light a gold disc keeps its 1 pt ember edge; the "System" pill and the label ink carry the state in words. The closing row says changes don’t touch what is playing.', theme:'light', opts:{ open:'downstairs' } },
+  { label:'Empty · dark', note:'The card header, the Mixer’s CardMessageRow with today’s copy, and "Add scene" where it always sits.', theme:'dark', opts:{ empty:true } },
+];
+const grid = document.getElementById('grid');
+for (const c of cells) {
+  const d = document.createElement('div');
+  d.innerHTML = `<div class="label">${c.label}</div><div class="note">${c.note}</div>${frame(c.theme, c.opts)}`;
+  grid.appendChild(d);
+}
+const notes = document.createElement('div');
+notes.className = 'text';
+notes.style.paddingTop = '58px';
+notes.innerHTML = `
+<p><b>Reused as they are:</b> PopoverColumnGrid, the Mixer card header and subsection header, GroupIdentityGlowView, DeviceIcon, FeedPillView, BusRailOverlayView / RailPlan / MembershipBusView, InvisibleSwitchCell, WarmNameFieldCell, CardMessageRow, the Pair Bluetooth row recipe, HoverTracker, FoldAnimator, IconPickerViewController, GroupCreationSheetController, the host footer.</p>
+<p><b>Nothing new is drawn.</b> The one new piece is a container that lays Mixer rows out as an outline (a scene, then its fleet) and hands row frames to the rail overlay.</p>
+<p><b>Removed:</b> the card grid, the dashed tile, member chips, the push, the "‹ Scenes" band, Done/Save, the 48 pt well on the overview.</p>
+<p><b>Unchanged:</b> nothing on this tab starts playback; you play a scene from the Main Audio menu. The creation sheet survives behind "Add scene" and ⌘N.</p>`;
+grid.appendChild(notes);
+</script>
+</body>
+</html>

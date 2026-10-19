@@ -62,6 +62,18 @@ import Network
         #expect(abs(DACPServer.level(fromDb: 5) - 1) <= 0.0001)     // clamp above
     }
 
+    /// The bug this guards: a DACP peer on the LAN can send
+    /// `dmcp.device-volume=nan`, `Double("nan")` parses it happily, and both
+    /// comparisons in `level(fromDb:)` are false for NaN — so a NaN volume
+    /// level used to flow out of `onVolume` into the backend's volume write.
+    /// Compared with `==` rather than a tolerance: every tolerance check
+    /// passes vacuously for NaN.
+    @Test func nonFiniteDbMapsToZero() {
+        #expect(DACPServer.level(fromDb: .nan) == 0)
+        #expect(DACPServer.level(fromDb: .infinity) == 0)
+        #expect(DACPServer.level(fromDb: -.infinity) == 0)
+    }
+
     // MARK: - Idle-connection timeout (unbounded-growth hardening)
     //
     // These drive `accept(_:)` directly with a real loopback `NWConnection`,
@@ -91,12 +103,12 @@ import Network
     /// Spin (not block) until every signal has fired or `timeout` elapses.
     /// Returns whether all fired. Same shape as the listener `.ready` wait
     /// below — deliberately consistent rather than introducing a second idiom.
-    private func waitFor(_ signals: [Signal], timeout: TimeInterval) -> Bool {
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            if signals.allSatisfy(\.fired) { return true }
-            Thread.sleep(forTimeInterval: 0.005)
-        }
+    private func waitFor(
+        _ signals: [Signal], timeout: TimeInterval,
+        sourceLocation: SourceLocation = #_sourceLocation
+    ) -> Bool {
+        SuiteWait.untilOnRunLoop("every signal to fire", timeout: timeout,
+                                 sourceLocation: sourceLocation) { signals.allSatisfy(\.fired) }
         return signals.allSatisfy(\.fired)
     }
 
@@ -201,7 +213,10 @@ import Network
         // rightly refuses to let this closure mutate a captured local `var`
         // — assert inline instead of capturing the reported values out.
         let volumeReported = Signal()
-        server.onVolume = { token, level in
+        // The loopback peer is 127.0.0.1: the host is what NativeBackend checks
+        // against the speaker's own address before it moves a slider.
+        server.onVolume = { remoteHost, token, level in
+            #expect(remoteHost == "127.0.0.1")
             #expect(token == 460916894)
             #expect(abs(level - DACPServer.level(fromDb: -16.5)) < 0.0001)
             volumeReported.fire()
@@ -222,6 +237,32 @@ import Network
         #expect(waitFor([volumeReported, responseReceived], timeout: 2),
                 "the request round trip did not complete within 2s")
         #expect(responseText?.hasPrefix("HTTP/1.1 204 No Content") == true)
+    }
+
+    /// The bug this guards: `accept(_:)` stored every arriving connection
+    /// with no upper bound, so a LAN peer opening connections in a loop grew
+    /// `connections` and held one kernel socket each until the 30 s idle
+    /// deadline reaped them — the file-descriptor exhaustion
+    /// `CompanionServer.pendingCap` already guards against.
+    @Test func connectionBeyondTheCapIsDroppedImmediately() throws {
+        let (firstListener, firstClient, firstServerSide) = try makeLoopbackPair()
+        defer { firstListener.cancel(); firstClient.cancel() }
+        let (secondListener, secondClient, secondServerSide) = try makeLoopbackPair()
+        defer { secondListener.cancel(); secondClient.cancel() }
+
+        let server = DACPServer()
+        server.test_connectionCapOverride = 1 // the real cap is 32
+        // The idle timeout is deliberately left at its 30 s default: the
+        // first connection never sends, so a shortened override would free
+        // the only slot mid-test.
+        defer { server.stop() }
+
+        server.accept(firstServerSide)
+        #expect(server.test_connectionCount == 1)
+
+        server.accept(secondServerSide)
+        #expect(server.test_connectionCount == 1,
+                "the over-cap connection was stored instead of dropped")
     }
 }
 

@@ -17,13 +17,12 @@ import AVFoundation
 /// ``PCMSink/write(pcm:pts:)`` with a per-buffer presentation timestamp taken
 /// straight off the IOProc's `AudioTimeStamp.mHostTime`.
 ///
-/// This is the native-path analogue of ``CaptureCoordinator`` — but structurally
-/// SIMPLER, not a port: there is no FIFO, no subprocess, no OwnTone library
-/// rescan and no `pipe_sample_rate` reconcile. Capture runs inside the app
-/// process (D2) so the `pts` comes for free from the tap's own clock and there is
-/// zero IPC. The old coordinator's suspend-to-pause / zombie-replay machinery has
-/// no equivalent here (nothing to re-kick — a session failure is reported by the
-/// engine, not a paused file player).
+/// This is the native capture coordinator: there is no FIFO, no subprocess, no
+/// external library rescan and no `pipe_sample_rate` reconcile. Capture runs
+/// inside the app process (D2) so the `pts` comes for free from the tap's own
+/// clock and there is zero IPC. A subprocess coordinator's suspend-to-pause /
+/// zombie-replay machinery has no equivalent here (nothing to re-kick — a
+/// session failure is reported by the engine, not a paused file player).
 ///
 /// ## The Phase-0 config-follows-tap invariant, applied
 /// The engine is HARDWIRED to S16LE / 44100 / 2ch — there is no engine "quality"
@@ -385,12 +384,16 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     /// dropped when the wizard injector is swapped.
     private var micProbeStarted: (() -> Void)?
     private var micProbeFinished: (() -> Void)?
-    /// Which Bluetooth device UID owns each staged sweep window, indexed by
-    /// the window number ``AlignmentTickInjector`` reports (0 = DOWN,
-    /// 1 = UP); `nil` at an index means no Bluetooth sink owns that window
-    /// (a Mac reference hears the DOWN sweep through the engine lane).
-    /// Non-empty ONLY for a companion run — the Mac's own wizard stages both
-    /// sweeps at once and needs no per-device routing. Pacer-queue confined.
+    /// Asked once at arm time for the probe's level step (0, 6 or 12 dB);
+    /// nil means 0. Only the Mac's own wizard sets it — its mic is listening.
+    private var micProbeLevelStep: (() -> Int)?
+    /// Which Bluetooth device UID owns each staged probe window, indexed by
+    /// the window number ``AlignmentTickInjector`` reports (0 = target,
+    /// 1 = reference); `nil` at an index means no Bluetooth sink owns that
+    /// window (a Mac reference hears its lane through the engine fan-out).
+    /// Non-empty ONLY for a routed companion run — the Mac's own wizard puts
+    /// each lane on its own fan-out and needs no per-device routing.
+    /// Pacer-queue confined.
     private var companionProbeWindowUIDs: [String?] = []
     /// A companion run owns this probe, so its completion must NOT hand over
     /// to the by-ear tick grid — the phone decides what happens next.
@@ -442,12 +445,15 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
 
     /// The tone stages this coordinator applies to each delivered buffer: the
     /// Main Out stage (before every fan-out, so the local Mac and Bluetooth
-    /// inherit it) plus one AirPlay write per EQ stream. Queue-confined here
+    /// inherit it) plus one AirPlay write per stream in the plan. Queue-confined here
     /// (set via ``setEQPlan(_:)``), consumed only through the published
     /// ``BufferSnapshot``. ``WholeSystemEQPlan/passthrough`` — the default — is
     /// the ONLY shape that stays byte-identical, and it is exactly the legacy
     /// single stream-0 write.
     private var eqPlan: WholeSystemEQPlan = .passthrough
+    /// The last `eq_plan_applied` summary written, so a scrub that hands the
+    /// same plan shape over every frame logs once. Queue-confined.
+    private var lastEQPlanLogSummary: String?
 
     /// W1-T7 (Gap 1 + Fix 1): the excluded process-OBJECT set the CURRENT live tap
     /// was last built/recreated against — the compare-before-rebuild key for the
@@ -609,7 +615,7 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             processResolver: processResolver,
             muteBehavior: muteBehavior,
             // T7: the same engine, as the workgroup target. Wired here (the one
-            // production construction site, via `OwnToneBackend`) rather than
+            // production construction site, via `makeBackend`) rather than
             // through `NativeBackend`, since the engine is already in hand and
             // every join/leave edge belongs to this coordinator's state machine.
             workgroup: EngineIOWorkgroup(engine: engine)
@@ -1376,6 +1382,7 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             self.pacerQueue.async { [weak self] in
                 self?.micProbeStarted = nil
                 self?.micProbeFinished = nil
+                self?.micProbeLevelStep = nil
                 self?.companionProbeWindowUIDs = []
                 self?.companionProbeActive = false
             }
@@ -1396,14 +1403,14 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     /// Inert when no wizard injector is live.
     ///
     /// When a mic probe is staged (roadmap 064), the SAME arm moment starts the
-    /// probe sweeps INSTEAD, and the tick grid arms automatically the moment the
-    /// sweeps finish — one gate, two payloads, so the backend's release gate
+    /// probe INSTEAD, and the tick grid arms automatically the moment the
+    /// probe finishes — one gate, two payloads, so the backend's release gate
     /// needs no probe awareness at all.
     public func armWizardTicks() {
         pacerQueue.async { [weak self] in
             guard let self, let injector = self.currentWizardInjector() else { return }
             if injector.probeStaged, !injector.test_probeArmed {
-                injector.armProbe()
+                injector.armProbe(levelStepDB: self.micProbeLevelStep?() ?? 0)
                 let started = self.micProbeStarted
                 self.micProbeStarted = nil
                 if let started { DispatchQueue.global(qos: .userInitiated).async(execute: started) }
@@ -1413,55 +1420,79 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         }
     }
 
-    /// Stage the one-shot calibration sweeps on the live wizard injector
+    /// Stage the one-shot calibration probe on the live wizard injector
     /// (roadmap 064). Call AFTER ``setAlignTickMode(_:)`` has entered `.wizard`.
-    /// `onStarted` fires when the arm gate opens and the sweeps begin rendering
-    /// into the feed; `onFinished` when the last sweep frame has been rendered
-    /// (air arrival lags by the sinks' pipeline delay). Both fire off-queue,
-    /// at most once; a run torn down early fires neither — callers recover by
-    /// timeout.
-    public func stageWizardMicProbe(onStarted: @escaping () -> Void,
+    /// `levelStepDB` is asked once, when the probe arms, for the level step
+    /// the room needs. `onStarted` fires when the arm gate opens and the probe
+    /// begins rendering into the feed; `onFinished` when its last frame has
+    /// been rendered (air arrival lags by the sinks' pipeline delay). Both
+    /// fire off-queue, at most once; a run torn down early fires neither —
+    /// callers recover by timeout. A probe that stages after the gate has
+    /// already opened starts immediately instead of being dropped, and the
+    /// tick grid re-arms after the probe as usual.
+    public func stageWizardMicProbe(levelStepDB: @escaping () -> Int,
+                                    onStarted: @escaping () -> Void,
                                     onFinished: @escaping () -> Void) {
         pacerQueue.async { [weak self] in
             guard let self, let injector = self.currentWizardInjector() else { return }
             injector.stageProbe()
-            self.micProbeStarted = onStarted
-            self.micProbeFinished = onFinished
+            self.micProbeLevelStep = levelStepDB
+            if injector.test_isArmed {
+                // The gate already opened and armed the by-ear ticks before this
+                // probe finished staging (cold mic start can take seconds). Undo
+                // that arm and start the probe right now instead of dropping
+                // it — the completion handoff below (`emitWizardBlock`) arms
+                // the tick grid again a clean interval after the probe, exactly
+                // as the normal stage-before-arm path does.
+                injector.disarmTicks()
+                injector.armProbe(levelStepDB: self.micProbeLevelStep?() ?? 0)
+                self.micProbeFinished = onFinished
+                let started = onStarted
+                DispatchQueue.global(qos: .userInitiated).async(execute: started)
+                self.queue.async { Telemetry.log(.captureWS, "wizard_probe_late_armed", [:]) }
+            } else {
+                self.micProbeStarted = onStarted
+                self.micProbeFinished = onFinished
+            }
         }
     }
 
-    /// Stage the calibration sweeps for a PHONE-driven run. Same feed, same
-    /// arm gate and same callbacks as ``stageWizardMicProbe(onStarted:onFinished:)``,
-    /// with two differences the companion run needs:
+    /// Stage the calibration probe for a PHONE-driven run. Same feed, same
+    /// arm gate and same callbacks as
+    /// ``stageWizardMicProbe(levelStepDB:onStarted:onFinished:)``, with the
+    /// differences the companion run needs:
     ///
-    /// - `staggered` lays the two sweeps a stagger apart instead of together,
-    ///   and `downWindowUID`/`upWindowUID` name the Bluetooth sink that is to
-    ///   HEAR each one. The fan-out then writes the sweep-carrying feed into
-    ///   that one sink's delay line and the sweep-free feed into every other,
-    ///   which is the only way to sequence two Bluetooth speakers: gating at
-    ///   the output with gain cannot do it, because each sink's delay line is
-    ///   exactly the unknown being measured. Either UID may be `nil` — a Mac
-    ///   reference hears the DOWN sweep through the engine lane instead.
-    /// - Completing the sweeps does NOT hand over to the by-ear tick grid.
+    /// - `routed` puts both lanes on the Bluetooth fan-out in windows 0 and 1,
+    ///   and `targetWindowUID`/`referenceWindowUID` name the Bluetooth sink
+    ///   that is to HEAR each one. The fan-out then writes the probe-carrying
+    ///   feed into that one sink's delay line and the probe-free feed into
+    ///   every other, which is the only way to sequence two Bluetooth
+    ///   speakers: gating at the output with gain cannot do it, because each
+    ///   sink's delay line is exactly the unknown being measured. Either UID
+    ///   may be `nil` — a Mac reference hears its lane through the engine
+    ///   fan-out instead.
+    /// - Completing the probe does NOT hand over to the by-ear tick grid.
     ///   The phone owns what happens next, and the Mac stands the run down on
     ///   its own a moment later.
     /// - The microphone is the phone's, at the listening position, so the
-    ///   engine lane plays at full amplitude. Its usual −6 dB pays for a Mac
-    ///   speaker inches from the Mac's own mic, which is not this run.
-    public func stageCompanionMicProbe(staggered: Bool,
+    ///   engine lane plays at full amplitude and at level step 0. Its usual
+    ///   scale pays for a Mac speaker inches from the Mac's own mic, which is
+    ///   not this run, and the Mac is not listening to the room.
+    public func stageCompanionMicProbe(routed: Bool,
                                        referenceOnEngine: Bool,
-                                       downWindowUID: String?,
-                                       upWindowUID: String?,
+                                       targetWindowUID: String?,
+                                       referenceWindowUID: String?,
                                        onStarted: @escaping () -> Void,
                                        onFinished: @escaping () -> Void) {
         pacerQueue.async { [weak self] in
             guard let self, let injector = self.currentWizardInjector() else { return }
             injector.stageProbe(
-                shape: staggered ? .staggered(referenceOnEngine: referenceOnEngine)
-                                 : .simultaneous,
+                shape: routed ? .routedWindows(referenceOnEngine: referenceOnEngine)
+                              : .perFanout,
                 engineLaneScale: 1)
-            self.companionProbeWindowUIDs = staggered ? [downWindowUID, upWindowUID] : []
+            self.companionProbeWindowUIDs = routed ? [targetWindowUID, referenceWindowUID] : []
             self.companionProbeActive = true
+            self.micProbeLevelStep = nil
             self.micProbeStarted = onStarted
             self.micProbeFinished = onFinished
         }
@@ -1546,7 +1577,7 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         let window = injector.mixWizardVariants(
             into: &pcm, bedded: &bedded, beddedNoProbe: &beddedNoProbe)
         if injector.takeProbeCompletion() {
-            // The sweeps are fully in the feed: start the by-ear grid (a clean
+            // The probe is fully in the feed: start the by-ear grid (a clean
             // interval away) and let the mic session know the tail is coming.
             // A COMPANION run skips the handover — the phone decides what
             // follows a measurement, and ticking on unasked would put a
@@ -1556,7 +1587,7 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             micProbeFinished = nil
             if let finished { DispatchQueue.global(qos: .userInitiated).async(execute: finished) }
         }
-        // Which Bluetooth sink, if any, is to hear the sweep in THIS block.
+        // Which Bluetooth sink, if any, is to hear the probe in THIS block.
         let sweepOwnerUID = window.flatMap { index -> String? in
             companionProbeWindowUIDs.indices.contains(index)
                 ? companionProbeWindowUIDs[index] : nil
@@ -1610,9 +1641,25 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     /// alone, so a value change reaches a live one only through its own mailbox,
     /// which the delivery thread itself picks up.
     public func setEQPlan(_ plan: WholeSystemEQPlan) {
-        queue.sync {
+        let summary = "\(plan.isPassthrough) \(plan.main == nil) \(plan.telemetryStreamSummary)"
+        let changed: Bool = queue.sync {
             self.eqPlan = plan
             self.publishBufferSnapshot()
+            defer { self.lastEQPlanLogSummary = summary }
+            return self.lastEQPlanLogSummary != summary
+        }
+        // What the delivery path will actually use, in the same shape as the
+        // backend's `eq_plan` line: a plan that is shaped where it is built and
+        // flat (or passthrough) here separates a backend fault from a delivery
+        // one on two adjacent lines (ticket 04). Logged on CHANGE only — a
+        // scrub republishes the plan per frame — and off the delivery thread,
+        // which must never call `Telemetry.log` at all.
+        if changed {
+            Telemetry.log(.captureWS, "eq_plan_applied", [
+                "passthrough": plan.isPassthrough ? "true" : "false",
+                "main": plan.main == nil ? "off" : "on",
+                "streams": plan.telemetryStreamSummary,
+            ])
         }
     }
 
@@ -1621,7 +1668,8 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     /// Runs on the tap's delivery thread (the IOProc, in production). Allocation
     /// beyond the converter's own scratch is avoided on this path where practical.
     private func handleBuffer(_ buffer: CapturedBuffer) {
-        // T8 (plan finding F12): REAL-TIME THREAD — never take `queue` here.
+        // T8 (plan finding F12): this is the tap's delivery thread — never take
+        // `queue` here. See the policy at `startIOProc`'s IOProc block.
         //
         // This used to be `queue.sync { (converter, meteringActive, sink,
         // resampler) }`, i.e. the audio thread blocking on the same unqualified,
@@ -1657,6 +1705,8 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         guard !snapshot.wizardActive else { return }
         guard let converter = snapshot.converter else { return }
 
+        // The converter's own lock is the bounded, single-caller kind point 3
+        // of the policy allows to be taken with `lock()`.
         let converted = converter.convertToAirPlayPCM(buffer)
         // Sampled AFTER the convert attempt and BEFORE the failure early-out,
         // so a converter dropping every buffer still surfaces its counters
@@ -1715,6 +1765,42 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             }
             if gapNanos > 0, gapNanos <= Self.maxFeedGapFillNanos {
                 fillFeedGap(nanos: gapNanos, from: gap.lastEndPtsNanos, snapshot: snapshot)
+            }
+        } else {
+            // No rebuild, and still a hole: the IOProc itself loses a cycle now
+            // and then (live diagnosis 2026-09-14: about one per 40 s with a
+            // third Bluetooth link on the radio, one per hour the day before).
+            // Nothing downstream notices on its own, because every sink is fed
+            // by sample count. `BTSyncedSink` reads a pts only for its first
+            // buffer, and the sender anchors packet time to samples too, so one
+            // lost cycle plays all later audio 11.6 ms early on every speaker at
+            // once: `write_cadence_drift`'s `netDriftTotalSeconds` climbs by that
+            // much with no overrun to explain it, and five of them put the
+            // arrival 55-66 ms early. Measuring every buffer against the last one
+            // delivered, not just the first after a rebuild, keeps the sample
+            // count honest against wall time.
+            let lastEnd = feedGap.lastDeliveredEndPtsNanos
+            let gapNanos = SyncTiming.monotonicNanos(buffer.pts) &- lastEnd
+            // A lost cycle costs a whole block. Anything smaller is the
+            // converter's own per-block rounding and clock jitter, which averages
+            // out to nothing; filling only the positive half of it would itself
+            // add silence that was never missing. Anything bigger than the cap is
+            // a pause or an idle tap (both taps sleep until an app plays), where
+            // the audio really did stop and padding would push the next real
+            // block late.
+            let blockFrames = pcm.count / (PCMFormat.airplay.channels * MemoryLayout<Int16>.size)
+            let blockNanos = Int64(Double(blockFrames) * 1_000_000_000 / Double(PCMFormat.airplay.sampleRate))
+            if lastEnd != 0, gapNanos >= blockNanos / 2, gapNanos <= Self.maxDroppedCycleFillNanos {
+                // Logged only when it fills, unlike the rebuild arm above: an
+                // unfilled hole here is the tap waking from idle, which happens
+                // every time the music stops and says nothing worth a line.
+                queue.async {
+                    Telemetry.log(.captureWS, "tap_feed_gap", [
+                        "cause": "dropped_cycle",
+                        "gapMs": String(format: "%.1f", Double(gapNanos) / 1_000_000),
+                    ])
+                }
+                fillFeedGap(nanos: gapNanos, from: lastEnd, snapshot: snapshot)
             }
         }
 
@@ -1904,6 +1990,12 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         // render process is excluded from this tap
         // (``resolveExcludedProcessObjectIDs()``) so their delayed output
         // can't loop back as an echo.
+        // Reference retention (roadmap 085 ticket 01): the Bluetooth-bound
+        // variant of this block, kept for passive-drift correlation. While
+        // nothing has armed the ring this is one atomic word read and a
+        // return — no lock, so a reader's copy can never stall delivery.
+        referenceRing.append(btPCM ?? pcm, pts: pts)
+
         if let btSink = snapshot.btSink, let btResampler = snapshot.btBaseResampler {
             if let btSweepFreePCM, btResampler.isIdentity {
                 Self.fanOutSplitToBT(sweep: btPCM ?? pcm, sweepFree: btSweepFreePCM,
@@ -1913,7 +2005,7 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
                 // streaming resampler cannot carry two independent feeds
                 // without corrupting its own filter state. The Bluetooth sink
                 // manager renders at the airplay rate in production
-                // (`OwnToneBackend`'s factory takes `BTSyncedSink`'s 44.1 kHz
+                // (`makeBackend`'s factory takes `BTSyncedSink`'s 44.1 kHz
                 // default), so identity is the real path and this arm is the
                 // honest fallback: one feed for everybody, which measures the
                 // two sweeps together instead of per speaker. Upgrade path if
@@ -2071,6 +2163,12 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             lastEndPtsPtr.pointee = endPtsNanos
         }
 
+        /// Delivery thread only: where the last block handed downstream ends, or
+        /// 0 when nothing has been delivered since the last ``reset()``. Read
+        /// without clearing the arm, so every buffer can be measured against it
+        /// and not only the first one after a rebuild.
+        var lastDeliveredEndPtsNanos: Int64 { lastEndPtsPtr.pointee }
+
         /// Control side only: the first buffer carrying `fromEpoch` or later is
         /// the first one after this rebuild, so it should measure and fill.
         /// Anything still in flight from before the claim carries an earlier epoch
@@ -2120,12 +2218,28 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
 
     private let feedGap = FeedGapTracker()
 
+    /// Rolling history of the Bluetooth-bound outgoing audio (roadmap 085
+    /// ticket 01): the correlation reference for passive drift tracking.
+    /// Disarmed by default — ``deliver`` feeds it one lock-free flag read per
+    /// block until a tracker or re-sync capture arms it.
+    let referenceRing = ReferenceAudioRing()
+
     /// Beyond this the hole is not a tap rebuild's — something else broke, and a
     /// fill that large would flood the downstream rings (``BTFrameRing`` drops
     /// over-large chunks wholesale). Measure it and log it, never fill it.
     private static let maxFeedGapFillNanos: Int64 = 2_000_000_000
     /// One fill block, capped at the same ~93 ms the wizard pacer uses per fire.
     private static let feedGapFillChunkFrames = 4_096
+    /// Beyond this a hole with no rebuild behind it is not a lost IOProc cycle:
+    /// it is a pause, a tap waking from idle, or a buffer in flight across a
+    /// rebuild, and the audio genuinely stopped. Four lost cycles in a row
+    /// (11.6 ms each at 512 frames / 44.1 kHz) still fit under it. The cap is
+    /// also the worst a wrong fill can cost, since it delays everything after it
+    /// by the length it patched.
+    /// razor: one flat cap rather than a multiple of the cycle length measured
+    /// per device. Upgrade path if a device ever runs cycles long enough for
+    /// 50 ms to be one of them: derive it from the incoming block's duration.
+    private static let maxDroppedCycleFillNanos: Int64 = 50_000_000
 
     /// Tear the current tap down and recreate it — against the (possibly
     /// new) default output device, and always with the LIVE exclusion process-
@@ -2756,7 +2870,7 @@ public protocol PCMSink: Sendable {
     func write(pcm: Data, pts: timespec)
 
     /// Forward several per-stream buffers sharing one `pts` — what a non-flat
-    /// ``WholeSystemEQPlan`` produces, one entry per EQ stream. Batching matters:
+    /// ``WholeSystemEQPlan`` produces, one entry per stream. Batching matters:
     /// the engine processes one shared `pts` per call, so N separate writes would
     /// let simultaneous streams drift apart.
     ///
@@ -3663,7 +3777,29 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
         let err = AudioDeviceCreateIOProcIDWithBlock(
             &newProcID, aggregateID, queue
         ) { [weak self] _, inInputData, inInputTime, _, _ in
-            // ---- REALTIME THREAD ----
+            // ---- THE REAL-TIME POLICY FOR TAP DELIVERY (the one place it
+            // is written down; every other site points here) ----
+            //
+            // 1. This block runs on the `.userInitiated` serial queue it was
+            //    registered on just above, NOT on the HAL's own real-time
+            //    thread. But `AudioHardware.h` says of that queue: "All
+            //    IOBlocks are dispatched synchronously", i.e. the HAL waits
+            //    for this block, so its wall time still counts against the
+            //    device's IO cycle. Everything downstream of here — the
+            //    per-app `onBuffer` closure, `handleBuffer`, `AppRouteMixer`
+            //    and `LeveledAppInjector` — is on that same critical path.
+            // 2. Nothing on this path waits on a serial queue, or on any lock
+            //    whose holder may do unbounded work (build a converter,
+            //    recompute routes, fire callbacks, log). Queue-confined state
+            //    is read as one immutable snapshot through
+            //    `snapshotLock.try()`, and a miss drops the buffer — at most
+            //    one edit stale, so a drop costs nothing.
+            // 3. A lock whose EVERY holder does only bounded in-memory work
+            //    may be taken with `lock()`: the converter's own lock (single
+            //    caller in production), and the mixers' timeline and ring
+            //    locks.
+            // 4. Allocation and the `AVAudioConverter` run are accepted costs
+            //    here. There is no no-allocation contract to honour.
             guard let self else { return }
             let mutablePtr = UnsafeMutablePointer(mutating: inInputData)
             let listPtr = UnsafeMutableAudioBufferListPointer(mutablePtr)
@@ -4077,30 +4213,45 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
     /// Test/convenience entry point: derives a fresh offset every call (no
     /// caching), so unlike the production RT path above it can never itself go
     /// stale across a sleep. Production code must go through the instance path
-    /// (seeded in `startIOProc`, healed in the IOProc block) instead, since
-    /// resampling both clocks on every single call is not something we want to
-    /// pay for on every real captured buffer.
+    /// (seeded in `startIOProc`, healed in the IOProc block) or the `offset:`
+    /// overload below, instead, since resampling both clocks on every single
+    /// call is not something we want to pay for on every real captured buffer.
     static func timespec(fromHostTime hostTime: UInt64) -> timespec {
         let machNanos = machNanoseconds(fromHostTime: hostTime)
         let offset = sampleMachToMonotonicOffsetNanos()
         return timespec(machNanos: machNanos, offset: offset)
     }
 
+    /// Production entry point for a caller that owns a cached mach-to-monotonic
+    /// offset (a synced sink's render block). Pays for one `clock_gettime` call
+    /// per invocation to check the drift heal (`shouldResample`), and only pays
+    /// for a fresh two-clock resample when the cached offset has fallen more
+    /// than 1s out of step with reality — e.g. the box slept. `offset` is
+    /// updated in place when a resample happens, so the caller's cached value
+    /// stays current across calls.
+    static func timespec(fromHostTime hostTime: UInt64, offset: inout Int64) -> timespec {
+        let machNanos = machNanoseconds(fromHostTime: hostTime)
+        if shouldResample(machNanos: machNanos, offset: offset, monotonicNowNanos: currentMonotonicNanos()) {
+            offset = sampleMachToMonotonicOffsetNanos()
+        }
+        return timespec(machNanos: machNanos, offset: offset)
+    }
+
     /// mach host ticks → nanoseconds on the mach-absolute timescale.
-    private static func machNanoseconds(fromHostTime hostTime: UInt64) -> UInt64 {
+    static func machNanoseconds(fromHostTime hostTime: UInt64) -> UInt64 {
         let timebase = cachedTimebase
         return hostTime &* UInt64(timebase.numer) / UInt64(max(1, timebase.denom))
     }
 
     /// The mach timebase, read once (it never changes for the life of a process).
-    private static let cachedTimebase: mach_timebase_info_data_t = {
+    static let cachedTimebase: mach_timebase_info_data_t = {
         var tb = mach_timebase_info_data_t()
         mach_timebase_info(&tb)
         return tb
     }()
 
     /// Current `CLOCK_MONOTONIC` reading in nanoseconds.
-    private static func currentMonotonicNanos() -> UInt64 {
+    static func currentMonotonicNanos() -> UInt64 {
         var ts = Darwin.timespec()
         clock_gettime(CLOCK_MONOTONIC, &ts)
         return UInt64(ts.tv_sec) &* 1_000_000_000 &+ UInt64(ts.tv_nsec)
@@ -4116,7 +4267,7 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
     /// advancing `CLOCK_MONOTONIC` position. Can be negative (CLOCK_MONOTONIC <
     /// mach-absolute when the box has slept), which is why all offset arithmetic
     /// in this file is signed.
-    private static func sampleMachToMonotonicOffsetNanos() -> Int64 {
+    static func sampleMachToMonotonicOffsetNanos() -> Int64 {
         // Sample both clocks as close together as possible.
         let mach = machNanoseconds(fromHostTime: mach_absolute_time())
         let monotonic = currentMonotonicNanos()
@@ -4215,6 +4366,9 @@ final class AVFormatConverter: PCMConverting, @unchecked Sendable {
     private let inputAVFormat: AVAudioFormat?
     private let outputAVFormat: AVAudioFormat?
     private let converter: AVAudioConverter?
+    /// Taken by ``convertToAirPlayPCM(_:)`` on the delivery thread and by the
+    /// `conversionFailureCount` test seam only — no two production threads ever
+    /// contend it.
     private let lock = NSLock()
 
     // Conversion-failure counters, one slot per ``ConversionFailureReason``

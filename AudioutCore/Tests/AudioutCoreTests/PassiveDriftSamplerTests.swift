@@ -33,7 +33,7 @@ import Testing
     /// What the mic hears: every speaker playing the same program, each at its
     /// own delay.
     private static func capture(of reference: [Float], delaysMs: [Double],
-                                tailSeconds: Double = 0.3) -> [Float] {
+                                tailSeconds: Double = 300.0 / 1_000) -> [Float] {
         var out = [Float](repeating: 0, count: reference.count + Int(tailSeconds * rate))
         for delayMs in delaysMs {
             let delay = Int((delayMs / 1000 * rate).rounded())
@@ -267,22 +267,21 @@ import Testing
 
         let ring = ReferenceAudioRing()
         let observations = UncheckedBox<[DriftCorrectionPolicy.Observation]>([])
-        let done = DispatchSemaphore(value: 0)
         let program = pcm
+        let delays = ManualDelayClock()
         let tracker = PassiveDriftTracker(
             ring: ring,
-            windowSeconds: 0.4,
-            // The ring retains nothing until the window arms it, and the window
-            // closes on its own clock: feeding from `start()` — which the
-            // tracker calls just after arming — is the only point that cannot
-            // race the window shut under a loaded machine.
+            // The ring retains nothing until the window arms it: feeding from
+            // `start()`, which the tracker calls just after arming, puts the
+            // program in while the window is open.
             makeRecorder: {
                 FeedingRecorder(rate: rate, startNanos: startNanos,
                                 scene: { scene },
                                 feed: { ring.append(program, pts: timespec(tv_sec: 500, tv_nsec: 0)) })
             },
             permissionIsGranted: { true },
-            onObservations: { observations.value = $0; done.signal() })
+            delayClock: delays.queueHoppingClock,
+            onObservations: { observations.value = $0 })
         // Baseline 100 ms; the speaker is heard at 120 ms.
         tracker.setBaselines([PassiveDriftSampler.Baseline(
             deviceUID: "bt", kind: .bluetooth, expectedDelayMs: 100)])
@@ -290,7 +289,11 @@ import Testing
         // .reconnect now waits 15 s inside the tracker before its window, so
         // an immediate-window test uses .verify instead.
         tracker.trigger(.verify)
-        #expect(done.wait(timeout: .now() + 10) == .success, "no observation was emitted")
+        // Reading a queue-synchronised property waits for the window to open;
+        // firing the clock then closes it.
+        _ = tracker.isBlind
+        delays.fireAll()
+        try await Self.waitUntil("an observation") { !observations.value.isEmpty }
 
         let emitted = try #require(observations.value.first)
         #expect(emitted.deviceUID == "bt")
@@ -331,39 +334,48 @@ import Testing
         // unusable and the tracker goes blind.
         let micIsDeaf = UncheckedBox<Bool>(true)
         let observations = UncheckedBox<[DriftCorrectionPolicy.Observation]>([])
-        let done = DispatchSemaphore(value: 0)
+        let periodic = HandDrivenPeriodicClock()
+        let delays = ManualDelayClock()
         let tracker = PassiveDriftTracker(
             ring: ring,
-            windowSeconds: 0.05,
-            intervalSeconds: 0.1,
-            firstWindowSeconds: 0.1,
+            intervalSeconds: 100,
+            firstWindowSeconds: 10,
             makeRecorder: {
                 FeedingRecorder(rate: rate, startNanos: startNanos,
                                 scene: { micIsDeaf.value ? silence : heard },
                                 feed: { ring.append(program, pts: timespec(tv_sec: 500, tv_nsec: 0)) })
             },
             permissionIsGranted: { true },
-            onObservations: { observations.value = $0; done.signal() })
+            isNearMiss: { _, _ in false },
+            periodicClock: periodic.clock,
+            delayClock: delays.queueHoppingClock,
+            onObservations: { observations.value = $0 })
         let baseline = PassiveDriftSampler.Baseline(
             deviceUID: "bt", kind: .bluetooth, expectedDelayMs: 100)
         tracker.setBaselines([baseline])
         tracker.start()
 
-        // A trigger landing while a window is already in flight is dropped, so
-        // drive until it goes quiet rather than counting triggers. .verify
-        // takes its window immediately; .reconnect now waits 15 s.
-        for _ in 1...(PassiveDriftSampler.blindAfterUnusableWindows * 4)
-        where !tracker.isBlind {
+        // Each window is closed and counted before the next trigger, since a
+        // trigger landing on a window in flight is dropped. .verify takes its
+        // window immediately; .reconnect waits 15 s.
+        for window in 1...PassiveDriftSampler.blindAfterUnusableWindows {
             tracker.trigger(.verify)
-            try await Task.sleep(nanoseconds: 120_000_000)
+            _ = tracker.isBlind
+            delays.fireAll()
+            try await Self.waitUntil("unusable window \(window)") {
+                tracker.consecutiveUnusableWindows >= window
+            }
         }
         #expect(tracker.isBlind, "unusable windows should have gone quiet")
 
         micIsDeaf.value = false
         tracker.setBaselines([baseline])
-        // No trigger from here on: only the periodic timer can produce this.
-        #expect(done.wait(timeout: .now() + 10) == .success,
-                "periodic sampling never resumed after the re-arm")
+        _ = tracker.isBlind
+        // No trigger from here on: only the periodic timer can open this window.
+        periodic.advance(to: 10)
+        try #require(delays.pendingCount == 1, "periodic sampling never resumed after the re-arm")
+        delays.fireAll()
+        try await Self.waitUntil("the periodic window's observation") { !observations.value.isEmpty }
         #expect(observations.value.first?.deviceUID == "bt")
     }
 
@@ -438,11 +450,11 @@ import Testing
         let silence = [Float](repeating: 0, count: Int(rate))
         let windowCount = UncheckedBox<Int>(0)
         let clock = HandDrivenPeriodicClock()
+        let delays = ManualDelayClock()
         let tracker = PassiveDriftTracker(
             ring: ring,
-            windowSeconds: 0.05,
             intervalSeconds: 10,
-            firstWindowSeconds: 0.1,
+            firstWindowSeconds: 1,
             makeRecorder: {
                 windowCount.value += 1
                 return FeedingRecorder(rate: rate, startNanos: startNanos,
@@ -451,6 +463,7 @@ import Testing
             },
             permissionIsGranted: { true },
             periodicClock: clock.clock,
+            delayClock: delays.queueHoppingClock,
             onObservations: { _ in })
         tracker.setBaselines([PassiveDriftSampler.Baseline(
             deviceUID: "bt", kind: .bluetooth, expectedDelayMs: 100)])
@@ -459,20 +472,21 @@ import Testing
         // start() has armed the clock.
         _ = tracker.isBlind
 
-        clock.advance(to: 0.1)
+        clock.advance(to: 1)
         #expect(windowCount.value == 1,
                 "exactly one window inside the first interval — got \(windowCount.value)")
 
         // The first window has to finish before another can start; its
         // unusable verdict is the sign it has.
+        delays.fireAll()
         try await Self.waitUntil("the first window to finish") {
             tracker.consecutiveUnusableWindows == 1
         }
-        clock.advance(to: 10.0)
+        clock.advance(to: 10.9)
         #expect(windowCount.value == 1,
                 "no second window before the periodic interval — got \(windowCount.value)")
 
-        clock.advance(to: 10.1)
+        clock.advance(to: 11)
         #expect(windowCount.value == 2,
                 "the second window lands at the periodic interval — got \(windowCount.value)")
     }
@@ -486,9 +500,9 @@ import Testing
         let silence = [Float](repeating: 0, count: Int(rate))
         let windowCount = UncheckedBox<Int>(0)
         let now = UncheckedBox<Double>(0)
+        let delays = ManualDelayClock()
         let tracker = PassiveDriftTracker(
             ring: ring,
-            windowSeconds: 0.05,
             intervalSeconds: 1000,
             firstWindowSeconds: 1000,
             makeRecorder: {
@@ -499,6 +513,7 @@ import Testing
             },
             permissionIsGranted: { true },
             now: { now.value },
+            delayClock: delays.queueHoppingClock,
             onObservations: { _ in })
         tracker.setBaselines([PassiveDriftSampler.Baseline(
             deviceUID: "bt", kind: .bluetooth, expectedDelayMs: 100)])
@@ -517,6 +532,7 @@ import Testing
         // The mic hears silence, so every window ends unusable and the
         // tracker's own count says when it is done.
         func waitForWindow(_ count: Int) async throws {
+            delays.fireAll()
             try await Self.waitUntil("window \(count) to finish") {
                 tracker.consecutiveUnusableWindows >= count
             }
@@ -552,12 +568,15 @@ import Testing
         let silence = [Float](repeating: 0, count: Int(rate))
         let windowCount = UncheckedBox<Int>(0)
         let now = UncheckedBox<Double>(0)
+        // On this clock B's window closes at 4 s and A's settled reconnect
+        // window opens at 15 s, after it.
+        let delays = ManualDelayClock()
         let tracker = PassiveDriftTracker(
             ring: ring,
-            windowSeconds: 0.05,
+            windowSeconds: 4,
             intervalSeconds: 1000,
             firstWindowSeconds: 1000,
-            reconnectDelaySeconds: 1,
+            reconnectDelaySeconds: 15,
             makeRecorder: {
                 windowCount.value += 1
                 return FeedingRecorder(rate: rate, startNanos: startNanos,
@@ -567,6 +586,7 @@ import Testing
             permissionIsGranted: { true },
             now: { now.value },
             isNearMiss: { _, _ in false },
+            delayClock: delays.queueHoppingClock,
             onObservations: { _ in })
         tracker.setBaselines([PassiveDriftSampler.Baseline(
             deviceUID: "bt", kind: .bluetooth, expectedDelayMs: 100)])
@@ -587,11 +607,17 @@ import Testing
 
         send(.clockJump(uid: "B"), at: 1)
         #expect(windowCount.value == 1, "another speaker's steps are untouched by A's reconnect")
+        delays.advance(by: 4)
         try await Self.waitUntil("B's window to finish") {
             tracker.consecutiveUnusableWindows >= 1
         }
 
+        delays.advance(by: 11)
         try await Self.waitUntil("A's delayed reconnect window") { windowCount.value == 2 }
+        // The window opened before the count moved but schedules its close
+        // just after; draining the queue lets that land before the clock moves.
+        _ = tracker.isBlind
+        delays.advance(by: 4)
         try await Self.waitUntil("the reconnect window to finish") {
             tracker.consecutiveUnusableWindows >= 2
         }
@@ -612,9 +638,9 @@ import Testing
         let silence = [Float](repeating: 0, count: Int(rate))
         let windowCount = UncheckedBox<Int>(0)
         let now = UncheckedBox<Double>(0)
+        let delays = ManualDelayClock()
         let tracker = PassiveDriftTracker(
             ring: ring,
-            windowSeconds: 0.02,
             intervalSeconds: 1000,
             firstWindowSeconds: 1000,
             clockStepWindowSpacingSeconds: 60,
@@ -628,6 +654,7 @@ import Testing
             permissionIsGranted: { true },
             now: { now.value },
             isNearMiss: { _, _ in false },
+            delayClock: delays.queueHoppingClock,
             onObservations: { _ in })
         tracker.setBaselines([PassiveDriftSampler.Baseline(
             deviceUID: "bt", kind: .bluetooth, expectedDelayMs: 100)])
@@ -650,6 +677,7 @@ import Testing
         // cleared link is skipped for a window in flight and reads as suppressed.
         // The mic hears silence, so that window ends unusable and the tracker's
         // own count says when it is done.
+        delays.fireAll()
         try await Self.waitUntil("the storm's first window to finish") {
             tracker.consecutiveUnusableWindows >= 1
         }
@@ -675,9 +703,10 @@ import Testing
         let silence = [Float](repeating: 0, count: Int(rate))
         let windowCount = UncheckedBox<Int>(0)
         let now = UncheckedBox<Double>(0)
+        // The verify window stays open until this clock fires.
+        let delays = ManualDelayClock()
         let tracker = PassiveDriftTracker(
             ring: ring,
-            windowSeconds: 0.3,
             intervalSeconds: 1000,
             firstWindowSeconds: 1000,
             makeRecorder: {
@@ -689,6 +718,7 @@ import Testing
             permissionIsGranted: { true },
             now: { now.value },
             isNearMiss: { _, _ in false },
+            delayClock: delays.queueHoppingClock,
             onObservations: { _ in })
         tracker.setBaselines([PassiveDriftSampler.Baseline(
             deviceUID: "bt", kind: .bluetooth, expectedDelayMs: 100)])
@@ -705,6 +735,7 @@ import Testing
 
         // That window closes when the tracker has recorded its result, and the
         // silent mic guarantees that result is an unusable one.
+        delays.fireAll()
         try await Self.waitUntil("the verify window to finish") {
             tracker.consecutiveUnusableWindows >= 1
         }
@@ -733,13 +764,13 @@ import Testing
         // cleared the spell at all.
         let polls = UncheckedBox<Int>(0)
         let now = UncheckedBox<Double>(0)
+        let pollClock = HandDrivenPeriodicClock()
         let tracker = PassiveDriftTracker(
             ring: ring,
-            windowSeconds: 0.02,
             intervalSeconds: 1000,
             firstWindowSeconds: 1000,
-            silenceEdgeSeconds: 0.2,
-            pollIntervalSeconds: 0.02,
+            silenceEdgeSeconds: 60,
+            pollIntervalSeconds: 1,
             makeRecorder: {
                 windowCount.value += 1
                 return FeedingRecorder(rate: rate, startNanos: startNanos,
@@ -749,34 +780,29 @@ import Testing
             permissionIsGranted: { true },
             programIsSilent: { polls.value += 1; return isSilent.value },
             now: { now.value },
+            silencePollClock: pollClock.clock,
+            delayClock: ManualDelayClock().clock,
             onObservations: { _ in })
         tracker.setBaselines([PassiveDriftSampler.Baseline(
             deviceUID: "bt", kind: .bluetooth, expectedDelayMs: 100)])
 
+        // Reading a queue-synchronised property waits for start() to arm the
+        // poll; `advance(to:)` returns once the poll it fires has run.
         tracker.start()
-        // A poll taken while the program is silent always leaves the spell's
-        // start set, so one such poll IS the precondition. Reading a
-        // queue-synchronised property afterwards waits for that poll to finish,
-        // so the spell is stamped with the clock it was taken at rather than
-        // with the 90 below.
-        try await Self.waitUntil("a poll to record the silent spell") { polls.value >= 1 }
         _ = tracker.isBlind
+        // A poll taken while the program is silent always leaves the spell's
+        // start set, so one such poll IS the precondition.
+        pollClock.advance(to: 1)
+        #expect(polls.value == 1, "a poll should have recorded the silent spell")
         now.value = 90                                   // a minute and a half of it
         tracker.stop()
 
-        // The stop has to be through the queue before the program turns
-        // audible, or a poll still queued behind it reads the stale spell and
-        // takes the window whether or not the stop clears it.
-        _ = tracker.isBlind
         isSilent.value = false
         tracker.start()
-        let pollsBeforeRestart = polls.value
-        // At most one poll of the cancelled timer can still be pending here, so
-        // three more means the restarted poll has run — and a tracker that kept
-        // the pre-stop spell takes its window on the first of them.
-        try await Self.waitUntil("the restarted silence poll to run") {
-            polls.value >= pollsBeforeRestart + 3
-        }
+        _ = tracker.isBlind
+        // A tracker that kept the pre-stop spell takes its window on this poll.
+        pollClock.advance(to: 2)
+        #expect(polls.value == 2, "the restarted silence poll should have run")
         #expect(windowCount.value == 0,
                 "silence measured before the stop is not an edge after the restart")
     }
@@ -791,12 +817,11 @@ import Testing
         let (ringA, programA) = Self.silenceProgram(rate: rate)
         let silence = [Float](repeating: 0, count: Int(rate))
         let windowCountA = UncheckedBox<Int>(0)
+        let delaysA = ManualDelayClock()
         let trackerA = PassiveDriftTracker(
             ring: ringA,
-            windowSeconds: 0.05,
             intervalSeconds: 1000,
             firstWindowSeconds: 1000,
-            retryDelaySeconds: 0.1,
             makeRecorder: {
                 windowCountA.value += 1
                 return FeedingRecorder(rate: rate, startNanos: startNanos,
@@ -805,25 +830,34 @@ import Testing
             },
             permissionIsGranted: { true },
             isNearMiss: { _, _ in true },
+            delayClock: delaysA.queueHoppingClock,
             onObservations: { _ in })
         trackerA.setBaselines([PassiveDriftSampler.Baseline(
             deviceUID: "bt", kind: .bluetooth, expectedDelayMs: 100)])
 
+        // Each `fireAll()` hands the due jobs to the tracker's queue, and a
+        // queue-synchronised read after it waits for them to run. Firing
+        // runs, in turn: the verify window's close, the retry, its close.
         trackerA.trigger(.verify)
-        try await Task.sleep(nanoseconds: 2_000_000_000)
+        _ = trackerA.isBlind
+        delaysA.fireAll()
+        _ = trackerA.isBlind
+        #expect(delaysA.pendingCount == 1, "a near miss should schedule one retry")
+        delaysA.fireAll()
+        _ = trackerA.isBlind
         #expect(windowCountA.value == 2, "a near miss should retry once")
+        delaysA.fireAll()
         #expect(trackerA.consecutiveUnusableWindows == 1, "the retry must not count toward blind")
-        try await Task.sleep(nanoseconds: 1_000_000_000)
+        #expect(delaysA.pendingCount == 0, "a retry must never itself retry")
         #expect(windowCountA.value == 2, "a retry must never itself retry")
 
         let (ringB, programB) = Self.silenceProgram(rate: rate)
         let windowCountB = UncheckedBox<Int>(0)
+        let delaysB = ManualDelayClock()
         let trackerB = PassiveDriftTracker(
             ring: ringB,
-            windowSeconds: 0.05,
             intervalSeconds: 1000,
             firstWindowSeconds: 1000,
-            retryDelaySeconds: 0.1,
             makeRecorder: {
                 windowCountB.value += 1
                 return FeedingRecorder(rate: rate, startNanos: startNanos,
@@ -832,18 +866,21 @@ import Testing
             },
             permissionIsGranted: { true },
             isNearMiss: { _, _ in false },
+            delayClock: delaysB.queueHoppingClock,
             onObservations: { _ in })
         trackerB.setBaselines([PassiveDriftSampler.Baseline(
             deviceUID: "bt", kind: .bluetooth, expectedDelayMs: 100)])
 
         trackerB.trigger(.verify)
+        _ = trackerB.isBlind
+        delaysB.fireAll()
+        // The refusal and any retry it schedules happen in one job on the
+        // tracker's queue, so once the count moves the clock holds whatever
+        // retry there is.
         try await Self.waitUntil("the refused window to finish") {
             trackerB.consecutiveUnusableWindows >= 1
         }
-        // A retry would land `retryDelaySeconds` after that refusal: wait
-        // several times as long, so a tracker that wrongly retries has taken
-        // its second window by the time the count is read.
-        try await Task.sleep(nanoseconds: 300_000_000)
+        #expect(delaysB.pendingCount == 0, "a plain refusal never retries")
         #expect(windowCountB.value == 1, "a plain refusal never retries")
         #expect(trackerB.consecutiveUnusableWindows == 1)
     }
@@ -884,18 +921,16 @@ import Testing
         let windowCount = UncheckedBox<Int>(0)
         let isSilent = UncheckedBox<Bool>(true)
         let polls = UncheckedBox<Int>(0)
-        // Both spells here are measured on an injected clock: read from
-        // `systemUptime`, the spell starts at the first poll after `start()` and
-        // a stall before that poll makes it shorter than the 0.2 s edge, failing
-        // a correct implementation.
+        // Both spells here are measured on an injected clock, and the polls
+        // are stepped by hand, so no stall can stretch or shrink a spell.
         let now = UncheckedBox<Double>(0)
+        let pollClock = HandDrivenPeriodicClock()
         let tracker = PassiveDriftTracker(
             ring: ring,
-            windowSeconds: 0.02,
             intervalSeconds: 1000,
             firstWindowSeconds: 100,
-            silenceEdgeSeconds: 0.2,
-            pollIntervalSeconds: 0.02,
+            silenceEdgeSeconds: 60,
+            pollIntervalSeconds: 1,
             makeRecorder: {
                 windowCount.value += 1
                 return FeedingRecorder(rate: rate, startNanos: startNanos,
@@ -905,19 +940,21 @@ import Testing
             permissionIsGranted: { true },
             programIsSilent: { polls.value += 1; return isSilent.value },
             now: { now.value },
+            silencePollClock: pollClock.clock,
+            delayClock: ManualDelayClock().clock,
             onObservations: { _ in })
         tracker.setBaselines([PassiveDriftSampler.Baseline(
             deviceUID: "bt", kind: .bluetooth, expectedDelayMs: 100)])
         tracker.start()
-
-        // Reading a queue-synchronised property waits for that poll to finish,
-        // so the spell is stamped with the clock it was taken at rather than
-        // with the 90 below.
-        try await Self.waitUntil("a poll to record the silent spell") { polls.value >= 1 }
+        // Reading a queue-synchronised property waits for start() to arm the
+        // poll; `advance(to:)` returns once the poll it fires has run.
         _ = tracker.isBlind
+
+        pollClock.advance(to: 1)
+        #expect(polls.value == 1, "a poll should have recorded the silent spell")
         now.value = 90                                   // a minute and a half of it
         isSilent.value = false
-        try await Self.waitUntil("the silence-to-audio window") { windowCount.value >= 1 }
+        pollClock.advance(to: 2)
         #expect(windowCount.value == 1, "silence past the edge followed by audio should take a window")
 
         tracker.stop()
@@ -927,13 +964,13 @@ import Testing
         let isSilent2 = UncheckedBox<Bool>(true)
         let polls2 = UncheckedBox<Int>(0)
         let now2 = UncheckedBox<Double>(0)
+        let pollClock2 = HandDrivenPeriodicClock()
         let tracker2 = PassiveDriftTracker(
             ring: ring2,
-            windowSeconds: 0.02,
             intervalSeconds: 1000,
             firstWindowSeconds: 100,
-            silenceEdgeSeconds: 0.2,
-            pollIntervalSeconds: 0.02,
+            silenceEdgeSeconds: 60,
+            pollIntervalSeconds: 1,
             makeRecorder: {
                 windowCount2.value += 1
                 return FeedingRecorder(rate: rate, startNanos: startNanos,
@@ -943,21 +980,22 @@ import Testing
             permissionIsGranted: { true },
             programIsSilent: { polls2.value += 1; return isSilent2.value },
             now: { now2.value },
+            silencePollClock: pollClock2.clock,
+            delayClock: ManualDelayClock().clock,
             onObservations: { _ in })
         tracker2.setBaselines([PassiveDriftSampler.Baseline(
             deviceUID: "bt", kind: .bluetooth, expectedDelayMs: 100)])
         tracker2.start()
-
-        try await Self.waitUntil("a poll to record the short gap") { polls2.value >= 1 }
         _ = tracker2.isBlind
-        now2.value = 0.05          // 50 ms of silence, well short of the edge
+
+        pollClock2.advance(to: 1)
+        #expect(polls2.value == 1, "a poll should have recorded the short gap")
+        now2.value = 30            // half a minute of silence, short of the edge
         isSilent2.value = false
-        let pollsBeforeAudio = polls2.value
-        // Three polls on the audible program, so the edge this gap is too short
-        // for has been offered to the tracker and declined.
-        try await Self.waitUntil("the polls that follow the short gap") {
-            polls2.value >= pollsBeforeAudio + 3
-        }
+        // A poll on the audible program offers the tracker the edge this gap
+        // is too short for.
+        pollClock2.advance(to: 2)
+        #expect(polls2.value == 2, "a poll should have followed the short gap")
         #expect(windowCount2.value == 0, "a gap short of the edge is not a silence-to-audio event")
     }
 }

@@ -198,4 +198,19 @@ import AppKit
             severity: severity)
         #expect((banner.test_actionButton is ProminentButton) == gold)
     }
+
+    /// Red if a one-line info banner with its gold button shrank below the
+    /// library's 44 pt, or if the gold went back to the automatic tint that
+    /// macOS 26+ draws as a dark olive.
+    @Test func anInfoBannersGoldButtonMatchesTheLibrary() {
+        let banner = SystemAirPlayNoteBannerView(
+            text: "What’s missing from Audiout? Two quick questions.", maxTextWidth: 600,
+            action: .init(title: "Answer", accessibilityLabel: "Answer", handler: {}),
+            severity: .question)
+        #expect(banner.fittingSize.height >= 44)
+        #expect(banner.test_actionButton?.controlSize == .large)
+        if #available(macOS 26.0, *) {
+            #expect(banner.test_actionButton?.tintProminence == .primary)
+        }
+    }
 }

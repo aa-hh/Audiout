@@ -84,7 +84,8 @@ extension SerializedEngineState {
             await SuiteWait.until("the waiter for device \(String(format: "0x%llX", id)) is armed") {
                 engine.waiterIsArmedForTest(callbackId: 0)
             }
-            if engine.waiterIsArmedForTest(callbackId: 0) {
+            // An actor call runs only after startOp's headless body (arm, issue) has finished.
+            if await engine.hasArmedWaiterForTest(callbackId: 0) {
                 fireCompletion(id: id, cbIdSlot: 0, state: state)
             }
         }
@@ -120,6 +121,8 @@ extension SerializedEngineState {
             await SuiteWait.until("the op's registry waiter is armed") {
                 engine.waiterIsArmedForTest(callbackId: 0)
             }
+            // An actor call runs only after startOp's headless body (arm, issue) has finished.
+            #expect(await engine.hasArmedWaiterForTest(callbackId: 0))
             #expect(engine.expireOpTimeoutForTest(callbackId: 0), "the armed op must carry a timeout timer")
             let opError = await op.value
             #expect(opError as? AirPlayEngineError == .opTimedOut,
@@ -157,6 +160,8 @@ extension SerializedEngineState {
             await SuiteWait.until("op A's registry waiter is armed") {
                 engine.waiterIsArmedForTest(callbackId: 0)
             }
+            // An actor call runs only after startOp's headless body (arm, issue) has finished.
+            #expect(await engine.hasArmedWaiterForTest(callbackId: 0))
             #expect(engine.expireOpTimeoutForTest(callbackId: 0), "op A must carry a timeout timer")
             let opAError = await opA.value
             #expect(opAError as? AirPlayEngineError == .opTimedOut,

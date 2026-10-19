@@ -253,7 +253,8 @@ extension SerializedEngineState {
             await SuiteWait.until("the waiter for device \(String(format: "0x%llX", id)) is armed") {
                 engine.waiterIsArmedForTest(callbackId: 0)
             }
-            if engine.waiterIsArmedForTest(callbackId: 0) {
+            // An actor call runs only after startOp's headless body (arm, issue) has finished.
+            if await engine.hasArmedWaiterForTest(callbackId: 0) {
                 outputs_cb(0, id, state)
                 outputs_cb_deferred_run()
             }

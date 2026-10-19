@@ -82,7 +82,8 @@ extension SerializedEngineState {
             await SuiteWait.until("the waiter for callbackId 0 is armed") {
                 engine.waiterIsArmedForTest(callbackId: 0)
             }
-            if engine.waiterIsArmedForTest(callbackId: 0) {
+            // An actor call runs only after startOp's headless body (arm, issue) has finished.
+            if await engine.hasArmedWaiterForTest(callbackId: 0) {
                 fireCompletion(id: id, cbIdSlot: 0, state: state)
             }
         }
@@ -297,7 +298,8 @@ extension SerializedEngineState {
             await SuiteWait.until("the waiter for callbackId 0 is armed") {
                 engine.waiterIsArmedForTest(callbackId: 0)
             }
-            if engine.waiterIsArmedForTest(callbackId: 0) {
+            // An actor call runs only after startOp's headless body (arm, issue) has finished.
+            if await engine.hasArmedWaiterForTest(callbackId: 0) {
                 outputs_device_get(id)?.pointee.state = state
                 fireCompletion(id: id, cbIdSlot: 0, state: state)
             }

@@ -511,44 +511,93 @@ import Testing
         ]
     }
 
-    @Test func aTargetThatIsNotPlayingIsRefusedByName() {
+    /// Turns red if the refusal of a target that is not a Main Out member
+    /// returns: the coordinator selects a silent target for the run itself.
+    @Test func aSilentTargetIsStagedAgainstTheMacsOwnOutput() {
         let outcome = CompanionAlignmentPreconditions.evaluate(
-            targetID: "bt-a", among: room(), isAudible: { $0 == "local" })
-        #expect(outcome == .refused(
-            "\u{201C}Kitchen\u{201D} isn't playing right now, so there's nothing to measure."))
+            targetID: "bt-a", referenceID: nil, among: room(), isAudible: { _ in false })
+        #expect(outcome == .ready(referenceID: "local"))
     }
 
-    @Test func aPlayingTargetWithNothingElseAudibleIsRefused() {
+    /// Turns red if the reference candidates are filtered by audibility again:
+    /// the Mac's own output is the reference even when nothing selects it.
+    @Test func theMacsOwnOutputIsTheReferenceEvenWhenSilent() {
         let outcome = CompanionAlignmentPreconditions.evaluate(
-            targetID: "bt-a", among: room(), isAudible: { $0 == "bt-a" })
-        #expect(outcome == .refused("Nothing else is playing to compare \u{201C}Kitchen\u{201D} against."))
+            targetID: "bt-a", referenceID: nil, among: room(), isAudible: { $0 == "bt-a" })
+        #expect(outcome == .ready(referenceID: "local"))
     }
 
     /// A Cast receiver plays seconds behind live, so it is never a reference —
-    /// a room where it is the only other audible device has none.
+    /// a room where it is the only other device has none. Turns red if the
+    /// fallback stops excluding Cast.
     @Test func aCastReceiverIsNeverTheReference() {
+        let castOnly = [
+            Device(id: "bt-a", name: "Kitchen", kind: .bluetooth),
+            Device(id: "cast", name: "Nest", kind: .cast),
+        ]
         let outcome = CompanionAlignmentPreconditions.evaluate(
-            targetID: "bt-a", among: room(), isAudible: { $0 == "bt-a" || $0 == "cast" })
-        #expect(outcome == .refused("Nothing else is playing to compare \u{201C}Kitchen\u{201D} against."))
+            targetID: "bt-a", referenceID: nil, among: castOnly, isAudible: { _ in true })
+        #expect(outcome == .refused("Nothing else to compare \u{201C}Kitchen\u{201D} against."))
     }
 
     @Test func theMacsOwnOutputIsPreferredOverAnotherSpeaker() {
         let outcome = CompanionAlignmentPreconditions.evaluate(
-            targetID: "bt-a", among: room(), isAudible: { _ in true })
+            targetID: "bt-a", referenceID: nil, among: room(), isAudible: { _ in true })
         #expect(outcome == .ready(referenceID: "local"))
     }
 
+    /// Turns red if the fallback stops preferring the one audible speaker
+    /// when the room has no Mac output.
     @Test func anotherBluetoothSpeakerIsTakenWhenTheMacIsSilent() {
+        let noMac = room().filter { $0.id != "local" }
         let outcome = CompanionAlignmentPreconditions.evaluate(
-            targetID: "bt-a", among: room(), isAudible: { $0 == "bt-a" || $0 == "bt-b" })
+            targetID: "bt-a", referenceID: nil, among: noMac, isAudible: { $0 == "bt-a" || $0 == "bt-b" })
         #expect(outcome == .ready(referenceID: "bt-b"))
     }
 
     @Test func aDeviceThatIsNotBluetoothIsNotAMeasurableTarget() {
         #expect(CompanionAlignmentPreconditions.evaluate(
-            targetID: "local", among: room(), isAudible: { _ in true }) == .refused("Unknown speaker."))
+            targetID: "local", referenceID: nil, among: room(), isAudible: { _ in true })
+            == .refused("Unknown speaker."))
         #expect(CompanionAlignmentPreconditions.evaluate(
-            targetID: "nobody", among: room(), isAudible: { _ in true }) == .refused("Unknown speaker."))
+            targetID: "nobody", referenceID: nil, among: room(), isAudible: { _ in true })
+            == .refused("Unknown speaker."))
+    }
+
+    /// Turns red if a reference the phone names is ignored or refused while
+    /// it is one of the Mac's own outputs.
+    @Test func aNamedLocalCandidateWins() {
+        let outcome = CompanionAlignmentPreconditions.evaluate(
+            targetID: "bt-a", referenceID: "local", among: room(), isAudible: { _ in false })
+        #expect(outcome == .ready(referenceID: "local"))
+    }
+
+    /// Turns red if a named reference equal to the fallback default is refused
+    /// because it is not one of the Mac's own outputs.
+    @Test func aNamedReferenceEqualToTheFallbackDefaultIsAccepted() {
+        let noMac = room().filter { $0.id != "local" }
+        let outcome = CompanionAlignmentPreconditions.evaluate(
+            targetID: "bt-a", referenceID: "bt-b", among: noMac, isAudible: { $0 == "bt-b" })
+        #expect(outcome == .ready(referenceID: "bt-b"))
+    }
+
+    /// Turns red if the Mac accepts any speaker the phone names instead of
+    /// only its own outputs or the default.
+    @Test func aNamedReferenceThatIsNeitherCandidateNorDefaultIsRefused() {
+        let outcome = CompanionAlignmentPreconditions.evaluate(
+            targetID: "bt-a", referenceID: "bt-b", among: room(), isAudible: { _ in true })
+        #expect(outcome == .refused("\u{201C}Study\u{201D} can't be compared against right now."))
+        let cast = CompanionAlignmentPreconditions.evaluate(
+            targetID: "bt-a", referenceID: "cast", among: room(), isAudible: { _ in true })
+        #expect(cast == .refused("\u{201C}Nest\u{201D} can't be compared against right now."))
+    }
+
+    /// Turns red if a named reference missing from the room is staged or
+    /// reported as anything but unknown.
+    @Test func aNamedReferenceNotInTheRoomIsUnknown() {
+        let outcome = CompanionAlignmentPreconditions.evaluate(
+            targetID: "bt-a", referenceID: "nobody", among: room(), isAudible: { _ in true })
+        #expect(outcome == .refused("Unknown speaker."))
     }
 }
 

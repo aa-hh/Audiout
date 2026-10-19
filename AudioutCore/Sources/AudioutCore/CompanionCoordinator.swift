@@ -204,6 +204,15 @@ public final class CompanionCoordinator {
     /// from a replaced request cannot stop its successor.
     private let alignmentOwners = CompanionAlignmentOwnership()
 
+    /// Device ids this coordinator selected so a phone's run could hear them,
+    /// per target, in the order they were selected. Released in reverse, so
+    /// `GroupController`'s auto-swap and empty-set floor put the user's
+    /// Selected Devices back exactly. The generation tells one engagement
+    /// from the next, so a late refusal from an ended run cannot release
+    /// the selections of the run that replaced it.
+    private var engagedByTarget: [String: (generation: Int, ids: [String])] = [:]
+    private var engagementGeneration = 0
+
     /// Cached `.regular` running-app list backing `addableApps`/`isRunning` in
     /// the snapshot (FIX-B2 finding 2b). The host's app-lifecycle observers
     /// invalidate it (``invalidateRunningAppsCache()``) on the only edges that
@@ -344,8 +353,9 @@ public final class CompanionCoordinator {
                     }
                     return  // no snapshot broadcast — icons are not snapshot state
                 }
-                if case .setAlignmentTick(let targetID, let active) = command {
+                if case .setAlignmentTick(let targetID, let active, let referenceID) = command {
                     self.handleAlignmentTick(targetID: targetID, active: active,
+                                             referenceID: referenceID,
                                              clientID: clientID, reply: reply)
                     return
                 }
@@ -431,6 +441,12 @@ public final class CompanionCoordinator {
                         (self?.backend as? BTOutputControlling)?
                             .cancelCompanionAlignmentProbe(targetID: id)
                     })
+                // razor: one phone at a time — any phone's disconnect puts back
+                // every selection a run made. Key `engagedByTarget` by client
+                // if two phones may ever measure at once.
+                for targetID in Array(self.engagedByTarget.keys) {
+                    self.releaseEngaged(forTarget: targetID)
+                }
             }
         }
 
@@ -740,6 +756,55 @@ public final class CompanionCoordinator {
         (host?.devices() ?? []).sorted { $0.id < $1.id }
     }
 
+    /// Make `id` audible for a phone's run on `targetID`, through the one
+    /// selection owner, as the Mac's own wizard does for its reference. A
+    /// device already in Main Out is left alone and not remembered, so a
+    /// repeat start selects nothing new; an id this call did select is
+    /// appended to `newlyEngaged`. The refusal sentence is the dispatcher's
+    /// own for a phone's selection. While Main Audio plays a scene, selecting
+    /// a speaker outside it reaches nothing, so that is refused and undone.
+    private func engage(_ id: String, forTarget targetID: String,
+                        newlyEngaged: inout [String]) -> String? {
+        if groupController.isMainOutMember(id) { return nil }
+        let wasSelected = groupController.selectedDeviceIDs.contains(id)
+        let result = groupController.setDeviceSelected(id, true)
+        guard result.applied else {
+            if result.refusalReason == GroupController.oneSpeakerLimitReason {
+                return "Audiout plays on one speaker at a time until you buy."
+            }
+            return result.refusalReason
+        }
+        guard groupController.isMainOutMember(id) else {
+            if !wasSelected { groupController.setDeviceSelected(id, false) }
+            let name = alignmentDevices.first { $0.id == id }?.name ?? id
+            return "\u{201C}\(name)\u{201D} isn't in the active scene."
+        }
+        if engagedByTarget[targetID] == nil {
+            engagementGeneration += 1
+            engagedByTarget[targetID] = (engagementGeneration, [])
+        }
+        engagedByTarget[targetID]?.ids.append(id)
+        newlyEngaged.append(id)
+        return nil
+    }
+
+    /// Put back the selections `engage` made for `targetID`, newest first:
+    /// all of them, or with `only`, just the ids one refused call selected,
+    /// so a refusal never silences a run already in progress. A call with
+    /// `only` passes the `generation` it engaged under and releases nothing
+    /// once that engagement has ended. Unlike the Mac's wizard, the target
+    /// is released too.
+    private func releaseEngaged(forTarget targetID: String, only: [String]? = nil,
+                                generation: Int? = nil) {
+        guard let entry = engagedByTarget[targetID],
+              generation == nil || generation == entry.generation else { return }
+        if only == nil { engagementGeneration += 1 }
+        let released = only.map { only in entry.ids.filter(only.contains) } ?? entry.ids
+        let kept = entry.ids.filter { !released.contains($0) }
+        engagedByTarget[targetID] = kept.isEmpty ? nil : (entry.generation, kept)
+        for id in released.reversed() { groupController.setDeviceSelected(id, false) }
+    }
+
     /// The wire copy for `Snapshot.takeoverStatus` — the same plain language
     /// as the popover's takeover strip. Duplicated because
     /// `PopoverController.takeoverStatusText(for:)` is internal to
@@ -790,7 +855,7 @@ public final class CompanionCoordinator {
     // MARK: Speaker clicks (the audition)
 
     private func handleAlignmentTick(
-        targetID: String, active: Bool, clientID: UUID,
+        targetID: String, active: Bool, referenceID requestedReferenceID: String?, clientID: UUID,
         reply: @escaping @Sendable (CompanionServer.CommandResult) -> Void
     ) {
         if let reason = CompanionCommandDispatcher.alignmentTargetIDRefusal(targetID) {
@@ -823,7 +888,7 @@ public final class CompanionCoordinator {
         }
         let referenceID: String
         switch CompanionAlignmentPreconditions.evaluate(
-            targetID: targetID, among: alignmentDevices,
+            targetID: targetID, referenceID: requestedReferenceID, among: alignmentDevices,
             isAudible: groupController.isMainOutMember
         ) {
         case .refused(let reason):
@@ -831,12 +896,22 @@ public final class CompanionCoordinator {
             return
         case .ready(let id): referenceID = id
         }
+        var engagedNow: [String] = []
+        let engageRefusal = engage(targetID, forTarget: targetID, newlyEngaged: &engagedNow)
+            ?? engage(referenceID, forTarget: targetID, newlyEngaged: &engagedNow)
+        let generation = engagedByTarget[targetID]?.generation ?? 0
+        if let reason = engageRefusal {
+            releaseEngaged(forTarget: targetID, only: engagedNow, generation: generation)
+            reply(.init(applied: false, refusalReason: reason))
+            return
+        }
         let entry: CompanionAlignmentOwnership.Entry
         let isFreshClaim: Bool
         switch alignmentOwners.claim(targetID: targetID, clientID: clientID, kind: .audition,
                                      referenceID: referenceID,
                                      leaseDeadline: Date().addingTimeInterval(600)) {
         case .refused(let reason):
+            releaseEngaged(forTarget: targetID, only: engagedNow, generation: generation)
             reply(.init(applied: false, refusalReason: reason))
             return
         case .fresh(let fresh):
@@ -872,13 +947,15 @@ public final class CompanionCoordinator {
                     return
                 }
                 if let reason {
+                    self.releaseEngaged(forTarget: targetID, only: engagedNow,
+                                        generation: generation)
                     reply(.init(applied: false, refusalReason: reason))
                     self.scheduleBroadcast()
                     return
                 }
                 let samePair: Bool
                 switch CompanionAlignmentPreconditions.evaluate(
-                    targetID: targetID, among: self.alignmentDevices,
+                    targetID: targetID, referenceID: referenceID, among: self.alignmentDevices,
                     isAudible: self.groupController.isMainOutMember
                 ) {
                 case .ready(let currentReference): samePair = currentReference == referenceID
@@ -934,7 +1011,7 @@ public final class CompanionCoordinator {
                   !entry.cleanupRequested else { return }
             let samePair: Bool
             switch CompanionAlignmentPreconditions.evaluate(
-                targetID: targetID, among: self.alignmentDevices,
+                targetID: targetID, referenceID: referenceID, among: self.alignmentDevices,
                 isAudible: self.groupController.isMainOutMember
             ) {
             case .ready(let currentReference): samePair = currentReference == referenceID
@@ -963,7 +1040,7 @@ public final class CompanionCoordinator {
     /// live delay line, and whether anything else is already running.
     private func makeAlignmentActions() -> CompanionAlignmentActions {
         CompanionAlignmentActions(
-            startProbe: { [weak self] targetID, clientID in
+            startProbe: { [weak self] targetID, requestedReferenceID, clientID in
                 guard let self, let bt = self.backend as? BTOutputControlling else {
                     return "This Mac can't measure speaker timing."
                 }
@@ -971,6 +1048,7 @@ public final class CompanionCoordinator {
                 let referenceID: String
                 switch CompanionAlignmentPreconditions.evaluate(
                     targetID: targetID,
+                    referenceID: requestedReferenceID,
                     among: self.alignmentDevices,
                     isAudible: self.groupController.isMainOutMember
                 ) {
@@ -978,6 +1056,14 @@ public final class CompanionCoordinator {
                     return reason
                 case .ready(let id):
                     referenceID = id
+                }
+                var engagedNow: [String] = []
+                let engageRefusal = self.engage(targetID, forTarget: targetID, newlyEngaged: &engagedNow)
+                    ?? self.engage(referenceID, forTarget: targetID, newlyEngaged: &engagedNow)
+                let generation = self.engagedByTarget[targetID]?.generation ?? 0
+                if let reason = engageRefusal {
+                    self.releaseEngaged(forTarget: targetID, only: engagedNow, generation: generation)
+                    return reason
                 }
                 // Claimed BEFORE the backend call, so a second phone is refused
                 // rather than racing it, and given back if the run never staged
@@ -989,7 +1075,11 @@ public final class CompanionCoordinator {
                     let attempt = self.alignmentOwners.claim(
                         targetID: targetID, clientID: clientID, kind: .probe,
                         referenceID: referenceID, leaseDeadline: nil)
-                    if case .refused(let reason) = attempt { return reason }
+                    if case .refused(let reason) = attempt {
+                        self.releaseEngaged(forTarget: targetID, only: engagedNow,
+                                            generation: generation)
+                        return reason
+                    }
                     claim = attempt
                 }
                 let refusal = bt.startCompanionAlignmentProbe(
@@ -1000,13 +1090,23 @@ public final class CompanionCoordinator {
                     onFinished: { [weak self] in
                         self?.sendProbeEvent(targetID: targetID, started: false)
                     })
-                if refusal != nil, let claim {
-                    self.alignmentOwners.releaseFresh(claim, targetID: targetID)
+                if refusal != nil {
+                    self.releaseEngaged(forTarget: targetID, only: engagedNow,
+                                        generation: generation)
+                    if let claim {
+                        self.alignmentOwners.releaseFresh(claim, targetID: targetID)
+                    }
                 }
                 return refusal
             },
             cancelProbe: { [weak self] targetID, clientID in
                 guard let self else { return nil }
+                // The asking phone's own run (or nobody's) gives its speakers
+                // back now, even while its clicks still drain below.
+                let owner = self.alignmentOwners.current(targetID: targetID)
+                if owner == nil || owner?.clientID == clientID {
+                    self.releaseEngaged(forTarget: targetID)
+                }
                 // Cancel is the legacy family's exit, never the audition's:
                 // that one is stopped by its own tick command.
                 if let busy = self.legacyAlignmentRefusal(targetID: targetID) { return busy }

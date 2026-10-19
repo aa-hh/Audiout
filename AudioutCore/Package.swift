@@ -194,7 +194,7 @@ let package = Package(
         // `hello`'s optional `checksPairingCode`; 0.28.0 adds the `removed`
         // goodbye reason.
         .package(url: "https://github.com/aa-hh/audiout-shared.git",
-                 from: "0.28.0"),
+                 from: "0.29.0"),
         // Sparkle 2 (MIT) — in-app updates for the paid, notarised build only.
         // Scoped to the `AudioutApp` executable target so no library, test or
         // harness target ever links it.

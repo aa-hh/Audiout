@@ -3430,18 +3430,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
 /// enumeration, app icons, popover repaints, and the app's own lifecycle flag.
 extension AppDelegate: CompanionCoordinatorHost {
 
-    /// The T24 approval alert: shows the pairing code the phone is showing,
-    /// explains the stakes, and reports the answer back to
-    /// `CompanionApprovalController` (which persists it and settles every
+    /// The T24 approval alert: the question, the pairing code the phone is
+    /// showing in six boxes, and Allow / Don't Allow. Reports the answer back
+    /// to `CompanionApprovalController` (which persists it and settles every
     /// connection waiting on it). Main-actor and modal — the SERVER never
     /// blocks (its queue keeps running; only this app's own UI waits), and
     /// the controller shows one prompt at a time. The phone's self-reported
     /// name is not in the question: the code is what identifies it.
-    /// "Don't Allow" is the default button, and the alert floats at
-    /// `.floating` level and requests attention without activating the app,
-    /// so a Return or click aimed at something else never approves a phone.
-    /// An abort from `withdrawApprovalPrompt` is not the user's answer and
-    /// records nothing.
+    /// Allow is drawn as the primary button but has no key equivalent:
+    /// Return does nothing and Escape is Don't Allow. With the alert floating
+    /// at `.floating` level and requesting attention without activating the
+    /// app, a keypress or click aimed at something else never approves a
+    /// phone. An abort from `withdrawApprovalPrompt` is not the user's answer
+    /// and records nothing.
     @MainActor
     func presentApprovalPrompt(clientID: String, clientName: String, pairingCode: String,
                                respond: @escaping (Bool) -> Void) {
@@ -3449,19 +3450,87 @@ extension AppDelegate: CompanionCoordinatorHost {
         // the decision unmade (no persisted denial) and the server's own
         // approval deadline closes the connection.
         guard !HeadlessRuntime.isActive, !isTerminating else { return }
-        let code = Self.formattedPairingCode(pairingCode)
         let alert = NSAlert()
         alert.messageText = "Allow an iPhone to control audio on this Mac?"
-        alert.informativeText = "The iPhone is showing a code. Allow only if it shows \(code) too.\n\nIt will be able to see and control what's playing on this Mac's speakers, including which apps are playing audio. You can change this later in Settings › Audiout Remote."
-        alert.addButton(withTitle: "Don't Allow")
-        alert.addButton(withTitle: "Allow")
+        alert.informativeText = ""
+        alert.icon = Self.lockBadgedAppIcon()
+        alert.accessoryView = Self.pairingCodeBoxes(pairingCode)
+        let allow = alert.addButton(withTitle: "Allow")
+        allow.keyEquivalent = ""
+        allow.bezelColor = .controlAccentColor
+        if #available(macOS 26.0, *) { allow.tintProminence = .primary }
+        alert.addButton(withTitle: "Don't Allow").keyEquivalent = "\u{1b}"
         alert.window.level = .floating
         NSApp.requestUserAttention(.criticalRequest)
         companionApprovalAlerts[clientID] = alert
         let outcome = alert.runModal()
         companionApprovalAlerts.removeValue(forKey: clientID)
         guard outcome != .abort else { return }
-        respond(outcome == .alertSecondButtonReturn)
+        respond(outcome == .alertFirstButtonReturn)
+    }
+
+    /// The app icon with a `lock.fill` symbol in a white circle at its
+    /// bottom-right corner, for the approval alert.
+    private static func lockBadgedAppIcon() -> NSImage {
+        let icon = NSApp.applicationIconImage ?? NSImage()
+        return NSImage(size: NSSize(width: 64, height: 64), flipped: false) { rect in
+            icon.draw(in: rect)
+            let badge = NSRect(x: rect.maxX - 28, y: 0, width: 28, height: 28)
+            // A faint shadow keeps the white circle visible against the
+            // icon's pale background.
+            NSGraphicsContext.saveGraphicsState()
+            let shadow = NSShadow()
+            shadow.shadowBlurRadius = 2
+            shadow.shadowOffset = NSSize(width: 0, height: -1)
+            shadow.shadowColor = NSColor.black.withAlphaComponent(0.3)
+            shadow.set()
+            NSColor.white.setFill()
+            NSBezierPath(ovalIn: badge.insetBy(dx: 1, dy: 1)).fill()
+            NSGraphicsContext.restoreGraphicsState()
+            let config = NSImage.SymbolConfiguration(pointSize: 14, weight: .semibold)
+                .applying(.init(paletteColors: [.black]))
+            if let lock = NSImage(systemSymbolName: "lock.fill", accessibilityDescription: nil)?
+                .withSymbolConfiguration(config) {
+                let size = lock.size
+                lock.draw(in: NSRect(x: badge.midX - size.width / 2, y: badge.midY - size.height / 2,
+                                     width: size.width, height: size.height))
+            }
+            return true
+        }
+    }
+
+    /// The approval alert's code: one large digit per rounded box, read
+    /// aloud by VoiceOver as a single "Pairing code 0 9 2 2 1 9".
+    private static func pairingCodeBoxes(_ pairingCode: String) -> NSView {
+        let boxes = pairingCode.map { digit -> NSView in
+            let label = NSTextField(labelWithString: String(digit))
+            label.font = .monospacedDigitSystemFont(ofSize: 28, weight: .semibold)
+            label.alignment = .center
+            label.translatesAutoresizingMaskIntoConstraints = false
+            let box = NSBox()
+            box.boxType = .custom
+            box.cornerRadius = 8
+            box.borderWidth = 1
+            box.borderColor = .separatorColor
+            box.fillColor = .quaternaryLabelColor.withAlphaComponent(0.06)
+            box.contentViewMargins = .zero
+            box.translatesAutoresizingMaskIntoConstraints = false
+            box.contentView?.addSubview(label)
+            NSLayoutConstraint.activate([
+                box.widthAnchor.constraint(equalToConstant: 36),
+                box.heightAnchor.constraint(equalToConstant: 46),
+                label.centerXAnchor.constraint(equalTo: box.centerXAnchor),
+                label.centerYAnchor.constraint(equalTo: box.centerYAnchor),
+            ])
+            return box
+        }
+        let row = NSStackView(views: boxes)
+        row.spacing = 6
+        row.setAccessibilityElement(true)
+        row.setAccessibilityRole(.staticText)
+        row.setAccessibilityLabel("Pairing code " + pairingCode.map(String.init).joined(separator: " "))
+        row.frame.size = row.fittingSize
+        return row
     }
 
     /// Close the prompt shown for `clientID`, if it's still the one on
@@ -3477,7 +3546,7 @@ extension AppDelegate: CompanionCoordinatorHost {
         NSApp.abortModal()
     }
 
-    /// "482913" → "482 913", as both pairing-code alerts show it.
+    /// "482913" → "482 913", as the pairing-code check shows it.
     private static func formattedPairingCode(_ pairingCode: String) -> String {
         "\(pairingCode.prefix(3)) \(pairingCode.dropFirst(3))"
     }

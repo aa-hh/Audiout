@@ -735,15 +735,18 @@ one hero panel, gating Done until every check passes.
 
 Mostly flat, matching iOS: the dark ground ladder (canvas → panel → raised)
 and, in light, edge weight alone carry depth. `Tokens.Color.shadow` (an
-alias of `NSColor.black`) has four real consumers, every one of them a flat
-clipped band rather than a blurred `NSShadow`: `AlignmentPlateCell` (the
+alias of `NSColor.black`) has five real consumers. Four are a flat clipped
+band rather than a blurred shadow: `AlignmentPlateCell` (the
 wizard's answer-plate lip shading, rim shadow blend, and chip shadow fill),
 `WarmFaderCell` (the fader trough's inset shade at
 `Tokens.Color.insetShadeAlpha`, 0.18),
 `GroupedSectionView`'s `.well` style (a 1pt band at that same alpha, clipped
 inside the shape's top edge), and `SetupPreviewFrameView` (the onboarding demo
 frame, which blends the same 0.18 lip and a 0.06 darkening of its own `well`
-fill, because it is layer-backed rather than hand-drawn). `.well` is the page card recessed: the
+fill, because it is layer-backed rather than hand-drawn). The one blurred
+shadow is `TrialSurveyCardView`'s: the expired-trial survey card floats over
+the screen it covers, so its layer casts a 44 pt blur at 0.4 opacity, 18 pt
+down. `.well` is the page card recessed: the
 `Tokens.Color.well` fill in place of `.card`'s `raised`, the same
 `containerEdge` stroke and, by default, the `panel` radius; both Equalizer
 wells take the `row` radius (16 pt), the radius of the list below them, so

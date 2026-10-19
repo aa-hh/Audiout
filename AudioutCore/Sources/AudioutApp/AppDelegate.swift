@@ -1026,6 +1026,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.useNewTrialKey()
         }, onValidated: { [weak self] in
             self?.applyLicenseState()
+            self?.groupController?.licenseAnswered()
         })
         trialReachability?.start()
 
@@ -1041,6 +1042,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // now and again on the answer costs nothing.
         LicenseValidator(settings: settings).validate { [weak self] _ in
             self?.applyLicenseState()
+            self?.groupController?.licenseAnswered()
         }
         applyLicenseState()
         RemoteAppConfigFetcher(settings: settings).refresh { [weak self] in self?.applyLicenseState() }
@@ -1511,6 +1513,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 if LicenseGate.limitsToOneSpeaker(settings: settings) {
                     LicenseValidator(settings: settings).validate { [weak self] _ in
                         self?.applyLicenseState()
+                        self?.groupController?.licenseAnswered()
                     }
                 }
                 // The consent ask comes on the open after the thank-you card.
@@ -1868,6 +1871,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         LicenseCheckIn(settings: settings).checkInIfNeeded()
         LicenseValidator(settings: settings).validate { [weak self] _ in
             self?.applyLicenseState()
+            self?.groupController?.licenseAnswered()
         }
         applyLicenseState()
     }

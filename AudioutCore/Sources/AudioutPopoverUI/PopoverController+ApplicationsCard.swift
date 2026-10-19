@@ -718,7 +718,11 @@ extension PopoverController: AppRowView.Delegate {
     /// ``surfaceDidShow()``, plus the two things that must not survive a
     /// session: the transient app-row selection, and every meter's last
     /// reading (a reopen must never show a stale bar).
-    func surfaceDidHide() {
+    ///
+    /// `closed` is true only when the window really closed. A cover-up by
+    /// another window or a tab switch also hides the Mixer, but must not count
+    /// as an unanswered close of the survey invite.
+    func surfaceDidHide(closed: Bool = false) {
         hostIsShown = false
         removeDeselectMonitor()
         selectedAppBundleID = nil
@@ -732,7 +736,7 @@ extension PopoverController: AppRowView.Delegate {
         // A survey invite up at hide comes back next open, until the host
         // says this was the last unanswered close: that one counts as declined.
         if let survey = raisedSurveyInvite {
-            if onSurveyInviteUnanswered?() ?? true {
+            if closed, onSurveyInviteUnanswered?() ?? true {
                 Analytics.captureStructured("survey dismissed", survey.dismissedProperties(.init()))
                 spendSurveyInvite()
             } else {

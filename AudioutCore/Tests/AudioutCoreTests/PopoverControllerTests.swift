@@ -4885,8 +4885,8 @@ extension SerializedSharedState {
             let popover = trialEndedPopover(invite: invite)
             popover.test_simulateOpen()
             let seen = StructuredEvents.recording {
-                popover.surfaceDidHide()
-                popover.surfaceDidHide()
+                popover.surfaceDidHide(closed: true)
+                popover.surfaceDidHide(closed: true)
             }
             #expect(seen.names() == ["survey dismissed"])
             #expect(invite.spentCalls == 1)
@@ -4902,12 +4902,28 @@ extension SerializedSharedState {
             invite.unansweredIsLast = false
             let popover = trialEndedPopover(invite: invite)
             popover.test_simulateOpen()
-            let hidden = StructuredEvents.recording { popover.surfaceDidHide() }
+            let hidden = StructuredEvents.recording { popover.surfaceDidHide(closed: true) }
             #expect(hidden.names().isEmpty)
             #expect(invite.spentCalls == 0)
             #expect(invite.unansweredCalls == 1)
             let reopened = StructuredEvents.recording { popover.test_simulateOpen() }
             #expect(reopened.names() == ["survey shown"])
+            #expect(popover.test_systemAirPlayNoteText == PopoverController.surveyInviteText)
+        }
+
+        /// Red if a hide that is not a close (another window covering the
+        /// Mixer, a tab switch) goes through the unanswered-close count: three
+        /// cover-ups would spend the invite and send `survey dismissed`.
+        @Test func aHideThatIsNotACloseLeavesTheCountAlone() {
+            let invite = Invite()
+            invite.unansweredIsLast = true
+            let popover = trialEndedPopover(invite: invite)
+            popover.test_simulateOpen()
+            let hidden = StructuredEvents.recording { popover.surfaceDidHide() }
+            #expect(hidden.names().isEmpty)
+            #expect(invite.unansweredCalls == 0)
+            #expect(invite.spentCalls == 0)
+            popover.test_simulateOpen()
             #expect(popover.test_systemAirPlayNoteText == PopoverController.surveyInviteText)
         }
 

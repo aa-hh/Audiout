@@ -2551,14 +2551,27 @@ extension SerializedSharedState {
             }
         }
 
-        /// Red if a later lift is counted after the first re-assignment.
+        /// Red if a later lift is counted after a still-limited licence answer.
         @Test func laterLiftAfterStillLimitedAnswerIsNotCounted() throws {
             try withSink { captured in
                 let controller = try limitedController(stored: ["office", "sonos-move"])
                 controller.ensureDefaultSelection()
                 controller.limitsToOneSpeaker = true
+                controller.licenseAnswered()
                 controller.limitsToOneSpeaker = false
                 #expect(captured.names().isEmpty)
+            }
+        }
+
+        /// Red if a pass that is not a licence answer (a remote-config refresh)
+        /// re-assigning the same limit swallows the lift that follows.
+        @Test func liftAfterNonAnswerReassignmentIsCounted() throws {
+            try withSink { captured in
+                let controller = try limitedController(stored: ["office", "sonos-move"])
+                controller.ensureDefaultSelection()
+                controller.limitsToOneSpeaker = true
+                controller.limitsToOneSpeaker = false
+                #expect(captured.names() == ["license:launch_clamp_lifted"])
             }
         }
 

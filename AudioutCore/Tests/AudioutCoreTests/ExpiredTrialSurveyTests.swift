@@ -159,4 +159,68 @@ import Testing
         let props = Self.ours(iteration: 2).sentProperties(.init(reason: "Too expensive"))
         #expect(props["$survey_iteration"] as? Int == 2)
     }
+
+    private func owedSettings(days: Int = 2) -> AppSettings {
+        let settings = AppSettings(defaults: isolation.makeDefaults(), licenseServerURL: Self.server)
+        TrialClock.start(settings: settings, now: Date().addingTimeInterval(-30 * 86_400))
+        settings.trialEndedStreamingDays = days
+        return settings
+    }
+
+    /// Red if `refresh` stops latching `started` after a successful fetch (two
+    /// calls would fetch twice) or `invite` stops re-checking `isOwed` after the
+    /// invite is spent.
+    @Test func fetcherFetchesOnceWhileOwed() {
+        let settings = owedSettings()
+        var count = 0
+        let fetcher = ExpiredTrialSurvey.Fetcher(settings: settings) { completion in
+            count += 1
+            completion(Self.ours())
+        }
+        fetcher.refresh(analyticsAvailable: true)
+        fetcher.refresh(analyticsAvailable: true)
+        #expect(count == 1)
+        #expect(fetcher.survey == Self.ours())
+        #expect(fetcher.invite == Self.ours())
+        settings.expiredTrialSurveyDone = true
+        #expect(fetcher.invite == nil)
+        #expect(fetcher.survey != nil)
+    }
+
+    /// Red if a nil fetch result leaves `started` set: a PostHog outage at launch
+    /// would silence the survey until the next launch.
+    @Test func fetcherRetriesAfterAFailedFetch() {
+        var count = 0
+        let fetcher = ExpiredTrialSurvey.Fetcher(settings: owedSettings()) { completion in
+            count += 1
+            completion(count == 1 ? nil : Self.ours())
+        }
+        fetcher.refresh(analyticsAvailable: true)
+        #expect(count == 1)
+        #expect(fetcher.survey == nil)
+        fetcher.refresh(analyticsAvailable: true)
+        #expect(count == 2)
+        #expect(fetcher.survey == Self.ours())
+        fetcher.refresh(analyticsAvailable: true)
+        #expect(count == 2)
+    }
+
+    /// Red if `refresh` drops its `analyticsAvailable` guard or stops routing
+    /// consent and the day count through `isOwed`: a Mac with analytics off or
+    /// not yet owed would hit PostHog.
+    @Test func fetcherSkipsWhenNotOwedWithoutConsentOrWithoutAnalytics() {
+        var count = 0
+        func fetcher(_ settings: AppSettings) -> ExpiredTrialSurvey.Fetcher {
+            ExpiredTrialSurvey.Fetcher(settings: settings) { completion in
+                count += 1
+                completion(Self.ours())
+            }
+        }
+        fetcher(owedSettings()).refresh(analyticsAvailable: false)
+        let noConsent = owedSettings()
+        noConsent.telemetryAsked = true
+        fetcher(noConsent).refresh(analyticsAvailable: true)
+        fetcher(owedSettings(days: 1)).refresh(analyticsAvailable: true)
+        #expect(count == 0)
+    }
 }

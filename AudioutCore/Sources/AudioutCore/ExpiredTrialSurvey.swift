@@ -197,3 +197,43 @@ public struct ExpiredTrialSurvey: Equatable, Sendable {
         return props
     }
 }
+
+extension ExpiredTrialSurvey {
+    /// Fetches the survey once per launch while this install is owed it, and
+    /// tries again after a failed fetch. Main thread only.
+    public final class Fetcher {
+        /// The network call. The caller must deliver `completion` on the main thread.
+        public typealias Fetch = (_ completion: @escaping (ExpiredTrialSurvey?) -> Void) -> Void
+
+        private let settings: AppSettings
+        private let fetch: Fetch
+
+        /// The survey's definition, once fetched; the popover's invite reads it.
+        public private(set) var survey: ExpiredTrialSurvey?
+        /// Set while a fetch runs or after one succeeded; a failed fetch clears
+        /// it so the next daily-active or licence pass tries again.
+        private var started = false
+
+        public init(settings: AppSettings, fetch: @escaping Fetch) {
+            self.settings = settings
+            self.fetch = fetch
+        }
+
+        /// Fetch the survey once this install is owed it.
+        public func refresh(analyticsAvailable: Bool) {
+            guard analyticsAvailable, !started,
+                  ExpiredTrialSurvey.isOwed(settings: settings, consent: settings.telemetryEnabled) else { return }
+            started = true
+            fetch { [weak self] survey in
+                guard let self else { return }
+                self.survey = survey
+                if survey == nil { self.started = false }
+            }
+        }
+
+        /// The survey to invite with, only while this install is still owed it.
+        public var invite: ExpiredTrialSurvey? {
+            ExpiredTrialSurvey.isOwed(settings: settings, consent: settings.telemetryEnabled) ? survey : nil
+        }
+    }
+}

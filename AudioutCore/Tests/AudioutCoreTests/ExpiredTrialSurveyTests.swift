@@ -119,6 +119,17 @@ import Testing
         #expect(settings.trialEndedStreamingDays == 0)
     }
 
+    /// Red if `recordUnansweredLook` stops persisting its count in
+    /// `expiredTrialUnansweredLooks` or `maxUnansweredLooks` moves off 3: the
+    /// invite would be spent on the wrong close.
+    @Test func recordUnansweredLookSpendsOnTheThirdClose() {
+        let settings = AppSettings(defaults: isolation.makeDefaults(), licenseServerURL: Self.server)
+        #expect(!ExpiredTrialSurvey.recordUnansweredLook(settings: settings))
+        #expect(!ExpiredTrialSurvey.recordUnansweredLook(settings: settings))
+        #expect(ExpiredTrialSurvey.recordUnansweredLook(settings: settings))
+        #expect(settings.expiredTrialUnansweredLooks == 3)
+    }
+
     /// Red if the missing-something details stop going to question 2 as an
     /// array, leak into questions 3 or 4, or a `$set` comes back (PostHog drops
     /// it for an install with no person profile).

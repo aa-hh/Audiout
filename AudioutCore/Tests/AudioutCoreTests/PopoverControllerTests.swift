@@ -4802,10 +4802,16 @@ extension SerializedSharedState {
             var owed = true
             var spentCalls = 0
             var answered: [ExpiredTrialSurvey] = []
+            /// What the host's unanswered-close count answers; `nil` leaves it unwired.
+            var unansweredIsLast: Bool?
+            var unansweredCalls = 0
             func wire(_ popover: PopoverController) {
                 popover.surveyInviteProvider = { [unowned self] in owed ? ExpiredTrialSurveyFixture.survey : nil }
                 popover.onSurveyInviteSpent = { [unowned self] in spentCalls += 1; owed = false }
                 popover.onSurveyAnswer = { [unowned self] in answered.append($0) }
+                if let isLast = unansweredIsLast {
+                    popover.onSurveyInviteUnanswered = { [unowned self] in unansweredCalls += 1; return isLast }
+                }
             }
         }
 
@@ -4843,15 +4849,18 @@ extension SerializedSharedState {
         }
 
         /// Red if Not now stopped sending `survey dismissed` with no answers,
-        /// stopped marking the invite done, or left the invite in the slot.
+        /// stopped marking the invite done, left the invite in the slot, or
+        /// went through the unanswered-close count instead of spending at once.
         @Test func notNowDismissesSpendsAndRestoresTheTrialNote() {
             let invite = Invite()
+            invite.unansweredIsLast = false
             let popover = trialEndedPopover(invite: invite)
             popover.test_simulateOpen()
             let seen = StructuredEvents.recording { popover.test_tapSystemAirPlayNoteTextAction() }
             #expect(seen.names() == ["survey dismissed"])
             #expect(seen.all.first?.1["$survey_partially_completed"] as? Bool == false)
             #expect(invite.spentCalls == 1)
+            #expect(invite.unansweredCalls == 0)
             #expect(popover.test_systemAirPlayNoteText == PopoverController.unregisteredTrialEndedNoteText)
         }
 
@@ -4867,10 +4876,12 @@ extension SerializedSharedState {
             #expect(popover.test_systemAirPlayNoteText == PopoverController.unregisteredTrialEndedNoteText)
         }
 
-        /// Red if hiding with the invite up stopped counting as a decline:
-        /// no `survey dismissed`, or the invite left owed for the next open.
-        @Test func hidingWithTheInviteUpDismissesAndSpendsItOnce() {
+        /// Red if the last allowed unanswered close (`onSurveyInviteUnanswered`
+        /// returning true) stopped counting as a decline: no `survey
+        /// dismissed`, or the invite left owed for the next open.
+        @Test func hidingOnTheLastUnansweredLookDismissesAndSpendsItOnce() {
             let invite = Invite()
+            invite.unansweredIsLast = true
             let popover = trialEndedPopover(invite: invite)
             popover.test_simulateOpen()
             let seen = StructuredEvents.recording {
@@ -4879,6 +4890,25 @@ extension SerializedSharedState {
             }
             #expect(seen.names() == ["survey dismissed"])
             #expect(invite.spentCalls == 1)
+            #expect(invite.unansweredCalls == 1)
+        }
+
+        /// Red if a hide before the last unanswered look (`surfaceDidHide`
+        /// ignoring `onSurveyInviteUnanswered` returning false) spends the
+        /// invite or sends `survey dismissed`, or the invite stops coming back
+        /// on the next open.
+        @Test func hidingBeforeTheLastLookBringsTheInviteBackNextOpen() {
+            let invite = Invite()
+            invite.unansweredIsLast = false
+            let popover = trialEndedPopover(invite: invite)
+            popover.test_simulateOpen()
+            let hidden = StructuredEvents.recording { popover.surfaceDidHide() }
+            #expect(hidden.names().isEmpty)
+            #expect(invite.spentCalls == 0)
+            #expect(invite.unansweredCalls == 1)
+            let reopened = StructuredEvents.recording { popover.test_simulateOpen() }
+            #expect(reopened.names() == ["survey shown"])
+            #expect(popover.test_systemAirPlayNoteText == PopoverController.surveyInviteText)
         }
 
         /// Red if the invite pushed a capture-failure note out of the slot, or

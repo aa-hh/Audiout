@@ -6,7 +6,7 @@ import AudioutSharedUI
 
 /// The expired-trial survey: a card that rises over the shell's content view
 /// on a dimmed ground, asks why the user has not bought (one tap), one
-/// follow-up for three of the five reasons, an optional line of text, then
+/// follow-up for three of the five reasons, an optional few lines of text, then
 /// shows a thank-you mark. The host (`AppSurfaceController`) sends the events;
 /// this view only reports the answers.
 final class TrialSurveyCardView: NSView {
@@ -33,6 +33,9 @@ final class TrialSurveyCardView: NSView {
         static let questionSpacing: CGFloat = 4
         static let fieldHintSpacing: CGFloat = 6
         static let footerSpacing: CGFloat = 16
+        // Text step: about four lines of `body`, scrolling past that.
+        static let textAreaHeight: CGFloat = 84
+        static let textAreaInset: CGFloat = 6
         // Tiles
         static let tileHeight: CGFloat = 44
         static let tileSpacing: CGFloat = 8
@@ -174,7 +177,7 @@ final class TrialSurveyCardView: NSView {
     private var stepView: NSView?
     private var tiles: [SurveyTileButton] = []
     private var continueButton: ProminentButton?
-    private var textField: NSTextField?
+    private var textView: SurveyTextView?
     private var markView: SurveyThanksMarkView?
 
     private static var animates: Bool { !HeadlessRuntime.isActive }
@@ -347,7 +350,7 @@ final class TrialSurveyCardView: NSView {
         step = next
         tiles = []
         continueButton = nil
-        textField = nil
+        textView = nil
         markView = nil
 
         let content: NSView
@@ -379,7 +382,7 @@ final class TrialSurveyCardView: NSView {
         setProgress(fraction(for: next), animated: animated)
         layoutSubtreeIfNeeded()
         if animated { slideIn(content) }
-        window?.makeFirstResponder(textField ?? self)
+        window?.makeFirstResponder(textView ?? self)
         markView?.play()
     }
 
@@ -488,13 +491,35 @@ final class TrialSurveyCardView: NSView {
     }
 
     private func textStep() -> NSView {
-        let field = NSTextField(string: "")
-        field.font = Tokens.Font.body
-        field.placeholderString = Self.textPlaceholder
-        field.setAccessibilityLabel(Self.textQuestion)
-        field.target = self
-        field.action = #selector(sendClicked)
-        textField = field
+        let contentWidth = Metrics.cardWidth - 2 * (Metrics.cardEdgeWidth + Metrics.insetSide)
+        let field = NSScrollView(frame: NSRect(x: 0, y: 0, width: contentWidth, height: Metrics.textAreaHeight))
+        field.borderType = .bezelBorder
+        field.hasVerticalScroller = true
+        field.hasHorizontalScroller = false
+        field.autohidesScrollers = true
+        let area = SurveyTextView(frame: NSRect(origin: .zero, size: field.contentSize))
+        area.minSize = NSSize(width: 0, height: field.contentSize.height)
+        area.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: .greatestFiniteMagnitude)
+        area.isVerticallyResizable = true
+        area.isHorizontallyResizable = false
+        area.autoresizingMask = [.width]
+        area.textContainer?.widthTracksTextView = true
+        area.textContainerInset = NSSize(width: Metrics.textAreaInset, height: Metrics.textAreaInset)
+        area.isRichText = false
+        area.allowsUndo = true
+        area.drawsBackground = true
+        area.backgroundColor = .textBackgroundColor
+        area.font = Tokens.Font.body
+        area.textColor = Tokens.Color.label
+        area.insertionPointColor = Tokens.Color.label
+        area.placeholder = Self.textPlaceholder
+        area.setAccessibilityPlaceholderValue(Self.textPlaceholder)
+        area.setAccessibilityLabel(Self.textQuestion)
+        area.delegate = self
+        area.onSend = { [weak self] in self?.sendClicked() }
+        field.documentView = area
+        field.heightAnchor.constraint(equalToConstant: Metrics.textAreaHeight).isActive = true
+        textView = area
         let hint = NSTextField(labelWithString: Self.textHint)
         hint.font = Tokens.Font.caption
         hint.textColor = Tokens.Color.label2
@@ -584,7 +609,7 @@ final class TrialSurveyCardView: NSView {
     }
 
     @objc private func sendClicked() {
-        let typed = (textField?.stringValue ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let typed = (textView?.string ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         answers.text = typed.isEmpty ? nil : String(typed.prefix(Metrics.textLimit))
         finish()
     }
@@ -616,10 +641,67 @@ final class TrialSurveyCardView: NSView {
     func test_back() { backClicked() }
     func test_notNow() { notNowClicked() }
     func test_skip() { skipClicked() }
-    var test_textField: NSTextField? { textField }
+    var test_textView: NSTextView? { textView }
     func test_send() { sendClicked() }
     func test_done() { doneClicked() }
     var test_progressFraction: CGFloat { progressFraction }
+}
+
+extension TrialSurveyCardView: NSTextViewDelegate {
+    /// Caps the answer at `Metrics.textLimit` while typing; a paste that
+    /// would pass it goes in cut to fit.
+    func textView(_ textView: NSTextView, shouldChangeTextIn range: NSRange, replacementString: String?) -> Bool {
+        guard let replacement = replacementString else { return true }
+        let room = Metrics.textLimit - ((textView.string as NSString).length - range.length)
+        if (replacement as NSString).length <= room { return true }
+        var used = 0
+        let fit = String(replacement.prefix { used += $0.utf16.count; return used <= room })
+        if !fit.isEmpty { textView.insertText(fit, replacementRange: range) }
+        return false
+    }
+}
+
+// MARK: - Text area
+
+/// The text step's answer: Return starts a new line, Command-Return sends,
+/// Tab moves on to the buttons, and Escape goes up the responder chain to
+/// the shell's cancel handler, so it dismisses the card as before. Draws its
+/// placeholder while empty.
+final class SurveyTextView: NSTextView {
+    var onSend: (() -> Void)?
+    var placeholder = ""
+
+    override func keyDown(with event: NSEvent) {
+        if event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,
+           event.charactersIgnoringModifiers == "\r" {
+            onSend?()
+            return
+        }
+        super.keyDown(with: event)
+    }
+
+    override func insertTab(_ sender: Any?) { window?.selectNextKeyView(sender) }
+    override func insertBacktab(_ sender: Any?) { window?.selectPreviousKeyView(sender) }
+
+    /// NSTextView turns Escape into completion; the card wants it to dismiss.
+    override func cancelOperation(_ sender: Any?) {
+        nextResponder?.tryToPerform(#selector(NSResponder.cancelOperation(_:)), with: sender)
+    }
+
+    override func didChangeText() {
+        super.didChangeText()
+        needsDisplay = true
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        guard string.isEmpty, !placeholder.isEmpty else { return }
+        let padding = textContainer?.lineFragmentPadding ?? 0
+        NSAttributedString(string: placeholder, attributes: [
+            .font: font ?? Tokens.Font.body,
+            .foregroundColor: NSColor.placeholderTextColor,
+        ]).draw(at: NSPoint(x: textContainerOrigin.x + padding, y: textContainerOrigin.y))
+    }
 }
 
 // MARK: - Card chrome

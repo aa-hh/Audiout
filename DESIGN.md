@@ -1131,10 +1131,12 @@ rings in a 96 pt well at the leading edge, a headline in `heading`, body
 text in `body` / `label2`, and a small rounded **Close** text button. The
 rings play one surge on appearing, then rest.
 
-**Expired-trial survey**: shown once to a trial-ended install that still
-streams. The invite takes the note slot in place of the trial-ended note for
-one open: an info banner reading "Have a minute? Two questions about what
-Audiout is missing for you.", an **Answer** button and a **Not now** link.
+**Expired-trial survey**: offered to a trial-ended install that still
+streams. The invite takes the note slot in place of the trial-ended note and
+comes back on up to 3 opens until **Answer** or **Not now** is clicked; the
+third close with neither clicked counts as declined. It is an info banner
+reading "Have a minute? Two questions about what Audiout is missing for
+you.", an **Answer** button and a **Not now** link.
 Answer raises `TrialSurveyCardView` over the shell's content view: the whole
 view under `cardScrim` (dark `#0A0A0C` at 0.6, light black at 0.22) and a
 centred 420 pt card in `panel` with a 1 pt `containerEdge` edge, a 16 pt
@@ -1153,8 +1155,9 @@ single-choice tile, or its number key, answers and moves on after 120 ms;
 each next step slides in 32 pt from the right while fading up over 200 ms
 (a fade only under Reduce Motion). The footer puts **Back** on the left and
 **Not now** (or **Skip**) and the gold primary button on the right. The text
-step is one stock field with the hint "Leave out names, emails or anything
-personal." in `caption` / `label2`. The card rises from 96 % scale while
+step is a stock bezeled text area about four lines tall (84 pt, scrolling
+past that) where Return starts a new line and ⌘Return sends, with the hint
+"Leave out names, emails or anything personal." in `caption` / `label2`. The card rises from 96 % scale while
 fading in over 200 ms.
 
 The thank-you step is a 160×100 pt mark, 36 pt below the progress line, over

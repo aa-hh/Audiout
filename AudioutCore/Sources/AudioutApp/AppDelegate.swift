@@ -1255,6 +1255,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         popoverController.onSurveyInviteSpent = { [settings] in
             settings.expiredTrialSurveyDone = true
         }
+        popoverController.onSurveyInviteUnanswered = { [settings] in
+            ExpiredTrialSurvey.recordUnansweredLook(settings: settings)
+        }
         // The trial's own two rungs of the same note slot, above the
         // one-speaker note `applyLicenseState()` drives: a Mac mid-trial is
         // not limited. Both are asked fresh on every rebuild, so the pill

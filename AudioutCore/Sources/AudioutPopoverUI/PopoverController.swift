@@ -1418,16 +1418,21 @@ public final class PopoverController: NSObject {
     /// The survey this install is owed, or `nil` (the host checks
     /// `ExpiredTrialSurvey.isOwed` and holds the fetched definition).
     public var surveyInviteProvider: (() -> ExpiredTrialSurvey?)?
-    /// The invite was answered, declined or hidden: the host marks it done.
+    /// The invite was answered, declined, or closed unanswered on its last
+    /// allowed open: the host marks it done.
     public var onSurveyInviteSpent: (() -> Void)?
+    /// The popover closed with the invite up and nothing clicked: the host
+    /// counts it and returns whether that was the last allowed close (spent
+    /// as declined). `nil` spends on the first close.
+    public var onSurveyInviteUnanswered: (() -> Bool)?
     /// "Answer" was clicked: the host raises the survey card.
     public var onSurveyAnswer: ((ExpiredTrialSurvey) -> Void)?
     /// Session state: the invite raised in this open.
     var raisedSurveyInvite: ExpiredTrialSurvey?
     static let surveyInviteText = "Have a minute? Two questions about what Audiout is missing for you."
 
-    /// Raise the invite in place of the plain trial-ended note, once: only
-    /// while that note is what the slot would show, so no higher note and no
+    /// Raise the invite in place of the plain trial-ended note, once per
+    /// open: only while that note is what the slot would show, so no higher note and no
     /// limit text is displaced. A limit hit or a licence change later in the
     /// open retires it unspent (`limitNoteRaised`, `setUnregisteredNote`).
     private func refreshSurveyInvite() {

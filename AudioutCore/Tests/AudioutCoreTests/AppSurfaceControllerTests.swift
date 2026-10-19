@@ -1469,7 +1469,7 @@ extension SerializedSharedState {
                 card.test_pick(0)
                 card.test_pick(1)
                 card.test_continue()
-                card.test_textField?.stringValue = "  More inputs  "
+                card.test_textView?.string = "  More inputs  "
                 card.test_send()
             }
             #expect(seen.names() == ["survey sent"])
@@ -1480,6 +1480,24 @@ extension SerializedSharedState {
             #expect(card.test_step == .thanks)
             card.test_done()
             #expect(surface.test_surveyCard == nil)
+        }
+
+        /// Red if the text step went back to a single-line field (Return
+        /// sending instead of starting a line), or Send trimmed inside the answer.
+        @Test func aTypedMultiLineAnswerIsSentWithItsNewline() throws {
+            let (surface, popover) = makeSurface()
+            let card = try #require(presentCard(surface, popover))
+            card.test_pick(try #require(card.test_tileTitles.firstIndex(of: "The price")))
+            let area = try #require(card.test_textView)
+            let seen = StructuredEvents.recording {
+                area.insertText("  Line one", replacementRange: area.selectedRange())
+                area.insertNewline(nil)
+                area.insertText("line two  \n", replacementRange: area.selectedRange())
+                #expect(card.test_step == .text)
+                card.test_send()
+            }
+            #expect(seen.names() == ["survey sent"])
+            #expect(seen.all.first?.1["$survey_response_q5"] as? String == "Line one\nline two")
         }
 
         /// Red if the number keys stopped choosing the tile they label.

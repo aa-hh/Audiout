@@ -104,7 +104,7 @@ public struct ExpiredTrialSurvey: Equatable, Sendable {
 
     // MARK: - Who is owed it
 
-    /// Whether this Mac should be invited: never invited before, consent on,
+    /// Whether this Mac should be invited: the invite not yet spent, consent on,
     /// the trial over with no license bought, and audio reached a speaker on
     /// two or more days since.
     public static func isOwed(settings: AppSettings, consent: Bool) -> Bool {
@@ -120,6 +120,17 @@ public struct ExpiredTrialSurvey: Equatable, Sendable {
               LicenseGate.limitsToOneSpeaker(settings: settings) else { return false }
         settings.trialEndedStreamingDays += 1
         return true
+    }
+
+    /// Opens the invite may close unanswered before the last one counts as
+    /// declined.
+    public static let maxUnansweredLooks = 3
+
+    /// Counts one close with the invite up and nothing clicked. Returns
+    /// whether this was the last allowed one, so the invite is spent.
+    public static func recordUnansweredLook(settings: AppSettings) -> Bool {
+        settings.expiredTrialUnansweredLooks += 1
+        return settings.expiredTrialUnansweredLooks >= maxUnansweredLooks
     }
 
     // MARK: - Event properties

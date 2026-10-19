@@ -1429,7 +1429,7 @@ public final class PopoverController: NSObject {
     public var onSurveyAnswer: ((ExpiredTrialSurvey) -> Void)?
     /// Session state: the invite raised in this open.
     var raisedSurveyInvite: ExpiredTrialSurvey?
-    static let surveyInviteText = "Have a minute? Two questions about what Audiout is missing for you."
+    static let surveyInviteText = "What’s missing from Audiout? Two quick questions."
 
     /// Raise the invite in place of the plain trial-ended note, once per
     /// open: only while that note is what the slot would show, so no higher note and no
@@ -1683,7 +1683,7 @@ public final class PopoverController: NSObject {
                     Analytics.captureStructured("survey dismissed", survey.dismissedProperties(.init()))
                     self?.spendSurveyInvite()
                 })
-            return (Self.surveyInviteText, answer, notNow, .info)
+            return (Self.surveyInviteText, answer, notNow, .question)
         }
         if let text = unregisteredNoteText {
             return (text, trialBuyAction, enterLicenseKeyAction, .info)

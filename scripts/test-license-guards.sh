@@ -52,6 +52,11 @@ expect_guard "make-release.sh refuses a build with an empty AUDIOUT_LICENSE_URL"
   "AUDIOUT_LICENSE_URL must be set" \
   env AUDIOUT_LICENSE_URL= APP_VERSION=9.9.9 BUILD_NUMBER=999 bash "$SCRIPT_DIR/make-release.sh" "$TMP_DIR/out"
 
+# A dev diagnostic exported in the shell would be baked into every buyer's copy.
+expect_guard "make-release.sh refuses a build while a dev diagnostic is set" \
+  "AIRPLAY_AUDIO_DIAG is set" \
+  env AIRPLAY_AUDIO_DIAG=/tmp/x AUDIOUT_LICENSE_URL=https://license.audiout.app APP_VERSION=9.9.9 BUILD_NUMBER=999 bash "$SCRIPT_DIR/make-release.sh" "$TMP_DIR/out"
+
 # The licence key travels to this URL as a bearer token — plaintext is refused.
 expect_guard "make-app.sh refuses a plaintext AUDIOUT_LICENSE_URL" \
   "AUDIOUT_LICENSE_URL must be https://" \

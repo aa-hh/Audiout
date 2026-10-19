@@ -2713,8 +2713,8 @@ final class StreamLevelTracker: @unchecked Sendable {
     }
 
     /// Reports every stream written since the last call and resets each
-    /// window peak; the silence run and write count persist. A stream that
-    /// stopped being written drops out on the next call.
+    /// window peak; the silence run and write count persist. The tracker never
+    /// drops a stream it has seen; the host decides which rows to report.
     func snapshot(sampleRate: Int) -> [StreamLevelSnapshot] {
         lock.lock()
         defer { lock.unlock() }

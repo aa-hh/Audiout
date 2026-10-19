@@ -257,7 +257,7 @@ public final class SpeakersPageViewController: NSViewController {
                       }),
         CountTileView(symbol: "antenna.radiowaves.left.and.right.slash", label: "Unavailable",
                       help: "Speakers your Mac can\u{2019}t reach right now, and Bluetooth speakers that aren\u{2019}t connected.",
-                      contentInset: 13, liveInk: Tokens.Color.label, sentence: { count in
+                      contentInset: 13, liveInk: Tokens.Color.labelCool, sentence: { count in
                           switch count {
                           case nil: return "Unavailable, still looking"
                           case 0?: return "No speakers unavailable"
@@ -464,8 +464,8 @@ public final class SpeakersPageViewController: NSViewController {
             case (true, _): scenes = "Forgetting it takes it out of \(m == 1 ? "1 scene" : "\(m) scenes")."
             case (false, _): scenes = "Forgetting them takes them out of \(m == 1 ? "1 scene" : "\(m) scenes")."
             }
-            cantBeFoundRow.titleLabel.stringValue = k == 1 ? "1 speaker can\u{2019}t be found"
-                                                           : "\(k) speakers can\u{2019}t be found"
+            cantBeFoundRow.titleLabel.stringValue = k < u ? "\(k) of the \(u) can\u{2019}t be found"
+                : k == 1 ? "1 speaker can\u{2019}t be found" : "\(k) speakers can\u{2019}t be found"
             setHelp(appeared + " " + scenes, on: cantBeFoundRow)
             forgetButton.title = k == 1 ? "Forget 1 speaker\u{2026}" : "Forget \(k) speakers\u{2026}"
         }
@@ -505,6 +505,7 @@ public final class SpeakersPageViewController: NSViewController {
 
     /// The card's first row: "Available" over the four kind tiles, then
     /// Unavailable behind a rule. Counts share one baseline, labels another.
+    /// "Available" is not a heading: VoiceOver would file Unavailable under it.
     private func makeKindsRow() -> NSView {
         let row = NSView()
         row.translatesAutoresizingMaskIntoConstraints = false
@@ -515,8 +516,6 @@ public final class SpeakersPageViewController: NSViewController {
         let available = NSTextField(labelWithString: "Available")
         available.font = Tokens.Font.captionEmphasized
         available.textColor = Tokens.Color.speakersAccent
-        available.setAccessibilityHeading()
-        let availableRule = makeRule()
         let kindTiles = NSStackView(views: Array(tiles.prefix(4)))
         kindTiles.orientation = .horizontal
         kindTiles.distribution = .fillEqually
@@ -524,7 +523,7 @@ public final class SpeakersPageViewController: NSViewController {
         kindTiles.spacing = 0
         let unavailable = tiles[4]
         let unavailableRule = makeRule()
-        for v in [available, availableRule, kindTiles, unavailable, unavailableRule] {
+        for v in [available, kindTiles, unavailable, unavailableRule] {
             v.translatesAutoresizingMaskIntoConstraints = false
             row.addSubview(v)
         }
@@ -537,11 +536,6 @@ public final class SpeakersPageViewController: NSViewController {
         NSLayoutConstraint.activate([
             available.topAnchor.constraint(equalTo: row.topAnchor, constant: top),
             available.leadingAnchor.constraint(equalTo: row.leadingAnchor, constant: ListRowView.leadingInset),
-            availableRule.leadingAnchor.constraint(equalTo: available.trailingAnchor, constant: 8),
-            availableRule.trailingAnchor.constraint(equalTo: kindTiles.trailingAnchor, constant: -12),
-            availableRule.widthAnchor.constraint(greaterThanOrEqualToConstant: 0),
-            availableRule.heightAnchor.constraint(equalToConstant: 1),
-            availableRule.centerYAnchor.constraint(equalTo: available.firstBaselineAnchor, constant: -3),
             kindTiles.topAnchor.constraint(equalTo: available.bottomAnchor, constant: 4),
             kindTiles.leadingAnchor.constraint(equalTo: row.leadingAnchor, constant: ListRowView.leadingInset),
             kindTiles.bottomAnchor.constraint(equalTo: row.bottomAnchor, constant: -bottom),
@@ -617,11 +611,12 @@ public final class SpeakersPageViewController: NSViewController {
         button.setAccessibilityHelp(caption)
         button.toolTip = caption
 
-        let chevron = ClickThroughImageView()
-        chevron.image = DeviceIcon.image("chevron.right")
-        chevron.contentTintColor = Tokens.Color.labelCool2
+        // Opens another app, so the leave-the-app arrow, not the in-app chevron.
+        let opensSettings = ClickThroughImageView()
+        opensSettings.image = DeviceIcon.image("arrow.up.forward.app")
+        opensSettings.contentTintColor = Tokens.Color.labelCool2
         let row = ListRowView(glyph: ListRowView.glyph("plus.circle", tint: Tokens.Color.speakersAccent),
-                              title: title, accessory: chevron)
+                              title: title, accessory: opensSettings)
         row.isClickThrough = true
         button.addSubview(row)
         NSLayoutConstraint.activate([

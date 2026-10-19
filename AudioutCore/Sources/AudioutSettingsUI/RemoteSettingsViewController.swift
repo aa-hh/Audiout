@@ -5,8 +5,8 @@ import AudioutCore
 import AudioutSharedUI
 
 /// Settings › **Audiout Remote**: the "Allow control from iPhone on this
-/// network" switch, the invitation to the iPhone app while it is on, and the
-/// remembered iPhones. A build that does not carry the companion
+/// network" switch, the Pair an iPhone button and the invitation to the
+/// iPhone app while it is on, and the remembered iPhones. A build that does not carry the companion
 /// (``isOffered`` false) never builds this section at all.
 @MainActor
 public final class RemoteSettingsViewController: NSViewController, SettingsReadoutProviding {
@@ -23,11 +23,14 @@ public final class RemoteSettingsViewController: NSViewController, SettingsReado
     private let phoneListHeading = SettingsPane.makeSectionTitle("Remembered iPhones")
     private var phoneCard: (container: NSView, box: GroupedSectionView, stack: NSStackView)?
 
-    // The switch's card, and the invitation mounted in it directly under the
-    // switch (or the override note) only while that switch is on.
+    // The switch's card, and the Pair an iPhone row and the invitation
+    // mounted in it directly under the switch (or the override note) only
+    // while that switch is on.
     private var remoteCard: (container: NSView, box: GroupedSectionView, stack: NSStackView)?
     private var remoteControlRow: NSView?
     private var overrideNoteRow: NSView?
+    private var pairRow: NSView?
+    private let pairButton = NSButton()
     private var remoteInviteRow: NSView?
     private var remoteInviteTile: RemoteInviteView?
     private let remoteInviteButton = NSButton()
@@ -49,6 +52,15 @@ public final class RemoteSettingsViewController: NSViewController, SettingsReado
     /// persists (T6), so the app layer can start/stop the companion server to
     /// match.
     public var onAllowRemoteControlChanged: (() -> Void)?
+
+    /// Fired by the Pair an iPhone button; the app layer opens the pairing
+    /// window.
+    public var onPairRequested: (() -> Void)?
+
+    /// Whether a pairing window is open right now — the button reads
+    /// "Pairing…" and is disabled while it is. Read by
+    /// ``refreshPairingState()``.
+    public var isPairingOpen: () -> Bool = { false }
 
     var onReadoutChanged: (() -> Void)?
 
@@ -144,6 +156,7 @@ public final class RemoteSettingsViewController: NSViewController, SettingsReado
         remoteControlOverrideNote.maximumNumberOfLines = 0
         remoteControlOverrideNote.preferredMaxLayoutWidth = SettingsPane.cardLaneWidth
 
+        buildPairRow()
         buildRemoteInviteRow()
 
         var cardRows: [NSView] = [remoteControlRow]
@@ -169,6 +182,36 @@ public final class RemoteSettingsViewController: NSViewController, SettingsReado
         view = page
         rebuildPhoneList()
         applyRemoteInviteVisibility()
+    }
+
+    /// "Pair an iPhone": the one way a new phone gets past the Mac's pairing
+    /// gate from here. A stock push button; the help text names the window's
+    /// length.
+    private func buildPairRow() {
+        pairButton.bezelStyle = .rounded
+        pairButton.target = self
+        pairButton.action = #selector(pairTapped)
+        pairButton.setContentHuggingPriority(.required, for: .horizontal)
+        pairRow = ListRowView(
+            title: "Pair an iPhone",
+            accessory: pairButton,
+            helpText: "Lets a new iPhone find this Mac for the next 3 minutes. "
+                + "Approve it with the code both screens show.")
+        refreshPairingState()
+    }
+
+    /// Re-read ``isPairingOpen``: "Pairing…" and disabled while the window
+    /// is open, "Pair an iPhone" otherwise. The app layer calls this whenever
+    /// the window opens or lapses.
+    public func refreshPairingState() {
+        let open = isPairingOpen()
+        pairButton.title = open ? "Pairing\u{2026}" : "Pair an iPhone"
+        pairButton.isEnabled = !open
+    }
+
+    @objc private func pairTapped() {
+        onPairRequested?()
+        refreshPairingState()
     }
 
     /// "Get Audiout Remote for iPhone": the pane's own invitation, one row
@@ -209,22 +252,26 @@ public final class RemoteSettingsViewController: NSViewController, SettingsReado
         remoteInviteRow = SettingsPane.makeLaneRow(invitation)
     }
 
-    /// Mount or unmount the invitation, and drop its QR once a phone is
-    /// remembered. Hidden-in-place for the TILE (a stack collapses an arranged
-    /// subview it is told to hide) and mounted/unmounted for the ROW.
+    /// Mount or unmount the Pair an iPhone row and the invitation under it,
+    /// and drop the invitation's QR once a phone is remembered. Hidden-in-place
+    /// for the TILE (a stack collapses an arranged subview it is told to hide)
+    /// and mounted/unmounted for the ROWS.
     private func applyRemoteInviteVisibility() {
-        guard isViewLoaded, let row = remoteInviteRow, let card = remoteCard else { return }
+        guard isViewLoaded, let pairRow, let inviteRow = remoteInviteRow, let card = remoteCard else { return }
         remoteInviteTile?.isHidden = !(approvals?.approvals.isEmpty ?? true)
         let wanted = remoteControlSwitch.state == .on
-        if wanted, row.superview == nil {
-            let anchor = overrideNoteRow ?? remoteControlRow
-            let after = card.stack.arrangedSubviews.firstIndex(where: { $0 === anchor })
-            card.stack.insertArrangedSubview(row, at: (after ?? 0) + 1)
-            // `removeFromSuperview` dropped the width pin.
-            row.widthAnchor.constraint(equalTo: card.stack.widthAnchor).isActive = true
-        } else if !wanted, row.superview != nil {
-            card.stack.removeArrangedSubview(row)
-            row.removeFromSuperview()
+        var anchor = overrideNoteRow ?? remoteControlRow
+        for row in [pairRow, inviteRow] {
+            if wanted, row.superview == nil {
+                let after = card.stack.arrangedSubviews.firstIndex(where: { $0 === anchor })
+                card.stack.insertArrangedSubview(row, at: (after ?? 0) + 1)
+                // `removeFromSuperview` dropped the width pin.
+                row.widthAnchor.constraint(equalTo: card.stack.widthAnchor).isActive = true
+            } else if !wanted, row.superview != nil {
+                card.stack.removeArrangedSubview(row)
+                row.removeFromSuperview()
+            }
+            anchor = row
         }
         card.box.rows = card.stack.arrangedSubviews.filter { !$0.isHidden }
     }
@@ -376,6 +423,31 @@ public final class RemoteSettingsViewController: NSViewController, SettingsReado
         _ = view
         remoteControlSwitch.state = on ? .on : .off
         remoteControlToggled()
+    }
+
+    // MARK: Test-support hooks (Pair an iPhone)
+
+    /// Whether the Pair an iPhone row is in the pane at all — mounted only
+    /// while the switch is on, like the invitation.
+    public var test_pairRowIsMounted: Bool {
+        _ = view
+        return pairRow?.superview != nil
+    }
+
+    public var test_pairButtonTitle: String {
+        _ = view
+        return pairButton.title
+    }
+
+    public var test_pairButtonIsEnabled: Bool {
+        _ = view
+        return pairButton.isEnabled
+    }
+
+    /// Click Pair an iPhone through the same action a real click runs.
+    public func test_tapPair() {
+        _ = view
+        pairTapped()
     }
 
     // MARK: Test-support hooks (Remembered iPhones — T24)

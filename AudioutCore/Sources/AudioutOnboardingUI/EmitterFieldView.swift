@@ -161,6 +161,16 @@ final class EmitterFieldView: NSView {
     /// Base energy of the field — the shared `gain`, unmodified. The surge
     /// envelope adds on top of it.
     private static let baseGain = Float(AudioutField.defaults.gain)
+    /// The surge raises the shared `sharp` by this much × envelope ×
+    /// intensity. `surgeEnvelope` tops out at about 0.686 rather than 1 — the
+    /// exponential fall is already under way before the smoothstep rise
+    /// finishes — so a full surge reaches about 2.03× the shared crest
+    /// exponent, and the `0.55 ×` gain term in `makeUniforms` reaches about
+    /// 1.58× the shared gain. The rings thin and crisp as the field
+    /// brightens, one gesture rather than two. The iPhone's connect surge is
+    /// the same gesture at higher peaks, 2.5× and 1.85×; whether to match
+    /// them here is a tuning call.
+    private static let surgeSharpen: Float = 1.5
     /// The site composes its stills at t = 40 s and starts its live clock
     /// there, so frame one is a developed field rather than three points
     /// snapping outward from nothing. Same here.
@@ -267,7 +277,8 @@ final class EmitterFieldView: NSView {
         mtkView?.isPaused = true
     }
 
-    /// One-shot swell of the field's energy — the success moment, at
+    /// One-shot swell of the field's energy and crest sharpness — the success
+    /// moment, at
     /// `intensity` 1; a quieter gesture (0.5) is what the states that cannot
     /// celebrate get. No-op while stopped or under Reduce Motion, where there
     /// is no motion to swell.
@@ -495,8 +506,8 @@ final class EmitterFieldView: NSView {
     /// `float`/`Float` align 4, `float2`/`SIMD2<Float>` align 8, and
     /// `float3`/`SIMD3<Float>` align 16 and OCCUPY 16 — so declaring the two
     /// structs in the same order is what keeps them the same bytes. The order
-    /// below packs the two `float2`s and the six scalars into the first 40
-    /// bytes (8 of tail padding to the first 16-byte boundary) and then runs
+    /// below packs the two `float2`s and the seven scalars into the first 44
+    /// bytes (4 of tail padding to the first 16-byte boundary) and then runs
     /// the five `float3`s: offsets 48, 64, 80, 96, 112, stride 128. Add a field
     /// to one struct and it goes in the same position in the other.
     private struct Uniforms {
@@ -508,6 +519,7 @@ final class EmitterFieldView: NSView {
         var dim: Float
         var breath: Float
         var hollowRadius: Float
+        var sharpen: Float
         var emitterGain: SIMD3<Float>
         var bg: SIMD3<Float>
         var lo: SIMD3<Float>
@@ -562,6 +574,7 @@ final class EmitterFieldView: NSView {
             dim: sceneCurrent.dim,
             breath: sceneCurrent.breath,
             hollowRadius: sceneCurrent.hollowRadius,
+            sharpen: 1 + Self.surgeSharpen * surgeEnvelope(at: now) * surgeIntensity,
             emitterGain: emitterGain(),
             bg: bg, lo: lo, mid: mid, peak: peak)
     }
@@ -627,6 +640,7 @@ final class EmitterFieldView: NSView {
         float dim;
         float breath;
         float hollowRadius;
+        float sharpen;
         float3 emitterGain;
         float3 bg;
         float3 lo;
@@ -693,7 +707,7 @@ final class EmitterFieldView: NSView {
             // ratio — at the site's own. See `stageScale`.
             float speed = (\(msl(d.speedBase)) + \(msl(d.speedStep)) * f) * \(msl(stageScale));
             float dens = (\(msl(d.densBase)) + \(msl(d.densStep)) * f) * \(msl(stageScale));
-            float rings = pow(0.5 + 0.5 * sin(r * dens - t * speed + seed), \(msl(d.sharp)));
+            float rings = pow(0.5 + 0.5 * sin(r * dens - t * speed + seed), \(msl(d.sharp)) * u.sharpen);
             float fall = exp(-r * \(msl(d.fade)));
             // `breath` scales only the OSCILLATING half and pays the rest back
             // at its midpoint, so breath = 1 is the site's swell, breath = 0

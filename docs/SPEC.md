@@ -360,7 +360,7 @@ is **sidebar + mixer** · volume is **horizontal rows**.
 > popover did: anchored under the status item with a beak, dismissed by a
 > click outside. *Pinned* it is an ordinary movable window that remembers its
 > frame, may sit behind other apps, and **closing it does not unpin it**. The
-> app stays menu-bar-only in both.
+> app keeps its Dock icon and menu bar in both.
 >
 > **Sizes are per screen**, animated with the top edge anchored: Mixer keeps
 > its exact content fit, Scenes opens at its designed size and remembers a

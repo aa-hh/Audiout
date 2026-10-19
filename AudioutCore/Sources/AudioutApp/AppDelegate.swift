@@ -651,9 +651,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
     // MARK: Lifecycle
 
     func applicationWillFinishLaunching(_ notification: Notification) {
-        // Menu-bar-only: no Dock icon, no app menu (RESOLVED Q1). Set before
-        // finishing launch so a Dock icon never even flickers.
-        NSApp.setActivationPolicy(.accessory)
+        // A regular app: Dock icon, ⌘-Tab, Force Quit and the menu bar, beside
+        // the status item (owner's call, 2026-10-19; was menu-bar-only).
+        NSApp.setActivationPolicy(.regular)
         // `audiout://` (CFBundleURLTypes, written by scripts/make-app.sh).
         // Registered HERE, not in didFinishLaunching: a link that LAUNCHES the
         // app delivers its Apple Event as part of finishing launch, and a
@@ -2391,10 +2391,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
         return menu
     }
 
-    /// A minimal application main menu. A menu-bar-only (`.accessory`) app shows
-    /// no menu bar, but a main menu still supplies working key equivalents while
-    /// the app is active — this is what makes ⌘Q (and ⌘,) work, which the app
-    /// otherwise lacked entirely.
+    /// The application main menu: Audiout (About, Settings, Hide, Quit), File,
+    /// Edit and Window, shown at the top of the screen while the app is active.
     ///
     /// Also installs a File menu with a single Close item (⌘W): AppKit only
     /// synthesizes ⌘W automatically for a `.closable` window when a main menu
@@ -2414,8 +2412,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
         let appItem = NSMenuItem()
         mainMenu.addItem(appItem)
         let appMenu = NSMenu()
+        appMenu.addItem(withTitle: "About Audiout", action: #selector(menuOpenAbout), keyEquivalent: "").target = self
+        appMenu.addItem(.separator())
         let settings = appMenu.addItem(withTitle: "Settings…", action: #selector(menuOpenSettings), keyEquivalent: ",")
         settings.target = self
+        appMenu.addItem(.separator())
+        appMenu.addItem(withTitle: "Hide Audiout", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h").target = NSApp
+        appMenu.addItem(withTitle: "Hide Others", action: #selector(NSApplication.hideOtherApplications(_:)), keyEquivalent: "h")
+            .keyEquivalentModifierMask = [.command, .option]
+        appMenu.addItem(withTitle: "Show All", action: #selector(NSApplication.unhideAllApplications(_:)), keyEquivalent: "")
         appMenu.addItem(.separator())
         let quit = appMenu.addItem(withTitle: "Quit Audiout", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         quit.target = NSApp
@@ -2450,6 +2455,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
             editMenu.addItem(withTitle: title, action: action, keyEquivalent: key).target = nil
         }
         editItem.submenu = editMenu
+
+        let windowItem = NSMenuItem()
+        mainMenu.addItem(windowItem)
+        let windowMenu = NSMenu(title: "Window")
+        windowMenu.addItem(withTitle: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m").target = nil
+        windowMenu.addItem(withTitle: "Zoom", action: #selector(NSWindow.performZoom(_:)), keyEquivalent: "").target = nil
+        windowItem.submenu = windowMenu
+        // AppKit appends the open windows to this menu itself.
+        NSApp.windowsMenu = windowMenu
 
         NSApp.mainMenu = mainMenu
     }

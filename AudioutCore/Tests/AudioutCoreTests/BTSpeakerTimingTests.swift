@@ -24,10 +24,10 @@ import Testing
 
     private func timing(_ store: StoredOffsets = StoredOffsets(),
                         stored: Double? = 300,
-                        floorRebroadcastDelay: TimeInterval = BTSpeakerTiming.settleSeconds)
+                        delayClock: @escaping NativeBackend.DelayClock = NativeBackend.dispatchDelayClock)
         -> BTSpeakerTiming {
         BTSpeakerTiming(storedOffsetMs: { uid in store.read(uid) ?? stored },
-                        floorRebroadcastDelay: floorRebroadcastDelay)
+                        delayClock: delayClock)
     }
 
     // MARK: The pure rules
@@ -327,16 +327,17 @@ import Testing
 
     /// Nothing fires at the instant the floor expires — the detector only
     /// speaks while the speaker plays — so the link-up arms its own re-check.
-    /// The connect instant is backdated so the shortened timer lands past the
-    /// floor.
+    /// The connect instant is backdated so the re-check, fired by hand, lands
+    /// past the floor.
     @Test func theFloorsExpiryRebroadcastsWhenNoEvidenceEverCame() {
-        let timing = self.timing(floorRebroadcastDelay: 0.05)
+        let clock = ManualDelayClock()
+        let timing = self.timing(delayClock: clock.clock)
         let changes = counting(timing)
         timing.noteConnected(
             uid: "speaker-a",
             at: Date().addingTimeInterval(-BTSpeakerTiming.settleSeconds - 1))
         #expect(changes.value == 1, "the connect itself")
-        SuiteWait.untilOnRunLoop("the floor's expiry to rebroadcast") { changes.value == 2 }
+        clock.fireAll()
         #expect(changes.value == 2, "the verdict flipped on a clock, so the phone has to be told")
         #expect(timing.report(uid: "speaker-a").clockState == .steady)
     }
@@ -607,13 +608,13 @@ extension SerializedSharedState {
                         speakerKey: String = "7",
                         codec: String? = nil,
                         deviceClassMinor: UInt32? = 5,
-                        floorRebroadcastDelay: TimeInterval = BTSpeakerTiming.settleSeconds)
+                        delayClock: @escaping NativeBackend.DelayClock = NativeBackend.dispatchDelayClock)
         -> BTSpeakerTiming {
         BTSpeakerTiming(storedOffsetMs: { _ in storedOffsetMs },
                         speakerKey: { _ in speakerKey },
                         codec: { _ in codec },
                         deviceClassMinor: { _ in deviceClassMinor },
-                        floorRebroadcastDelay: floorRebroadcastDelay)
+                        delayClock: delayClock)
     }
 
     /// Ten jump-free seconds, which is what the detector calls settled.
@@ -694,11 +695,13 @@ extension SerializedSharedState {
     /// slowest bucket, which is a measurement of nothing.
     @Test func secondsToSettleIsAbsentWhenTheFloorMadeTheVerdict() {
         withSinks { lines, events in
-            let timing = self.timing(floorRebroadcastDelay: 0.05)
-            // Backdated so the shortened timer lands past the floor itself,
-            // which is what makes the verdict steady with no evidence at all.
+            let clock = ManualDelayClock()
+            let timing = self.timing(delayClock: clock.clock)
+            // Backdated so the re-check, fired by hand, lands past the floor
+            // itself, which is what makes the verdict steady with no evidence at all.
             timing.noteConnected(
                 uid: self.uid, at: Date().addingTimeInterval(-BTSpeakerTiming.settleSeconds - 1))
+            clock.fireAll()
             SuiteWait.untilOnRunLoop("the floor's expiry to record the link") {
                 lines.lines(evt: "bt_link_settled").count == 1
             }

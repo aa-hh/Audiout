@@ -44,10 +44,14 @@ import AudioutProtocol
         private let lock = NSLock()
         private var _messages: [CompanionMessage] = []
         private var _closed = false
+        private var _pings = 0
         func append(_ message: CompanionMessage) { lock.withLock { _messages.append(message) } }
         func markClosed() { lock.withLock { _closed = true } }
+        func notePing() { lock.withLock { _pings += 1 } }
         var messages: [CompanionMessage] { lock.withLock { _messages } }
         var closed: Bool { lock.withLock { _closed } }
+        /// Server pings this client's own receive loop saw.
+        var pings: Int { lock.withLock { _pings } }
         func contains(_ message: CompanionMessage) -> Bool { messages.contains(message) }
     }
 
@@ -168,10 +172,12 @@ import AudioutProtocol
     private func receiveInto(_ log: MessageLog, from client: NWConnection) {
         client.receiveMessage { data, context, _, error in
             if error != nil { log.markClosed(); return }
-            if let metadata = context?.protocolMetadata(definition: NWProtocolWebSocket.definition) as? NWProtocolWebSocket.Metadata,
-               metadata.opcode == .close {
-                log.markClosed()
-                return
+            if let metadata = context?.protocolMetadata(definition: NWProtocolWebSocket.definition) as? NWProtocolWebSocket.Metadata {
+                if metadata.opcode == .close {
+                    log.markClosed()
+                    return
+                }
+                if metadata.opcode == .ping { log.notePing() }
             }
             guard let data, !data.isEmpty else { log.markClosed(); return }
             if let envelope = try? CompanionEnvelope.decode(data) {
@@ -227,9 +233,12 @@ import AudioutProtocol
             checksPairingCode: checksPairingCode)).encoded(), over: client)
     }
 
-    /// A server claiming ``testFingerprint`` as its certificate.
-    private func makeServer() -> CompanionServer {
-        let server = CompanionServer()
+    /// A server claiming ``testFingerprint`` as its certificate. Its
+    /// deadlines and liveness ticks run on `clock`, so none fires unless the
+    /// test advances it: on the wall clock a starved test could send its
+    /// hello after the 5 s pre-hello deadline had already closed the socket.
+    private func makeServer(clock: ManualDelayClock = ManualDelayClock()) -> CompanionServer {
+        let server = CompanionServer(delayClock: clock.queueHoppingClock, uptimeClock: clock.uptime)
         server.localCertificateSHA256 = Self.testFingerprint
         return server
     }
@@ -237,8 +246,8 @@ import AudioutProtocol
     /// A server whose T24 approval gate answers `.approved` instantly — what
     /// every pre-approval test below means by "a client hellos and is
     /// promoted". The gate's own behavior is tested separately at the end.
-    private func makeAutoApprovingServer() -> CompanionServer {
-        let server = makeServer()
+    private func makeAutoApprovingServer(clock: ManualDelayClock = ManualDelayClock()) -> CompanionServer {
+        let server = makeServer(clock: clock)
         server.onApprovalRequest = { _, _, _, _, _, decide in decide(.approved) }
         return server
     }
@@ -372,14 +381,15 @@ import AudioutProtocol
     @Test func silentClientIsCancelledAfterTheHandshakeDeadline() async throws {
         let hub = try await makeHub()
         defer { hub.cancel() }
-        let server = makeAutoApprovingServer()
-        server.test_handshakeTimeoutOverride = 0.3 // real default is 10s
+        let clock = ManualDelayClock()
+        let server = makeAutoApprovingServer(clock: clock)
         defer { server.stop() }
 
         let (client, log) = try await connectClient(via: hub, to: server)
         defer { client.cancel() }
         // Deliberately never send hello — the exact idle-peer shape the
         // deadline exists for.
+        clock.advance(by: CompanionServer.preHelloTimeout)
         #expect(await waitUntil { log.closed },
                 "the server never cancelled the client that skipped its hello")
     }
@@ -681,9 +691,8 @@ import AudioutProtocol
     @Test func silentDeadClientIsReapedByLivenessPings() async throws {
         let hub = try await makeHub()
         defer { hub.cancel() }
-        let server = makeAutoApprovingServer()
-        server.test_pingIntervalOverride = 0.1  // real default is 20 s
-        server.test_livenessTimeoutOverride = 0.3 // real default is 60 s
+        let clock = ManualDelayClock()
+        let server = makeAutoApprovingServer(clock: clock)
         defer { server.stop() }
         server.broadcast(makeSnapshot())
 
@@ -699,6 +708,14 @@ import AudioutProtocol
         try #require(await waitUntil { log.messages.contains { if case .welcome = $0 { return true } else { return false } } },
                      "the client was never welcomed")
 
+        // Every tick inside the liveness timeout pings; the next one reaps.
+        let unansweredPings = Int(CompanionServer.livenessTimeout / CompanionServer.pingInterval)
+        for ping in 1...unansweredPings {
+            clock.advance(by: CompanionServer.pingInterval)
+            try #require(await waitUntil { log.pings == ping }, "liveness tick \(ping) never pinged the client")
+        }
+        #expect(disconnected.value.isEmpty, "the client was reaped before the liveness timeout")
+        clock.advance(by: CompanionServer.pingInterval)
         #expect(await waitUntil { !disconnected.value.isEmpty },
                 "the server never reaped the client that stopped answering pings")
     }
@@ -706,11 +723,8 @@ import AudioutProtocol
     @Test func pongAnsweringClientSurvivesLivenessPings() async throws {
         let hub = try await makeHub()
         defer { hub.cancel() }
-        let server = makeAutoApprovingServer()
-        server.test_pingIntervalOverride = 0.1
-        // Generous vs. the 0.1 s ping cadence: several agents' suites share
-        // this machine, and a scheduling stall must not read as death.
-        server.test_livenessTimeoutOverride = 1.5
+        let clock = ManualDelayClock()
+        let server = makeAutoApprovingServer(clock: clock)
         defer { server.stop() }
         server.broadcast(makeSnapshot(volume: 10))
 
@@ -723,9 +737,16 @@ import AudioutProtocol
         try #require(await waitUntil { log.messages.contains { if case .welcome = $0 { return true } else { return false } } },
                      "the client was never welcomed")
 
-        // Observe past several ping cycles; the auto-ponging client must
-        // never be reaped, and must still be receiving broadcasts at the end.
-        _ = await waitUntil(timeout: 2) { !disconnected.value.isEmpty }
+        // Run ticks past the liveness timeout, letting each pong land before
+        // the next tick; the auto-ponging client must never be reaped, and
+        // must still be receiving broadcasts at the end.
+        let ticks = Int(CompanionServer.livenessTimeout / CompanionServer.pingInterval) + 1
+        for _ in 1...ticks {
+            clock.advance(by: CompanionServer.pingInterval)
+            let now = clock.uptime()
+            try #require(await waitUntil { server.test_lastActivities() == [now] },
+                         "the client's pong never refreshed its last activity")
+        }
         #expect(disconnected.value.isEmpty, "a pong-answering client was reaped as dead")
         let snap2 = makeSnapshot(volume: 20)
         server.broadcast(snap2)
@@ -875,10 +896,8 @@ import AudioutProtocol
     @Test func unknownClientIsHeldPastTheHandshakeDeadlineThenPromotedOnApproval() async throws {
         let hub = try await makeHub()
         defer { hub.cancel() }
-        let server = makeServer()
-        // Short enough to outlive cheaply below, long enough that the hello
-        // itself always lands inside it even on a loaded machine.
-        server.test_handshakeTimeoutOverride = 0.5
+        let clock = ManualDelayClock()
+        let server = makeServer(clock: clock)
         defer { server.stop() }
         server.broadcast(makeSnapshot())
 
@@ -895,22 +914,23 @@ import AudioutProtocol
         #expect(await waitUntil { log.contains(.awaitingApproval) },
                 "the unknown client was never told it's awaiting approval")
         // Outlive the pre-hello deadline several times over while the
-        // human decides.
-        try await Task.sleep(for: .seconds(1.5))
-        #expect(!log.closed, "the awaiting client was killed by the pre-hello deadline")
+        // human decides, staying inside the approval deadline. A connection
+        // the pre-hello deadline closed could not carry the welcome below.
+        clock.advance(by: CompanionServer.preHelloTimeout * 3)
 
         let decide = decider.value
         try #require(decide != nil, "the gate never asked the app layer")
         decide?(.approved)
         #expect(await waitUntil { log.messages.contains { if case .welcome = $0 { return true } else { return false } } },
                 "the late-approved client was never welcomed")
+        #expect(!log.closed, "the awaiting client was killed by the pre-hello deadline")
     }
 
     @Test func awaitingApprovalTimesOutWithARetryableReason() async throws {
         let hub = try await makeHub()
         defer { hub.cancel() }
-        let server = makeServer()
-        server.test_approvalTimeoutOverride = 0.3 // real default is 180s
+        let clock = ManualDelayClock()
+        let server = makeServer(clock: clock)
         defer { server.stop() }
         server.broadcast(makeSnapshot())
         server.onApprovalRequest = { _, _, _, _, _, decide in decide(.pending) } // never answered
@@ -918,6 +938,8 @@ import AudioutProtocol
         let (client, log) = try await connectClient(via: hub, to: server)
         defer { client.cancel() }
         try await sendAuthenticatedHello(over: client, log: log)
+        try #require(await waitUntil { log.contains(.awaitingApproval) }, "the client was never held for approval")
+        clock.advance(by: CompanionServer.approvalTimeout)
 
         #expect(await waitUntil { log.contains(.goodbye(reason: CompanionGoodbyeReason.approvalTimedOut)) },
                 "the unanswered client never got the timeout goodbye")
@@ -964,8 +986,8 @@ import AudioutProtocol
     @Test func approvalDeadlineReportsAbandonment() async throws {
         let hub = try await makeHub()
         defer { hub.cancel() }
-        let server = makeServer()
-        server.test_approvalTimeoutOverride = 0.3 // real default is 180s
+        let clock = ManualDelayClock()
+        let server = makeServer(clock: clock)
         defer { server.stop() }
         server.broadcast(makeSnapshot())
         server.onApprovalRequest = { _, _, _, _, _, decide in decide(.pending) } // never answered
@@ -975,6 +997,8 @@ import AudioutProtocol
         let (client, log) = try await connectClient(via: hub, to: server)
         defer { client.cancel() }
         try await sendAuthenticatedHello(over: client, log: log)
+        try #require(await waitUntil { log.contains(.awaitingApproval) }, "the client was never held for approval")
+        clock.advance(by: CompanionServer.approvalTimeout)
 
         #expect(await waitUntil { abandoned.value == [Self.testClientID] },
                 "the approval-deadline reap never reported abandonment")
@@ -1323,9 +1347,13 @@ import AudioutProtocol
         server.sendAppIcons([AppIconPayload(bundleID: "com.example.app", png: nil)],
                             page: 0, pageCount: 1, to: UUID())
 
-        // Nothing to wait FOR — give the server queue a beat, then assert
-        // the connected client neither received a stray page nor died.
-        try await Task.sleep(for: .milliseconds(200))
+        // A later broadcast on the same socket is the barrier: the server
+        // queue runs the icon send first, so a stray page would arrive
+        // before this state frame.
+        let later = makeSnapshot(volume: 60)
+        server.broadcast(later)
+        try #require(await waitUntil { log.contains(.state(snapshot: later)) },
+                     "the client never received the later broadcast")
         #expect(!log.messages.contains { if case .appIcons = $0 { return true } else { return false } },
                 "a page addressed to an unknown client must not leak to anyone else")
         #expect(!log.closed, "a bad clientID must not disturb live connections")

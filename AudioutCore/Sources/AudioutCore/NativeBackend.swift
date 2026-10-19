@@ -1593,8 +1593,9 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     }
 
     /// Runs the backed-off retries, the companion audition's deadlines and
-    /// liveness poll, the wizard's arm-gate poll, and the Bluetooth hold,
-    /// sink-recovery and synced-local settle timers, among others. Only the
+    /// liveness poll, the wizard's arm-gate poll, the aggregate restore's
+    /// landing check, and the Bluetooth hold, sink-recovery and synced-local
+    /// settle timers, among others. Only the
     /// tests pass anything but ``dispatchDelayClock``:
     /// on the wall clock, a loaded test run let a 0.05 s backoff burn every
     /// rebind attempt before the test's next step, and a 4 s stop deadline

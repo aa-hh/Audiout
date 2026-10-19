@@ -401,7 +401,8 @@ extension SerializedSharedState {
     private func makeBackend(
         aggregateControl: FakeAggregateControl,
         currentDefaultOutputUIDBox: LockedBox<String?>,
-        currentDefaultOutputUID: (@Sendable () -> String?)? = nil
+        currentDefaultOutputUID: (@Sendable () -> String?)? = nil,
+        delayClock: @escaping NativeBackend.DelayClock = NativeBackend.dispatchDelayClock
     ) -> (NativeBackend, FakeSystemVolume) {
         let systemVolume = FakeSystemVolume()
         let backend = NativeBackend(
@@ -410,6 +411,7 @@ extension SerializedSharedState {
             dacpEndpoint: MinimalDACPEndpoint(),
             systemVolume: systemVolume,
             ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
+            delayClock: delayClock,
             aggregateControl: aggregateControl,
             currentDefaultOutputUID: currentDefaultOutputUID ?? { currentDefaultOutputUIDBox.get() },
             // D7 (adversarial review, Seamless handoff T3): this suite drives
@@ -1165,10 +1167,13 @@ extension SerializedSharedState {
     /// land, and return `backend`/`systemVolume` ready for a deselect. Every
     /// caller scripts the same two devices: the aggregate (501) and the
     /// pre-takeover built-in speakers (601).
+    /// The restore's landing check runs on `clock`, so it fires only when a
+    /// test fires it; a test that never does sees no read-back and no retry.
     private func makeRestoreBackend(
-        control: FakeAggregateControl, box: LockedBox<String?>
+        control: FakeAggregateControl, box: LockedBox<String?>, clock: ManualDelayClock = ManualDelayClock()
     ) async -> (NativeBackend, FakeSystemVolume) {
-        let (backend, systemVolume) = makeBackend(aggregateControl: control, currentDefaultOutputUIDBox: box)
+        let (backend, systemVolume) = makeBackend(
+            aggregateControl: control, currentDefaultOutputUIDBox: box, delayClock: clock.queueHoppingClock)
         backend.start()
         _ = await collectQuiescent(from: backend) { backend.setOutputSet(["some-airplay-device"]) }
         // The HAL's switch to the aggregate has landed — the state a deselect
@@ -1181,8 +1186,8 @@ extension SerializedSharedState {
 
     /// Whether `sink` holds an `aggregate_default_restore` line carrying every
     /// one of `fields`. The restore's landing check logs one of these from
-    /// inside its `captureControlQueue` block, so seeing it and then draining
-    /// that queue means the check, and any retry it chose, has finished.
+    /// inside its `captureControlQueue` block; the sink delivers on its own
+    /// queue, so wait for the line before reading it.
     private func hasRestoreLine(_ sink: LinesBox, _ fields: String...) -> Bool {
         sink.snapshot().contains { line in
             line.contains(#""evt":"aggregate_default_restore""#) && fields.allSatisfy { line.contains($0) }
@@ -1316,7 +1321,8 @@ extension SerializedSharedState {
             AggregateOutputDevice.productUID: 501,
             Self.builtInSpeakers: 601])
         let box = LockedBox<String?>(Self.builtInSpeakers)
-        let (backend, _) = await makeRestoreBackend(control: control, box: box)
+        let clock = ManualDelayClock()
+        let (backend, _) = await makeRestoreBackend(control: control, box: box, clock: clock)
         defer { backend.stop() }
         let sink = LinesBox()
         Telemetry._installTestSink { sink.append($0) }
@@ -1329,8 +1335,9 @@ extension SerializedSharedState {
         // The re-select below lands INSIDE the landing-check window, and is exactly
         // what `verifyRestoreLanded` must not fight — no retry may follow it.
         _ = await collectQuiescent(from: backend) { backend.setOutputSet(["some-airplay-device"]) }
+        clock.fireAll()   // the landing check, whatever its delay
+        backend.captureControlQueue.sync {}   // the check, and where a retry would write
         await pollUntil { self.hasRestoreLine(sink, #""outcome":"did_not_land""#) }
-        backend.captureControlQueue.sync {}   // the rest of the check, where a retry would write
 
         #expect(control.setDefaultCalls == [501, 601], "the aggregate already reads as default — no third write")
         #expect(backend.test_aggregateDefaultActive == true, "we own the default again")
@@ -1442,7 +1449,8 @@ extension SerializedSharedState {
             AggregateOutputDevice.productUID: 501,
             Self.builtInSpeakers: 601])
         let box = LockedBox<String?>(Self.builtInSpeakers)
-        let (backend, _) = await makeRestoreBackend(control: control, box: box)
+        let clock = ManualDelayClock()
+        let (backend, _) = await makeRestoreBackend(control: control, box: box, clock: clock)
         defer { backend.stop() }
         let sink = LinesBox()
         Telemetry._installTestSink { sink.append($0) }
@@ -1451,15 +1459,19 @@ extension SerializedSharedState {
         // The box keeps reporting the aggregate: every write is accepted (the fake
         // returns true) and none of them moves the default.
         backend.setOutputSet([])
-        await pollUntil { control.setDefaultCalls.count == 3 }
+        await pollUntil { control.setDefaultCalls.count == 2 }
+        backend.captureControlQueue.sync {}   // the rest of the restore, which schedules the check
+        clock.fireAll()
+        backend.captureControlQueue.sync {}   // the check and the retry it starts
 
         #expect(control.setDefaultCalls == [501, 601, 601], "the ignored write is retried exactly once")
 
         // Past the retry's OWN read-back: it stops there (no loop), and the flag
         // ends up back true — the aggregate is still the default, so we still hold
         // it and quit must still restore.
+        clock.fireAll()
+        backend.captureControlQueue.sync {}   // that check, where a third write would go
         await pollUntil { self.hasRestoreLine(sink, #""outcome":"did_not_land""#, #""attempt":"2""#) }
-        backend.captureControlQueue.sync {}   // the rest of that check, where a third write would go
         #expect(control.setDefaultCalls.count == 3, "one retry, never a loop")
         #expect(backend.test_aggregateDefaultActive == true)
     }
@@ -1471,7 +1483,8 @@ extension SerializedSharedState {
             AggregateOutputDevice.productUID: 501,
             Self.builtInSpeakers: 601])
         let box = LockedBox<String?>(Self.builtInSpeakers)
-        let (backend, _) = await makeRestoreBackend(control: control, box: box)
+        let clock = ManualDelayClock()
+        let (backend, _) = await makeRestoreBackend(control: control, box: box, clock: clock)
         defer { backend.stop() }
         let sink = LinesBox()
         Telemetry._installTestSink { sink.append($0) }
@@ -1479,10 +1492,12 @@ extension SerializedSharedState {
 
         backend.setOutputSet([])
         await pollUntil { control.setDefaultCalls.count == 2 }
-        box.set(Self.builtInSpeakers)   // landed, well inside the check window
+        box.set(Self.builtInSpeakers)   // landed, before the check reads it back
+        backend.captureControlQueue.sync {}   // the rest of the restore, which schedules the check
+        clock.fireAll()
+        backend.captureControlQueue.sync {}   // the check, and where a retry would write
 
         await pollUntil { self.hasRestoreLine(sink, #""outcome":"landed""#) }
-        backend.captureControlQueue.sync {}   // the rest of the check, where a retry would write
         #expect(control.setDefaultCalls == [501, 601], "a landed switch is never re-written")
         #expect(backend.test_aggregateDefaultActive == false)
     }

@@ -37,9 +37,9 @@ public struct ExpiredTrialSurvey: Equatable, Sendable {
     /// one), and the free-text line.
     public let questions: [Question]
 
-    /// The owner fills this in after creating the survey in PostHog. Empty
-    /// means no fetch and no survey.
-    public static let surveyID = ""
+    /// The "Mac: expired trial, what's missing" API survey in PostHog
+    /// project 258793, created 2026-10-19. Empty means no fetch and no survey.
+    public static let surveyID = "01a1525e-ffb5-0000-2483-5de695887897"
 
     /// The question types, in order, a usable survey must have.
     private static let questionTypes = ["single_choice", "multiple_choice", "single_choice", "single_choice", "open"]

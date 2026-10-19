@@ -152,7 +152,7 @@ public actor AirPlayEngine {
     // path can read without an actor hop. `nil` before the first start / after
     // stop.
     private nonisolated let engineThreadHolder = EngineThreadHolder()
-    private let completions = CompletionRegistry()
+    private nonisolated let completions = CompletionRegistry()
     private let stateHub = StateStreamHub()
     private let remoteHub = RemoteEventHub()
 
@@ -1788,6 +1788,24 @@ public actor AirPlayEngine {
     /// exists (which would be dropped and hang/time-out the op).
     func hasArmedWaiterForTest(callbackId: Int32) -> Bool {
         completions.hasWaiter(callbackId: callbackId)
+    }
+
+    /// Test-only: the synchronous twin of ``hasArmedWaiterForTest(callbackId:)``,
+    /// for a `SuiteWait.until` condition, which cannot await the actor.
+    nonisolated func waiterIsArmedForTest(callbackId: Int32) -> Bool {
+        completions.hasWaiter(callbackId: callbackId)
+    }
+
+    /// Test-only: make the armed op's real timeout timer fire now. Returns
+    /// `false` when `callbackId` has no armed timer.
+    nonisolated func expireOpTimeoutForTest(callbackId: Int32) -> Bool {
+        completions.expireTimeoutForTest(callbackId: callbackId)
+    }
+
+    /// Test-only: run the op-timeout handler for `callbackId` as a timer that
+    /// fired after the op already resolved would.
+    nonisolated func fireOpTimeoutForTest(callbackId: Int32) {
+        completions.fireTimeoutForTest(callbackId: callbackId)
     }
 
     /// Test-only: map C descriptor -> keyval feed WITHOUT the engine thread, so a

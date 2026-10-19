@@ -299,6 +299,14 @@ import Testing
         }
     }
 
+    /// Set once from a background queue, read by the test's wait.
+    private final class DoneFlag: @unchecked Sendable {
+        private let lock = NSLock()
+        private var done = false
+        var isSet: Bool { lock.lock(); defer { lock.unlock() }; return done }
+        func set() { lock.lock(); done = true; lock.unlock() }
+    }
+
     /// Turns red if `handleBuffer` takes the injector's state queue again,
     /// because a state or volume edit holding that queue then parks the tap
     /// delivery thread for the edit's whole duration.
@@ -323,14 +331,16 @@ import Testing
         gate.entered.wait()
 
         let buffer = s16Buffer([(1000, 1000)])
-        let returned = DispatchSemaphore(value: 0)
+        let returned = DoneFlag()
         DispatchQueue.global().async {
             injector.handleBuffer(bundleID: "a", buffer: buffer)
-            returned.signal()
+            returned.set()
         }
-        // 10 s is a hang-stop, not a speed claim.
-        #expect(returned.wait(timeout: .now() + 10) == .success,
-                "delivery must not wait on the state queue a converter build holds")
+        // The gate stays closed until this returns, so a delivery that waits
+        // on the state queue never returns and the wait fails at its ceiling.
+        SuiteWait.untilOnRunLoop("delivery returns while a converter build holds the state queue") {
+            returned.isSet
+        }
 
         gate.release.signal()
         finished.wait()

@@ -28,7 +28,7 @@ import AudioutProtocol
     @Test func cancelProbeReceivesTheAskingClient() async throws {
         let seen = DispatcherCancelSpy()
         let actions = CompanionAlignmentActions(
-            startProbe: { _, _ in nil },
+            startProbe: { _, _, _ in nil },
             cancelProbe: { targetID, clientID in
                 seen.calls.append((targetID, clientID))
                 return nil
@@ -48,6 +48,35 @@ import AudioutProtocol
         #expect(seen.calls.first?.0 == "speaker-1")
         #expect(seen.calls.first?.1 == phone,
                 "the wiring layer needs the caller to refuse another phone's cancel")
+    }
+
+    /// Turns red if the dispatcher drops the reference the phone named
+    /// before it reaches the wiring layer's `startProbe`.
+    @Test func startProbeReceivesTheNamedReference() async throws {
+        let seen = DispatcherStartSpy()
+        let actions = CompanionAlignmentActions(
+            startProbe: { targetID, referenceID, _ in
+                seen.calls.append((targetID, referenceID))
+                return nil
+            },
+            cancelProbe: { _, _ in nil },
+            reportMeasurement: { _, _, _ in nil },
+            setTick: { _, _, _ in nil },
+            nudgeTrim: { _, _ in nil },
+            revertNudge: { _ in nil },
+            clearTuning: { _ in nil },
+            playDemo: { _, _ in nil })
+        let context = try await makeContext(alignmentActions: actions)
+        let result = context.dispatcher.execute(
+            .startAlignmentProbe(targetID: "speaker-1", referenceID: "mac"), clientID: UUID())
+        #expect(result.applied)
+        #expect(seen.calls.count == 1)
+        #expect(seen.calls.first?.0 == "speaker-1")
+        #expect(seen.calls.first?.1 == "mac")
+    }
+
+    private final class DispatcherStartSpy {
+        var calls: [(String, String?)] = []
     }
 
     private final class DispatcherCancelSpy {

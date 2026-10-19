@@ -30,7 +30,7 @@ import AudioutProtocol
 /// a phone that walks out of range takes whatever it left playing down with it.
 @MainActor
 public struct CompanionAlignmentActions {
-    public var startProbe: (_ targetID: String, _ clientID: UUID?) -> String?
+    public var startProbe: (_ targetID: String, _ referenceID: String?, _ clientID: UUID?) -> String?
     /// Carries the asking client, like `startProbe` does: cancel is the
     /// owner's own exit, and without the id one phone's cancel can end
     /// another phone's run.
@@ -43,7 +43,7 @@ public struct CompanionAlignmentActions {
     public var playDemo: (_ targetID: String, _ clientID: UUID?) -> String?
 
     public init(
-        startProbe: @escaping (String, UUID?) -> String?,
+        startProbe: @escaping (String, String?, UUID?) -> String?,
         cancelProbe: @escaping (String, UUID?) -> String?,
         reportMeasurement: @escaping (String, Double, Double) -> String?,
         setTick: @escaping (String, Bool, UUID?) -> String?,
@@ -312,8 +312,8 @@ public final class CompanionCommandDispatcher {
             // applied so the phone doesn't surface a spurious refusal toast.
             return .ok
 
-        case .startAlignmentProbe(let targetID):
-            return alignment(targetID) { actions, id in actions.startProbe(id, clientID) }
+        case .startAlignmentProbe(let targetID, let referenceID):
+            return alignment(targetID) { actions, id in actions.startProbe(id, referenceID, clientID) }
 
         case .cancelAlignmentProbe(let targetID):
             return alignment(targetID) { actions, id in actions.cancelProbe(id, clientID) }
@@ -341,7 +341,7 @@ public final class CompanionCommandDispatcher {
                 actions.reportMeasurement(id, offsetMs, confidence)
             }
 
-        case .setAlignmentTick(let targetID, let active):
+        case .setAlignmentTick(let targetID, let active, _):
             return alignment(targetID) { actions, id in actions.setTick(id, active, clientID) }
 
         case .nudgeAlignmentTrim(let targetID, let deltaMs):

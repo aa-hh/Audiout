@@ -19,7 +19,7 @@ Shared AppKit rows, pages and chrome. Hosts own models, routing and persistence;
 - Permission prompts suspend transient dismissal across pin changes; restore manners before raising windows.
 - Respect accessibility-display changes. Warm ink means `isRouteArmed`, never a wash; instruments stay flat; pending Cast glows.
 - Muted ink belongs only to an engaged mute.
-- `Tokens.Color.shadow` draws flat clipped bands, never `NSShadow`.
+- Outside `TrialSurveyCardView`, `Tokens.Color.shadow` draws flat clipped bands, never `NSShadow`.
 - The invitation QR stays black-on-white for cameras.
 - "Removed, Undo" and "Play here" offers are host state; rows draw, never decide.
 - Custom-drawn: `GroupedSectionView` (Equalizer recesses, no light outlines), `DeviceIconWellView`, and `RollingCountLabel`; AppKit has no rolling-count control.

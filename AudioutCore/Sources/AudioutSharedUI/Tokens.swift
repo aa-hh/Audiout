@@ -162,7 +162,10 @@ public enum Tokens {
         public static var selectedContentBackground: NSColor { .selectedContentBackgroundColor }
         /// Black for flat inset shades clipped inside a recess (a fader's
         /// trough, the Equalizer `.well`, a plate's lip) and for darkening
-        /// blends; never an `NSShadow` drop shadow. Alias of `NSColor.black`.
+        /// blends; never an `NSShadow` drop shadow. The one exception is the
+        /// expired-trial survey card (`TrialSurveyCardView`), which casts a
+        /// soft `CALayer` shadow because it floats over the dimmed popover.
+        /// Alias of `NSColor.black`.
         public static var shadow: NSColor { .black }
         /// Alpha of ``shadow`` for the 1 pt inset shade along a recess's top
         /// edge: a fader's trough (`WarmFaderCell`), the Groups `.well`
@@ -963,6 +966,24 @@ public enum Tokens {
         /// Contrast.
         public static var iconWellBadgeBorder: NSColor {
             scrimDynamic(name: "iconWellBadgeBorder", hex: 0xFFFFFF, alpha: 0.25, highContrastAlpha: 0.55)
+        }
+
+        /// The dimming laid over the whole popover under a card that rises
+        /// above it (`TrialSurveyCardView`): dark `#0A0A0C` (the `canvas`
+        /// hex) at 0.6, light pure black at 0.22. CONTRAST RATIONALE:
+        /// content-agnostic overlay, no stated floor (same precedent as
+        /// ``iconWellBadge``) — it dims whatever is beneath and carries no
+        /// text. Increase Contrast steps alpha to 0.75 dark and 0.35 light so
+        /// the card stands further off the popover behind it. Unlike
+        /// ``iconWellBadge`` the value differs by theme, because the same
+        /// alpha that quiets a dark popover turns a light one muddy.
+        public static var cardScrim: NSColor {
+            NSColor(name: NSColor.Name("WarmSignal.cardScrim")) { appearance in
+                let increaseContrast = Tokens.test_increaseContrastOverride ?? NSWorkspace.shared.accessibilityDisplayShouldIncreaseContrast
+                return appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+                    ? NSColor(warmSignalHex: 0x0A0A0C).withAlphaComponent(increaseContrast ? 0.75 : 0.6)
+                    : NSColor(warmSignalHex: 0x000000).withAlphaComponent(increaseContrast ? 0.35 : 0.22)
+            }
         }
 
         // MARK: Permission-row instruments (colour-return pass, decisions Q1-Q6/NEW-1)

@@ -170,6 +170,91 @@ import Testing
             environment: ["AUDIOUT_LICENSE_GATE": "gibberish"]) == .auto)
     }
 
+    // Turns red if a shipping build reads the Developer popup's stored value,
+    // which would let a leftover dev preference hide the gate in a release.
+    @Test func shippingBuildIgnoresTheStoredGateSetting() {
+        let stored = settings(store: isolation.makeDefaults())
+        stored.licenseGatePresentation = .forceShow
+        #expect(LicenseGatePresentation.resolved(
+            environment: [:], settings: stored, isDevBuild: false) == .auto)
+    }
+
+    // Turns red if the resolver stops reading the Developer popup on a dev build.
+    @Test func devBuildStoredGateSettingBeatsAuto() {
+        let stored = settings(store: isolation.makeDefaults())
+        stored.licenseGatePresentation = .forceHide
+        #expect(LicenseGatePresentation.resolved(
+            environment: [:], settings: stored, isDevBuild: true) == .forceHide)
+    }
+
+    // Turns red if the stored setting is checked before `AUDIOUT_LICENSE_GATE`.
+    @Test func environmentKnobBeatsTheStoredGateSetting() {
+        let stored = settings(store: isolation.makeDefaults())
+        stored.licenseGatePresentation = .forceHide
+        #expect(LicenseGatePresentation.resolved(
+            environment: ["AUDIOUT_LICENSE_GATE": "force"], settings: stored, isDevBuild: true) == .forceShow)
+    }
+
+    // MARK: Remote waiver
+
+    /// A purchased build whose key the server revoked: limited to one speaker
+    /// until something waives it.
+    private func revokedSettings() -> AppSettings {
+        let settings = settings()
+        settings.licenseKey = Self.key
+        settings.licenseStatus = .revoked
+        return settings
+    }
+
+    /// The website's app-config with the Mac licence switch set as given.
+    private func appConfig(disabled: Bool, upToBuild: String = "null") -> Data {
+        Data("""
+        {"v": 1,
+         "ios": {"sync": {"disabled": false, "upToBuild": null, "message": null},
+                 "licenseCheck": {"disabled": false, "upToBuild": null}},
+         "mac": {"licenseCheck": {"disabled": \(disabled), "upToBuild": \(upToBuild)}}}
+        """.utf8)
+    }
+
+    /// Red if a revoked key stopped being limited when no config was ever
+    /// fetched, which would make the waiver the default instead of the
+    /// exception.
+    @Test func aRevokedKeyWithNoCachedConfigIsLimited() {
+        #expect(LicenseGate.limitsToOneSpeaker(settings: revokedSettings()))
+    }
+
+    /// Red if a fresh file with `mac.licenseCheck.disabled` true stopped
+    /// lifting the limit, which is the whole point of the switch.
+    @Test func aFreshWaiverLiftsTheLimit() {
+        let settings = revokedSettings()
+        settings.remoteConfigData = appConfig(disabled: true)
+        settings.remoteConfigFetchedAt = Date()
+        #expect(!LicenseGate.limitsToOneSpeaker(settings: settings))
+    }
+
+    /// Red if a file fetched eight days ago still waived the limit, which would
+    /// let one forgotten switch unlicense the app for good.
+    @Test func aWaiverFetchedEightDaysAgoNoLongerCounts() {
+        let settings = revokedSettings()
+        settings.remoteConfigData = appConfig(disabled: true)
+        settings.remoteConfigFetchedAt = Date(timeIntervalSinceNow: -8 * 86_400)
+        #expect(LicenseGate.limitsToOneSpeaker(settings: settings))
+    }
+
+    /// Red if `upToBuild` stopped being inclusive or stopped being checked: a
+    /// build above the cut-off must stay limited, and the cut-off build itself
+    /// must be waived.
+    @Test func theWaiverStopsAtItsBuildCutOff() {
+        let settings = revokedSettings()
+        settings.remoteConfigFetchedAt = Date()
+
+        settings.remoteConfigData = appConfig(disabled: true, upToBuild: "4")
+        #expect(!RemoteAppConfig.licenseCheckWaived(settings: settings, build: 5, now: Date()))
+
+        settings.remoteConfigData = appConfig(disabled: true, upToBuild: "5")
+        #expect(RemoteAppConfig.licenseCheckWaived(settings: settings, build: 5, now: Date()))
+    }
+
     // MARK: The thank-you card and the consent ask
 
     /// A trial that converted to a paid key: started, then cleared of its end

@@ -27,13 +27,15 @@ extension NativeBackend {
             if var device = known[record.id] {
                 let returned = !device.isAvailable
                 device.name = record.friendlyName
+                device.model = Device.advertisedModel(record.model)
                 device.isAvailable = true
                 if device != known[record.id] { commitKnownDevice(record.id, device) }
                 if returned { logCastRowState(device) }
             } else {
                 let device = Device(
                     id: record.id, name: record.friendlyName, kind: .cast,
-                    isAvailable: true, supportsAirPlay2: false)
+                    isAvailable: true, supportsAirPlay2: false,
+                    model: Device.advertisedModel(record.model))
                 known[record.id] = device
                 order.append(record.id)
                 emit(.deviceAdded(device))

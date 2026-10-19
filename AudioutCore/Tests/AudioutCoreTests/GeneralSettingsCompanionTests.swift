@@ -138,7 +138,9 @@ import AppKit
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("AudioutTests-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: dir) }
-        let approvals = CompanionApprovalController(store: CompanionApprovalStore(directory: dir))
+        let approvals = CompanionApprovalController(store: CompanionApprovalStore(directory: dir),
+                                                    schedule: { _, job in job() })
+        approvals.isPairingOpen = { true }
         let pane = RemoteSettingsViewController(settings: settings, environment: [:],
                                                 remoteAppIsOffered: true, approvals: approvals)
         let root = SettingsRootViewController(sections: [
@@ -149,13 +151,16 @@ import AppKit
         pane.test_toggleAllowRemoteControl(true)
         #expect(root.test_readoutLines(at: 0) == ["On · no iPhones yet"])
 
-        approvals.presentPrompt = { _, _, respond in respond(false) }
-        approvals.handleRequest(clientID: "7C1D93F0-1111-4A2A-B3C4-D5E6F7A8B9C0", clientName: "Guest's iPhone") { _ in }
+        approvals.presentPrompt = { _, _, _, respond in respond(false) }
+        approvals.handleRequest(clientID: "7C1D93F0-1111-4A2A-B3C4-D5E6F7A8B9C0", clientName: "Guest's iPhone",
+                                pairingCode: "000000") { _ in }
         #expect(root.test_readoutLines(at: 0) == ["On · no iPhones allowed"])
 
-        approvals.presentPrompt = { _, _, respond in respond(true) }
-        approvals.handleRequest(clientID: "2B5E5A2B-58D8-4979-9F41-92E668FD9C0A", clientName: "Owner's iPhone") { _ in }
-        approvals.handleRequest(clientID: "0A1B2C3D-4E5F-4A6B-8C7D-9E0F1A2B3C4D", clientName: "Kid's iPhone") { _ in }
+        approvals.presentPrompt = { _, _, _, respond in respond(true) }
+        approvals.handleRequest(clientID: "2B5E5A2B-58D8-4979-9F41-92E668FD9C0A", clientName: "Owner's iPhone",
+                                pairingCode: "000000") { _ in }
+        approvals.handleRequest(clientID: "0A1B2C3D-4E5F-4A6B-8C7D-9E0F1A2B3C4D", clientName: "Kid's iPhone",
+                                pairingCode: "000000") { _ in }
         #expect(root.test_readoutLines(at: 0) == ["On · 2 iPhones allowed"])
     }
 }
@@ -167,13 +172,17 @@ import AppKit
 @MainActor
 @Suite final class GeneralSettingsRememberedPhonesTests: IsolatedSuite {
 
-    private static let ownerID = "2B5E5A2B-58D8-4979-9F41-92E668FD9C0A"
+    private static let ownerID = "2B5E5A2B58D849799F4192E668FD9C0A2B5E5A2B58D849799F4192E668FD9C0A"
     private static let guestID = "7C1D93F0-1111-4A2A-B3C4-D5E6F7A8B9C0"
 
+    /// Inside an open pairing window, so a test's unknown phone is prompted
+    /// for rather than refused.
     private func makeController(records: [CompanionApproval]) throws -> CompanionApprovalController {
         let store = CompanionApprovalStore(directory: scratchDir)
         try store.save(records)
-        return CompanionApprovalController(store: store)
+        let controller = CompanionApprovalController(store: store)
+        controller.isPairingOpen = { true }
+        return controller
     }
 
     private func makePane(approvals: CompanionApprovalController?) -> RemoteSettingsViewController {
@@ -182,14 +191,19 @@ import AppKit
                                      approvals: approvals)
     }
 
-    private func record(_ id: String, name: String, decision: CompanionApproval.Decision) -> CompanionApproval {
+    private func record(_ id: String, name: String, decision: CompanionApproval.Decision,
+                        lastSeen: Date = Date()) -> CompanionApproval {
         CompanionApproval(clientID: id, lastKnownName: name, decision: decision,
-                          firstSeen: .distantPast, lastSeen: .distantPast)
+                          firstSeen: .distantPast, lastSeen: lastSeen)
     }
 
+    /// Turns red if a phone past `CompanionApprovalStore.trustLapse` is
+    /// still listed as "Allowed" before it next connects.
     @Test func rememberedPhonesRenderWithTheirDecisions() throws {
         let controller = try makeController(records: [
             record(Self.ownerID, name: "Owner's iPhone", decision: .approved),
+            record(String(repeating: "F", count: 64), name: "Lapsed iPhone", decision: .approved,
+                   lastSeen: Date().addingTimeInterval(-CompanionApprovalStore.trustLapse - 60)),
             record(Self.guestID, name: "Guest's iPhone", decision: .denied),
         ])
         let pane = makePane(approvals: controller)
@@ -274,12 +288,12 @@ import AppKit
         let settings = AppSettings(defaults: isolatedDefaults)
         settings.allowRemoteControl = true
         let controller = try makeController(records: [])
-        controller.presentPrompt = { _, _, respond in respond(true) }
+        controller.presentPrompt = { _, _, _, respond in respond(true) }
         let pane = RemoteSettingsViewController(settings: settings, environment: [:], remoteAppIsOffered: true,
                                                  approvals: controller)
         #expect(pane.test_remoteInviteQRIsVisible)
 
-        controller.handleRequest(clientID: Self.ownerID, clientName: "Owner's iPhone") { _ in }
+        controller.handleRequest(clientID: Self.ownerID, clientName: "Owner's iPhone", pairingCode: "000000") { _ in }
 
         #expect(!pane.test_remoteInviteQRIsVisible)
         #expect(pane.test_remoteInviteRowIsMounted,
@@ -302,15 +316,60 @@ import AppKit
         #expect(opened.map(\.absoluteString) == [RemoteInviteView.pageURLString])
     }
 
+    // MARK: Pair an iPhone
+
+    /// Turns red if the Pair an iPhone row stops following the switch, or its
+    /// button stops reaching the app layer — the one way a new phone gets
+    /// past the Mac's pairing gate from Settings.
+    @Test func pairButtonIsMountedUnderTheSwitchAndFiresTheCallback() throws {
+        let settings = AppSettings(defaults: isolatedDefaults)
+        settings.allowRemoteControl = true
+        let pane = RemoteSettingsViewController(settings: settings, environment: [:], remoteAppIsOffered: true,
+                                                 approvals: try makeController(records: []))
+        var requests = 0
+        pane.onPairRequested = { requests += 1 }
+        #expect(pane.test_pairRowIsMounted)
+        #expect(pane.test_pairButtonTitle == "Pair an iPhone")
+
+        pane.test_tapPair()
+        #expect(requests == 1)
+
+        pane.test_toggleAllowRemoteControl(false)
+        #expect(!pane.test_pairRowIsMounted, "a Mac that refuses phones offers no pairing")
+        pane.test_toggleAllowRemoteControl(true)
+        #expect(pane.test_pairRowIsMounted)
+    }
+
+    /// Turns red if the button keeps offering to pair while a window is
+    /// already open, or stays disabled after the window lapses.
+    @Test func pairButtonReadsPairingWhileTheWindowIsOpen() throws {
+        let settings = AppSettings(defaults: isolatedDefaults)
+        settings.allowRemoteControl = true
+        let pane = RemoteSettingsViewController(settings: settings, environment: [:], remoteAppIsOffered: true,
+                                                 approvals: try makeController(records: []))
+        var windowOpen = false
+        pane.isPairingOpen = { windowOpen }
+        pane.onPairRequested = { windowOpen = true }
+
+        pane.test_tapPair()
+        #expect(pane.test_pairButtonTitle == "Pairing\u{2026}")
+        #expect(!pane.test_pairButtonIsEnabled)
+
+        windowOpen = false
+        pane.refreshPairingState()
+        #expect(pane.test_pairButtonTitle == "Pair an iPhone")
+        #expect(pane.test_pairButtonIsEnabled)
+    }
+
     /// A phone approved WHILE the window is open (the prompt path) appears
     /// live — the pane claims the controller's `onChange`.
     @Test func aNewDecisionAppearsInTheOpenList() throws {
         let controller = try makeController(records: [])
-        controller.presentPrompt = { _, _, respond in respond(true) }
+        controller.presentPrompt = { _, _, _, respond in respond(true) }
         let pane = makePane(approvals: controller)
         #expect(!pane.test_phoneListIsVisible)
 
-        controller.handleRequest(clientID: Self.ownerID, clientName: "Owner's iPhone") { _ in }
+        controller.handleRequest(clientID: Self.ownerID, clientName: "Owner's iPhone", pairingCode: "000000") { _ in }
 
         #expect(pane.test_phoneListIsVisible)
         #expect(pane.test_rememberedPhones.map(\.name) == ["Owner's iPhone"])

@@ -116,8 +116,9 @@ repo. `AudioutCore` pins it by version.
   switch with its QR row and phone list, the alignment wizard's iPhone panel,
   and the companion server itself. A NEW surface mentioning the phone must ask
   it too, or a release ships an invitation to an app nobody can download.
-  `AUDIOUT_COMPANION=on` still overrides it, which is how a dev build tests
-  against a TestFlight phone.
+  A dev build (bundle id `com.audiout.Audiout.<suffix>`) is always offered it,
+  with the Settings switch defaulting OFF; `AUDIOUT_COMPANION=on` still
+  overrides everything.
 - **Read `dev/notes/` before a non-trivial phase** — briefs exist to de-risk work
   before it starts. They live in the main checkout only, so a worktree reads them
   at `~/Projects/AirPlay Controller/dev/notes/`.
@@ -267,13 +268,13 @@ repo. `AudioutCore` pins it by version.
   human can enter the password. Never `--apply` while a live Audiout session is
   actively streaming: it unloads the running helper too. It only ever touches
   `*.ptphelper` jobs. `--keep <label>` spares one exact label.
-- **Uninstall dead hand-off builds with `scripts/purge-dev-installs.sh`.** The
-  one-bundle-id-per-build rule above is correct and stays, but each throwaway id
-  leaves permanent residue that trashing the `.app` does not remove: a
+- **Uninstall dead hand-off builds with `scripts/purge-dev-installs.sh`.** Each
+  throwaway id leaves permanent residue that trashing the `.app` does not remove: a
   preferences domain, TCC grants (a dead row in System Settings › Privacy &
   Security forever), a PUBLIC aggregate audio device that keeps appearing in
-  Sound settings, a root PTP-helper daemon, and a stored AirPlay speaker
-  password in the login keychain. This script finds every non-shipping
+  Sound settings, a root PTP-helper daemon, and, in the login keychain, a stored
+  AirPlay speaker password plus the licence key and companion token under
+  `<bundle id>.license`. This script finds every non-shipping
   `com.audiout.*` identity across all five surfaces, unions them, and removes
   the lot — plus the preference domains leaked by the test
   suites (`swift test` creates a per-test `UserDefaults` suite and never

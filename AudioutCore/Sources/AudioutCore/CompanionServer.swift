@@ -208,6 +208,9 @@ public final class CompanionServer: @unchecked Sendable {
         var unsentBytes = 0
         /// `welcome` sent (requires a cached snapshot; may lag promotion).
         var isWelcomed = false
+        /// A goodbye already went out (``refuse``); ``stopLocked`` must not
+        /// send a second one on the same socket.
+        var isClosing = false
         /// The active deadline work item: the pre-hello deadline while in
         /// `pending`, re-armed as the (much longer) approval deadline while
         /// in `awaiting`; cancelled on promotion. For a connection refused
@@ -467,7 +470,7 @@ public final class CompanionServer: @unchecked Sendable {
             noteAwaitingClosed(client.id)
             client.handshakeTimeout?.cancel()
             let connection = client.connection
-            if let goodbye {
+            if let goodbye, !client.isClosing {
                 sendRaw(goodbye, over: connection) {
                     connection.cancel()
                 }
@@ -480,7 +483,7 @@ public final class CompanionServer: @unchecked Sendable {
             // Cancel from the send's completion, not inline — an immediate
             // cancel aborts the just-enqueued goodbye (observed on loopback).
             let connection = client.connection
-            if let goodbye {
+            if let goodbye, !client.isClosing {
                 sendRaw(goodbye, over: connection) {
                     connection.cancel()
                 }
@@ -740,6 +743,7 @@ public final class CompanionServer: @unchecked Sendable {
     private func refuse(_ client: Client, reason: String) {
         client.handshakeTimeout?.cancel()
         client.handshakeTimeout = nil
+        client.isClosing = true
         let connection = client.connection
         if let goodbye = encoded(.goodbye(reason: reason)) {
             sendRaw(goodbye, over: connection) {
@@ -756,11 +760,13 @@ public final class CompanionServer: @unchecked Sendable {
     public func dropClient(clientID: String) {
         queue.async { [weak self] in
             guard let self else { return }
+            // The goodbye lets the phone stop redialling; the state handler
+            // still removes the entry and fires the disconnect signal.
             for client in self.clients.values where client.phoneClientID == clientID {
-                client.connection.cancel()
+                self.refuse(client, reason: CompanionGoodbyeReason.removed)
             }
             for client in self.awaiting.values where client.phoneClientID == clientID {
-                client.connection.cancel()
+                self.refuse(client, reason: CompanionGoodbyeReason.removed)
             }
         }
     }

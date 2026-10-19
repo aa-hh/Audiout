@@ -40,6 +40,23 @@ public enum LicenseStatus: String {
     case invalid
 }
 
+/// Dev builds only: which licence server the Settings › General › Developer
+/// "Licence server" popup points the app at. `url` is `nil` for
+/// ``buildDefault``, which keeps the bundle's own `AudioutLicenseServerURL`.
+public enum LicenseServerChoice: String, CaseIterable {
+    case buildDefault
+    case staging
+    case production
+
+    public var url: URL? {
+        switch self {
+        case .buildDefault: return nil
+        case .staging: return URL(string: "https://license-staging.audiout.app")
+        case .production: return URL(string: "https://license.audiout.app")
+        }
+    }
+}
+
 /// The app's **scalar** user preferences, backed by `UserDefaults`.
 ///
 /// This is the deliberate other half of the persistence split (decided with the
@@ -60,6 +77,7 @@ public struct AppSettings {
 
     private let defaults: UserDefaults
     private let licenseServerURLOverride: URL?
+    private let devBuild: Bool
     private let buyURLOverride: URL?
     private let secrets: SecretStoring
 
@@ -76,12 +94,16 @@ public struct AppSettings {
     ///     picks the login keychain in a real app run and `defaults` under
     ///     `swift test` / headless tools (``HeadlessRuntime``), so the suites
     ///     that set a key through a throwaway suite keep working unchanged.
+    ///   - isDevBuild: whether ``licenseServerChoice`` is honoured; a test seam
+    ///     like `licenseServerURL`, since the test runner is never a dev build.
     public init(defaults: UserDefaults = .standard,
                 licenseServerURL: URL? = nil,
                 buyURL: URL? = nil,
-                secrets: SecretStoring? = nil) {
+                secrets: SecretStoring? = nil,
+                isDevBuild: Bool = Self.isDevBuild) {
         self.defaults = defaults
         self.licenseServerURLOverride = licenseServerURL
+        self.devBuild = isDevBuild
         self.buyURLOverride = buyURL
         self.secrets = secrets ?? (HeadlessRuntime.isActive ? DefaultsSecretStore(defaults) : KeychainSecretStore())
     }
@@ -144,6 +166,7 @@ public struct AppSettings {
         static let btKeepAliveMinutes = "audio.btKeepAliveMinutes"
         static let allowRemoteControl = "companion.allowRemoteControl"
         static let licenseGatePresentation = "dev.licenseGatePresentation"
+        static let licenseServerChoice = "dev.licenseServerChoice"
         static let surfacePinned = "surface.pinned"
         static let eqAdvancedExpanded = "eq.advancedExpanded"
         static let licenseKey = "license.key"
@@ -482,6 +505,37 @@ public struct AppSettings {
                 .flatMap(LicenseGatePresentation.init(rawValue:)) ?? .auto
         }
         nonmutating set { defaults.set(newValue.rawValue, forKey: Keys.licenseGatePresentation) }
+    }
+
+    /// Dev builds only: the Settings › General › Developer "Licence server"
+    /// popup, read by ``licenseServerURL`` only when this is a dev build.
+    /// Changing it clears the stored verdict (``licenseStatus``,
+    /// ``licenseReason``, ``licenseMaxMajor``, ``companionToken``,
+    /// ``trialExpiresAt``), because a verdict from one server says nothing
+    /// about another; the key and the trial start are kept, so the next check
+    /// asks the new server about the same key.
+    public var licenseServerChoice: LicenseServerChoice {
+        get {
+            defaults.string(forKey: Keys.licenseServerChoice)
+                .flatMap(LicenseServerChoice.init(rawValue:)) ?? .buildDefault
+        }
+        nonmutating set {
+            let changed = newValue != licenseServerChoice
+            defaults.set(newValue.rawValue, forKey: Keys.licenseServerChoice)
+            guard changed else { return }
+            licenseStatus = nil
+            licenseReason = nil
+            licenseMaxMajor = nil
+            companionToken = nil
+            trialExpiresAt = nil
+        }
+    }
+
+    /// The feed Sparkle's delegate returns on a dev build pointed at a chosen
+    /// server: that server's `appcast.xml`. `nil` keeps the baked `SUFeedURL`.
+    public var licenseServerChoiceAppcastURL: URL? {
+        guard devBuild, licenseServerChoice != .buildDefault else { return nil }
+        return licenseServerChoice.url?.appending(path: "appcast.xml")
     }
 
     /// Whether this process is a dev build: the shipping id plus a suffix
@@ -841,9 +895,11 @@ public struct AppSettings {
     /// `AUDIOUT_LICENSE_URL`). **A build run from source has none** — so it
     /// does no validation, no check-in and shows no buy prompt. That is the
     /// free build, and the absence is the whole switch. The initializer's
-    /// override wins when non-nil, for tests.
+    /// override wins when non-nil, for tests. A dev build's
+    /// ``licenseServerChoice`` wins over both when it names a server.
     public var licenseServerURL: URL? {
-        licenseServerURLOverride ?? Self.bundleURL(forInfoDictionaryKey: "AudioutLicenseServerURL")
+        if devBuild, let chosen = licenseServerChoice.url { return chosen }
+        return licenseServerURLOverride ?? Self.bundleURL(forInfoDictionaryKey: "AudioutLicenseServerURL")
     }
 
     /// Where "Buy Audiout" sends the user, from the bundle's

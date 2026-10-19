@@ -44,6 +44,11 @@ public final class GeneralSettingsViewController: NSViewController, SettingsRead
     private static let licenseGateOptions: [(String, LicenseGatePresentation)] = [
         ("Automatic", .auto), ("Always show", .forceShow), ("Never show", .forceHide),
     ]
+    /// Dev builds only: which licence server the app talks to (Developer card).
+    private let licenseServerPopup = NSPopUpButton()
+    private static let licenseServerOptions: [(String, LicenseServerChoice)] = [
+        ("Build default", .buildDefault), ("Staging", .staging), ("Production", .production),
+    ]
     private let isDevBuild: Bool
     private var developerCard: NSView?
 
@@ -58,6 +63,12 @@ public final class GeneralSettingsViewController: NSViewController, SettingsRead
     /// update path that cannot work. The app layer wires it before the view
     /// loads, exactly as it does `onRunSetupAgain`.
     public var onCheckForUpdates: (() -> Void)?
+
+    /// Fired after the Developer "Licence server" popup stores a new choice,
+    /// so the app can re-apply the licence state and ask the new server. Nil
+    /// (unset) leaves the popup storing the choice only — the app layer wires
+    /// it in `makeSettingsRoot`.
+    public var onLicenseServerChanged: (() -> Void)?
 
     var onReadoutChanged: (() -> Void)?
 
@@ -225,15 +236,32 @@ public final class GeneralSettingsViewController: NSViewController, SettingsRead
         licenseGatePopup.target = self
         licenseGatePopup.action = #selector(licenseGateChanged)
         licenseGatePopup.setAccessibilityLabel("Licence gate")
-        let row = ListRowView(title: "Licence gate", accessory: licenseGatePopup,
-                              helpText: "Takes effect next launch.")
-        return SettingsPane.makeCard(rows: [row]).container
+        let gateRow = ListRowView(title: "Licence gate", accessory: licenseGatePopup,
+                                  helpText: "Takes effect next launch.")
+
+        for (title, _) in Self.licenseServerOptions { licenseServerPopup.addItem(withTitle: title) }
+        if let index = Self.licenseServerOptions.firstIndex(where: { $0.1 == settings.licenseServerChoice }) {
+            licenseServerPopup.selectItem(at: index)
+        }
+        licenseServerPopup.target = self
+        licenseServerPopup.action = #selector(licenseServerChanged)
+        licenseServerPopup.setAccessibilityLabel("Licence server")
+        let serverRow = ListRowView(title: "Licence server", accessory: licenseServerPopup,
+                                    helpText: "Clears the saved licence verdict; the next check asks this server.")
+        return SettingsPane.makeCard(rows: [gateRow, serverRow]).container
     }
 
     @objc private func licenseGateChanged() {
         let index = licenseGatePopup.indexOfSelectedItem
         guard Self.licenseGateOptions.indices.contains(index) else { return }
         settings.licenseGatePresentation = Self.licenseGateOptions[index].1
+    }
+
+    @objc private func licenseServerChanged() {
+        let index = licenseServerPopup.indexOfSelectedItem
+        guard Self.licenseServerOptions.indices.contains(index) else { return }
+        settings.licenseServerChoice = Self.licenseServerOptions[index].1
+        onLicenseServerChanged?()
     }
 
     @objc private func reconnectToggled() {
@@ -391,6 +419,14 @@ public final class GeneralSettingsViewController: NSViewController, SettingsRead
     public var test_developerSectionIsMounted: Bool {
         _ = view
         return developerCard?.superview != nil
+    }
+
+    /// Pick a Developer "Licence server" entry as a click would.
+    public func test_selectLicenseServer(_ choice: LicenseServerChoice) {
+        _ = view
+        guard let index = Self.licenseServerOptions.firstIndex(where: { $0.1 == choice }) else { return }
+        licenseServerPopup.selectItem(at: index)
+        licenseServerChanged()
     }
 
     /// Invoke "About Audiout…" as a click would.

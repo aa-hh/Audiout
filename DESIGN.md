@@ -1131,6 +1131,44 @@ rings in a 96 pt well at the leading edge, a headline in `heading`, body
 text in `body` / `label2`, and a small rounded **Close** text button. The
 rings play one surge on appearing, then rest.
 
+**Expired-trial survey**: shown once to a trial-ended install that still
+streams. The invite takes the note slot in place of the trial-ended note for
+one open: an info banner reading "Have a minute? Two questions about what
+Audiout is missing for you.", an **Answer** button and a **Not now** link.
+Answer raises `TrialSurveyCardView` over the shell's content view: the whole
+view under `cardScrim` (dark `#0A0A0C` at 0.6, light black at 0.22) and a
+centred 420 pt card in `panel` with a 1 pt `containerEdge` edge, a 16 pt
+(`row`) corner and a drop shadow 18 pt down, 44 pt blur, 0.4 opacity. A 3 pt
+progress line runs along the top, `gold` over a `hairline` track, filling by
+thirds (a reason with no follow-up jumps from one third to full). The body
+sits 22 pt below it with 20 pt sides and 18 pt below, steps 16 pt apart; the
+question is `display` / `label`, with an optional `body` / `label2` line 4 pt
+under it. Answers are 44 pt tiles 8 pt apart: `raised` fill, 1 pt
+`containerEdge` edge, 10 pt corner, a 32 pt `well` holding a 20 pt SF Symbol
+in `label2`, the label in `body` / `label`, and the number key at the trailing
+edge in `keycap` / `label3`. Hover washes `engagedChrome` at 0.10; chosen
+washes it at 0.18, turns the edge (1.5 pt), the glyph and the key `gold`.
+Multi-select tiles have no checkbox: the gold edge is the tick. A
+single-choice tile, or its number key, answers and moves on after 120 ms;
+each next step slides in 32 pt from the right while fading up over 200 ms
+(a fade only under Reduce Motion). The footer puts **Back** on the left and
+**Not now** (or **Skip**) and the gold primary button on the right. The text
+step is one stock field with the hint "Leave out names, emails or anything
+personal." in `caption` / `label2`. The card rises from 96 % scale while
+fading in over 200 ms.
+
+The thank-you step is a 160×100 pt mark, 36 pt below the progress line, over
+"Thanks." and one line, 14 pt apart, then **Done**. The mark is a 30 pt
+`hifispeaker` glyph inside a 72 pt `rim` ring (3.8 pt stroke) open across the
+halo ring's 70° gap, a 19 pt `gold` dot in the gap, and a `glow` ellipse
+(150×96 pt, softened 36 pt) behind it at 0.22. Over 420 ms the ring draws in
+one clockwise sweep from the gap's lower edge to the dot on an ease-out curve
+(0.33, 1, 0.68, 1), its trailing 45° lit from grey toward `glow` like a
+highlighter; the lit stretch fades from 300 ms to 420 ms; at 420 ms the dot
+springs from 0 to full size (stiffness 400, damping 21, peaking near 1.15);
+from 600 ms to 840 ms the glow fades up. Under Reduce Motion the ring, dot
+and glow fade in together over 200 ms with no sweep.
+
 **Inset cards under a device row**: the first-join alignment note (a `well`
 card with a `containerEdge` edge; one wrapping sentence in `detail` /
 `label2` whose last words, "Align it now.", are the button, set in

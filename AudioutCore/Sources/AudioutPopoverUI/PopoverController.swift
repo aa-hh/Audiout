@@ -1406,6 +1406,39 @@ public final class PopoverController: NSObject {
         applyNoteSlot()
     }
 
+    // MARK: Expired-trial survey invite
+
+    /// The survey this install is owed, or `nil` (the host checks
+    /// `ExpiredTrialSurvey.isOwed` and holds the fetched definition).
+    public var surveyInviteProvider: (() -> ExpiredTrialSurvey?)?
+    /// The invite was answered, declined or hidden: the host marks it done.
+    public var onSurveyInviteSpent: (() -> Void)?
+    /// "Answer" was clicked: the host raises the survey card.
+    public var onSurveyAnswer: ((ExpiredTrialSurvey) -> Void)?
+    /// Session state: the invite raised in this open.
+    var raisedSurveyInvite: ExpiredTrialSurvey?
+    static let surveyInviteText = "Have a minute? Two questions about what Audiout is missing for you."
+
+    /// Raise the invite in place of the plain trial-ended note, once: only
+    /// while that note is what the slot would show, so no higher note and no
+    /// limit text is displaced.
+    private func refreshSurveyInvite() {
+        guard raisedSurveyInvite == nil,
+              unregisteredNote == .trialEnded,
+              !limitNoteRaised,
+              isRebuildingForOpen || isEffectivelyShown,
+              resolvedSystemAirPlayNote.text == Self.unregisteredTrialEndedNoteText,
+              let survey = surveyInviteProvider?() else { return }
+        raisedSurveyInvite = survey
+        Analytics.captureStructured("survey shown", survey.shownProperties())
+    }
+
+    func spendSurveyInvite() {
+        raisedSurveyInvite = nil
+        onSurveyInviteSpent?()
+        applyNoteSlot()
+    }
+
     // MARK: Thank-you card
 
     /// Whether the one-time thank-you card is owed (the host reads
@@ -1620,6 +1653,23 @@ public final class PopoverController: NSObject {
         }
         if let trialDaysLeft {
             return (Self.trialPillText(daysLeft: trialDaysLeft), trialBuyAction, enterLicenseKeyAction, .info)
+        }
+        if let survey = raisedSurveyInvite {
+            let answer = SystemAirPlayNoteBannerView.Action(
+                title: "Answer",
+                accessibilityLabel: "Answer two questions about Audiout",
+                handler: { [weak self] in
+                    self?.spendSurveyInvite()
+                    self?.onSurveyAnswer?(survey)
+                })
+            let notNow = SystemAirPlayNoteBannerView.Action(
+                title: "Not now",
+                accessibilityLabel: "Don't ask again",
+                handler: { [weak self] in
+                    Analytics.captureStructured("survey dismissed", survey.dismissedProperties(.init()))
+                    self?.spendSurveyInvite()
+                })
+            return (Self.surveyInviteText, answer, notNow, .info)
         }
         if let text = unregisteredNoteText {
             return (text, trialBuyAction, enterLicenseKeyAction, .info)
@@ -2031,6 +2081,7 @@ public final class PopoverController: NSObject {
         // The trial's own two rungs are re-read first: this is the cycle the pill
         // follows, and the one that raises a one-time banner.
         refreshTrialNudge()
+        refreshSurveyInvite()
         mountNoteSlot()
         // The device list this rebuild just re-mounted is a fresh scrolling card,
         // and a fresh one starts at height 0. Callers that publish a size get the

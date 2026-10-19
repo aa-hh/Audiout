@@ -965,6 +965,24 @@ public enum Tokens {
             scrimDynamic(name: "iconWellBadgeBorder", hex: 0xFFFFFF, alpha: 0.25, highContrastAlpha: 0.55)
         }
 
+        /// The dimming laid over the whole popover under a card that rises
+        /// above it (`TrialSurveyCardView`): dark `#0A0A0C` (the `canvas`
+        /// hex) at 0.6, light pure black at 0.22. CONTRAST RATIONALE:
+        /// content-agnostic overlay, no stated floor (same precedent as
+        /// ``iconWellBadge``) — it dims whatever is beneath and carries no
+        /// text. It takes no Increase Contrast step: the card it sits under
+        /// is bounded by its own ``containerEdge``, which steps under
+        /// Increase Contrast itself. Unlike ``iconWellBadge`` the value
+        /// differs by theme, because the same alpha that quiets a dark
+        /// popover turns a light one muddy.
+        public static var cardScrim: NSColor {
+            NSColor(name: NSColor.Name("WarmSignal.cardScrim")) { appearance in
+                appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+                    ? NSColor(warmSignalHex: 0x0A0A0C).withAlphaComponent(0.6)
+                    : NSColor(warmSignalHex: 0x000000).withAlphaComponent(0.22)
+            }
+        }
+
         // MARK: Permission-row instruments (colour-return pass, decisions Q1-Q6/NEW-1)
         //
         // Onboarding's four permission rows (`SetupCardView`: System Audio,

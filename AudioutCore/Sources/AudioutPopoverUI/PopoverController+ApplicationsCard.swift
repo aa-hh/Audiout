@@ -729,6 +729,11 @@ extension PopoverController: AppRowView.Delegate {
         limitNoteRaised = false
         // A thank-you card up at hide counts as seen (no closed event).
         retireThankYouCardOnHide()
+        // A survey invite up at hide counts as declined, like the card above.
+        if let survey = raisedSurveyInvite {
+            Analytics.captureStructured("survey dismissed", survey.dismissedProperties(.init()))
+            spendSurveyInvite()
+        }
         // Nor do the Cast pending glows.
         for timer in castPendingTimers.values.flatMap(\.values) { timer.invalidate() }
         castPendingTimers.removeAll()

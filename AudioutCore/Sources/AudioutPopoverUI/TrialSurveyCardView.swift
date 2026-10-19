@@ -79,34 +79,36 @@ final class TrialSurveyCardView: NSView {
         // from the step appearing; contact is when the ring's tip meets the dot.
         /// A hold that lets the step's slide land before the ring moves.
         static let ringDrawBegin: CFTimeInterval = 0.08
-        static let ringDrawDuration: CFTimeInterval = 0.56
-        /// Speeds up into contact so the tip reaches the dot with energy; the
-        /// steeper (0.55, 0.05, 0.8, 0.4) covered only 16° in its first 150 ms.
-        static var ringDrawCurve: CAMediaTimingFunction { CAMediaTimingFunction(controlPoints: 0.45, 0.05, 0.75, 0.5) }
+        static let ringDrawDuration: CFTimeInterval = 0.5
+        /// Starts gently and keeps speeding up until the tip hits the dot
+        /// (owner, 2026-10-19: "speed up over the course of going to the ring").
+        static var ringDrawCurve: CAMediaTimingFunction { CAMediaTimingFunction(controlPoints: 0.6, 0, 0.92, 0.55) }
         static var contactTime: CFTimeInterval { ringDrawBegin + ringDrawDuration }
         /// The lit stretch behind the drawing tip, fully lit until contact.
         static let highlighterSweep: CGFloat = .pi / 4
-        static let highlighterFadeDuration: CFTimeInterval = 0.16
+        static let highlighterFadeDuration: CFTimeInterval = 0.1
         /// The empty dot's outline fades out from contact while the fill
-        /// blooms `ember → gold` over `PopoverColumnGrid.routeArmedBloomDuration`.
-        static let dotRimFadeDuration: CFTimeInterval = 0.12
-        /// The dot's snap at contact: 1 → 1.32 → 0.96 → 1, one overshoot.
-        static let dotSnapPeakScale: CGFloat = 1.32
-        static let dotSnapDipScale: CGFloat = 0.96
-        static let dotSnapRiseDuration: CFTimeInterval = 0.09
-        static let dotSnapDipDuration: CFTimeInterval = 0.11
-        static let dotSnapSettleDuration: CFTimeInterval = 0.12
+        /// blooms `ember → gold` over `dotBloomDuration`, the Mixer's bloom
+        /// compressed so the end state lands as a snap.
+        static let dotRimFadeDuration: CFTimeInterval = 0.06
+        static let dotBloomDuration: CFTimeInterval = 0.18
+        /// The dot's snap at contact: 1 → 1.36 → 0.97 → 1, one overshoot.
+        static let dotSnapPeakScale: CGFloat = 1.36
+        static let dotSnapDipScale: CGFloat = 0.97
+        static let dotSnapRiseDuration: CFTimeInterval = 0.05
+        static let dotSnapDipDuration: CFTimeInterval = 0.07
+        static let dotSnapSettleDuration: CFTimeInterval = 0.08
         /// One `gold` ring leaving the dot at contact, never repeated.
         static let shockwaveLineWidth: CGFloat = 1.5
         static let shockwaveEndScale: CGFloat = 2.6
         static let shockwaveOpacity: Float = 0.55
-        static let shockwaveDuration: CFTimeInterval = 0.42
+        static let shockwaveDuration: CFTimeInterval = 0.34
         static var shockwaveCurve: CAMediaTimingFunction { CAMediaTimingFunction(controlPoints: 0.16, 1, 0.3, 1) }
         /// The dot glow peaks 120 ms after contact, then eases down to
         /// `dotGlowOpacity` 460 ms after contact.
         static let dotGlowPeakOpacity: Float = 0.9
-        static let dotGlowPeakDelay: CFTimeInterval = 0.12
-        static let dotGlowDuration: CFTimeInterval = 0.46
+        static let dotGlowPeakDelay: CFTimeInterval = 0.06
+        static let dotGlowDuration: CFTimeInterval = 0.32
         /// Under Reduce Motion only colour moves: the dot's bloom, and the
         /// glow fading up over this.
         static let reduceMotionGlowDuration: CFTimeInterval = 0.3
@@ -1074,17 +1076,17 @@ final class SurveyThanksMarkView: NSView {
             rim = Tokens.Color.rim.cgColor
         }
         // The `RouteArmedDotView` bloom, under Reduce Motion too: colour only.
-        func bloom(at begin: CFTimeInterval) {
+        func bloom(at begin: CFTimeInterval, duration: CFTimeInterval) {
             let fill = CABasicAnimation(keyPath: "fillColor")
             fill.fromValue = ember
             fill.beginTime = begin
-            fill.duration = PopoverColumnGrid.routeArmedBloomDuration
+            fill.duration = duration
             fill.timingFunction = CAMediaTimingFunction(name: .easeOut)
             dotLayer.add(fill, forKey: "dotBloom")
         }
 
         if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
-            bloom(at: now)
+            bloom(at: now, duration: PopoverColumnGrid.routeArmedBloomDuration)
             let glowIn = CABasicAnimation(keyPath: "opacity")
             glowIn.fromValue = 0
             glowIn.toValue = M.dotGlowOpacity
@@ -1149,7 +1151,7 @@ final class SurveyThanksMarkView: NSView {
         hollow.beginTime = now
         hollow.duration = M.contactTime
         dotLayer.add(hollow, forKey: "dotHollow")
-        bloom(at: contact)
+        bloom(at: contact, duration: M.dotBloomDuration)
         let rimTotal = M.contactTime + M.dotRimFadeDuration
         let rimFade = CAKeyframeAnimation(keyPath: "strokeColor")
         rimFade.values = [rim, rim, clear]

@@ -39,6 +39,14 @@ import Testing
         #expect(shader.contains("float2(1.0, \(literal(defaults.squash)))"))
     }
 
+    /// Turns red if the surge's sharpen stops riding the shared `sharp` as a
+    /// uniform multiplier — a retyped exponent, or a dropped `sharpen`
+    /// uniform, either of which would silently cost the surge half its
+    /// gesture.
+    @MainActor @Test func theSurgesSharpenMultipliesTheSharedRingExponent() {
+        #expect(shader.contains("\(literal(defaults.sharp)) * u.sharpen"))
+    }
+
     @MainActor @Test func orbitAndBreathingAreTheSharedValues() {
         #expect(shader.contains("+ \(literal(defaults.orbit)) * float2(sin(t * 0.030 + seed)"))
         #expect(shader.contains("(\(literal(defaults.breatheRate)) + \(literal(defaults.breatheStep)) * f)"))

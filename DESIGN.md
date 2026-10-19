@@ -702,15 +702,17 @@ strip: "Available" in `captionEmphasized` / `speakersAccent` over four kind
 tiles (AirPlay, Bluetooth, Cast, This Mac), then Unavailable behind a 1 pt
 `containerEdge` rule. A tile is a 16 pt `labelCool2` glyph, its number in
 `Tokens.Font.headingDigits` and its label in `caption` / `labelCool`; a kind's
-number is `speakersAccent` above 0, Unavailable's is `label`, and both are
+number is `speakersAccent` above 0, Unavailable's is `labelCool`, and both are
 `labelCool2` at 0. This Mac counts as This Mac; any other speaker counts under
 its kind only while the Mac can reach it and as Unavailable otherwise, so
 Unavailable equals the rows under the sidebar's dividers. After the strip come
 one-line `ListRowView` rows, built once and only shown while true: "N speakers
-can't be found" with "Forget N speakers…", "Local Network access is off" with
+can't be found" (or "K of the N can't be found" when only some unavailable
+speakers are missing) with "Forget K speakers…", "Local Network access is off" with
 "Open Privacy Settings…", "Bluetooth access is off" with its action button, and
 "Pair Bluetooth speaker…" with a `speakersAccent` `plus.circle` and a
-`labelCool2` chevron, always last. Each row's longer sentence is its tooltip
+`labelCool2` `arrow.up.forward.app`, since it opens System Settings, always
+last. Each row's longer sentence is its tooltip
 and VoiceOver hint. Nothing on the tab uses `systemGreen`.
 
 `SpeakerSearch` decides when each number is known: This Mac once it is
@@ -767,6 +769,17 @@ The popover's own
 `NSPanel` has no arrow) is a separate, named custom-drawn exception that
 does not itself draw a shadow.
 
+`BetaChipView`, in the alignment wizard's title row, is the other named
+exception: a layer-backed `well` capsule with a 1pt `rim` border carrying
+`Beta` in `microLabel` `label2`. Alignment ships as a beta and the window
+that offers it says so, between the speaker's name and the click count. No
+stock control is a label on a tinted capsule — `NSButton`'s recessed bezel
+is the nearest look and it is a control, which this is not. It is
+fixed-width chrome, so the truncating name is the half that gives way, and
+it is one accessibility element, not two. The iPhone draws the same capsule
+as `BetaBadge` on its three alignment doors; neither app puts the word in a
+menu item, where a capsule cannot go.
+
 ### Named Rules
 
 **Custom Drawing Is a Short, Named List.** Root `AGENTS.md` names the
@@ -819,7 +832,9 @@ round at **control** (10pt).
 ### ProminentButton (signature component)
 The one call-to-action button in the app: `Tokens.Color.gold` fill via
 `bezelColor`, `Tokens.Color.inkOnFill` ink, `Tokens.Font.body` (or the
-emphasized weight for a finale CTA). Fill and ink are pinned to their DARK
+emphasized weight for a finale CTA). On macOS 26 and later it sets
+`tintProminence` to primary: at the automatic default AppKit draws the
+`bezelColor` muted, and the gold came out a dark olive in the popover. Fill and ink are pinned to their DARK
 values (`#E8B84B` with `#171104`) in both appearances: one light gold with dark
 text everywhere, the same pin as the alignment wizard's primary plates. Light
 mode's paper gold `#A67C1E` is shaded by the rounded bezel into a muddy olive
@@ -1093,17 +1108,22 @@ why a card is empty must not be the faintest text on the panel.
 ### Note Banner, Inset Cards and the Thank-You Card (Mixer)
 **Note banner** (`SystemAirPlayNoteBannerView`, a `TintedNoteBackgroundView`
 subclass): a glyph and a wrapping label in `label`. It mounts in two
-places, the warning banner at the top of the panel and the note slot. Two
+places, the warning banner at the top of the panel and the note slot. Three
 severities:
 
-| Severity | Tint | Glyph |
-|---|---|---|
-| Info | `ring` | `info.circle.fill` |
-| Warning | `failure` | `exclamationmark.triangle.fill` |
+| Severity | Tint | Glyph | Button |
+|---|---|---|---|
+| Info | `ring` | `info.circle.fill` | gold `ProminentButton` |
+| Question | `ring` | `bubble.left.fill` | gold `ProminentButton` |
+| Warning | `failure` | `exclamationmark.triangle.fill` | small plain rounded |
 
 It may carry a trailing button, pinned to the trailing edge, and an
 underlined `TextLinkButton` left of it; never more than one link beside a
-button. A banner is not dismissible.
+button. An info or question banner's button is the gold call to action at
+the large control size (a 24 pt bezel), and the banner grows to hold it with
+8 pt above and below, so a one-line note with a button is 44 pt tall; a
+warning banner's stays plain and small, so gold never sits on the failure
+tint. A banner is not dismissible.
 
 `TintedNoteBackgroundView` (`AudioutSharedUI`) is the ground every tinted
 notice shares: the tint at 12 % (`PopoverColumnGrid.insetCardTintAlpha`), a
@@ -1117,6 +1137,55 @@ purchase. The same background in `gold`, 112 pt tall, the emitter's settled
 rings in a 96 pt well at the leading edge, a headline in `heading`, body
 text in `body` / `label2`, and a small rounded **Close** text button. The
 rings play one surge on appearing, then rest.
+
+**Expired-trial survey**: offered to a trial-ended install that still
+streams. The invite takes the note slot in place of the trial-ended note and
+comes back on up to 3 opens until **Answer** or **Not now** is clicked; the
+third close with neither clicked counts as declined. It is a question banner
+reading "What’s missing from Audiout? Two quick questions.", a gold
+**Answer** button and a **Not now** link.
+Answer raises `TrialSurveyCardView` over the shell's content view: the whole
+view under `cardScrim` (dark `#0A0A0C` at 0.6, light black at 0.22) and a
+centred 420 pt card in `panel` with a 1 pt `containerEdge` edge, a 16 pt
+(`row`) corner and a drop shadow 18 pt down, 44 pt blur, 0.4 opacity. A 3 pt
+progress line runs along the top, `gold` over a `hairline` track, filling by
+thirds (a reason with no follow-up jumps from one third to full). The body
+sits 22 pt below it with 20 pt sides and 18 pt below, steps 16 pt apart; the
+question is `display` / `label`, with an optional `body` / `label2` line 4 pt
+under it. Answers are 44 pt tiles 8 pt apart: `raised` fill, 1 pt
+`containerEdge` edge, 10 pt corner, a 32 pt `well` holding a 20 pt SF Symbol
+in `label2`, the label in `body` / `label`, and the number key at the trailing
+edge in `keycap` / `label3`. Hover washes `engagedChrome` at 0.10; chosen
+washes it at 0.18, turns the edge (1.5 pt), the glyph and the key `gold`.
+Multi-select tiles have no checkbox: the gold edge is the tick. A
+single-choice tile, or its number key, answers and moves on after 120 ms;
+each next step slides in 32 pt from the right while fading up over 200 ms
+(a fade only under Reduce Motion). The footer puts **Back** on the left and
+**Not now** (or **Skip**) and the gold primary button on the right. The text
+step is a stock bezeled text area about four lines tall (84 pt, scrolling
+past that) where Return starts a new line and ⌘Return sends, with the hint
+"Leave out names, emails or anything personal." in `caption` / `label2`. The card rises from 96 % scale while
+fading in over 200 ms.
+
+The thank-you step is a 160×100 pt mark, 36 pt below the progress line, over
+"Thanks." and one line, 14 pt apart, then **Done**. The mark replays the
+Mixer's connect moment. A 30 pt `hifispeaker` glyph sits inside a 72 pt ring
+(3.8 pt stroke) open across the halo ring's 70° gap. When the step appears
+the ring is a faint track (`rim` at 0.28) and the 19 pt dot in the gap is
+empty, a 1.5 pt `rim` outline. After an 80 ms hold, the ring fills in `rim`
+over 500 ms in one clockwise sweep from the gap's lower edge to the dot,
+starting gently and speeding up all the way into the dot (0.6, 0, 0.92,
+0.55), its leading 45° lit from grey toward `glow` like a highlighter and
+fully lit until the tip arrives. At contact (580 ms) the lit stretch fades
+over 100 ms; the dot fills with the Mixer's `ember → gold` bloom compressed
+to 180 ms (ease-out) as its outline fades over 60 ms; it snaps to 1.36× in
+50 ms, dips to 0.97× over 70 ms and settles over 80 ms; and one 1.5 pt
+`gold` ring leaves it, widening to 2.6× the dot and fading from 0.55 over
+340 ms (0.16, 1, 0.3, 1). A 56 pt radial `glow` centred on the dot rises to
+0.9 by 640 ms and eases down to 0.55 by 900 ms, where it stays: the finished
+mark is a gold dot with a soft halo. Nothing else moves. Under Reduce Motion
+the ring and dot are drawn finished at once; only colour moves, the dot's
+`ember → gold` bloom and its glow fading up to 0.55 over 300 ms.
 
 **Inset cards under a device row**: the first-join alignment note (a `well`
 card with a `containerEdge` edge; one wrapping sentence in `detail` /
@@ -1503,6 +1572,28 @@ to the same page is a stock push button beside it. The tile is hidden from
 accessibility and the address printed under it — `audiout.app/remote`, no
 scheme, in the surface's own caption voice — is the element, so a person who
 cannot or will not scan can type it.
+
+Scanning the code only gets the app; pairing needs the Mac to be listening.
+In Settings › Audiout Remote, a "Pair an iPhone" row sits directly under the
+Allow switch (and its override note), above the invitation, mounted only
+while the switch is on. Its stock rounded push button reads "Pair an iPhone"
+and opens a 3-minute pairing window; while the window is open it reads
+"Pairing…" and is disabled. The help text under the title says "Lets a new
+iPhone find this Mac for the next 3 minutes. Approve it with the code both
+screens show." The Setup window's iPhone card and the wizard sheet's iPhone
+panel, when it shows its code, open the same window as they come on screen.
+The Mac is discoverable on the network only while a pairing window is open
+or once a phone is paired; outside both, a new phone finds nothing to join.
+A paired phone that has forgotten this Mac asks its user to compare the code
+again; the Mac lets it in without asking and shows the code in a stock alert,
+not modal, with only an OK button: "<phone name> is checking it reached this
+Mac", then "Its screen should show:" over the code and "If it shows a
+different code, tap Cancel on the iPhone." OK, Return or Escape closes it,
+and it closes itself when that phone sends its first command, disconnects or
+is refused, or after 3 minutes. A paired phone that has not connected for 30
+days counts as new again and needs a pairing window; it leaves the
+Remembered iPhones list at that moment, and connecting again never closes a
+pairing window that is already open.
 
 ### Permission Row (Onboarding, signature component, Mac-only)
 `IconTileView`'s neutral `raised` fill and hairline rim stay untouched; only

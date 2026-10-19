@@ -6,16 +6,27 @@ import Testing
 
 /// The T24 per-phone approval persistence (`CompanionApprovalStore`) and its
 /// in-memory model (`CompanionApprovalController`): round-trip, the
-/// refuse-forward schema guard every store shares, denial persistence, the
-/// prompt funnel (one alert per clientID no matter how many connections pile
-/// up behind it), and revocation dropping a live client.
+/// refuse-forward schema guard every store shares, denial persistence and its
+/// cap, the pairing-window gate, the prompt funnel (one alert at a time, one
+/// per clientID no matter how many connections pile up behind it, with a
+/// cooldown between), and revocation dropping a live client.
 @MainActor
 @Suite final class CompanionApprovalStoreTests: IsolatedSuite {
 
-    private static let phoneID = "2B5E5A2B-58D8-4979-9F41-92E668FD9C0A"
+    private static let phoneID = "2B5E5A2B58D849799F4192E668FD9C0A2B5E5A2B58D849799F4192E668FD9C0A"
 
     private func makeStore() -> CompanionApprovalStore {
         CompanionApprovalStore(directory: scratchDir)
+    }
+
+    /// A controller inside an open pairing window whose cooldown wake-ups run
+    /// at once — for tests about everything but the window and the queue.
+    private func makeOpenController(store: CompanionApprovalStore? = nil,
+                                    now: @escaping () -> Date = Date.init) -> CompanionApprovalController {
+        let controller = CompanionApprovalController(store: store ?? makeStore(), now: now,
+                                                     schedule: { _, job in job() })
+        controller.isPairingOpen = { true }
+        return controller
     }
 
     // MARK: - Store
@@ -51,24 +62,28 @@ import Testing
     /// must not re-prompt on every reconnect.
     @Test func denialIsRememberedAcrossRelaunch() throws {
         let store = makeStore()
-        let first = CompanionApprovalController(store: store)
+        let first = makeOpenController(store: store)
         var promptCount = 0
-        first.presentPrompt = { _, _, respond in
+        first.presentPrompt = { _, _, _, respond in
             promptCount += 1
             respond(false)
         }
         var decisions: [CompanionServer.ApprovalDecision] = []
-        first.handleRequest(clientID: Self.phoneID, clientName: "iPhone") { decisions.append($0) }
+        first.handleRequest(clientID: Self.phoneID, clientName: "iPhone", pairingCode: "123456") { decisions.append($0) }
         #expect(decisions == [.pending, .denied])
         #expect(promptCount == 1)
 
         // "Relaunch": a fresh controller over the same directory.
         let second = CompanionApprovalController(store: store)
-        second.presentPrompt = { _, _, _ in
+        second.presentPrompt = { _, _, _, _ in
             Issue.record("a remembered denial must never re-prompt")
         }
+        second.presentCodeCheck = { _, _, _ in
+            Issue.record("a denied phone is never shown the pairing code")
+        }
         var relaunchDecisions: [CompanionServer.ApprovalDecision] = []
-        second.handleRequest(clientID: Self.phoneID, clientName: "iPhone") { relaunchDecisions.append($0) }
+        second.handleRequest(clientID: Self.phoneID, clientName: "iPhone", pairingCode: "123456",
+                             checksPairingCode: true, connectionID: UUID()) { relaunchDecisions.append($0) }
         #expect(relaunchDecisions == [.denied])
     }
 
@@ -78,15 +93,19 @@ import Testing
         let store = makeStore()
         try store.save([CompanionApproval(
             clientID: Self.phoneID, lastKnownName: "old name",
-            decision: .approved, firstSeen: .distantPast, lastSeen: .distantPast)])
+            decision: .approved, firstSeen: .distantPast, lastSeen: Date(timeIntervalSince1970: 4_000))])
         let lastSeen = Date(timeIntervalSince1970: 5_000)
         let controller = CompanionApprovalController(store: store, now: { lastSeen })
-        controller.presentPrompt = { _, _, _ in
+        controller.presentPrompt = { _, _, _, _ in
             Issue.record("an approved phone must never re-prompt")
         }
+        controller.presentCodeCheck = { _, _, _ in
+            Issue.record("no pairing-code alert unless the phone is checking the code")
+        }
 
+        // No pairing window is open: a remembered phone never needs one.
         var decisions: [CompanionServer.ApprovalDecision] = []
-        controller.handleRequest(clientID: Self.phoneID, clientName: "renamed iPhone") { decisions.append($0) }
+        controller.handleRequest(clientID: Self.phoneID, clientName: "renamed iPhone", pairingCode: "123456") { decisions.append($0) }
 
         #expect(decisions == [.approved])
         // Reconnects refresh the display name + lastSeen (and persist both).
@@ -96,19 +115,166 @@ import Testing
         #expect(record.firstSeen == .distantPast, "firstSeen must survive reconnects")
     }
 
+    /// Turns red if an approved phone that is checking the pairing code is
+    /// held for an Allow/Deny prompt, or if the information-only alert is not
+    /// asked for with that phone's name and code.
+    @Test func anApprovedPhoneCheckingTheCodeIsLetInAndShownTheCode() throws {
+        let store = makeStore()
+        try store.save([CompanionApproval(
+            clientID: Self.phoneID, lastKnownName: "Owner's iPhone",
+            decision: .approved, firstSeen: .distantPast, lastSeen: Date(timeIntervalSince1970: 1_000))])
+        let controller = CompanionApprovalController(store: store, now: { Date(timeIntervalSince1970: 2_000) },
+                                                     schedule: { _, _ in })
+        controller.presentPrompt = { _, _, _, _ in
+            Issue.record("an approved phone must never get Allow/Deny")
+        }
+        var shown: [(id: String, name: String, code: String)] = []
+        controller.presentCodeCheck = { id, name, code in shown.append((id, name, code)) }
+
+        var decisions: [CompanionServer.ApprovalDecision] = []
+        controller.handleRequest(clientID: Self.phoneID, clientName: "Owner's iPhone", pairingCode: "482913",
+                                 checksPairingCode: true, connectionID: UUID()) { decisions.append($0) }
+
+        #expect(decisions == [.approved])
+        #expect(shown.count == 1)
+        #expect(shown.first?.id == Self.phoneID)
+        #expect(shown.first?.name == "Owner's iPhone")
+        #expect(shown.first?.code == "482913")
+    }
+
+    /// Turns red if the pairing-code alert stays up after its own connection
+    /// ends (a close or a first command both reach `endCodeCheck`) or past
+    /// `CompanionServer.approvalTimeout`, if a reconnect stacks a second
+    /// alert instead of replacing the first, or if an earlier connection's
+    /// close or timeout closes the alert of the one that replaced it.
+    @Test func thePairingCodeAlertClosesWithItsConnectionOrItsTimeout() throws {
+        let store = makeStore()
+        try store.save([CompanionApproval(
+            clientID: Self.phoneID, lastKnownName: "Owner's iPhone",
+            decision: .approved, firstSeen: .distantPast, lastSeen: Date(timeIntervalSince1970: 1_000))])
+        var jobs: [(delay: TimeInterval, job: @MainActor () -> Void)] = []
+        let controller = CompanionApprovalController(store: store, now: { Date(timeIntervalSince1970: 2_000) },
+                                                     schedule: { delay, job in jobs.append((delay, job)) })
+        var events: [String] = []
+        controller.presentCodeCheck = { _, _, _ in events.append("show") }
+        controller.withdrawCodeCheck = { clientID in
+            #expect(clientID == Self.phoneID)
+            events.append("close")
+        }
+        func connect(_ connectionID: UUID) {
+            controller.handleRequest(clientID: Self.phoneID, clientName: "Owner's iPhone", pairingCode: "482913",
+                                     checksPairingCode: true, connectionID: connectionID) { _ in }
+        }
+
+        let first = UUID(), second = UUID(), third = UUID()
+        connect(first)
+        #expect(events == ["show"])
+        #expect(jobs.map(\.delay) == [CompanionServer.approvalTimeout])
+
+        controller.endCodeCheck(connectionID: UUID())
+        #expect(events == ["show"], "another connection's close or command leaves it up")
+        controller.endCodeCheck(connectionID: first)
+        #expect(events == ["show", "close"])
+
+        connect(second)
+        connect(third)
+        #expect(events == ["show", "close", "show", "close", "show"], "a reconnect replaces the alert")
+
+        jobs[0].job()
+        jobs[1].job()
+        #expect(events.count == 5, "earlier connections' timeouts leave the newest alert up")
+        jobs[2].job()
+        #expect(events.last == "close")
+        #expect(events.count == 6)
+    }
+
+    /// Turns red if an approved phone last seen more than
+    /// `CompanionApprovalStore.trustLapse` ago is still let in unasked, keeps
+    /// its record, or skips the prompt inside a pairing window; or if a phone
+    /// that connects regularly lapses because a connection did not move and
+    /// save its last-seen time.
+    @Test func anApprovalUnseenForAMonthLapsesAndEachConnectionResetsTheClock() throws {
+        let day: TimeInterval = 24 * 60 * 60
+        var now = Date(timeIntervalSince1970: 100 * day)
+        let recent = Self.phoneID
+        let lapsedOutside = String(repeating: "A", count: 64)
+        let lapsedInside = String(repeating: "B", count: 64)
+        let store = makeStore()
+        try store.save([
+            CompanionApproval(clientID: recent, lastKnownName: "Owner's iPhone", decision: .approved,
+                              firstSeen: .distantPast, lastSeen: now.addingTimeInterval(-29 * day)),
+            CompanionApproval(clientID: lapsedOutside, lastKnownName: "Old iPhone", decision: .approved,
+                              firstSeen: .distantPast, lastSeen: now.addingTimeInterval(-31 * day)),
+            CompanionApproval(clientID: lapsedInside, lastKnownName: "Older iPhone", decision: .approved,
+                              firstSeen: .distantPast, lastSeen: now.addingTimeInterval(-31 * day)),
+        ])
+        let controller = CompanionApprovalController(store: store, now: { now }, schedule: { _, job in job() })
+        var prompts = 0
+        controller.presentPrompt = { _, _, _, _ in prompts += 1 }
+        var approvedSetChanges: [Bool] = []
+        controller.onApprovedSetChanged = { approvedSetChanges.append($0) }
+
+        var recentDecisions: [CompanionServer.ApprovalDecision] = []
+        controller.handleRequest(clientID: recent, clientName: "Owner's iPhone", pairingCode: "000000") { recentDecisions.append($0) }
+        #expect(try store.load()?.first { $0.clientID == recent }?.lastSeen == now)
+        now = now.addingTimeInterval(29 * day)
+        controller.handleRequest(clientID: recent, clientName: "Owner's iPhone", pairingCode: "000000") { recentDecisions.append($0) }
+        #expect(recentDecisions == [.approved, .approved], "29 days since the last connection is still trusted")
+
+        var outsideDecisions: [CompanionServer.ApprovalDecision] = []
+        controller.handleRequest(clientID: lapsedOutside, clientName: "Old iPhone", pairingCode: "000000") { outsideDecisions.append($0) }
+        #expect(outsideDecisions == [.pairingClosed], "lapsed, and no pairing window: refused like a stranger")
+        #expect(prompts == 0)
+
+        controller.isPairingOpen = { true }
+        var insideDecisions: [CompanionServer.ApprovalDecision] = []
+        controller.handleRequest(clientID: lapsedInside, clientName: "Older iPhone", pairingCode: "000000") { insideDecisions.append($0) }
+        #expect(insideDecisions == [.pending], "lapsed, inside a pairing window: asked like a new phone")
+        #expect(prompts == 1)
+
+        #expect(controller.approvals.map(\.clientID) == [recent])
+        #expect(try store.load()?.map(\.clientID) == [recent], "the lapsed approvals are removed from disk")
+        #expect(approvedSetChanges == [false, false], "a lapse is a removal, never a recorded approval")
+
+        now = now.addingTimeInterval(30 * day + 1)
+        #expect(controller.approvals.isEmpty,
+                "a phone that lapses without connecting leaves the list Settings shows at once")
+    }
+
+    /// Turns red if trust outlasts `CompanionApprovalStore.trustLapse` in
+    /// either direction (a clock set back leaves the last-seen time in the
+    /// future), lapses a day early at the boundary, or ever lapses a denial.
+    @Test func trustLapsesPastThirtyDaysEitherSideOfTheLastConnection() {
+        let lastSeen = Date(timeIntervalSince1970: 1_000_000_000)
+        let approval = CompanionApproval(clientID: Self.phoneID, lastKnownName: "iPhone", decision: .approved,
+                                         firstSeen: .distantPast, lastSeen: lastSeen)
+        let lapse = CompanionApprovalStore.trustLapse
+        let rows: [(offset: TimeInterval, lapsed: Bool)] = [
+            (lapse, false), (lapse + 1, true), (-lapse, false), (-lapse - 1, true),
+        ]
+        for row in rows {
+            #expect(CompanionApprovalStore.hasLapsed(approval, at: lastSeen.addingTimeInterval(row.offset)) == row.lapsed,
+                    "offset \(row.offset) s")
+        }
+        var denial = approval
+        denial.decision = .denied
+        #expect(!CompanionApprovalStore.hasLapsed(denial, at: lastSeen.addingTimeInterval(10 * lapse)))
+    }
+
     @Test func unknownPhonePromptsOnceAndTheAnswerResolvesEveryWaiter() throws {
-        let controller = CompanionApprovalController(store: makeStore())
-        var prompts: [(name: String, respond: (Bool) -> Void)] = []
-        controller.presentPrompt = { _, name, respond in prompts.append((name, respond)) }
+        let controller = makeOpenController()
+        var prompts: [(name: String, code: String, respond: (Bool) -> Void)] = []
+        controller.presentPrompt = { _, name, code, respond in prompts.append((name, code, respond)) }
 
         var firstDecisions: [CompanionServer.ApprovalDecision] = []
         var secondDecisions: [CompanionServer.ApprovalDecision] = []
-        controller.handleRequest(clientID: Self.phoneID, clientName: "iPhone") { firstDecisions.append($0) }
+        controller.handleRequest(clientID: Self.phoneID, clientName: "iPhone", pairingCode: "042317") { firstDecisions.append($0) }
         // The same phone reconnects while the alert is open — it must JOIN
         // the open prompt, not stack a second one.
-        controller.handleRequest(clientID: Self.phoneID, clientName: "iPhone") { secondDecisions.append($0) }
+        controller.handleRequest(clientID: Self.phoneID, clientName: "iPhone", pairingCode: "042317") { secondDecisions.append($0) }
 
         #expect(prompts.count == 1, "one clientID must produce exactly one prompt")
+        #expect(prompts.first?.code == "042317", "the prompt shows the code the phone shows")
         #expect(firstDecisions == [.pending])
         #expect(secondDecisions == [.pending])
 
@@ -118,24 +284,66 @@ import Testing
         #expect(controller.approvals.first?.decision == .approved)
     }
 
-    @Test func differentPhonesPromptIndependently() throws {
-        let controller = CompanionApprovalController(store: makeStore())
+    /// Turns red if a second stranger's prompt opens while the first is on
+    /// screen, or as soon as the first is answered: a click or Return aimed
+    /// at one alert would then land on the next.
+    @Test func aSecondUnknownPhoneWaitsUntilTheFirstPromptResolvesAndTheCooldownPasses() throws {
+        var jobs: [(delay: TimeInterval, job: @MainActor () -> Void)] = []
+        let fixedNow = Date(timeIntervalSince1970: 1_000)
+        let controller = CompanionApprovalController(store: makeStore(), now: { fixedNow },
+                                                     schedule: { delay, job in jobs.append((delay, job)) })
+        controller.isPairingOpen = { true }
         var prompts: [(name: String, respond: (Bool) -> Void)] = []
-        controller.presentPrompt = { _, name, respond in prompts.append((name, respond)) }
+        controller.presentPrompt = { _, name, _, respond in prompts.append((name, respond)) }
 
-        controller.handleRequest(clientID: Self.phoneID, clientName: "Owner's iPhone") { _ in }
-        controller.handleRequest(clientID: UUID().uuidString, clientName: "Guest's iPhone") { _ in }
+        controller.handleRequest(clientID: Self.phoneID, clientName: "Owner's iPhone", pairingCode: "111111") { _ in }
+        var guestDecisions: [CompanionServer.ApprovalDecision] = []
+        controller.handleRequest(clientID: "GUEST", clientName: "Guest's iPhone", pairingCode: "222222") { guestDecisions.append($0) }
+        #expect(prompts.map(\.name) == ["Owner's iPhone"], "one prompt on screen at a time")
+        #expect(guestDecisions == [.pending], "the waiting phone is held, not refused")
+
+        prompts[0].respond(true)
+        #expect(prompts.count == 1, "the next prompt waits out the cooldown")
+        #expect(jobs.map { $0.delay } == [CompanionApprovalController.promptCooldown])
+
+        // A third phone arriving during the cooldown queues behind the guest.
+        controller.handleRequest(clientID: "THIRD", clientName: "Third iPhone", pairingCode: "333333") { _ in }
+        #expect(prompts.count == 1)
+
+        let wake = jobs.removeFirst()
+        wake.job()
         #expect(prompts.map(\.name) == ["Owner's iPhone", "Guest's iPhone"])
     }
 
-    @Test func abandonedRequestFreesTheEntryAndWithdrawsThePrompt() throws {
+    /// Turns red if an unknown phone can raise a prompt, or leave a record,
+    /// while no pairing window is open.
+    @Test func unknownPhoneWhileNoPairingWindowIsRefusedWithoutAPrompt() throws {
         let controller = CompanionApprovalController(store: makeStore())
+        controller.presentPrompt = { _, _, _, _ in
+            Issue.record("no prompt may open outside a pairing window")
+        }
+
+        var decisions: [CompanionServer.ApprovalDecision] = []
+        controller.handleRequest(clientID: Self.phoneID, clientName: "iPhone", pairingCode: "123456") { decisions.append($0) }
+
+        #expect(decisions == [.pairingClosed])
+        #expect(controller.approvals.isEmpty, "a refused stranger leaves no record")
+    }
+
+    /// Turns red if withdrawing an unanswered prompt keeps its entry, so the
+    /// phone's next connect joins a dead prompt instead of asking again, or
+    /// if the next prompt skips the cooldown the withdrawal started.
+    @Test func abandonedRequestFreesTheEntryAndWithdrawsThePrompt() throws {
+        var jobs: [@MainActor () -> Void] = []
+        let controller = CompanionApprovalController(store: makeStore(),
+                                                     schedule: { _, job in jobs.append(job) })
+        controller.isPairingOpen = { true }
         var promptCount = 0
         var withdrawn: [String] = []
-        controller.presentPrompt = { _, _, _ in promptCount += 1 }
+        controller.presentPrompt = { _, _, _, _ in promptCount += 1 }
         controller.withdrawPrompt = { clientID in withdrawn.append(clientID) }
 
-        controller.handleRequest(clientID: Self.phoneID, clientName: "iPhone") { _ in }
+        controller.handleRequest(clientID: Self.phoneID, clientName: "iPhone", pairingCode: "123456") { _ in }
         #expect(promptCount == 1)
 
         controller.abandonRequest(clientID: Self.phoneID)
@@ -143,8 +351,11 @@ import Testing
         #expect(controller.approvals.isEmpty, "abandonment must not persist a decision")
 
         // The entry was freed, not just hidden: the phone's next connect
-        // re-prompts rather than joining a dead prompt.
-        controller.handleRequest(clientID: Self.phoneID, clientName: "iPhone") { _ in }
+        // re-prompts rather than joining a dead prompt — once the cooldown
+        // the withdrawal started has passed.
+        controller.handleRequest(clientID: Self.phoneID, clientName: "iPhone", pairingCode: "123456") { _ in }
+        #expect(promptCount == 1)
+        for job in jobs { job() }
         #expect(promptCount == 2)
     }
 
@@ -163,7 +374,7 @@ import Testing
         let store = makeStore()
         try store.save([CompanionApproval(
             clientID: Self.phoneID, lastKnownName: "iPhone",
-            decision: .approved, firstSeen: .distantPast, lastSeen: .distantPast)])
+            decision: .approved, firstSeen: .distantPast, lastSeen: Date())])
         let controller = CompanionApprovalController(store: store)
         var dropped: [String] = []
         controller.dropClient = { dropped.append($0) }
@@ -193,7 +404,7 @@ import Testing
         try store.save([CompanionApproval(
             clientID: Self.phoneID, lastKnownName: "iPhone",
             decision: .denied, firstSeen: .distantPast, lastSeen: .distantPast)])
-        let controller = CompanionApprovalController(store: store)
+        let controller = makeOpenController(store: store)
         controller.dropClient = { _ in }
 
         controller.revoke(clientID: Self.phoneID)
@@ -201,14 +412,115 @@ import Testing
         // Now unknown again → the next connect must prompt (a remembered denial
         // would NOT have), and approving replaces the forgotten record.
         var prompts = 0
-        controller.presentPrompt = { _, _, respond in prompts += 1; respond(true) }
+        controller.presentPrompt = { _, _, _, respond in prompts += 1; respond(true) }
         var decisions: [CompanionServer.ApprovalDecision] = []
-        controller.handleRequest(clientID: Self.phoneID, clientName: "iPhone") { decisions.append($0) }
+        controller.handleRequest(clientID: Self.phoneID, clientName: "iPhone", pairingCode: "123456") { decisions.append($0) }
 
         #expect(prompts == 1, "a revoked phone must re-prompt on its next connect")
         #expect(decisions == [.pending, .approved])
         #expect(controller.approvals.map(\.clientID) == [Self.phoneID])
         #expect(controller.approvals.first?.decision == .approved,
                 "the fresh answer replaces the revoked record, not stacks on it")
+    }
+
+    // MARK: - Denial cap and the approved set
+
+    /// Turns red if remembered denials stop being capped, or if the cap
+    /// drops the newest denial or an approval instead of the oldest denial.
+    @Test func denialsAreCappedAtEight() throws {
+        let store = makeStore()
+        try store.save([CompanionApproval(
+            clientID: Self.phoneID, lastKnownName: "Owner's iPhone",
+            decision: .approved, firstSeen: .distantPast, lastSeen: Date(timeIntervalSince1970: 0))])
+        var tick = 0.0
+        let controller = makeOpenController(store: store, now: {
+            tick += 1
+            return Date(timeIntervalSince1970: tick)
+        })
+        controller.presentPrompt = { _, _, _, respond in respond(false) }
+
+        for index in 0..<10 {
+            controller.handleRequest(clientID: "STRANGER-\(index)", clientName: "iPhone \(index)",
+                                     pairingCode: "000000") { _ in }
+        }
+
+        let denied = controller.approvals.filter { $0.decision == .denied }.map(\.clientID)
+        #expect(denied == (2..<10).map { "STRANGER-\($0)" })
+        #expect(controller.approvals.contains { $0.clientID == Self.phoneID && $0.decision == .approved })
+        #expect(try store.load()?.count == 9, "the cap is persisted, not just held in memory")
+    }
+
+    /// Turns red if approving or revoking a phone stops telling the
+    /// coordinator, which starts or stops the server and closes the pairing
+    /// window on a recorded approval — if a revocation is reported as a
+    /// recorded approval, or a denial as a change to the approved set.
+    @Test func onApprovedSetChangedFiresOnApproveAndRevoke() throws {
+        let controller = makeOpenController()
+        controller.dropClient = { _ in }
+        var changes: [Bool] = []
+        controller.onApprovedSetChanged = { changes.append($0) }
+
+        controller.presentPrompt = { _, _, _, respond in respond(true) }
+        controller.handleRequest(clientID: Self.phoneID, clientName: "Owner's iPhone", pairingCode: "111111") { _ in }
+        #expect(changes == [true])
+
+        controller.presentPrompt = { _, _, _, respond in respond(false) }
+        controller.handleRequest(clientID: "GUEST", clientName: "Guest's iPhone", pairingCode: "222222") { _ in }
+        #expect(changes == [true], "a denial leaves the approved set alone")
+
+        controller.revoke(clientID: Self.phoneID)
+        #expect(changes == [true, false])
+        controller.revoke(clientID: "GUEST")
+        #expect(changes == [true, false], "revoking a denial leaves the approved set alone")
+    }
+
+    /// Turns red if `onPendingRequestsSettled` fires while another phone still
+    /// waits, so the coordinator stops the server under it, or stays silent
+    /// when the last waiting request is abandoned or answered, so a server
+    /// kept up for that prompt never stops.
+    @Test func onPendingRequestsSettledFiresOnlyWhenTheLastWaitingRequestEnds() throws {
+        var jobs: [@MainActor () -> Void] = []
+        let controller = CompanionApprovalController(store: makeStore(),
+                                                     schedule: { _, job in jobs.append(job) })
+        controller.isPairingOpen = { true }
+        var answers: [(Bool) -> Void] = []
+        controller.presentPrompt = { _, _, _, respond in answers.append(respond) }
+        var settled = 0
+        controller.onPendingRequestsSettled = { settled += 1 }
+
+        controller.handleRequest(clientID: "FIRST", clientName: "iPhone", pairingCode: "111111") { _ in }
+        controller.handleRequest(clientID: "SECOND", clientName: "iPhone", pairingCode: "222222") { _ in }
+        answers[0](false)
+        #expect(settled == 0, "the second phone is still queued")
+        #expect(controller.hasPendingRequest)
+
+        controller.abandonRequest(clientID: "SECOND")
+        #expect(settled == 1)
+        #expect(!controller.hasPendingRequest)
+
+        controller.handleRequest(clientID: "THIRD", clientName: "iPhone", pairingCode: "333333") { _ in }
+        for job in jobs { job() }
+        answers[1](true)
+        #expect(settled == 2)
+        #expect(!controller.hasPendingRequest)
+    }
+
+    /// Turns red if an approval keyed by a protocol-v1 UUID survives load,
+    /// where it counts as an approved phone no current phone can be, or if
+    /// the cleaned list is not written back.
+    @Test func aProtocolV1ApprovalIsDroppedOnLoad() throws {
+        let store = makeStore()
+        let v1 = CompanionApproval(clientID: "8E4CE9B0-B2C1-4E0E-9D25-000000000001", lastKnownName: "Old iPhone",
+                                   decision: .approved, firstSeen: .distantPast, lastSeen: .distantPast)
+        let current = CompanionApproval(clientID: Self.phoneID, lastKnownName: "Owner's iPhone",
+                                        decision: .approved, firstSeen: .distantPast, lastSeen: Date())
+        let denial = CompanionApproval(clientID: "GUEST", lastKnownName: "Guest's iPhone",
+                                       decision: .denied, firstSeen: .distantPast, lastSeen: .distantPast)
+        try store.save([v1, current, denial])
+
+        let controller = CompanionApprovalController(store: store)
+
+        #expect(controller.approvals == [current, denial])
+        #expect(try store.load() == [current, denial])
     }
 }

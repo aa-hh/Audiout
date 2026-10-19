@@ -184,4 +184,18 @@ import AppKit
         #expect(abs(iconMidY - visibleMidY(button)) <= 0.5, "icon and button share one centre")
         #expect(abs(iconMidY - visibleMidY(link)) <= 0.5, "icon and text action share one centre")
     }
+
+    /// Red if an info or question banner's button stopped being the gold
+    /// call to action, or if a warning banner's button turned gold on the
+    /// failure tint.
+    @Test(arguments: [(SystemAirPlayNoteBannerView.Severity.info, true),
+                      (.question, true),
+                      (.warning, false)])
+    func onlyNonWarningBannersWearTheGoldButton(severity: SystemAirPlayNoteBannerView.Severity, gold: Bool) {
+        let banner = SystemAirPlayNoteBannerView(
+            text: "Note", maxTextWidth: 400,
+            action: .init(title: "Answer", accessibilityLabel: "Answer", handler: {}),
+            severity: severity)
+        #expect((banner.test_actionButton is ProminentButton) == gold)
+    }
 }

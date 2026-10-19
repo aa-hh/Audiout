@@ -27,14 +27,17 @@ final class SystemAirPlayNoteBannerView: TintedNoteBackgroundView {
 
     /// Tint tier (T-UI, routing-blocked-needs-default). `.info` is a note the
     /// reader can act on later, so it wears `ring`; `.warning` is a real
-    /// problem — routing is dead — so it wears `failure`.
+    /// problem — routing is dead — so it wears `failure`. `.question` is an
+    /// info note that asks the reader something (the expired-trial survey
+    /// invite): `ring` like `.info`, with a speech bubble for its glyph.
     enum Severity {
         case info
         case warning
+        case question
 
         var tintColor: NSColor {
             switch self {
-            case .info: return Tokens.Color.ring
+            case .info, .question: return Tokens.Color.ring
             case .warning: return Tokens.Color.failure
             }
         }
@@ -42,12 +45,14 @@ final class SystemAirPlayNoteBannerView: TintedNoteBackgroundView {
             switch self {
             case .info: return "info.circle.fill"
             case .warning: return "exclamationmark.triangle.fill"
+            case .question: return "bubble.left.fill"
             }
         }
         var accessibilityDescription: String {
             switch self {
             case .info: return "Note"
             case .warning: return "Warning"
+            case .question: return "Question"
             }
         }
     }
@@ -76,11 +81,19 @@ final class SystemAirPlayNoteBannerView: TintedNoteBackgroundView {
         icon.setContentCompressionResistancePriority(.required, for: .horizontal)
         self.iconView = icon
 
+        // An info or question note's button is the gold call to action
+        // (owner's call, 2026-10-19); a warning's stays the plain small bezel,
+        // so gold never sits on the failure tint.
         var button: NSButton?
         if let action {
-            let b = NSButton(title: action.title, target: nil, action: nil)
-            b.bezelStyle = .rounded
-            b.controlSize = .small
+            let b: NSButton
+            if severity == .warning {
+                b = NSButton(title: action.title, target: nil, action: nil)
+                b.bezelStyle = .rounded
+                b.controlSize = .small
+            } else {
+                b = ProminentButton(title: action.title, target: nil, action: nil)
+            }
             b.translatesAutoresizingMaskIntoConstraints = false
             b.setContentHuggingPriority(.required, for: .horizontal)
             b.setContentCompressionResistancePriority(.required, for: .horizontal)

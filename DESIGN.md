@@ -1106,17 +1106,20 @@ why a card is empty must not be the faintest text on the panel.
 ### Note Banner, Inset Cards and the Thank-You Card (Mixer)
 **Note banner** (`SystemAirPlayNoteBannerView`, a `TintedNoteBackgroundView`
 subclass): a glyph and a wrapping label in `label`. It mounts in two
-places, the warning banner at the top of the panel and the note slot. Two
+places, the warning banner at the top of the panel and the note slot. Three
 severities:
 
-| Severity | Tint | Glyph |
-|---|---|---|
-| Info | `ring` | `info.circle.fill` |
-| Warning | `failure` | `exclamationmark.triangle.fill` |
+| Severity | Tint | Glyph | Button |
+|---|---|---|---|
+| Info | `ring` | `info.circle.fill` | gold `ProminentButton` |
+| Question | `ring` | `bubble.left.fill` | gold `ProminentButton` |
+| Warning | `failure` | `exclamationmark.triangle.fill` | small plain rounded |
 
 It may carry a trailing button, pinned to the trailing edge, and an
 underlined `TextLinkButton` left of it; never more than one link beside a
-button. A banner is not dismissible.
+button. An info or question banner's button is the gold call to action; a
+warning banner's stays plain, so gold never sits on the failure tint. A
+banner is not dismissible.
 
 `TintedNoteBackgroundView` (`AudioutSharedUI`) is the ground every tinted
 notice shares: the tint at 12 % (`PopoverColumnGrid.insetCardTintAlpha`), a
@@ -1134,9 +1137,9 @@ rings play one surge on appearing, then rest.
 **Expired-trial survey**: offered to a trial-ended install that still
 streams. The invite takes the note slot in place of the trial-ended note and
 comes back on up to 3 opens until **Answer** or **Not now** is clicked; the
-third close with neither clicked counts as declined. It is an info banner
-reading "Have a minute? Two questions about what Audiout is missing for
-you.", an **Answer** button and a **Not now** link.
+third close with neither clicked counts as declined. It is a question banner
+reading "What’s missing from Audiout? Two quick questions.", a gold
+**Answer** button and a **Not now** link.
 Answer raises `TrialSurveyCardView` over the shell's content view: the whole
 view under `cardScrim` (dark `#0A0A0C` at 0.6, light black at 0.22) and a
 centred 420 pt card in `panel` with a 1 pt `containerEdge` edge, a 16 pt

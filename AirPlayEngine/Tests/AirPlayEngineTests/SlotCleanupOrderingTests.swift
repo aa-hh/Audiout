@@ -81,14 +81,12 @@ extension SerializedEngineState {
             state: output_device_state,
             engine: AirPlayEngine
         ) async throws {
-            for _ in 0..<500 {
-                if await engine.hasArmedWaiterForTest(callbackId: 0) {
-                    fireCompletion(id: id, cbIdSlot: 0, state: state)
-                    return
-                }
-                try await Task.sleep(nanoseconds: 1_000_000) // 1ms
+            await SuiteWait.until("the waiter for device \(String(format: "0x%llX", id)) is armed") {
+                engine.waiterIsArmedForTest(callbackId: 0)
             }
-            Issue.record("waiter was never armed for device \(String(format: "0x%llX", id))")
+            if engine.waiterIsArmedForTest(callbackId: 0) {
+                fireCompletion(id: id, cbIdSlot: 0, state: state)
+            }
         }
 
         /// Whether the C callback register has ANY armed slot for this device.
@@ -109,19 +107,23 @@ extension SerializedEngineState {
             makeRegistryDevice(id: id.rawValue)
 
             let engine = AirPlayEngine()
-            // N=1 arms a real waiter; short injected timeout; never deliver -> only the
-            // timeout can resolve it.
-            await engine.enterHeadlessTestMode(issue: { _, _ in 1 }, opTimeout: 0.2)
+            // N=1 arms a real waiter; never deliver -> only the timeout can resolve
+            // it. The timeout is long enough never to fire on its own; the test
+            // moves the op's real timer to fire now.
+            await engine.enterHeadlessTestMode(issue: { _, _ in 1 }, opTimeout: 60)
             await engine.registerKnownOutputForTest(id)
 
-            do {
-                try await engine.addOutput(id)
-                Issue.record("a stalled op must throw opTimedOut")
-            } catch AirPlayEngineError.opTimedOut {
-                // expected
-            } catch {
-                Issue.record("wrong error: \(error)")
+            let op = Task { () -> Error? in
+                do { try await engine.addOutput(id); return nil }
+                catch { return error }
             }
+            await SuiteWait.until("the op's registry waiter is armed") {
+                engine.waiterIsArmedForTest(callbackId: 0)
+            }
+            #expect(engine.expireOpTimeoutForTest(callbackId: 0), "the armed op must carry a timeout timer")
+            let opError = await op.value
+            #expect(opError as? AirPlayEngineError == .opTimedOut,
+                    "a stalled op must throw opTimedOut (got \(String(describing: opError)))")
 
             // The load-bearing assertion: the timed-out op's slot is ALREADY cleared
             // the instant its throw is observed. If cleanup were deferred past the
@@ -143,16 +145,22 @@ extension SerializedEngineState {
             makeRegistryDevice(id: id.rawValue)
 
             let engine = AirPlayEngine()
-            await engine.enterHeadlessTestMode(issue: { _, _ in 1 }, opTimeout: 0.25)
+            await engine.enterHeadlessTestMode(issue: { _, _ in 1 }, opTimeout: 60)
             await engine.registerKnownOutputForTest(id)
 
-            // Op A: never delivered -> times out. Its cleanup clears slot 0.
-            do {
-                try await engine.addOutput(id)
-                Issue.record("op A must time out")
-            } catch AirPlayEngineError.opTimedOut {
-                // expected
+            // Op A: never delivered -> its timer is moved to fire now. Its cleanup
+            // clears slot 0.
+            let opA = Task { () -> Error? in
+                do { try await engine.addOutput(id); return nil }
+                catch { return error }
             }
+            await SuiteWait.until("op A's registry waiter is armed") {
+                engine.waiterIsArmedForTest(callbackId: 0)
+            }
+            #expect(engine.expireOpTimeoutForTest(callbackId: 0), "op A must carry a timeout timer")
+            let opAError = await opA.value
+            #expect(opAError as? AirPlayEngineError == .opTimedOut,
+                    "op A must time out (got \(String(describing: opAError)))")
             #expect(!deviceHasArmedSlot(id.rawValue),
                        "op A's slot must be cleared before op B arms")
 

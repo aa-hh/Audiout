@@ -187,16 +187,22 @@ extension SerializedEngineState {
 
             let engine = AirPlayEngine()
             // Issue promises N=1 but we NEVER fire a completion → the op times out.
-            // Short timeout so the test is fast.
-            await engine.enterHeadlessTestMode(issue: { _, _ in 1 }, opTimeout: 0.05)
+            // The timeout is long enough never to fire on its own; the test moves
+            // the op's real timer to fire now.
+            await engine.enterHeadlessTestMode(issue: { _, _ in 1 }, opTimeout: 60)
             await engine.registerKnownOutputForTest(id)
 
-            do {
-                try await engine.addOutput(id)
-                Issue.record("op with no completion must time out")
-            } catch {
-                #expect(error as? AirPlayEngineError == .opTimedOut)
+            let first = Task { () -> Error? in
+                do { try await engine.addOutput(id); return nil }
+                catch { return error }
             }
+            await SuiteWait.until("the first op's registry waiter is armed") {
+                engine.waiterIsArmedForTest(callbackId: 0)
+            }
+            #expect(engine.expireOpTimeoutForTest(callbackId: 0), "the armed op must carry a timeout timer")
+            let firstError = await first.value
+            #expect(firstError as? AirPlayEngineError == .opTimedOut,
+                    "op with no completion must time out (got \(String(describing: firstError)))")
 
             // The timed-out slot must have been cleared (B5.2). A SECOND op on the
             // same device must therefore arm a fresh waiter (slot 0 again) and, when
@@ -242,15 +248,13 @@ extension SerializedEngineState {
             engine: AirPlayEngine,
             state: output_device_state = OUTPUT_STATE_CONNECTED
         ) async throws {
-            for _ in 0..<400 {
-                if await engine.hasArmedWaiterForTest(callbackId: 0) {
-                    outputs_cb(0, id, state)
-                    outputs_cb_deferred_run()
-                    return
-                }
-                try await Task.sleep(nanoseconds: 1_000_000)
+            await SuiteWait.until("the waiter for device \(String(format: "0x%llX", id)) is armed") {
+                engine.waiterIsArmedForTest(callbackId: 0)
             }
-            Issue.record("waiter was never armed for device \(String(format: "0x%llX", id))")
+            if engine.waiterIsArmedForTest(callbackId: 0) {
+                outputs_cb(0, id, state)
+                outputs_cb_deferred_run()
+            }
         }
     }
 }

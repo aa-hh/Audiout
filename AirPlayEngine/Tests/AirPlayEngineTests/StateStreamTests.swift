@@ -178,7 +178,7 @@ extension SerializedEngineState {
             outputs_cb(-1, id.rawValue, OUTPUT_STATE_FAILED)
             outputs_cb_deferred_run()
 
-            let element = try await reader.next(timeout: 2)
+            let element = try await reader.next()
             #expect(element.0 == id)
             #expect(element.1 == .failed)
 
@@ -208,7 +208,7 @@ extension SerializedEngineState {
             #expect(resolved == .connected)
 
             // The stream also observed the CONNECTED transition (armed report).
-            let first = try await reader.next(timeout: 2)
+            let first = try await reader.next()
             #expect(first.1 == .connected)
 
             // 2) Out-of-band FAILED after the op resolved — the transition the
@@ -216,7 +216,7 @@ extension SerializedEngineState {
             outputs_cb(-1, id.rawValue, OUTPUT_STATE_FAILED)
             outputs_cb_deferred_run()
 
-            let failed = try await reader.next(timeout: 2)
+            let failed = try await reader.next()
             #expect(failed.0 == id)
             #expect(failed.1 == .failed)
 
@@ -250,25 +250,23 @@ extension SerializedEngineState {
             // C callback alone can hit the window before the waiter exists — the
             // completion is then dropped and the op hangs until its timeout. See the
             // twin helper in AirPlayEngineAPITests for the full rationale.
-            for _ in 0..<200 {
-                if await engine.hasArmedWaiterForTest(callbackId: 0) {
-                    outputs_cb(0, id, state)
-                    outputs_cb_deferred_run()
-                    return
-                }
-                try await Task.sleep(nanoseconds: 1_000_000)
+            await SuiteWait.until("the waiter for device \(String(format: "0x%llX", id)) is armed") {
+                engine.waiterIsArmedForTest(callbackId: 0)
             }
-            Issue.record("waiter was never armed for device \(String(format: "0x%llX", id))")
+            if engine.waiterIsArmedForTest(callbackId: 0) {
+                outputs_cb(0, id, state)
+                outputs_cb_deferred_run()
+            }
         }
 
     }
 }
 
 /// Drains an `AsyncStream` into a thread-safe FIFO on a background task, and
-/// exposes a timeout-guarded `next()` the test polls. This sidesteps the
-/// single-consumer / non-Sendable-iterator constraints (one dedicated task owns
-/// the iterator; the test only reads the buffer) while still failing fast — a
-/// dropped-delivery regression drains nothing, so `next()` times out instead of
+/// exposes a `next()` the test polls. This sidesteps the single-consumer /
+/// non-Sendable-iterator constraints (one dedicated task owns the iterator; the
+/// test only reads the buffer) while still failing — a dropped-delivery
+/// regression drains nothing, so `next()` hits `SuiteWait`'s ceiling instead of
 /// hanging the suite.
 private final class StreamReader: @unchecked Sendable {
     private let task: Task<Void, Never>
@@ -294,16 +292,19 @@ private final class StreamReader: @unchecked Sendable {
         }
     }
 
-    /// The next buffered element, or throws `StateStreamTestTimeout` after
-    /// `timeout` s. Polls a short interval so a synchronously-delivered element
-    /// (the normal path) returns almost immediately.
-    func next(timeout seconds: Double) async throws -> (OutputID, OutputState) {
-        let deadline = Date().addingTimeInterval(seconds)
-        while Date() < deadline {
-            if let element = sink.popFirst() { return element }
-            try await Task.sleep(nanoseconds: 2_000_000) // 2ms
+    /// The next buffered element, or throws `StateStreamTestTimeout` once
+    /// `SuiteWait`'s ceiling passes with nothing delivered. Returns the moment an
+    /// element is buffered.
+    func next(
+        sourceLocation: SourceLocation = #_sourceLocation
+    ) async throws -> (OutputID, OutputState) {
+        var element: (OutputID, OutputState)?
+        await SuiteWait.until("the state stream delivers its next element", sourceLocation: sourceLocation) {
+            element = sink.popFirst()
+            return element != nil
         }
-        throw StateStreamTestTimeout()
+        guard let element else { throw StateStreamTestTimeout() }
+        return element
     }
 
     deinit { task.cancel() }

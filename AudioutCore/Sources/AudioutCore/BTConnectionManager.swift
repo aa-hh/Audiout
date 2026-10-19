@@ -162,19 +162,17 @@ final class BTConnectionManager: BTConnectionManaging, @unchecked Sendable {
             // own worker thread until IOBluetooth gives up — accepted: it holds
             // no lock of ours and resolves within the OS's own horizon.
             let elapsed = Date().timeIntervalSince(began)
-            Telemetry.log(.localPlayback, "bt_connect_failed", [
-                "address": address, "reason": "timeout",
-                "elapsed": String(format: "%.1f", elapsed),
-            ])
+            Telemetry.fail(.localPlayback, "bt:connect_failed",
+                           local: ["address": address, "elapsed": String(format: "%.1f", elapsed)],
+                           shared: ["reason": "timeout"])
             return .failed(elapsed: elapsed, reason: "timeout")
         }
         guard openReturn == 0 else {
             let elapsed = Date().timeIntervalSince(began)
             let reason = String(format: "0x%08x", UInt32(bitPattern: openReturn))
-            Telemetry.log(.localPlayback, "bt_connect_failed", [
-                "address": address, "reason": reason,
-                "elapsed": String(format: "%.1f", elapsed),
-            ])
+            Telemetry.fail(.localPlayback, "bt:connect_failed",
+                           local: ["address": address, "elapsed": String(format: "%.1f", elapsed)],
+                           shared: ["reason": reason])
             return .failed(elapsed: elapsed, reason: reason)
         }
 
@@ -192,10 +190,9 @@ final class BTConnectionManager: BTConnectionManaging, @unchecked Sendable {
             try? await Task.sleep(nanoseconds: UInt64(endpointPollInterval * 1_000_000_000))
         }
         let elapsed = Date().timeIntervalSince(began)
-        Telemetry.log(.localPlayback, "bt_connect_failed", [
-            "address": address, "reason": "no_audio_endpoint",
-            "elapsed": String(format: "%.1f", elapsed),
-        ])
+        Telemetry.fail(.localPlayback, "bt:connect_failed",
+                       local: ["address": address, "elapsed": String(format: "%.1f", elapsed)],
+                       shared: ["reason": "no_audio_endpoint"])
         return .failed(elapsed: elapsed, reason: "no_audio_endpoint")
     }
 

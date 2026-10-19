@@ -24,8 +24,9 @@ import Testing
 /// this repo alone, so a cross-repo read would simply never run.
 @Suite struct CompanionCopyTripwireTests {
 
-    /// Every Mac string the phone keeps its own copy of. Changing copy here is
-    /// meant to be a stop: update audiout-remote to match, then update this.
+    /// Every banner the phone keeps its own copy of; the password-sheet lines
+    /// sit as literals in their own test. Changing copy here is meant to be a
+    /// stop: update audiout-remote to match, then update this.
     static let mirroredOnThePhone = [
         "Speakers unreachable. Playing on your Mac. Will resume automatically.",
         "Your Mac's system output is also set to AirPlay. Audio may play twice. Switch it back to avoid an echo.",
@@ -42,5 +43,34 @@ import Testing
             StatusBanners, so change audiout-remote to match, then update
             `mirroredOnThePhone` above.
             """)
+    }
+
+    /// Changing any password- or code-sheet string in `SpeakerPasswordSheetViewController`,
+    /// `PopoverController.passwordRejectedText` or `PopoverController.codeRejectedText` turns it red.
+    @Test func mirroredPasswordSheetCopyStillSaysWhatThePhoneWasToldItSays() {
+        let note = """
+            This password-sheet line changed. The phone hardcodes its own copy of it
+            in SpeakerPasswordSheet, so change audiout-remote to match, then update
+            the literal in this test.
+            """
+        #expect(SpeakerPasswordSheetViewController.emptyPasswordText == "Enter the speaker's password.", "\(note)")
+        #expect(SpeakerPasswordSheetViewController.connectingText == "Connecting…", "\(note)")
+        #expect(PopoverController.passwordRejectedText == "That password didn't work. Check it and try again.",
+                "\(note)")
+        #expect(SpeakerPasswordSheetViewController.headingText(deviceName: "Kitchen") == "Enter the password for “Kitchen”",
+                "\(note)")
+        #expect(SpeakerPasswordSheetViewController.emptyCodeText(deviceName: "Kitchen") == "Enter all 4 digits shown on “Kitchen”.", "\(note)")
+        #expect(PopoverController.codeRejectedText == "That code didn't work. Check the screen and try again.",
+                "\(note)")
+        #expect(SpeakerPasswordSheetViewController.headingText(deviceName: "Kitchen", kind: .onScreenCode)
+                == "Enter the code shown on “Kitchen”", "\(note)")
+    }
+
+    /// Turns red if either note the coordinator sends the phone stops matching
+    /// the popover's own copy of it.
+    @MainActor
+    @Test func theCoordinatorsNoteCopyStillSaysWhatThePopoverSays() {
+        #expect(CompanionCoordinator.routingBlockedText == PopoverController.routingBlockedNeedsDefaultText)
+        #expect(CompanionCoordinator.doublePathText == PopoverController.systemAirPlayNoteText)
     }
 }

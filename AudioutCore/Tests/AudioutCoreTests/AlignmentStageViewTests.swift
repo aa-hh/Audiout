@@ -70,38 +70,38 @@ import AudioutSharedUI
         #expect(stage.test_rung == .locked)
     }
 
-    /// The lock's thesis on screen: neither voice wins — the ring is warm
+    /// The lock's thesis on screen: neither voice wins — the light is warm
     /// white, not the target's green surviving alone.
-    @Test func lockedRingIsFuseWhiteNotTheTargetsGreen() throws {
+    @Test func lockedLightIsFuseWhiteNotTheTargetsGreen() throws {
         let stage = makeStage()
         stage.apply(.question(intervalMs: 30...50, range: range), animated: false)
-        let live = try #require(stage.test_targetRingColor?.usingColorSpace(.sRGB))
+        let live = try #require(stage.test_targetLightColor?.usingColorSpace(.sRGB))
         stage.apply(.locked(valueMs: 40, range: range), animated: false)
-        let locked = try #require(stage.test_targetRingColor?.usingColorSpace(.sRGB))
+        let locked = try #require(stage.test_targetLightColor?.usingColorSpace(.sRGB))
         let fuse = try #require(Tokens.Color.fuseWhite.usingColorSpace(.sRGB))
 
-        #expect(live.greenComponent > 0.9 && live.redComponent < 0.3, "a question ring is Sync Green")
+        #expect(live.greenComponent > 0.9 && live.redComponent < 0.3, "a question light is Sync Green")
         #expect(abs(locked.redComponent - fuse.redComponent) < 0.02
                     && abs(locked.greenComponent - fuse.greenComponent) < 0.02
                     && abs(locked.blueComponent - fuse.blueComponent) < 0.02,
-                "the locked ring is stamped fuseWhite, got \(locked)")
+                "the locked light is stamped fuseWhite, got \(locked)")
     }
 
     /// The stage is a fixed instrument: the reference light is `ring`'s DARK
     /// hex whichever appearance the sheet is in, the way every other stage
     /// token passes one hex for both.
-    @Test func referenceRingIsRingsDarkHexInBothAppearances() throws {
+    @Test func referenceLightIsRingsDarkHexInBothAppearances() throws {
         let pinned = try #require(resolved(Tokens.Color.ring, appearanceName: .darkAqua)
             .usingColorSpace(.sRGB))
         for appearanceName in [NSAppearance.Name.aqua, .darkAqua] {
             let stage = makeStage()
             stage.appearance = NSAppearance(named: appearanceName)
             stage.apply(.question(intervalMs: 30...50, range: range), animated: false)
-            let drawn = try #require(stage.test_referenceRingColor?.usingColorSpace(.sRGB))
+            let drawn = try #require(stage.test_referenceLightColor?.usingColorSpace(.sRGB))
             #expect(abs(drawn.redComponent - pinned.redComponent) < 0.02
                         && abs(drawn.greenComponent - pinned.greenComponent) < 0.02
                         && abs(drawn.blueComponent - pinned.blueComponent) < 0.02,
-                    "\(appearanceName.rawValue): the reference ring is the pinned ring, got \(drawn)")
+                    "\(appearanceName.rawValue): the reference light is the pinned ring, got \(drawn)")
         }
     }
 
@@ -178,6 +178,8 @@ import AudioutSharedUI
         let stage = makeStage()
         stage.apply(.armed(range: range), animated: false)
         #expect(stage.test_rung == .armed)
+        stage.apply(.measuring(range: range), animated: false)
+        #expect(stage.test_rung == .measuring)
         stage.apply(.listening(valueMs: 12, range: range), animated: false)
         #expect(stage.test_rung == .fused)
         stage.apply(.locked(valueMs: 12, range: range), animated: false)
@@ -316,8 +318,14 @@ import AudioutSharedUI
                 "gave ground inside one rung — still the demotion")
     }
 
-    @Test func theFuseAndTheLockAreTheirOwnEdges() {
+    /// Turns red if `measuring → fused` stops dispatching `.gather`, or the
+    /// by-ear `threshold → fused` stops dispatching `.fuse`.
+    @Test func theGatherTheFuseAndTheLockAreTheirOwnEdges() {
         let stage = makeStage()
+        stage.apply(.measuring(range: range), animated: false)
+        stage.apply(.listening(valueMs: 20, range: range), animated: false)
+        #expect(stage.test_lastTransition == .gather, "measuring → fused, the mic's answer")
+
         stage.apply(.question(intervalMs: interval(halfWidth: 8), range: range),
                     animated: false)
         stage.apply(.listening(valueMs: 20, range: range), animated: false)
@@ -384,31 +392,233 @@ import AudioutSharedUI
         #expect(!stage.test_isBreathing, "breathing never runs headless (no window)")
     }
 
-    /// The living ring's clock rides the same gate as breathing, so headless
-    /// the stage renders at PINNED phase: the ported squash is there (it is a
-    /// settled property), the wobble and the swell are not. This is what keeps
-    /// `cacheDisplay` byte-deterministic for the wizard renders.
-    @Test func headlessDrawsThePinnedRingAtTheRungsOwnOpacity() {
+    /// The light's settled box is the table's diameter, squashed 1.12 in y —
+    /// a settled property of the carrier's bounds, present in every render —
+    /// and its brightness is the table's own column, untouched by any
+    /// transient. This is what keeps `cacheDisplay` deterministic for the
+    /// wizard renders.
+    @Test func headlessDrawsThePinnedHaloAtTheRungsOwnOpacity() {
         let stage = makeStage()
         // Exactly AT the threshold boundary, so `thresholdProgress` is 0 and
-        // the line width is the table's own — this test is about the port, not
-        // about the top rung's inner ramp.
+        // the light is the table's own size, without the top rung's inner
+        // ramp on top of it.
         stage.apply(.question(intervalMs: interval(halfWidth: 12), range: range),
                     animated: false)
 
         let look = AlignmentStageView.look(for: .threshold)
         let light = stage.test_targetLight
-        // The ellipse is the ring box inset by half the stroke, shortened 1.12.
-        let width = look.ringRadius * 2 - look.ringLineWidth
-        #expect(abs(light.ring.width - width) < 0.01,
-                "pinned: no wobble — the path is exactly the settled ellipse")
-        #expect(abs(light.ring.height - width / 1.12) < 0.01,
-                "the emitter's squash IS settled, so it renders at pinned phase too")
+        #expect(abs(light.halo.width - look.haloDiameter) < 0.01,
+                "the light's box is the rung's own diameter")
         #expect(abs(light.halo.height - look.haloDiameter / 1.12) < 0.01,
-                "the halo wears the same squash in its bounds")
-        // `thresholdProgress` brightens the halo inside this rung; the RING's
-        // opacity is the table's, and the swell must not have touched it.
-        #expect(abs(light.ringOpacity - look.ringOpacity) < 0.001,
-                "brightness still encodes certainty — pinned means factor 1")
+                "the emitter's squash IS settled, so it renders here too")
+        #expect(abs(light.opacity - look.haloOpacity) < 0.001,
+                "brightness still encodes certainty — one column, the table's")
+    }
+
+    /// Turns red if the fused branch puts the reference back on the target's
+    /// variant 0, or the locked branch stops merging it onto variant 0.
+    @Test func theReferenceKeepsItsOwnMathsUntilTheLock() {
+        let stage = makeStage()
+        stage.apply(.question(intervalMs: 30...50, range: range), animated: false)
+        #expect(stage.test_referenceVariant == 1, "apart, the two lights differ")
+
+        stage.apply(.listening(valueMs: 40, range: range), animated: false)
+        #expect(stage.test_referenceVariant == 1, "fused, the reference keeps its own maths")
+
+        stage.apply(.locked(valueMs: 40, range: range), animated: false)
+        #expect(stage.test_referenceVariant == 0, "locked, still one light")
+
+        stage.apply(.dormant, animated: false)
+        #expect(stage.test_referenceVariant == 1, "dormant is two lights again")
+    }
+
+    /// FUSED (the proposal) is one ring with two edges, not a merge: both
+    /// lights lit at one centre, the reference drawn 1.285× the target so its
+    /// band sits half a band outside the target's, with no gap between. LOCKED
+    /// they merge to one white ring — the reference fades to nothing and only
+    /// the target survives. Turns red if the fused size leaves 64 pt or
+    /// `fusedReferenceScale` leaves 1.285.
+    @Test func fusedIsOneRingWithTwoEdgesAndLockedMergesToOne() {
+        let stage = makeStage()
+
+        stage.apply(.question(intervalMs: 30...50, range: range), animated: false)
+        #expect(stage.test_referenceLightOpacity > 0, "apart, the reference light is lit")
+
+        stage.apply(.listening(valueMs: 40, range: range), animated: false)
+        let target = stage.test_targetLight
+        let reference = stage.test_referenceLight
+        #expect(reference.opacity > 0, "fused, the reference light is still lit")
+        #expect(abs(reference.opacity - target.opacity) < 0.001,
+                "fused, both rings sit at the rung's full opacity")
+        #expect(reference.halo.width > target.halo.width + 0.5,
+                "fused, the reference ring is larger than the target, got \(reference.halo.width) vs \(target.halo.width)")
+        #expect(abs(target.halo.width - 64) < 0.01, "fused, the target is 64 pt")
+        #expect(abs(reference.halo.width / target.halo.width - 1.285) < 0.001,
+                "fused, the reference is 1.285× the target")
+        let centres = stage.test_lightCentres
+        #expect(abs(centres.target.x - centres.reference.x) < 0.01
+                    && abs(centres.target.y - centres.reference.y) < 0.01,
+                "fused, the two rings share one centre")
+
+        stage.apply(.locked(valueMs: 40, range: range), animated: false)
+        #expect(stage.test_referenceLightOpacity == 0,
+                "locked, the reference fades out so a single white ring reads")
+        #expect(stage.test_targetLight.opacity > 0,
+                "locked, the lone target ring is the kept white light")
+    }
+
+    // MARK: (f) Listening — the measuring rung, per light
+
+    /// Turns red if a turn stops growing its light with the smoothed level
+    /// above the room, grows the other light, or a finished turn stops
+    /// holding its size while it waits for a verdict.
+    @Test func aTurnGrowsItsLightWithTheLevelAboveTheRoom() {
+        let stage = makeStage()
+        // Pinned: the CI runner has the system's Reduce Motion on.
+        stage.test_reduceMotionOverride = false
+        stage.apply(.measuring(range: range), animated: false)
+        stage.setListeningTurn(.target, levelAboveRoomDB: 24, now: 100)
+        stage.setListeningTurn(.target, levelAboveRoomDB: 24, now: 101)
+
+        #expect(stage.test_listeningPhases.target == .turn)
+        #expect(abs(stage.test_targetLight.halo.width - 126) < 0.5,
+                "+24 dB is full growth, got \(stage.test_targetLight.halo.width)")
+        #expect(abs(stage.test_targetLight.opacity - 1) < 0.001)
+        #expect(abs(stage.test_referenceLight.halo.width - 84) < 0.01,
+                "the other speaker's light is untouched")
+
+        let held = stage.test_targetLight.halo.width
+        stage.setListeningTurn(nil, levelAboveRoomDB: nil, now: 102)
+        #expect(stage.test_listeningPhases.target == .checking)
+        #expect(abs(stage.test_targetLight.halo.width - held) < 0.01,
+                "checking holds what the turn ended on")
+
+        let quiet = makeStage()
+        quiet.test_reduceMotionOverride = false
+        quiet.apply(.measuring(range: range), animated: false)
+        quiet.setListeningTurn(.reference, levelAboveRoomDB: 6, now: 100)
+        quiet.setListeningTurn(.reference, levelAboveRoomDB: 6, now: 101)
+        #expect(abs(quiet.test_referenceLight.halo.width - 84) < 0.01,
+                "+6 dB is the growth floor: the light holds its resting size")
+    }
+
+    /// Turns red if `currentLights()` stops handing a turn light at full
+    /// growth a shimmer of 1, hands one to a resting or heard light, lets
+    /// Reduce Motion shimmer, or `smoothedShimmer` stops fading a finished
+    /// turn's shimmer over 0.3 s (dropping it at once) or lags a rising one.
+    @Test func aTurnAtFullLevelShimmersAndOtherLightsDoNot() {
+        let stage = makeStage()
+        stage.test_reduceMotionOverride = false
+        stage.apply(.measuring(range: range), animated: false)
+        stage.setListeningPhase(.heard, for: .reference, animated: false)
+        stage.setListeningTurn(.target, levelAboveRoomDB: 24, now: 100)
+        stage.setListeningTurn(.target, levelAboveRoomDB: 24, now: 101)
+
+        #expect(abs(stage.test_listeningShimmer.target - 1) < 0.01,
+                "full growth shimmers fully, got \(stage.test_listeningShimmer.target)")
+        #expect(stage.test_listeningShimmer.reference == 0, "a heard light is still")
+
+        let resting = makeStage()
+        resting.test_reduceMotionOverride = false
+        resting.apply(.measuring(range: range), animated: false)
+        #expect(resting.test_listeningShimmer.target == 0
+                    && resting.test_listeningShimmer.reference == 0,
+                "a resting light is still")
+
+        stage.test_reduceMotionOverride = true
+        #expect(stage.test_listeningShimmer.target == 0, "Reduce Motion never shimmers")
+
+        let faded = AlignmentStageView.smoothedShimmer(from: 1, toward: 0, dt: 0.3)
+        #expect(abs(faded - Float(exp(-1.0))) < 0.001,
+                "one 0.3 s time constant after the turn, got \(faded)")
+        #expect(AlignmentStageView.smoothedShimmer(from: 0.2, toward: 0.9, dt: 0.01) == 0.9,
+                "a rising shimmer follows the already-smoothed growth at once")
+    }
+
+    /// Turns red if a heard verdict stops seating the light 40 pt left of the
+    /// centre at 72 pt, a missed one stops shrinking and dimming it at home in
+    /// its hue mixed 80 % toward `stageRule`, or `resetListening` stops
+    /// sending both home.
+    @Test func verdictsSeatHeardDimMissedAndResetSendsBothHome() throws {
+        let stage = makeStage()
+        stage.apply(.measuring(range: range), animated: false)
+        let homes = stage.test_lightCentres
+
+        stage.setListeningPhase(.heard, for: .target, animated: false)
+        #expect(abs(stage.test_lightCentres.target.x - (stage.bounds.midX - 40)) < 0.01)
+        #expect(abs(stage.test_targetLight.halo.width - 72) < 0.01)
+
+        stage.setListeningPhase(.missed, for: .reference, animated: false)
+        #expect(abs(stage.test_lightCentres.reference.x - homes.reference.x) < 0.01,
+                "a missed light stays at its range end")
+        #expect(abs(stage.test_referenceLight.halo.width - 72) < 0.01)
+        #expect(abs(stage.test_referenceLight.opacity - 0.35) < 0.001)
+        let drawn = try #require(stage.test_referenceLightColor?.usingColorSpace(.sRGB))
+        let mixed = try #require(resolved(Tokens.Color.ring, appearanceName: .darkAqua)
+            .blended(withFraction: 0.8, of: resolved(Tokens.Color.stageRule, appearanceName: .darkAqua))?
+            .usingColorSpace(.sRGB))
+        #expect(abs(drawn.redComponent - mixed.redComponent) < 0.02
+                    && abs(drawn.greenComponent - mixed.greenComponent) < 0.02
+                    && abs(drawn.blueComponent - mixed.blueComponent) < 0.02,
+                "a missed light leans 80 % to the rule, got \(drawn), wanted \(mixed)")
+
+        stage.resetListening(animated: false)
+        #expect(stage.test_listeningPhases.target == .waiting
+                    && stage.test_listeningPhases.reference == .waiting)
+        #expect(abs(stage.test_lightCentres.target.x - homes.target.x) < 0.01
+                    && abs(stage.test_lightCentres.reference.x - homes.reference.x) < 0.01)
+        #expect(abs(stage.test_targetLight.halo.width - 84) < 0.01
+                    && abs(stage.test_referenceLight.halo.width - 84) < 0.01)
+    }
+
+    /// Turns red if the ruler keeps clearing ticks only at the lights' range
+    /// ends, so the 250 ms tick of a 50…650 ms range runs through the target
+    /// once it is heard and seated 40 pt left of the centre.
+    @Test func aSeatedLightClearsTheTicksUnderIt() {
+        let stage = makeStage()
+        stage.apply(.measuring(range: 50...650), animated: false)
+        let seatX = stage.bounds.midX - 40
+        #expect(stage.test_tickXs.contains { abs($0 - seatX) < 36 },
+                "a tick sits where the target will be seated")
+
+        stage.setListeningPhase(.heard, for: .target, animated: false)
+        #expect(!stage.test_tickXs.contains { abs($0 - seatX) < 36 },
+                "no tick crosses the seated light, got \(stage.test_tickXs)")
+    }
+
+    /// Turns red if Reduce Motion lets a turn grow the light's size, or stops
+    /// raising its brightness instead.
+    @Test func reduceMotionTurnsGrowthIntoBrightness() {
+        let stage = makeStage()
+        stage.test_reduceMotionOverride = true
+        stage.apply(.measuring(range: range), animated: false)
+        stage.setListeningTurn(.target, levelAboveRoomDB: 24, now: 100)
+        stage.setListeningTurn(.target, levelAboveRoomDB: 24, now: 101)
+
+        #expect(abs(stage.test_targetLight.halo.width - 84) < 0.01)
+        #expect(abs(stage.test_targetLight.opacity - 1) < 0.001)
+    }
+
+    /// Turns red if a turn or a verdict lands on any rung but measuring.
+    @Test func listeningInputIsIgnoredOffTheMeasuringRung() {
+        let stage = makeStage()
+        stage.apply(.question(intervalMs: 30...50, range: range), animated: false)
+        let centres = stage.test_lightCentres
+        let target = stage.test_targetLight
+        let reference = stage.test_referenceLight
+
+        stage.setListeningTurn(.target, levelAboveRoomDB: 24, now: 100)
+        stage.setListeningTurn(.target, levelAboveRoomDB: 24, now: 101)
+        stage.setListeningPhase(.heard, for: .target, animated: false)
+        stage.setListeningPhase(.missed, for: .reference, animated: false)
+
+        #expect(stage.test_listeningPhases.target == .waiting
+                    && stage.test_listeningPhases.reference == .waiting)
+        #expect(stage.test_listeningGrowth == 0)
+        #expect(stage.test_lightCentres.target == centres.target
+                    && stage.test_lightCentres.reference == centres.reference)
+        #expect(stage.test_targetLight.halo == target.halo
+                    && stage.test_referenceLight.halo == reference.halo
+                    && stage.test_referenceLight.opacity == reference.opacity)
     }
 }

@@ -159,20 +159,12 @@ public enum PopoverColumnGrid {
 
     /// Diameter of the Main Audio ring's visible circle (stroke centerline).
     /// Deliberately its OWN constant, not `haloRingDiameter` — grown slightly
-    /// past the device-row ring so the heavier matched stroke doesn't read
-    /// cramped against the icon glyph.
+    /// past the device-row ring so it doesn't read cramped against the icon
+    /// glyph.
     public static let mainAudioRingDiameter: CGFloat = 34
-    /// Stroke width of the Main Audio ring while connected — set equal to
-    /// `busLineWidth` (the rail's own stroke) so the rail and ring read as ONE
-    /// continuous line at their join, not two different-weight strokes
-    /// touching. Only the CONNECTED form uses this; connecting/failed keep the
-    /// shared `haloRingConnectingStroke`/`haloRingFailedStroke` weights (the
-    /// rail's tone already matches those states via `segColor`, and neither
-    /// state is the "one continuous line" case this override exists for).
-    public static var mainAudioRingConnectedStroke: CGFloat { busLineWidth }
     /// Extra headroom (mirrors `haloBreathingRoomGap`) added to the Main Audio
     /// ring's own host box past `iconWidth`, so the larger `mainAudioRingDiameter`
-    /// ring plus its heavier matched stroke has drawing room without crowding
+    /// ring has drawing room without crowding
     /// the row's other controls.
     public static let mainAudioRingHostBoxGap: CGFloat = 8
     /// The Main Audio ring's host square diameter once breathing room is
@@ -222,8 +214,11 @@ public enum PopoverColumnGrid {
     /// sized (116 → 140, Warm Signal C1) so the two longest fixed dropdown
     /// titles, "Follows main output" (the app-row bridge phrase, decision 3) and
     /// the count-free "Selected Speakers" (decision m), fit a small-control
-    /// `NSPopUpButton` untruncated (measured fitting width 137 pt).
-    public static let trailingControlWidth: CGFloat = 140
+    /// `NSPopUpButton` untruncated (measured fitting width 137 pt). Grown
+    /// 140 → 200 on 2026-10-04, paid for by `SurfaceLayout.width`, so the
+    /// Mac's, a Bluetooth or a Cast row can show "System" plus one app pill
+    /// beside the 84 pt Offset chip instead of "+2" alone.
+    public static let trailingControlWidth: CGFloat = 200
     /// The FEED column's available text width (Warm Signal v4.1 item 3) — the
     /// same physical slot as `trailingControlWidth` (the reserved-but-empty
     /// trailing column on a bus row, since the membership control moved to the
@@ -258,7 +253,7 @@ public enum PopoverColumnGrid {
     //
     // Geometry inherited from the RETIRED corner connection dot (the halo ring
     // §3.2 replaced it): `statusDotInset` still seats `RouteArmedDotView` on
-    // the icon's corner, `statusDotBorderWidth` its punch-out rim, and the
+    // the icon's corner, `routeArmedDotCutoutDiameter` its punch-out, and the
     // `statusDotBreath*` timings drive `HaloRingView`'s breathing pulse.
     // Grouped as NAMED CONSTANTS on purpose: a future settings menu will offer
     // compact/normal/large row densities, so icon + badge sizing must be
@@ -267,17 +262,11 @@ public enum PopoverColumnGrid {
 
     /// Diameter of the on-icon status badge (the connection-state dot).
     public static let statusDotDiameter: CGFloat = 10
-    /// Width of the punch-out border ringing the badge, drawn in the card/window
-    /// background colour so the dot reads as a separate badge over the icon. A
-    /// best-effort separator — tuned live later.
-    public static let statusDotBorderWidth: CGFloat = 1.5
     /// Duration of one half-cycle of the connecting/reconnecting "breathing"
-    /// pulse (opacity + scale), auto-reversed and repeated forever.
+    /// pulse (opacity + radius), auto-reversed and repeated forever.
     public static let statusDotBreathDuration: CFTimeInterval = 1.6
     /// The breathing pulse's minimum opacity (rises to 1.0).
     public static let statusDotBreathMinOpacity: Float = 0.3
-    /// The breathing pulse's minimum scale (grows to 1.0).
-    public static let statusDotBreathMinScale: CGFloat = 0.82
 
     /// SF-Symbol point size for the device icon glyph. Without this the symbol
     /// renders at its small default size and floats in the middle of the 26pt
@@ -307,7 +296,7 @@ public enum PopoverColumnGrid {
     // it), and was tuned by rendering + eyeballing per the spec's ~3–4 pt
     // target, landing this constant at 26 pt (up from the original 21 pt,
     // which hugged the glyph at ~1.5–2.5 pt). `haloRingDiameter` is also the
-    // size the ≥3:1 `ringConnected` contrast floor is tested at (spec §3.2).
+    // size the ≥3:1 `rim` contrast floor is tested at (spec §3.2).
     // The breathing pulse REUSES the `statusDotBreath*` timing constants above
     // (spec §6: "breathing pulse (`statusDotBreathDuration` timing)").
 
@@ -330,19 +319,40 @@ public enum PopoverColumnGrid {
     // so the enlarged ring still has host-box headroom. Stays the smaller
     // sibling of the bespoke `mainAudioRingDiameter` (34).
     public static let haloRingDiameter: CGFloat = 30
-    /// Stroke width of the **connected** solid ring (spec §3.2 ≈1.6 pt).
-    public static let haloRingConnectedStroke: CGFloat = 1.6
-    /// Stroke width of the **connecting/reconnecting** dashed ring — same weight
-    /// as connected; the dashed FORM (not weight) carries "pending" (spec §3.2).
-    public static let haloRingConnectingStroke: CGFloat = 1.6
-    /// Stroke width of the **failed** solid ring — deliberately heavier than the
-    /// connected ring (spec §3.2 ≈1.8 pt) so a failed row wins the scan beside
-    /// flickering meters (redundant weight atop the failure hue).
-    public static let haloRingFailedStroke: CGFloat = 1.8
+    /// The ONE stroke width every ring on a Mixer row draws at (owner's
+    /// ruling, 2026-10-03): the glyph ring in every form (connected,
+    /// connecting, failed, resting), Main Audio's ring, and the rail's node
+    /// circles. Weight never carries state; colour and dash do. At 1.6 pt the
+    /// device ring's inner edge sits 14.2 pt from the icon centre, Main
+    /// Audio's 16.2 pt.
+    public static let ringStrokeWidth: CGFloat = 1.6
+    /// How far the connecting ring's breathing pulse pushes its radius OUT
+    /// past the resting radius at the top of each breath. The pulse only ever
+    /// grows the ring — it never comes inside the resting radius, so the ring
+    /// can never touch the glyph it surrounds. Sized so the grown stroke stays
+    /// inside both host boxes: device ring 15 + 2 + 0.8 = 17.8 pt of the
+    /// 19 pt half-box, Main Audio 17 + 2 + 0.8 = 19.8 of 21.
+    public static let haloRingBreathGrowth: CGFloat = 2
     /// Dash segment length for the connecting ring (the "incomplete" form).
     public static let haloRingDashLength: CGFloat = 2.6
     /// Gap length between connecting-ring dashes.
     public static let haloRingDashGap: CGFloat = 2.6
+
+    /// Polar angle (radians, `HaloRingView`'s own y-up layer space) at the
+    /// center of the ring's permanent gap — ported from the iOS ring treatment
+    /// so the gold route-armed dot sits in a break in the ring rather than
+    /// nearly touching its stroke. The dot's center sits `statusDotInset`
+    /// (3 pt) in from the 26 pt icon box's bottom-right corner, i.e. (+10, +10)
+    /// from the ring's own center toward the visual bottom-right — which is
+    /// −45° from the +x axis in this non-flipped layer.
+    public static let haloRingGapCenterAngle: CGFloat = -.pi / 4
+    /// Total angular width (radians) of the ring's permanent gap. 70° puts
+    /// each arc stop 8.8 pt (device-row ring, radius 15) / 9.8 pt (Main Audio
+    /// ring, radius 17) from the dot's center — with the 1.6 pt stroke's round
+    /// cap, 2.75 / 3.75 pt clear of the dot's 10.5 pt cut-out. Fixed across every drawn ring form
+    /// (connected, connecting-dashed, failed, resting); stays far from the
+    /// rail's join at the Main Audio ring's LEFT edge (180°).
+    public static let haloRingGapWidth: CGFloat = .pi * 70 / 180
 
     /// Extra headroom (Warm Signal v4.1 item 2) added to the halo ring's own
     /// host box past `iconWidth`, on each side, so the enlarged
@@ -378,6 +388,16 @@ public enum PopoverColumnGrid {
     // the glyph. Paired with the `routeArmedDotBoxSize` bump so the larger disc
     // isn't clipped.
     public static let routeArmedDotDiameter: CGFloat = 8
+    /// The disc drawn in the popover ground (`Tokens.Color.panel`) BEHIND the
+    /// dot, cutting it out of the glyph: 1.25 pt of clear ground all round the
+    /// full 8 pt dot, in every state, appearance and accent setting.
+    public static let routeArmedDotCutoutDiameter: CGFloat = 10.5
+    /// The playing dot's `ember` edge, drawn inside the 8 pt outline.
+    public static let routeArmedDotEdgeWidth: CGFloat = 1
+    /// The not-playing dot's hollow ring, drawn inside the 8 pt outline. 1.5 pt
+    /// covers at least one whole device pixel at 1x, so the ring renders at its
+    /// token's full contrast instead of an anti-aliased blend under 3:1.
+    public static let routeArmedDotRingWidth: CGFloat = 1.5
     /// Duration of the one-shot `ember → gold` bloom when a dot transitions
     /// INTO armed while visible (spec §6 first-light bloom, ≤450 ms ease-out;
     /// instant under Reduce Motion; never fires on initial render).
@@ -425,20 +445,23 @@ public enum PopoverColumnGrid {
     public static let busNodeDiameterUnselected: CGFloat = 11
     /// Stroke width of the bus line (spec §4.1 "~2 pt").
     public static let busLineWidth: CGFloat = 2
-    /// Stroke width of the rim ringing a filled node / edging a hollow one.
-    public static let busNodeRimWidth: CGFloat = 1.5
     /// Rim width for a SELECTED-but-unavailable member (`MembershipBusView`'s
     /// `emphasizesDimmedMemberRim`, set true only by the Groups editor's own
-    /// row) — 2x `busNodeRimWidth`, so the seat that already carries the
-    /// visual weight (`socket`) reads as emphasized rather than merely
-    /// dim.
-    public static let busNodeDimmedRimWidth: CGFloat = busNodeRimWidth * 2
+    /// row), so the seat that already carries the visual weight (`socket`)
+    /// reads as emphasized rather than merely dim. Groups editor only; every
+    /// Mixer node rim draws at `ringStrokeWidth`.
+    public static let busNodeDimmedRimWidth: CGFloat = 3
     /// The unstroked VERTICAL gap between a node's edge and where the rail line
     /// stops/resumes above and below it (the owner's clearance refinement) —
     /// the rail "meets" a node with breathing room instead of jamming into it,
     /// so consecutive nodes read airy. Applied to the straight through-rail
-    /// (member / connecting / pending / failed nodes, which sit ON the spine).
+    /// (member and failed nodes, which sit ON the spine; a connecting node uses
+    /// `busConnectingNodeRailGap` instead).
     public static let busNodeRailGap: CGFloat = 3
+    /// The same gap for a CONNECTING node: the line stops this far from the
+    /// node's edge, above and below, so the break says "not joined yet" by
+    /// shape rather than by colour.
+    public static let busConnectingNodeRailGap: CGFloat = 9
     /// How far the detour arc bows out past an off-spine node's own edge, so the
     /// line visibly goes AROUND a node it doesn't run through. Added to that
     /// node's radius, so a large node and a small one are cleared by the same
@@ -489,10 +512,9 @@ public enum PopoverColumnGrid {
     /// run), so a box derived to land EXACTLY on the icon's leading edge lands
     /// under it half the time — this pulls it clear.
     public static let busHitTargetIconGap: CGFloat = 1
-    /// Diameter of the small filled dot the rail draws where it is CUT SHORT by a
-    /// collapsed (or mid-collapse clipping) section — the terminus marker that
-    /// says "the rail stops HERE, at this section's header, nothing below it is
-    /// currently visible" (collapse-reactive rail, 2026-07-22). Matches the old
+    /// Diameter of the small filled dot the rail draws on a collapsed header
+    /// that hides a reached speaker, centred on the header's text line, and on
+    /// a collapsed origin header (owner's ruling, 2026-10-04). Matches the old
     /// `busOriginDotDiameter` weight so the collapsed terminus reads as the same
     /// family of gutter dot the rail used before the ring-hook terminus landed.
     public static let railCollapsedTerminusDotDiameter: CGFloat = 5
@@ -514,26 +536,36 @@ public enum PopoverColumnGrid {
     /// Alpha for the selection wash, drawn in ``Tokens/Color/engagedChrome``.
     /// Used by AppRowView's single-selection highlight.
     public static let rowSelectionWashAlpha: CGFloat = 0.18
-    /// Alpha of the gold wash behind a SOUNDING row (`DeviceRowView.isRouteArmed`,
-    /// `AppRowView`'s routed ∧ running) — the iPhone's 12 % (`gold.opacity(0.12)`);
-    /// measured 1.256:1 on dark `panel`, 1.140:1 on the light ground.
+    /// Alpha of the gold wash behind a sounding SetupCardView
+    /// (the Mixer rows draw none), the iPhone's 12 % (`gold.opacity(0.12)`); measured 1.256:1 on
+    /// dark `panel`, 1.140:1 on the light ground.
     public static let rowLiveWashAlpha: CGFloat = 0.12
+    /// Alpha of the tint filling an inset notice card (`TintedNoteBackgroundView`):
+    /// the note banner, the thank-you card and the connection diagnosis card.
+    public static let insetCardTintAlpha: CGFloat = 0.12
 
-    // MARK: The engaged fill behind a row accessory (Warm Signal v3 §3.4/§3.5, S3)
+    /// Fills the shared row wash: ``Tokens/Color/engagedChrome`` at `alpha`
+    /// in a rounded rect inset ``selectionHighlightInsetX`` ×
+    /// ``selectionHighlightInsetY`` from `bounds`, radius
+    /// ``selectionHighlightCornerRadius``. Call from `draw(_:)`.
+    public static func fillRowWash(in bounds: NSRect, alpha: CGFloat) {
+        Tokens.Color.engagedChrome.withAlphaComponent(alpha).setFill()
+        NSBezierPath(roundedRect: bounds.insetBy(dx: selectionHighlightInsetX,
+                                                 dy: selectionHighlightInsetY),
+                     xRadius: selectionHighlightCornerRadius,
+                     yRadius: selectionHighlightCornerRadius).fill()
+    }
+
+    // MARK: The engaged fill (Warm Signal v3 §3.4/§3.5, S3)
     //
-    // A row's two engaged accessory marks — the muted speaker and the
-    // Equalizer door on a shaped curve — are ONE rounded square in two
-    // colours (owner's call, 2026-09-04: "the same object in two colours"),
-    // and that square is now part of the SYMBOL rather than a rectangle drawn
-    // behind it. `RowAccessorySymbol` owns the four images and their point
-    // size; the seat's own geometry constants, `engagedSeatSize` and
-    // `engagedSeatCornerRadius`, retired with the two `NSView`s that drew it.
+    // The row accessory marks no longer draw a fill: their engaged square is
+    // part of the symbol (`RowAccessorySymbol`).
 
-    /// Alpha of an ``Tokens/Color/engagedChrome`` engaged fill — subtle,
-    /// because mute is config-adjacent, not a signal. The strongest alpha in
-    /// that token's ladder, since a seat is smaller than a row wash and needs
-    /// the extra weight to read at glyph scale.
-    public static let mutePillFillAlpha: CGFloat = 0.22
+    /// Alpha of an ``Tokens/Color/engagedChrome`` engaged fill on a small
+    /// control: the open sync chip and a pressed toolbar seat. The strongest
+    /// step in that token's ladder (hover 0.10, selection 0.18), since a
+    /// small control needs the extra weight to read.
+    public static let engagedFillAlpha: CGFloat = 0.22
 
     // MARK: Single-selection highlight (AppRowView, 2026-07-17)
     //
@@ -612,7 +644,7 @@ public enum PopoverColumnGrid {
 
     /// Height of the inline rename field. Tall enough to read as a control
     /// (rather than a label with a box around it) while still fitting beside
-    /// the 64 pt icon well in the side-by-side header band.
+    /// the 48 pt icon well in the side-by-side header band.
     public static let titleFieldHeight: CGFloat = 28
     /// Corner radius of the inline rename field — the control radius every
     /// field and button in the app wears.
@@ -664,10 +696,10 @@ public enum PopoverColumnGrid {
     /// body row without crowding the row's vertical rhythm.
     public static let syncChipHeight: CGFloat = 18
     /// Corner radius of the SYNC value chip. A soft rounded rect ("this is a
-    /// control you can press"). What tells it apart from the engaged marks up
-    /// the row is the FILL, not the corner: this chip is an OUTLINE around a
-    /// value it is showing you, where the mute button and the Equalizer door
-    /// wear a solid filled square to say "engaged".
+    /// control you can press"). What tells it apart from the mute button and
+    /// the Equalizer door up the row is what sits inside, not the corner:
+    /// this chip is an OUTLINE around a value it is showing you, where those
+    /// two are symbols that change ink to say "engaged".
     public static let syncChipCornerRadius: CGFloat = 5
     /// Stroke width of the chip's border, solid (tuned) or dashed (untuned).
     public static let syncChipBorderWidth: CGFloat = 1
@@ -680,7 +712,7 @@ public enum PopoverColumnGrid {
     /// Gap between the FEED pill slot and the SYNC chip that follows it.
     public static let btFeedToSyncGap: CGFloat = 4
     /// The sync-capable row's FEED slot: the trailing-control column's LEADING
-    /// portion — everything the chip and their gap leave (140 − 84 − 4 = 52).
+    /// portion — everything the chip and their gap leave (200 − 84 − 4 = 112).
     /// The pills left-align on `feedColumnLeadingFromTrailing`, and this width
     /// is both their ceiling and the feed stack's clipping bound (the stack
     /// masks to its own bounds), so an overlong pill is cut off at the chip's
@@ -697,9 +729,9 @@ public enum PopoverColumnGrid {
     /// syncChipWidth`), so the title LEFT-ALIGNS over its column exactly as
     /// "Source" left-aligns on `feedColumnLeadingFromTrailing` (sibling
     /// anchor, same card header line). At `Tokens.Font.captionMedium`
-    /// "Source" measures 37.7 pt and starts at 154, ending at 116.3;
+    /// "Source" measures 37.7 pt and starts at 214, ending at 176.3;
     /// "Offset" measures 33.6 pt and starts here at 98, ending at 64.4 —
-    /// **18.3 pt of clear air** between them. Re-anchoring the chip
+    /// **78.3 pt of clear air** between them. Re-anchoring the chip
     /// re-anchors this title, which is the point: the title always sits
     /// over the chip it names. This legend prints exactly once, on the card
     /// header, never on a subsection line.
@@ -709,7 +741,7 @@ public enum PopoverColumnGrid {
     //
     // The panel that opens underneath a Bluetooth row: ONE horizontal band,
     //
-    //     [⑂ Align again…] [♪ Align by ear] [Reset alignment]   hold ⇧ for 10 ms   [ − | −414 ms | + ]
+    //     [⑂ Align again…] [♪ Play ticks] [Reset alignment]   hold ⇧ for 10 ms   [ − | −414 ms | + ]
     //
     // The two alignment doors and Reset sit at the far LEADING edge,
     // deliberately as far as the band allows from the steppers, so Reset
@@ -720,9 +752,17 @@ public enum PopoverColumnGrid {
     // to sit WITH the row's own controls — two earlier versions were redone for
     // being oversized. Named constants only.
 
-    /// Horizontal inset of the drawer's content from its container edges. No
+    /// TRAILING inset of the drawer's content from its container edge. No
     /// accent edge or border (live feedback — see `BTSyncDrawerView`'s header).
     public static let syncDrawerHorizontalInset: CGFloat = 12
+    /// LEADING inset of the drawer's content: the icon column, not the edge.
+    /// Everything that opens under a device row — this drawer, the alignment
+    /// note, the connection diagnosis — starts its content at
+    /// `firstElementLeading`, so the rail gutter stays the spine's alone. The
+    /// continuous rail overlay draws ON TOP of every row (one unbroken wire);
+    /// a control placed inside the gutter is painted over, which is what
+    /// happened to "Align again…" at the plain 12 pt inset (live, 2026-09-13).
+    public static var syncDrawerLeadingInset: CGFloat { firstElementLeading(indented: false) }
     /// Vertical inset of the drawer's content from its top/bottom edges.
     public static let syncDrawerVerticalInset: CGFloat = 12
     /// The ONE height every element of the band shares — the three leading
@@ -733,8 +773,10 @@ public enum PopoverColumnGrid {
     /// Width of the "Align again…" push button that leads the band — fits the
     /// title with its leading tuning-fork glyph at ``Tokens/Font/caption``.
     public static let syncDrawerAlignAgainButtonWidth: CGFloat = 104
-    /// Width of the align-by-ear toggle — fits "Align by ear" with its leading
-    /// metronome glyph at ``Tokens/Font/caption``.
+    /// Width of the tick toggle — fits "Play ticks" with its leading
+    /// metronome glyph at ``Tokens/Font/caption``, with room to spare (the
+    /// title measures 49.7 pt where the "Align by ear" it replaced measured
+    /// 62.1).
     public static let syncDrawerAlignButtonWidth: CGFloat = 104
     /// Width of the "Reset alignment" push button — it spells out what it
     /// clears, which is longer than either alignment door beside it.
@@ -755,11 +797,19 @@ public enum PopoverColumnGrid {
     /// `−` crowding the digits made the minus read as part of the NUMBER rather
     /// than as a button (live-found).
     public static let syncDrawerStepperToValueGap: CGFloat = 8
-    /// The drawer's total height: one band plus the top and bottom insets.
-    /// `PopoverController` (T7) grows the popover by exactly this on expand and
-    /// shrinks back by it on collapse.
+    /// Gap between the band and the caption line under it.
+    public static let syncDrawerCaptionGap: CGFloat = 4
+    /// Height reserved for the caption line under the band — one line of
+    /// ``Tokens/Font/caption``. RESERVED even when the line is empty (a
+    /// never-measured speaker has no source to name), so the band never jumps
+    /// as a source arrives.
+    public static let syncDrawerCaptionHeight: CGFloat = 14
+    /// The drawer's total height: one band, the caption line under it, plus
+    /// the top and bottom insets. `PopoverController` (T7) grows the popover
+    /// by exactly this on expand and shrinks back by it on collapse.
     public static var syncDrawerHeight: CGFloat {
         syncDrawerVerticalInset * 2 + syncDrawerControlHeight
+            + syncDrawerCaptionGap + syncDrawerCaptionHeight
     }
 
     // MARK: Inter-column gaps
@@ -807,8 +857,12 @@ public enum PopoverColumnGrid {
     /// row type. Sized to clear the readout that hangs off it, the min flex
     /// slack, and the trailing control.
     public static var sliderTrailing: CGFloat {
+        readoutTrailing + readoutWidth + sliderToReadout
+    }
+    /// Distance from the row trailing edge to the `%` readout's trailing edge —
+    /// where rows pin a `RowVolumeFader`'s trailing edge.
+    public static var readoutTrailing: CGFloat {
         trailingControlTrailing + trailingControlWidth + readoutToTrailingControl
-            + readoutWidth + sliderToReadout
     }
     // MARK: Column-center helpers (for the combined section/column header row)
     //

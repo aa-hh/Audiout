@@ -75,7 +75,7 @@ import AppKit
     @Test func airPlayRowMenuOffersEqualizerAndDispatchesTheDeviceID() {
         let (popover, recorder) = makePopover()
         let menu = popover.test_deviceRow(for: "office")?.test_contextMenu()
-        #expect(titles(menu) == ["Equalizer…"])
+        #expect(titles(menu) == ["Equalizer…", "", "Show in Mixer", "When available", "Always", "Hide when not in use", "", "Speaker settings…"])
 
         menu?.performActionForItem(at: 0)
         #expect(recorder.opened == ["office"])
@@ -84,21 +84,21 @@ import AppKit
     @Test func bluetoothRowMenuOffersEqualizerThenAlign() {
         let (popover, _) = makePopover()
         let menu = popover.test_deviceRow(for: "bt-a:output")?.test_contextMenu()
-        #expect(titles(menu) == ["Equalizer…", "Align speaker…"],
-                "tone first, alignment second — and no separator between two items")
+        #expect(titles(menu) == ["Equalizer…", "Align by ear…", "", "Show in Mixer", "When available", "Always", "Hide when not in use", "", "Speaker settings…"],
+                "tone first, alignment second, then the host's Mixer visibility actions after one separator")
     }
 
     @Test func thisMacRowMenuOffersAlignmentButNeverEqualizer() {
         // Roadmap 060: the Mac's own row carries the SAME sync affordances as a
-        // Bluetooth row — including "Align speaker…" — but it is still not an
+        // Bluetooth row — including "Align by ear…" — but it is still not an
         // Equalizer target (per-device EQ covers AirPlay and Bluetooth outputs).
         let (popover, _) = makePopover()
         let row = popover.test_deviceRow(for: "mac")
         #expect(row != nil)
-        #expect(titles(row?.test_contextMenu()) == ["Align speaker…"],
+        #expect(titles(row?.test_contextMenu()) == ["Align by ear…"],
                 "alignment yes, tone no — This Mac is not an EQ target")
         #expect(row?.test_iconIsMenuTrigger == true)
-        #expect(titles(row?.test_clickIcon()) == ["Align speaker…"],
+        #expect(titles(row?.test_clickIcon()) == ["Align by ear…"],
                 "the icon pops the same menu")
     }
 

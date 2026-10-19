@@ -60,6 +60,9 @@ public struct BTClockStability: Sendable {
     /// Sonos Move takes up to 42 s of jumps first). The ceiling is a learned
     /// per-device prior.
     public static let stableAfterSeconds = 10.0
+    /// How often `BTClockWatcher` logs the running deviation, so slow creep
+    /// that never crosses `jumpThresholdMs` still leaves a trail.
+    public static let deviationLineIntervalSeconds = 30.0
 
     private struct Point {
         let sampleTime: Double
@@ -73,6 +76,10 @@ public struct BTClockStability: Sendable {
     /// Seconds of jump-free advance since the baseline or the last jump.
     public private(set) var stableForSeconds: Double = 0
     public var isStable: Bool { stableForSeconds >= Self.stableAfterSeconds }
+    /// The running deviation since the baseline, INCLUDING the step on a
+    /// `.jumped` sample — unlike `Outcome.jumped`'s own `magnitudeMs`, which
+    /// is only that one step. Zero on every path that resets the baseline.
+    public private(set) var deviationMs: Double = 0
 
     public init() {}
 
@@ -87,6 +94,7 @@ public struct BTClockStability: Sendable {
             // idle stretch as one enormous jump.
             baseline = nil
             previous = nil
+            self.deviationMs = 0
             return .frozen
         }
         previousSampleTime = sampleTime
@@ -94,12 +102,14 @@ public struct BTClockStability: Sendable {
             baseline = Point(sampleTime: sampleTime, hostNanos: hostNanos, deviationMs: 0)
             previous = baseline
             stableForSeconds = 0
+            self.deviationMs = 0
             return .ignored
         }
         if sampleTime < base.sampleTime || hostNanos <= base.hostNanos {
             baseline = Point(sampleTime: sampleTime, hostNanos: hostNanos, deviationMs: 0)
             previous = baseline
             stableForSeconds = 0
+            self.deviationMs = 0
             return .rebaselined
         }
         // Rate-normalised clock position minus host elapsed: flat while the
@@ -107,6 +117,7 @@ public struct BTClockStability: Sendable {
         let elapsed = Double(hostNanos - base.hostNanos) / 1_000_000_000
         let deviationMs = ((sampleTime - base.sampleTime) / nominalRate - elapsed) * 1_000
         let point = Point(sampleTime: sampleTime, hostNanos: hostNanos, deviationMs: deviationMs)
+        self.deviationMs = point.deviationMs
         let last = previous ?? base
         previous = point
         let step = deviationMs - last.deviationMs
@@ -114,6 +125,7 @@ public struct BTClockStability: Sendable {
             baseline = Point(sampleTime: sampleTime, hostNanos: hostNanos, deviationMs: 0)
             previous = baseline
             stableForSeconds = 0
+            self.deviationMs = 0
             return .rebaselined
         }
         if abs(step) > Self.jumpThresholdMs {
@@ -157,16 +169,22 @@ final class BTClockWatcher: @unchecked Sendable {
     }
 
     private let deviceID: AudioObjectID
+    private let deviceUID: String
     private let onOutcome: @Sendable (BTClockStability.Outcome) -> Void
     private let queue: DispatchQueue
     /// Only ever touched on `queue`.
     private var detector = BTClockStability()
     private var nominalRate: Double = 0
     private var timer: DispatchSourceTimer?
+    /// Only ever touched on `queue`. The stamp of the last `bt_clock_deviation`
+    /// line, and how many `.jumped` samples landed since it.
+    private var lastDeviationLineNanos: Int64?
+    private var jumpsSinceDeviationLine = 0
 
     init(deviceID: AudioObjectID, deviceUID: String,
          onOutcome: @escaping @Sendable (BTClockStability.Outcome) -> Void) {
         self.deviceID = deviceID
+        self.deviceUID = deviceUID
         self.onOutcome = onOutcome
         self.queue = DispatchQueue(label: "com.audiout.btsink.clock.\(deviceUID)")
     }
@@ -178,6 +196,8 @@ final class BTClockWatcher: @unchecked Sendable {
         queue.async {
             self.nominalRate = nominalRate
             self.detector = BTClockStability()
+            self.lastDeviationLineNanos = nil
+            self.jumpsSinceDeviationLine = 0
         }
         guard timer == nil else { return }
         let timer = DispatchSource.makeTimerSource(queue: queue)
@@ -204,7 +224,28 @@ final class BTClockWatcher: @unchecked Sendable {
         // The same mach-to-monotonic rebase the render path uses.
         let hostNanos = SyncTiming.monotonicNanos(
             CoreAudioSystemTap.timespec(fromHostTime: stamp.mHostTime))
-        onOutcome(detector.observe(
-            sampleTime: stamp.mSampleTime, hostNanos: hostNanos, nominalRate: nominalRate))
+        let outcome = detector.observe(
+            sampleTime: stamp.mSampleTime, hostNanos: hostNanos, nominalRate: nominalRate)
+        onOutcome(outcome)
+        // A visible `.jumped` step is already logged by the caller
+        // (`bt_clock_jump`); this line is the running total a jump-only log
+        // cannot show — a licence-clean file already logs from here, see
+        // `BTSyncedSink.swift`'s own `Telemetry.log` calls.
+        if case .jumped = outcome { jumpsSinceDeviationLine += 1 }
+        guard let last = lastDeviationLineNanos else {
+            lastDeviationLineNanos = hostNanos
+            return
+        }
+        let intervalNanos = Int64(BTClockStability.deviationLineIntervalSeconds * 1_000_000_000)
+        if hostNanos - last >= intervalNanos {
+            Telemetry.log(.localPlayback, "bt_clock_deviation", [
+                "uid": deviceUID,
+                "ms": String(format: "%+.1f", detector.deviationMs),
+                "jumps": String(jumpsSinceDeviationLine),
+                "hostNanos": String(hostNanos),
+            ])
+            lastDeviationLineNanos = hostNanos
+            jumpsSinceDeviationLine = 0
+        }
     }
 }

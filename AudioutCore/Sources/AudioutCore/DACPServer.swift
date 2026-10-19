@@ -36,16 +36,18 @@ import os
 /// with no sockets; the `Network` plumbing around it is thin.
 public final class DACPServer: @unchecked Sendable {
 
-    /// Called for an absolute device-volume report: the receiver's `Active-Remote`
-    /// token and the new level (0…1). The backend routes the token to a device.
-    /// Invoked on ``queue``.
-    public var onVolume: (@Sendable (_ activeRemote: UInt32, _ level: Double) -> Void)?
+    /// Called for an absolute device-volume report: the sender's IP text (`nil`
+    /// when the connection has no host/port remote endpoint, `%scope` stripped),
+    /// the receiver's `Active-Remote` token and the new level (0…1). The backend
+    /// routes the token to a device and only believes a report that comes from
+    /// that device's own address. Invoked on ``queue``.
+    public var onVolume: (@Sendable (_ remoteHost: String?, _ activeRemote: UInt32, _ level: Double) -> Void)?
 
-    /// Called for a relative `volumeup`/`volumedown` verb: the receiver's
-    /// `Active-Remote` token and the direction (+1 / −1). The backend steps that
-    /// device's CURRENT level, so consecutive presses accumulate. Invoked on
-    /// ``queue``.
-    public var onVolumeStep: (@Sendable (_ activeRemote: UInt32, _ direction: Int) -> Void)?
+    /// Called for a relative `volumeup`/`volumedown` verb: the sender's IP text
+    /// (as for ``onVolume``), the receiver's `Active-Remote` token and the
+    /// direction (+1 / −1). The backend steps that device's CURRENT level, so
+    /// consecutive presses accumulate. Invoked on ``queue``.
+    public var onVolumeStep: (@Sendable (_ remoteHost: String?, _ activeRemote: UInt32, _ direction: Int) -> Void)?
 
     private let log = Logger(subsystem: "com.audiout.Audiout", category: "dacp")
     private let queue = DispatchQueue(label: "DACPServer")
@@ -89,6 +91,20 @@ public final class DACPServer: @unchecked Sendable {
     /// (success or error), cleaned up in the same places `connections`
     /// itself is (the `.cancelled`/`.failed` state handler and `stop()`).
     private var idleTimeouts: [ObjectIdentifier: DispatchWorkItem] = [:]
+
+    /// How many DACP connections may be accepted at once. The listener is
+    /// unauthenticated and open to the LAN, so a misbehaving or flooding
+    /// peer could otherwise grow `connections` without limit and exhaust
+    /// this process's file descriptors — which AirPlay RTP, PTP and Bonjour
+    /// draw on too. The idle deadline above bounds how LONG each socket
+    /// lives; this bounds how MANY exist. Same value and same reasoning as
+    /// ``CompanionServer``'s `pendingCap`.
+    private static let connectionCap = 32
+    /// Test-only: overrides ``connectionCap`` so the flood test doesn't need
+    /// 33 real sockets. Nil (default) uses the real value.
+    public var test_connectionCapOverride: Int?
+    /// Test-only: how many connections are currently held.
+    var test_connectionCount: Int { connections.count }
 
     public init() {}
 
@@ -194,6 +210,12 @@ public final class DACPServer: @unchecked Sendable {
     /// unchanged: always invoked on ``queue`` in production, via
     /// `listener.newConnectionHandler`.
     func accept(_ connection: NWConnection) {
+        guard connections.count < (test_connectionCapOverride ?? Self.connectionCap) else {
+            // Flood: drop on arrival, no courtesy goodbye — see connectionCap.
+            log.notice("DACP connection dropped: connection pool full")
+            connection.cancel()
+            return
+        }
         let key = ObjectIdentifier(connection)
         connections[key] = connection
         connection.stateUpdateHandler = { [weak self] state in
@@ -239,7 +261,7 @@ public final class DACPServer: @unchecked Sendable {
             // it can fire and cancel a connection we're already finishing.
             self.idleTimeouts.removeValue(forKey: key)?.cancel()
             if let data, !data.isEmpty, let request = DACPServer.parse(data) {
-                self.dispatch(request)
+                self.dispatch(request, remoteHost: DACPServer.remoteHost(of: connection))
             }
             if error != nil {
                 connection.cancel()
@@ -252,14 +274,28 @@ public final class DACPServer: @unchecked Sendable {
         }
     }
 
-    private func dispatch(_ request: DACPRequest) {
+    /// The peer's IP as text, from a host/port remote endpoint, minus any
+    /// `%scope` suffix; `nil` for anything else (no path yet, a service endpoint).
+    static func remoteHost(of connection: NWConnection) -> String? {
+        guard case .hostPort(let host, _)? = connection.currentPath?.remoteEndpoint else { return nil }
+        let text: String
+        switch host {
+        case .ipv4(let address): text = address.debugDescription
+        case .ipv6(let address): text = address.debugDescription
+        case .name(let name, _): text = name
+        @unknown default: return nil
+        }
+        return String(text.prefix { $0 != "%" })
+    }
+
+    private func dispatch(_ request: DACPRequest, remoteHost: String?) {
         debugLog("request cmd=\(request.command) token=\(request.activeRemote.map(String.init) ?? "nil") query=\(request.query)")
         guard let token = request.activeRemote else { return }
         if let db = request.deviceVolumeDb {
             let level = DACPServer.level(fromDb: db)
             log.info("DACP volume: token \(token) -> \(level, format: .fixed(precision: 3)) (\(db, format: .fixed(precision: 1)) dB)")
             debugLog("VOLUME token=\(token) -> \(level) (\(db) dB)")
-            onVolume?(token, level)
+            onVolume?(remoteHost, token, level)
         }
         // volumeup/volumedown are RELATIVE; the backend applies them against the
         // level it currently holds for the device. Transport verbs are
@@ -268,7 +304,7 @@ public final class DACPServer: @unchecked Sendable {
             let direction = request.command == "volumeup" ? 1 : -1
             log.info("DACP volume step: token \(token) direction \(direction)")
             debugLog("VOLUME-STEP token=\(token) direction=\(direction)")
-            onVolumeStep?(token, direction)
+            onVolumeStep?(remoteHost, token, direction)
         }
     }
 
@@ -343,8 +379,12 @@ public final class DACPServer: @unchecked Sendable {
 
     /// Map an AirPlay volume in dB to a 0…1 level, mirroring the outbound map for
     /// the default `max_volume` (`airplay_volume_from_pct`): −30…0 dB ↔ 0…1, and
-    /// ≤ −30 dB (including the −144 mute sentinel) clamps to 0.
+    /// ≤ −30 dB (including the −144 mute sentinel) clamps to 0. The dB value
+    /// arrives from an unauthenticated LAN request via ``DACPRequest/deviceVolumeDb``
+    /// and `Double("nan")` parses, so a non-finite input maps to 0 here rather
+    /// than reaching the backend's volume write.
     public static func level(fromDb db: Double) -> Double {
+        guard db.isFinite else { return 0 }
         if db <= -30 { return 0 }
         if db >= 0 { return 1 }
         return (db + 30) / 30

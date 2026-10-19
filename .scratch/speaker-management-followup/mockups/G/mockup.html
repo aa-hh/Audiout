@@ -1,0 +1,280 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Speakers, Direction G</title>
+<script>
+/* Respect a data-theme already on <html>; otherwise follow the system. */
+(function(){var h=document.documentElement;if(h.hasAttribute('data-theme'))return;try{var t=localStorage.getItem('g-theme');if(t==='light'||t==='dark')h.setAttribute('data-theme',t);}catch(e){}})();
+</script>
+<style>
+:root{
+  --canvas:#FAFAFB; --panel:#FAFAFB; --raised:#FAFAFB; --well:#E9EAEC;
+  --hairline:#CBCED4; --edge:#AEB3BB; --rim:#66717A;
+  --label:#1D1D1F; --label2:#6B5F4E; --label3:#6B6459; --cool:#4E5A63; --cool2:#5F6A73;
+  --gold:#E8B84B; --goldText:#825E0F; --ink-on-fill:#171104; --failure:#B03327;
+  --side:#EEEEEF; --chrome:#F3F3F4; --sel:rgba(0,0,0,.09); --btn:#FFFFFF; --btn-edge:rgba(0,0,0,.16);
+  --menu:#F6F6F7; --page:#DCDDE0; --iconwell:#E4E5E8; --iconfg:#4E5A63;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --canvas:#0A0A0C; --panel:#15171A; --raised:#1F232A; --well:#050507;
+    --hairline:#2A2E33; --edge:#3D4247; --rim:#6B767D;
+    --label:#ECECEE; --label2:#B7AC95; --label3:#9E947F; --cool:#A9B3BB; --cool2:#818C94;
+    --gold:#E8B84B; --goldText:#E8B84B; --failure:#D9564A;
+    --side:#18191C; --chrome:#121315; --sel:rgba(255,255,255,.10); --btn:#3A3D42; --btn-edge:rgba(255,255,255,.10);
+    --menu:#26282C; --page:#2A2B2E; --iconwell:#2A2E33; --iconfg:#A9B3BB;
+  }
+}
+:root[data-theme="dark"]{
+    --canvas:#0A0A0C; --panel:#15171A; --raised:#1F232A; --well:#050507;
+    --hairline:#2A2E33; --edge:#3D4247; --rim:#6B767D;
+    --label:#ECECEE; --label2:#B7AC95; --label3:#9E947F; --cool:#A9B3BB; --cool2:#818C94;
+    --gold:#E8B84B; --goldText:#E8B84B; --failure:#D9564A;
+    --side:#18191C; --chrome:#121315; --sel:rgba(255,255,255,.10); --btn:#3A3D42; --btn-edge:rgba(255,255,255,.10);
+    --menu:#26282C; --page:#2A2B2E; --iconwell:#2A2E33; --iconfg:#A9B3BB;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{background:var(--page)}
+body{font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif;color:var(--label);-webkit-font-smoothing:antialiased;padding:24px 16px 64px;overflow-x:hidden}
+::selection{background:color-mix(in srgb,var(--gold) 35%,transparent)}
+button{font:inherit;color:inherit}
+:focus-visible{outline:2px solid var(--gold);outline-offset:1px}
+.toggle{position:fixed;top:12px;right:12px;z-index:9;font-size:12px;padding:5px 10px;border-radius:999px;border:1px solid var(--btn-edge);background:var(--btn);cursor:pointer}
+.cap{font-size:13px;font-weight:600;color:var(--label);margin:0 0 6px}
+.note{font-size:12px;color:var(--label3);max-width:560px;line-height:1.4;margin-bottom:10px}
+
+/* ---------- window ---------- */
+.stage{zoom:2;width:max-content;display:flex;gap:16px;align-items:flex-start}
+.win{width:653px;height:669px;border-radius:12px;overflow:hidden;background:var(--canvas);border:.5px solid var(--edge);box-shadow:0 10px 30px rgba(0,0,0,.18);display:flex;flex-direction:column}
+.hdr{height:62px;flex:none;background:var(--chrome);border-bottom:.5px solid var(--hairline);display:flex;align-items:center;padding:0 16px;position:relative}
+.seg{display:flex;align-items:center;gap:4px;height:34px;padding:3px;border:1px solid var(--edge);border-radius:999px}
+.seg span{display:flex;align-items:center;gap:6px;height:26px;padding:0 9px;border-radius:999px;font-size:11px;color:var(--cool2)}
+.seg .on{background:var(--sel);color:var(--cool2)}
+.seg svg{width:15px;height:15px}
+.title{position:absolute;left:0;right:0;text-align:center;font-size:17px;font-weight:700;color:var(--label2);pointer-events:none}
+.pin{margin-left:auto;width:15px;height:15px;color:var(--cool)}
+.body{flex:1;display:flex;min-height:0}
+.side{width:210px;flex:none;background:var(--side);border-right:.5px solid var(--hairline);display:flex;flex-direction:column}
+.side-in{padding:10px 10px 0;flex:1}
+.side .scap{margin-top:18px}
+.scbtn{display:flex;align-items:center;gap:10px;height:36px;padding:0 10px 0 16px;border:1px solid var(--edge);border-radius:10px;background:var(--btn);font-size:13px}
+.scbtn svg{width:16px;height:16px;color:var(--cool)}
+.scbtn.sel{background:var(--sel);border-color:transparent;color:var(--label2);font-weight:600}
+.scbtn .pc{margin-left:auto;font-size:11px;font-weight:400;color:var(--cool2)}
+.scbtn .pc+.chev{margin-left:8px}
+.scbtn .chev{margin-left:auto;width:9px;height:9px}
+.scap{font-size:11px;font-weight:500;color:var(--cool2);margin:22px 4px 6px}
+.sitem{display:flex;align-items:center;gap:12px;padding:5px 14px;border-radius:7px;font-size:13px}
+.sitem svg{width:16px;height:16px;color:var(--cool);flex:none}
+.sitem.sel{background:var(--sel);color:var(--label2);font-weight:600;margin-top:4px}
+.sitem.child{padding:4px 14px 4px 28px;align-items:center}
+.sitem .n{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sitem .s{font-size:11px;color:var(--label2)}
+.sitem.dim .n{color:var(--cool2)}
+.sfoot{height:28px;border-top:.5px solid var(--hairline);display:flex;align-items:center;gap:6px;padding:0 10px;font-size:13px}
+.content{flex:1;display:flex;flex-direction:column;min-width:0;background:var(--canvas)}
+.ci{flex:1;padding:16px 14px 0;overflow:hidden}
+.cfoot{height:30px;flex:none;display:flex;align-items:center;justify-content:center;font-size:11px;color:var(--label3)}
+
+/* ---------- page ---------- */
+h1{font-size:16px;font-weight:600;letter-spacing:-.01em}
+.lede{font-size:11px;color:var(--label3);margin-top:3px;line-height:1.35}
+.sechead{display:flex;align-items:baseline;margin:16px 4px 6px}
+.sechead h2{font-size:13px;font-weight:400;color:var(--label2)}
+.sechead .count{font-size:11px;color:var(--cool2);margin-left:6px;font-variant-numeric:tabular-nums}
+.link{margin-left:auto;font-size:11px;color:var(--cool);background:none;border:0;cursor:pointer;padding:0}
+.link:hover{text-decoration:underline;text-underline-offset:2px}
+.group{border-radius:26px;border:1px solid var(--edge);background:var(--raised);overflow:hidden;padding:2px 0}
+.group.well{background:var(--well);border-color:transparent}
+.row{display:flex;align-items:center;height:42px;padding:0 14px 0 12px;position:relative}
+.row+.row::before{content:"";position:absolute;top:0;left:50px;right:0;border-top:.5px solid var(--hairline)}
+.iw{width:26px;height:26px;border-radius:50%;background:var(--iconwell);display:grid;place-items:center;flex:none;margin-right:12px;position:relative}
+.well .iw{background:color-mix(in srgb,var(--iconwell) 60%,var(--canvas))}
+.iw svg{width:15px;height:15px;color:var(--iconfg)}
+.iw .bad{position:absolute;right:-3px;bottom:-3px;width:12px;height:12px;border-radius:50%;background:rgba(0,0,0,.55);border:1px solid rgba(255,255,255,.25);display:grid;place-items:center}
+.iw .bad svg{width:7px;height:7px;color:#fff}
+.txt{min-width:0;flex:1}
+.nm{font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sub{font-size:11px;color:var(--cool2);margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sub .live{color:var(--goldText);font-weight:500}
+.away .nm{color:var(--cool)}
+.away .iw svg{opacity:.55}
+.pd{display:flex;align-items:center;gap:3px;font-size:11px;color:var(--label2);background:none;border:1px solid transparent;border-radius:6px;padding:2px 4px 2px 7px;cursor:default;flex:none}
+.pd svg{width:8px;height:10px;color:var(--cool2)}
+.pd:hover,.pd.hov{border-color:var(--btn-edge);background:var(--btn)}
+.fixed{font-size:11px;color:var(--label3);padding-right:4px}
+.sbtn{font-size:11px;height:20px;padding:0 9px;border-radius:6px;background:var(--btn);border:.5px solid var(--btn-edge);box-shadow:0 .5px 1px rgba(0,0,0,.08);cursor:default;flex:none}
+.cta{background:var(--gold);color:var(--ink-on-fill);border-color:transparent;font-weight:500}
+.eq{width:24px;height:22px;display:grid;place-items:center;border-radius:6px;border:1px solid transparent;background:none;margin-left:6px;flex:none;color:var(--label2);cursor:default}
+.eq svg{width:14px;height:14px}
+.eq.on{background:var(--gold);border-color:var(--ink-on-fill);color:var(--ink-on-fill)}
+.eq.on svg{--btn:var(--gold)}
+.eq.hov{border-color:var(--btn-edge);background:var(--btn)}
+.eqspacer{width:30px;flex:none}
+.tip{position:absolute;right:-4px;top:31px;font-size:10.5px;background:var(--menu);border:.5px solid var(--btn-edge);border-radius:4px;padding:2px 6px;box-shadow:0 2px 6px rgba(0,0,0,.15);white-space:nowrap;z-index:2}
+.foldline{display:flex;align-items:center;height:36px;padding:0 16px;font-size:11px;color:var(--cool2)}
+.permrow .nm{font-size:12px}
+.permrow .sub{white-space:normal;line-height:1.3;padding-right:10px}
+
+/* ---------- side menu callout ---------- */
+.callout{width:220px;margin-top:150px}
+.menu{background:var(--menu);border:.5px solid var(--btn-edge);border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.2);padding:5px;font-size:13px}
+.mi{padding:3px 10px 3px 22px;border-radius:4px;position:relative;white-space:nowrap}
+.mi.h{font-size:11px;font-weight:600;color:var(--cool2);padding-left:10px}
+.mi.chk::before{content:"";position:absolute;left:8px;top:8px;width:7px;height:4px;border-left:1.5px solid currentColor;border-bottom:1.5px solid currentColor;transform:rotate(-45deg)}
+.mi.hl{background:#3D7FF5;color:#fff}
+.mi .tag{font-size:10px;font-weight:600;color:var(--failure);margin-left:6px}
+.sep{height:1px;background:var(--hairline);margin:4px 8px}
+.ann{font-size:10.5px;color:var(--label3);line-height:1.4;margin-top:8px}
+
+/* ---------- small panels ---------- */
+.panels{zoom:1.4;display:flex;flex-wrap:wrap;gap:24px;margin-top:28px;width:max-content}
+.pnl{width:443px}
+.pnl .ci{background:var(--canvas);border:.5px solid var(--edge);border-radius:10px;padding:14px;height:auto}
+.pnl .row{height:36px}
+.pnl .group{overflow:visible}
+.pnl .iw{width:22px;height:22px}
+.pnl .iw svg{width:13px;height:13px}
+</style>
+</head>
+<body>
+<button class="toggle" id="tg" type="button">Appearance: System</button>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <symbol id="i-laptop" viewBox="0 0 20 20"><rect x="4" y="5" width="12" height="8" rx="1" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M2 15.5h16" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></symbol>
+    <symbol id="i-spk" viewBox="0 0 20 20"><rect x="5.5" y="2.5" width="9" height="15" rx="2" fill="none" stroke="currentColor" stroke-width="1.4"/><circle cx="10" cy="12" r="2.4" fill="none" stroke="currentColor" stroke-width="1.4"/><circle cx="10" cy="6.3" r="1" fill="currentColor"/></symbol>
+    <symbol id="i-radio" viewBox="0 0 20 20"><rect x="2.5" y="6.5" width="15" height="10" rx="2" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M5 6.5 14 3" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><circle cx="7" cy="11.5" r="2" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M11.5 10h3.5M11.5 13h3.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></symbol>
+    <symbol id="i-tv" viewBox="0 0 20 20"><rect x="2" y="3.5" width="13" height="9" rx="1.2" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M5 15.5h7" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><rect x="13" y="9" width="5" height="8" rx="1.2" fill="var(--iconwell)" stroke="currentColor" stroke-width="1.3"/><circle cx="15.5" cy="14" r="1.2" fill="currentColor"/></symbol>
+    <symbol id="i-pod" viewBox="0 0 20 20"><path d="M5 5c0-1.4 2.2-2.5 5-2.5s5 1.1 5 2.5v10c0 1.4-2.2 2.5-5 2.5s-5-1.1-5-2.5z" fill="none" stroke="currentColor" stroke-width="1.4"/><ellipse cx="10" cy="5" rx="5" ry="2.5" fill="none" stroke="currentColor" stroke-width="1.2"/></symbol>
+    <symbol id="i-cone" viewBox="0 0 20 20"><path d="M4 8h3l5-4v12l-5-4H4z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/></symbol>
+    <symbol id="i-bt" viewBox="0 0 20 20"><path d="M6 6.5l8 7-4 3.5v-14l4 3.5-8 7" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/></symbol>
+    <symbol id="i-x" viewBox="0 0 10 10"><path d="M2.5 2.5l5 5M7.5 2.5l-5 5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></symbol>
+    <symbol id="i-ud" viewBox="0 0 8 10"><path d="M1.5 3.8 4 1.5l2.5 2.3M1.5 6.2 4 8.5l2.5-2.3" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-scenes" viewBox="0 0 20 20"><rect x="2.5" y="4" width="6" height="5" rx="1" fill="none" stroke="currentColor" stroke-width="1.3"/><rect x="2.5" y="11" width="6" height="5" rx="1" fill="none" stroke="currentColor" stroke-width="1.3"/><rect x="10.5" y="4" width="7" height="12" rx="1.2" fill="none" stroke="currentColor" stroke-width="1.3"/></symbol>
+    <symbol id="i-wave" viewBox="0 0 20 20"><path d="M3 8v4M6 5v10M9 3v14M12 6v8M15 4v12M18 8v4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></symbol>
+    <symbol id="i-gear" viewBox="0 0 20 20"><circle cx="10" cy="10" r="2.6" fill="none" stroke="currentColor" stroke-width="1.3"/><circle cx="10" cy="10" r="6.5" fill="none" stroke="currentColor" stroke-width="1.3" stroke-dasharray="2.4 1.6"/></symbol>
+    <symbol id="i-pin" viewBox="0 0 20 20"><path d="M6 3h8M7 3v6l-2 3h10l-2-3V3M10 12v6" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-in" viewBox="0 0 20 20"><rect x="7" y="3" width="9" height="14" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M2 10h8M7.5 7.5 10 10l-2.5 2.5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-eq" viewBox="0 0 20 20"><path d="M3 5.5h14M3 10h14M3 14.5h14" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/><circle cx="7" cy="5.5" r="1.8" fill="var(--btn)" stroke="currentColor" stroke-width="1.3"/><circle cx="13" cy="10" r="1.8" fill="var(--btn)" stroke="currentColor" stroke-width="1.3"/><circle cx="9" cy="14.5" r="1.8" fill="var(--btn)" stroke="currentColor" stroke-width="1.3"/></symbol>
+    <symbol id="i-chev" viewBox="0 0 10 10"><path d="M3.5 1.5 7 5l-3.5 3.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  </defs>
+</svg>
+
+<div class="stage">
+<div class="win" role="img" aria-label="Scenes window, Speakers page, Direction G">
+  <div class="hdr">
+    <div class="seg"><span><svg><use href="#i-wave"/></svg></span><span class="on"><svg><use href="#i-scenes"/></svg>Scenes</span><span><svg><use href="#i-gear"/></svg></span></div>
+    <div class="title">Audiout</div>
+    <svg class="pin"><use href="#i-pin"/></svg>
+  </div>
+  <div class="body">
+    <aside class="side">
+      <div class="side-in">
+        <div class="scbtn"><svg><use href="#i-scenes"/></svg>Scenes<svg class="chev"><use href="#i-chev"/></svg></div>
+        <div class="scap">System Audio</div>
+        <div class="sitem"><svg><use href="#i-in"/></svg><span class="n">Main Audio</span></div>
+        <div class="scbtn plate sel" style="margin-top:10px"><svg><use href="#i-spk"/></svg>Speakers<span class="pc">8</span><svg class="chev"><use href="#i-chev"/></svg></div>
+      </div>
+      <div class="sfoot"><span style="font-size:15px;color:var(--cool)">+</span>Add scene</div>
+    </aside>
+
+    <main class="content">
+      <div class="ci">
+        <h1>Speakers</h1>
+        <p class="lede">Your speakers are the ones the Mixer lists, in every scene.<br>Other speakers nearby stay out of the Mixer until you show them.</p>
+
+        <div class="sechead"><h2>Your speakers</h2><span class="count">6</span></div>
+        <div class="group">
+          <div class="row"><span class="iw"><svg><use href="#i-laptop"/></svg></span><div class="txt"><div class="nm">MacBook Pro Speakers</div><div class="sub">This Mac · Available</div></div><span class="fixed">Always</span><button class="eq" type="button" aria-label="Equalizer"><svg><use href="#i-eq"/></svg></button></div>
+          <div class="row"><span class="iw"><svg><use href="#i-spk"/></svg></span><div class="txt"><div class="nm">Move 2</div><div class="sub">AirPlay · Available</div></div><button class="pd" type="button">When available<svg><use href="#i-ud"/></svg></button><button class="eq on" type="button" aria-label="Equalizer"><svg><use href="#i-eq"/></svg></button></div>
+          <div class="row"><span class="iw"><svg><use href="#i-tv"/></svg></span><div class="txt"><div class="nm">TV</div><div class="sub">Cast · Connected · <span class="live">Playing now</span></div></div><button class="pd" type="button">When available<svg><use href="#i-ud"/></svg></button><button class="eq" type="button" aria-label="Equalizer"><svg><use href="#i-eq"/></svg></button></div>
+          <div class="row away"><span class="iw"><svg><use href="#i-pod"/></svg><span class="bad"><svg><use href="#i-x"/></svg></span></span><div class="txt"><div class="nm">Bedroom</div><div class="sub">AirPlay · Unavailable</div></div><button class="pd hov" type="button">Always<svg><use href="#i-ud"/></svg></button><button class="eq" type="button" aria-label="Equalizer"><svg><use href="#i-eq"/></svg></button></div>
+          <div class="row away"><span class="iw"><svg><use href="#i-radio"/></svg></span><div class="txt"><div class="nm">Sonos Move</div><div class="sub">Bluetooth · Not connected</div></div><button class="pd" type="button">Always<svg><use href="#i-ud"/></svg></button><button class="eq" type="button" aria-label="Equalizer"><svg><use href="#i-eq"/></svg></button></div>
+          <div class="row away"><span class="iw"><svg><use href="#i-cone"/></svg><span class="bad"><svg><use href="#i-x"/></svg></span></span><div class="txt"><div class="nm">Missing speaker</div><div class="sub">Not found</div></div><button class="pd" type="button">Always<svg><use href="#i-ud"/></svg></button><button class="eq" type="button" aria-label="Equalizer"><svg><use href="#i-eq"/></svg></button></div>
+        </div>
+
+        <div class="sechead"><h2>Other speakers nearby</h2><span class="count">2</span><button class="link" type="button">Hide All</button></div>
+        <div class="group well">
+          <div class="row"><span class="iw"><svg><use href="#i-radio"/></svg></span><div class="txt"><div class="nm">Onkyo TX-8220</div><div class="sub">Bluetooth · Connected</div></div><button class="sbtn" type="button">Show in Mixer</button></div>
+          <div class="row"><span class="iw"><svg><use href="#i-spk"/></svg></span><div class="txt"><div class="nm">Office</div><div class="sub">AirPlay · Available</div></div><button class="sbtn" type="button">Show in Mixer</button></div>
+        </div>
+      </div>
+      <div class="cfoot">Set up scenes here, then switch to the Mixer to play</div>
+    </main>
+  </div>
+</div>
+
+<div class="callout">
+  <div class="cap">Bedroom's pull-down, open</div>
+  <div class="menu" role="img" aria-label="Pull-down menu">
+    <div class="mi h">Show in Mixer</div>
+    <div class="mi">When available</div>
+    <div class="mi chk">Always</div>
+    <div class="mi hl">Hide when not in use</div>
+    <div class="sep"></div>
+    <div class="mi">Speaker settings…</div>
+    <div class="sep"></div>
+    <div class="mi">Forget Bedroom…<span class="tag">Proposed</span></div>
+  </div>
+  <p class="ann">The same three choices, in the same words, as the Mixer's right-click menu. Hide when not in use moves the row down to Other speakers nearby. Selecting several rows and right-clicking applies one choice to all of them. Forget is new behaviour awaiting the owner's ruling; it would ask first and say how many scenes include the speaker.</p>
+</div>
+</div>
+
+<div class="panels">
+  <section class="pnl">
+    <div class="cap">Fifteen speakers, and the way to an Equalizer</div>
+    <p class="note">Six kept, nine seen; Hide All has folded the lower section to one line, so nothing scrolls. Every kept row carries the Mixer's own Equalizer button (gold when the curve is not flat, as on Move 2 above; hovered here on Bedroom). One click on it opens that speaker's page at its Equalizer. Clicking anywhere else on the row opens the same page at the top.</p>
+    <div class="ci">
+      <div class="sechead" style="margin-top:0"><h2>Your speakers</h2><span class="count">6</span></div>
+      <div class="group">
+        <div class="row"><span class="iw"><svg><use href="#i-laptop"/></svg></span><div class="txt"><div class="nm">MacBook Pro Speakers</div></div><span class="fixed">Always</span><button class="eq" type="button" aria-label="Equalizer"><svg><use href="#i-eq"/></svg></button></div>
+        <div class="row"><span class="iw"><svg><use href="#i-spk"/></svg></span><div class="txt"><div class="nm">Move 2</div></div><button class="pd" type="button">When available<svg><use href="#i-ud"/></svg></button><button class="eq" type="button" aria-label="Equalizer"><svg><use href="#i-eq"/></svg></button></div>
+        <div class="row"><span class="iw"><svg><use href="#i-tv"/></svg></span><div class="txt"><div class="nm">TV</div></div><button class="pd" type="button">When available<svg><use href="#i-ud"/></svg></button><button class="eq" type="button" aria-label="Equalizer"><svg><use href="#i-eq"/></svg></button></div>
+        <div class="row"><span class="iw"><svg><use href="#i-spk"/></svg></span><div class="txt"><div class="nm">Studio left</div></div><button class="pd" type="button">When available<svg><use href="#i-ud"/></svg></button><button class="eq" type="button" aria-label="Equalizer"><svg><use href="#i-eq"/></svg></button></div>
+        <div class="row"><span class="iw"><svg><use href="#i-spk"/></svg></span><div class="txt"><div class="nm">Studio right</div></div><button class="pd" type="button">When available<svg><use href="#i-ud"/></svg></button><button class="eq" type="button" aria-label="Equalizer"><svg><use href="#i-eq"/></svg></button></div>
+        <div class="row away"><span class="iw"><svg><use href="#i-pod"/></svg></span><div class="txt"><div class="nm">Bedroom</div></div><button class="pd" type="button">Always<svg><use href="#i-ud"/></svg></button><span class="tip">Equalizer</span><button class="eq hov" type="button" aria-label="Equalizer"><svg><use href="#i-eq"/></svg></button></div>
+      </div>
+      <div class="sechead"><h2>Other speakers nearby</h2><span class="count">9</span><button class="link" type="button">Show All</button></div>
+      <div class="group well"><div class="foldline">9 speakers on this network, none in the Mixer</div></div>
+    </div>
+  </section>
+
+  <section class="pnl">
+    <div class="cap">Bluetooth access denied</div>
+    <p class="note">Sonos Move is remembered, so it stays, greyed. Onkyo is connected, so macOS still lists it. One row says why the rest are missing.</p>
+    <div class="ci">
+      <div class="sechead" style="margin-top:0"><h2>Your speakers</h2><span class="count">3</span></div>
+      <div class="group">
+        <div class="row"><span class="iw"><svg><use href="#i-laptop"/></svg></span><div class="txt"><div class="nm">MacBook Pro Speakers</div></div><span class="fixed">Always</span><button class="eq" type="button" aria-label="Equalizer"><svg><use href="#i-eq"/></svg></button></div>
+        <div class="row"><span class="iw"><svg><use href="#i-spk"/></svg></span><div class="txt"><div class="nm">Move 2</div></div><button class="pd" type="button">When available<svg><use href="#i-ud"/></svg></button><button class="eq" type="button" aria-label="Equalizer"><svg><use href="#i-eq"/></svg></button></div>
+        <div class="row away"><span class="iw"><svg><use href="#i-radio"/></svg></span><div class="txt"><div class="nm">Sonos Move</div><div class="sub">Bluetooth access is off</div></div><button class="pd" type="button">Always<svg><use href="#i-ud"/></svg></button><button class="eq" type="button" aria-label="Equalizer"><svg><use href="#i-eq"/></svg></button></div>
+      </div>
+      <div class="sechead"><h2>Other speakers nearby</h2><span class="count">2</span><button class="link" type="button">Hide All</button></div>
+      <div class="group well">
+        <div class="row"><span class="iw"><svg><use href="#i-radio"/></svg></span><div class="txt"><div class="nm">Onkyo TX-8220</div><div class="sub">Bluetooth · Connected</div></div><button class="sbtn" type="button">Show in Mixer</button></div>
+        <div class="row"><span class="iw"><svg><use href="#i-spk"/></svg></span><div class="txt"><div class="nm">Office</div><div class="sub">AirPlay · Available</div></div><button class="sbtn" type="button">Show in Mixer</button></div>
+        <div class="row permrow" style="height:54px"><span class="iw"><svg><use href="#i-bt"/></svg></span><div class="txt"><div class="nm">Bluetooth access is off</div><div class="sub">Audiout can only list Bluetooth speakers that are already connected.</div></div><button class="sbtn cta" type="button">Open Privacy Settings…</button></div>
+      </div>
+    </div>
+  </section>
+</div>
+
+<script>
+(function(){
+  var h=document.documentElement,b=document.getElementById('tg'),order=['system','light','dark'];
+  function cur(){return h.getAttribute('data-theme')||'system';}
+  function label(){var c=cur();b.textContent='Appearance: '+c.charAt(0).toUpperCase()+c.slice(1);}
+  b.addEventListener('click',function(){
+    var n=order[(order.indexOf(cur())+1)%3];
+    if(n==='system')h.removeAttribute('data-theme');else h.setAttribute('data-theme',n);
+    try{localStorage.setItem('g-theme',n);}catch(e){}
+    label();
+  });
+  label();
+})();
+</script>
+</body>
+</html>

@@ -39,6 +39,7 @@ public struct DiscoveredDevice: Sendable, Equatable {
         lhs.outputID == rhs.outputID &&
         lhs.isAirPlay2Supported == rhs.isAirPlay2Supported &&
         lhs.isAvailable == rhs.isAvailable &&
+        lhs.access == rhs.access &&
         lhs.descriptor.name == rhs.descriptor.name &&
         lhs.descriptor.hostname == rhs.descriptor.hostname &&
         lhs.descriptor.address == rhs.descriptor.address &&
@@ -97,13 +98,19 @@ public struct DiscoveredDevice: Sendable, Equatable {
     /// streamable and has now gone offline.
     public let isAvailable: Bool
 
+    /// What the receiver asks for before it plays, from its TXT records
+    /// (``NativeDiscovery/access(airplay:raop:)``).
+    public let access: AirPlayAccess
+
     public init(id: String, descriptor: DeviceDescriptor, outputID: OutputID,
-                isAirPlay2Supported: Bool, isAvailable: Bool = true) {
+                isAirPlay2Supported: Bool, isAvailable: Bool = true,
+                access: AirPlayAccess = .open) {
         self.id = id
         self.descriptor = descriptor
         self.outputID = outputID
         self.isAirPlay2Supported = isAirPlay2Supported
         self.isAvailable = isAvailable
+        self.access = access
     }
 }
 
@@ -225,7 +232,7 @@ public enum BrowserState: Sendable, Equatable {
 /// ⟷ ``OutputID`` mapping (both forms are naturally in hand here at resolve time).
 ///
 /// All mutable state is confined to one serial queue (same discipline as
-/// `MockBackend`/`OwnToneBackend`); `@unchecked Sendable` is honest because of it.
+/// `MockBackend`); `@unchecked Sendable` is honest because of it.
 public final class NativeDiscovery: @unchecked Sendable {
 
     /// Fires on the discovery queue for every classified change. Set before
@@ -255,6 +262,38 @@ public final class NativeDiscovery: @unchecked Sendable {
     /// service, not one per re-announce (D6: drops are loud, but not spam).
     private var loggedSelfDrops: Set<String> = []
 
+    /// How long any Bonjour removal (`_airplay._tcp` or `_raop._tcp`, for any
+    /// device) is held before it is applied. mDNS drops and re-adds these
+    /// adverts transiently under normal network churn (Wi-Fi congestion, an
+    /// mDNSResponder cache refresh, a roam), so ONE `.removed` change is a blip,
+    /// not a departure: applying it at once deselects the speaker and tears down
+    /// its live stream out from under the user, then flaps back when the advert
+    /// re-resolves seconds later. A re-resolve of the SAME leg within the window
+    /// cancels that removal (`handleResolve`); only a removal that outlasts the
+    /// window is applied, and the ordinary offline/disappear rules then run
+    /// (`commitRemove`). Mirrors the Cast absence grace in `NativeBackend`
+    /// (`castAbsenceGrace`). Injectable so tests shrink it; never mutated after
+    /// init.
+    ///
+    /// razor: the cancel arrives from `handleResolve`, which fires only after
+    /// `NetworkFrameworkBrowser`'s `NWConnection` probe reaches `.ready`, so the
+    /// probe's latency is charged against this grace. Cancelling on the browse
+    /// `.added` change instead would need a new callback on the
+    /// `ServiceBrowsing` seam, and the production side of it,
+    /// `NetworkFrameworkBrowser` mapping an `NWBrowser` `.added` result to that
+    /// callback, cannot be covered by a hermetic test because
+    /// `NWBrowser.Result` has no public initialiser.
+    private let removeGrace: TimeInterval
+
+    /// The default removal grace (seconds). Matches the Cast absence grace
+    /// default: one browse blip is not a departure.
+    public static let defaultRemoveGrace: TimeInterval = 3
+
+    /// Removal timers, keyed by device id then by service leg. Armed by
+    /// `handleRemove` and fired on `queue`; a resolve of the same leg cancels
+    /// that leg's timer (`handleResolve`); `stop()` clears them all.
+    private var pendingRemoves: [String: [ResolvedService.ServiceType: DispatchWorkItem]] = [:]
+
     /// Per-device tracking of which service types are currently advertising it,
     /// and the best descriptor seen. De-dupe + AP1↔AP2 transitions live here.
     private struct Entry {
@@ -268,10 +307,17 @@ public final class NativeDiscovery: @unchecked Sendable {
         /// `_airplay._tcp` with the AP2 feature bits), it stays AP2 for the rest
         /// of the session. A real AP2 receiver does NOT downgrade to AP1 at
         /// runtime — losing its `_airplay._tcp` advert means it's going offline,
-        /// not that it became an AP1-only device. Set true in `buildDevice`
+        /// not that it became an AP1-only device. Set true in `handleResolve`
         /// whenever `classify` returns true; never cleared. Gates the
-        /// offline-vs-downgrade decision in `handleRemove`.
+        /// offline-vs-downgrade decision in `commitRemove`.
         var hasEverBeenAP2: Bool = false
+
+        /// The reachability rule derived from the legs currently held, as
+        /// opposed to `device.isAvailable`, which is the last snapshot built. A
+        /// sticky-AP2 device with no live `_airplay._tcp` advert is offline; a
+        /// device that has never been AP2 is always available. The only place
+        /// this rule lives.
+        var isAvailable: Bool { !(hasEverBeenAP2 && airplay == nil) }
     }
 
     /// - Parameters:
@@ -281,8 +327,10 @@ public final class NativeDiscovery: @unchecked Sendable {
     ///     filter (see `localHostname` above). Defaults to the system's
     ///     `SCDynamicStoreCopyLocalHostName` + ".local"; tests inject a fixture.
     public init(browser: ServiceBrowsing? = nil,
-                localHostname: String? = NativeDiscovery.systemLocalHostname()) {
+                localHostname: String? = NativeDiscovery.systemLocalHostname(),
+                removeGrace: TimeInterval = NativeDiscovery.defaultRemoveGrace) {
         self.localHostname = localHostname.map(Self.normalizedHostname)
+        self.removeGrace = removeGrace
         self.browser = browser ?? NetworkFrameworkBrowser()
         self.browser.onResolve = { [weak self] service in
             guard let self else { return }
@@ -317,6 +365,10 @@ public final class NativeDiscovery: @unchecked Sendable {
         queue.async {
             self.started = false
             self.known.removeAll()
+            for legs in self.pendingRemoves.values {
+                for work in legs.values { work.cancel() }
+            }
+            self.pendingRemoves.removeAll()
         }
     }
 
@@ -388,17 +440,23 @@ public final class NativeDiscovery: @unchecked Sendable {
         case .raop:    entry.raop = service
         }
 
-        // Latch the sticky-AP2 bit the moment this device classifies AP2. A
-        // resolve always carries a live `_airplay._tcp` advert when it classifies
-        // AP2, so the device is reachable now — availability is unconditionally
-        // true on the resolve path (only a REMOVE can make a sticky-AP2 device
-        // unavailable; see `handleRemove`).
+        // The leg that was pending removal is back, so its removal is void. The
+        // other leg's pending removal, if any, is untouched.
+        pendingRemoves[id]?.removeValue(forKey: service.serviceType)?.cancel()
+        if pendingRemoves[id]?.isEmpty == true { pendingRemoves[id] = nil }
+
+        // The sticky-AP2 bit latches the moment this device classifies AP2.
+        // Availability comes from `Entry.isAvailable`, so a lone `_raop._tcp`
+        // re-resolve while the `_airplay._tcp` advert is still gone keeps a
+        // sticky-AP2 device offline (and, because `buildDevice` keeps the stored
+        // descriptor in that state, produces no `.updated`). Only an
+        // `_airplay._tcp` resolve brings such a device back.
         if Self.classify(airplay: entry.airplay) {
             entry.hasEverBeenAP2 = true
         }
 
         let rebuilt = Self.buildDevice(
-            id: id, outputID: outputID, entry: entry, available: true)
+            id: id, outputID: outputID, entry: entry, available: entry.isAvailable)
         entry.device = rebuilt
 
         let previous = known[id]
@@ -429,13 +487,34 @@ public final class NativeDiscovery: @unchecked Sendable {
                 }
             }?.key
         }
-        guard let id = key, var entry = known[id] else { return }
+        guard let id = key, known[id] != nil else { return }
+
+        // Hold every removal for `removeGrace` and apply it in `commitRemove`.
+        // The leg is NOT cleared here, so a second removal of the same leg
+        // inside the window still correlates by instance name and simply
+        // re-arms this timer.
+        pendingRemoves[id]?[removed.serviceType]?.cancel()
+        let serviceType = removed.serviceType
+        let work = DispatchWorkItem { [weak self] in
+            self?.commitRemove(id: id, serviceType: serviceType)
+        }
+        pendingRemoves[id, default: [:]][serviceType] = work
+        queue.asyncAfter(deadline: .now() + removeGrace, execute: work)
+    }
+
+    /// Applies a removal that outlasted `removeGrace`: clears the departed leg,
+    /// then runs the offline/disappear rules. Runs on `queue`, like every other
+    /// handler, so all state stays serial.
+    private func commitRemove(id: String, serviceType: ResolvedService.ServiceType) {
+        pendingRemoves[id]?.removeValue(forKey: serviceType)
+        if pendingRemoves[id]?.isEmpty == true { pendingRemoves[id] = nil }
+        guard var entry = known[id] else { return }
 
         // Clear only the service type that departed. A device advertising both
-        // must lose BOTH before it disappears — losing its `_airplay._tcp`
+        // must lose BOTH before it disappears: losing its `_airplay._tcp`
         // advert alone marks a sticky-AP2 device OFFLINE (an `.updated` with
         // `isAvailable == false`), it does NOT downgrade it to AP1-only.
-        switch removed.serviceType {
+        switch serviceType {
         case .airplay: entry.airplay = nil
         case .raop:    entry.raop = nil
         }
@@ -447,17 +526,18 @@ public final class NativeDiscovery: @unchecked Sendable {
             return
         }
 
-        // Still advertising on the OTHER service type. Availability is now
-        // false iff a sticky-AP2 device just lost its `_airplay._tcp` advert:
-        // it's a real AP2 receiver going offline (its `_raop._tcp` record simply
-        // lingers longer than the `_airplay._tcp` one when it powers off), so it
-        // stays `isAirPlay2Supported == true` but becomes unavailable — the
-        // backend tears down any engine session and the UI shows an unavailable
-        // (retry-on-click) row, NOT the AP1 "coming soon" popover. A device that
-        // was NEVER AP2 (genuine AP1-only) is unaffected and stays available.
-        let available = !(entry.hasEverBeenAP2 && entry.airplay == nil)
+        // Still advertising on the OTHER service type. `Entry.isAvailable` is
+        // now false iff a sticky-AP2 device just lost its `_airplay._tcp`
+        // advert: it's a real AP2 receiver going offline (its `_raop._tcp`
+        // record simply lingers longer than the `_airplay._tcp` one when it
+        // powers off), so it stays `isAirPlay2Supported == true` but becomes
+        // unavailable. The backend then tears down any engine session and the UI
+        // shows an unavailable (retry-on-click) row, NOT the AP1 "coming soon"
+        // popover. A device that was NEVER AP2 (genuine AP1-only) is unaffected
+        // and stays available.
         let rebuilt = Self.buildDevice(
-            id: id, outputID: entry.device.outputID, entry: entry, available: available)
+            id: id, outputID: entry.device.outputID, entry: entry,
+            available: entry.isAvailable)
         let before = entry.device
         entry.device = rebuilt
         known[id] = entry
@@ -491,11 +571,13 @@ public final class NativeDiscovery: @unchecked Sendable {
         // advertised `_airplay._tcp` with the AP2 feature bits stays AP1-only.
         let isAP2 = entry.hasEverBeenAP2 || classify(airplay: entry.airplay)
         // A sticky-AP2 device that has gone offline (lost `_airplay._tcp`, only
-        // `_raop._tcp` lingers) keeps its last AP2-sourced descriptor — name,
-        // address, port, TXT all stay put — so the row doesn't cosmetically flip
-        // to the raop-decorated name just because the device powered off. It's
-        // the same physical device at the same address; only availability changed.
-        let built: DeviceDescriptor = (entry.hasEverBeenAP2 && entry.airplay == nil)
+        // `_raop._tcp` lingers) keeps its last AP2-sourced descriptor and access
+        // — name, address, port, TXT, the advertised lock all stay put — so the
+        // row doesn't cosmetically flip to the raop-decorated name, or change its
+        // lock glyph, just because the device powered off. It's the same physical
+        // device at the same address; only availability changed.
+        let carriesForward = entry.hasEverBeenAP2 && entry.airplay == nil
+        let built: DeviceDescriptor = carriesForward
             ? entry.device.descriptor
             : descriptor(from: source)
         // The `DeviceDescriptor` is the ENGINE-facing contract, so its `name`
@@ -521,7 +603,8 @@ public final class NativeDiscovery: @unchecked Sendable {
             descriptor: built,
             outputID: outputID,
             isAirPlay2Supported: isAP2,
-            isAvailable: available
+            isAvailable: available,
+            access: carriesForward ? entry.device.access : access(airplay: entry.airplay, raop: entry.raop)
         )
     }
 
@@ -558,6 +641,31 @@ public final class NativeDiscovery: @unchecked Sendable {
         return supportsAudio && supportsCoreUtils
     }
 
+    /// What a receiver asks for before it plays. Reads `flags` (`_airplay._tcp`)
+    /// and `sf` (`_raop._tcp`) as hex status flags, plus `pw` and `act` on
+    /// either record. `pw` counts when present, non-empty and not "false",
+    /// the same test as the vendored `raop_device_cb` (`raop.c` ~:4446).
+    /// Precedence: Home-only (`act=2`, bit 10), then on-screen code on every
+    /// join (bit 3), then on-screen code the first time only (bit 9), then
+    /// password (`pw`, bit 7).
+    static func access(airplay: ResolvedService?, raop: ResolvedService?) -> AirPlayAccess {
+        let records = [airplay?.txtRecord, raop?.txtRecord].compactMap { $0 }
+        let flags = [airplay?.txtRecord["flags"], raop?.txtRecord["sf"]]
+            .compactMap { $0.flatMap { parseHex32($0) } }
+            .reduce(UInt32(0), |)
+        func bit(_ n: UInt32) -> Bool { (flags >> n) & 1 == 1 }
+        let pw = records.contains { txt in
+            guard let value = txt["pw"], !value.isEmpty else { return false }
+            return value.lowercased() != "false"
+        }
+        let homeOnly = records.contains { $0["act"] == "2" }
+        if homeOnly || bit(10) { return .homeMembersOnly }
+        if bit(3) { return .onScreenCodeEveryTime }
+        if bit(9) { return .onScreenCode }
+        if pw || bit(7) { return .password }
+        return .open
+    }
+
     /// Parse the AirPlay `features` TXT value into a 64-bit mask. The field is
     /// either a single 32-bit hex value (`0x444F8A00`) or two comma-separated
     /// 32-bit hex values `LOW,HIGH` (`0x445D0A00,0x1C340`) where LOW is the low
@@ -573,7 +681,7 @@ public final class NativeDiscovery: @unchecked Sendable {
         return UInt64(low) | (UInt64(high) << 32)
     }
 
-    private static func parseHex32<S: StringProtocol>(_ s: S) -> UInt32? {
+    static func parseHex32<S: StringProtocol>(_ s: S) -> UInt32? {
         var str = s.trimmingCharacters(in: .whitespaces)
         if str.hasPrefix("0x") || str.hasPrefix("0X") { str = String(str.dropFirst(2)) }
         guard !str.isEmpty else { return nil }

@@ -186,6 +186,7 @@ public struct AppRouteStore: Sendable {
     /// Load the saved app routes. Missing file → `nil` (first run — the caller
     /// applies its own defaults, i.e. no routes). A file from a newer schema is
     /// treated as missing rather than crashing an older build.
+    /// The file is moved aside first (`StoreRecovery.quarantine`) so the next save cannot overwrite a file this build cannot read.
     public func load() throws -> [AppRoute]? {
         guard FileManager.default.fileExists(atPath: fileURL.path) else { return nil }
         let data = try Data(contentsOf: fileURL)
@@ -196,7 +197,10 @@ public struct AppRouteStore: Sendable {
             StoreRecovery.quarantine(fileURL)
             throw error
         }
-        guard envelope.schemaVersion <= Self.currentSchemaVersion else { return nil }
+        guard envelope.schemaVersion <= Self.currentSchemaVersion else {
+            StoreRecovery.quarantine(fileURL)
+            return nil
+        }
         return envelope.routes.map { $0.route }
     }
 

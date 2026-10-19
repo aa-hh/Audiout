@@ -55,6 +55,30 @@ plist/Info.plist identity scheme (`scripts/ptp-helper.plist`,
   privilege boundary (design doc §4). This is a hard ceiling, not a start:
   never grow it into a general IPC channel — that would put a message parser
   in the one root process.
+  **2026-09-20:** the release trigger was honored from any local process that
+  could open the Mach service — repeated sends held the daemon down as a
+  persistent denial of AirPlay, not just a one-off blip. Fixed with
+  `xpc_connection_set_peer_code_signing_requirement()` on each accepted peer,
+  before `xpc_connection_resume()`: the requirement string is rendered by
+  `scripts/make-app.sh` from the signing identity's bundle id and Team ID into
+  the launchd plist's `AUDIOUT_PTP_PEER_REQUIREMENT` environment key, so only
+  a peer whose code signature matches the app that shipped the helper can
+  release it. An ad-hoc build carries no Team ID, so the requirement renders
+  empty and the helper refuses every release, relying on idle exit alone.
+  Manual check (owner's live session, not run here): with a Developer ID
+  `.dev` build installed and the helper running (`PTPClockProbe` ready),
+  compile with `clang` a small C program that mirrors
+  `PTPHelperService.swift`'s `release()` (`xpc_connection_create_mach_service`
+  with `XPC_CONNECTION_MACH_SERVICE_PRIVILEGED` on the `.dev` Mach service
+  name, an empty event handler, resume, send a dictionary with `release` true,
+  sleep 2s); run it unsigned. XPC drops a request that fails the requirement
+  and reports the failure to the sender only where a reply was expected, and
+  `release()` expects none, so the helper may log nothing: the check passes
+  when `log show --last 1m --predicate 'process == "ptp-helper"'` shows no
+  "release requested" line and the daemon is still running (`pgrep
+  ptp-helper`). A "failed the code-signing requirement" line may appear too,
+  but is not required. Then release from the app (switch the last AirPlay
+  speaker away) and confirm the existing "release requested" line and exit 0.
 - **XPC, libdispatch, and os_log are all libSystem, so none add a linked
   library** — the Library Validation constraint below is unaffected. `otool
   -L` on the built helper must keep showing `libSystem.B.dylib` and nothing
@@ -102,6 +126,18 @@ plist/Info.plist identity scheme (`scripts/ptp-helper.plist`,
   __info_plist`, done in `scripts/make-app.sh`), not a bundle resource —
   `SMAppService` requires a standalone-executable LaunchDaemon to carry one.
   `CFBundleIdentifier` must match the daemon's launchd `Label`.
+  **2026-09-07:** `scripts/ptp-helper-info.plist` is a `__BUNDLE_ID__`
+  template now, rendered by `make-app.sh` (locally into the build dir, on the
+  remote compile into `.remote-products/`) before the link. Until then it
+  hardcoded `com.audiout.Audiout.ptphelper` while `Label`/`MachServices` were
+  `BUNDLE_ID`-derived, so every `.dev`/`.staging`/handover build shipped a
+  helper whose embedded identifier — and, since codesign derives the signing
+  Identifier from it, its signature — named the DEFAULT daemon. Suspected
+  contributor to `SMAppService.register()` throwing
+  `SMAppServiceErrorDomain Code=1` on non-default ids. The helper is now also
+  signed with an explicit `--identifier` equal to the label, and
+  `scripts/verify-bundle.sh` check 8 refuses a bundle whose embedded id and
+  Label differ.
 - **The launchd `Label`/plist filename are `BUNDLE_ID`-derived**, not
   hardcoded, so side-by-side dev builds under different `BUNDLE_ID`s get
   independent daemon identities (a same-label collision previously caused a

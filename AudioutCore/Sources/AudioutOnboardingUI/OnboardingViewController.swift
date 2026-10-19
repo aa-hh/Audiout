@@ -80,6 +80,16 @@ public final class OnboardingViewController: NSViewController {
     /// four call sites is on the way there.
     public var onWillOpenSystemSettings: (() -> Void)?
 
+    /// Opens `audiout.app/remote` — the iPhone card's primary button, and the
+    /// only link this window has. Defaults to the real browser; a headless
+    /// test and the snapshot renderers replace it so nothing launches one.
+    public var openURL: (URL) -> Void = { NSWorkspace.shared.open($0) }
+
+    /// Fired each time the iPhone card comes on screen. The app opens a
+    /// pairing window then, so a phone that scans the card's code may ask to
+    /// pair with this Mac.
+    public var onRemoteInviteShown: (() -> Void)?
+
     /// Called on every edge of "a system permission dialog this flow raised is
     /// still unanswered". The window controller goes quiet while it is true —
     /// see ``isPromptInFlight``.
@@ -151,6 +161,10 @@ public final class OnboardingViewController: NSViewController {
     /// Same idea for refusals: a denial is announced when it first becomes
     /// visible, not on every repaint that still shows it.
     private var deniedAtLastRefresh: Set<SetupStep> = []
+    /// The step whose card the hero pane last displayed (active or browsed) —
+    /// the edge `remote_invite:setup_card_shown` fires on, so a repaint that
+    /// leaves the same card up does not recount it.
+    private var lastHeroDisplayedStep: SetupStep?
     private var announcedCheckPassed = false
     private var announcedSnapBack: SetupStep?
     /// Flips true once the load-time silent status read has LANDED. Before that,
@@ -440,10 +454,8 @@ public final class OnboardingViewController: NSViewController {
         tile.translatesAutoresizingMaskIntoConstraints = false
 
         titleLabel = NSTextField(labelWithString: "")
-        // The window's own heading, so VoiceOver's rotor can find it. The raw
-        // AX string, not `NSAccessibilityHeadingRole`: that constant is macOS 26+
-        // and this app installs on 14.2.
-        titleLabel.setAccessibilityRole(NSAccessibility.Role(rawValue: "AXHeading"))
+        // The window's own heading, so VoiceOver's rotor can find it.
+        titleLabel.setAccessibilityHeading()
         titleLabel.font = Tokens.Font.display
         titleLabel.lineBreakMode = .byWordWrapping
         titleLabel.maximumNumberOfLines = 2
@@ -487,9 +499,11 @@ public final class OnboardingViewController: NSViewController {
         // async audio probe resolving, the Bluetooth prompt being answered —
         // repaints the rows.
         model.onChange = { [weak self] in self?.refresh() }
-        // Register the PTP helper daemon once, at load: unlike the probes,
+        // Register the PTP helper daemon at load: unlike the probes,
         // registering shows no system prompt of its own, so it's safe to run
-        // unconditionally rather than waiting for a tap.
+        // unconditionally rather than waiting for a tap. Every return to the
+        // front registers again (`appDidBecomeActive`) — approval in Login
+        // Items is what lets the next register succeed and load the daemon.
         model.registerPTPHelper()
         // Reflect real current state up front — without this the Bluetooth row
         // paints undetermined even when the grant is already in place
@@ -584,12 +598,20 @@ public final class OnboardingViewController: NSViewController {
     /// it finds — "we looked; nothing changed" stops the spinner honestly.
     /// Otherwise this is just the ordinary catching-up activation, so it does
     /// the plain silent re-read as before.
+    ///
+    /// Both paths REGISTER the PTP helper again before the re-read, not on the
+    /// poll's tick (``SetupModel/reregisterPTPHelperOnReturn()``): the switch
+    /// the user flips in Login Items — reached through our trip or through the
+    /// "Background Items Added" notice, which is no trip of ours — approves
+    /// the registration, and the next `register()` is what loads the daemon.
+    /// A still-unapproved helper just lands on `.requiresApproval` again.
     public func appDidBecomeActive() {
         // Back in front — the polls have somewhere to land again.
         startRemoteControlPoll()
         startPTPHelperPoll()
         if settingsTripDeparted {
             settingsReturnTask = Task { @MainActor in
+                await model.reregisterPTPHelperOnReturn()
                 await model.refreshStatuses()
                 cancelSettingsTripTimer()
                 settingsTripStep = nil
@@ -597,7 +619,10 @@ public final class OnboardingViewController: NSViewController {
                 refresh(animated: false)
             }
         } else {
-            refreshStatuses()
+            Task { @MainActor in
+                await model.reregisterPTPHelperOnReturn()
+                await model.refreshStatuses()
+            }
         }
     }
 
@@ -630,6 +655,10 @@ public final class OnboardingViewController: NSViewController {
     /// (the daemon isn't in the bundle — it cannot heal itself, so waiting for
     /// it would be a timer running forever).
     private func startPTPHelperPoll() {
+        // A headless run drives the status itself; a wall-clock tick there
+        // races the test's own status flips, and its read can land `.enabled`
+        // ahead of the return's re-register.
+        guard !HeadlessRuntime.isActive else { return }
         guard ptpHelperPoll == nil else { return }
         guard !Self.ptpPollIsSettled(model.ptpHelperStatus) else { return }
         ptpHelperPoll = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] timer in
@@ -750,13 +779,14 @@ public final class OnboardingViewController: NSViewController {
                 detail: "Your speakers share one clock, through a small "
                     + "helper. Approve it once in Login Items.",
                 heroHeadline: "Keep speakers on one shared clock",
-                whyLine: "A small helper shares one clock so your speakers never drift.",
+                whyLine: "Audiout needs this helper to keep your speakers in time. "
+                    + "Approve it once in Login Items.",
                 allowTitle: "Turn on at login",
-                // Skippable (P0-1): approval lives in Login Items, where macOS
-                // can simply refuse — and without an exit an unapproved helper
-                // locked the gate with nothing to press. The why line above
-                // already names what a skip forfeits (speakers may drift).
-                isSkippable: true,
+                // Required (owner decision 2026-09-07): without the helper the
+                // app cannot keep speakers in time, so there is no way past.
+                // Approval in Login Items is the only exit; `.notFound` (no
+                // daemon to approve) the only auto-pass.
+                isSkippable: false,
                 spineAskTitle: "Keep speakers in time",
                 spineDoneTitle: "Speakers stay in time")
         case .remoteControl:
@@ -776,6 +806,28 @@ public final class OnboardingViewController: NSViewController {
                 isSkippable: true,
                 spineAskTitle: "Volume-key control",
                 spineDoneTitle: "Volume-key control")
+        case .audioutRemote:
+            return SetupCardContent(
+                step: step,
+                symbolName: "iphone",
+                iconColor: Tokens.Color.permissionAudioutRemote,
+                activeTitle: "Tune your speakers from your iPhone",
+                completedTitle: "Your iPhone can tune your speakers",
+                detail: "Audiout Remote measures each speaker's timing from "
+                    + "where you sit and controls this Mac. Get it at "
+                    + "\(RemoteInviteView.pageAddress).",
+                heroHeadline: "Measure with your iPhone",
+                whyLine: "Audiout Remote listens from where you sit and sets each "
+                    + "speaker's timing in seconds. Scan to get it.",
+                // The one card whose primary button is not the completion: a
+                // phone connecting is. The primary moves setup on rather than
+                // sending anyone out of it (owner decision 2026-09-12); the
+                // page stays one quiet link away. Continue IS the skip, so no
+                // second Skip button beside it.
+                allowTitle: "Continue",
+                isSkippable: false,
+                spineAskTitle: "iPhone remote",
+                spineDoneTitle: "iPhone remote")
         case .usageStats:
             return SetupCardContent(
                 step: step,
@@ -784,18 +836,12 @@ public final class OnboardingViewController: NSViewController {
                 activeTitle: "Share anonymous usage counts",
                 completedTitle: "Audiout counts feature use, anonymously",
                 detail: "Audiout counts which features get used. No audio, "
-                    + "speaker names, network details or license key ever "
-                    + "leave your Mac.",
+                    + "speaker names or your license key are ever part of it.",
                 // What the button gets: not a capability for the user, and the
                 // copy doesn't pretend otherwise. This is the one card where
                 // the person being helped is the one who wrote the app, and
                 // saying so plainly is what earns the yes.
                 heroHeadline: "Help make Audiout better",
-                // This is the ONLY place the never-sent promise is made now
-                // that the card below is a two-button dialog rather than an
-                // itemised ledger. The deleted-body rule still holds — the
-                // picture shows the SHAPE of the decision and cannot show its
-                // terms, so the terms ride the why line.
                 // The WHY, not the terms: the card this ask raises carries the
                 // privacy fence in full, and it appears directly under this
                 // line on the stage — saying it in both read as a stutter.
@@ -841,6 +887,14 @@ public final class OnboardingViewController: NSViewController {
         // choreography happens somewhere the user can see it. A permission that
         // was already in place when the window opened is not that.
         if !newlyCompleted.isEmpty, initialStatusesSettled { returnToFront() }
+        // One funnel event per step the user just got through — the same edge
+        // the choreography fires on, so a grant already in place at opening
+        // is not counted as a step completed here.
+        if initialStatusesSettled {
+            for step in flow.steps where newlyCompleted.contains(step) {
+                Analytics.capture("onboarding:step_granted", ["step": SetupFlowModel.telemetryName(step)])
+            }
+        }
         if let snapBackStep, flow.isComplete(snapBackStep) { self.snapBackStep = nil }
 
         // A browse is a reading position on a DECIDED row, and it yields to
@@ -884,6 +938,14 @@ public final class OnboardingViewController: NSViewController {
     /// The hero pane's two halves: which rehearsal is on stage, and whether the
     /// stage is standing back for a real dialog.
     private func refreshHero(active: SetupStep?, animated: Bool) {
+        let displayedStep = browseStep ?? active
+        if displayedStep != lastHeroDisplayedStep {
+            lastHeroDisplayedStep = displayedStep
+            if displayedStep == .audioutRemote {
+                Analytics.capture("remote_invite:setup_card_shown")
+                onRemoteInviteShown?()
+            }
+        }
         if let browsed = browseStep {
             // Two steps whose browse is NOT the Settings pane. Usage
             // Statistics has no such pane at all, so it re-shows its own card.
@@ -892,7 +954,7 @@ public final class OnboardingViewController: NSViewController {
             // no privacy pane to show either, and the dialog it never raised
             // is the honest picture, at rest.
             let mode: DemoMode
-            if browsed == .usageStats {
+            if browsed == .usageStats || browsed == .audioutRemote {
                 mode = .prompt
             } else if browsed == .localNetwork, !model.isLocalNetworkGated {
                 mode = .prompt
@@ -978,12 +1040,12 @@ public final class OnboardingViewController: NSViewController {
         if step == .audio, model.audioStatus == .unsupported {
             return .autoPassed(note: Self.audioAutoPassNote)
         }
-        // Same shape for Speaker Sync's two unfixable states: the daemon isn't
-        // in the bundle, or registering it threw. `SetupFlowModel.isComplete`
-        // is what routes those here — the row auto-passes so the gate can open,
-        // and the note is the whole explanation.
-        if step == .speakerSync,
-           model.ptpHelperStatus == .notFound || model.ptpHelperRegistrationFailed {
+        // Same shape for Speaker Sync's one unfixable state: the daemon isn't
+        // in the bundle. `SetupFlowModel.isComplete` is what routes it here —
+        // the row auto-passes so the gate can open, and the note is the whole
+        // explanation. A `register()` that threw is NOT this: on a first run
+        // it throws into `.requiresApproval`, which the gate waits for.
+        if step == .speakerSync, model.ptpHelperStatus == .notFound {
             return .autoPassed(note: Self.speakerSyncAutoPassNote)
         }
         return .completed
@@ -1021,6 +1083,9 @@ public final class OnboardingViewController: NSViewController {
         // right here, and a "no" is an answer rather than a refusal to route
         // around.
         case .usageStats:    return false
+        // Nothing to spend: the button opens a web page, and it opens the
+        // same page every time.
+        case .audioutRemote: return false
         }
     }
 
@@ -1067,7 +1132,7 @@ public final class OnboardingViewController: NSViewController {
         case .audio:         return model.audioStatus == .denied
         case .localNetwork:  return model.localNetworkStatus == .denied
         case .bluetooth:     return model.bluetoothStatus == .denied
-        case .speakerSync, .remoteControl, .usageStats: return false
+        case .speakerSync, .remoteControl, .usageStats, .audioutRemote: return false
         }
     }
 
@@ -1095,16 +1160,19 @@ public final class OnboardingViewController: NSViewController {
         case .speakerSync:   return .ptpHelper
         // Neither is a `RequiredPermission` — both are skippable, and a
         // revocation of one never re-opens this window.
-        case .bluetooth, .remoteControl, .usageStats: return nil
+        case .bluetooth, .remoteControl, .usageStats, .audioutRemote: return nil
         }
     }
 
     private func demoMode(for step: SetupStep?) -> DemoMode {
         guard let step else { return .settled }
         // Usage Statistics wears the privacy card's two-button SHAPE — the
-        // decision has that shape — but the card is ours, so the frame drops
-        // its macOS caption (see `previewFrameLabel(for:)`).
-        if step == .usageStats { return .prompt }
+        // decision has that shape — but the card is ours, which is what its
+        // caption says (see `previewFrameLabel(for:)`).
+        // Two cards raise no macOS dialog at all: one draws our own consent
+        // card, the other the QR the user scans at life size. Both rehearse as
+        // `.prompt` — the surface the click leads to.
+        if step == .usageStats || step == .audioutRemote { return .prompt }
         // Speaker Sync has no prompt at all — Login Items is the only surface
         // it ever shows the user.
         if step == .speakerSync { return .settings }
@@ -1306,14 +1374,14 @@ public final class OnboardingViewController: NSViewController {
     static let localNetworkUnansweredStatus = "Nothing has answered yet. If the permission "
         + "dialog is open, choose Allow, or try again."
     /// Speaker Sync's recovery, for a trip to Login Items that came back with
-    /// the switch still off. The status names the place people actually go
-    /// looking; the body repeats the step's own explanation and then names the
-    /// cost of skipping, since a skip is now on offer here.
-    static let speakerSyncRecoveryStatus = "It isn't on yet. The switch is in Login Items, "
-        + "not Privacy & Security."
+    /// the switch still off. The status says the helper is required and names
+    /// the place people actually go looking; the body repeats the step's own
+    /// explanation and, like the denied path, promises the row will tick
+    /// itself — there is no skip on offer here.
+    static let speakerSyncRecoveryStatus = "It isn't on yet. Audiout needs it to keep your "
+        + "speakers in time — the switch is in Login Items, not Privacy & Security."
     static let speakerSyncRecoveryBody = "Your speakers share one clock, through a small "
-        + "helper. Approve it once in Login Items. You can skip this for now, but without it "
-        + "your speakers may drift apart."
+        + "helper. Approve it once in Login Items, then come back. This row ticks itself."
     static let alertSymbol = "exclamationmark.triangle.fill"
     /// The gate's CTA (owner copy 2026-08-11: closing setup is what starts the
     /// deferred audio engine, so the button names that). Named once — a browse
@@ -1323,14 +1391,21 @@ public final class OnboardingViewController: NSViewController {
     /// whole ribbon line on ("This is what macOS will ask you next."), said by
     /// the frame instead.
     static let previewFrameLabel = "You'll see this from macOS"
+    /// The same sentence for the one ask whose surface Audiout raises itself.
+    static let audioutPreviewFrameLabel = "You'll see this from Audiout"
     /// The frame's caption, per step. Its whole job is to say WHOSE surface is
-    /// inside it, so Usage Statistics gets NONE: that card wears the privacy
-    /// dialog's two-button shape because the decision has that shape, but macOS
-    /// raises nothing here and captioning it "You'll see this from macOS" would
-    /// be a claim we can't back. Same rule the finale already follows — its own
-    /// card is ours, so it is uncaptioned too.
+    /// inside it, and both answers are now sayable: macOS for the permission
+    /// dialogs, Audiout for the usage-statistics sheet, which the stage draws
+    /// as a mock like every other rehearsal. Audiout Remote is the one step
+    /// with no caption at all — what is inside its frame is a code for the
+    /// user's phone, not a preview of a surface. The finale follows the same
+    /// rule from elsewhere: it is a moment, not a preview, so it is bare.
     static func previewFrameLabel(for step: SetupStep) -> String? {
-        step == .usageStats ? nil : previewFrameLabel
+        switch step {
+        case .usageStats: return audioutPreviewFrameLabel
+        case .audioutRemote: return nil
+        default: return previewFrameLabel
+        }
     }
     /// What VoiceOver hears in place of that caption on Remote Control's first
     /// ask — the one rehearsal whose two surfaces and ghosted Deny ARE the
@@ -1410,16 +1485,17 @@ public final class OnboardingViewController: NSViewController {
         }
 
         // Speaker Sync came back from Login Items still unapproved — the state
-        // that had no words at all (P0-1). It says where the switch really is
-        // (users look for it under Privacy & Security, where it isn't), offers
-        // the trip again, and offers the way past.
+        // that once had no words at all. It says where the switch really is
+        // (users look for it under Privacy & Security, where it isn't), that
+        // the helper is required, and offers the trip again. No skip: the
+        // step is not skippable (`content(for:)`), so the way past is the
+        // switch.
         if step == .speakerSync, didTripLoginItems,
            model.ptpHelperStatus == .requiresApproval {
             content.status = (Self.alertSymbol, Self.speakerSyncRecoveryStatus,
                               Tokens.Color.label2, false)
             content.body = Self.ribbonBody(Self.speakerSyncRecoveryBody)
             content.primary = ("Open Login Items…", .prominent)
-            content.showsSkip = true
             return content
         }
 
@@ -1483,6 +1559,7 @@ public final class OnboardingViewController: NSViewController {
         content.primary = (copy.allowTitle, .prominent)
         content.showsSkip = copy.isSkippable
         content.skipTitle = Self.skipTitle(for: step)
+        if step == .audioutRemote { content.quietLink = "Open \(RemoteInviteView.pageAddress)" }
         return content
     }
 
@@ -1505,7 +1582,7 @@ public final class OnboardingViewController: NSViewController {
         // Network, and Usage Statistics is Audiout's own switch — offering
         // "Open Settings…" for either would open the wrong app on nothing.
         let hasPane = !(step == .localNetwork && !model.isLocalNetworkGated)
-            && step != .usageStats
+            && step != .usageStats && step != .audioutRemote
         var sentence = browseCapabilitySentence(step)
         if hasPane, step != .speakerSync {
             sentence += " It lives under Privacy & Security \u{25B8} \(Self.paneName(for: step)) "
@@ -1535,6 +1612,11 @@ public final class OnboardingViewController: NSViewController {
         case .usageStats:
             return "Audiout counts feature use, anonymously. It lives in "
                 + "Audiout's settings, under General."
+        // Same reason as Usage Statistics: the switch is ours, so this names
+        // where it really lives rather than a System Settings pane.
+        case .audioutRemote:
+            return "Audiout Remote is connected. Manage iPhones in Audiout's "
+                + "settings, under Audiout Remote."
         }
     }
 
@@ -1549,7 +1631,8 @@ public final class OnboardingViewController: NSViewController {
         case .bluetooth:     return "Bluetooth"
         case .remoteControl: return "Accessibility"
         case .speakerSync:   return "Login Items"
-        case .usageStats:    return "Audiout \u{25B8} Settings \u{25B8} General"
+        case .usageStats, .audioutRemote:
+            return "Audiout \u{25B8} Settings \u{25B8} General"
         }
     }
 
@@ -1822,6 +1905,9 @@ public final class OnboardingViewController: NSViewController {
         // would have left the button on screen doing nothing.
         if flow.isDoneAvailable { doneTapped(); return }
         guard let step = displayedActiveStep else { return }
+        // Continue: the card completes only when a phone connects, so moving
+        // on is a skip.
+        if step == .audioutRemote { skipTapped(step); return }
         allowTapped(step)
     }
 
@@ -1836,6 +1922,7 @@ public final class OnboardingViewController: NSViewController {
     private func ribbonQuietLinkTapped() {
         if let browsed = browseStep { openSettings(for: browsed); return }
         guard let step = displayedActiveStep else { return }
+        if step == .audioutRemote { openDestination(.remotePage); return }
         settingsLinkTapped(step)
     }
 
@@ -1854,7 +1941,7 @@ public final class OnboardingViewController: NSViewController {
         // Unreachable: every path here is gated on this step HAVING a System
         // Settings pane, and this one's switch is Audiout's own. Explicit
         // rather than a default, so a step added later is a compile error here.
-        case .usageStats: break
+        case .usageStats, .audioutRemote: break
         }
     }
 
@@ -1915,6 +2002,8 @@ public final class OnboardingViewController: NSViewController {
         // fronting on a click the user made INSIDE this window would be a
         // flash for nothing.
         case .usageStats: return false
+        // A browser is coming forward; fronting ourselves would bury it.
+        case .audioutRemote: return false
         }
     }
 
@@ -1938,7 +2027,10 @@ public final class OnboardingViewController: NSViewController {
         // Our own sheet is not a trip out of the app, so it arms no
         // settings-trip ceiling — that timer exists to catch a user who left
         // for System Settings and never came back.
-        case .usageStatsConsent:
+        // Neither is a trip into System Settings, so neither arms the
+        // settings-trip ceiling — that timer catches a user who left for
+        // System Settings and never came back.
+        case .usageStatsConsent, .remotePage:
             openDestination(result.destination)
         case .settingsPane, .loginItems:
             settingsTripStep = step
@@ -1955,13 +2047,11 @@ public final class OnboardingViewController: NSViewController {
     /// Audiout's own Share / Don't Share sheet — the surface this step's ask
     /// raises, exactly as every other step's ask raises one of macOS's.
     ///
-    /// It is ``UsageStatsConsentCard`` — the SAME view the rehearsal on the
-    /// stage draws, with its buttons live instead of switched off. An `NSAlert`
-    /// was the first attempt and was wrong for exactly the reason this window
-    /// exists: the stage promises "this is what you'll see", and a stock alert
-    /// is not what the stage was showing (owner: "why can't you make it look
-    /// exactly like your mock-up"). One card, two hosts, nothing to keep in
-    /// step.
+    /// It is ``UsageStatsConsentCard``, the surface the stage's rehearsal is a
+    /// drawing OF. An `NSAlert` was the first attempt and was wrong for exactly
+    /// the reason this window exists: the stage promises "this is what you'll
+    /// see", and a stock alert is not what the stage was showing (owner: "why
+    /// can't you make it look exactly like your mock-up").
     ///
     /// This is NOT the `NSAlert` that was deleted from `AppDelegate`. That one
     /// ambushed the first menu-bar click, with nothing on screen to explain it;
@@ -1992,6 +2082,12 @@ public final class OnboardingViewController: NSViewController {
         // OURS, so no level yield and no `onWillOpenSystemSettings` — nothing
         // is coming to the front over us; the sheet lands on this window.
         case .usageStatsConsent: presentConsentSheet()
+        // OURS in the sense that matters here too: no level yield and no
+        // `onWillOpenSystemSettings`, because System Settings is not what
+        // comes forward.
+        case .remotePage:
+            openURL(RemoteInviteView.pageURL)
+            Analytics.capture("remote_invite:setup_link_opened")
         case .settingsPane(let pane):
             onWillOpenSystemSettings?()
             onOpenSettings(pane)
@@ -2014,6 +2110,9 @@ public final class OnboardingViewController: NSViewController {
     }
 
     private func skipTapped(_ step: SetupStep) {
+        // A required step has no skip to press; refusing here keeps the
+        // announcement honest for the one way in that is not a button.
+        guard SetupFlowModel.skippableSteps.contains(step) else { return }
         flow.skip(step)
         announce("Skipped. \(Self.content(for: step).spineTitle(for: .skipped))")
         // Skipping is UI-initiated, and `SetupFlowModel` has no change hook of
@@ -2275,10 +2374,10 @@ public final class OnboardingViewController: NSViewController {
     }
 
     /// Whether the gate button is the gold prominent CTA — a `ProminentButton`
-    /// carrying the gold fill, not a plain bezel. Compared by RESOLVED
-    /// sRGB components: two accesses of a provider-backed token are distinct
-    /// `NSColor` instances, and their `isEqual` is not documented to see
-    /// through the provider.
+    /// carrying the gold fill (pinned to `gold`'s dark value), not a plain bezel.
+    /// Compared by RESOLVED sRGB components: two accesses of a provider-backed
+    /// token are distinct `NSColor` instances, and their `isEqual` is not
+    /// documented to see through the provider.
     public var test_doneIsGoldProminent: Bool {
         _ = view
         guard ribbon.test_primaryIsCTA,
@@ -2327,6 +2426,13 @@ public final class OnboardingViewController: NSViewController {
 
     /// Whether the browsed pane rests with its switch already on.
     public var test_heroRestingSwitchOn: Bool { _ = view; return demoPane.test_restingSwitchOn }
+
+    /// The invitation the iPhone card's stage carries — the same view the
+    /// wizard sheet and Settings mount, not a second drawing of it.
+    public var test_demoRemoteInvite: RemoteInviteView? {
+        _ = view
+        return demoPane.test_remoteInvite
+    }
 
     /// Reduce Motion override for the demo pane (`nil` = the live setting).
     public var test_demoReduceMotionOverride: Bool? {

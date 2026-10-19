@@ -21,12 +21,13 @@ import QuartzCore
 /// keys do, HUD included. Volume alone bypasses that, because an aux key would
 /// target the dead aggregate; it drives Main Out directly.
 ///
-/// WHEN IT SHOWS, and it is three facts, not one: only while Audiout owns the
-/// volume AND audio is actually leaving the Mac AND the user hasn't turned the
-/// feature off in Settings › General. Ownership alone was too broad — it lasts
-/// the entire time our aggregate is the Mac's output, so the user's own Touch
-/// Bar was gone for hours at a stretch over a feature they might use for
-/// seconds. Any of the three going false hands the bar straight back.
+/// WHEN IT SHOWS: while Audiout owns the volume AND the user hasn't turned the
+/// feature off in Settings › General. Ownership lasts the whole time our
+/// aggregate is the Mac's default output, and for that whole time macOS's own
+/// volume controls do nothing — including the "Speakers unreachable. Playing on
+/// your Mac" fallback, where the aggregate stays the default output. So the
+/// user needs ours on screen whenever we hold the volume, streaming or not.
+/// Either fact going false hands the bar straight back.
 ///
 /// PROVENANCE: the private-API sequence was learned by reading Pock and MTMR
 /// (both MIT). No code was copied — this is a clean-room reimplementation, which
@@ -52,6 +53,14 @@ final class TouchBarFullBar: NSObject, NSTouchBarDelegate {
     var onVolumeStep: ((_ up: Bool) -> Void)?
     /// Mute toggle.
     var onToggleMute: (() -> Void)?
+    /// `true` when the bar goes up, `false` when it is handed back. The app
+    /// keeps the backend's levels flowing for exactly that span, because
+    /// ``noteAudioLevel(_:)`` is the play/pause glyph's only input.
+    var onPresentedChange: ((Bool) -> Void)?
+    /// Seconds a slow output (a Cast receiver) takes to catch up with the
+    /// Mac, or `nil` when nothing is slow, handed to the closure on the main
+    /// thread. Asked each time the glyph flips, to pulse for that long.
+    var slowOutputDelay: ((@escaping (TimeInterval?) -> Void) -> Void)?
 
     private var presented = false
 
@@ -65,7 +74,6 @@ final class TouchBarFullBar: NSObject, NSTouchBarDelegate {
     private var lastAudibleAt: CFTimeInterval = 0
 
     private var ownsVolume = false
-    private var isStreaming = false
     private var isEnabled = true
 
     // MARK: - Presenting
@@ -76,14 +84,6 @@ final class TouchBarFullBar: NSObject, NSTouchBarDelegate {
         reconcilePresentation()
     }
 
-    /// Follow whether audio is actually leaving the Mac. Ownership lasts as
-    /// long as the aggregate is the default output; this is the narrower fact
-    /// that says the bar is worth taking right now.
-    func setStreaming(_ streaming: Bool) {
-        isStreaming = streaming
-        reconcilePresentation()
-    }
-
     /// Follow the user's Settings › General opt-out.
     func setEnabled(_ enabled: Bool) {
         isEnabled = enabled
@@ -91,7 +91,7 @@ final class TouchBarFullBar: NSObject, NSTouchBarDelegate {
     }
 
     private func reconcilePresentation() {
-        (ownsVolume && isStreaming && isEnabled) ? present() : dismiss()
+        (ownsVolume && isEnabled) ? present() : dismiss()
     }
 
     private func present() {
@@ -105,12 +105,14 @@ final class TouchBarFullBar: NSObject, NSTouchBarDelegate {
         }
 
         presented = true
+        onPresentedChange?(true)
         reassert()
     }
 
     private func dismiss() {
         guard presented else { return }
         presented = false
+        onPresentedChange?(false)
         TouchBarPrivateAPI.dismiss(bar)
     }
 
@@ -118,6 +120,7 @@ final class TouchBarFullBar: NSObject, NSTouchBarDelegate {
     /// is not restored automatically.
     private func reassert() {
         TouchBarPrivateAPI.presentFullWidth(bar)
+        applyAwaitingPlayback()
     }
 
     // MARK: - Play/pause state
@@ -129,7 +132,13 @@ final class TouchBarFullBar: NSObject, NSTouchBarDelegate {
     /// `MediaRemote`'s symbols still resolve on macOS 27, but
     /// `MRMediaRemoteGetNowPlayingApplicationIsPlaying` never calls back; Apple
     /// gated it. We are already tapping the system audio to route it, so "is
-    /// sound actually coming out" is a fact we own outright and costs nothing.
+    /// sound actually coming out" is a fact we own outright.
+    ///
+    /// TRAP: the backend emits levels only while someone asks for them, and the
+    /// popover asks only while it is open. A bar that relied on the popover's
+    /// request sat on play whenever the popover was closed, which is nearly
+    /// always. ``onPresentedChange`` is how the app asks on the bar's behalf
+    /// (`MeteringControlling.setDeviceLevelsWanted`), for as long as it is up.
     ///
     /// KNOWN IMPRECISION, and it is inherent to the proxy rather than a bug: it
     /// tracks AUDIBLE OUTPUT, not transport state. A notification chime while
@@ -153,6 +162,7 @@ final class TouchBarFullBar: NSObject, NSTouchBarDelegate {
     private func setPlaying(_ playing: Bool) {
         guard playing != isPlaying else { return }
         isPlaying = playing
+        notePlaybackStarted(playing)
         playPauseButton?.image = NSImage(
             systemSymbolName: playPauseSymbol, accessibilityDescription: "Play or pause")
         playing ? startSilenceTimer() : stopSilenceTimer()
@@ -164,7 +174,7 @@ final class TouchBarFullBar: NSObject, NSTouchBarDelegate {
         guard silenceTimer == nil else { return }
         let timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
-                guard let self, CACurrentMediaTime() - self.lastAudibleAt >= 2.0 else { return }
+                guard let self, CACurrentMediaTime() - self.lastAudibleAt >= Self.silenceHold else { return }
                 self.setPlaying(false)
             }
         }
@@ -179,6 +189,92 @@ final class TouchBarFullBar: NSObject, NSTouchBarDelegate {
     }
 
     private var playPauseSymbol: String { isPlaying ? "pause.fill" : "play.fill" }
+
+    /// While a speaker has been told to play but has not yet confirmed that
+    /// sound is coming out (a Cast receiver loading, which can take seconds),
+    /// the play/pause button pulses its opacity so a press visibly registered.
+    /// It goes steady again once every speaker confirms or gives up. It also
+    /// pulses after sound starts or stops leaving the Mac while a slow output
+    /// is in the room (a Cast receiver is ~5 s behind), until it catches up. With
+    /// Reduce Motion on it holds at half opacity instead of pulsing. The glyph
+    /// is untouched: play versus pause still follows the audio level above.
+    func setAwaitingPlayback(_ waiting: Bool) {
+        speakerStillConnecting = waiting
+        reconcileAwaitingPlayback()
+    }
+
+    /// Sound has started or stopped leaving the Mac. With a slow output in the
+    /// room, that output catches up only after its delay: it starts sounding
+    /// that much later, and keeps playing its buffer that much longer after a
+    /// stop. Pulse until it has caught up. A stop is noticed only after
+    /// `silenceHold` of quiet, so that much of the delay has already passed.
+    private func notePlaybackStarted(_ playing: Bool) {
+        startWaitTimer?.invalidate()
+        startWaitTimer = nil
+        reconcileAwaitingPlayback()
+        flipCount += 1
+        let flip = flipCount
+        let asked = CACurrentMediaTime()
+        slowOutputDelay? { [weak self] slow in
+            // A later flip owns the pulse; this answer is stale.
+            guard let self, flip == self.flipCount, let slow else { return }
+            let delay = (playing ? slow : slow - Self.silenceHold) - (CACurrentMediaTime() - asked)
+            guard delay > 0 else { return }
+            self.startWaitTimer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    self?.startWaitTimer = nil
+                    self?.reconcileAwaitingPlayback()
+                }
+            }
+            self.reconcileAwaitingPlayback()
+        }
+    }
+
+    private func reconcileAwaitingPlayback() {
+        let waiting = speakerStillConnecting || startWaitTimer != nil
+        guard waiting != awaitingPlayback else { return }
+        awaitingPlayback = waiting
+        applyAwaitingPlayback()
+    }
+
+    /// Quiet needed before the glyph reads "stopped".
+    private static let silenceHold: TimeInterval = 2.0
+    private var speakerStillConnecting = false
+    private var startWaitTimer: Timer?
+    private var flipCount = 0
+    private var awaitingPlayback = false
+    private var pulseTimer: Timer?
+
+    /// Also called when the button is rebuilt and when the bar comes back after
+    /// a dim, so a fresh button picks the pulse up.
+    ///
+    /// TRAP: the Touch Bar draws its buttons in a system process, which renders
+    /// `alphaValue` but ignores a Core Animation animation added to the button's
+    /// layer. The first version pulsed that way and showed nothing on hardware.
+    /// So a timer steps `alphaValue` itself.
+    private func applyAwaitingPlayback() {
+        pulseTimer?.invalidate()
+        pulseTimer = nil
+        guard let button = playPauseButton else { return }
+        guard awaitingPlayback else {
+            button.alphaValue = 1
+            return
+        }
+        if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            button.alphaValue = 0.5
+            return
+        }
+        // One full fade out and back every 1.6 s, as a cosine between 1 and 0.35.
+        let start = CACurrentMediaTime()
+        let timer = Timer.scheduledTimer(withTimeInterval: 1.0 / 20, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let button = self?.playPauseButton else { return }
+                let phase = (CACurrentMediaTime() - start) / 1.6 * 2 * .pi
+                button.alphaValue = 0.675 + 0.325 * cos(phase)
+            }
+        }
+        pulseTimer = timer
+    }
 
     // MARK: - The bar
 
@@ -238,6 +334,7 @@ final class TouchBarFullBar: NSObject, NSTouchBarDelegate {
                 SystemAuxKey.playPause.post()
             }
             playPauseButton = item.view as? NSButton
+            applyAwaitingPlayback()
             return item
         case ItemID.next:
             return button(identifier, symbol: "forward.end", label: "Next") {

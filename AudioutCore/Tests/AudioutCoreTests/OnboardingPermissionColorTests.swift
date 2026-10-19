@@ -7,9 +7,10 @@ import AppKit
 @testable import AudioutOnboardingUI
 @testable import AudioutSharedUI
 
-/// T3 (colour-return pass, decisions Q1-Q6/NEW-1): the five permission-row
+/// T3 (colour-return pass, decisions Q1-Q6/NEW-1): the six permission-row
 /// identity tokens — `Tokens.Color.permissionSystemAudio` / `permissionLocalNetwork`
 /// / `permissionRemoteControl` / `permissionSpeakerSync` / `permissionUsageStats`
+/// / `permissionAudioutRemote`
 /// — stay mutually
 /// DISTINCT in both accent-dial columns (Q1), each clears the same >=3:1
 /// own-theme contrast floor every other `Tokens.Color` instrument is held to
@@ -23,27 +24,22 @@ import AppKit
 ///  - `relativeLuminance`/`contrastRatio` — ported from `AppTetherColorTests`.
 ///  - `resolved(_:appearanceName:)` — ported from `SettingsAccentAndHintsTests`.
 /// `SettingsAccentAndHintsTests.accentDialNeverRemapsFailureCautionOrRing`
-/// names `failure`/`caution`/`ringConnected` explicitly — not "every token the
+/// names `failure`/`caution`/`ring` explicitly — not "every token the
 /// dial doesn't touch" — so these five permission tokens (which the dial DOES
 /// remap, just not via `accentDynamic`) don't trip it.
 ///
 /// Nested into `SerializedSharedState` alongside `SettingsAccentAndHintsTests`
-/// — both mutate the process-global `Tokens.accentStyle` (see the `deinit`
-/// below), and running concurrently under swift-testing produced real,
+/// — both mutate the process-global `Tokens.accentStyle` (each test that
+/// moves the dial restores it with `defer` on the main actor, since a
+/// `deinit` runs on the test runner's thread and the setter's notification
+/// would repaint AppKit views there), and running concurrently under swift-
+/// testing produced real,
 /// reproducible test failures (a concurrent accent-style write racing this
 /// suite's color comparisons).
 extension SerializedSharedState {
 
 @MainActor
 @Suite final class OnboardingPermissionColorTests: IsolatedSuite {
-
-    deinit {
-        // `Tokens.accentStyle` is process-global (the live remap seam) —
-        // restore the flagship default so no other test in this suite, or a
-        // later golden render in this process, inherits a dialed accent.
-        // Same discipline as `SettingsAccentAndHintsTests.tearDown`.
-        Tokens.accentStyle = .fullGold
-    }
 
     // MARK: - Ported helpers (see file doc comment for provenance)
 
@@ -93,7 +89,7 @@ extension SerializedSharedState {
         #expect(abs(a.blueComponent - b.blueComponent) <= 0.02, "blue: \(message)")
     }
 
-    /// The five permission tokens, named for failure messages. A computed
+    /// The permission tokens, named for failure messages. A computed
     /// property (not a stored snapshot) so every call site gets a fresh
     /// access — irrelevant for correctness (each dynamic `NSColor`'s
     /// provider closure re-reads `Tokens.accentStyle` at RESOLUTION time
@@ -107,7 +103,10 @@ extension SerializedSharedState {
          // The fifth is not a macOS permission — the Setup card for Audiout's
          // own usage-statistics opt-in — but it wears a family hue and is held
          // to every rule the other four are.
-         ("permissionUsageStats", Tokens.Color.permissionUsageStats)]
+         ("permissionUsageStats", Tokens.Color.permissionUsageStats),
+         // Nor is the sixth: the card that invites Audiout Remote. Same
+         // fence, same floors.
+         ("permissionAudioutRemote", Tokens.Color.permissionAudioutRemote)]
     }
 
     private func assertMutuallyDistinct(appearance: NSAppearance.Name,
@@ -124,12 +123,14 @@ extension SerializedSharedState {
     // MARK: 1 — Distinctness in both dial columns (Q1)
 
     @Test func everyTokenIsMutuallyDistinctInFullGold() {
+        defer { Tokens.accentStyle = .fullGold }
         Tokens.accentStyle = .fullGold
         assertMutuallyDistinct(appearance: .darkAqua)
         assertMutuallyDistinct(appearance: .aqua)
     }
 
     @Test func everyTokenIsMutuallyDistinctInSubtle() {
+        defer { Tokens.accentStyle = .fullGold }
         Tokens.accentStyle = .subtle
         assertMutuallyDistinct(appearance: .darkAqua)
         assertMutuallyDistinct(appearance: .aqua)
@@ -140,8 +141,9 @@ extension SerializedSharedState {
     /// Checked against BOTH `panel` and `raised` (the two own-theme surfaces
     /// T1's doc comments measure against for every one of these
     /// tokens), across `.fullGold`/`.subtle` and `.darkAqua`/`.aqua` — the
-    /// full 5 tokens x 2 columns x 2 appearances x 2 surfaces sweep.
+    /// full tokens x 2 columns x 2 appearances x 2 surfaces sweep.
     @Test func contrastFloorClearsInBothDialColumnsBothAppearancesBothSurfaces() {
+        defer { Tokens.accentStyle = .fullGold }
         let floor: CGFloat = 3.0
         for style: AccentStyle in [.fullGold, .subtle] {
             Tokens.accentStyle = style
@@ -164,6 +166,7 @@ extension SerializedSharedState {
     // MARK: 3 — the dial genuinely mutes all five in .subtle (Q5)
 
     @Test func subtleActuallyChangesEveryTokenFromFullGold() {
+        defer { Tokens.accentStyle = .fullGold }
         for appearance: NSAppearance.Name in [.darkAqua, .aqua] {
             Tokens.accentStyle = .fullGold
             let full = permissionTokens.map { (name: $0.name, color: resolved($0.color, appearanceName: appearance)) }
@@ -184,12 +187,16 @@ extension SerializedSharedState {
     /// `raised` well (a deliberate non-permission hue — the first note of the
     /// finale's colour story). Same ≥3:1 glyph floor the five permission
     /// tokens are held to, measured in both authored dial columns and both
-    /// appearances (light 3.64:1, Subtle light 3.95:1).
+    /// appearances (Subtle light 3.95:1) — except Full light, the light gold
+    /// on paper since 2026-09-17, which `TokenContrastMatrixTests` lists as
+    /// the one accepted exception.
     @Test func goldOnRaisedClearsTheGlyphFloorInBothDialColumnsAndAppearances() {
+        defer { Tokens.accentStyle = .fullGold }
         let floor: CGFloat = 3.0
         for style: AccentStyle in [.fullGold, .subtle] {
             Tokens.accentStyle = style
             for appearance: NSAppearance.Name in [.darkAqua, .aqua] {
+                if style == .fullGold && appearance == .aqua { continue }
                 let gold = resolved(Tokens.Color.gold, appearanceName: appearance)
                 let raised = resolved(Tokens.Color.raised, appearanceName: appearance)
                 let ratio = contrastRatio(gold, raised)
@@ -202,11 +209,14 @@ extension SerializedSharedState {
     // MARK: The gold CTA fill — its double floor (ink AND canvas)
 
     /// A `gold`-filled call to action is contrast-governed on BOTH sides:
-    /// `inkOnFill` must clear the 4.5:1 body floor on it (dark 10.18:1, light
-    /// 4.94:1), and the fill itself must clear 3:1 against `canvas`, the Setup
-    /// window's true background (10.73:1 / 3.64:1). Re-measured here rather
-    /// than trusted from the tokens' written rationales.
+    /// `inkOnFill` must clear the 4.5:1 body floor on it (10.18:1 in both,
+    /// since light `gold` took the dark hex on 2026-09-17), and the fill
+    /// itself must clear 3:1 against `canvas`, the Setup window's true
+    /// background, in dark (10.73:1); light is the accepted exception
+    /// `TokenContrastMatrixTests` lists. Re-measured here rather than
+    /// trusted from the tokens' written rationales.
     @Test func goldFillTakesInkOnFillAndClearsTheCanvasFloorInBothAppearances() {
+        defer { Tokens.accentStyle = .fullGold }
         Tokens.accentStyle = .fullGold
         for appearance: NSAppearance.Name in [.darkAqua, .aqua] {
             let fill = resolved(Tokens.Color.gold, appearanceName: appearance)
@@ -216,8 +226,10 @@ extension SerializedSharedState {
             let canvasRatio = contrastRatio(fill, canvas)
             #expect(inkRatio >= 4.5,
                     "gold/\(appearance.rawValue): inkOnFill \(inkRatio):1 under the 4.5:1 body floor")
-            #expect(canvasRatio >= 3.0,
-                    "gold/\(appearance.rawValue): fill vs canvas \(canvasRatio):1 under the 3:1 floor")
+            if appearance == .darkAqua {
+                #expect(canvasRatio >= 3.0,
+                        "gold/\(appearance.rawValue): fill vs canvas \(canvasRatio):1 under the 3:1 floor")
+            }
         }
     }
 
@@ -322,9 +334,9 @@ extension SerializedSharedState {
     /// stand-in is some other mark) and NEVER a hand-drawn rune. Asserting the
     /// card really carries that image is what stops a later pass from quietly
     /// dropping back to `symbolName`.
-    @Test func bluetoothCardCarriesTheSystemBluetoothGlyph() {
+    @Test func bluetoothCardCarriesTheSystemBluetoothGlyph() throws {
         let content = OnboardingViewController.content(for: .bluetooth)
-        let system = try? #require(NSImage(named: NSImage.bluetoothTemplateName))
+        let system = try #require(NSImage(named: NSImage.bluetoothTemplateName))
 
         #expect(content.customIcon != nil,
                 "the Bluetooth row must carry a real glyph override, not fall through to symbolName")
@@ -358,6 +370,34 @@ extension SerializedSharedState {
                 #expect(ratio >= floor,
                         "bluetoothBrand/\(appearance.rawValue) vs \(name): \(ratio):1 under the \(floor):1 floor")
             }
+        }
+    }
+
+    /// The demo frame must stay a visible recess on the hero pane.
+    ///
+    /// Turns red if `SetupPreviewFrameView` goes back to filling its well with
+    /// bare `Tokens.Color.well` and rimming it with `Tokens.Color.hairline`:
+    /// since the tokens were re-valued to cool neutrals, that pair measures
+    /// 1.154:1 against the pane's `panel` — the same hue at nearly the same
+    /// lightness — and the frame reads as flat.
+    ///
+    /// The ratio floor is LIGHT only. Dark's own `well`-on-`panel` step is
+    /// 1.134:1 and always was; there the rim and the top lip carry the recess,
+    /// so holding dark to a light-mode number would assert a redesign nobody
+    /// asked for.
+    @Test func thePreviewFrameStaysDistinctFromTheHeroPanel() {
+        let floor: CGFloat = 1.25
+        let frame = SetupPreviewFrameView()
+
+        let lightRatio = contrastRatio(resolved(frame.test_wellFill, appearanceName: .aqua),
+                                       resolved(Tokens.Color.panel, appearanceName: .aqua))
+        #expect(lightRatio >= floor,
+                "frame well vs panel in light: \(lightRatio):1 under the \(floor):1 floor")
+
+        for appearance: NSAppearance.Name in [.aqua, .darkAqua] {
+            assertSameRGB(resolved(frame.test_wellRim, appearanceName: appearance),
+                          resolved(Tokens.Color.containerEdge, appearanceName: appearance),
+                          "the frame's rim must be containerEdge under \(appearance.rawValue)")
         }
     }
 }

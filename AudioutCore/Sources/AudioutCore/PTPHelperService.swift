@@ -28,6 +28,16 @@ public enum PTPHelperStatus: Equatable, Sendable {
     /// decision. There is nothing the approval UX can do about it, same
     /// posture as ``PermissionStatus/unsupported``.
     case notFound
+
+    /// Stable short token for a telemetry line (the enum has no raw value).
+    var telemetryName: String {
+        switch self {
+        case .notRegistered: return "notRegistered"
+        case .requiresApproval: return "requiresApproval"
+        case .enabled: return "enabled"
+        case .notFound: return "notFound"
+        }
+    }
 }
 
 /// The app-side seam for the PTP helper's `SMAppService` daemon registration —
@@ -154,6 +164,16 @@ public enum PTPHelperActivationOutcome: Equatable, Sendable {
     /// timeout — the bind may still be racing macOS's own AirPlay off the
     /// ports (G1: ~1-3 s typical), or the daemon failed to come up at all.
     case timingPortsUnavailable
+
+    /// Stable short token for a telemetry line, and the `reason` a gate
+    /// refusal sends with `airplay:connect_failed`.
+    var telemetryName: String {
+        switch self {
+        case .ready: return "ready"
+        case .needsApproval: return "needsApproval"
+        case .timingPortsUnavailable: return "timingPortsUnavailable"
+        }
+    }
 }
 
 /// Demand-starts the PTP helper for an about-to-connect session and waits,
@@ -191,13 +211,12 @@ public struct PTPHelperReleaser: PTPHelperReleasing {
         self.machServiceName = machServiceName
     }
 
-    // razor: unauthenticated. Any local process can send this and stop our
-    // clock — repeatedly, indefinitely, holding the daemon down as a
-    // persistent denial of AirPlay, not just a one-off blip (impact: our
-    // audio blips and re-establishes; no privilege is gained, DoS only, never
-    // escalation). Upgrade path once hardened:
-    // xpc_connection_set_peer_code_signing_requirement on the helper's peer
-    // connections (macOS 13+, deployment target is 14).
+    // The helper honors this release request only from a peer that satisfies
+    // the code-signing requirement rendered into its launchd plist
+    // (scripts/ptp-helper.plist, AUDIOUT_PTP_PEER_REQUIREMENT) — so only the
+    // app that shipped the helper can stop its clock. An ad-hoc build's
+    // helper has no requirement to satisfy against, so it refuses every
+    // release and relies on idle exit alone.
     public func release() {
         // Nothing running to release — a send would demand-START the root
         // helper (rebinding 319/320) just to kill it, which is self-defeating
@@ -263,6 +282,12 @@ public struct PTPHelperActivator: PTPHelperActivating {
     /// sleep; a test injects an instant, deterministic advance so the whole
     /// loop runs at CPU speed with a fake clock instead of racing a real one.
     private let sleep: @Sendable (TimeInterval) async -> Void
+    /// Reads the helper's clock record. Defaults to the real `/airptp_shm`
+    /// probe; injected by a test that needs the wait to run its full course,
+    /// because the real probe reports READY whenever any helper is live on the
+    /// machine — including the one the developer's own running copy of the app
+    /// demand-started, which is not a fact about the loop under test.
+    private let isReady: @Sendable () -> Bool
 
     public init(
         ptpHelper: PTPHelperManaging = SMAppServicePTPHelper(),
@@ -273,7 +298,8 @@ public struct PTPHelperActivator: PTPHelperActivating {
         now: @escaping @Sendable () -> Date = Date.init,
         sleep: @escaping @Sendable (TimeInterval) async -> Void = { seconds in
             try? await Task.sleep(nanoseconds: UInt64(max(0, seconds) * 1_000_000_000))
-        }
+        },
+        isReady: @escaping @Sendable () -> Bool = { PTPClockProbe.isReady() }
     ) {
         self.ptpHelper = ptpHelper
         self.machServiceName = machServiceName
@@ -282,6 +308,7 @@ public struct PTPHelperActivator: PTPHelperActivating {
         self.onTouch = onTouch
         self.now = now
         self.sleep = sleep
+        self.isReady = isReady
     }
 
     public var willWaitForClock: Bool { ptpHelper.status == .enabled }
@@ -310,7 +337,7 @@ public struct PTPHelperActivator: PTPHelperActivating {
 
         let deadline = now().addingTimeInterval(max(0, timeout))
         while now() < deadline {
-            if PTPClockProbe.isReady() { break }
+            if isReady() { break }
             // razor: fixed 2.0 s re-touch ceiling, not adaptive backoff — well
             // under the helper's own ~15 s idle-exit window, so a flat
             // interval keeps it re-armed with room to spare. Upgrade path:
@@ -323,7 +350,7 @@ public struct PTPHelperActivator: PTPHelperActivating {
             }
             await sleep(pollInterval)
         }
-        let ready = PTPClockProbe.isReady()
+        let ready = isReady()
         withExtendedLifetime(touches) {}
         return ready ? .ready : .timingPortsUnavailable
     }
@@ -499,28 +526,28 @@ public struct PTPHelperReconciler: Sendable {
         switch cycle.outcome {
         case .unregisterThrew:
             Telemetry.log(.airplay, "ptp_zombie_heal", [
-                "before": Self.telemetryStatus(status),
+                "before": status.telemetryName,
                 "result": "heal_failed",
             ])
             return .healFailed
         case .drainNeverObserved:
             Telemetry.log(.airplay, "ptp_zombie_heal", [
-                "before": Self.telemetryStatus(status),
+                "before": status.telemetryName,
                 "result": "heal_failed",
                 "drain_polls": String(cycle.drainPolls),
             ])
             return .healFailed
         case .registerExhausted:
             Telemetry.log(.airplay, "ptp_zombie_heal", [
-                "before": Self.telemetryStatus(status),
+                "before": status.telemetryName,
                 "result": "heal_failed",
                 "register_attempts": String(cycle.registerAttempts),
             ])
             return .healFailed
         case .registered(let newStatus):
             Telemetry.log(.airplay, "ptp_zombie_heal", [
-                "before": Self.telemetryStatus(status),
-                "after": Self.telemetryStatus(newStatus),
+                "before": status.telemetryName,
+                "after": newStatus.telemetryName,
                 "drain_polls": String(cycle.drainPolls),
             ])
             return .healed(newStatus)
@@ -574,16 +601,6 @@ public struct PTPHelperReconciler: Sendable {
             }
         }
         return (.registerExhausted, drainPolls, attemptsUsed)
-    }
-
-    /// Stable short tokens for the telemetry line (the enum has no raw value).
-    private static func telemetryStatus(_ status: PTPHelperStatus) -> String {
-        switch status {
-        case .notRegistered: return "notRegistered"
-        case .requiresApproval: return "requiresApproval"
-        case .enabled: return "enabled"
-        case .notFound: return "notFound"
-        }
     }
 
     /// razor: the real probe is an untested-by-design system-integration ceiling

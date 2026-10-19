@@ -126,10 +126,11 @@ import Testing
         ]
     }
 
-    private func waitFleet(_ backend: MockBackend, count: Int) {
-        let deadline = Date().addingTimeInterval(3)
-        while backend.devices.count < count && Date() < deadline {
-            RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+    private func waitFleet(_ backend: MockBackend, count: Int,
+                          sourceLocation: SourceLocation = #_sourceLocation) {
+        SuiteWait.untilOnRunLoop("the fleet has \(count) devices",
+                                 sourceLocation: sourceLocation) {
+            backend.devices.count >= count
         }
     }
 
@@ -160,6 +161,14 @@ import Testing
 
         popover.test_reduceMotionOverride = false
         popover.test_switchMainOut(.selectedDevices)
+        // The controller's override reaches `beginEnergize` only and the rows read the
+        // live Reduce Motion setting, so each row is pinned and the notification makes
+        // it re-derive its node.
+        for id in ["en-a", "en-b", "en-c"] {
+            popover.test_deviceRow(for: id)?.test_reduceMotionOverride = false
+        }
+        NSWorkspace.shared.notificationCenter.post(
+            name: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification, object: nil)
 
         #expect(popover.test_energizePendingIDs == ["en-a", "en-b"],
                        "only the selected members that hadn't started connecting get the beat")

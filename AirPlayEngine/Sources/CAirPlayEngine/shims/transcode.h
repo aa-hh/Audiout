@@ -22,17 +22,7 @@
 //   - the enum keeps OwnTone's full ordering so XCODE_PCM16/XCODE_ALAC have the
 //     exact integer values airplay.c's designated-initializers expect.
 //
-// STUB STATUS (T-BUILD-1): transcode.c bodies are MINIMAL stubs that LINK but
-// do NOT encode — transcode_encode_setup returns NULL, so master_session_make
-// takes airplay.c's own "ffmpeg has no ALAC encoder" error branch (airplay.c:
-// 1192) cleanly. This is deliberate: getting the cluster to COMPILE + LINK
-// does not require a working encoder. The REAL ffmpeg-backed ALAC encoder
-// (Q2a) is T-SHIM-1's job (seam-map §5, risk R-C), at which point the
-// avcodec/avutil/swresample link libs get added to Package.swift.
-//
-// TODO(T-SHIM-1): implement transcode.c for real against libavcodec (ALAC
-// encode + PCM16 raw decode-setup), guarding the :1192 failure mode; later
-// swap to the uncompressed-ALAC path to shed ffmpeg (seam-map §5.3).
+// transcode.c is the real ffmpeg-backed ALAC encoder; the ffmpeg-free swap is the open item in transcode.c.
 
 #ifndef CAIRPLAYENGINE_SHIM_TRANSCODE_H
 #define CAIRPLAYENGINE_SHIM_TRANSCODE_H

@@ -11,7 +11,7 @@ Archived verbatim from AGENTS.md on 2026-09-02 when that file was trimmed to the
 This is the actual source folder for the `AudioutCore` library target — the
 UI-agnostic routing/session core: device discovery, output backends, capture
 (whole-system + per-app), the routing "brain" (Selected Devices/Main Out/
-groups/per-app redirects), local playback, persistence, and the first-run
+scenes/per-app redirects), local playback, persistence, and the first-run
 setup/permissions flow. It owns everything up to the `OutputBackend` protocol
 seam; it never imports AppKit and knows nothing about windows, popovers, or
 views (those live in `AudioutSharedUI`/UI targets, one level up). The
@@ -78,6 +78,12 @@ so the Bluetooth sink can run the same processor — never add one or move
 GPL-derived code in; and `DeviceEQStore` drops flat entries on save, so a
 round-trip legitimately returns fewer keys than it was handed.
 
+**SUPERSEDED 2026-09-15 (roadmap 056): there is no EQ rebind any more.** Every
+speaker owns a whole-system stream from connect to disconnect
+(`connectTargetStreamLocked`) and an edit only retargets that stream's
+processor; `EQStreamTopology`, `EQStreamAllocator` and `enqueueEQRebindLocked`
+are deleted. What follows is why the old shape existed.
+
 **An EQ rebind is a whole-system engine op: it rides the per-device `converging`
 slot, and its stream ids live in their own namespace.** Moving a device onto its
 EQ group's stream is a real `removeOutput`→`addOutput` with the accepted ~1 s
@@ -92,7 +98,9 @@ allocates from 1, so the two id spaces can never collide and the EQ budget can
 count per-app streams by range test alone.
 
 **`reconcileEQPlan` owns BOTH `added` edges, and `pushEQPlanLocked` NEVER
-rebuilds a live stage.** The departure edge is `removeFromAddedLocked` — the
+rebuilds a live stage.** (The stream-move half is superseded — see above; the
+processor-reuse half below is still the rule.) The departure edge is
+`removeFromAddedLocked` — the
 single site every per-device `added.remove` goes through — because a departure
 frees a stream for whoever the budget refused AND takes the departed device's
 stream out of the plan; `setOutputSet`'s reconcile cannot cover it (it runs while
@@ -118,7 +126,7 @@ so with its own reason.** Its audio comes from `AppRouteMixer`, never through th
 whole-system EQ stage, so `reconcileEQPlan` sets `eqBypassReason =
 .perAppRouting` for a claimed device with a non-flat stored EQ — a different
 sentence from `.streamBudget`, because sending the user to delete other speakers'
-tone would not help. The Equalizer page (Groups screen)
+tone would not help. The Equalizer page (Scenes screen)
 carries the honesty — the popover shows no tone state at all.
 
 **A Bluetooth trim change must NEVER rebuild a sink.** The delay is physically
@@ -151,6 +159,42 @@ The strip is triggered by the helper's clock not being ready — NOT by a macOS 
 
 **Helper-cycling self-heal path:**
 Helper-cycling must ALWAYS go through `PTPHelperReconciler.unregisterDrainAndReregister` — never re-derive the unregister→register sequence. A register() call before the drain completes is a proven failure mode producing a doomed registration.
+
+**The first-run `register()` throw is not a failure (2026-09-07):**
+On current macOS the FIRST `SMAppService.register()` for a daemon normally THROWS (`SMAppServiceErrorDomain` code 1, "Operation not permitted") while the "Background Items Added" notice is shown, and `status` afterwards reads `.requiresApproval` — the user finishes it in Login Items. `SetupModel.registerPTPHelper()` used to take ANY throw as a packaging fault (sticky `ptpHelperRegistrationFailed`), which auto-passed the onboarding step on every first run and left the helper unregistered. The status AFTER the throw decides now: only `.notFound` is the fault. Approval alone does not load the daemon either — the next `register()` after it does — so the Setup window registers again on every return to the front (`SetupModel.reregisterPTPHelperOnReturn()`), never from the status poll, and a once-approved helper that reads `.notFound` (BTM reset) gets one drain-safe recycle through the reconciler.
+
+**The decision log stopped going to PostHog (2026-09-10):**
+1.1.1 shipped `54cdfea8`, which forwarded every `Telemetry.log` line to PostHog
+Logs under the usage-stats opt-in and stripped only six field names (`device`,
+`deviceID`, `uid`, `name`, `host`, `address`). A denylist was the wrong shape:
+live records carried app bundle ids (`org.mozilla.firefox`,
+`com.spotify.client`), speaker names rendered by
+`NativeBackend.telemetryDeviceList`, and raw error strings such as
+`processNotYetAudible(bundleID:)` — all of it forbidden by PRODUCT.md "Data
+Collection". The owner deleted the forward rather than lengthen the strip list.
+The rule is an allowlist now, with one implementation:
+`Telemetry.fail(category, event, local:, shared:)` writes both field sets to the
+local file at `level:error` and sends only `shared` to
+`Analytics.captureError`. Ordinary `Telemetry.log` lines never leave the Mac;
+the user ships them by hand through Settings › About › Save diagnostics. Never
+put a forward back into the private `write(...)` helper that `log` and `fail`
+share — that is precisely how `local:` fields would start leaking again.
+
+TRAP: an error report from `fail` has no usable stack trace. The send runs on
+the telemetry writer's queue, so the trace the PostHog SDK builds describes that
+queue and never the code that failed. The exception type (the event name) is the
+only locator; the detail is in the local `telemetry.jsonl` line.
+
+TRAP: `scripts/run-tests.sh` exited 1 after fully green runs, because its EXIT
+trap killed an already-finished process group with a bare `kill` and `set -e`
+lets a command failing inside an EXIT trap replace the script's exit status.
+Guard 4 read those green suites as failures. Fixed by adding `|| true` to the
+kill.
+
+Four documents state what leaves the Mac, and a change to any one of them moves
+all four: `PRODUCT.md` "Data Collection", `UsageStatsConsentCard.bodyText`, the
+website's privacy page and its support page about usage statistics, and
+`audiout-shared/docs/analytics-events.md`.
 
 ## Architecture
 
@@ -238,9 +282,9 @@ Redirecting one app to a specific device:
 | Per-app capture/mix | `PerAppCaptureCoordinator`, `AppRouteMixer`, `LeveledAppInjector` |
 | Shared capture infra | `DefaultOutputDeviceMonitor`, `TapRebuildLifecycle` (`TapRebuildCoalescer`, `TapReanchor`) |
 | Routing brain | `GroupController`, `AppRoutingController`, `PhaseController` |
-| Repaint gating | `StructuralStateGate` — has selection/groups moved since the surfaces were last painted? `onStateDidChange` fires for EVERY model change (a volume-key hold included) while the repaints it can trigger are full sweeps, so the coordinator gates them on this. |
+| Repaint gating | `StructuralStateGate` — has selection/scenes moved since the surfaces were last painted? `onStateDidChange` fires for EVERY model change (a volume-key hold included) while the repaints it can trigger are full sweeps, so the coordinator gates them on this. |
 | Persistence | `AppRouteStore`, `RoutingStore`, `GroupStore`, `AppSettings`, `ExcludedAppsStore`, `ExcludedAppsController`, `DeviceIconStore`, `DeviceEQStore` |
-| Tone shaping | `DeviceEQ`, `EQStreamTopology`, `EQProcessor` |
+| Tone shaping | `DeviceEQ`, `EQProcessor` |
 | Mic-probe calibration (064) | `MicProbeSession`, `BuiltInMicRecorder`, `MicCapturePermission` (license-clean; hardware-free). The DSP itself — `SyncProbe`, `SyncProbeCorrelator` — moved out to the `ProbeKit` package in [audiout-shared](https://github.com/aa-hh/audiout-shared), which the iPhone companion also links |
 | Local playback | `LocalPlaybackEngine`, `SyncedLocalSink`, `LocalOutputLatency`, `DefaultOutputObserver`, `SystemOutputVolume` |
 | Public aggregate device (Wave 3) | `AggregateOutputDevice` — PUBLIC aggregate "Audiout" (UID `com.audiout.Audiout.aggregate`); wired by `NativeBackend` (adopt/sweep/restore on start/quit). Becomes Mac default when whole-system routing arms; restore-prior-default-then-destroy on quit. New `BackendEvent` case `routingBlockedNeedsDefault(Bool)` (in `OutputBackend.swift`) drives popover warning via `PopoverController.setRoutingBlockedNeedsDefault(_:)` and user-reselect via `PopoverController.onReselectAudiout`. Shared `EffectiveCaptureDevice.resolve(_:)` (in `NativeCaptureCoordinator.swift`) prevents the private tap-aggregate nesting on the public aggregate (A1). **Interim ceiling:** system volume slider + hardware volume keys dead (A2); fix is `docs/plans/PLAN-VOLUME-KEY-INTERCEPTION.md`. **Seamless handoff (Wave 3 T9+):** `AirPlayHandoffWatcher` (best-effort unified-log watcher for blocked macOS AirPlay attempts; spawns `/usr/bin/log stream`; degrades silently), `BlockedAirPlayAttempt` (pure matcher), `PTPHelperReleasing` (fast ~1s port release), `releaseForHandoff`/`resumeFromHandoffLocked` (NativeBackend seam; release preserves selection intent, resume restores whole-system + per-app). |
@@ -266,3 +310,50 @@ repo-wide and are detailed in [../AGENTS.md](../AGENTS.md): subclass
 `IsolatedTestCase` instead of touching `UserDefaults.standard`/shared temp
 dirs directly, and use `Telemetry._installTestSink(_:)` to assert a
 subsystem's own emissions rather than adding ad hoc logging hooks.
+
+2026-10-04, AirPlay passwords: a stored password the receiver refuses is deleted at the failure site (the connect catch and both state-stream failure arms in `NativeBackend`) and never retried, so a wrong password costs one attempt, not one per reconnect. On AirPlay 2 a refused password and a network failure during connect both arrive as a plain failure, so a speaker that advertises a password reads any connect failure as a bad password until the engine can say more. `notePasswordOutcome`, reading `pendingPasswordOutcome`, is the one place `airplay:code_submitted` fires, for submissions from the Mac and the phone alike.
+
+2026-10-04, AirPlay passwords, review round 1 (supersedes the deletion rule above): a stored password is deleted only when the engine reports `.passwordRequired`, at the connect catch or a state-stream failure arm. A plain `sessionFailed` on a `.password` or `.homeMembersOnly` speaker is still read as that demand, so the user gets the prompt or the Home-app instruction, but the password is kept, because a Wi-Fi blip looks the same; every other connect error is `.unknown`. A password or code demand with no password fed leaves the speaker available, so it keeps offering "Enter password"; only a refused password makes it unavailable (owner's ruling). A password submitted while a connect is still failing buys one more attempt (`passwordResubmitted`) instead of parking, so the typed password reaches the receiver. Keychain reads happen on the caller's thread before `stateQueue`, because a read can wait on an access prompt.
+
+2026-10-04, AirPlay passwords, review round 2: the real engine reports a failed `addOutput` on the state stream too (shims/outputs.c fires the completion hook, then the state hook), so the one-extra-attempt rule now lives in both state-stream failure arms as well as the connect catch. `passwordResubmitted` holds the typed password; while it differs from the fed password a failure report neither parks the speaker, nor shows `.failed`, nor records a password outcome, and the catch lifts any park before looping. `descriptorToFeed` clears it on every attempt, so a submit buys at most one extra attempt; Forget clears it too. The arms share their deletion and availability rule through `applyPasswordFailureLocked`.
+
+2026-10-04, AirPlay passwords, review round 2 ruling: the `passwordResubmitted` skip applies only while a whole-system connect holds the speaker's `converging` slot (not a rebind recovery's `rebindConverging` one), because only that connect has a catch to give the typed password its extra attempt. Outside one, the mark is dropped and the failure is parked, shown and reported as before (coordinator's ruling).
+
+2026-10-04, AirPlay passwords, review round 3: the engine fires the completion hook before the state hook, so the converge catch can loop past a failed add before its state-stream report arrives, by which time `descriptorToFeed` has spent the typed-password mark. For a `sessionFailed` or `passwordRequired` add (both always reported on the stream; a timeout or a stopped engine is not) whose report has not landed (`failureEchoSeen`), the catch records `expectStaleFailure` and the failure arm drops exactly that one report. `descriptorToFeed` clears the mark only when it equals the password it read, so a password typed between the read and the feed keeps its extra attempt. A failure report that skips for a typed password no longer marks the row unavailable or deselected.
+
+2026-10-04, AirPlay passwords, review round 4: the converge catch now spends the typed-password mark when it grants the extra attempt, so a store that never holds the typed password (a refused Keychain write) costs one extra attempt, not an endless addOutput loop. `submitAirPlayPassword` sets the mark under `stateQueue.sync` before the store write, so a `.passwordRequired` catch in that gap loops instead of deleting the password just typed. The state-stream failure arm deletes a refused password off `stateQueue`. The `.startup` arm no longer touches the stale-echo flags: no add resolves `.startup`, and the senders report it on the state stream only from a probe.
+
+2026-10-04, AirPlay passwords, correction to the round 4 line above: the refused-password delete in `applyPasswordFailureLocked` stayed synchronous on `stateQueue` after all. Deletes are exempt from the off-queue Keychain rule because they target an item this app's own signature created (no access prompt on a Developer ID build), and running them synchronously is what stops a background delete from erasing a password the user types right after.
+
+2026-10-04, AirPlay passwords, the Keychain rule: Keychain reads and writes happen off `stateQueue`, because an access prompt would freeze every main-thread `stateQueue.sync`. Deletes of our own items stay on it: they never prompt on a Developer ID build.
+
+2026-10-04, AirPlay passwords, review round 5 (coordinator's ruling): `submitAirPlayPassword` no longer waits on `stateQueue` from the main thread. It sets the mark on `stateQueue`, writes the Keychain from a background queue, then calls its completion on main, where `GroupController` runs `retryConnection` (select fallback kept). A `.passwordRequired` catch queued ahead of the mark runs while the store still holds the old password, so its delete cannot remove the typed one. The catch now moves the typed password from the mark into `passwordForNextFeed`, and `descriptorToFeed` feeds that first, then the mark, then the store, so the extra attempt carries the typed password even when the Keychain write has not landed. A feed that carries the mark's password clears it.
+
+2026-10-04, AirPlay passwords, per-app routes: a speaker waiting for a password or code (`.failed` with `.authRequired` or `.codeRequired`, still available so it offers "Enter password") counts as unreachable for a per-app route, so the route is removed and the app rejoins the system mix; its `.connected` edge puts the route back. The route removal keeps that `.failed` (`droppedByOwnFailureLocked`), because an `.off` there would make the speaker reachable again and re-bind into the same refusal. `handleBindFailure` maps engine errors the way the whole-system connect catch does, since the engine reports the password demand before the bind throws and a `.unknown` from the throw would overwrite it.
+2026-10-04, AirPlay passwords, review follow-ups: Keychain writes from submitAirPlayPassword run on one private serial queue so two submits land in submit order; deletes are unchanged (synchronous on stateQueue at the refusal sites, caller's thread in forgetAirPlayPassword, which AGENTS-HISTORY's Keychain-rule line above overstates). A per-app route the USER removes from a speaker waiting for a password or code writes .off from updateAppRoutes, where the user's table changes; the self-drop in handleDestinationSetsChanged still keeps .failed, so the route cannot rebind into the same refusal.
+2026-10-04, AirPlay passwords, AirPlay 1 plain failure: a plain sessionFailed on a .raop password speaker reads .unknown, not .authRequired (narrows the round-1 line above to AirPlay 2). The RAOP sender reports a wrong or missing password itself (RAOP_STATE_PASSWORD → .passwordRequired), so its plain failure carries no password evidence; live 2026-10-04 a stuck shairport-sync holding an old session was shown as "That password didn't work" and the speaker could not be selected. The rule lives in accessCause, which takes the fed descriptor's kind from lastDescriptors; AirPlay 2 keeps the guess because its refusal only ever arrives as a plain failure.
+2026-10-04, AirPlay passwords, fixes after merge: a password demand on a Home-only receiver reads `.homeMembersOnly` (no password satisfies a Mac in Current User mode). `GroupController.submitAirPlayPassword` retries through `retryConnection` only for a selected or active-group speaker; any other speaker goes through `requestReconnect`, and `NativeBackend.retryOutput` re-drives a per-app route target waiting for a password by feeding the typed password, then writing `.connecting` so the route replays, never touching the whole-system set.
+2026-10-04, AirPlay passwords, per-app retype after a refusal: a refused typed password on a per-app-only route target leaves the row unavailable (`applyPasswordFailureLocked` keeps `isAvailable` false once a password was fed), so `retryOutput`'s per-app arm writes `.connecting` with `makingAvailable: true` in one commit; without it eligibility stays false on both sides of the write, no route replay runs, nothing binds, and the row sits in `.connecting` until discovery re-announces the speaker.
+2026-10-04, AirPlay passwords, password wait is a state: a password demand (`.authRequired`) with no password fed writes `ConnectionState.awaitingPassword` instead of `.failed` at all four refusal sites (the converge catch, both state-stream arms, `handleBindFailure`), with no `Telemetry.fail` and no `notePasswordOutcome`; `awaitsPassword` is the predicate, and a code demand stays `.failed(.codeRequired)`. The speaker is parked like a failure (the converge catch and the whole-system arm add it to `failedGate` and clear `isSelected`; it stays available), and `retryOutput` or a submitted password lifts it through `.connecting`; a `.stopped` report leaves it alone like a sticky `.failed`. `waitsForPasswordEntry` covers it, so a per-app route to it reads unreachable and keeps it through the unbind. `reconcileSilenceWatchdog` leaves a speaker in `.awaitingPassword` or `.failed(.authRequired)` out of `desiredNonLocal`, so neither arms the countdown; the watchdog pause the password sheet used to drive is gone. `retryOutput`'s per-app password arm requires `lastDescriptors`, so a retype never makes an offline speaker available.
+
+2026-10-04: Forget (`SpeakerLibraryController.forget`) is the only path that removes a speaker's metadata and scene membership together; it refuses to empty a scene and never touches routing.
+
+2026-10-06, AirPlay passwords, the Mac keeps playing: the capture gate's `want` and the silence watchdog's `desiredNonLocal` share one filter, `selectedSpeakerWantsStreamLocked`, that leaves out a speaker in `.awaitingPassword` or `.failed(.authRequired)`, and every `setConnectionState` and the engine state-stream path re-run the gate, so a lone password-waiting speaker leaves the Mac playing with no banner and no countdown (owner ruling 2026-10-06, "the Mac keeps playing"); the early return that kept an already-fired fallback on is gone. A mixed selection with a connected member is unchanged.
+
+2026-10-06, AirPlay passwords, typed password under a group: `GroupController.submitAirPlayPassword` branches on `isMainOutMember` alone, so a speaker remembered in `selectedDeviceIDs` but absent from the active group's Main Out goes through `requestReconnect(for:)` and its typed password reaches the backend; `retryConnection(for:)`'s Selected-Devices arm returns `.ok` without calling the backend under a group.
+
+2026-10-06, AirPlay passwords, per-app retype: `retryOutput`'s per-app password arm writes `.off` with `makingAvailable: true` after feeding the typed password and lets the replayed route's bind write `.connecting`; a throwing `updateDiscovery` logs `airplay:connect_failed` through `Telemetry.fail` and writes `.failed(.unknown)` to the row instead of returning silently.
+
+2026-10-06, AirPlay on-screen codes: a code typed for a speaker that shows one (`.onScreenCode`, status-flags bit 9, or `.onScreenCodeEveryTime`, bit 3) goes through `engine.authorize` from `submitAirPlayPassword`'s code branch (`submitCodeLocked`), never down the password path; a refused code fails the speaker as `.failed(.codeRequired)` and runs no retry. The pairing key is a second Keychain item under the same service (account `<device id>/pairing-key`) and rides the descriptor as `authKey`. A `.passwordRequired` with a fed key deletes the key, and the connect loops once more with no key so the receiver shows a fresh code. An every-time receiver stores nothing, since it discards the pairing. The wait predicates (`awaitsPassword`, `waitsForPassword`) read the fed credential, password or key (`fedCredential`).
+
+2026-10-06, AirPlay on-screen codes, authorize echo: the vendored dispatcher fires the completion hook and then the state hook for the same armed report (`shims/outputs.c`), so `engine.authorize` is followed by a state-stream `.passwordRequired` (refused code) or `.stopped` (accepted code). `submitCodeLocked` arms `expectStaleFailure` before the call, the same mark the converge catch uses for its own echo, so the echo neither reopens the code wait nor stops the retry; an error with no echo (a timeout, a stopped engine) drops the mark again.
+
+2026-10-06, AirPlay on-screen codes, every-time receivers stay unsupported: a receiver advertising status-flags bit 3 (`.onScreenCodeEveryTime`) fails a code demand as `.failed(.codeEveryTimeUnsupported)` ("Needs a code every time") and stays unavailable; `submitAirPlayPassword` takes no code for it. The vendored sender's info handler frees `device->auth_key` and starts `PIN_START` on every start when bit 3 is set (`airplay.c:3447-3455`), and the PIN_START response sets no next sequence (`:3496-3502`), so after a good code the retry asks for a fresh code and waits forever; no path leads from a PIN-authorized session into START_PLAYBACK. This replaces the "an every-time receiver stores nothing" sentence of the 2026-10-06 on-screen codes entry above.
+2026-10-06, AirPlay on-screen codes, Keychain threading: `submitCodeLocked` writes the pairing key on `passwordWriteQueue` and runs its completion from there, like the password submit; `forgetAirPlayPassword` reads and deletes on the same queue before its `stateQueue` hop, so no Keychain call runs on the main thread and Forget's deletes keep their order with submit writes (this replaces "caller's thread in forgetAirPlayPassword" in the review follow-ups line above). A Forget that lands while `engine.authorize` is still pending is enqueued before the key write, so that write can still restore the key; closing it needs a per-id Forget generation the write checks.
+2026-10-06, AirPlay on-screen codes, superseded line: the 2026-10-04 "password wait is a state" entry's "a code demand stays `.failed(.codeRequired)`" no longer holds. A first-time code demand (`.onScreenCode`) with no credential fed waits in `.awaitingPassword` like a password demand; `.failed(.codeRequired)` is a refused typed code; an every-time receiver fails as `.codeEveryTimeUnsupported`.
+
+2026-10-06, AirPlay on-screen codes, Forget deletes synchronously again (replaces the Forget half of the Keychain threading line above): `forgetAirPlayPassword` deletes the password and pairing key on the caller's thread before returning, because `descriptorToFeed` reads the store and a queued delete let a connect in that gap feed the forgotten credential back. Deletes never raise an access prompt, so they stay exempt from the off-main rule; the event's `kind` comes from `known` on `stateQueue` and reads "password" for an id that has left it. A per-id `forgetGeneration`, bumped by Forget and captured by both submit writes (password and pairing key), makes a write queued before a Forget skip the store; the completion still runs.
+
+2026-10-06, AirPlay on-screen codes, review round 1: the sender clears its own pairing key when an encrypted SETUP times out (airplay.c `start_failure`) and reports a plain failure, so the converge catch clears `fedDescriptors[id].authKey` on any failure that reaches it. The next feed then sends the stored key again; the Keychain item and `rejectedPairingKeyIDs` are untouched, since the receiver did not refuse the key.
+
+2026-10-06, AirPlay on-screen codes, review round 2: `handleBindFailure` clears `fedDescriptors[id].authKey` on a plain per-app bind failure too, for the same sender reason. The per-app bind never feeds a descriptor itself (only connect, the password retry and a discovery update do), so the stored key reaches the sender again at the next of those.

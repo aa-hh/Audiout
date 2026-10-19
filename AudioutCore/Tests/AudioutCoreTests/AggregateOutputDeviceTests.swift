@@ -338,8 +338,8 @@ extension SerializedSharedState {
     }
 
     private final class MinimalDACPEndpoint: DACPEndpoint, @unchecked Sendable {
-        var onVolume: (@Sendable (_ activeRemote: UInt32, _ level: Double) -> Void)?
-        var onVolumeStep: (@Sendable (_ activeRemote: UInt32, _ direction: Int) -> Void)?
+        var onVolume: (@Sendable (_ remoteHost: String?, _ activeRemote: UInt32, _ level: Double) -> Void)?
+        var onVolumeStep: (@Sendable (_ remoteHost: String?, _ activeRemote: UInt32, _ direction: Int) -> Void)?
         func start(dacpID: UInt64) {}
         func stop() {}
     }
@@ -400,7 +400,8 @@ extension SerializedSharedState {
 
     private func makeBackend(
         aggregateControl: FakeAggregateControl,
-        currentDefaultOutputUIDBox: LockedBox<String?>
+        currentDefaultOutputUIDBox: LockedBox<String?>,
+        currentDefaultOutputUID: (@Sendable () -> String?)? = nil
     ) -> (NativeBackend, FakeSystemVolume) {
         let systemVolume = FakeSystemVolume()
         let backend = NativeBackend(
@@ -410,7 +411,7 @@ extension SerializedSharedState {
             systemVolume: systemVolume,
             ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
             aggregateControl: aggregateControl,
-            currentDefaultOutputUID: { currentDefaultOutputUIDBox.get() },
+            currentDefaultOutputUID: currentDefaultOutputUID ?? { currentDefaultOutputUIDBox.get() },
             // D7 (adversarial review, Seamless handoff T3): this suite drives
             // `expectedSelected` non-empty, which arms the handoff watcher
             // (`reconcileHandoffWatcherLocked`, tail of `reconcileAggregateDefault`)
@@ -509,6 +510,44 @@ extension SerializedSharedState {
     }
 
     // MARK: Tests
+
+    /// A default-output read that coreaudiod never answers must not hold
+    /// `stateQueue`: the main thread's `setOutputSet` and `setMeteringActive`
+    /// both take `stateQueue.sync`, and the live freeze (2026-10-03) was the main
+    /// thread parked there behind the aggregate's default-output read. The
+    /// provider below blocks until released; every call must return while it is
+    /// still blocked.
+    @MainActor
+    @Test func theMainThreadReturnsWhileTheDefaultOutputReadIsStuck() async {
+        let control = FakeAggregateControl(resolvable: [AggregateOutputDevice.productUID: 501])
+        let armed = LockedBox<Bool>(false)
+        let finished = LockedBox<Bool>(false)
+        let release = DispatchSemaphore(value: 0)
+        let provider: @Sendable () -> String? = {
+            guard armed.get() else { return "com.other.speakers" }
+            // Hang-stop only, not a speed assert: the test releases it below.
+            _ = release.wait(timeout: .now() + 5)
+            finished.set(true)
+            return "com.other.speakers"
+        }
+        let (backend, _) = makeBackend(
+            aggregateControl: control, currentDefaultOutputUIDBox: LockedBox<String?>(nil),
+            currentDefaultOutputUID: provider)
+        backend.start(); defer { backend.stop() }
+        // start() queues a default-output read on stateQueue; wait for it so the stuck read belongs to the click, not to startup.
+        _ = backend.test_expectedSelected
+        armed.set(true)
+
+        backend.setOutputSet(["some-airplay-device"])
+        #expect(finished.get() == false)
+        backend.setMeteringActive(false)
+        #expect(finished.get() == false)
+        #expect(backend.test_expectedSelected == ["some-airplay-device"])
+
+        release.signal()
+        await pollUntil { finished.get() }
+        armed.set(false)
+    }
 
     /// ACTIVATION SEAM: the moment routing goes non-empty (`setOutputSet` with a
     /// non-empty set — "actively routing" per the AMBIGUITY note on
@@ -1139,6 +1178,36 @@ extension SerializedSharedState {
     }
 
     private static let builtInSpeakers = "com.builtin.speakers"
+
+    /// Quit must REPORT the outcome of the restore write that hands the Mac's
+    /// default output back. The result was discarded and the aggregate destroyed
+    /// on the next line, so a write the HAL refuses left the user on a device
+    /// that no longer exists with nothing recorded anywhere. Dropping the
+    /// `aggregate_default_restore` line from `stop()` turns this red.
+    @Test func theQuitTimeDefaultRestoreReportsItsOutcome() async {
+        let control = FakeAggregateControl(resolvable: [
+            AggregateOutputDevice.productUID: 501,
+            Self.builtInSpeakers: 601])
+        let box = LockedBox<String?>(Self.builtInSpeakers)
+        let (backend, _) = await makeRestoreBackend(control: control, box: box)
+
+        #expect(backend.test_aggregateDefaultActive == true, "precondition: the takeover ran")
+        #expect(backend.test_priorDefaultUID == Self.builtInSpeakers, "precondition: the prior was captured")
+
+        let sink = LinesBox()
+        Telemetry._installTestSink { sink.append($0) }
+        defer { Telemetry._installTestSink(nil) }
+
+        backend.stop()
+
+        // `stop()`'s teardown runs on `stateQueue`, so the line lands after the call returns.
+        func restoreLines() -> [String] {
+            sink.snapshot().filter { $0.contains(#""evt":"aggregate_default_restore""#) }
+        }
+        await pollUntil { restoreLines().contains { $0.contains(#""outcome":"wrote""#) } }
+        #expect(restoreLines().contains { $0.contains(#""outcome":"wrote""#) },
+                "the quit-time restore must record its outcome — a write the HAL refuses is otherwise invisible")
+    }
 
     /// Deselecting the last AirPlay device (Mac-only) must hand the Mac's default
     /// output back to the pre-takeover device — otherwise the aggregate stays the

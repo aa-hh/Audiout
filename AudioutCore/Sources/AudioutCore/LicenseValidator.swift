@@ -74,6 +74,11 @@ public struct LicenseValidator {
                     return
                 }
                 settings.licenseStatus = status
+                // Written on every answer, present or not. An answer with no
+                // reason is the server saying this verdict needs no
+                // explaining, and yesterday's reason left in place would
+                // outlive the verdict it explained.
+                settings.licenseReason = body.reason
                 // The server's spelling of the key wins — it normalises case
                 // and separators, so storing it back means the field shows
                 // what the receipt shows.
@@ -83,6 +88,15 @@ public struct LicenseValidator {
                 if let maxMajor = body.maxMajor {
                     settings.licenseMaxMajor = maxMajor
                 }
+                // Only a trial key's answer carries an expiry, which is why
+                // writing it unconditionally is right in both directions: the
+                // server's date beats a local one a backwards clock inflated,
+                // and an answer without one is a PAID key — a converted trial
+                // comes back exactly so — after which nothing may still read
+                // as mid-trial. ``AppSettings/trialStartedAt`` stays: this Mac
+                // did have a trial, and that is what stops it starting a
+                // second one.
+                settings.trialExpiresAt = body.expiresAt
                 // The companion token rides only an `.active` verdict. Any
                 // other verified status revokes it; `.active` with no token
                 // (old server, or the secret isn't configured) leaves the
@@ -102,8 +116,13 @@ public struct LicenseValidator {
     /// A 200 with a body we can read, or `nil` for every other outcome — a
     /// transport error, a non-200, or JSON that isn't the documented shape.
     /// All of those are "no answer", never "the key is bad".
+    ///
+    /// `kind` is read and not stored: `"trial"` marks an active trial, and
+    /// every reader of that fact reads ``TrialClock`` instead, which the
+    /// stored `expires_at` already answers for.
     private static func parse(data: Data?, response: URLResponse?)
-        -> (status: LicenseStatus?, key: String?, maxMajor: Int?, companionToken: String?)? {
+        -> (status: LicenseStatus?, key: String?, maxMajor: Int?, companionToken: String?,
+            reason: String?, kind: String?, expiresAt: Date?)? {
         guard let http = response as? HTTPURLResponse, http.statusCode == 200,
               let data,
               let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
@@ -111,7 +130,10 @@ public struct LicenseValidator {
         return ((object["status"] as? String).flatMap(LicenseStatus.init(rawValue:)),
                 object["key"] as? String,
                 object["max_major"] as? Int,
-                object["companion_token"] as? String)
+                object["companion_token"] as? String,
+                object["reason"] as? String,
+                object["kind"] as? String,
+                (object["expires_at"] as? String).flatMap(AppSettings.date(fromServerText:)))
     }
 
     private func finish(_ result: Result, _ completion: @escaping (Result) -> Void) {

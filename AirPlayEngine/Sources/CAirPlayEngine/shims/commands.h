@@ -13,9 +13,7 @@
 // command_exit_cb) — airplay_events.c passes NULL for the exit cb. We mirror
 // that so the call compiles; the exit cb is ignored.
 //
-// STUB STATUS (T-BUILD-1): commands.c is a REAL trivial impl (alloc a tiny
-// struct stashing evbase; free it). It links and is behaviorally complete for
-// this cluster's use (no dispatch needed) — not a placeholder.
+// commands.c is complete for this cluster (allocate/free a base-holding struct; no dispatch needed).
 
 #ifndef CAIRPLAYENGINE_SHIM_COMMANDS_H
 #define CAIRPLAYENGINE_SHIM_COMMANDS_H

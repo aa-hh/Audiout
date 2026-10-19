@@ -15,6 +15,9 @@ bug template. The three things that make a report actionable:
 - **What you did, what happened, what you expected.** If audio dropped or fell
   out of sync, say roughly how long after starting playback.
 
+If what you found is a security problem, don't put it in a public issue — see
+[SECURITY.md](SECURITY.md) for where to send it instead.
+
 ## Suggesting a feature
 
 Also an issue — use the feature template. Say what you were trying to do, not

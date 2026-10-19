@@ -117,13 +117,16 @@ extension SerializedSharedState {
             #expect(refused.contains("\"unmet\":\"speaker_sync\""), "names the permission: \(refused)")
         }
 
-        /// A `register()` that throws is a packaging/signing fault the user can
-        /// neither see nor fix, and stderr dies with the process — so it has to
-        /// reach the decision log, where a support ticket can quote it.
+        /// A `register()` that throws into `.notFound` is a packaging/signing
+        /// fault the user can neither see nor fix, and stderr dies with the
+        /// process — so it has to reach the decision log, where a support ticket
+        /// can quote it, together with the status that followed (the same line
+        /// also records the normal first-run throw, and only that field tells
+        /// the two apart).
         @Test func aFailedPTPHelperRegistrationReachesTheDecisionLog() throws {
             struct RegistrationFailed: Error {}
             struct FailingPTPHelper: PTPHelperManaging {
-                let status: PTPHelperStatus = .notRegistered
+                let status: PTPHelperStatus = .notFound
                 func register() throws { throw RegistrationFailed() }
                 func openSystemSettingsLoginItems() {}
                 func unregister() async throws {}
@@ -142,6 +145,8 @@ extension SerializedSharedState {
             #expect(lines.count == 1, "one failure, one line: \(lines)")
             #expect(try #require(lines.first).contains("RegistrationFailed"),
                     "the error itself is in the line: \(lines)")
+            #expect(try #require(lines.first).contains("\"status_after\":\"notFound\""),
+                    "and the status that followed: \(lines)")
             #expect(setup.ptpHelperRegistrationFailed)
         }
 

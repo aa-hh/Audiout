@@ -2,7 +2,7 @@
 
 import Foundation
 import Testing
-@testable import AudioutPopoverUI
+@testable import AudioutSharedUI
 
 /// The launch splash's discovery-quiescence debouncer, driven deterministically
 /// through its injectable scheduling seam — no real run loop, no waits.

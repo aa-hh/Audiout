@@ -20,8 +20,20 @@
 # Config (git config, NOT a committed file or a shell export — see the
 # audiout.remoteHost note in AudioutCore/AGENTS.md for why):
 #   git config --local audiout.remoteHost 'user@host.local'
-#   git config --local audiout.testPrefer cpu     # local (default) | remote | cpu
+#   git config --local audiout.testPrefer remote  # local (default) | remote | cpu | permits
 #   git config --local audiout.testRemoteBias 40  # cpu mode only
+#
+# What each testPrefer value means:
+#   local   — never offer the work to the other Mac.
+#   remote  — always offer it there first; it comes back only when every remote
+#             permit is held (remote_run's exit 98).
+#   cpu     — compare load average per core. Kept for compatibility only: this
+#             suite is wait-bound, so load average misreports it (see the
+#             remote_slots comment below) and the comparison throttles an idle
+#             machine or waves through a busy one.
+#   permits — send the job to whichever machine has more FREE capacity permits,
+#             ties to the mule. Measures the thing that actually matters, how
+#             many jobs are resident on each side.
 
 remote_host=${AUDIOUT_TEST_REMOTE_HOST:-$(git config --get audiout.remoteHost 2>/dev/null || true)}
 remote_pref=${AUDIOUT_TEST_PREFER:-$(git config --get audiout.testPrefer 2>/dev/null || echo local)}
@@ -34,7 +46,9 @@ remote_bias=${AUDIOUT_TEST_REMOTE_BIAS:-$(git config --get audiout.testRemoteBia
 # survives neither quoting on the remote `cd` (it is not expanded inside quotes,
 # so `cd '~/foo'` fails) nor safe quoting of paths containing spaces. ssh starts
 # in $HOME, so a relative path is both simpler and correct.
-remote_root=${AUDIOUT_TEST_REMOTE_ROOT:-audiout-remote-tests}
+# The .noindex suffix keeps Spotlight out: each synced tree carries ~1.6 GB of
+# build products, and indexing them pinned the mule's CPU (load 96, 2026-09-26).
+remote_root=${AUDIOUT_TEST_REMOTE_ROOT:-audiout-remote-tests.noindex}
 # The binary whose presence proves the remote can do this KIND of work. SwiftPM
 # callers want `swift`; the iOS target is built by `xcodebuild`, which can sit on
 # a machine with no Swift on PATH and vice versa. A caller sets this before
@@ -89,12 +103,96 @@ remote_remote_load_pct() {
         "n=\$(sysctl -n hw.ncpu); set -- \$(sysctl -n vm.loadavg | tr -d '{}'); awk -v l=\"\$1\" -v n=\"\$n\" 'BEGIN{printf \"%d\", (l/n)*100}'" 2>/dev/null
 }
 
+# Print the mule's permit table, one tab-separated `n pid state age cmd` line
+# per HELD permit, state one of alive|orphaned|dead. Nothing is printed for a
+# free permit, so an empty table means the mule is idle.
+#
+# Shared because two callers need the identical table and the identical
+# classification: scripts/capacity.sh prints it for a human, and
+# remote_mule_free_count below counts it for the routing decision. Two copies
+# of this ssh body would drift, and the drift would show up as the status
+# command and the router disagreeing about how busy the mule is.
+#
+# Does NOT probe reachability itself — the caller decides whether an
+# unreachable mule is worth a message or is simply "no". Returns ssh's own exit
+# status, so a caller under `set -e` must guard it (`|| true`) exactly as
+# remote_wins does with remote_remote_load_pct.
+remote_mule_permits() {
+    ssh -o BatchMode=yes -o ConnectTimeout="$remote_probe_timeout" \
+        -o StrictHostKeyChecking=accept-new "$remote_host" \
+        "_n=1; while [ \$_n -le $remote_slots ]; do \
+             _f=/tmp/audiout-remote-work.lock.\$_n; \
+             if [ -f \"\$_f\" ]; then \
+                 _p=\$(cat \"\$_f\" 2>/dev/null | tr -d ' '); \
+                 _age=\$(( \$(date +%s) - \$(stat -f %m \"\$_f\" 2>/dev/null || date +%s) )); \
+                 if [ -n \"\$_p\" ] && kill -0 \"\$_p\" 2>/dev/null; then \
+                     _c=\$(ps -o command= -p \"\$_p\" 2>/dev/null); \
+                     _pp=\$(ps -o ppid= -p \"\$_p\" 2>/dev/null | tr -d ' '); \
+                     if [ \"\$_pp\" = 1 ]; then \
+                         echo \"\$_n	\$_p	orphaned	\$_age	\$_c\"; \
+                     else \
+                         echo \"\$_n	\$_p	alive	\$_age	\$_c\"; \
+                     fi; \
+                 else \
+                     echo \"\$_n	\$_p	dead	\$_age	(process gone)\"; \
+                 fi; \
+             fi; \
+             _n=\$((_n + 1)); \
+         done" 2>/dev/null
+}
+
+# How many mule permits are free. Orphaned and dead holders do not count as
+# held — the next remote run reclaims both — which is the same rule
+# scripts/capacity.sh prints. Returns non-zero (printing nothing) when the mule
+# could not be asked, so the caller can tell "idle" from "no answer".
+remote_mule_free_count() {
+    _mf_out=$(remote_mule_permits) || return 1
+    if [ -z "$_mf_out" ]; then
+        _mf_held=0
+    else
+        _mf_held=$(printf '%s\n' "$_mf_out" | awk -F'\t' '$3=="alive"' | grep -c . || true)
+    fi
+    _mf_free=$((remote_slots - _mf_held))
+    [ "$_mf_free" -lt 0 ] && _mf_free=0
+    echo "$_mf_free"
+}
+
+# "permits" mode: whichever machine has more free capacity permits gets the job.
+remote_permits_win() {
+    # No separate remote_reachable probe: the permit-table ssh carries the same
+    # short connect timeout, so a sleeping host fails just as fast and one
+    # round trip does the work of two. `|| true` under `set -e`, for the same
+    # reason remote_wins guards the cpu probe: an unreachable host must fall
+    # back locally, not kill the caller.
+    _rf=$(remote_mule_free_count || true)
+    [ -n "$_rf" ] || return 1
+    # Sweep first: a permit held by a dead or unrecognised job would otherwise
+    # count against this machine and push work to the mule for no reason.
+    # Under AUDIOUT_TEST_NO_LOCK=1 no permit files exist at all, so this
+    # machine always reads as fully free and work stays here -- fine for a
+    # debug escape hatch.
+    capacity_sweep
+    _lf=$(( $(capacity_slots) - $(capacity_held_count) ))
+    [ "$_lf" -lt 0 ] && _lf=0
+    echo "  remote: permit check — local ${_lf} free of $(capacity_slots), mule ${_rf} free of ${remote_slots}." >&2
+    [ "$_rf" -gt 0 ] || return 1
+    # Ties go to the mule on purpose, the same reasoning as the remote_bias
+    # comment above: this Mac also carries the agents, the editor and any app
+    # under live test, so its spare permit is worth more than the mule's.
+    #
+    # Two jobs deciding at the same moment can both read "1 free" and both go.
+    # That race is fine: the mule's own permit loop is atomic, so the loser gets
+    # exit 98 from remote_run and comes straight back here to the local pool.
+    [ "$_rf" -ge "$_lf" ]
+}
+
 # Returns 0 when the work should be offered to the remote BEFORE trying locally.
 # Never fails the caller: an unconfigured, asleep or unmeasurable remote simply
 # returns 1 and everything proceeds locally.
 remote_wins() {
     remote_configured || return 1
     [ "$remote_pref" = "remote" ] && return 0
+    [ "$remote_pref" = "permits" ] && { remote_permits_win; return $?; }
     [ "$remote_pref" = "cpu" ] || return 1
     # `|| true` matters under `set -e`: an unreachable host makes ssh exit
     # non-zero, and a bare command substitution would propagate that straight
@@ -153,14 +251,20 @@ remote_sweep_orphans() {
 # Delete remote trees to keep the disk usable. Two rules, applied in order:
 #   1. AGE  — a tree unused for 24h+ goes, unconditionally.
 #   2. SPACE — while free space is under the floor, evict the least recently
-#      used tree, until it clears or nothing is left to take.
+#      used tree not touched in the last hour, until it clears or nothing is
+#      left to take.
 #
 # Rule 1 was 7 days and bounded nothing -- twice that took the remote down.
 # `.last-used` is re-stamped every run, so with a fleet of agents cycling
 # branches no tree ever reached 7 days and the rule never fired once. 24h is
 # short enough to actually bite. NOTE the BSD find quirk: `-mtime +1` means
 # older than TWO days (the fraction is truncated), so "older than 24h" is
-# `-mtime +0` -- the same predicate rule 2 uses to protect a live run.
+# `-mtime +0`.
+# Rule 2 used that same 24h predicate until 2026-10-04, which made it dead
+# code: rule 1 had already deleted every tree it could pick. 54 trees used
+# within the day held 82 GB, the disk sat at 4.4 GB free, and suites fell back
+# to local again. One hour still spares a live run: `.last-used` is stamped at
+# run start and a mule permit expires at 45 minutes.
 # Cost of cutting it this fine: returning to a worktree after a day pays one
 # re-sync plus one cold build, a few minutes.
 # Each tree carries a ~1.6 GB .build cache, and `.last-used` is re-stamped on
@@ -182,7 +286,7 @@ remote_prune_stale() {
          done; \
          while [ \"\$(df -m . | awk 'NR==2{print \$4}')\" -lt $remote_free_floor ]; do \
              _v=\$(for d in */; do d=\${d%/}; s=\"\$d/.last-used\"; [ -f \"\$s\" ] || s=\"\$d\"; \
-                     [ -n \"\$(find \"\$s\" -maxdepth 0 -mtime +0 2>/dev/null)\" ] && \
+                     [ -n \"\$(find \"\$s\" -maxdepth 0 -mmin +60 2>/dev/null)\" ] && \
                          echo \"\$(date -r \"\$s\" +%s) \$d\"; \
                    done | sort -n | head -1 | cut -d' ' -f2-); \
              [ -n \"\$_v\" ] || break; \
@@ -191,9 +295,23 @@ remote_prune_stale() {
         2>/dev/null || true
 }
 
+# The remote command is a STRING the far shell re-parses, so a caller argument
+# must be quoted INTO that string, not just quoted in this shell. Prints each
+# argument single-quoted and preceded by one space; nothing if there are none.
+remote_quote_args() {
+    for _a in "$@"; do
+        printf " '%s'" "$(printf '%s' "$_a" | sed "s/'/'\\\\''/g")"
+    done
+}
+
 # Run a command in the synced tree on the remote.
 #   remote_run <repo_root> <shell command string>
-# Sets $remote_status to the command's own exit code when it ACTUALLY RAN.
+# Sets $remote_status to the command's own exit code when it ACTUALLY RAN, and
+# $remote_failure_kind to WHICH of the three failures it was: `tests` (named
+# failing tests), `nobuild` (the build never finished), `noverdict` (tests
+# passed, then the process died without a summary). Empty means unknown -- the
+# classifier only runs for the swift toolchain -- and every reader must treat
+# empty as "do not trust".
 #
 # Return codes, and why the distinction is the whole point of this function:
 #   0  ran remotely and succeeded
@@ -202,12 +320,17 @@ remote_prune_stale() {
 #   2  ran remotely and FAILED
 #
 # A remote that cannot be reached, synced or set up must NEVER surface as "your
-# code is broken". Both Macs run Swift 6.4 but against different SDKs (macOS 27
-# here, macOS 26 there), and the remote has been out of disk and starved
-# before, so callers accept a remote PASS but re-confirm a
-# remote FAILURE locally before letting it block anything. The asymmetry is
-# deliberate: the expensive error is a false refusal, not a false pass.
+# code is broken". The toolchains match (re-checked 2026-09-20), so named test
+# failures from there are a real verdict; what callers still re-confirm locally
+# is a `nobuild` or a `noverdict`, because those say more about the machine's
+# condition -- out of disk, starved, a crashed test process -- than about the
+# caller's code. The asymmetry is deliberate: the expensive error is a false
+# refusal, not a false pass.
 remote_run() {
+    # Cleared here, not only on the failure path: it is a global, and a stale
+    # value from an earlier call in the same script would be read as this
+    # call's answer.
+    remote_failure_kind=''
     _root=$1
     shift
     _rdir=$(remote_dir_for "$_root")
@@ -237,20 +360,68 @@ remote_run() {
     # remote. `xcrun --show-sdk-platform-path` is what SwiftPM calls before
     # running any test bundle, and it fails under CLT — the remote twin of
     # run-tests.sh's exit-78 check.
-    # -tt ties the remote command's life to this connection: with a tty, sshd
-    # HUPs the remote process group the moment the local side dies — even
-    # SIGKILL, since the kernel still closes the socket. Without it an
-    # interrupted caller strands its run on the remote, where it holds the
-    # package build lock (see remote_sweep_orphans). The tty's price is CRLF
-    # line endings, stripped right below before anything parses $_out.
-    _out=$(ssh -tt -o BatchMode=yes -o LogLevel=QUIET \
+    # The mule permit loop is preceded by the same stale sweep capacity_sweep
+    # does locally: shlock reclaims a permit whose PID is dead, but not one held
+    # by a hung job or by a recycled PID, and either shrinks that pool until
+    # someone notices. Exit 98 stays immediate — when the mule is genuinely full
+    # the work comes straight back here (no mule wait, owner's call, 2026-09-10).
+    # -tt allocates a tty on the mule. It does NOT hang the remote job up when
+    # the local side dies, which is what this comment used to claim. Measured
+    # on this pair of Macs 2026-09-11: SIGKILL of the local ssh client, and
+    # SIGTERM of it, both left the remote wrapper running — reparented to pid 1,
+    # its own EXIT/HUP/INT/TERM trap never firing, still holding the permit file
+    # and SwiftPM's build lock. What ends an orphaned run is the pair of
+    # watchers below: a local one that kills this ssh as soon as the runner
+    # process is gone, and a remote one that sees its own parent become pid 1
+    # and kills the job's process group. The tty's price is CRLF line endings,
+    # stripped right below before anything parses $_out.
+    # SDKROOT is pinned to the selected Xcode's macOS SDK before the toolchain
+    # probe. Found 2026-09-10: the mule runs macOS 26.5 with only the Xcode 27
+    # beta installed, and with no SDK matching the OS version a bare `xcrun`
+    # falls back to the Command Line Tools SDK, which is broken there — every
+    # run took the exit-97 path and every "mule" job silently ran on this Mac.
+    # An explicit `--sdk macosx` resolves correctly; exporting its answer makes
+    # the probe and the compile agree. If the lookup fails SDKROOT stays empty
+    # and the probe below reports it as it always did.
+    # $$ inside remote_run is the RUNNER's pid: this file is sourced, never run.
+    _rr_pid=$$
+    _rr_out=$(mktemp -t audiout-remote-out)
+    ssh -tt -o BatchMode=yes -o LogLevel=QUIET \
         -o ServerAliveInterval=15 -o ServerAliveCountMax=4 \
         "$remote_host" \
         "export PATH=/opt/homebrew/bin:\$PATH; \
+         export SDKROOT=\$(xcrun --sdk macosx --show-sdk-path 2>/dev/null); \
          cd \"$_rdir\" || exit 97; \
          touch .last-used; \
          command -v $remote_toolchain >/dev/null 2>&1 || exit 97; \
          xcrun --show-sdk-platform-path >/dev/null 2>&1 || exit 97; \
+         _n=1; \
+         while [ \$_n -le $remote_slots ]; do \
+             _f=/tmp/audiout-remote-work.lock.\$_n; \
+             if [ -f \"\$_f\" ]; then \
+                 _p=\$(cat \"\$_f\" 2>/dev/null | tr -d ' '); \
+                 if [ -n \"\$_p\" ] && kill -0 \"\$_p\" 2>/dev/null; then \
+                     _c=\$(ps -o command= -p \"\$_p\" 2>/dev/null); \
+                     _a=\$(( \$(date +%s) - \$(stat -f %m \"\$_f\" 2>/dev/null || date +%s) )); \
+                     _pp=\$(ps -o ppid= -p \"\$_p\" 2>/dev/null | tr -d ' '); \
+                     if [ \"\$_pp\" = 1 ]; then \
+                         _g=\$(ps -o pgid= -p \"\$_p\" 2>/dev/null | tr -d ' '); \
+                         [ -n \"\$_g\" ] && kill -KILL -- \"-\$_g\" 2>/dev/null; \
+                         rm -f \"\$_f\"; \
+                         echo \"  remote: reclaimed mule permit \$_n held by pid \$_p (its ssh session is gone; killed its process group)\" >&2; \
+                     else \
+                         case \"\$_c\" in \
+                             *run-tests.sh*|*mule-test.sh*|*build.sh*|*make-app.sh*|*ios.sh*|*run-app.sh*|*pre-commit*|*swift*|*xcodebuild*|*xctest*) \
+                                 if [ \$_a -gt 2700 ]; then rm -f \"\$_f\"; \
+                                     echo \"  remote: reclaimed mule permit \$_n held by pid \$_p (held \${_a}s > ceiling)\" >&2; fi;; \
+                             *) rm -f \"\$_f\"; \
+                                 echo \"  remote: reclaimed mule permit \$_n held by pid \$_p (not a recognised job)\" >&2;; \
+                         esac; \
+                     fi; \
+                 fi; \
+             fi; \
+             _n=\$((_n + 1)); \
+         done; \
          _s=''; _n=1; \
          while [ \$_n -le $remote_slots ]; do \
              if /usr/bin/shlock -f /tmp/audiout-remote-work.lock.\$_n -p \$\$; then \
@@ -259,16 +430,63 @@ remote_run() {
              _n=\$((_n + 1)); \
          done; \
          [ -n \"\$_s\" ] || exit 98; \
-         trap 'rm -f \"\$_s\"' EXIT HUP INT TERM; \
-         $* ; echo \"REMOTE_EXIT:\$?\"" 2>&1)
+         _me=\$\$; _pg=\$(ps -o pgid= -p \$\$ 2>/dev/null | tr -d ' '); \
+         ( while :; do sleep 5; \
+               case \"\$(ps -o ppid= -p \$_me 2>/dev/null | tr -d ' ')\" in \
+                   '') exit 0;; \
+                   1) rm -f \"\$_s\"; kill -KILL -- \"-\$_pg\" 2>/dev/null; exit 0;; \
+               esac; \
+           done ) & \
+         _w=\$!; \
+         trap 'rm -f \"\$_s\"; kill \$_w 2>/dev/null' EXIT HUP INT TERM; \
+         $* ; _jrc=\$?; \
+         echo \"REMOTE_LOAD:\$(sysctl -n hw.ncpu 2>/dev/null) \$(sysctl -n vm.loadavg 2>/dev/null)\"; \
+         echo \"REMOTE_EXIT:\$_jrc\"" >"$_rr_out" 2>&1 </dev/null &
+    _rr_ssh=$!
+    # macOS has no parent-death signal, so poll for one. A trap cannot cover
+    # this: the runner is often SIGKILLed (a torn-down agent session), and traps
+    # do not run then. Observed 2026-09-11: the ssh client was reparented to
+    # launchd and held the connection open for 27 minutes after its runner was
+    # gone, so sshd never even started tearing the session down and the mule sat
+    # on a permit and the build lock the whole time.
+    ( while kill -0 "$_rr_pid" 2>/dev/null; do sleep 3; done; \
+      kill -TERM "$_rr_ssh" 2>/dev/null ) &
+    _rr_watch=$!
+    wait "$_rr_ssh"
     _rc=$?
+    # `wait` after the kill, stderr discarded: without it the shell announces the
+    # watcher's death ("Terminated: 15 ( while kill -0 ... )") on every single
+    # remote run, in the middle of a pre-commit guard's output.
+    kill -TERM "$_rr_watch" 2>/dev/null || true
+    wait "$_rr_watch" 2>/dev/null || true
+    _out=$(cat "$_rr_out" 2>/dev/null || true)
+    rm -f "$_rr_out"
     _out=$(printf '%s' "$_out" | tr -d '\r')
     # `|| true` on both greps: a grep that matches nothing exits 1, and callers
     # run with `set -e` (make-app.sh adds `pipefail`), so a remote command whose
     # only output was the marker line would kill the CALLER outright instead of
     # falling back. Neither grep's exit status is information we use.
-    printf '%s\n' "$_out" | grep -v '^REMOTE_EXIT:' >&2 || true
+    printf '%s\n' "$_out" | grep -v -e '^REMOTE_EXIT:' -e '^REMOTE_LOAD:' >&2 || true
     _marker=$(printf '%s\n' "$_out" | grep '^REMOTE_EXIT:' | tail -1 | cut -d: -f2 || true)
+    # "REMOTE_LOAD:8 { 1.23 4.56 7.89 }" -> " (mule load 1.23, 8 cores)", appended
+    # to the failure messages. A starved mule fails wait-bound tests by name, which
+    # now reads as a real verdict, so the number makes that diagnosable.
+    # razor: reported, never gated on. A threshold here would silently change when
+    # a commit gets refused, and the mule's job cap already attacks starvation at
+    # its source. Upgrade path if starvation outlives the cap: decide in the
+    # CALLER, where refusing a commit is already a decision.
+    _load=$(printf '%s\n' "$_out" | grep '^REMOTE_LOAD:' | tail -1 || true)
+    _loadnote=''
+    if [ -n "$_load" ]; then
+        _cores=$(printf '%s' "$_load" | sed -e 's/^REMOTE_LOAD://' -e 's/ .*//')
+        _load1=$(printf '%s' "$_load" | sed -e 's/.*{ *//' -e 's/ .*//')
+        # `if`, not `[ ... ] && ...`: callers run with `set -e`, and a trailing
+        # AND-list whose test fails would abort the whole run when the mule's
+        # sysctl came back empty.
+        if [ -n "$_load1" ]; then
+            _loadnote=" (mule load $_load1, ${_cores:-?} cores)"
+        fi
+    fi
 
     if [ "$_rc" -eq 97 ]; then
         echo "  remote: environment not usable (missing dir, no toolchain, or Command Line Tools selected instead of Xcode) — staying local." >&2
@@ -305,7 +523,8 @@ remote_run() {
         _nfailed=$(printf '%s' "$_failed" | grep -c . || true)
         if [ "$_nfailed" -gt 0 ]; then
             _names=$(printf '%s' "$_failed" | tr '\n' ' ' | sed 's/ *$//')
-            echo "  remote: ran and FAILED there — $_nfailed test(s) failed: $_names" >&2
+            remote_failure_kind=tests
+            echo "  remote: ran and FAILED there — $_nfailed test(s) failed: $_names$_loadnote" >&2
         else
             # Pattern match, not `grep -q`: under pipefail grep -q exits at the first
             # match, printf takes SIGPIPE, and `!` inverts the resulting 141 — which
@@ -315,10 +534,12 @@ remote_run() {
                 *"Build complete!"*)
                     _npassed=$(printf '%s\n' "$_out" | grep -v ' Test run with ' \
                         | grep -c ' Test .* passed after ' || true)
-                    echo "  remote: ran and FAILED there — exit $remote_status, no test verdict in the output ($_npassed tests passed, no failure lines, no summary line)" >&2
+                    remote_failure_kind=noverdict
+                    echo "  remote: ran and FAILED there — exit $remote_status, no test verdict in the output ($_npassed tests passed, no failure lines, no summary line)$_loadnote" >&2
                     ;;
                 *)
-                    echo "  remote: ran and FAILED there — the build did not finish (no \"Build complete!\" line); the compiler errors are in the output above" >&2
+                    remote_failure_kind=nobuild
+                    echo "  remote: ran and FAILED there — the build did not finish (no \"Build complete!\" line); the compiler errors are in the output above$_loadnote" >&2
                     ;;
             esac
         fi
@@ -340,4 +561,179 @@ remote_run() {
 remote_fetch() {
     _esc=$(printf '%s/%s' "$(remote_dir_for "$1")" "$2" | sed 's/ /\\ /g')
     rsync -az --timeout=30 "$remote_host:$_esc" "$(dirname "$3")/" >/dev/null 2>&1
+}
+
+# --- local capacity permits -------------------------------------------------
+# The counting semaphore that used to live inline in scripts/run-tests.sh, moved
+# here so every entry point can take a permit from the SAME pool. Only the test
+# runner ever took one; build.sh, make-app.sh, ios.sh and Guard 6 compiled
+# uncapped beside it, so "3 permits" never described what the machine was
+# actually running.
+#
+# Rulings (owner's call, 2026-09-10): no mule wait, 1800s local ceiling then
+# uncapped, sweep-on-acquire.
+#   - no mule wait: remote_run's exit 98 keeps falling straight back to local.
+#   - 1800s local ceiling then uncapped: waiting forever would let one wedged
+#     worktree block every commit on the machine; refusing would fail a commit
+#     for a reason its author cannot see. Degrading is the only option that
+#     leaves the machine usable.
+#   - sweep-on-acquire: shlock reclaims a permit whose PID is dead, but not one
+#     whose PID was recycled onto some unrelated process, and not one held by a
+#     job that hung. Both wedge the pool until a human notices.
+
+# Same resolution as the inline copy it replaces, so a worktree still running the
+# old runner sees the same number.
+capacity_slots() {
+    echo "${AUDIOUT_TEST_SLOTS:-$(git config --get audiout.localSlots 2>/dev/null || echo 3)}"
+}
+
+# The name is load-bearing: worktrees that predate this file still take permits
+# under /tmp/audiout-suite.lock.N inline, and both must share one pool or the cap
+# is silently doubled.
+capacity_lock_base() {
+    echo "${AUDIOUT_TEST_LOCK_FILE:-/tmp/audiout-suite.lock}"
+}
+
+# How many local permits are held right now. A dead holder does not count: the
+# next capacity_acquire takes that file atomically via shlock, the same rule
+# scripts/capacity.sh prints. Reads only — never sweeps, so a caller that wants
+# stale permits released must call capacity_sweep first.
+capacity_held_count() {
+    _hc_base=$(capacity_lock_base)
+    _hc_slots=$(capacity_slots)
+    _hc_held=0
+    _hc_n=1
+    while [ "$_hc_n" -le "$_hc_slots" ]; do
+        _hc_f="${_hc_base}.${_hc_n}"
+        if [ -f "$_hc_f" ]; then
+            _hc_pid=$(cat "$_hc_f" 2>/dev/null | tr -d ' ')
+            if [ -n "$_hc_pid" ] && kill -0 "$_hc_pid" 2>/dev/null; then
+                _hc_held=$((_hc_held + 1))
+            fi
+        fi
+        _hc_n=$((_hc_n + 1))
+    done
+    echo "$_hc_held"
+}
+
+# Free permits whose holder is alive but is not the job it claims to be, or has
+# held far longer than any real job takes. Never kills the PID — a wrong guess
+# then costs one over-subscribed run, not somebody's build.
+capacity_sweep() {
+    _cs_base=$(capacity_lock_base)
+    _cs_slots=$(capacity_slots)
+    _cs_max=${AUDIOUT_CAPACITY_MAX_AGE:-2700}
+    _cs_now=$(date +%s)
+    _cs_n=1
+    while [ "$_cs_n" -le "$_cs_slots" ]; do
+        _cs_f="${_cs_base}.${_cs_n}"
+        if [ -f "$_cs_f" ]; then
+            _cs_pid=$(cat "$_cs_f" 2>/dev/null | tr -d ' ')
+            # A dead PID is left alone on purpose: shlock reclaims exactly that
+            # case atomically on the next acquire, and racing it here would let
+            # two processes take the same permit.
+            if [ -n "$_cs_pid" ] && kill -0 "$_cs_pid" 2>/dev/null; then
+                _cs_cmd=$(ps -o command= -p "$_cs_pid" 2>/dev/null)
+                _cs_age=$((_cs_now - $(stat -f %m "$_cs_f" 2>/dev/null || echo "$_cs_now")))
+                case "$_cs_cmd" in
+                    *run-tests.sh*|*mule-test.sh*|*build.sh*|*make-app.sh*|*ios.sh*|*run-app.sh*|*pre-commit*|*swift*|*xcodebuild*|*xctest*)
+                        if [ "$_cs_age" -gt "$_cs_max" ]; then
+                            rm -f "$_cs_f"
+                            echo "  capacity: reclaimed local permit $_cs_n held by pid $_cs_pid (held ${_cs_age}s > ceiling)" >&2
+                            echo "  (pid $_cs_pid is still running and may be a genuinely stuck job just cut loose — check it)" >&2
+                        fi
+                        ;;
+                    *)
+                        rm -f "$_cs_f"
+                        echo "  capacity: reclaimed local permit $_cs_n held by pid $_cs_pid (not a recognised job)" >&2
+                        ;;
+                esac
+            fi
+        fi
+        _cs_n=$((_cs_n + 1))
+    done
+}
+
+# While capacity_acquire waits, a mule permit can free up before a local one.
+# A caller that can run its job on the mule sets capacity_mule_retry to a
+# function name; once a minute, if the mule reports a free permit, that function
+# runs. On a result it trusts it exits the script itself; otherwise it returns
+# and the wait goes on. Once the job has actually run on the mule and failed
+# (remote_status set), checking stops: that failure is re-confirmed here, as
+# every remote failure is. A mule that filled up again or did not answer is
+# checked again a minute later.
+capacity_try_mule() {
+    [ -n "${capacity_mule_retry:-}" ] && remote_configured || return 0
+    _tm_free=$(remote_mule_free_count || true)
+    [ -n "$_tm_free" ] && [ "$_tm_free" -gt 0 ] || return 0
+    echo "  capacity: a mule permit freed up — sending this job there." >&2
+    remote_status=""
+    "$capacity_mule_retry" || true
+    [ -z "$remote_status" ] || capacity_mule_retry=""
+}
+
+# capacity_acquire [label] — take one permit, or proceed uncapped after the
+# ceiling. NEVER returns non-zero: a caller that cannot get a permit still has
+# work to do, and refusing would turn machine load into a build failure.
+# AUDIOUT_CAPACITY_NO_TRAP=1 means the caller installs its own EXIT trap (run-
+# tests.sh re-traps around the compiler process group) and calls
+# capacity_release itself; installing ours would clobber theirs.
+capacity_acquire() {
+    _ca_label=${1:-job}
+    capacity_slot_file=""
+    if [ "${AUDIOUT_TEST_NO_LOCK:-0}" = "1" ]; then
+        echo "  capacity: AUDIOUT_TEST_NO_LOCK=1 — not limiting concurrency." >&2
+        return 0
+    fi
+    _ca_base=$(capacity_lock_base)
+    _ca_slots=$(capacity_slots)
+    _ca_ceiling=${AUDIOUT_CAPACITY_TIMEOUT:-1800}
+    capacity_sweep
+    _ca_waited=0
+    _ca_announced=0
+    while :; do
+        _ca_n=1
+        while [ "$_ca_n" -le "$_ca_slots" ]; do
+            if /usr/bin/shlock -f "${_ca_base}.${_ca_n}" -p $$; then
+                capacity_slot_file="${_ca_base}.${_ca_n}"
+                break
+            fi
+            _ca_n=$((_ca_n + 1))
+        done
+        if [ -n "$capacity_slot_file" ]; then
+            echo "  capacity: local permit $_ca_n/$_ca_slots ($_ca_label)" >&2
+            [ "${AUDIOUT_CAPACITY_NO_TRAP:-0}" = "1" ] || \
+                trap 'capacity_release' EXIT HUP INT TERM
+            return 0
+        fi
+        if [ "$_ca_announced" -eq 0 ]; then
+            echo "  capacity: all $_ca_slots local permits busy — waiting (ceiling ${_ca_ceiling}s)" >&2
+            _ca_announced=1
+        fi
+        if [ "$_ca_waited" -ge "$_ca_ceiling" ]; then
+            echo "  capacity: WARNING all local permits busy for ${_ca_ceiling}s — proceeding UNCAPPED (check scripts/capacity.sh status)" >&2
+            capacity_slot_file=""
+            return 0
+        fi
+        sleep 5
+        _ca_waited=$((_ca_waited + 5))
+        # Re-sweep on the same minute tick as the progress line: a permit that
+        # went stale WHILE we waited is the common case in a long wait.
+        if [ $((_ca_waited % 60)) -eq 0 ]; then
+            capacity_try_mule
+            capacity_sweep
+            echo "  capacity: still waiting (${_ca_waited}s of ${_ca_ceiling}s)" >&2
+        fi
+    done
+}
+
+# Idempotent, and refuses to delete a file that is no longer ours — after the
+# sweep above reclaims a permit, the next holder's PID is in it, and removing
+# that would hand a third process a permit nobody counted.
+capacity_release() {
+    [ -n "${capacity_slot_file:-}" ] || return 0
+    if [ "$(cat "$capacity_slot_file" 2>/dev/null | tr -d ' ')" = "$$" ]; then
+        rm -f "$capacity_slot_file"
+    fi
+    capacity_slot_file=""
 }

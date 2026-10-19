@@ -126,6 +126,51 @@ import AppKit
         #expect(!drawer.test_resetVisible, "nothing left to reset")
     }
 
+    // MARK: Cast pending glow
+
+    /// The host's pending flag shows the white glow around the field and
+    /// says so to VoiceOver, and clearing it removes both. Turns red if
+    /// `configure` drops `pendingApply` or `refreshDisplay` stops appending
+    /// ", applying" to the field's label.
+    @Test func pendingApplyShowsTheFieldGlowAndSpeaksIt() {
+        let (drawer, _) = makeDrawer()
+        drawer.test_reduceMotionOverride = true
+        #expect(!drawer.test_isPendingGlowShown)
+
+        drawer.configure(deviceName: "Living Room TV", trimMs: 24, isSet: true,
+                         usableRangeMs: -500...500, alignTickActive: false, pendingApply: true)
+        #expect(drawer.test_isPendingGlowShown)
+        #expect(drawer.test_valueField.accessibilityLabel() == "Sync offset for Living Room TV, applying")
+
+        drawer.configure(deviceName: "Living Room TV", trimMs: 24, isSet: true,
+                         usableRangeMs: -500...500, alignTickActive: false)
+        #expect(!drawer.test_isPendingGlowShown)
+        #expect(drawer.test_valueField.accessibilityLabel() == "Sync offset for Living Room TV")
+    }
+
+    /// Unmounting mid-hold drops the hold with no arrival, so nothing runs
+    /// on the detached drawer and the next device's field never flashes.
+    /// Turns red if `viewDidMoveToWindow` stops resetting the hold.
+    @Test func unmountingMidHoldLeavesNoTimerAndNoArrival() {
+        let (drawer, _) = makeDrawer()
+        drawer.test_reduceMotionOverride = false
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 620, height: 200),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentView?.addSubview(drawer)
+        drawer.configure(deviceName: "Living Room TV", trimMs: 24, isSet: true,
+                         usableRangeMs: -500...500, alignTickActive: false, pendingApply: true)
+        #expect(drawer.test_isPulseTimerRunning)
+
+        drawer.removeFromSuperview()
+        #expect(!drawer.test_isPulseTimerRunning)
+        #expect(!drawer.test_isPendingGlowShown)
+
+        drawer.configure(deviceName: "Kitchen", trimMs: 0, isSet: true,
+                         usableRangeMs: -500...500, alignTickActive: false)
+        #expect(!drawer.test_isPendingGlowShown, "a later device's field must not play an arrival")
+        #expect(!drawer.test_isPulseTimerRunning)
+    }
+
     // MARK: One stepper pair — 1 ms a click, 10 while ⇧ is held
 
     @Test func minusStepsByOne() {
@@ -179,6 +224,32 @@ import AppKit
                 "press-and-hold has to cover the ±500 ms range — one click per ms is not a control")
         #expect((repeatSpec?.delay ?? 0) > 0, "a deliberate single click must never repeat")
         #expect((repeatSpec?.interval ?? 0) > 0)
+    }
+
+    /// Field defect: a held `+` committed every 60 ms auto-repeat tick, and
+    /// each commit rewrote the trim store and sent `bt_sync:trim_committed`
+    /// (244 events from one customer in four holds). Every tick now applies
+    /// live; the release commits once, with the final value.
+    @Test func holdingPlusAppliesEachRepeatLiveAndCommitsOnceOnRelease() {
+        let (drawer, spy) = makeDrawer(trimMs: 24)
+        drawer.test_holdPlus(repeats: 5)
+        #expect(spy.changes.map(\.ms) == [25, 26, 27, 28, 29, 29])
+        #expect(spy.changes.map(\.committed) == [false, false, false, false, false, true])
+    }
+
+    @Test func holdingPlusWithShiftStepsTenLiveAndCommitsOnce() {
+        let (drawer, spy) = makeDrawer(trimMs: 24)
+        drawer.test_shiftModifierOverride = true
+        drawer.test_holdPlus(repeats: 3)
+        #expect(spy.changes.map(\.ms) == [34, 44, 54, 54])
+        #expect(spy.changes.map(\.committed) == [false, false, false, true])
+    }
+
+    @Test func aSingleClickCommitsExactlyOnce() {
+        let (drawer, spy) = makeDrawer(trimMs: 24)
+        drawer.test_firePlusClick()
+        #expect(spy.changes.map(\.ms) == [25])
+        #expect(spy.changes.map(\.committed) == [true])
     }
 
     // MARK: The value cluster reads as one control around a typeable field
@@ -334,6 +405,50 @@ import AppKit
                          usableRangeMs: -500...500, alignTickActive: true)
         #expect(drawer.test_alignActive)
         #expect(spy.alignToggles.isEmpty, "an external push repositions state, it isn't a user gesture")
+    }
+
+    // MARK: The caption line — where the applied offset came from
+
+    /// Defect this names: the toggle keeps the wizard's name, so "Align by
+    /// ear" would mean two different things one button apart.
+    @Test func theTickToggleSaysWhatItPlays() {
+        let (drawer, _) = makeDrawer()
+        #expect(drawer.test_alignTitle == "Play ticks")
+    }
+
+    /// Defect this names: the line printing the wrong source, or printing
+    /// something on a speaker nobody has measured — and the reserved height
+    /// going away with it, which makes the band jump when a source lands.
+    @Test func theCaptionNamesTheSourceAndStaysReservedWithoutOne() {
+        let (drawer, _) = makeDrawer()
+        #expect(drawer.test_captionText.isEmpty, "no source, no sentence")
+
+        for (source, expected) in [(BTOffsetSource.measured, "Measured with your iPhone"),
+                                   (.fromLastTime, "Timing from last time"),
+                                   (.byEar, "Aligned by ear on this Mac")] {
+            drawer.configure(deviceName: "Move 2", trimMs: 24, isSet: true,
+                             usableRangeMs: -500...500, alignTickActive: false,
+                             offsetSource: source)
+            #expect(drawer.test_captionText == expected)
+        }
+        drawer.configure(deviceName: "Move 2", trimMs: 24, isSet: true,
+                         usableRangeMs: -500...500, alignTickActive: false,
+                         offsetSource: .firstPass)
+        #expect(drawer.test_captionText
+                    == "First pass. Your iPhone checks again once the speaker has settled.",
+                "a first pass keeps the clause that promises the re-check")
+        #expect(drawer.test_captionTextColor == Tokens.Color.label2,
+                "the line is a note, never a failure")
+    }
+
+    /// Defect this names: the over-40 ms notice never reaching the user
+    /// because the source sentence sits on the line it needs.
+    @Test func theMovedNoticeTakesTheLineFromTheSource() {
+        let (drawer, _) = makeDrawer()
+        drawer.configure(deviceName: "Move 2", trimMs: 24, isSet: true,
+                         usableRangeMs: -500...500, alignTickActive: false,
+                         offsetSource: .measured, movedSinceLastTimeMs: 46)
+        #expect(drawer.test_captionText.hasPrefix("Moved 46 ms since last time."))
     }
 
     // MARK: Escape — drawer-level close vs field-level revert don't collide

@@ -41,6 +41,7 @@ public struct DeviceEQStore: Sendable {
 
     /// Load the saved EQ settings. Missing file → `nil` (first run). A file from
     /// a newer schema is treated as missing rather than crashing an older build.
+    /// The file is moved aside first (`StoreRecovery.quarantine`) so the next save cannot overwrite a file this build cannot read.
     public func load() throws -> (mainOut: DeviceEQ?, devices: [String: DeviceEQ])? {
         guard FileManager.default.fileExists(atPath: fileURL.path) else { return nil }
         let data = try Data(contentsOf: fileURL)
@@ -51,7 +52,10 @@ public struct DeviceEQStore: Sendable {
             StoreRecovery.quarantine(fileURL)
             throw error
         }
-        guard envelope.schemaVersion <= Self.currentSchemaVersion else { return nil }
+        guard envelope.schemaVersion <= Self.currentSchemaVersion else {
+            StoreRecovery.quarantine(fileURL)
+            return nil
+        }
         return (envelope.mainOut, envelope.devices)
     }
 

@@ -7,7 +7,7 @@ import AppKit
 /// A row's icon is the most obvious thing on it and, as a plain `NSImageView`,
 /// the most inert — a picture of a speaker that does nothing. This one is the
 /// visible door to the same menu right-click already offers ("Equalizer…",
-/// and on a Bluetooth row "Align speaker…") — a second way in for anyone who
+/// and on a Bluetooth row "Align by ear…") — a second way in for anyone who
 /// never thinks to right-click a row.
 ///
 /// **Armed only when there is something to show.** The host sets ``onPress``;

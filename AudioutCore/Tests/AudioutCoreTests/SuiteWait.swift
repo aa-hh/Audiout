@@ -62,6 +62,20 @@ import Testing
 /// revisit** — and revisiting one constant here is the whole reason not to
 /// have sixty of them.
 ///
+/// Raised 30s → 120s on 2026-09-20, and this is the measurement that forced it.
+/// Once the migration had put most of the suite's waits on this type, a full
+/// LOCAL run was instrumented to count polls: waits that eventually SUCCEEDED
+/// were reaching poll 2 after 11s, and one (`SetupFlowModelTests:845`) after
+/// 75.9s — a nominal 5ms `Task.sleep` was taking tens of seconds to resume,
+/// across main-actor and non-main-actor suites alike. The suite's own blocking
+/// waits (`untilOnRunLoop`, ``settle(_:)``) each hold a cooperative thread for
+/// their whole duration, so a loaded run starves Swift concurrency process-wide
+/// and every `Task.sleep` in it — the test's poll AND the production timer it is
+/// waiting for, which in the Bluetooth case is itself a `Task.sleep` on the main
+/// actor. 30s sat right in the middle of that spread: 13 tests failed on a
+/// loaded machine and none on an idle one. Dropping the interval to 50ms was
+/// measured and did NOT help, which is what rules out poll volume as the cause.
+///
 /// ## Use
 ///
 /// ```swift
@@ -74,8 +88,21 @@ import Testing
 /// than keeping a second implementation — call sites then need no edit at all.
 enum SuiteWait {
 
+    /// ## One last look before giving up
+    ///
+    /// Both loops below re-test the condition once more AFTER the loop and
+    /// before recording anything. The loop exits on the WALL CLOCK, so a poll
+    /// that the scheduler starved can sleep clean through the arrival it was
+    /// waiting for and then report a timeout for a state that is already
+    /// there. Measured 2026-09-20: a full-suite run recorded four such
+    /// timeouts, and in every one the very next assertion — reading the same
+    /// state the wait had just given up on — passed. The hand-rolled loops
+    /// these replaced were bounded by ITERATIONS, not by the clock, so they
+    /// never had this failure mode. This does not weaken the fail-closed rule:
+    /// a condition that is genuinely still false records exactly as before.
+
     /// The one deadline. See "Sizing" above before changing it.
-    static let timeout: TimeInterval = 30
+    static let timeout: TimeInterval = 120
 
     /// ## Why `timeout` is optional, and what passing one MEANS
     ///
@@ -110,23 +137,33 @@ enum SuiteWait {
     /// `description` is what the reader needs in the failure message: name the
     /// state being waited FOR, not the act of waiting ("the coordinator reaches
     /// .running", not "waiting for state").
+    ///
+    /// Runs on the CALLER's actor (`#isolation`): in a `@MainActor` suite the
+    /// condition is evaluated on the main thread after every sleep, so a
+    /// condition that reads or lays out AppKit views is legal. Without this the
+    /// loop resumed on the generic executor and a `fittingSize` inside the
+    /// condition forced a layout pass from a background thread.
     static func until(
         _ description: @autoclosure () -> String = "condition to hold",
         timeout: TimeInterval? = nil,
         sourceLocation: SourceLocation = #_sourceLocation,
+        isolation: isolated (any Actor)? = #isolation,
         _ condition: () -> Bool
     ) async {
         let limit = timeout ?? Self.timeout
         let deadline = Date().addingTimeInterval(limit)
+        var polls = 0
         while Date() < deadline {
+            polls += 1
             if condition() { return }
             try? await Task.sleep(for: .milliseconds(5))
         }
+        if condition() { return }              // see "One last look" on the type
         guard timeout == nil else { return }   // explicit deadline: expiry is the point
         // Fail CLOSED, at the caller. A silent return here is what let a
         // starved wait masquerade as the next assertion's failure.
         Issue.record(
-            "timed out after \(limit)s waiting for \(description())",
+            "timed out after \(limit)s (\(polls) polls) waiting for \(description())",
             sourceLocation: sourceLocation
         )
     }
@@ -167,6 +204,19 @@ enum SuiteWait {
     /// not interchangeable: an `await` yields the thread, which does NOT let a
     /// main-run-loop source fire, and pumping the run loop from an async
     /// context re-enters it. Pick the one that matches how the state arrives.
+    ///
+    /// **NEVER use this to wait for something a `Task { @MainActor … }` makes
+    /// true.** A nested `RunLoop.run` does not drain the main DISPATCH queue —
+    /// the serial queue will not re-enter while one of its blocks is on the
+    /// stack — so main-actor continuations cannot run for as long as this is
+    /// blocking. Measured 2026-09-20 on one such call (a wait for a 0.05s
+    /// `Task.sleep` in `SetupModel.primeBluetooth`): 5145 pumps of the run loop
+    /// over the full 30s and the continuation never got to run. The damage is
+    /// not local, either — the main thread is shared, so that one call starved
+    /// every other main-actor `until` in the run (one of them managed 2 polls
+    /// in 30s) and took 13 unrelated tests down with it. If the state arrives
+    /// on the main actor, use ``until(_:timeout:sourceLocation:isolation:_:)``;
+    /// this method is for `Timer`s and other run-loop sources.
     static func untilOnRunLoop(
         _ description: @autoclosure () -> String = "condition to hold",
         timeout: TimeInterval? = nil,
@@ -175,13 +225,16 @@ enum SuiteWait {
     ) {
         let limit = timeout ?? Self.timeout
         let deadline = Date().addingTimeInterval(limit)
+        var polls = 0
         while Date() < deadline {
+            polls += 1
             if condition() { return }
             RunLoop.current.run(until: Date().addingTimeInterval(0.005))
         }
+        if condition() { return }              // see "One last look" on the type
         guard timeout == nil else { return }   // explicit deadline: expiry is the point
         Issue.record(
-            "timed out after \(limit)s waiting for \(description())",
+            "timed out after \(limit)s (\(polls) polls) waiting for \(description())",
             sourceLocation: sourceLocation
         )
     }

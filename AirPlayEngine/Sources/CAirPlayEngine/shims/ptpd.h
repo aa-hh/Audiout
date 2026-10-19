@@ -19,11 +19,7 @@
 //   ptpd_deinit() -> void
 // (the T-PKG-1 scaffold had these wrong — int*/int-return; corrected here.)
 //
-// STUB STATUS (T-BUILD-1): shims/ptpd.c is a REAL adaptation of OwnTone's
-// ptpd.c (it links against the vendored libairptp cluster, which compiles).
-// This is a full port, not a no-op stub, because ptpd.c has no OwnTone-
-// plumbing entanglement beyond logger + cfg + thread_setname (all shimmed).
-// It does NOT run anything at build time — T-BUILD-1 is compile+link only.
+// ptpd.c is a full port of OwnTone's ptpd.c against the vendored libairptp (deferred-lookup contract below).
 //
 // DEFERRED LOOKUP CONTRACT (T2b, docs/ptp-helper-design.md §1.3/§5.1-5.2):
 // the root helper daemon is demand-started (starts on the user's first

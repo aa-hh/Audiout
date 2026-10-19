@@ -98,7 +98,7 @@ merge) / `important` (concrete issue worth fixing in this PR) / `optional`
   `Incompatible` (exactly what breaks, for whom, when) / `Not established`
   (what evidence is missing).
 - **Verification**: run the smallest scoped check that answers the question
-  (`swift test --package-path AudioutCore --filter <Suite>` — NEVER a bare
+  (`bash scripts/run-tests.sh --filter <Suite>` — NEVER a bare
   full `swift test`; the full run is `scripts/run-tests.sh` and rarely needed
   for review). Record exact commands + outcomes in the summary. Separate
   clearly: covered by tests here / needs the owner's live hardware test (TCC,

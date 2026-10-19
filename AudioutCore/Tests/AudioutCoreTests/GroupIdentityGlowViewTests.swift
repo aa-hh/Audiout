@@ -30,7 +30,7 @@ extension SerializedSharedState {
     /// Increase Contrast is not part of the effective appearance, so only the
     /// workspace observer can catch it — without that, the glow would keep the
     /// standard-contrast magenta after the setting is turned on.
-    @Test func coreFollowsIncreaseContrastLive() {
+    @Test func coreFollowsIncreaseContrastLive() throws {
         defer { Tokens.test_increaseContrastOverride = nil }
         let view = GroupIdentityGlowView()
         view.appearance = NSAppearance(named: .aqua)
@@ -57,10 +57,10 @@ extension SerializedSharedState {
         NSAppearance(named: .aqua)?.performAsCurrentDrawingAppearance {
             expected = Tokens.Color.partyRampDeep.usingColorSpace(.sRGB)
         }
-        let want = try? #require(expected)
-        #expect(abs(increased.redComponent - (want?.redComponent ?? -1)) <= 0.004)
-        #expect(abs(increased.greenComponent - (want?.greenComponent ?? -1)) <= 0.004)
-        #expect(abs(increased.blueComponent - (want?.blueComponent ?? -1)) <= 0.004)
+        let want = try #require(expected)
+        #expect(abs(increased.redComponent - want.redComponent) <= 0.004)
+        #expect(abs(increased.greenComponent - want.greenComponent) <= 0.004)
+        #expect(abs(increased.blueComponent - want.blueComponent) <= 0.004)
     }
 
     @Test func glowIsNeitherHittableNorSpoken() {

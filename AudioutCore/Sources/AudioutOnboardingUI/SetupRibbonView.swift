@@ -96,10 +96,8 @@ final class SetupHeroHeadView: NSView {
         headlineLabel.font = Tokens.Font.display
         headlineLabel.textColor = Tokens.Color.label
         headlineLabel.maximumNumberOfLines = 2
-        // The hero's heading, findable in VoiceOver's rotor. The raw AX string,
-        // not `NSAccessibilityHeadingRole`: that constant is macOS 26+ and this
-        // app installs on 14.2.
-        headlineLabel.setAccessibilityRole(NSAccessibility.Role(rawValue: "AXHeading"))
+        // The hero's heading, findable in VoiceOver's rotor.
+        headlineLabel.setAccessibilityHeading()
 
         // Primary ink, not secondary: this is the sentence the whole step rests
         // on, and it is the only body copy a first ask has.
@@ -164,6 +162,25 @@ final class SetupPreviewFrameView: NSView {
     /// around them reads as two mismatched roundings.
     private static let cornerRadius: CGFloat = Tokens.Layout.Radius.control
     private static let labelInset: CGFloat = 12
+    /// The rim's width, and the inset the top lip sits at so the layer's own
+    /// border (drawn above sublayers) does not cover it.
+    private static let rimWidth: CGFloat = 1
+
+    /// The frame's surface: `Tokens.Color.well` darkened towards
+    /// `Tokens.Color.shadow`. Bare `well` on the hero pane's `panel` is
+    /// 1.154:1 in light — the same hue at almost the same lightness — so the
+    /// recess vanishes; the blend takes it to ~1.31:1 and is a no-op in dark,
+    /// where `well` is already far below `panel`.
+    private static var wellFill: NSColor {
+        dynamicBlend(Tokens.Color.well, fraction: 0.06, of: Tokens.Color.shadow)
+    }
+    /// A 1 pt shade lip inside the top edge — the recess recipe
+    /// `GroupedSectionView`'s `.well` style draws (DESIGN.md), at the same
+    /// `Tokens.Color.insetShadeAlpha`, composited here because this view is layer-backed rather
+    /// than hand-drawn.
+    private static var topLipFill: NSColor {
+        dynamicBlend(Self.wellFill, fraction: Tokens.Color.insetShadeAlpha, of: Tokens.Color.shadow)
+    }
 
     /// Where the caller installs whatever plays in here (the demo pane). Its
     /// contents are centred and clipped, never resized — the pane owns its own
@@ -175,11 +192,13 @@ final class SetupPreviewFrameView: NSView {
     private let captionLabel = NSTextField(labelWithString: "")
     private let bandRule = RoundedContainerView(fill: Tokens.Color.hairline,
                                                 border: .clear, radius: 0)
+    private let topLip = RoundedContainerView(fill: SetupPreviewFrameView.topLipFill,
+                                              border: .clear, radius: 0)
     private var bandHeight: NSLayoutConstraint!
 
     init() {
-        well = RoundedContainerView(fill: Tokens.Color.well,
-                                    border: Tokens.Color.hairline,
+        well = RoundedContainerView(fill: Self.wellFill,
+                                    border: Tokens.Color.containerEdge,
                                     radius: Self.cornerRadius)
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false
@@ -199,6 +218,10 @@ final class SetupPreviewFrameView: NSView {
         body.translatesAutoresizingMaskIntoConstraints = false
         well.addSubview(labelBand)
         well.addSubview(body)
+        // Last, so nothing playing inside the frame paints over the lip; the
+        // well's rounded clip trims it at the corners.
+        topLip.borderWidth = 0
+        well.addSubview(topLip)
 
         bandHeight = labelBand.heightAnchor.constraint(equalToConstant: Self.labelBandHeight)
         NSLayoutConstraint.activate([
@@ -227,6 +250,14 @@ final class SetupPreviewFrameView: NSView {
                                       constant: Self.bodyPadding),
             body.bottomAnchor.constraint(equalTo: well.bottomAnchor,
                                          constant: -Self.bodyPadding),
+
+            topLip.leadingAnchor.constraint(equalTo: well.leadingAnchor,
+                                            constant: Self.rimWidth),
+            topLip.trailingAnchor.constraint(equalTo: well.trailingAnchor,
+                                             constant: -Self.rimWidth),
+            topLip.topAnchor.constraint(equalTo: well.topAnchor,
+                                        constant: Self.rimWidth),
+            topLip.heightAnchor.constraint(equalToConstant: 1),
         ])
     }
 
@@ -270,10 +301,11 @@ final class SetupPreviewFrameView: NSView {
     var isChromeless: Bool = false {
         didSet {
             guard isChromeless != oldValue else { return }
-            well.fill = isChromeless ? .clear : Tokens.Color.well
-            well.border = isChromeless ? .clear : Tokens.Color.hairline
-            well.borderWidth = isChromeless ? 0 : 1
+            well.fill = isChromeless ? .clear : Self.wellFill
+            well.border = isChromeless ? .clear : Tokens.Color.containerEdge
+            well.borderWidth = isChromeless ? 0 : Self.rimWidth
             well.layer?.masksToBounds = !isChromeless
+            topLip.isHidden = isChromeless
         }
     }
 
@@ -297,10 +329,14 @@ final class SetupPreviewFrameView: NSView {
     /// What VoiceOver reads for the caption band.
     var test_captionAccessibilityLabel: String? { captionLabel.accessibilityLabel() }
 
-    /// Whether the well is actually drawing chrome (fill, rim, clip).
+    /// Whether the well is actually drawing chrome (fill, rim, top lip, clip).
     var test_drawsChrome: Bool {
-        well.fill != .clear && well.border != .clear && well.borderWidth > 0
+        well.fill != .clear && well.border != .clear && well.borderWidth > 0 && !topLip.isHidden
     }
+
+    /// The frame's surface and its rim, for the recess-contrast measurement.
+    var test_wellFill: NSColor { well.fill }
+    var test_wellRim: NSColor { well.border }
 }
 
 /// The hero's lower half: the recovery copy (a status line and, where a state

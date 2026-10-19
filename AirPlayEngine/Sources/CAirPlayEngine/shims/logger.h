@@ -16,13 +16,7 @@
 // site references. Signatures match OwnTone's exactly (note DHEXDUMP takes
 // `int data_len`, not size_t).
 //
-// STUB STATUS (T-BUILD-1): the .c bodies (logger.c) are MINIMAL stubs so the
-// link succeeds — DPRINTF/DVPRINTF/DHEXDUMP currently no-op (or write to
-// stderr). T-SHIM-1 replaces them with the real os_log/stderr routing gated
-// by an env log level, per seam-map §3.2.
-//
-// TODO(T-SHIM-1): implement real logging in logger.c (os_log / stderr,
-// env-gated severity). Bodies are stubbed for T-BUILD-1's link only.
+// logger.c is the real implementation: os_log plus optional file mirroring, level-gated (see logger.c).
 
 #ifndef CAIRPLAYENGINE_SHIM_LOGGER_H
 #define CAIRPLAYENGINE_SHIM_LOGGER_H
@@ -96,6 +90,14 @@ DHEXDUMP(int severity, int domain, const unsigned char *data, int data_len, cons
  * Swift wrapper calls this once on the engine thread at start(). Idempotent. */
 void
 engine_logger_wire_libevent(void);
+
+/* Append every line at or below AIRPLAYENGINE_LOG_LEVEL to `path`, rotating it
+ * to "<path>.1" once it reaches `cap_bytes` (0 keeps the current cap, 5 MB by
+ * default). NULL or "" closes the file and writes none. AIRPLAYENGINE_LOG_FILE,
+ * when set, overrides `path`. The shim has no default path: the host decides
+ * where its logs live (AirPlayEngine.setLogFile). Thread-safe. */
+void
+engine_logger_set_file(const char *path, long cap_bytes);
 
 #ifdef __cplusplus
 }

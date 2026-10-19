@@ -6,7 +6,12 @@ import AudioutSharedUI
 
 /// The first-open licence gate's content: the emitter field (the marketing
 /// site's hero, remapped to gold) filling the window, with the welcome, the
-/// key field and the gold Register floating in its calm centre.
+/// key field and the gold Register on a translucent glass panel floating in
+/// its centre. The panel (``GlassPanelView``) is a translucent veil that dims
+/// the rings behind the type, so the field can run bolder and reach closer
+/// without its crests crossing the letterforms — the field is still glimpsed
+/// through it, softened. The two quiet links sit on the panel's lower band;
+/// the trial offer sits below it, on the calm-zoned field.
 ///
 /// **One surface, and nothing on it ever moves.** Every state — a clipboard
 /// offer, a verdict, the checkout wait, the lost-key detour — lands as words in
@@ -36,14 +41,21 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
     private let onPassed: () -> Void
 
     private let field = EmitterFieldView()
+    private let glass = GlassPanelView()
+    private let headlineLabel = NSTextField(labelWithString: "")
+    private let whyLabel = NSTextField(wrappingLabelWithString: "")
     private let keyField = NSTextField()
     private let gutterLine = NSTextField(wrappingLabelWithString: "")
     private var registerButton: ProminentButton!
     private var resendButton: ProminentButton!
-    private let pasteKeyButton = NSButton()
-    private let lostKeyButton = NSButton()
+    /// The quiet tier's two links. Underlined so they read as tappable text,
+    /// the one signal that separates them from the plain sentence above; gold
+    /// stays spent on Register alone.
+    private let pasteKeyButton = TextLinkButton(title: "Paste key")
+    private let lostKeyButton = TextLinkButton(title: "I lost my key")
     private let buyButton = NSButton()
     private let quitButton = NSButton()
+    private let trialButton = NSButton()
     private var didPass = false
 
     /// What the shared controls currently mean. The lost-key path MORPHS this
@@ -82,6 +94,25 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
     /// The key column's width — the Settings sheet's 320, the one width a full
     /// key plus slop is known to fit.
     private static let columnWidth: CGFloat = 320
+
+    /// The glass panel's padding around the content it backs. The glass runs
+    /// from the brand mark down through the quiet links; only the trial offer
+    /// sits BELOW it on the bare field, which is what guarantees the panel
+    /// clears the Quit/Buy row (`theGlassPanelClearsTheButtonRowAndTop`).
+    private static let glassHInset: CGFloat = 20
+    private static let glassVInset: CGFloat = 12
+
+    /// The gate's trial copy, owner-verbatim from
+    /// `dev/notes/trial-spec-2026-09-05.md` § Copy. The offer is only ever
+    /// shown to a Mac that has never started a trial.
+    ///
+    /// The spec's caption under the offer — "No card, no email. Every feature.
+    /// Buy any time." — is NOT here: at 560 x 440 the column has room for the
+    /// button or the caption, not both (`LicenseGateTests`'
+    /// `theContentColumnClearsTheBottomButtonRow` measures it). Either the
+    /// window grows or the caption borrows the gutter, and both are the
+    /// owner's call, not this ticket's.
+    private static let trialTitle = "Try Audiout free for 14 days"
 
     /// Rest and lifted opacity for the bottom-edge pair. They sit under the
     /// hero's attention and rise ONCE for a user who has sat there without
@@ -132,7 +163,6 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
         // `Tokens.Font.wordmark(size:)` returns system bold at 25 and the name
         // renders 1 pt taller than the rest of the line. That is the normal
         // path under `swift run`, `swift test` and the snapshot tools.
-        let headline = NSTextField(labelWithString: "Welcome to Audiout")
         let centred = NSMutableParagraphStyle()
         centred.alignment = .center
         let line = NSMutableAttributedString(
@@ -145,17 +175,16 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
                          .foregroundColor: Tokens.Color.label]))
         line.addAttribute(.paragraphStyle, value: centred,
                           range: NSRange(location: 0, length: line.length))
-        headline.attributedStringValue = line
-        headline.alignment = .center
-        headline.setAccessibilityRole(.staticText)
-        headline.setAccessibilitySubrole(NSAccessibility.Subrole(rawValue: "AXHeading"))
+        headlineLabel.attributedStringValue = line
+        headlineLabel.alignment = .center
+        headlineLabel.setAccessibilityHeading()
 
-        let why = NSTextField(wrappingLabelWithString:
-            "It takes one key to open. Yours is in your receipt email, starting with AUDT.")
-        why.font = Tokens.Font.titleLarge
-        why.textColor = Tokens.Color.label2
-        why.alignment = .center
-        why.preferredMaxLayoutWidth = Self.columnWidth
+        whyLabel.stringValue =
+            "It takes one key to open. Yours is in your receipt email, starting with AUDT."
+        whyLabel.font = Tokens.Font.titleLarge
+        whyLabel.textColor = Tokens.Color.label2
+        whyLabel.alignment = .center
+        whyLabel.preferredMaxLayoutWidth = Self.columnWidth
 
         keyField.stringValue = settings.licenseKey ?? ""
         keyField.placeholderString = LicenseCopy.keyFormatHint
@@ -196,21 +225,18 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
         gutter.translatesAutoresizingMaskIntoConstraints = false
         gutter.addSubview(gutterLine)
 
-        pasteKeyButton.isBordered = false
-        pasteKeyButton.controlSize = .regular
         pasteKeyButton.target = self
         pasteKeyButton.action = #selector(pasteKeyTapped)
-        setPasteKeyEnabled(true)
 
-        lostKeyButton.isBordered = false
-        lostKeyButton.controlSize = .regular
         lostKeyButton.target = self
         lostKeyButton.action = #selector(lostKeyTapped)
-        setQuietLinkTitle("I lost my key", on: lostKeyButton)
 
         buyButton.title = "Buy Audiout"
         buyButton.bezelStyle = .rounded
-        buyButton.controlSize = .regular
+        // Tertiary tier of the CTA ladder (16 pt Register → 13 pt trial → this):
+        // `.small` is ~11 pt, so the type size itself ranks the corner utilities
+        // below the trial offer. Buy keeps its 0.75→1.0 quiet-lift besides.
+        buyButton.controlSize = .small
         buyButton.target = self
         buyButton.action = #selector(buyTapped)
         buyButton.isHidden = settings.buyURL == nil
@@ -219,7 +245,8 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
 
         quitButton.title = "Quit"
         quitButton.bezelStyle = .rounded
-        quitButton.controlSize = .regular
+        // Tertiary, same rung as Buy — `.small` (~11 pt) corner utility.
+        quitButton.controlSize = .small
         quitButton.target = self
         quitButton.action = #selector(quitTapped)
         // No main menu exists yet at the gate, so ⌘Q needs an explicit home.
@@ -228,27 +255,56 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
         quitButton.alphaValue = Self.quietRestAlpha
         quitButton.translatesAutoresizingMaskIntoConstraints = false
 
+        // The offer for someone who has no key and never had one. The question
+        // is whether a trial has ever STARTED here, not whether one is running:
+        // a trial that converted to a purchase has no expiry left (the server's
+        // answer to a paid key clears it), so it reads as no trial at all, and
+        // if that key is later refunded this window comes back — offering a
+        // second trial that `TrialClock.start` would refuse to give. Bordered
+        // rather than gold so it reads as the other road out of this window
+        // without competing with Register for the eye.
+        trialButton.title = Self.trialTitle
+        trialButton.bezelStyle = .rounded
+        // Secondary tier: dropped from `.large` to `.regular` (~13 pt) so it
+        // stops matching Register's own scale and reads as the alternative path,
+        // not a second primary. Kept at full opacity (it is the no-key user's
+        // main route), unlike the corner utilities' quiet-lift.
+        trialButton.controlSize = .regular
+        trialButton.target = self
+        trialButton.action = #selector(trialTapped)
+        trialButton.isHidden = settings.trialStartedAt != nil
+        trialButton.translatesAutoresizingMaskIntoConstraints = false
+
         let quietLinks = NSStackView(views: [pasteKeyButton, lostKeyButton])
         quietLinks.orientation = .horizontal
         quietLinks.alignment = .centerY
         quietLinks.spacing = 16
         quietLinks.translatesAutoresizingMaskIntoConstraints = false
 
-        let column = NSStackView(views: [mark, headline, why, keyField, buttonSlot,
-                                         gutter, quietLinks])
+        // The trial offer is last and DETACHES when hidden (the stack view's
+        // default), so a Mac with a trial behind it gets the same column, to
+        // the pixel, as one with no trial offer at all.
+        let column = NSStackView(views: [mark, headlineLabel, whyLabel, keyField, buttonSlot,
+                                         gutter, quietLinks, trialButton])
         column.orientation = .vertical
         column.alignment = .centerX
         column.spacing = 10
         column.setCustomSpacing(14, after: mark)
-        column.setCustomSpacing(6, after: headline)
-        column.setCustomSpacing(22, after: why)
+        column.setCustomSpacing(6, after: headlineLabel)
+        column.setCustomSpacing(22, after: whyLabel)
         column.setCustomSpacing(12, after: keyField)
         column.setCustomSpacing(14, after: buttonSlot)
         column.setCustomSpacing(6, after: gutter)
+        column.setCustomSpacing(26, after: quietLinks)
         column.translatesAutoresizingMaskIntoConstraints = false
+
+        // Between the field and the column: a translucent veil the column
+        // renders on top of.
+        glass.setAccessibilityElement(false)
 
         let root = NSView()
         root.addSubview(field)
+        root.addSubview(glass)
         root.addSubview(column)
         root.addSubview(quitButton)
         root.addSubview(buyButton)
@@ -259,6 +315,13 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
             field.bottomAnchor.constraint(equalTo: root.bottomAnchor),
             field.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             field.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            // The panel backs the brand mark down through the quiet links; it
+            // takes the column's width plus a side inset, and its height from
+            // the mark's top to the links' bottom. The trial offer sits below it.
+            glass.leadingAnchor.constraint(equalTo: column.leadingAnchor, constant: -Self.glassHInset),
+            glass.trailingAnchor.constraint(equalTo: column.trailingAnchor, constant: Self.glassHInset),
+            mark.topAnchor.constraint(equalTo: glass.topAnchor, constant: Self.glassVInset),
+            quietLinks.bottomAnchor.constraint(equalTo: glass.bottomAnchor, constant: -Self.glassVInset),
             column.centerXAnchor.constraint(equalTo: root.centerXAnchor),
             column.centerYAnchor.constraint(equalTo: root.centerYAnchor),
             quitButton.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 16),
@@ -300,33 +363,17 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
         return button
     }
 
-    /// The quiet tier's two links. `ProminentButton` stamps its own title, so
-    /// these carry their ink themselves.
-    private func setQuietLinkTitle(_ title: String, on button: NSButton,
-                                   ink: NSColor = Tokens.Color.label2) {
-        button.attributedTitle = NSAttributedString(
-            string: title,
-            attributes: [.foregroundColor: ink,
-                         .font: Tokens.Font.body])
-    }
-
-    /// The ink IS the disabled look: an attributed title carries its own
-    /// colour, so `isEnabled` alone leaves the link at full strength.
-    private func setPasteKeyEnabled(_ enabled: Bool) {
-        pasteKeyButton.isEnabled = enabled
-        setQuietLinkTitle("Paste key", on: pasteKeyButton,
-                          ink: enabled ? Tokens.Color.label2
-                                       : Tokens.Color.label3)
-    }
 
     /// Authored rather than inferred from frames: field, the commit button,
-    /// the two links, then the two bottom-edge buttons, and back.
+    /// the two links, the trial offer where there is one, then the two
+    /// bottom-edge buttons, and back.
     private func applyTabOrder() {
         let commit: NSButton = mode == .resend ? resendButton : registerButton
         keyField.nextKeyView = commit
         commit.nextKeyView = pasteKeyButton
         pasteKeyButton.nextKeyView = lostKeyButton
-        lostKeyButton.nextKeyView = buyButton
+        lostKeyButton.nextKeyView = trialButton.isHidden ? buyButton : trialButton
+        trialButton.nextKeyView = buyButton
         buyButton.nextKeyView = quitButton
         quitButton.nextKeyView = keyField
     }
@@ -434,6 +481,25 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
         NSApp?.terminate(nil)
     }
 
+    /// Start the trial and get out of the way in the same breath.
+    ///
+    /// Nothing here waits on the network: the trial's dates are written
+    /// locally, and telling the licence server about them is a later, silent
+    /// job (`TrialRegistrar`) that runs with the app already open. A start that
+    /// blocked on a server would put the one wall this window exists to remove
+    /// back in front of a user who has not even seen the app yet.
+    ///
+    /// The pass is granted by the trial that `TrialClock` actually wrote, never
+    /// by the click. `start` refuses a Mac that has had a trial before, and
+    /// letting the click through anyway would open the app on no trial and no
+    /// valid key, then do it again at every launch.
+    @objc private func trialTapped() {
+        TrialClock.start(settings: settings)
+        guard case .active = TrialClock.state(settings: settings) else { return }
+        Analytics.capture("license:trial_started")
+        pass(afterBeat: false)
+    }
+
     /// The lost-key detour, both ways: the SAME field and the SAME button ask
     /// the other question, so nothing opens and nothing moves.
     @objc private func lostKeyTapped() {
@@ -451,8 +517,8 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
         registerButton.keyEquivalent = ""
         resendButton.isHidden = false
         resendButton.keyEquivalent = "\r"
-        setQuietLinkTitle("Back to your key", on: lostKeyButton)
-        setPasteKeyEnabled(false)
+        lostKeyButton.linkTitle = "Back to your key"
+        pasteKeyButton.isEnabled = false
         show("Enter the email you bought with.")
         applyTabOrder()
         view.window?.makeFirstResponder(keyField)
@@ -470,8 +536,8 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
         resendButton.keyEquivalent = ""
         registerButton.isHidden = false
         registerButton.keyEquivalent = "\r"
-        setQuietLinkTitle("I lost my key", on: lostKeyButton)
-        setPasteKeyEnabled(true)
+        lostKeyButton.linkTitle = "I lost my key"
+        pasteKeyButton.isEnabled = true
         if !keepingLine { show("") }
         applyTabOrder()
         updateSceneForText()
@@ -535,7 +601,7 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
             Analytics.capture("license:key_submitted", ["outcome": outcome, "source": "gate"])
             switch result {
             case .verified(.active):
-                self.show(LicenseCopy.statusLine(for: .active))
+                self.show(LicenseCopy.statusLine(for: .active, reason: nil))
                 self.field.surge(intensity: 1.0)
                 self.field.setScene(.farewell)
                 self.pass(afterBeat: true)
@@ -543,7 +609,7 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
                 self.keyField.isEnabled = true
                 self.registerButton.isEnabled = true
                 self.keyField.stringValue = self.settings.licenseKey ?? ""
-                self.show(LicenseCopy.statusLine(for: status))
+                self.show(LicenseCopy.statusLine(for: status, reason: self.settings.licenseReason))
                 self.field.setScene(.quiet)
                 // A refunded key has one useful answer left, so the offer
                 // stops being quiet.
@@ -631,6 +697,9 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
         registerTapped()
     }
 
+    /// True while a Register check is waiting on the licence server.
+    public var isChecking: Bool { !registerButton.isEnabled }
+
     // MARK: Test-support hooks
 
     /// Replace the field's text, as typing would.
@@ -663,6 +732,36 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
     public func test_tapBuy() {
         _ = view
         buyTapped()
+    }
+
+    /// Invoke the trial offer as a click would.
+    public func test_tapTrial() {
+        _ = view
+        trialTapped()
+    }
+
+    /// Whether the trial offer is on screen at all.
+    public var test_trialIsVisible: Bool {
+        _ = view
+        return !trialButton.isHidden
+    }
+
+    /// The trial button's title, as drawn.
+    public var test_trialTitle: String {
+        _ = view
+        return trialButton.title
+    }
+
+    /// The headline, flattened out of its two type runs.
+    public var test_headlineText: String {
+        _ = view
+        return headlineLabel.attributedStringValue.string
+    }
+
+    /// The line under the headline.
+    public var test_bodyText: String {
+        _ = view
+        return whyLabel.stringValue
     }
 
     /// Arrival, without the on-screen half of `viewDidAppear`.
@@ -730,4 +829,73 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
 
     /// Whether the gate has fired `onPassed` (or is in the beat before it).
     public var test_didPass: Bool { didPass }
+
+    /// The centre veil, for the layout tests that measure its clearances.
+    var test_glassPanel: NSView {
+        _ = view
+        return glass
+    }
+}
+
+/// The centre backing: a rounded, hairline-bordered TINTED VEIL — not blur —
+/// that dims the ring field passing behind the type, so the field can run
+/// bolder and reach closer without its crests crossing the letterforms. The
+/// field is still glimpsed through it, softened.
+///
+/// TRAP this replaces: `NSVisualEffectView` with `.withinWindow` blending does
+/// NOT sample the sibling `EmitterFieldView`'s `CAMetalLayer` (confirmed live,
+/// Reduce Transparency off) — the backdrop sample comes up empty and the
+/// material renders as its opaque tint, so the panel showed as solid gray with
+/// zero field visible through it. No material choice fixes a failed backdrop
+/// sample, so this draws its own translucency instead of compositing one.
+///
+/// razor: a flat alpha-tinted fill is the ceiling here — real frosting would
+/// live inside `EmitterFieldView`'s shader (soften/dim the field within the
+/// panel's rect), not by compositing a view on top of it.
+///
+/// Inserted once at `loadView` and never animated, so the gate's "nothing on
+/// the surface ever moves" contract holds. Colors resolve at draw time —
+/// nothing is stamped onto a layer — so there is no layer-stamp trap here.
+private final class GlassPanelView: NSView {
+
+    /// THE transparency knob — owner-tuned live against the real field.
+    static let veilAlpha: CGFloat = 0.6
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        translatesAutoresizingMaskIntoConstraints = false
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self, selector: #selector(reduceTransparencyDidChange),
+            name: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification,
+            object: nil)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    deinit {
+        NSWorkspace.shared.notificationCenter.removeObserver(self)
+    }
+
+    private var reduceTransparency: Bool {
+        NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency
+    }
+
+    @objc private func reduceTransparencyDidChange() {
+        needsDisplay = true
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        needsDisplay = true
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let path = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5),
+                                xRadius: 16, yRadius: 16)
+        Tokens.Color.canvas.withAlphaComponent(reduceTransparency ? 1.0 : Self.veilAlpha).setFill()
+        path.fill()
+        Tokens.Color.separator.setStroke()
+        path.lineWidth = 1
+        path.stroke()
+    }
 }

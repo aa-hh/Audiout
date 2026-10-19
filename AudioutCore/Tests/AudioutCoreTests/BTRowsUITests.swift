@@ -86,8 +86,15 @@ import AppKit
     @Test func greyedBTRowNameClickRequestsReconnectNotSelection() {
         let spy = SpyDelegate()
         let row = makeRow(btDevice(available: false), delegate: spy)
+        row.apply(row.device, selected: false, unavailableStatus: "Not connected")
+        let node = row.test_busNode
         row.test_clickName()
-        #expect(spy.reconnects == [btDevice().id], "a greyed BT row's click CONNECTS")
+        row.test_pressNameKey(49)
+        #expect(row.test_pressNameAccessibility())
+        #expect(row.test_busNode == node)
+        #expect(row.test_unavailableStatusText == "Not connected")
+        #expect(row.test_liveControlsHidden)
+        #expect(spy.reconnects == [btDevice().id, btDevice().id, btDevice().id], "a greyed BT row's click CONNECTS")
         #expect(spy.toggles.isEmpty, "…and never edits membership")
     }
 
@@ -290,12 +297,12 @@ import AppKit
         #expect(row.test_syncChipChevronSymbolName == "chevron.down", "expanded ⇒ rotated down to reveal")
         #expect(row.test_syncChipIsEngaged)
         #expect(row.test_syncChipFill
-                == Tokens.Color.engagedChrome.withAlphaComponent(PopoverColumnGrid.mutePillFillAlpha),
+                == Tokens.Color.engagedChrome.withAlphaComponent(PopoverColumnGrid.engagedFillAlpha),
                 "the engaged-chrome fill at the pill alpha")
         #expect(row.test_syncChipFill != Tokens.Color.gold, "…and never the gold accent")
         #expect(row.test_syncChipTitleColor == Tokens.Color.engagedChrome)
         #expect(row.test_syncChipBorderColor == Tokens.Color.engagedChrome)
-        #expect(row.test_syncChipBorderColor != Tokens.Color.accent,
+        #expect(row.test_syncChipBorderColor != NSColor.controlAccentColor,
                 "…nor the user's system accent")
 
         let collapsed = makeRow(btDevice(), delegate: SpyDelegate(), syncTrimMs: 24,
@@ -388,7 +395,11 @@ import AppKit
     @Test func anUntunedBluetoothChipReadsAlignAndOpensTheWizard() {
         let spy = SpyDelegate()
         let row = makeRow(btDevice(), delegate: spy, syncTrimIsSet: false)
-        #expect(row.test_syncChipTitle == "Align")
+        #expect(row.test_syncChipTitle == "Align by ear")
+        // Defect this names: a longer door title than the 84 pt column holds,
+        // which AppKit truncates silently rather than reporting.
+        #expect(row.test_syncChipFittingWidth <= PopoverColumnGrid.syncChipWidth,
+                "the chip's door title needs \(row.test_syncChipFittingWidth) pt of \(PopoverColumnGrid.syncChipWidth)")
         #expect(row.test_syncChipTitleColor == Tokens.Color.label)
         #expect(row.test_syncChipIsDashed, "still the invitation")
         #expect(row.test_syncChipAXLabel == "Align Sonos Move 2")
@@ -602,14 +613,14 @@ import AppKit
                 "…and ends clear of the value cluster — \(placement)")
     }
 
-    @Test func contextMenuCarriesAlignSpeakerOnBTRowsThroughRealMenuDispatch() throws {
+    @Test func contextMenuCarriesAlignByEarOnBTRowsThroughRealMenuDispatch() throws {
         let spy = SpyDelegate()
         let row = makeRow(btDevice(), delegate: spy)
         let menu = row.test_contextMenu()
         // "Equalizer…" leads on every non-local row (owner decision
         // 2026-08-22); alignment is the Bluetooth-only item under it.
-        #expect(menu?.items.map(\.title) == ["Equalizer…", "Align speaker…"])
-        let alignIndex = try #require(menu?.items.firstIndex { $0.title == "Align speaker…" })
+        #expect(menu?.items.map(\.title) == ["Equalizer…", "Align by ear…"])
+        let alignIndex = try #require(menu?.items.firstIndex { $0.title == "Align by ear…" })
         #expect(menu?.items[alignIndex].isEnabled == true)
         menu?.performActionForItem(at: alignIndex)   // real AppKit menu dispatch
         #expect(spy.wizardRequests.map(\.id) == [btDevice().id])
@@ -625,7 +636,7 @@ import AppKit
     @Test func contextMenuAlignItemDisablesOnAGreyedRow() throws {
         let row = makeRow(btDevice(available: false), delegate: SpyDelegate())
         let menu = try #require(row.test_contextMenu())
-        let align = try #require(menu.items.first { $0.title == "Align speaker…" })
+        let align = try #require(menu.items.first { $0.title == "Align by ear…" })
         #expect(align.isEnabled == false, "no wizard offer over a silent target")
     }
 }
@@ -637,8 +648,10 @@ import AppKit
 @MainActor
 @Suite(.serialized) struct BTPopoverRowsTests {
 
+    private let isolation = TestIsolation(owner: "BTPopoverRowsTests")
+
     private func tempDirectory() -> URL {
-        FileManager.default.temporaryDirectory
+        isolation.scratchDir
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
     }
 
@@ -653,8 +666,10 @@ import AppKit
         let controller = GroupController(backend: backend,
                                          store: GroupStore(directory: tempDirectory()),
                                          routingStore: RoutingStore(directory: tempDirectory()),
+                                         settings: AppSettings(defaults: isolation.makeDefaults()),
                                          loadPersisted: false)
-        let popover = PopoverController()
+        let popover = PopoverController(appRouting: AppRoutingController(
+            store: AppRouteStore(directory: tempDirectory()), loadPersisted: false))
         popover.configure(groupController: controller)
         popover.test_isShownOverride = true
         if !fleet.isEmpty {
@@ -686,12 +701,13 @@ import AppKit
 
     // MARK: Subsection — always renders (BT-LIST) + recency sort
 
-    @Test func bluetoothSubsectionHeaderAlwaysRendersWithAConnectRowWhenEmpty() {
+    // An empty Bluetooth heading must disappear while Pair remains reachable.
+    @Test func emptyBluetoothHasPairFooterWithoutAnEmptyHeading() {
         let (popover, _, _) = makePopover()
         popover.update(devices: [local(), airplay()])
-        #expect(popover.test_subsectionTitles() == ["AirPlay Speakers", "Bluetooth Speakers"])
+        #expect(popover.test_subsectionTitles() == ["AirPlay Speakers"])
         #expect(popover.test_bluetoothRowOrder().isEmpty)
-        #expect(popover.test_bluetoothConnectRowShown())
+        #expect(popover.test_pairBluetoothButton != nil)
     }
 
     /// The "Offset" column title (the card header's, since 2026-08-28) is
@@ -703,8 +719,8 @@ import AppKit
     @Test func offsetColumnTitleIsPrintedOnlyWhenSyncChipRowsExist() {
         let (popover, _, _) = makePopover()
         popover.update(devices: [airplay()])
-        #expect(popover.test_bluetoothConnectRowShown(),
-                "precondition: the subsection is in its empty state")
+        #expect(popover.test_pairBluetoothButton != nil,
+                "pairing remains available without a Bluetooth row")
         #expect(!popover.test_offsetColumnTitleShown(),
                 "no chip rows under it means no column to name")
 
@@ -762,19 +778,16 @@ import AppKit
                 "AirPlay rows never do")
     }
 
-    // MARK: OUTPUT DEVICES "+" menu
-
-    @Test func plusMenuOffersPairingAndDispatchesThroughRealMenuActions() {
-        let (popover, _, _) = makePopover()
+    // Pair must use the native footer action without changing playback membership.
+    @Test func pairFooterDispatchesThroughRealTargetAction() {
+        let (popover, controller, _) = makePopover()
         popover.update(devices: [local(), airplay()])
         var paired = 0
         popover.onPairBluetoothSpeaker = { paired += 1 }
-
-        let menu = popover.test_outputDevicesPlusMenu()
-        #expect(menu.items.map(\.title)
-                == ["Save Selected Speakers as scene", "Pair a Bluetooth speaker…"])
-        menu.performActionForItem(at: 1)   // real AppKit menu dispatch
+        let selection = controller.selectedDeviceIDs
+        popover.test_tapPairBluetooth()
         #expect(paired == 1)
+        #expect(controller.selectedDeviceIDs == selection)
     }
 
     // MARK: SYNC plumbing — cache, closures, chip seeding
@@ -821,7 +834,7 @@ import AppKit
                                  bt("bt-b:output", name: "Speaker B")])
 
         let never = popover.test_deviceRow(for: "bt-a:output")
-        #expect(never?.test_syncChipTitle == "Align")
+        #expect(never?.test_syncChipTitle == "Align by ear")
         #expect(never?.test_syncChipIsDashed == true)
 
         let tunedToZero = popover.test_deviceRow(for: "bt-b:output")
@@ -958,8 +971,10 @@ import AppKit
 @MainActor
 @Suite(.serialized) struct BTSyncDrawerAccordionTests {
 
+    private let isolation = TestIsolation(owner: "BTSyncDrawerAccordionTests")
+
     private func tempDirectory() -> URL {
-        FileManager.default.temporaryDirectory
+        isolation.scratchDir
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
     }
 
@@ -969,15 +984,16 @@ import AppKit
         let controller = GroupController(backend: backend,
                                          store: GroupStore(directory: tempDirectory()),
                                          routingStore: RoutingStore(directory: tempDirectory()),
+                                         settings: AppSettings(defaults: isolation.makeDefaults()),
                                          loadPersisted: false)
-        let popover = PopoverController()
+        let popover = PopoverController(appRouting: AppRoutingController(
+            store: AppRouteStore(directory: tempDirectory()), loadPersisted: false))
         popover.configure(groupController: controller)
         popover.test_isShownOverride = true
         if !fleet.isEmpty {
             backend.start()
-            let deadline = Date().addingTimeInterval(5)
-            while Date() < deadline && backend.devices.count < fleet.count {
-                RunLoop.current.run(until: Date().addingTimeInterval(0.005))
+            SuiteWait.untilOnRunLoop("the fleet has \(fleet.count) devices") {
+                backend.devices.count >= fleet.count
             }
         }
         return (popover, controller)
@@ -1245,7 +1261,9 @@ extension SerializedSharedState {
     ///
     /// It replaces the seat-border suite that stood here: the border, the
     /// gold seat and the `inkOnFill` pin all retired with the drawn seat.
-    @Test func theEngagedDoorPaintsTheReservedHueWithMarksPunchedThrough() {
+    @Test func theEngagedDoorPaintsTheReservedHueWithMarksPunchedThrough() throws {
+        // Removing this install makes the pixels depend on another suite running first.
+        try #require(CompiledSymbolFixture.install() != nil, "the symbol fixture failed to compile")
         defer { Tokens.test_increaseContrastOverride = nil }
         let device = Device(id: "C4-38-75-0E-BF-4A:output", name: "Sonos Move 2",
                             kind: .bluetooth, supportsAirPlay2: false)

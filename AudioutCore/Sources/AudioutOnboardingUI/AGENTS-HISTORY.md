@@ -135,26 +135,44 @@ gate/motion/demo/selection rules change.
   `AppDelegate` at the exact moment the user was reaching for the mixer. Don't
   put it back there.
 
-- **FOUR steps are skippable** — Bluetooth, Remote Control, Usage Statistics, and **Speaker
-  Sync** (`SetupFlowModel.skippableSteps`). The first two sit outside
-  `RequiredPermission` entirely; Speaker Sync stays required and is still audited
-  once it has ever been on, so its skip is an EXIT rather than a demotion —
-  `SetupFlowModel.unmetRequiredSteps()` is the filter that keeps a skipped one out
-  of the gate. Before it, an approval macOS simply refused locked the gate forever
-  with nothing on screen to press. Speaker Sync's other states, all new:
+- **THREE steps are skippable** — Bluetooth, Remote Control and Usage Statistics
+  (`SetupFlowModel.skippableSteps`); the first two sit outside `RequiredPermission`
+  entirely. **Speaker Sync is REQUIRED and not skippable** (owner decision
+  2026-09-07): without the helper the app cannot keep speakers in time, so the
+  step holds the gate until Login Items says `.enabled`. It was skippable for a
+  while as a workaround for a dead end that turned out to be a misread: on current
+  macOS the FIRST `SMAppService.register()` for a daemon normally THROWS
+  (`SMAppServiceErrorDomain` code 1) while the "Background Items Added" notice is
+  up, and the status afterwards is `.requiresApproval` — the user's switch to flip.
+  `SetupModel.registerPTPHelper()` took every throw for a packaging fault, set a
+  sticky `ptpHelperRegistrationFailed`, and the row auto-passed as "Couldn't be
+  turned on" with nothing to press. Now only a throw into `.notFound` is a fault,
+  and every return to the front registers again
+  (`SetupModel.reregisterPTPHelperOnReturn()` from `appDidBecomeActive`, never
+  from the 1.5 s poll): approval alone does not load the daemon — the next
+  `register()` after it does. Speaker Sync's other states:
   - **Asked, and still off.** Once the flow has actually opened Login Items
     (`didTripLoginItems`) and the helper still reads `.requiresApproval`, the
-    ribbon shows its own recovery — where the switch really lives (Login Items,
-    not Privacy & Security), "Open Login Items…" to go back, and "Skip for now"
-    beside it. (**OWNER-PENDING** copy.)
-  - **Nothing there to approve.** `.notFound` (the daemon isn't in the bundle) or a
-    `register()` that threw auto-passes the row with the note "Couldn't be turned
-    on", the same posture as `.unsupported` audio: a packaging fault is not a user
-    decision, so it must not hold the gate shut. (**OWNER-PENDING** copy.)
-  - **The skip is remembered** (`AppSettings.speakerSyncWasEnabled` — set the first
-    time the status reads `.enabled`, cleared by a skip). The app-level wake audit
-    re-opens this window for the Login Item only on a real REGRESSION, never at a
-    user who passed on it or never approved it.
+    ribbon shows its own recovery — that the helper is required, where the switch
+    really lives (Login Items, not Privacy & Security), and "Open Login Items…" to
+    go back. No skip beside it. Copy (owner-approved direction, 2026-09-07):
+    status "It isn't on yet. Audiout needs it to keep your speakers in time — the
+    switch is in Login Items, not Privacy & Security."; body "Your speakers share
+    one clock, through a small helper. Approve it once in Login Items, then come
+    back. This row ticks itself."; why line "Audiout needs this helper to keep your
+    speakers in time. Approve it once in Login Items."
+  - **Nothing there to approve.** `.notFound` (launchd does not know the label —
+    the daemon isn't in the bundle) auto-passes the row with the note "Couldn't be
+    turned on", the same posture as `.unsupported` audio: a packaging fault is not
+    a user decision, so it must not hold the gate shut. A `register()` that threw
+    is NOT this state any more (see above).
+  - **The ratchet** (`AppSettings.speakerSyncWasEnabled` — set the first time the
+    status reads `.enabled`, never cleared now that there is no skip). The
+    app-level wake audit re-opens this window for the Login Item only on a real
+    REGRESSION, never at a user who never approved it. A once-approved helper
+    that reads `.notFound` (Background Task Management reset) gets ONE
+    unregister→drain→register cycle on the next return, through
+    `PTPHelperReconciler.unregisterDrainAndReregister` — never a naked pair.
 - **Setup is a GATE, not guidance** (owner decision 2026-08-11 — this REVERSES the
   documented "setup is guidance, not a gate" decision, so read the history before
   changing it back). Done is **ABSENT from the view hierarchy** until

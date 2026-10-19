@@ -235,7 +235,7 @@ public final class SystemOutputVolume: SystemVolumeControlling, @unchecked Senda
         mScope: kAudioObjectPropertyScopeGlobal,
         mElement: kAudioObjectPropertyElementMain)
 
-    private static func volumeAddress(element: AudioObjectPropertyElement) -> AudioObjectPropertyAddress {
+    static func volumeAddress(element: AudioObjectPropertyElement) -> AudioObjectPropertyAddress {
         AudioObjectPropertyAddress(
             mSelector: kAudioDevicePropertyVolumeScalar,
             mScope: kAudioDevicePropertyScopeOutput,
@@ -256,7 +256,7 @@ public final class SystemOutputVolume: SystemVolumeControlling, @unchecked Senda
     /// last-resort fallback because it's the most forgiving: on a device with only
     /// per-channel controls it drives them as a set *and preserves their relative
     /// balance* (AudioHardwareService.h), which raw per-channel writes do not.
-    private static let virtualMainVolumeAddress = AudioObjectPropertyAddress(
+    static let virtualMainVolumeAddress = AudioObjectPropertyAddress(
         mSelector: kAudioHardwareServiceDeviceProperty_VirtualMainVolume,
         mScope: kAudioDevicePropertyScopeOutput,
         mElement: kAudioObjectPropertyElementMain)
@@ -281,7 +281,7 @@ public final class SystemOutputVolume: SystemVolumeControlling, @unchecked Senda
 
     /// The device's preferred stereo pair, used for the per-channel fallback.
     /// Defaults to channels 1/2, which is what virtually every stereo output uses.
-    private static func preferredStereoChannels(_ deviceID: AudioObjectID) -> [AudioObjectPropertyElement] {
+    static func preferredStereoChannels(_ deviceID: AudioObjectID) -> [AudioObjectPropertyElement] {
         var address = AudioObjectPropertyAddress(
             mSelector: kAudioDevicePropertyPreferredChannelsForStereo,
             mScope: kAudioDevicePropertyScopeOutput,
@@ -298,7 +298,7 @@ public final class SystemOutputVolume: SystemVolumeControlling, @unchecked Senda
 
     // MARK: Primitive get/set (every one guarded)
 
-    private static func readFloat(_ deviceID: AudioObjectID, _ address: AudioObjectPropertyAddress) -> Float? {
+    static func readFloat(_ deviceID: AudioObjectID, _ address: AudioObjectPropertyAddress) -> Float? {
         var address = address
         guard AudioObjectHasProperty(deviceID, &address) else { return nil }
         var value: Float32 = 0
@@ -322,7 +322,7 @@ public final class SystemOutputVolume: SystemVolumeControlling, @unchecked Senda
     /// Checking both is the difference between a no-op and a `kAudioHardwareUnknownPropertyError`
     /// (or worse) on outputs that publish a read-only volume — e.g. HDMI/digital
     /// outs that report a level they won't let you change.
-    private static func isWritable(_ deviceID: AudioObjectID, _ address: AudioObjectPropertyAddress) -> Bool {
+    static func isWritable(_ deviceID: AudioObjectID, _ address: AudioObjectPropertyAddress) -> Bool {
         var address = address
         guard AudioObjectHasProperty(deviceID, &address) else { return false }
         var settable: DarwinBoolean = false
@@ -477,7 +477,7 @@ public final class SystemOutputVolume: SystemVolumeControlling, @unchecked Senda
     }
 
     /// Returns `true` if *something* was actually written.
-    private static func writeVolume(_ volume: Int, to deviceID: AudioObjectID) -> Bool {
+    static func writeVolume(_ volume: Int, to deviceID: AudioObjectID) -> Bool {
         let scalar = scalar(fromVolumeInt: volume)
         if writeFloat(deviceID, volumeAddress(element: kAudioObjectPropertyElementMain), scalar) {
             return true

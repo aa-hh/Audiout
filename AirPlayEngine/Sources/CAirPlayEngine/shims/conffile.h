@@ -21,17 +21,7 @@
 //   cfg_gettsec(cfg,"airplay",name) + per-device cfg_getbool/getstr/getint
 //   cfg_getopt(devcfg,"reconnect") + cfg_opt_getnbool(opt,0) :4102-4104
 //
-// STUB STATUS (T-BUILD-1): conffile.c bodies are MINIMAL — cfg_getsec/getstr/
-// getint/getbool return safe defaults (the conffile.c defaults from seam-map
-// §3.1), cfg_gettsec returns NULL (so all `if (devcfg && ...)` per-device
-// override branches in airplay.c short-circuit), cfg_getopt returns NULL,
-// cfg_opt_getnbool returns false. This is enough to LINK and run with pure
-// defaults. T-SHIM-1 wires these to the real config struct populated from the
-// Swift API.
-//
-// TODO(T-SHIM-1): back cfg_* with the static config struct, populated from
-// the Swift AirPlayEngine session config (user_agent, client name, ports,
-// bind address, per-device nickname/password/max_volume/ptp_disable).
+// conffile.c is the real implementation: a static config populated from the Swift EngineConfig at start.
 
 #ifndef CAIRPLAYENGINE_SHIM_CONFFILE_H
 #define CAIRPLAYENGINE_SHIM_CONFFILE_H
@@ -87,6 +77,16 @@ void conffile_set_bind_address(const char *addr);   /* NULL = bind to any */
 void conffile_set_ipv6(bool enabled);
 void conffile_set_ports(long int timing_port, long int control_port);
 void conffile_set_libhash(uint64_t h);              /* device id / PTP clock seed */
+
+/* Per-device password, keyed by the name the vendored device callbacks pass to
+ * cfg_gettsec (AirPlay 2: the Bonjour instance name; RAOP: the part after the
+ * first '@'). password == NULL clears it. Both strings are copied, and a
+ * replaced copy is never freed, because device->password and session->password
+ * alias it (airplay.c:4129, :1706, raop.c:4472, shims/outputs.c:143).
+ * The on-screen code pairing key is not kept here: AirPlayEngine.feedDescriptor
+ * (Swift) writes device->auth_key from DeviceDescriptor.authKey on every
+ * appearing feed. */
+void conffile_set_device_password(const char *name, const char *password);
 
 /* --- Unknown-key loud-miss policy (first-light hardening #5) ---
  * cfg_getstr/getint/getbool no longer silently return 0/NULL for a key the

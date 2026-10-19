@@ -382,9 +382,8 @@ public final class DefaultOutputDeviceMonitor: @unchecked Sendable {
     /// deliver at most `maxWait` after the first un-reconciled notification.
     private func scheduleTrailingFanout() {
         pendingFanout?.cancel()
-        var item: DispatchWorkItem!
-        item = DispatchWorkItem { [weak self] in
-            guard let self, !item.isCancelled else { return }
+        let item = DispatchWorkItem { [weak self] in
+            guard let self else { return }
             self.pendingFanout = nil
             guard self.settleDirty else { return }
             self.settleDirty = false
@@ -455,6 +454,11 @@ public final class DefaultOutputDeviceMonitor: @unchecked Sendable {
             settleDirty = false
             deliverToSubscribers()
         }
+    }
+
+    /// The currently armed trailing fan-out item, read on ``queue``. Tests only.
+    internal var _pendingFanoutForTesting: DispatchWorkItem? {
+        runOnQueue { pendingFanout }
     }
 
     private func readLive() -> Snapshot {

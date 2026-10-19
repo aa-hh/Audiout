@@ -23,16 +23,7 @@
 // prototype it was written for. macOS portability: the endian helper macros
 // (htobe*/be*toh) come from compat/endian_compat.h rather than <endian.h>.
 //
-// STUB STATUS (T-BUILD-1): the .c bodies (misc.c) are MINIMAL stubs — the
-// net_*/keyval_*/device_id_*/safe_*/quality/uuid functions currently return
-// error/empty (or a trivially-safe value) with TODO(T-SHIM-1) markers so the
-// link succeeds. They do NOT yet implement real socket binding, TXT parsing,
-// or id conversion — that is T-SHIM-1 (seam-map §3.3, incl. macOS scope-id
-// handling for net_if_get, risk from seam-map §10.4).
-//
-// TODO(T-SHIM-1): implement misc.c bodies for real (BSD sockets w/ macOS
-// scope-id care, keyval linked list, device_id string<->u64, hex parsers,
-// quality_is_equal, uuid_make).
+// misc.c is the real implementation (BSD sockets, keyval, hex parsers, uuid_make); see its provenance header.
 
 #ifndef CAIRPLAYENGINE_SHIM_MISC_H
 #define CAIRPLAYENGINE_SHIM_MISC_H

@@ -58,18 +58,30 @@ import AppKit
     }
 
     private enum Key {
-        case newline, escape
-        var code: UInt16 { self == .newline ? 36 : 53 }
-        var characters: String { self == .newline ? "\r" : "\u{1b}" }
+        case newline, escape, up
+        var code: UInt16 {
+            switch self {
+            case .newline: return 36
+            case .escape: return 53
+            case .up: return 126
+            }
+        }
+        var characters: String {
+            switch self {
+            case .newline: return "\r"
+            case .escape: return "\u{1b}"
+            case .up: return "\u{F700}"    // NSUpArrowFunctionKey
+            }
+        }
     }
 
-    private func press(_ key: Key, into window: NSWindow) throws {
+    private func press(_ key: Key, into window: NSWindow, isARepeat: Bool = false) throws {
         let event = try #require(NSEvent.keyEvent(
             with: .keyDown, location: .zero, modifierFlags: [],
             timestamp: ProcessInfo.processInfo.systemUptime,
             windowNumber: window.windowNumber, context: nil,
             characters: key.characters, charactersIgnoringModifiers: key.characters,
-            isARepeat: false, keyCode: key.code), "AppKit refused to build the key event")
+            isARepeat: isARepeat, keyCode: key.code), "AppKit refused to build the key event")
         window.sendEvent(event)
     }
 
@@ -230,6 +242,25 @@ import AppKit
 
         #expect(mounted.host.commits.last?.ms == before + BTSyncTrim.fineStepMs,
                 "Return re-committed the stale pre-paddle text; got \(mounted.host.commits.map(\.ms))")
+    }
+
+    /// A held ↑ in the mounted field reaches the popover as live, unpersisted
+    /// trims — no store write, no drift re-arm, no `trim_committed` — and the
+    /// key-up persists the final value once.
+    @Test func aHeldArrowIsLiveUntilKeyUpThenPersistsOnce() throws {
+        let mounted = try mountedDrawer()
+        try clickIn(mounted.field, window: mounted.window)
+
+        try press(.up, into: mounted.window)
+        try press(.up, into: mounted.window, isARepeat: true)
+        try press(.up, into: mounted.window, isARepeat: true)
+        let editor = try #require(mounted.field.delegate as? SyncValueFieldEditor)
+        editor.test_keyUp()
+
+        #expect(mounted.host.commits.map(\.ms) == [-413, -412, -411, -411],
+                "got \(mounted.host.commits.map(\.ms))")
+        #expect(mounted.host.commits.map(\.persist) == [false, false, false, true],
+                "got \(mounted.host.commits.map(\.persist))")
     }
 
     @Test func escapeRevertsTheEditAndLeavesTheDrawerOpen() throws {

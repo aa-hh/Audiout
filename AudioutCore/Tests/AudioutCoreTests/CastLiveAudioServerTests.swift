@@ -39,27 +39,51 @@ import Testing
         var value: UInt16? { lock.withLock { stored } }
     }
 
-    private func startServer(primeMilliseconds: Int = 0) throws -> (server: CastLiveAudioServer, port: UInt16) {
-        let server = CastLiveAudioServer(source: SineSource(), loopbackOnly: true, primeMilliseconds: primeMilliseconds)
+    private func startServer(
+        primeMilliseconds: Int = 0,
+        allowedPeer: String? = nil,
+        maxConnections: Int = 32,
+        idleDeadline: TimeInterval = 30
+    ) async throws -> (server: CastLiveAudioServer, port: UInt16) {
+        let server = CastLiveAudioServer(
+            source: SineSource(),
+            loopbackOnly: true,
+            primeMilliseconds: primeMilliseconds,
+            allowedPeer: allowedPeer,
+            maxConnections: maxConnections,
+            idleDeadline: idleDeadline
+        )
         let box = PortBox()
         server.start { result in
             if case .success(let port) = result { box.set(port) }
         }
-        let deadline = Date().addingTimeInterval(2)
-        while box.value == nil && Date() < deadline { Thread.sleep(forTimeInterval: 0.005) }
+        await SuiteWait.until("the live audio server binds a loopback port") { box.value != nil }
         let port = try #require(box.value, "live audio server never bound a loopback port")
         return (server, port)
     }
 
-    /// Sends one request and collects the response until `until` is satisfied,
-    /// the server closes, or `timeout` elapses. Spin-waits rather than blocks,
-    /// matching the idiom in DACPServerTests.
+    /// Opens a raw client connection and spin-waits for it to reach `.ready`,
+    /// so a test can hold a connection slot open against `maxConnections`
+    /// while it drives a second `exchange` against the server.
+    private func openConnection(port: UInt16) async throws -> NWConnection {
+        let readyBox = PortBox()
+        let netQueue = DispatchQueue(label: "CastLiveAudioServerTests.held")
+        let connection = NWConnection(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: port)!, using: .tcp)
+        connection.stateUpdateHandler = { state in
+            if case .ready = state { readyBox.set(1) }
+        }
+        connection.start(queue: netQueue)
+        await SuiteWait.until("the held connection reaches .ready") { readyBox.value != nil }
+        _ = try #require(readyBox.value, "held connection never reached .ready")
+        return connection
+    }
+
+    /// Sends one request and collects the response until `until` is satisfied or the server closes.
     private func exchange(
         port: UInt16,
         request: String,
-        timeout: TimeInterval,
         until: (Data) -> Bool
-    ) -> (data: Data, completed: Bool) {
+    ) async -> (data: Data, completed: Bool) {
         let collector = Collector()
         let netQueue = DispatchQueue(label: "CastLiveAudioServerTests.client")
         let connection = NWConnection(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: port)!, using: .tcp)
@@ -83,11 +107,7 @@ import Testing
         }
         connection.start(queue: netQueue)
 
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            if collector.completed || until(collector.data) { break }
-            Thread.sleep(forTimeInterval: 0.01)
-        }
+        await SuiteWait.until("the live audio server answers or closes the connection") { collector.completed || until(collector.data) }
         let result = (collector.data, collector.completed)
         connection.cancel()
         return result
@@ -130,11 +150,11 @@ import Testing
 
     // MARK: - Tests
 
-    @Test func servesAnEndlessChunkedWavStream() throws {
-        let (server, port) = try startServer()
+    @Test func servesAnEndlessChunkedWavStream() async throws {
+        let (server, port) = try await startServer()
         defer { server.stop() }
 
-        let (response, _) = exchange(port: port, request: "GET /live.wav HTTP/1.1\r\nHost: x\r\n\r\n", timeout: 2) {
+        let (response, _) = await exchange(port: port, request: "GET /live.wav HTTP/1.1\r\nHost: x\r\n\r\n") {
             guard let (_, body) = self.split($0) else { return false }
             return self.chunks(body).count >= 4
         }
@@ -180,25 +200,94 @@ import Testing
         #expect(sizes.allSatisfy { $0 > 0 })
     }
 
-    @Test func headGetsTheHeaderAndThenEOF() throws {
-        let (server, port) = try startServer()
+    @Test func headGetsTheHeaderAndThenEOF() async throws {
+        let (server, port) = try await startServer()
         defer { server.stop() }
 
-        let (response, completed) = exchange(port: port, request: "HEAD /live.wav HTTP/1.1\r\nHost: x\r\n\r\n", timeout: 2) { _ in false }
+        let (response, completed) = await exchange(port: port, request: "HEAD /live.wav HTTP/1.1\r\nHost: x\r\n\r\n") { _ in false }
         #expect(completed, "the server should close after answering a HEAD")
         let (head, body) = try #require(split(response), "no complete response head arrived")
         #expect(head.hasPrefix("HTTP/1.1 200 OK"))
         #expect(body.isEmpty)
     }
 
-    @Test func rejectsAnythingOtherThanGetOrHead() throws {
-        let (server, port) = try startServer()
+    @Test func rejectsAnythingOtherThanGetOrHead() async throws {
+        let (server, port) = try await startServer()
         defer { server.stop() }
 
-        let (response, _) = exchange(port: port, request: "POST /live.wav HTTP/1.1\r\nHost: x\r\n\r\n", timeout: 2) {
+        let (response, _) = await exchange(port: port, request: "POST /live.wav HTTP/1.1\r\nHost: x\r\n\r\n") {
             $0.count >= 12
         }
         #expect(String(decoding: response, as: UTF8.self).hasPrefix("HTTP/1.1 405"))
+    }
+
+    /// Turns red if `accept(_:)` stops checking the connection's endpoint
+    /// against `allowedPeer` before starting it.
+    @Test func refusesAGetFromAnAddressOtherThanTheReceiver() async throws {
+        let (wrongServer, wrongPort) = try await startServer(allowedPeer: "10.0.0.1")
+        defer { wrongServer.stop() }
+
+        let (refused, refusedCompleted) = await exchange(
+            port: wrongPort,
+            request: "GET /live.wav HTTP/1.1\r\nHost: x\r\n\r\n",
+            until: { _ in false }
+        )
+        #expect(refusedCompleted, "a connection from a non-matching peer should be cancelled, not served")
+        #expect(refused.isEmpty, "a refused connection must get no bytes at all")
+
+        let (rightServer, rightPort) = try await startServer(allowedPeer: "127.0.0.1")
+        defer { rightServer.stop() }
+
+        let (admitted, _) = await exchange(
+            port: rightPort,
+            request: "GET /live.wav HTTP/1.1\r\nHost: x\r\n\r\n",
+            until: { self.split($0) != nil }
+        )
+        let (head, _) = try #require(split(admitted), "the real receiver's own address must still be admitted")
+        #expect(head.hasPrefix("HTTP/1.1 200 OK"))
+    }
+
+    /// Turns red if `accept(_:)` stops checking `connections.count` against
+    /// `maxConnections` before storing a new connection.
+    @Test func cancelsConnectionsBeyondTheCapOnArrival() async throws {
+        let (server, port) = try await startServer(maxConnections: 1)
+        defer { server.stop() }
+
+        let held = try await openConnection(port: port)
+        defer { held.cancel() }
+
+        let firstBox = Collector()
+        held.send(content: Data("GET /live.wav HTTP/1.1\r\nHost: x\r\n\r\n".utf8), completion: .idempotent)
+        func receiveFirst() {
+            held.receive(minimumIncompleteLength: 1, maximumLength: 65_536) { data, _, isComplete, error in
+                if let data, !data.isEmpty { firstBox.append(data) }
+                if isComplete || error != nil { firstBox.end(); return }
+                receiveFirst()
+            }
+        }
+        receiveFirst()
+        await SuiteWait.until("the connection within the cap is served") { !firstBox.data.isEmpty }
+        #expect(!firstBox.data.isEmpty, "the connection that arrived within the cap should be served")
+
+        let (secondResponse, secondCompleted) = await exchange(
+            port: port,
+            request: "GET /live.wav HTTP/1.1\r\nHost: x\r\n\r\n",
+            until: { _ in false }
+        )
+        #expect(secondCompleted, "a connection past the cap should be cancelled on arrival, not queued")
+        #expect(secondResponse.isEmpty, "a connection past the cap must get no bytes at all")
+    }
+
+    /// Turns red if `accept(_:)` stops arming the idle-deadline work item, or
+    /// if removing it (or never arming it) leaves the silent connection open
+    /// so `completed` never becomes true.
+    @Test func closesAConnectionThatSendsNothingAfterTheIdleDeadline() async throws {
+        let (server, port) = try await startServer(idleDeadline: 0.3)
+        defer { server.stop() }
+
+        let (response, completed) = await exchange(port: port, request: "", until: { _ in false })
+        #expect(completed, "a connection that never sends a request should be closed after the idle deadline")
+        #expect(response.isEmpty)
     }
 
     @Test func sineSourceIsContinuousAcrossRenders() {
@@ -210,5 +299,57 @@ import Testing
         let twoRenders = first + source.render(frames: 441)
         let oneRender = SineSource().render(frames: 882)
         #expect(twoRenders == oneRender, "phase must carry across renders, or the stream clicks at every chunk boundary")
+    }
+
+    /// The peer check runs against endpoints the REAL listener produces, not
+    /// the loopback ones every other test here drives. An address off a real
+    /// network path carries its interface and prints as `192.168.4.54%en0`,
+    /// while the control channel's copy of the same address prints bare, so
+    /// comparing the printed forms refused the receiver's own GET and
+    /// cancelled it in silence (live failure, 2026-09-20). The dual-stack
+    /// listener also reports an IPv4 peer as an IPv4-mapped IPv6 address.
+    /// Addresses therefore compare by value, and all three shapes are one
+    /// receiver.
+    @Test func admitsTheReceiverWhateverShapeItsAddressArrivesIn() throws {
+        let receiver = "192.168.4.54"
+        let mapped = try #require(IPv6Address("::ffff:192.168.4.54"))
+
+        let scoped = try #require(IPv4Address("192.168.4.54%en0"))
+        #expect(CastLiveAudioServer.peerMatches(
+            .hostPort(host: .ipv4(scoped), port: 36_488),
+            allowedPeer: receiver
+        ), "an address carrying its interface is still the receiver")
+
+        #expect(CastLiveAudioServer.peerMatches(
+            .hostPort(host: .ipv6(mapped), port: 36_488),
+            allowedPeer: receiver
+        ), "the receiver's own GET arrives IPv4-mapped on the dual-stack listener")
+
+        #expect(CastLiveAudioServer.peerMatches(
+            .hostPort(host: .ipv4(try #require(IPv4Address(receiver))), port: 36_488),
+            allowedPeer: receiver
+        ))
+    }
+
+    @Test func refusesAPeerThatIsNotTheReceiver() throws {
+        let other = try #require(IPv4Address("192.168.4.99"))
+        #expect(!CastLiveAudioServer.peerMatches(
+            .hostPort(host: .ipv4(other), port: 36_488),
+            allowedPeer: "192.168.4.54"
+        ))
+
+        let v6Only = try #require(IPv6Address("fd00::1"))
+        #expect(!CastLiveAudioServer.peerMatches(
+            .hostPort(host: .ipv6(v6Only), port: 36_488),
+            allowedPeer: "192.168.4.54"
+        ))
+    }
+
+    /// Nothing to compare against is not grounds to refuse: a session whose
+    /// control channel never yielded an IPv4 address still has to play.
+    @Test func admitsEveryPeerWhenTheReceiverAddressIsUnknown() throws {
+        let anyone = try #require(IPv4Address("192.168.4.99"))
+        #expect(CastLiveAudioServer.peerMatches(.hostPort(host: .ipv4(anyone), port: 36_488), allowedPeer: nil))
+        #expect(CastLiveAudioServer.peerMatches(.hostPort(host: .ipv4(anyone), port: 36_488), allowedPeer: "not an address"))
     }
 }

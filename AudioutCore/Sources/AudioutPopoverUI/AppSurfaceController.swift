@@ -5,22 +5,26 @@ import AudioutCore
 import AudioutSharedUI
 import AudioutSettingsUI
 
-/// The three screens the one-surface app hosts (U3, PLAN-ONE-SURFACE-032).
+/// The four screens the one-surface app hosts (U3, PLAN-ONE-SURFACE-032).
 /// `Int`-raw so the toolbar's tab group can map a segment index to a screen.
+/// `groups` is the Scenes screen: the case keeps its name so the
+/// `surface:screen_selected` value "groups" stays what dashboards read.
 public enum SurfaceScreen: Int, CaseIterable, Sendable {
-    case mixer, groups, settings
+    case mixer, groups, speakers, settings
 
     var label: String {
         switch self {
         case .mixer: return "Mixer"
         case .groups: return "Scenes"
+        case .speakers: return "Speakers"
         case .settings: return "Settings"
         }
     }
 
-    /// Tab glyphs (plan U3). All three resolve on the macOS 14 deployment
+    /// Tab glyphs (plan U3). All four resolve on the macOS 14 deployment
     /// target (verified against CoreGlyphs' availability list: `waveform`
-    /// macOS 10.15, `hifispeaker.2` and `gearshape` macOS 11).
+    /// macOS 10.15, `hifispeaker.2`, `rectangle.3.group` and `gearshape`
+    /// macOS 11).
     ///
     /// Mixer is NOT the sliders glyph (owner's call, 2026-09-04).
     /// `slider.horizontal.3` is what every device row's equalizer door draws
@@ -28,12 +32,15 @@ public enum SurfaceScreen: Int, CaseIterable, Sendable {
     /// so the equalizer keeps it and the tab moves. `waveform` is audio
     /// playing rather than a control being adjusted, and it collides with
     /// nothing else on screen: the rows use `speaker.wave.2.fill` and
-    /// `speaker.slash.fill`, Groups uses `hifispeaker.2`, Settings
-    /// `gearshape`, and the alignment wizard `tuningfork`.
+    /// `speaker.slash.fill`, Scenes uses the default scene glyph
+    /// (`Group.defaultIconSymbolName`), Speakers the Overview plate's
+    /// `hifispeaker.2`, Settings `gearshape`, and the alignment wizard
+    /// `tuningfork`.
     var symbolName: String {
         switch self {
         case .mixer: return "waveform"
-        case .groups: return "hifispeaker.2"
+        case .groups: return Group.defaultIconSymbolName
+        case .speakers: return "hifispeaker.2"
         case .settings: return "gearshape"
         }
     }
@@ -43,19 +50,20 @@ public enum SurfaceScreen: Int, CaseIterable, Sendable {
     var fallbackSymbolNames: [String] {
         switch self {
         case .mixer: return ["waveform.path", "waveform.circle"]
-        case .groups: return ["hifispeaker.2.fill", "hifispeaker"]
+        case .groups: return ["rectangle.3.group.fill", "square.grid.2x2"]
+        case .speakers: return ["hifispeaker.2.fill", "hifispeaker"]
         case .settings: return ["gearshape.fill", "gear"]
         }
     }
 
-    /// ⌘1 / ⌘2 / ⌘3, in tab order.
+    /// ⌘1 / ⌘2 / ⌘3 / ⌘4, in tab order.
     var keyEquivalent: String { String(rawValue + 1) }
 }
 
 /// The one-surface host (U3): owns ONE `ControlPanelWindowController` shell,
 /// the shell window's native toolbar header (`SurfaceToolbarController` —
 /// owner decision D1, 2026-08-07: a real `NSToolbar` is the one header strip
-/// in both manner profiles), and the three lazily-built screens behind the
+/// in both manner profiles), and the four lazily-built screens behind the
 /// toolbar's tab group —
 ///
 /// - **Mixer** — the real `PopoverController` panel, claimed through
@@ -64,8 +72,11 @@ public enum SurfaceScreen: Int, CaseIterable, Sendable {
 ///   show/hide/switch, and a `surfaceResizer` that listens to the panel's
 ///   published size only to notice content the fixed frame cannot show.
 /// - **Scenes** — the caller-provided content controller
-///   (`MixerWindowController.contentController` in the app), seated below the
-///   toolbar strip in a `SurfaceScreenViewController`.
+///   (`MixerWindowController.scenesContentController` in the app), seated
+///   below the toolbar strip in a `SurfaceScreenViewController`.
+/// - **Speakers** — the caller-provided content controller
+///   (`MixerWindowController.speakersContentController` in the app), same
+///   container.
 /// - **Settings** — a caller-provided `SettingsRootViewController` (a section
 ///   sidebar plus one scrolling pane), same container.
 ///
@@ -91,7 +102,7 @@ public enum SurfaceScreen: Int, CaseIterable, Sendable {
 /// overlaps the content in BOTH profiles (`.fullSizeContentView` never leaves
 /// the style mask — R6), so every screen's content is seated below it by a
 /// measured chrome inset (`contentLayoutRect`), never a hardcoded strip
-/// height. ⌘1/⌘2/⌘3 ride the shell panel's `keyEquivalentHandler` seam — a
+/// height. ⌘1–⌘4 ride the shell panel's `keyEquivalentHandler` seam — a
 /// toolbar item group carries no per-segment key equivalents.
 ///
 /// Lives in AudioutPopoverUI (a library) because `AudioutApp` is invisible
@@ -107,13 +118,18 @@ public final class AppSurfaceController {
 
     private let popoverController: PopoverController
     private let settings: AppSettings
-    /// The shell window's one header strip (D1): three icon-only tabs + Pin,
+    /// The expired-trial survey, over the shell's content view while up.
+    private var surveyCard: TrialSurveyCardView?
+    /// The shell window's one header strip (D1): four icon-only tabs + Pin,
     /// as a real unified `NSToolbar`.
     private let toolbarController = SurfaceToolbarController()
-    /// Lazily builds the Groups content the FIRST time the Groups tab is
-    /// selected (`MixerWindowController.contentController` in the app — the
-    /// surface must not construct window controllers itself).
+    /// Lazily builds the Scenes content the FIRST time the Scenes tab is
+    /// selected (`MixerWindowController.scenesContentController` in the app —
+    /// the surface must not construct window controllers itself).
     private let makeGroupsContent: () -> NSViewController
+    /// Lazily builds the Speakers content the FIRST time the Speakers tab is
+    /// selected (`MixerWindowController.speakersContentController` in the app).
+    private let makeSpeakersContent: () -> NSViewController
     /// Lazily builds the Settings root the FIRST time the Settings tab is
     /// selected. The surface subscribes to nothing on it: the frame is fixed,
     /// so no pane size is ever published to a host.
@@ -124,15 +140,15 @@ public final class AppSurfaceController {
     /// actually hosts the Mixer).
     private var mixerPanel: PopoverPanelViewController?
     private var groupsScreen: SurfaceScreenViewController?
+    private var speakersScreen: SurfaceScreenViewController?
     private var settingsScreen: SurfaceScreenViewController?
     private var settingsRoot: SettingsRootViewController?
 
     public private(set) var selectedScreen: SurfaceScreen = .mixer
 
-    /// Asked when Escape reaches the surface while the Groups screen is
-    /// showing. Return `true` when the screen stepped back a level (the app
-    /// wires `MixerWindowController.dismissEditor()`); `false` lets the press
-    /// close the surface.
+    /// Asked when Escape reaches the surface while the Scenes screen shows.
+    /// A screen may consume the key by returning `true`; `false` lets the
+    /// surface close.
     public var groupsCancelHandler: (() -> Bool)?
 
     /// The one frame's content size for THIS open session — measured on every
@@ -202,7 +218,7 @@ public final class AppSurfaceController {
 
     /// Fired whenever the screen a user can actually SEE changes — a tab
     /// switch, a show, or a close (`nil` = nothing is on screen). Screen
-    /// content that skips work while hidden (the Groups content's B8 gate)
+    /// content that skips work while hidden (the Scenes and Speakers content's B8 gate)
     /// hangs off this; the Mixer needs no subscriber because the surface
     /// drives its `surfaceDidShow`/`surfaceDidHide` pair directly.
     public var onVisibleScreenChange: ((SurfaceScreen?) -> Void)?
@@ -240,11 +256,13 @@ public final class AppSurfaceController {
     public init(popoverController: PopoverController,
                 settings: AppSettings = AppSettings(),
                 groupsContent: @escaping () -> NSViewController,
+                speakersContent: @escaping () -> NSViewController,
                 settingsContent: @escaping () -> SettingsRootViewController,
                 frameAutosaveName: NSWindow.FrameAutosaveName = "ControlPanelSurface") {
         self.popoverController = popoverController
         self.settings = settings
         self.makeGroupsContent = groupsContent
+        self.makeSpeakersContent = speakersContent
         self.makeSettingsContent = settingsContent
         self.shell = ControlPanelWindowController(title: "Audiout",
                                                   frameAutosaveName: frameAutosaveName)
@@ -255,6 +273,12 @@ public final class AppSurfaceController {
         // One fixed frame: nothing in the surface resizes, so no screen offers
         // a drag affordance.
         shell.setUserResizable(false)
+
+        // The wizard's mic ask must not tuck the surface away or steal the
+        // system dialog's focus.
+        popoverController.onMicPromptInFlightChanged = { [weak self] in self?.shell.setPermissionPromptInFlight($0) }
+        popoverController.onMicPromptAnswered = { [weak self] in self?.shell.returnToFront() }
+        popoverController.onSurveyAnswer = { [weak self] in self?.presentSurveyCard(for: $0) }
 
         // The one header (D1): a real unified NSToolbar on the shell window,
         // both profiles. Attaching here — before anything shows — means the
@@ -283,6 +307,8 @@ public final class AppSurfaceController {
             // `contentLayoutRect` until AppKit's first layout pass), so
             // `chromeTopInset` measures the real strip from the first mount.
             window.layoutIfNeeded()
+            // The Mixer tab is the first key view in visual order, and the seed in `mount` selects it.
+            window.initialFirstResponder = toolbarController.tabButton(.mixer)
         }
         syncToolbar()
 
@@ -307,7 +333,7 @@ public final class AppSurfaceController {
         }
         pixelVisibilityObservers = observers
 
-        // ⌘1/⌘2/⌘3 (the retired header buttons' key equivalents): the shell
+        // ⌘1–⌘4 (the retired header buttons' key equivalents): the shell
         // panel consults this before stock dispatch while the surface is key.
         shell.keyEquivalentHandler = { [weak self] event in
             guard event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,
@@ -317,11 +343,15 @@ public final class AppSurfaceController {
             self?.select(screen)
             return true
         }
-        // Escape on the Groups screen steps back one level first (a group
-        // editor pops to the overview); anything else, and the next Escape,
-        // closes the surface.
+        // Escape closes Scenes unless its optional cancel handler consumes it.
+        // On the Mixer, a showing thank-you card takes the first Escape.
         shell.cancelHandler = { [weak self] in
-            guard let self, selectedScreen == .groups else { return false }
+            guard let self else { return false }
+            if let surveyCard { return surveyCard.handleEscape() }
+            if selectedScreen == .mixer, popoverController.dismissThankYouCardForEscape() {
+                return true
+            }
+            guard selectedScreen == .groups else { return false }
             return groupsCancelHandler?() ?? false
         }
     }
@@ -350,11 +380,12 @@ public final class AppSurfaceController {
     /// hidden, so re-showing it without `rebuildForOpen()` would put a stale
     /// list back on screen.
     ///
-    /// Only the Mixer sleeps: Groups and Settings run no metering and no
+    /// Only the Mixer sleeps: Scenes, Speakers and Settings run no metering and no
     /// monitors, and a reveal-pending surface is not on screen yet.
     private func applyPixelVisibility(_ visible: Bool) {
         guard isShown, selectedScreen == .mixer, !isRevealPending else { return }
         if !visible, !surfaceCoveredHidden {
+            dismissSurveyCard()
             surfaceCoveredHidden = true
             popoverController.surfaceDidHide()
         } else if visible, surfaceCoveredHidden {
@@ -523,6 +554,7 @@ public final class AppSurfaceController {
     }
 
     private func handleShellClosed() {
+        dismissSurveyCard()
         // A Mixer already asleep behind the latch has had its `surfaceDidHide()`;
         // a second one would run the teardown twice.
         if isShown, selectedScreen == .mixer, !surfaceCoveredHidden {
@@ -534,6 +566,39 @@ public final class AppSurfaceController {
         cancelPendingReveal()
         publishVisibleScreen()
         onClose?()
+    }
+
+    // MARK: Expired-trial survey
+
+    /// Raise the survey card over the current screen and send its answers.
+    private func presentSurveyCard(for survey: ExpiredTrialSurvey) {
+        guard surveyCard == nil, let host = shell.window?.contentView else { return }
+        let card = TrialSurveyCardView(survey: survey)
+        card.onSent = { Analytics.captureStructured("survey sent", survey.sentProperties($0)) }
+        card.onDismissed = { [weak self] in
+            Analytics.captureStructured("survey dismissed", survey.dismissedProperties($0))
+            self?.removeSurveyCard()
+        }
+        card.onDone = { [weak self] in self?.removeSurveyCard() }
+        host.addSubview(card)
+        NSLayoutConstraint.activate([
+            card.leadingAnchor.constraint(equalTo: host.leadingAnchor),
+            card.trailingAnchor.constraint(equalTo: host.trailingAnchor),
+            card.topAnchor.constraint(equalTo: host.topAnchor),
+            card.bottomAnchor.constraint(equalTo: host.bottomAnchor),
+        ])
+        surveyCard = card
+        card.appear()
+    }
+
+    /// End a card that is up, reporting it the way its own Not now would.
+    private func dismissSurveyCard() {
+        surveyCard?.dismiss()
+    }
+
+    private func removeSurveyCard() {
+        surveyCard?.removeFromSuperview()
+        surveyCard = nil
     }
 
     /// Drop a pending first-open reveal (a close during the settle wait). The
@@ -605,6 +670,8 @@ public final class AppSurfaceController {
     /// size. Selecting the current screen is a no-op.
     public func select(_ screen: SurfaceScreen) {
         guard screen != selectedScreen else { return }
+        // `setContent` replaces the content view the card sits on.
+        dismissSurveyCard()
         Analytics.capture("surface:screen_selected", ["screen": String(describing: screen)])
         if selectedScreen == .mixer, isShown, !surfaceCoveredHidden {
             // The panel is leaving the window: drop what must not outlive a
@@ -617,7 +684,6 @@ public final class AppSurfaceController {
         // Mixer hides it anyway, and arriving at it below shows it awake.
         surfaceCoveredHidden = false
         selectedScreen = screen
-        syncToolbar()
         if screen == .mixer {
             // The Mixer's open ritual — `show` already ran it while measuring,
             // so returning to the screen re-ingests what arrived meanwhile.
@@ -628,6 +694,17 @@ public final class AppSurfaceController {
             popoverController.surfaceDidShow()
         }
         publishVisibleScreen()
+        // The toolbar is synced HERE, after the mount, not before it: syncing
+        // starts the tab's name reveal on `FoldAnimator`, and that travel lasts
+        // `Tokens.Motion.collapseRevealDuration` of WALL time. Started before
+        // the mount, the swap's synchronous work runs inside the travel and
+        // eats it — the Mixer rebuilds its whole card stack (`rebuildForOpen`)
+        // and Settings mounts its panes, both longer than the reveal, so ⌘1 and
+        // ⌘3 snapped to the finished width while ⌘2 (Groups, prewarmed and
+        // cheap) animated normally (owner, live, 2026-09-13). Both animations a
+        // swap runs now start from the same point: nothing blocking between
+        // this line and the first clock tick.
+        syncToolbar()
         fadeInMountedScreen()
     }
 
@@ -754,6 +831,10 @@ public final class AppSurfaceController {
             let screenVC = builtGroupsScreen()
             applyChromeTopInset()
             shell.setContent(screenVC, defaultSize: sessionContentSize)
+        case .speakers:
+            let screenVC = builtSpeakersScreen()
+            applyChromeTopInset()
+            shell.setContent(screenVC, defaultSize: sessionContentSize)
         case .settings:
             let screenVC = builtSettingsScreen()
             applyChromeTopInset()
@@ -776,6 +857,12 @@ public final class AppSurfaceController {
         if let window = shell.window {
             window.contentViewController?.preferredContentSize =
                 window.contentRect(forFrameRect: window.frame).size
+        }
+        // Assigning `contentViewController` drops the first responder to the window, which never handles Tab.
+        // `canBecomeKeyView` is false for a button unless Full Keyboard Access is on, so a mouse user gets no ring and focus never jumps into a slider or field after a swap.
+        if let window = shell.window, window.firstResponder === window,
+           let first = window.initialFirstResponder, first.canBecomeKeyView {
+            window.makeFirstResponder(first)
         }
     }
 
@@ -807,12 +894,12 @@ public final class AppSurfaceController {
         return panel
     }
 
-    /// Whether the off-click-path build of Groups and Settings has been asked
+    /// Whether the off-click-path build of Scenes, Speakers and Settings has been asked
     /// for in this process. Once, ever — the screens are kept for the process
     /// lifetime, so there is nothing to redo.
     private var prewarmRequested = false
 
-    /// Build Groups and Settings NOW, so the click that selects one only has to
+    /// Build Scenes, Speakers and Settings NOW, so the click that selects one only has to
     /// mount a screen that already exists.
     ///
     /// Both are built lazily on first selection, and measured headless against
@@ -825,10 +912,11 @@ public final class AppSurfaceController {
     /// (`SurfaceSplashView`, 0.7 s solid before it even starts leaving) is
     /// covering the surface and nothing is animating.
     ///
-    /// Building is NOT mounting: neither screen reaches `setContent`, so the
+    /// Building is NOT mounting: no screen reaches `setContent`, so the
     /// one session frame is untouched.
     private func prewarmScreens() {
         _ = builtGroupsScreen()
+        _ = builtSpeakersScreen()
         _ = builtSettingsScreen()
         // The screens were built while the toolbar strip was already measurable,
         // so seat them now rather than leaving the first mount to do it.
@@ -848,6 +936,13 @@ public final class AppSurfaceController {
         if let groupsScreen { return groupsScreen }
         let screen = SurfaceScreenViewController(content: makeGroupsContent())
         groupsScreen = screen
+        return screen
+    }
+
+    private func builtSpeakersScreen() -> SurfaceScreenViewController {
+        if let speakersScreen { return speakersScreen }
+        let screen = SurfaceScreenViewController(content: makeSpeakersContent())
+        speakersScreen = screen
         return screen
     }
 
@@ -914,6 +1009,7 @@ public final class AppSurfaceController {
         let inset = chromeTopInset
         mixerPanel?.setContentTopInset(inset)
         groupsScreen?.setContentTopInset(inset)
+        speakersScreen?.setContentTopInset(inset)
         settingsScreen?.setContentTopInset(inset)
     }
 
@@ -956,7 +1052,9 @@ public final class AppSurfaceController {
     var test_toolbarController: SurfaceToolbarController { toolbarController }
     /// The lazily-built pieces, `nil` until their tab is first selected.
     var test_mixerPanel: PopoverPanelViewController? { mixerPanel }
+    var test_surveyCard: TrialSurveyCardView? { surveyCard }
     var test_groupsScreen: SurfaceScreenViewController? { groupsScreen }
+    var test_speakersScreen: SurfaceScreenViewController? { speakersScreen }
     var test_settingsScreen: SurfaceScreenViewController? { settingsScreen }
     var test_settingsRoot: SettingsRootViewController? { settingsRoot }
     /// Run the off-click-path screen build now, instead of a turn from now.
@@ -1006,7 +1104,7 @@ extension AppSurfaceController: FoldFollowing {
 
 // MARK: - SurfaceScreenViewController
 
-/// One surface screen (Groups, Settings): a thin container that seats the
+/// One surface screen (Scenes, Speakers, Settings): a thin container that seats the
 /// content controller — a real CHILD view controller, so the responder chain
 /// and appearance plumbing stay stock — below the window's toolbar strip by
 /// the surface-pushed chrome inset. (The Mixer panel is hosted directly

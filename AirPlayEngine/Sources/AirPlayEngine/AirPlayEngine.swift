@@ -245,6 +245,8 @@ public actor AirPlayEngine {
     // "probe always-on, rate-limited").
     private nonisolated let schedulingProbe = WriteSchedulingProbe()
 
+    private nonisolated let levels = StreamLevelTracker()
+
     // Test seam (headless verification). When set, `issueOverride` replaces the
     // backend device_* call in startOp: it still arms the REAL C dispatcher
     // waiter (outputs_callback_add + CompletionRegistry) and returns N, but does
@@ -288,6 +290,18 @@ public actor AirPlayEngine {
     private let ptpLog = Logger(subsystem: "com.airplayengine", category: "ptp-clock")
 
     // MARK: Init
+
+    /// Where the vendored sender's own log lines (RTSP failures, dropped
+    /// packets, receiver teardowns — everything `DPRINTF` emits at or below
+    /// `AIRPLAYENGINE_LOG_LEVEL`) are appended, rotating to `<path>.1` at
+    /// `capBytes`. `nil` writes no file. Process-wide, not per engine: the C
+    /// shim has one sink. The package has no notion of where an app keeps its
+    /// logs, so the host calls this once at launch with its own directory;
+    /// tests and `engine-probe` never call it and write nothing.
+    /// `AIRPLAYENGINE_LOG_FILE`, when set, still wins (dev tooling).
+    public nonisolated static func setLogFile(path: String?, capBytes: Int = 5 * 1024 * 1024) {
+        engine_logger_set_file(path, capBytes)
+    }
 
     public init(config: EngineConfig = EngineConfig()) {
         self.config = config
@@ -689,6 +703,24 @@ public actor AirPlayEngine {
         // port > 0 => appeared/updated; port < 0 => disappeared.
         let port: Int32 = appearing ? Int32(descriptor.port) : -1
 
+        if appearing {
+            // The key the vendored device callback passes to cfg_gettsec: RAOP
+            // names are "<deviceid>@<name>" and raop.c keys on the part after '@'.
+            let key: Substring
+            if descriptor.kind == .raop, let at = descriptor.name.firstIndex(of: "@") {
+                key = descriptor.name[descriptor.name.index(after: at)...]
+            } else {
+                key = Substring(descriptor.name)
+            }
+            String(key).withCString { k in
+                if let pw = descriptor.password {
+                    pw.withCString { conffile_set_device_password(k, $0) }
+                } else {
+                    conffile_set_device_password(k, nil)
+                }
+            }
+        }
+
         descriptor.name.withCString { name in
             descriptor.hostname.withCString { host in
                 descriptor.address.withCString { addr in
@@ -699,6 +731,16 @@ public actor AirPlayEngine {
                         _ = airplayengine_feed_device(name, host, family, addr, port, kv)
                     }
                 }
+            }
+        }
+
+        // The pairing key lives in the app's store; the device holds whatever the
+        // latest feed carried (a value replaces, nil clears).
+        if appearing, let id = descriptor.parsedID, let device = outputs_device_get(id.rawValue) {
+            let held = device.pointee.auth_key.map { String(cString: $0) }
+            if held != descriptor.authKey {
+                free(device.pointee.auth_key)
+                device.pointee.auth_key = descriptor.authKey.map { strdupC($0) }
             }
         }
     }
@@ -774,7 +816,9 @@ public actor AirPlayEngine {
     ///
     /// The stream_id write happens BEFORE `device_start` is issued — it MUST
     /// land before `session_make` runs, same ordering constraint `setVolume`
-    /// has for `device->volume`. Devices already streaming/connected take the
+    /// has for `device->volume`. The per-output gate is taken before the
+    /// idempotency read and the `stream_id` write, so those are atomic with the
+    /// `device_start` that follows. Devices already streaming/connected take the
     /// existing idempotency no-op path (below) and do NOT get re-bound to a
     /// new `streamId` — the session already exists. THAT NO-OP IS NOW VISIBLE:
     /// the return value is ``OutputBindResult/alreadyBound(streamId:)`` carrying
@@ -840,6 +884,12 @@ public actor AirPlayEngine {
         try requireStarted()
         guard knownOutputs[id] != nil else { throw AirPlayEngineError.unknownOutput(id) }
 
+        // The per-output gate is taken here, before the idempotency read and the
+        // stream_id write below, so those are atomic with the device_start that
+        // follows (startOp runs unserialized because this call owns the slot).
+        if serialize { await acquireOp(id) }
+        defer { if serialize { releaseOp(id) } }
+
         // Idempotency guard (first-light hardening #5): an output already in a
         // live session is a no-op success — don't re-issue device_start, which
         // would arm a second RTSP SETUP against a receiver that's already
@@ -874,7 +924,7 @@ public actor AirPlayEngine {
         // device->stream_id at session-creation time; see the doc comment above).
         await applyStreamIdOnDevice(id: id, streamId: streamId)
 
-        let terminal = try await startOp(id: id, serialize: serialize) { device, cbId in
+        let terminal = try await startOp(id: id, serialize: false) { device, cbId in
             // Dispatch by the device's backend (output_airplay OR output_raop)
             // so a RAOP-typed device runs raop_device_start, not the AP2 sender.
             return outputs_device_start(device, cbId)
@@ -896,9 +946,44 @@ public actor AirPlayEngine {
         try await unbind(id, serialize: true)
     }
 
+    /// Run `pair-setup` with the code the receiver is showing. Returns the pairing
+    /// key to store and feed back as `DeviceDescriptor.authKey`. Throws
+    /// `.passwordRequired` when the receiver refuses the code (a back-off or
+    /// max-tries answer reads the same, the vendored handler only logs them), and
+    /// `.sessionFailed` when no key was earned.
+    public func authorize(_ id: OutputID, pin: String) async throws -> String {
+        try requireStarted()
+        guard knownOutputs[id] != nil else { throw AirPlayEngineError.unknownOutput(id) }
+
+        let terminal = try await startOp(id: id) { device, cbId in
+            pin.withCString { outputs_device_authorize(device, $0, cbId) }
+        }
+        switch terminal {
+        case .passwordRequired:
+            throw AirPlayEngineError.passwordRequired
+        case .stopped:
+            let read: () -> String? = {
+                guard let device = outputs_device_get(id.rawValue) else { return nil }
+                return device.pointee.auth_key.map { String(cString: $0) }
+            }
+            let key: String?
+            if issueOverride != nil { key = read() }
+            else if let t = engineThreadHolder.current { key = (try? await t.run(read)) ?? nil }
+            else { key = nil }
+            guard let key else { throw AirPlayEngineError.sessionFailed }
+            return key
+        default:
+            throw AirPlayEngineError.sessionFailed
+        }
+    }
+
     private func unbind(_ id: OutputID, serialize: Bool) async throws {
         try requireStarted()
         guard knownOutputs[id] != nil else { throw AirPlayEngineError.unknownOutput(id) }
+
+        // Gate before the live-state read, same reasoning as `bind`.
+        if serialize { await acquireOp(id) }
+        defer { if serialize { releaseOp(id) } }
 
         // Idempotency guard (first-light hardening #5): stopping an output that
         // isn't in a session is a no-op success. device_stop on an already-idle
@@ -913,7 +998,7 @@ public actor AirPlayEngine {
         let liveState = await liveDeviceState(id)
         if liveState == .stopped { knownOutputs[id] = .stopped; return }
 
-        let terminal = try await startOp(id: id, serialize: serialize) { device, cbId in
+        let terminal = try await startOp(id: id, serialize: false) { device, cbId in
             // TOCTOU guard: a receiver-side RTSP drop can free the session and
             // NULL device->session (shims/outputs.c outputs_device_session_remove)
             // between the liveState check above and this closure running on the
@@ -1012,13 +1097,20 @@ public actor AirPlayEngine {
         return issued.value
     }
 
-    /// Set the volume (0.0...1.0) on `id`. Maps onto AirPlay's volume model and
-    /// calls `output_airplay.device_volume_set`. Awaits the completion.
+    /// Set the volume on `id`. Maps onto AirPlay's volume model and calls
+    /// `output_airplay.device_volume_set`. Awaits the completion.
+    ///
+    /// `volume` is 0.0...1.0, plus one sentinel: **exactly `-1.0`** means true
+    /// mute and is passed through to `applyVolumeOnDevice` unchanged, so the C
+    /// layer sees `device->volume = -1`. `raop_volume_from_pct` reads that as
+    /// out of range and sends -144 dB — real silence on an AirPlay 1 receiver,
+    /// where 0 would be -30 dB and still audible. Any other negative value
+    /// clamps to 0, as does anything above 1.
     public func setVolume(_ id: OutputID, _ volume: Double) async throws {
         try requireStarted()
         guard knownOutputs[id] != nil else { throw AirPlayEngineError.unknownOutput(id) }
 
-        let clamped = max(0.0, min(1.0, volume))
+        let clamped = volume == -1.0 ? -1.0 : max(0.0, min(1.0, volume))
         // Set device->volume (a 0...100 PERCENT) BEFORE the op, on the engine
         // thread. The vendored airplay_set_volume_one reads it to build
         // SET_PARAMETER, and airplay_volume_from_pct() maps 0..100 -> -30..0 dB.
@@ -1178,6 +1270,10 @@ public actor AirPlayEngine {
         // is charged back via `recordRefused` (below), so the cumulative deficit
         // still equals wall time minus audio actually DELIVERED — the receiver
         // anchor slide — instead of crediting refused audio as delivered.
+        // That equality holds only for host writes: while the shim's idle
+        // silence fill is running (shims/outputs.c), the receiver is also being
+        // fed from below this layer, so the cumulative deficit then measures the
+        // host's own shortfall, not what the receiver is missing.
         // Allocation-free, never gates the write.
         let firstSamples = entries.first.map { $0.pcm.count / bytesPerSample }
         if let firstSamples {
@@ -1236,6 +1332,14 @@ public actor AirPlayEngine {
                 samples: byteCount / bytesPerSample,
                 streamId: entry.streamId
             )
+        }
+
+        // Peak level per stream, over bytes already copied for the engine
+        // thread: this is the one place the delivered audio is in hand off the
+        // capture IOProc (C3 of PLAN-LIVE-DIAGNOSTICS.md).
+        for entry in prepared {
+            levels.record(streamId: entry.streamId, bytes: UnsafeRawPointer(entry.cbuf),
+                          byteCount: entry.byteCount, channels: PCMFormat.airplay.channels)
         }
 
         let quality = media_quality(
@@ -1333,13 +1437,13 @@ public actor AirPlayEngine {
 
     /// Max simultaneous `output_data` entries one `write(streams:pts:)` call
     /// can carry. Derived from the shim's fixed `output_buffer.data` array
-    /// (`OUTPUTS_MAX_QUALITY_SUBSCRIPTIONS` (5) `+ 2` in `shims/outputs.h`: one
+    /// (`OUTPUTS_MAX_QUALITY_SUBSCRIPTIONS` (15) `+ 2` in `shims/outputs.h`: one
     /// slot for the original untranscoded blob the array was originally sized
     /// for, one always-zero terminator) minus 1 further reserved slot so a
     /// zero terminator (`buffer == NULL`) always remains immediately after the
     /// last real entry — `airplay_write` loops `for (i; obuf->data[i].buffer;
     /// i++)` and never sees a `bufsize`/count, only the NULL sentinel.
-    static let maxSimultaneousStreams = 6
+    static let maxSimultaneousStreams = 16
 
     /// The write-path backpressure cap (memory-leak audit 2026-07-23): the most
     /// *un-drained* audio, per stream, that may sit queued on the engine thread
@@ -1393,6 +1497,13 @@ public actor AirPlayEngine {
     /// from a non-RT thread, never the engine thread.
     public nonisolated func writeSchedulingSnapshot() -> WriteSchedulingSnapshot {
         schedulingProbe.snapshot()
+    }
+
+    /// Peak level and silence run per content stream since the previous call
+    /// (see `StreamLevelSnapshot`). `nonisolated`, cheap, polled every ~5 s by
+    /// the host's telemetry bridge from a non-RT thread.
+    public nonisolated func streamLevelSnapshot() -> [StreamLevelSnapshot] {
+        levels.snapshot(sampleRate: PCMFormat.airplay.sampleRate)
     }
 
     // MARK: - Audio I/O workgroup (T7, docs/plans/PLAN-AUDIO-THREAD-SCHEDULING.md)
@@ -1513,9 +1624,10 @@ public actor AirPlayEngine {
                 }
                 guard armed else {
                     // B5.3: a waiter was already armed for this id (should be
-                    // unreachable given per-id serialization). Release the C slot
-                    // we just took and fail this op rather than strand it.
-                    outputs_callback_remove(device)
+                    // unreachable given per-id serialization). Release exactly
+                    // the slot this call took and fail this op rather than
+                    // strand it.
+                    outputs_callback_clear(cbId)
                     cont.resume(throwing: AirPlayEngineError.operationRejected)
                     return
                 }
@@ -1715,11 +1827,18 @@ final class StateStreamHub: @unchecked Sendable {
     /// Install this hub as the process-wide target and wire the C hook. Called on
     /// the engine thread right after the dispatcher is initialised (alongside
     /// `CompletionRegistry.install()`).
-    func install() {
+    @discardableResult
+    func install() -> Bool {
+        let displaced = StateStreamHub.shared.map { $0 !== self } ?? false
+        if displaced {
+            Logger(subsystem: "com.airplayengine", category: "state-stream")
+                .fault("StateStreamHub.install: a second hub is replacing a live one; the first engine's state stream goes silent")
+        }
         StateStreamHub.shared = self
         outputs_engine_state_set({ deviceId, state, _ in
             StateStreamHub.shared?.deliver(deviceId: deviceId, state: state)
         }, nil)
+        return !displaced
     }
 
     /// Tear down the hook and finish every live stream (on stop).
@@ -1780,11 +1899,18 @@ final class RemoteEventHub: @unchecked Sendable {
 
     /// Install this hub as the process-wide target and wire the C hook. MUST run
     /// before airplay_init spawns the events thread (see the type doc).
-    func install() {
+    @discardableResult
+    func install() -> Bool {
+        let displaced = RemoteEventHub.shared.map { $0 !== self } ?? false
+        if displaced {
+            Logger(subsystem: "com.airplayengine", category: "remote-events")
+                .fault("RemoteEventHub.install: a second hub is replacing a live one; the first engine's remote events go silent")
+        }
         RemoteEventHub.shared = self
         airplayengine_remote_event_set({ deviceId, event, volume, _ in
             RemoteEventHub.shared?.deliver(deviceId: deviceId, event: event, volume: volume)
         }, nil)
+        return !displaced
     }
 
     /// Tear down the hook and finish every live stream (on stop). MUST run after
@@ -2426,8 +2552,15 @@ final class WriteSchedulingProbe: @unchecked Sendable {
     private var lastWriteArrivalMs: Double?
     private var windowStartMs: Double?
 
-    init(logInterval: Double = 5.0, ringCapacity: Int = 1024) {
+    /// Same idiom as `WriteCadenceTracker.now`: injectable so a test can drive
+    /// deterministic gaps without a real sleep. Production always takes the
+    /// default, which is the real monotonic clock this class exists to
+    /// measure against — nothing about a live producer's cadence changes.
+    private let nowMs: () -> Double
+
+    init(logInterval: Double = 5.0, ringCapacity: Int = 1024, nowMs: @escaping () -> Double = WriteSchedulingProbe.nowMs) {
         self.logInterval = logInterval
+        self.nowMs = nowMs
         self.wakeRing = MetricRing(capacity: ringCapacity)
         self.workRing = MetricRing(capacity: ringCapacity)
         self.gapRing = MetricRing(capacity: ringCapacity)
@@ -2464,7 +2597,7 @@ final class WriteSchedulingProbe: @unchecked Sendable {
     /// Also drives the rate-limited log check, so logging cadence tracks
     /// real write activity rather than a separate timer.
     func recordWriteArrival() {
-        let now = Self.nowMs()
+        let now = self.nowMs()
         lock.lock()
         defer { lock.unlock() }
         if let last = lastWriteArrivalMs {
@@ -2530,5 +2663,72 @@ final class WriteSchedulingProbe: @unchecked Sendable {
             gap.p50Ms, gap.p95Ms, gap.p99Ms, gap.maxMs, gap.count)
         log.notice("\(line, privacy: .public)")
         FileHandle.standardError.write(Data((line + "\n").utf8))
+    }
+}
+
+// MARK: - Stream level (PLAN-LIVE-DIAGNOSTICS.md C3)
+
+/// Per-stream peak level and consecutive-silence run, recorded on the write
+/// path where the S16LE bytes are already being copied for the engine thread —
+/// never the capture IOProc. The scan is a max-abs over one buffer (704
+/// samples per AirPlay frame) and runs outside the lock; only the merge is
+/// locked. Same shape as `WriteCadenceTracker`: a small `@unchecked Sendable`
+/// box read by a 5 s poller on a non-RT thread.
+final class StreamLevelTracker: @unchecked Sendable {
+    /// −60 dBFS in 16-bit sample counts (32768 × 10^(−3) = 32.8): a write whose
+    /// loudest sample is at or below this counts as silent.
+    static let silenceThreshold: Int32 = 32
+    static let floorDBFS: Double = -120
+
+    private struct Stream {
+        var windowPeak: Int32 = 0
+        var silentRunSamples: Int = 0
+        var writes: UInt64 = 0
+    }
+
+    private let lock = NSLock()
+    private var streams: [UInt32: Stream] = [:]
+
+    /// `bytes` is interleaved S16LE; `channels` turns the sample count into
+    /// frames, which `snapshot(sampleRate:)` turns into seconds.
+    func record(streamId: UInt32, bytes: UnsafeRawPointer, byteCount: Int, channels: Int) {
+        let sampleCount = byteCount / 2
+        var peak: Int32 = 0
+        var offset = 0
+        while offset + 1 < byteCount {
+            let s = Int32(bytes.loadUnaligned(fromByteOffset: offset, as: Int16.self))
+            let a = s < 0 ? -s : s
+            if a > peak { peak = a }
+            offset += 2
+        }
+        let frames = channels > 0 ? sampleCount / channels : sampleCount
+
+        lock.lock()
+        defer { lock.unlock() }
+        var stream = streams[streamId] ?? Stream()
+        stream.writes &+= 1
+        if peak > stream.windowPeak { stream.windowPeak = peak }
+        stream.silentRunSamples = peak <= Self.silenceThreshold ? stream.silentRunSamples + frames : 0
+        streams[streamId] = stream
+    }
+
+    /// Reports every stream written since the last call and resets each
+    /// window peak; the silence run and write count persist. The tracker never
+    /// drops a stream it has seen; the host decides which rows to report.
+    func snapshot(sampleRate: Int) -> [StreamLevelSnapshot] {
+        lock.lock()
+        defer { lock.unlock() }
+        let out = streams.keys.sorted().map { id -> StreamLevelSnapshot in
+            let s = streams[id]!
+            let dbfs = s.windowPeak > 0
+                ? 20 * log10(Double(s.windowPeak) / 32768)
+                : Self.floorDBFS
+            return StreamLevelSnapshot(streamId: id,
+                                       peakDBFS: dbfs,
+                                       silentSeconds: Double(s.silentRunSamples) / Double(max(sampleRate, 1)),
+                                       writes: s.writes)
+        }
+        for id in streams.keys { streams[id]?.windowPeak = 0 }
+        return out
     }
 }

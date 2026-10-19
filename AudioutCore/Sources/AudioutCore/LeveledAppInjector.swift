@@ -56,7 +56,8 @@ public final class LeveledAppInjector: @unchecked Sendable {
     /// volume SOURCE RMS (0…1) of the app whose buffer was just handled — how
     /// loud that app is actually playing, NOT scaled by its volume slider (the
     /// meter shows the program level, not the attenuated output). Same contract
-    /// as ``AppRouteMixer/onAppLevel``. Called on this injector's serial queue.
+    /// as ``AppRouteMixer/onAppLevel``. Called on the delivering tap's thread,
+    /// holding no lock of the injector's.
     public var onAppLevel: (@Sendable (_ bundleID: String, _ rms: Float) -> Void)?
 
     // MARK: Tunables
@@ -92,6 +93,32 @@ public final class LeveledAppInjector: @unchecked Sendable {
     /// ``onAppLevel``. `false` until a meter asks for it, so the common case
     /// costs nothing in the buffer path.
     private var meteringActive = false
+
+    // MARK: State published to the delivery path (`snapshotLock`)
+
+    /// The queue-confined state ``handleBuffer(bundleID:buffer:)`` needs, frozen
+    /// into ONE immutable value so the delivery path never waits on `queue`.
+    private struct DeliverySnapshot {
+        let volumeForBundle: [String: Int]
+        let converterForBundle: [String: PCMConverting]
+        let meteringActive: Bool
+
+        static let empty = DeliverySnapshot(
+            volumeForBundle: [:], converterForBundle: [:], meteringActive: false)
+    }
+
+    /// Guards ONLY the `_snapshot` reference — one pointer store on publish, one
+    /// non-blocking `try()` read on delivery, nothing else. NEVER held across a
+    /// converter call, and never held while waiting on `queue`. Same shape as
+    /// ``NativeCaptureCoordinator``'s own `snapshotLock`; the rule it serves is
+    /// the real-time policy written at `NativeCaptureCoordinator.startIOProc`'s
+    /// IOProc block.
+    private let snapshotLock = NSLock()
+
+    /// The currently published snapshot. Written only via
+    /// ``publishSnapshotLocked()`` (always while holding `queue`), read only by
+    /// ``handleBuffer(bundleID:buffer:)``.
+    private var _snapshot: DeliverySnapshot = .empty
 
     // MARK: State shared with the real-time mix path (`mixLock`)
 
@@ -131,11 +158,10 @@ public final class LeveledAppInjector: @unchecked Sendable {
 
     private var diag = Diagnostics()
 
-    /// The write-side counters, confined to `queue` like every other field the
-    /// buffer path touches. Deliberately NOT under `mixLock`: counting a dropped
-    /// buffer must not lengthen the critical section the real-time `mix(into:)`
-    /// is trying to take, or the instrument starts causing the contention it is
-    /// there to measure.
+    /// The write-side counters: bumped under `mixLock` from the per-app tap's
+    /// delivery thread (which no longer hops to `queue`), and read and reset
+    /// under `mixLock` by ``takeDiagnostics()``. An increment adds nothing
+    /// measurable to the critical section the real-time `mix(into:)` takes.
     private var buffersIn = 0
     private var droppedInactive = 0
     private var droppedNotLeveled = 0
@@ -152,7 +178,6 @@ public final class LeveledAppInjector: @unchecked Sendable {
             out.ringCount = rings.count
             out.pendingSamples = rings.values.reduce(0) { $0 + $1.count }
             diag = Diagnostics()
-            mixLock.unlock()
 
             out.buffersIn = buffersIn
             out.droppedInactive = droppedInactive
@@ -164,6 +189,7 @@ public final class LeveledAppInjector: @unchecked Sendable {
             droppedNotLeveled = 0
             droppedNoConverter = 0
             droppedConvertFailed = 0
+            mixLock.unlock()
             return out
         }
     }
@@ -186,6 +212,25 @@ public final class LeveledAppInjector: @unchecked Sendable {
     }
     #endif
 
+    // MARK: Delivery snapshot
+
+    /// Freeze the queue-confined state ``handleBuffer(bundleID:buffer:)`` needs
+    /// into a fresh immutable ``DeliverySnapshot`` and swap it into the published
+    /// slot. MUST be called while holding `queue` — it reads queue-confined
+    /// state — and from EVERY site that mutates any of the fields it mirrors, so
+    /// the delivery path never runs on a stale set. The swap itself is a single
+    /// reference store under `snapshotLock`, held for those few instructions
+    /// only.
+    private func publishSnapshotLocked() {   // must hold `queue`
+        let snapshot = DeliverySnapshot(
+            volumeForBundle: volumeForBundle,
+            converterForBundle: converterForBundle,
+            meteringActive: meteringActive)
+        snapshotLock.lock()
+        _snapshot = snapshot
+        snapshotLock.unlock()
+    }
+
     // MARK: Configuration
 
     /// Replace the leveled table with `apps` (bundle id + 0…100 volume) and
@@ -207,6 +252,7 @@ public final class LeveledAppInjector: @unchecked Sendable {
                 rings[bundleID] = SampleRing(capacity: Self.ringCapacitySamples)
             }
             mixLock.unlock()
+            publishSnapshotLocked()
         }
     }
 
@@ -216,6 +262,7 @@ public final class LeveledAppInjector: @unchecked Sendable {
         queue.async {
             guard self.volumeForBundle[bundleID] != nil else { return }
             self.volumeForBundle[bundleID] = volume
+            self.publishSnapshotLocked()
         }
     }
 
@@ -237,7 +284,10 @@ public final class LeveledAppInjector: @unchecked Sendable {
     /// Gate per-app RMS computation/emission on or off. Independent of routing
     /// and capture, exactly like ``AppRouteMixer/setMeteringActive(_:)``.
     public func setMeteringActive(_ active: Bool) {
-        queue.async { self.meteringActive = active }
+        queue.async {
+            self.meteringActive = active
+            self.publishSnapshotLocked()
+        }
     }
 
     // MARK: Capture wiring
@@ -253,6 +303,7 @@ public final class LeveledAppInjector: @unchecked Sendable {
             case .idle, .resolvingProcess, .creatingTap, .stopping, .failed:
                 converterForBundle.removeValue(forKey: bundleID)
             }
+            publishSnapshotLocked()
         }
     }
 
@@ -260,37 +311,59 @@ public final class LeveledAppInjector: @unchecked Sendable {
     /// correctly) when the injector is inactive, the app isn't leveled, it has no
     /// converter yet, or the buffer can't be converted. Otherwise: convert to
     /// S16LE/44100/2ch, scale by the app's volume, append. Called from the
-    /// per-app tap's delivery thread; hops to `queue` like ``AppRouteMixer``.
+    /// per-app tap's delivery thread: it reads the published snapshot and takes
+    /// `mixLock` for bounded sections only, never waiting on `queue`.
     public func handleBuffer(bundleID: String, buffer: CapturedBuffer) {
-        let level: Float? = queue.sync {
-            mixLock.lock()
-            let isActive = active
-            mixLock.unlock()
-            guard isActive else { droppedInactive += 1; return nil }
-            guard let volume = volumeForBundle[bundleID] else {
-                droppedNotLeveled += 1; return nil
-            }
-            guard let converter = converterForBundle[bundleID] else {
-                droppedNoConverter += 1; return nil
-            }
-            guard let pcm = converter.convertToAirPlayPCM(buffer), !pcm.isEmpty else {
-                droppedConvertFailed += 1; return nil
-            }
-
-            let scaled = AppRouteMixer.scaledStereoSamples(pcm, volumePercent: volume)
-            guard !scaled.isEmpty else {
-                droppedConvertFailed += 1; return nil
-            }
-            buffersIn += 1
-            mixLock.lock()
-            rings[bundleID]?.write(scaled)
-            mixLock.unlock()
-            // The meter is a SOURCE/program level: RMS the PRE-volume converted
-            // buffer, so the bar reflects how loud the app is actually playing
-            // rather than how far its slider is pulled down.
-            return meteringActive ? NativeCaptureCoordinator.rmsOfS16LE(pcm) : nil
+        // Delivery thread: read the published state with a single non-blocking
+        // reference read and drop this buffer on a miss, instead of waiting on
+        // `queue` — which `updateLeveled` and `handleStateChange` hold while they
+        // BUILD CONVERTERS, so a wait here parks the tap for the whole edit. The
+        // snapshot is swapped whole, so a torn read is impossible, and it is at
+        // most one edit stale. This is the policy written at
+        // `NativeCaptureCoordinator.startIOProc`'s IOProc block.
+        let snapshot: DeliverySnapshot
+        if snapshotLock.try() {
+            snapshot = _snapshot
+            snapshotLock.unlock()
+        } else {
+            return
         }
-        if let level { onAppLevel?(bundleID, level) }
+
+        mixLock.lock()
+        let isActive = active
+        if !isActive { droppedInactive += 1 }
+        mixLock.unlock()
+        guard isActive else { return }
+
+        guard let volume = snapshot.volumeForBundle[bundleID] else {
+            mixLock.lock(); droppedNotLeveled += 1; mixLock.unlock()
+            return
+        }
+        guard let converter = snapshot.converterForBundle[bundleID] else {
+            mixLock.lock(); droppedNoConverter += 1; mixLock.unlock()
+            return
+        }
+        guard let pcm = converter.convertToAirPlayPCM(buffer), !pcm.isEmpty else {
+            mixLock.lock(); droppedConvertFailed += 1; mixLock.unlock()
+            return
+        }
+
+        let scaled = AppRouteMixer.scaledStereoSamples(pcm, volumePercent: volume)
+        guard !scaled.isEmpty else {
+            mixLock.lock(); droppedConvertFailed += 1; mixLock.unlock()
+            return
+        }
+
+        mixLock.lock()
+        buffersIn += 1
+        rings[bundleID]?.write(scaled)
+        mixLock.unlock()
+
+        // The meter is a SOURCE/program level: RMS the PRE-volume converted
+        // buffer, so the bar reflects how loud the app is actually playing
+        // rather than how far its slider is pulled down.
+        guard snapshot.meteringActive else { return }
+        onAppLevel?(bundleID, NativeCaptureCoordinator.rmsOfS16LE(pcm))
     }
 
     // MARK: The real-time mix
@@ -367,8 +440,8 @@ public final class LeveledAppInjector: @unchecked Sendable {
 // MARK: - Per-app FIFO ring
 
 /// A fixed-capacity circular buffer of interleaved S16LE stereo samples. Written
-/// from ``LeveledAppInjector``'s serial queue, read from the whole-system tap's
-/// real-time thread, both under `mixLock` — so it allocates ONCE, at init, and
+/// from the per-app tap's delivery thread, read from the whole-system tap's
+/// delivery thread, both under `mixLock` — so it allocates ONCE, at init, and
 /// never again.
 private final class SampleRing {
     private var storage: [Int16]

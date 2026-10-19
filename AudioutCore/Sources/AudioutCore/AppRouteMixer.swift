@@ -144,19 +144,20 @@ public final class AppRouteMixer: @unchecked Sendable {
     /// Fired whenever the destination-set topology changes (an app's route
     /// changed the set of distinct streams, or a stream's device membership
     /// changed). NOT fired for volume-only changes or for route edits that
-    /// leave the distinct app-sets identical. Called on the mixer's serial
-    /// queue.
+    /// leave the distinct app-sets identical. Called on whatever thread called
+    /// ``updateRoutes(_:)``, after the mixer's queue has been released.
     public var onDestinationSetsChanged: (@Sendable ([DestinationSet]) -> Void)?
 
     /// Fired for each finished mixed buffer, tagged with its `streamID`. Called
-    /// on the mixer's serial queue.
+    /// on the delivering tap's thread, holding no lock of the mixer's.
     public var onMixedBuffer: (@Sendable (MixedBuffer) -> Void)?
 
     /// Fired once per handled buffer, while metering is active, with the PRE-
     /// volume SOURCE RMS (0…1) of the ONE app whose buffer was just handled — how
     /// loud that app is actually playing, NOT scaled by its routing-volume slider
     /// (the meter shows the program level, not the attenuated output). Not the
-    /// summed mix. Called on the mixer's serial queue. See ``setMeteringActive(_:)``.
+    /// summed mix. Called on the delivering tap's thread, holding no lock of the
+    /// mixer's. See ``setMeteringActive(_:)``.
     public var onAppLevel: (@Sendable (_ bundleID: String, _ rms: Float) -> Void)?
 
     // MARK: Tunables
@@ -209,15 +210,50 @@ public final class AppRouteMixer: @unchecked Sendable {
     /// `.capturing(format)` transition lands).
     private var converterForBundle: [String: PCMConverting] = [:]
 
-    /// streamID → its running mix timeline.
-    private var timelines: [Int: MixTimeline] = [:]
-
     /// Whether per-app PRE-volume source RMS should be computed and handed to
     /// ``onAppLevel`` (T2 — the per-app-routed meter). `false` until
     /// ``setMeteringActive(_:)`` first flips it on, so the common case (no
     /// meter shown) costs nothing extra in the mixing hot path. Confined to
     /// `queue`, same as every other piece of state here.
     private var meteringActive = false
+
+    // MARK: State published to / shared with the delivery path
+
+    /// The queue-confined state ``handleBuffer(bundleID:buffer:)`` needs, frozen
+    /// into ONE immutable value so the delivery path never waits on `queue`.
+    private struct DeliverySnapshot {
+        let streamGainsForBundle: [String: [Int: Int]]
+        let converterForBundle: [String: PCMConverting]
+        let contributorCountByStream: [Int: Int]
+        let meteringActive: Bool
+
+        static let empty = DeliverySnapshot(
+            streamGainsForBundle: [:], converterForBundle: [:],
+            contributorCountByStream: [:], meteringActive: false)
+    }
+
+    /// Guards ONLY the `_snapshot` reference — one pointer store on publish, one
+    /// non-blocking `try()` read on delivery, nothing else. NEVER held across a
+    /// converter call, and never held while waiting on `queue`. Same shape as
+    /// ``NativeCaptureCoordinator``'s own `snapshotLock`; the rule it serves is
+    /// the real-time policy written at `NativeCaptureCoordinator.startIOProc`'s
+    /// IOProc block.
+    private let snapshotLock = NSLock()
+
+    /// The currently published snapshot. Written only via
+    /// ``publishSnapshotLocked()`` (always while holding `queue`, so the
+    /// published value is consistent with the queue-confined state it mirrors);
+    /// read only by ``handleBuffer(bundleID:buffer:)``.
+    private var _snapshot: DeliverySnapshot = .empty
+
+    /// Guards ONLY `timelines`. Every holder does bounded in-memory work — a
+    /// timeline add, a drain, or a removal — never a converter call, never a
+    /// Core Audio call, never a wait on `queue`. That is what makes it the kind
+    /// of lock the delivery thread may take with `lock()` rather than `try()`.
+    private let timelineLock = NSLock()
+
+    /// streamID → its running mix timeline. Guarded by `timelineLock`.
+    private var timelines: [Int: MixTimeline] = [:]
 
     // MARK: Init
 
@@ -236,6 +272,31 @@ public final class AppRouteMixer: @unchecked Sendable {
         self.init(makeConverter: { format in AVFormatConverter(from: format) })
     }
     #endif
+
+    // MARK: Delivery snapshot
+
+    /// Freeze the queue-confined state ``handleBuffer(bundleID:buffer:)`` needs
+    /// into a fresh immutable ``DeliverySnapshot`` and swap it into the published
+    /// slot. MUST be called while holding `queue` — it reads queue-confined
+    /// state — and from EVERY site that mutates any of the fields it mirrors, so
+    /// the delivery path never runs on a stale set. The swap itself is a single
+    /// reference store under `snapshotLock`, held for those few instructions
+    /// only; every caller is a non-delivery thread, so their side is
+    /// unconstrained and the constraint lives entirely on the read side.
+    private func publishSnapshotLocked() {   // must hold `queue`
+        var contributorCountByStream: [Int: Int] = [:]
+        for set in currentSets {
+            contributorCountByStream[set.streamID] = set.contributors.count
+        }
+        let snapshot = DeliverySnapshot(
+            streamGainsForBundle: streamGainsForBundle,
+            converterForBundle: converterForBundle,
+            contributorCountByStream: contributorCountByStream,
+            meteringActive: meteringActive)
+        snapshotLock.lock()
+        _snapshot = snapshot
+        snapshotLock.unlock()
+    }
 
     // MARK: Topology
 
@@ -297,12 +358,18 @@ public final class AppRouteMixer: @unchecked Sendable {
 
             // Drop timelines for streams that no longer exist.
             let liveStreamIDs = Set(newSets.map { $0.streamID })
+            timelineLock.lock()
             for streamID in timelines.keys where !liveStreamIDs.contains(streamID) {
                 timelines.removeValue(forKey: streamID)
             }
+            timelineLock.unlock()
 
+            // `streamGainsForBundle` was just rewritten, so the delivery path
+            // needs the new one even when the topology itself is unchanged.
+            publishSnapshotLocked()
             guard newSets != currentSets else { return nil }
             currentSets = newSets
+            publishSnapshotLocked()
             return newSets
         }
         if let changed { onDestinationSetsChanged?(changed) }
@@ -359,7 +426,10 @@ public final class AppRouteMixer: @unchecked Sendable {
     /// stays off (no meter shown), and vice versa is harmless (metering active
     /// with nothing routed just means ``onAppLevel`` never fires).
     public func setMeteringActive(_ active: Bool) {
-        queue.async { self.meteringActive = active }
+        queue.async {
+            self.meteringActive = active
+            self.publishSnapshotLocked()
+        }
     }
 
     // MARK: Capture wiring
@@ -377,6 +447,7 @@ public final class AppRouteMixer: @unchecked Sendable {
             case .idle, .resolvingProcess, .creatingTap, .stopping, .failed:
                 converterForBundle.removeValue(forKey: bundleID)
             }
+            publishSnapshotLocked()
         }
     }
 
@@ -387,44 +458,58 @@ public final class AppRouteMixer: @unchecked Sendable {
     /// frame-indexed timeline, and emit whatever prefix is now old enough to be
     /// final. Safe to call concurrently from several taps' IOProc threads.
     public func handleBuffer(bundleID: String, buffer: CapturedBuffer) {
-        let (emissions, level): ([MixedBuffer], Float?) = queue.sync {
-            guard let streamGains = streamGainsForBundle[bundleID], !streamGains.isEmpty,
-                  let converter = converterForBundle[bundleID],
-                  let pcm = converter.convertToAirPlayPCM(buffer),
-                  !pcm.isEmpty
-            else { return ([], nil) }
+        // Delivery thread: read the published state with a single non-blocking
+        // reference read and drop this buffer on a miss, instead of waiting on
+        // `queue` — which `updateRoutes` and `handleStateChange` hold while they
+        // recompute routes and BUILD CONVERTERS, so a wait here parks the tap for
+        // the whole edit. Because the snapshot is swapped whole, a torn read is
+        // structurally impossible, and the published set is at most one edit
+        // stale, so a dropped buffer costs nothing. This is the policy written at
+        // `NativeCaptureCoordinator.startIOProc`'s IOProc block.
+        let snapshot: DeliverySnapshot
+        if snapshotLock.try() {
+            snapshot = _snapshot
+            snapshotLock.unlock()
+        } else {
+            return
+        }
 
-            // The per-app meter is a SOURCE/program level: RMS the PRE-volume
-            // converted buffer (`pcm`), so the bar reflects how loud the app is
-            // actually playing, independent of its routing-volume slider — the
-            // meter shows the source, not the attenuated output (ahh's meter
-            // feedback: a low slider used to leave the bar stuck near-empty even
-            // when the source was loud). Skipped entirely unless a meter listens.
-            let level: Float? = meteringActive ? NativeCaptureCoordinator.rmsOfS16LE(pcm) : nil
+        guard let streamGains = snapshot.streamGainsForBundle[bundleID], !streamGains.isEmpty,
+              let converter = snapshot.converterForBundle[bundleID],
+              let pcm = converter.convertToAirPlayPCM(buffer),
+              !pcm.isEmpty
+        else { return }
 
-            // One converted buffer, mixed into every stream this app feeds — a
-            // routed group whose members carry different levels is several
-            // streams, at one gain each.
-            var emissions: [MixedBuffer] = []
-            for streamID in streamGains.keys.sorted() {
-                let gain = streamGains[streamID]!
-                emissions.append(contentsOf: mixLocked(
-                    pcm: pcm, gain: gain, streamID: streamID, pts: buffer.pts))
-            }
-            return (emissions, level)
+        // The per-app meter is a SOURCE/program level: RMS the PRE-volume
+        // converted buffer (`pcm`), so the bar reflects how loud the app is
+        // actually playing, independent of its routing-volume slider — the
+        // meter shows the source, not the attenuated output (ahh's meter
+        // feedback: a low slider used to leave the bar stuck near-empty even
+        // when the source was loud). Skipped entirely unless a meter listens.
+        let level: Float? = snapshot.meteringActive
+            ? NativeCaptureCoordinator.rmsOfS16LE(pcm) : nil
+
+        // One converted buffer, mixed into every stream this app feeds — a
+        // routed group whose members carry different levels is several
+        // streams, at one gain each.
+        var emissions: [MixedBuffer] = []
+        for streamID in streamGains.keys.sorted() {
+            let gain = streamGains[streamID]!
+            emissions.append(contentsOf: mixUnderTimelineLock(
+                pcm: pcm, gain: gain, streamID: streamID, pts: buffer.pts,
+                contributorCount: snapshot.contributorCountByStream[streamID] ?? 1))
         }
         for emission in emissions { onMixedBuffer?(emission) }
         if let level { onAppLevel?(bundleID, level) }
     }
 
     /// Mix one app's already-converted buffer into ONE stream at `gain`, and
-    /// return whatever that stream is now ready to emit. MUST hold `queue`.
-    private func mixLocked(
-        pcm: Data, gain: Int, streamID: Int, pts: timespec
+    /// return whatever that stream is now ready to emit. Takes `timelineLock`
+    /// around the `timelines` touches — and nothing else; `contributorCount`
+    /// comes from the caller's published snapshot, not from `currentSets`.
+    private func mixUnderTimelineLock(
+        pcm: Data, gain: Int, streamID: Int, pts: timespec, contributorCount: Int
     ) -> [MixedBuffer] {
-        let contributorCount = currentSets.first(where: { $0.streamID == streamID })?
-            .contributors.count ?? 1
-
         // SINGLE-contributor stream: pass the converted buffer STRAIGHT
         // through with its own capture pts — identical to the shipping
         // whole-system path (`NativeCaptureCoordinator.handleBuffer` →
@@ -440,7 +525,9 @@ public final class AppRouteMixer: @unchecked Sendable {
         if contributorCount <= 1 {
             // A stream that just dropped from 2 contributors back to 1 may
             // have a stale accumulator — clear it so no held frames leak out.
+            timelineLock.lock()
             timelines.removeValue(forKey: streamID)
+            timelineLock.unlock()
             let out = gain == 100
                 ? pcm
                 : Self.packClipped(Self.scaledStereoSamples(pcm, volumePercent: gain)[...])
@@ -457,6 +544,8 @@ public final class AppRouteMixer: @unchecked Sendable {
         // follow-up (single-stream routing is the shipping priority).
         let scaled = Self.scaledStereoSamples(pcm, volumePercent: gain)
         guard !scaled.isEmpty else { return [] }
+        timelineLock.lock()
+        defer { timelineLock.unlock() }
         let timeline = timelines[streamID] ?? {
             let t = MixTimeline()
             timelines[streamID] = t
@@ -472,11 +561,11 @@ public final class AppRouteMixer: @unchecked Sendable {
     /// Emit every stream's still-pending mixed audio immediately (end-of-run,
     /// teardown, or deterministic test drain). Leaves timelines empty.
     public func flush() {
-        let emissions: [MixedBuffer] = queue.sync {
-            timelines.flatMap { streamID, timeline in
-                timeline.drainAll(streamID: streamID)
-            }
+        timelineLock.lock()
+        let emissions: [MixedBuffer] = timelines.flatMap { streamID, timeline in
+            timeline.drainAll(streamID: streamID)
         }
+        timelineLock.unlock()
         for emission in emissions { onMixedBuffer?(emission) }
     }
 
@@ -486,6 +575,7 @@ public final class AppRouteMixer: @unchecked Sendable {
         queue.sync {
             converterForBundle.removeValue(forKey: bundleID)
             streamGainsForBundle.removeValue(forKey: bundleID)
+            publishSnapshotLocked()
         }
     }
 
@@ -563,7 +653,7 @@ public final class AppRouteMixer: @unchecked Sendable {
 /// per frame) for the half-open frame range `[startFrame, startFrame + frames)`;
 /// an absent contribution is simply zero (a paused app is silence, which is the
 /// correct thing to hear). Not thread-safe on its own — ``AppRouteMixer`` only
-/// ever touches it while holding its serial queue.
+/// ever touches it while holding `timelineLock`.
 private final class MixTimeline {
     private var startFrame: Int64 = 0
     private var acc: [Int32] = []          // interleaved L,R,L,R…  (2 * frames)

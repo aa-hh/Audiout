@@ -13,7 +13,7 @@ cannot see it.
 - A screen nobody is looking at does no work; never force-build one to deliver an event.
 - The backend is chosen once from `AIRPLAY_BACKEND`; everything downstream holds `OutputBackend`.
 - Subscribe before `start()`, and start once, or the first `deviceAdded` burst is lost.
-- The licence gate precedes everything on a purchased build, and owns clicks meanwhile.
+- The licence gate is the first-open welcome for an install with no key and no trial, and owns clicks meanwhile; an unregistered install runs limited to one speaker, the limit set on `GroupController.limitsToOneSpeaker` from `applyLicenseState`.
 - First-run setup defers the backend on native, because discovery raises the Local Network prompt.
 - `AIRPLAY_SETUP` and `AIRPLAY_PERMISSIONS` override the gate and the OS permission seams for testing.
 - Permission-dependent live builds need a Developer ID signature; ad-hoc grants die on every rebuild.
@@ -26,7 +26,7 @@ cannot see it.
 
 ## Map
 
-- `AppDelegate` → lifecycle owner: backend, `GroupController`, surface, setup gate.
+- `AppDelegate` → lifecycle owner: backend, `GroupController`, surface, setup gate; companion wiring is `CompanionCoordinator` in the library.
 - `StatusItemController` → the `NSStatusItem`: volume symbol, forwards clicks.
 - `main.swift` → bootstrap: builds and retains `AppDelegate`.
 - `scripts/make-app.sh` → wraps the binary into a signed `.app` with Info.plist keys.

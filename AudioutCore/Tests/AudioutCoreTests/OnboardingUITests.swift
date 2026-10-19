@@ -269,6 +269,11 @@ import Testing
                            bluetoothPromptTimeout: TimeInterval = 10,
                            remoteControlTrusted: Bool = false,
                            localNetworkGated: Bool = true,
+                           // The iPhone card is OFF unless a test asks for it,
+                           // the same posture usage counts already has here: a
+                           // seventh row every gate test has to skip past
+                           // would say nothing about the gate.
+                           remoteAppAvailable: Bool = false,
                            ptpHelper: PTPHelperManaging = FakePTPHelper()) -> SetupModel {
         SetupModel(audioProbe: audioProbe ?? CannedAudioProbe(result: audio, silent: silentAudio),
                    localNetwork: localNetwork ?? CannedLocalNetwork(found: foundSpeakers),
@@ -278,6 +283,7 @@ import Testing
                    bluetoothPrimer: bluetoothPrimer ?? SimulatedBluetoothPermission(status: bluetooth),
                    settings: AppSettings(defaults: defaults),
                    localNetworkGated: localNetworkGated,
+                   remoteAppAvailable: remoteAppAvailable,
                    bluetoothPromptTimeout: bluetoothPromptTimeout)
     }
 
@@ -321,11 +327,11 @@ import Testing
     /// Wait for something a background timeout will make true. A fixed sleep is a
     /// flake here: the main actor is shared with every other test in the run, so
     /// how soon that work lands is not this test's to decide.
-    private func waitUntil(_ satisfied: () -> Bool) async {
-        for _ in 0..<600 {                                   // ≤3 s, then give up
-            if satisfied() { return }
-            try? await Task.sleep(nanoseconds: 5_000_000)
-        }
+    private func waitUntil(
+        sourceLocation: SourceLocation = #_sourceLocation,
+        _ satisfied: () -> Bool
+    ) async {
+        await SuiteWait.until(sourceLocation: sourceLocation, satisfied)
     }
 
     // MARK: Sequencing
@@ -829,6 +835,7 @@ import Testing
     @Test func theRibbonNamesBothHalvesOfTheLocalNetworkWait() async {
         let net = SteppedLocalNetwork(found: 2)
         let vc = makeVC(model: makeModel(audio: .granted, localNetwork: net))
+        vc.test_ribbonReduceMotionOverride = false
         await vc.test_tapAllow(.audio)
 
         let priming = Task { await vc.test_tapAllow(.localNetwork) }
@@ -911,6 +918,7 @@ import Testing
         let model = makeModel(audio: .granted, foundSpeakers: 2,
                               bluetoothPrimer: NeverDecidingBluetooth())
         let vc = makeVC(model: model)
+        vc.test_ribbonReduceMotionOverride = false
         await vc.test_allow([.audio, .localNetwork])
         #expect(vc.test_activeStep == .bluetooth)
 
@@ -929,6 +937,7 @@ import Testing
                               bluetoothPrimer: NeverDecidingBluetooth(),
                               bluetoothPromptTimeout: 0.05)
         let vc = makeVC(model: model)
+        vc.test_ribbonReduceMotionOverride = false
         await vc.test_allow([.audio, .localNetwork])
         await vc.test_tapAllow(.bluetooth)
         #expect(vc.test_ribbonIsWaiting)
@@ -1070,9 +1079,10 @@ import Testing
         await vc.test_allow([.audio, .localNetwork])
         vc.test_tapSkip(.bluetooth)
         #expect(vc.test_activeStep == .speakerSync)
-        #expect(vc.test_ribbonButtonTitles == ["Skip for now", "Turn on at login"])
+        #expect(vc.test_ribbonButtonTitles == ["Turn on at login"], "required: no skip on offer")
         #expect(vc.test_heroHeadline == "Keep speakers on one shared clock")
-        #expect(vc.test_heroWhy == "A small helper shares one clock so your speakers never drift.")
+        #expect(vc.test_heroWhy == "Audiout needs this helper to keep your speakers in time. "
+                + "Approve it once in Login Items.")
 
         await vc.test_tapAllow(.speakerSync)
 
@@ -1102,14 +1112,33 @@ import Testing
 
         #expect(!vc.test_rowIsWaiting(.speakerSync))
         #expect(vc.test_hasCheckmark(.speakerSync))
+        #expect(helper.registerCount == 2,
+                "the return registers again — approval alone does not load the daemon")
     }
 
-    // MARK: Speaker Sync's un-rehearsed states (P0-1)
+    /// The approval can land without any trip of ours (the "Background Items
+    /// Added" notice opens Login Items itself), so the plain catching-up
+    /// activation registers again too. Turns red if that path goes back to a
+    /// status-only read.
+    @Test func aPlainReturnToTheFrontRegistersTheHelperAgainWhileUnapproved() async {
+        let helper = FakePTPHelper(status: .requiresApproval)
+        let vc = makeVC(model: makeModel(audio: .granted, foundSpeakers: 2, bluetooth: .granted,
+                                         ptpHelper: helper))
+        await vc.test_awaitInitialStatuses()
+        #expect(helper.registerCount == 1, "the load-time register")
+
+        vc.appDidBecomeActive()
+        await waitUntil { helper.registerCount == 2 }
+
+        #expect(helper.registerCount == 2)
+    }
+
+    // MARK: Speaker Sync's un-rehearsed states
 
     /// …and the trip that comes back with the switch STILL off — the state that
-    /// used to re-draw the untouched first ask and leave the gate shut forever.
-    /// It now says where the switch really is, offers the trip again, and offers
-    /// the way past.
+    /// used to re-draw the untouched first ask. It says where the switch really
+    /// is, that the helper is required, and offers the trip again — and only
+    /// that: the step is not skippable, so a skip goes nowhere.
     @Test func speakerSyncSaysWhereTheSwitchIsWhenLoginItemsCameBackStillOff() async {
         let helper = FakePTPHelper(status: .requiresApproval)
         let vc = makeVC(model: makeModel(audio: .granted, foundSpeakers: 2, bluetooth: .granted,
@@ -1124,11 +1153,12 @@ import Testing
 
         #expect(vc.test_ribbonStatusText == OnboardingViewController.speakerSyncRecoveryStatus)
         #expect(vc.test_ribbonBodyText == OnboardingViewController.speakerSyncRecoveryBody)
-        #expect(vc.test_ribbonButtonTitles == ["Skip for now", "Open Login Items\u{2026}"])
+        #expect(vc.test_ribbonButtonTitles == ["Open Login Items\u{2026}"])
 
-        vc.test_ribbonTapSkip()
+        vc.test_tapSkip(.speakerSync)
 
-        #expect(vc.test_isSkipped(.speakerSync), "and the way past really goes through")
+        #expect(!vc.test_isSkipped(.speakerSync), "required: the flow cannot be talked out of it")
+        #expect(vc.test_activeStep == .speakerSync)
     }
 
     /// The daemon isn't in the bundle: there is no switch anywhere, so the row
@@ -1183,6 +1213,7 @@ import Testing
         let model = makeModel(audio: .granted, foundSpeakers: 2,
                               bluetoothPrimer: NeverDecidingBluetooth())
         let vc = makeVC(model: model)
+        vc.test_ribbonReduceMotionOverride = false
         await vc.test_awaitInitialStatuses()   // announcements start once the opening state is known
         await vc.test_allow([.audio, .localNetwork])
 
@@ -1456,6 +1487,59 @@ import Testing
         await vc.test_awaitFinalCheck()
 
         #expect(vc.test_checkRowAccessibilityLabel == "Everything's ready")
+    }
+
+    // MARK: The iPhone card
+
+    /// Defect this names: the card asking for something macOS raises (a
+    /// caption promising a system dialog, a Settings deep link), or drawing
+    /// anything other than the invitation the other two hosts mount.
+    /// Also turns red if the card stops firing `onRemoteInviteShown` once as
+    /// it comes on screen: the app opens a pairing window on it, and without
+    /// one a phone that scans the card is refused.
+    @Test func theIPhoneCardStagesTheInvitationAndOpensThePage() async {
+        var opened: [URL] = []
+        var invitesShown = 0
+        let vc = makeVC(model: makeModel(audio: .granted, foundSpeakers: 3,
+                                         remoteAppAvailable: true,
+                                         ptpHelper: FakePTPHelper(status: .enabled)))
+        vc.openURL = { opened.append($0) }
+        vc.onRemoteInviteShown = { invitesShown += 1 }
+        await vc.test_allow([.audio, .localNetwork])
+        vc.test_tapSkip(.bluetooth)
+        #expect(invitesShown == 0, "no pairing window before the card is up")
+        vc.test_tapSkip(.remoteControl)
+
+        #expect(vc.test_activeStep == .audioutRemote)
+        #expect(invitesShown == 1, "the card coming on screen opens one pairing window")
+        #expect(vc.test_heroHeadline == "Measure with your iPhone")
+        #expect(vc.test_previewFrameLabel == nil,
+                "macOS raises nothing here, so nothing may claim it does")
+        #expect(vc.test_demoRemoteInvite?.test_tileSide == RemoteInviteView.setupTileSide)
+        #expect(vc.test_ribbonButtonTitles == ["Open audiout.app/remote", "Continue"],
+                "Continue is the skip, so no separate Skip button")
+
+        vc.test_ribbonTapQuietLink()
+        #expect(opened.map(\.absoluteString) == [RemoteInviteView.pageURLString])
+        #expect(vc.test_activeStep == .audioutRemote,
+                "opening the page is not the completion — a phone connecting is")
+
+        await vc.test_ribbonTapPrimary()
+        #expect(opened.count == 1, "Continue must not leave setup")
+        #expect(vc.test_activeStep != .audioutRemote, "Continue moves setup past the card")
+    }
+
+    /// Defect this names: the seventh row pushing the spine out of the fixed
+    /// 820×560 window — the check the brief asks for before the card lands.
+    @Test func theSpineStillFitsWithTheIPhoneCardOnIt() {
+        let vc = makeVC(model: makeModel(audio: .unknown, remoteAppAvailable: true))
+        let root = vc.test_rootView
+        root.frame = NSRect(x: 0, y: 0,
+                            width: OnboardingViewController.contentWidth,
+                            height: OnboardingViewController.contentHeight)
+        root.layoutSubtreeIfNeeded()
+        #expect(vc.test_spineStackFrame.minY >= 0,
+                "seven rows overrun the pane by \(-vc.test_spineStackFrame.minY) pt")
     }
 
     /// The fixed 820×560 fit, re-pinned on the spine: the header plus six rows
@@ -2332,6 +2416,7 @@ import Testing
             DemoSettingsMockView(step: .localNetwork, metricScale: 1.35),
             DemoSettingsHandoffMockView(step: .remoteControl),
             DemoSystemAlertMockView(step: .remoteControl),
+            DemoConsentCardMockView(),
         ]
         for mock in mocks {
             mock.layoutSubtreeIfNeeded()

@@ -880,27 +880,30 @@ leading of it. Each has an at-rest state and an engaged state, and both wear
 the same shape in the engaged state — one rounded square, in two colours. Hue
 alone says which control it is.
 
-`Tokens.Color.muted` — `#4A50C7` — means "this output is deliberately silent".
-`Tokens.Color.equalizer` — `#227950` — means "this speaker's curve is not
-flat". Both are fenced to their one job: `muted` to the two engaged mute
-buttons (the device row's and Main Out's), `equalizer` to the device row's
-engaged Equalizer door. A second consumer fails a test.
+`Tokens.Color.muted` — `#8E93F0` dark / `#585EC7` light — means "this output is
+deliberately silent". `Tokens.Color.equalizer` — `#41B07A` dark / `#007835`
+light — means "this speaker's curve is not flat". Both are fenced to their one
+job: `muted` to the two engaged mute buttons (the device row's and Main Out's),
+`equalizer` to the device row's engaged Equalizer door. A second consumer fails
+a test.
 
-Both are ONE value in light and dark, which almost nothing else here is. The
-rule is the owner's (2026-09-04): an engaged control wears the same fill in both
-appearances, so a muted row looks like a muted row wherever you meet it.
-Neither carries an Increase Contrast variant, and that follows from the single
-value rather than being a separate decision — one value sits between two
-opposite grounds, so darkening it lifts the light row and drops the dark one
-while lightening does the reverse. Every candidate lowers one side, and the
-contrast suites assert that Increase Contrast never lowers a ratio.
+Both took TWO values on 2026-09-05. The owner's 2026-09-04 rule — an engaged
+control wears the same fill in both appearances — assumed the hue was a filled
+square, where one value reads on either ground. Since the marks stopped being
+filled, the hue is a 1.5 pt stroke (1.0 pt before 2026-09-14), with no area to
+carry a marginal ratio: one value left light mode "impossible to see". Neither
+carries an Increase Contrast variant; both clear the 3:1 non-text floor at
+their base values on every ground, and a variant that lifts one appearance
+drops the other.
 
 `equalizer` replaces `goldText` on the door. Gold means "audio is flowing here"
 everywhere else in the app, including the live wash this same row draws behind
-the door, so one hue was carrying two ideas. Green was unspoken for. `#227950`
-was chosen over six other candidates on separation: 85° of hue off `muted`,
-which is the control 6 pt to its right, and 11° off `permissionUsageStats`,
-which is fenced to onboarding and never shares a screen with a device row.
+the door, so one hue was carrying two ideas. Green was unspoken for, and stays
+84–86° of hue off `muted`, which is the control 6 pt to its right, and 9° off
+`permissionUsageStats`, which is fenced to onboarding and never shares a screen
+with a device row. The green is tuned as a PAIR with `muted` rather than to a
+floor of its own — see the Equalizer-Hue Fence in `DESIGN.md` for the
+measurements and for what the 2026-09-05 values got wrong.
 
 ## The drawn seat is retired
 

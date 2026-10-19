@@ -48,8 +48,38 @@ extension SerializedSharedState {
             let last = try parseJSONObject(lines.last!)
             #expect(last["cat"] as? String == "airplay")
             #expect(last["evt"] as? String == "test_event")
+            #expect(last["level"] as? String == "info", "a plain log line must not read as a failure")
             #expect(last["device"] as? String == "Kitchen")
             #expect(last["gen"] as? String == "3")
+        }
+
+        /// The defect this catches: a `local` field (a device id, an error
+        /// description) reaching the analytics sink, or a failure line written
+        /// at `info` so a reader grepping `level":"error` misses it.
+        @Test func failWritesErrorLineAndForwardsOnlySharedFields() throws {
+            let forwarded = Locked([(String, [String: String])]())
+            Analytics.install(Analytics.Sink(capture: { _, _ in },
+                                             captureError: { name, props in forwarded.append((name, props)) },
+                                             consentChanged: { _ in }), consent: true)
+            defer { Analytics.install(nil, consent: false) }
+            let capturedBox = Locked([String]())
+            Telemetry._installTestSink { line in capturedBox.append(line) }
+
+            Telemetry.fail(.airplay, "airplay:session_failed",
+                           local: ["device": "54:2A:1B:79:08:9E"],
+                           shared: ["cause": "droppedMidStream"])
+            drain()
+
+            let line = try #require(capturedBox.snapshot().last { $0.contains("airplay:session_failed") })
+            let obj = try parseJSONObject(line)
+            #expect(obj["level"] as? String == "error")
+            #expect(obj["device"] as? String == "54:2A:1B:79:08:9E", "the local line keeps the device id")
+            #expect(obj["cause"] as? String == "droppedMidStream")
+
+            let sent = forwarded.snapshot()
+            #expect(sent.count == 1)
+            #expect(sent.first?.0 == "airplay:session_failed")
+            #expect(sent.first?.1 == ["cause": "droppedMidStream"], "only `shared` may leave the Mac")
         }
 
         @Test func fieldsWithSpecialCharactersAreEscapedAndRoundTrip() throws {

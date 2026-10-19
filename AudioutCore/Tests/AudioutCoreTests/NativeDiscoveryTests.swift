@@ -52,9 +52,10 @@ import AirPlayEngine
         model: String = "S13",
         features: String? = nil,
         address: String = "192.168.1.10",
-        port: Int = 7000
+        port: Int = 7000,
+        extraTXT: [String: String] = [:]
     ) -> ResolvedService {
-        var txt = ["deviceid": id, "model": model]
+        var txt = ["deviceid": id, "model": model].merging(extraTXT) { $1 }
         if let features { txt["features"] = features }
         return ResolvedService(
             serviceType: .airplay,
@@ -72,7 +73,8 @@ import AirPlayEngine
         name: String = "Old Express",
         model: String = "AirPort4,107",
         address: String = "192.168.1.20",
-        port: Int = 5000
+        port: Int = 5000,
+        extraTXT: [String: String] = [:]
     ) -> ResolvedService {
         ResolvedService(
             serviceType: .raop,
@@ -81,8 +83,20 @@ import AirPlayEngine
             address: address,
             family: .ipv4,
             port: port,
-            txtRecord: ["deviceid": id, "model": model]
+            txtRecord: ["deviceid": id, "model": model].merging(extraTXT) { $1 }
         )
+    }
+
+    /// Every test builds its `NativeDiscovery` here, so the 3-second production
+    /// removal grace is unreachable from this file. `EventCollector.wait` polls
+    /// for 3 seconds by default, so a test that ran on the production grace would
+    /// race the timer instead of asserting against it.
+    private func makeDiscovery(
+        browser: FakeBrowser,
+        localHostname: String? = NativeDiscovery.systemLocalHostname(),
+        removeGrace: TimeInterval = 0.05
+    ) -> NativeDiscovery {
+        NativeDiscovery(browser: browser, localHostname: localHostname, removeGrace: removeGrace)
     }
 
     // MARK: appear -> update -> disappear (AP2)
@@ -97,7 +111,7 @@ import AirPlayEngine
     /// real one, so a single .appeared event proves they produced nothing.
     @Test func selfHostnameServicesAreNeverSurfaced() {
         let browser = FakeBrowser()
-        let discovery = NativeDiscovery(browser: browser, localHostname: "my-test-mac.local")
+        let discovery = makeDiscovery(browser: browser, localHostname: "my-test-mac.local")
         let events = EventCollector()
         discovery.onEvent = { events.append($0) }
         discovery.start()
@@ -136,7 +150,7 @@ import AirPlayEngine
     /// `.disappeared`.
     @Test func ap2DeviceAppearUpdateDisappear() {
         let browser = FakeBrowser()
-        let discovery = NativeDiscovery(browser: browser)
+        let discovery = makeDiscovery(browser: browser)
         let events = EventCollector()
         discovery.onEvent = { events.append($0) }
         discovery.start()
@@ -195,7 +209,7 @@ import AirPlayEngine
     /// re-resolve with changed facts as `.updated`, and disappears cleanly.
     @Test func ap1OnlyDeviceAppearUpdateDisappear() {
         let browser = FakeBrowser()
-        let discovery = NativeDiscovery(browser: browser)
+        let discovery = makeDiscovery(browser: browser)
         let events = EventCollector()
         discovery.onEvent = { events.append($0) }
         discovery.start()
@@ -244,7 +258,7 @@ import AirPlayEngine
     /// through from the resolved service to the discovered device untouched.
     @Test func descriptorFieldsPropagateVerbatim() {
         let browser = FakeBrowser()
-        let discovery = NativeDiscovery(browser: browser)
+        let discovery = makeDiscovery(browser: browser)
         let events = EventCollector()
         discovery.onEvent = { events.append($0) }
         discovery.start()
@@ -274,7 +288,7 @@ import AirPlayEngine
     /// not AP2 — the classifier is bit-exact, not "advertises airplay at all."
     @Test func airplayServiceWithoutAP2BitsClassifiesAsAP1Only() {
         let browser = FakeBrowser()
-        let discovery = NativeDiscovery(browser: browser)
+        let discovery = makeDiscovery(browser: browser)
         let events = EventCollector()
         discovery.onEvent = { events.append($0) }
         discovery.start()
@@ -294,7 +308,7 @@ import AirPlayEngine
     /// (missing key, not just missing bits) also classifies AP1-only.
     @Test func airplayServiceMissingFeaturesKeyClassifiesAsAP1Only() {
         let browser = FakeBrowser()
-        let discovery = NativeDiscovery(browser: browser)
+        let discovery = makeDiscovery(browser: browser)
         let events = EventCollector()
         discovery.onEvent = { events.append($0) }
         discovery.start()
@@ -308,6 +322,23 @@ import AirPlayEngine
         #expect(!device.isAirPlay2Supported)
 
         discovery.stop()
+    }
+
+    /// Reading the wrong TXT key, dropping the `pw=false` check, or reordering
+    /// the precedence (Home-only over code over password) turns it red.
+    @Test func accessReadsPasswordCodeAndHomeOnlyFromTXT() {
+        func access(airplay: [String: String]? = nil, raop: [String: String]? = nil) -> AirPlayAccess {
+            NativeDiscovery.access(airplay: airplay.map { airplayService(features: ap2Features, extraTXT: $0) },
+                                   raop: raop.map { raopService(extraTXT: $0) })
+        }
+        #expect(access(raop: ["pw": "true"]) == .password)
+        #expect(access(airplay: ["flags": "0x80"]) == .password)
+        #expect(access(airplay: ["flags": "0x8"]) == .onScreenCodeEveryTime)
+        #expect(access(airplay: ["flags": "0x200"]) == .onScreenCode)
+        #expect(access(airplay: ["flags": "0x208"]) == .onScreenCodeEveryTime)
+        #expect(access(airplay: ["act": "2"]) == .homeMembersOnly)
+        #expect(access(raop: ["pw": "false"]) == .open)
+        #expect(access(airplay: ["act": "2", "flags": "0x80"]) == .homeMembersOnly)
     }
 
     /// Direct unit coverage of the classifier (pure/static): a nil airplay
@@ -337,7 +368,7 @@ import AirPlayEngine
     /// while the `OutputID` itself is the correct parse of the hex value.
     @Test func colonHexIDRoundTripNeverReformatted() {
         let browser = FakeBrowser()
-        let discovery = NativeDiscovery(browser: browser)
+        let discovery = makeDiscovery(browser: browser)
         let events = EventCollector()
         discovery.onEvent = { events.append($0) }
         discovery.start()
@@ -368,7 +399,7 @@ import AirPlayEngine
     /// can key on it) — `parseDeviceID` returns nil and no event fires.
     @Test func missingDeviceIDIsDropped() {
         let browser = FakeBrowser()
-        let discovery = NativeDiscovery(browser: browser)
+        let discovery = makeDiscovery(browser: browser)
         let events = EventCollector()
         discovery.onEvent = { events.append($0) }
         discovery.start()
@@ -395,7 +426,7 @@ import AirPlayEngine
     /// `_airplay._tcp`), NOT an AP1 downgrade — not a removal.
     @Test func dedupesDeviceAdvertisingBothServiceTypes() {
         let browser = FakeBrowser()
-        let discovery = NativeDiscovery(browser: browser)
+        let discovery = makeDiscovery(browser: browser)
         let events = EventCollector()
         discovery.onEvent = { events.append($0) }
         discovery.start()
@@ -454,7 +485,7 @@ import AirPlayEngine
     /// via `.updated`.
     @Test func dedupeRaopFirstThenAirplayUpgrade() {
         let browser = FakeBrowser()
-        let discovery = NativeDiscovery(browser: browser)
+        let discovery = makeDiscovery(browser: browser)
         let events = EventCollector()
         discovery.onEvent = { events.append($0) }
         discovery.start()
@@ -487,7 +518,7 @@ import AirPlayEngine
     /// NOT reclassified AP1-only. It must NOT `.disappeared` (raop still present).
     @Test func ap2LosingAirplayAdvertGoesOfflineNotAP1() {
         let browser = FakeBrowser()
-        let discovery = NativeDiscovery(browser: browser)
+        let discovery = makeDiscovery(browser: browser)
         let events = EventCollector()
         discovery.onEvent = { events.append($0) }
         discovery.start()
@@ -523,7 +554,7 @@ import AirPlayEngine
     /// sticky bit doesn't wedge it permanently offline.
     @Test func ap2OfflineThenBackOnlineRecoversAvailable() {
         let browser = FakeBrowser()
-        let discovery = NativeDiscovery(browser: browser)
+        let discovery = makeDiscovery(browser: browser)
         let events = EventCollector()
         discovery.onEvent = { events.append($0) }
         discovery.start()
@@ -553,12 +584,254 @@ import AirPlayEngine
         discovery.stop()
     }
 
+    // MARK: Removal grace (mDNS churn debounce)
+
+    /// THE FLAPPING BUG: mDNS drops and re-adds a device's `_airplay._tcp` advert
+    /// transiently under normal network churn. A drop that heals within the grace
+    /// window must NOT be surfaced as an offline (`.vanished`) transition — no
+    /// event, and the row stays available — so a transient blip never deselects
+    /// the speaker or tears down its live stream. This is the regression guard
+    /// for the `connection:failed` (`vanished`) flapping storm.
+    @Test func transientAirplayDropWithinGraceEmitsNoVanish() {
+        let browser = FakeBrowser()
+        let discovery = makeDiscovery(browser: browser, removeGrace: 0.3)
+        let events = EventCollector()
+        discovery.onEvent = { events.append($0) }
+        discovery.start()
+
+        let id = "AA:BB:CC:DD:EE:45"
+        browser.resolve(airplayService(id: id, name: "Sonos", features: ap2Features))
+        browser.resolve(raopService(id: id, name: "Sonos"))
+        _ = events.wait(count: 1)
+
+        // The airplay advert blips out, then re-resolves before the grace fires.
+        browser.remove(RemovedService(serviceType: .airplay, deviceID: id, name: "Sonos"))
+        browser.resolve(airplayService(id: id, name: "Sonos", features: ap2Features))
+
+        // No offline event ever fires (the re-resolve is an unchanged rebuild, so
+        // it is suppressed too) and the grace elapses without surfacing anything.
+        #expect(events.waitCountStaysAt(1, timeout: 0.6),
+                "a transient airplay-advert drop that heals within the grace must not emit a vanish")
+        #expect(discovery.devices.first?.isAvailable == true,
+                "the row stays available across a transient blip")
+
+        discovery.stop()
+    }
+
+    /// A sustained airplay-advert loss (no re-resolve) IS surfaced once the grace
+    /// elapses — the debounce delays a real departure, it does not swallow it. And
+    /// it fires exactly once, not on a repeat schedule.
+    @Test func sustainedAirplayDropAfterGraceEmitsVanishOnce() {
+        let browser = FakeBrowser()
+        let discovery = makeDiscovery(browser: browser)
+        let events = EventCollector()
+        discovery.onEvent = { events.append($0) }
+        discovery.start()
+
+        let id = "AA:BB:CC:DD:EE:46"
+        browser.resolve(airplayService(id: id, name: "Sonos", features: ap2Features))
+        browser.resolve(raopService(id: id, name: "Sonos"))
+        _ = events.wait(count: 1)
+
+        browser.remove(RemovedService(serviceType: .airplay, deviceID: id, name: "Sonos"))
+        guard case .updated(let offline)? = events.wait(count: 2).last else {
+            Issue.record("expected a vanish .updated once the grace elapses")
+            return
+        }
+        #expect(!offline.isAvailable, "a sustained airplay-advert loss surfaces as offline")
+        #expect(offline.isAirPlay2Supported, "still sticky-AP2")
+        #expect(events.waitCountStaysAt(2, timeout: 0.2), "the vanish fires once, not on a repeat schedule")
+
+        discovery.stop()
+    }
+
+    /// Both legs drop within milliseconds of each other and both come back
+    /// inside the grace window: the device never left, so nothing is emitted and
+    /// the row stays available. A remove path that applies the both-legs-gone
+    /// branch at once turns this red with a `.disappeared`.
+    @Test func bothLegsDropAndReturnWithinGraceEmitNothing() {
+        let browser = FakeBrowser()
+        let discovery = makeDiscovery(browser: browser, removeGrace: 0.3)
+        let events = EventCollector()
+        discovery.onEvent = { events.append($0) }
+        discovery.start()
+
+        let id = "AA:BB:CC:DD:EE:47"
+        browser.resolve(airplayService(id: id, name: "Sonos", features: ap2Features))
+        browser.resolve(raopService(id: id, name: "Sonos"))
+        _ = events.wait(count: 1)
+
+        // Both adverts blip out, then both re-resolve with the same facts.
+        browser.remove(RemovedService(serviceType: .airplay, deviceID: id, name: "Sonos"))
+        browser.remove(RemovedService(serviceType: .raop, deviceID: id, name: "Sonos"))
+        browser.resolve(airplayService(id: id, name: "Sonos", features: ap2Features))
+        browser.resolve(raopService(id: id, name: "Sonos"))
+
+        #expect(events.waitCountStaysAt(1, timeout: 0.6),
+                "a two-leg blip that heals within the grace must emit nothing")
+        #expect(discovery.devices.count == 1, "the device is still known")
+        #expect(discovery.devices.first?.isAvailable == true,
+                "the row stays available across a two-leg blip")
+
+        discovery.stop()
+    }
+
+    /// Both legs drop and nothing returns. Each leg's timer applies its own
+    /// removal, so the device goes offline when the first timer fires and
+    /// disappears when the second one fires. Offline first, then disappeared,
+    /// is timer order rather than a cross-leg rule: the airplay removal is armed
+    /// first, the two `asyncAfter` deadlines are taken on separate queue turns
+    /// and so differ, and libdispatch fires timers in deadline order, so the
+    /// airplay commit (the offline `.updated`) lands before the raop commit (the
+    /// `.disappeared`). The defect this catches is a remove path that applies
+    /// the both-legs-gone branch before the grace: the
+    /// `.disappeared` would arrive as the second event rather than the third,
+    /// and `wait(count: 3)` would time out.
+    @Test func bothLegsDropSustainedGoOfflineThenDisappear() {
+        let browser = FakeBrowser()
+        let discovery = makeDiscovery(browser: browser, removeGrace: 0.3)
+        let events = EventCollector()
+        discovery.onEvent = { events.append($0) }
+        discovery.start()
+
+        let id = "AA:BB:CC:DD:EE:48"
+        browser.resolve(airplayService(id: id, name: "Sonos", features: ap2Features))
+        browser.resolve(raopService(id: id, name: "Sonos"))
+        _ = events.wait(count: 1)
+
+        browser.remove(RemovedService(serviceType: .airplay, deviceID: id, name: "Sonos"))
+        browser.remove(RemovedService(serviceType: .raop, deviceID: id, name: "Sonos"))
+
+        let all = events.wait(count: 3)
+        #expect(all.count == 3)
+        guard case .disappeared(let goneID, _)? = all.last else {
+            Issue.record("expected .disappeared as the last event")
+            return
+        }
+        #expect(goneID == id)
+        #expect(events.waitCountStaysAt(3, timeout: 0.4),
+                "each leg's timer fires once and nothing follows")
+        #expect(discovery.devices.isEmpty)
+
+        discovery.stop()
+    }
+
+    /// A `_raop._tcp` re-resolve while the `_airplay._tcp` advert is still gone
+    /// must NOT bring a sticky-AP2 device back to available: only the airplay leg
+    /// says the receiver is reachable. `handleResolve` hard-coding `available:
+    /// true` flips the row back on the raop re-resolve.
+    @Test func raopReresolveWhileAirplayGoneKeepsDeviceOffline() {
+        let browser = FakeBrowser()
+        let discovery = makeDiscovery(browser: browser)
+        let events = EventCollector()
+        discovery.onEvent = { events.append($0) }
+        discovery.start()
+
+        let id = "AA:BB:CC:DD:EE:49"
+        browser.resolve(airplayService(id: id, name: "Sonos", features: ap2Features))
+        browser.resolve(raopService(id: id, name: "Sonos"))
+        _ = events.wait(count: 1)
+
+        browser.remove(RemovedService(serviceType: .airplay, deviceID: id, name: "Sonos"))
+        guard case .updated(let offline)? = events.wait(count: 2).last else {
+            Issue.record("expected the offline .updated once the grace elapses")
+            return
+        }
+        #expect(!offline.isAvailable)
+
+        // The raop leg re-resolves with the same facts. The airplay advert is
+        // still gone, so the row must stay offline and emit nothing.
+        browser.resolve(raopService(id: id, name: "Sonos"))
+        #expect(events.waitCountStaysAt(2, timeout: 0.3),
+                "a lone raop re-resolve is not a return to availability")
+        #expect(discovery.devices.first?.isAvailable == false,
+                "the row stays offline until the airplay advert is back")
+
+        // The airplay advert returns: that IS the return to availability.
+        browser.resolve(airplayService(id: id, name: "Sonos", features: ap2Features))
+        guard case .updated(let back)? = events.wait(count: 3).last else {
+            Issue.record("expected an .updated when the airplay advert returns")
+            return
+        }
+        #expect(back.isAvailable, "the airplay resolve brings the row back")
+        #expect(back.isAirPlay2Supported, "still sticky-AP2")
+
+        discovery.stop()
+    }
+
+    /// Recomputing `access` from the lingering `_raop._tcp` record when a sticky-AP2
+    /// device loses its `_airplay._tcp` advert (flipping the lock glyph and
+    /// `credentialKind` while only availability changed) turns it red.
+    @Test func losingTheAirplayLegKeepsTheAdvertisedAccess() {
+        let browser = FakeBrowser()
+        let discovery = makeDiscovery(browser: browser)
+        let events = EventCollector()
+        discovery.onEvent = { events.append($0) }
+        discovery.start()
+
+        let id = "AA:BB:CC:DD:EE:51"
+        browser.resolve(airplayService(id: id, name: "Sonos", features: ap2Features,
+                                       extraTXT: ["act": "2"]))
+        browser.resolve(raopService(id: id, name: "Sonos"))
+        guard case .appeared(let first)? = events.wait(count: 1).first else {
+            Issue.record("expected .appeared")
+            return
+        }
+        #expect(first.access == .homeMembersOnly)
+
+        browser.remove(RemovedService(serviceType: .airplay, deviceID: id, name: "Sonos"))
+        guard case .updated(let offline)? = events.wait(count: 2).last else {
+            Issue.record("expected the offline .updated once the grace elapses")
+            return
+        }
+        #expect(!offline.isAvailable)
+        #expect(offline.access == .homeMembersOnly,
+                "the raop record carries no act key, so only availability changed")
+
+        discovery.stop()
+    }
+
+    /// A device advertising only `_airplay._tcp` gets the same debounce as a
+    /// two-leg one: a blip emits nothing, a sustained loss disappears it once the
+    /// grace elapses. A grace covering only the airplay-gone-raop-lingers branch
+    /// leaves this device with no debounce at all.
+    @Test func airplayOnlyDeviceDropIsDebouncedThenDisappears() {
+        let browser = FakeBrowser()
+        let discovery = makeDiscovery(browser: browser, removeGrace: 0.3)
+        let events = EventCollector()
+        discovery.onEvent = { events.append($0) }
+        discovery.start()
+
+        let id = "AA:BB:CC:DD:EE:50"
+        browser.resolve(airplayService(id: id, name: "Sonos", features: ap2Features))
+        _ = events.wait(count: 1)
+
+        // Blip: the only advert drops and re-resolves inside the window.
+        browser.remove(RemovedService(serviceType: .airplay, deviceID: id, name: "Sonos"))
+        browser.resolve(airplayService(id: id, name: "Sonos", features: ap2Features))
+        #expect(events.waitCountStaysAt(1, timeout: 0.6),
+                "an airplay-only device's transient drop must emit nothing")
+        #expect(discovery.devices.count == 1, "the device is still known")
+
+        // Sustained: nothing comes back this time.
+        browser.remove(RemovedService(serviceType: .airplay, deviceID: id, name: "Sonos"))
+        guard case .disappeared(let goneID, _)? = events.wait(count: 2).last else {
+            Issue.record("expected .disappeared once the grace elapses")
+            return
+        }
+        #expect(goneID == id)
+        #expect(events.waitCountStaysAt(2, timeout: 0.4), "it disappears once, not on a repeat schedule")
+        #expect(discovery.devices.isEmpty)
+
+        discovery.stop()
+    }
+
     /// A genuine raop-only device (NEVER advertised `_airplay._tcp`) stays
     /// AP1-only and available — the sticky mechanism only affects devices that
     /// were EVER AP2. This is the regression guard for the "coming soon" row.
     @Test func genuineAP1OnlyStaysAP1AndAvailable() {
         let browser = FakeBrowser()
-        let discovery = NativeDiscovery(browser: browser)
+        let discovery = makeDiscovery(browser: browser)
         let events = EventCollector()
         discovery.onEvent = { events.append($0) }
         discovery.start()
@@ -606,7 +879,7 @@ import AirPlayEngine
     /// advertise exactly this TXT shape.
     @Test func raopNameDerivedIDSurfacesAsAP1Only() {
         let browser = FakeBrowser()
-        let discovery = NativeDiscovery(browser: browser)
+        let discovery = makeDiscovery(browser: browser)
         let events = EventCollector()
         discovery.onEvent = { events.append($0) }
         discovery.start()
@@ -659,7 +932,7 @@ import AirPlayEngine
     /// ("Dev Speaker") is applied downstream, NOT on the descriptor.
     @Test func raopOnlyDisplayNameStripsMACPrefix() {
         let browser = FakeBrowser()
-        let discovery = NativeDiscovery(browser: browser)
+        let discovery = makeDiscovery(browser: browser)
         let events = EventCollector()
         discovery.onEvent = { events.append($0) }
         discovery.start()
@@ -691,7 +964,7 @@ import AirPlayEngine
     /// `OutputID` the Swift side already derived from the same instance name.
     @Test func raopOnlyDescriptorKeepsRawHexPrefixForEngineIDParse() {
         let browser = FakeBrowser()
-        let discovery = NativeDiscovery(browser: browser)
+        let discovery = makeDiscovery(browser: browser)
         let events = EventCollector()
         discovery.onEvent = { events.append($0) }
         discovery.start()
@@ -725,7 +998,7 @@ import AirPlayEngine
     /// human-readable) is left unchanged — nothing to strip.
     @Test func raopOnlyDisplayNameWithoutPrefixUnchanged() {
         let browser = FakeBrowser()
-        let discovery = NativeDiscovery(browser: browser)
+        let discovery = makeDiscovery(browser: browser)
         let events = EventCollector()
         discovery.onEvent = { events.append($0) }
         discovery.start()
@@ -750,7 +1023,7 @@ import AirPlayEngine
     /// confirmed regardless of which service resolves first.
     @Test func dualAdvertisedKeepsAirplayNameOverRaopPrefixedName() {
         let browser = FakeBrowser()
-        let discovery = NativeDiscovery(browser: browser)
+        let discovery = makeDiscovery(browser: browser)
         let events = EventCollector()
         discovery.onEvent = { events.append($0) }
         discovery.start()
@@ -784,7 +1057,7 @@ import AirPlayEngine
     /// name-derived canonical form must equal the TXT deviceid form for the merge.
     @Test func nameDerivedRaopThenAirplayTXTDedupesToOneAP2() {
         let browser = FakeBrowser()
-        let discovery = NativeDiscovery(browser: browser)
+        let discovery = makeDiscovery(browser: browser)
         let events = EventCollector()
         discovery.onEvent = { events.append($0) }
         discovery.start()
@@ -819,7 +1092,7 @@ import AirPlayEngine
     /// device.
     @Test func airplayTXTThenNameDerivedRaopDedupesToOneAP2() {
         let browser = FakeBrowser()
-        let discovery = NativeDiscovery(browser: browser)
+        let discovery = makeDiscovery(browser: browser)
         let events = EventCollector()
         discovery.onEvent = { events.append($0) }
         discovery.start()
@@ -849,7 +1122,7 @@ import AirPlayEngine
     /// keyed on it — and no event fires and nothing crashes.
     @Test func neitherTXTNorNamePrefixIsDroppedNoCrash() {
         let browser = FakeBrowser()
-        let discovery = NativeDiscovery(browser: browser)
+        let discovery = makeDiscovery(browser: browser)
         let events = EventCollector()
         discovery.onEvent = { events.append($0) }
         discovery.start()
@@ -891,7 +1164,7 @@ import AirPlayEngine
         // Through the full pipeline: mixed-case name and an uppercase deviceid-TXT
         // airplay advert for the same device merge (canonical forms are identical).
         let browser = FakeBrowser()
-        let discovery = NativeDiscovery(browser: browser)
+        let discovery = makeDiscovery(browser: browser)
         let events = EventCollector()
         discovery.onEvent = { events.append($0) }
         discovery.start()
@@ -915,7 +1188,7 @@ import AirPlayEngine
     /// paint), independent of the event stream.
     @Test func devicesSnapshotReflectsKnownSet() {
         let browser = FakeBrowser()
-        let discovery = NativeDiscovery(browser: browser)
+        let discovery = makeDiscovery(browser: browser)
         discovery.start()
 
         #expect(discovery.devices.isEmpty)
@@ -1048,7 +1321,7 @@ import AirPlayEngine
     /// devices are untouched and later resolves still land normally).
     @Test func failedStateChangeDoesNotDropKnownDevices() {
         let browser = FakeBrowser()
-        let discovery = NativeDiscovery(browser: browser)
+        let discovery = makeDiscovery(browser: browser)
         let collector = EventCollector()
         discovery.onEvent = { collector.append($0) }
         discovery.start()
@@ -1095,10 +1368,11 @@ private final class EventCollector: @unchecked Sendable {
     /// Poll until at least `count` events have arrived (or timeout), then
     /// return the snapshot.
     @discardableResult
-    func wait(count: Int, timeout: TimeInterval = 3) -> [DiscoveryEvent] {
-        let deadline = Date().addingTimeInterval(timeout)
-        while snapshot().count < count && Date() < deadline {
-            Thread.sleep(forTimeInterval: 0.005)
+    func wait(count: Int, timeout: TimeInterval? = nil,
+              sourceLocation: SourceLocation = #_sourceLocation) -> [DiscoveryEvent] {
+        SuiteWait.untilOnRunLoop("at least \(count) discovery event(s)",
+                                 timeout: timeout, sourceLocation: sourceLocation) {
+            snapshot().count >= count
         }
         return snapshot()
     }

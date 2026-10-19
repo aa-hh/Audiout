@@ -231,6 +231,9 @@ private final class RoomSpillView: NSView {
     private static func haloOpacity(for rung: AlignmentStageView.Rung) -> CGFloat {
         switch rung {
         case .armed: return 0.20
+        // Open's brightness on armed's geometry: the room is being listened
+        // to, so the spill is awake even though the lights have not moved.
+        case .measuring: return 0.40
         case .open: return 0.40
         case .closing: return 0.46
         case .near: return 0.52

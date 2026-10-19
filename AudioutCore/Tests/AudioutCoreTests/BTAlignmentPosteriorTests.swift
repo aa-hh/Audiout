@@ -221,37 +221,44 @@ import Testing
                 "the bar RETREATS, honestly — \(estimator.progress) vs \(progressBefore)")
     }
 
-    /// THREE rejections, not two: the third one is free and halves the share of
-    /// runs that bow out (brief §3.5), which is what pays for the looser stop
-    /// rule. Every rejection in between has to put the questions back.
-    @Test func threeRejectionsBowOutAsUnsettled() {
-        var (estimator, proposed) = drivenToProposal()
-        #expect(!proposed.isNaN)
-        var listener = Listener(trueOffsetMs: 120, rng: SeededRNG(seed: 99))
+    /// "Still off" is a correction, not a strike: however many times the user
+    /// says it, the run goes back to the questions. The only thing that ends
+    /// it is the answer budget running out. A rejection cap put back in
+    /// `rejectProposal` turns this red.
+    ///
+    /// The listener is deterministic — truth 120 ms, together inside ±4 ms —
+    /// so the run's length is a property of the estimator, not of a seed.
+    @Test func rejectionsNeverEndTheRunBeforeTheAnswerBudget() {
+        var estimator = BTAlignmentPosterior(range: Self.range)
+        func judge(_ levelMs: Double) -> BTAlignmentPosterior.Answer {
+            if abs(levelMs - 120) < 4 { return .together }
+            return levelMs < 120 ? .target : .reference
+        }
         var rejections = 0
-        while case .proposing = estimator.phase {
+        var loops = 0
+        while loops < 200 {
+            loops += 1
+            var answers = 0
+            while case .asking(let levelMs) = estimator.phase, answers < 200 {
+                estimator.record(judge(levelMs))
+                answers += 1
+            }
+            guard case .proposing = estimator.phase else { break }
+            let countBefore = estimator.answerCount
             estimator.rejectProposal()
             rejections += 1
-            if rejections < BTAlignmentPosterior.maxRejections {
+            if countBefore < BTAlignmentPosterior.maxAnswers {
                 guard case .asking = estimator.phase else {
-                    Issue.record("rejection \(rejections) must resume the questions, got \(estimator.phase)")
+                    Issue.record("rejection \(rejections) at \(countBefore) answers must resume the questions, got \(estimator.phase)")
                     return
                 }
             }
-            // Back to the same listener until it proposes again.
-            var answers = 0
-            while case .asking(let levelMs) = estimator.phase, answers < 60 {
-                estimator.record(listener.judge(levelMs: levelMs))
-                answers += 1
-            }
         }
         guard case .unsettled(let bestGuessMs) = estimator.phase else {
-            Issue.record("expected unsettled, got \(estimator.phase) after \(rejections)")
+            Issue.record("expected unsettled, got \(estimator.phase) after \(rejections) rejections")
             return
         }
-        #expect(rejections == BTAlignmentPosterior.maxRejections,
-                "the run's last word comes on rejection \(BTAlignmentPosterior.maxRejections)")
-        #expect(estimator.test_rejections == BTAlignmentPosterior.maxRejections)
+        #expect(rejections >= 3, "the old cap ended the run on 3; got \(rejections)")
         #expect(Self.range.contains(bestGuessMs))
     }
 
@@ -266,7 +273,6 @@ import Testing
     @Test func massPinnedInAWingBowsOutUnreachableAndNeverBeforeEightAnswers() {
         var estimator = BTAlignmentPosterior(range: Self.range)
         var answers = 0
-        var rejections = 0
         while answers < 60 {
             switch estimator.phase {
             case .asking:
@@ -278,7 +284,6 @@ import Testing
                 }
             case .proposing:
                 estimator.rejectProposal()
-                rejections += 1
             default:
                 break
             }
@@ -288,8 +293,6 @@ import Testing
         }
         #expect(estimator.phase == .unreachable, "got \(estimator.phase) after \(answers)")
         #expect(answers >= BTAlignmentPosterior.minAnswersForUnreachable)
-        #expect(rejections < BTAlignmentPosterior.maxRejections,
-                "unreachable, not talked out of two proposals")
     }
 
     /// A listener whose answers contradict each other never lands on a value
@@ -298,11 +301,11 @@ import Testing
     /// consistent enough to keep the belief moving, contradictory enough that
     /// nothing it names is right.
     ///
-    /// The route to the bow-out is the REJECTIONS, not the stagnation rule:
-    /// with the sharpened model this listener's belief does close up, so the
-    /// run offers it a value (at answer 9), is told it is wrong, and repeats
-    /// until `maxRejections` is spent. That is the shape a real user in this
-    /// position sees, and it is why the third rejection had to be free.
+    /// The route to the bow-out is the STAGNATION rule. This listener's belief
+    /// does close up, so the run offers a value (at answer 9), is told it is
+    /// wrong, and goes back to the questions each time — rejections do not end
+    /// a run. What ends it is the interval refusing to shrink: 17 answers and
+    /// 4 rejections in.
     static let contradictoryAnswers: [BTAlignmentPosterior.Answer] =
         [.target, .target, .reference]
 
@@ -329,8 +332,7 @@ import Testing
             Issue.record("expected unsettled, got \(estimator.phase) after \(answers)")
             return
         }
-        #expect(rejections == BTAlignmentPosterior.maxRejections,
-                "the bow-out comes on rejection \(BTAlignmentPosterior.maxRejections), got \(rejections)")
+        #expect(rejections > 0, "the run proposed and was told no, got \(rejections)")
         #expect(answers <= BTAlignmentPosterior.maxAnswers,
                 "nobody is asked more than \(BTAlignmentPosterior.maxAnswers): got \(answers)")
         #expect(Self.range.contains(bestGuessMs))

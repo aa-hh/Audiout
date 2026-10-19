@@ -17,9 +17,11 @@ import Foundation
 ///
 /// All time is `CLOCK_MONOTONIC`-based nanoseconds — the SAME timeline the
 /// AirPlay sessions' `pts` live on (`CapturedBuffer.pts`, produced by
-/// ``CoreAudioSystemTap/timespec(fromHostTime:)``). The render block rebases the
-/// output device's `mHostTime` (mach) into this timeline via that same helper
-/// before calling in here, so both sides of the comparison are one clock.
+/// ``CoreAudioSystemTap/timespec(fromHostTime:)``). The render blocks rebase
+/// the output device's `mHostTime` (mach) into this timeline through the same
+/// offset math (`CoreAudioSystemTap.timespec(fromHostTime:offset:)`, a cached
+/// per-sink offset) before calling in here, so both sides of the comparison
+/// are one clock.
 enum SyncTiming {
 
     static func monotonicNanos(_ ts: timespec) -> Int64 {

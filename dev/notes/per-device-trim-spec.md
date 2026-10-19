@@ -44,8 +44,9 @@ it (Airfoil's advanced sliders).
   Settings-only, not on the device row.
 - **AirPlay**: nothing, by design (Decision 1).
 - **Drift**: settled acoustically 2026-08-12 — A2DP sinks servo to the host
-  delivery rate; measured inter-speaker drift −0.02 ppm (~0 over 30 min). A
-  fixed trim holds for a whole session. `BTDriftCorrector` servos on the
+  delivery rate; one 120-second run (commit efb67775) measured inter-speaker
+  drift of −0.02 ppm, which extrapolates to ~0 over 30 min (not measured over
+  30 min). A fixed trim is expected to hold for a whole session. `BTDriftCorrector` servos on the
   host-side pacing clock, i.e. compares that clock to itself — it is inert.
 
 ## Part 1 — one SYNC surface for every trimmable device
@@ -115,6 +116,9 @@ known holes, one measurement:
   offset is stable (within a few ms), stored trims persist silently and
   nothing more ships. If not, an aligned device that reconnects gets a
   re-align prompt (wizard entry point) — never silently plays misaligned.
+  *2026-09-12: superseded (roadmap 062 dropped) — the passive drift tracker
+  re-measures on reconnect from the music itself; see
+  `.scratch/passive-drift-tracking/spec.md` (roadmap 085).*
 - **(c) Delete `BTDriftCorrector`.** Inert (Part 0 above); it reads as a
   safety net but corrects nothing. Removing it simplifies BTSyncedSink and
   kills a false signal for future readers.

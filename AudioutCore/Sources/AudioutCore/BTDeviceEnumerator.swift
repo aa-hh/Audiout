@@ -42,14 +42,22 @@ public struct BTDeviceSnapshot: Sendable, Equatable {
     /// unreadable without the Bluetooth grant), and the glyph then falls back
     /// to the neutral speaker (`Device.symbolName`).
     public let deviceClassMinor: UInt32?
+    /// What this speaker IS, never what its owner called it:
+    /// `bt:<vendor>:<product>` (four lowercase hex digits each) from the
+    /// pairing's cached Device ID record, else a product phrase matched
+    /// against the name (``Device/bluetoothProductModel(forName:)``), else
+    /// `nil`. It reaches the phone in the snapshot so a sync measurement can
+    /// say which product it was taken on.
+    public let model: String?
 
     public init(id: String, name: String, isConnected: Bool, lastUsed: Date? = nil,
-                deviceClassMinor: UInt32? = nil) {
+                deviceClassMinor: UInt32? = nil, model: String? = nil) {
         self.id = id
         self.name = name
         self.isConnected = isConnected
         self.lastUsed = lastUsed
         self.deviceClassMinor = deviceClassMinor
+        self.model = model
     }
 }
 
@@ -82,6 +90,13 @@ struct BTPairedRecord: Sendable, Equatable {
     /// Recorded at pairing like the major class, so it is readable for a
     /// long-disconnected device too. `nil` when the OS reported none.
     let deviceClassMinor: UInt32?
+    /// The pairing's cached Device ID (PnP Information, SDP service class
+    /// `0x1200`) attributes `0x0201` and `0x0202`: the vendor and product the
+    /// speaker's own firmware reports. Unlike the device classes these are not
+    /// recorded at pairing, so they are readable only while the SDP record is
+    /// cached; `nil` when it is not.
+    let vendorID: UInt16?
+    let productID: UInt16?
 }
 
 // MARK: - Seam
@@ -280,7 +295,9 @@ final class BTDeviceEnumerator: BTDeviceEnumerating, @unchecked Sendable {
             let record = key.flatMap { pairedByMAC[$0] }
             snapshots.append(BTDeviceSnapshot(
                 id: output.uid, name: output.name, isConnected: true, lastUsed: record?.lastUsed,
-                deviceClassMinor: record?.deviceClassMinor))
+                deviceClassMinor: record?.deviceClassMinor,
+                model: model(vendorID: record?.vendorID, productID: record?.productID,
+                             name: output.name)))
         }
         for record in paired {
             guard record.isAudioCapable,
@@ -288,12 +305,26 @@ final class BTDeviceEnumerator: BTDeviceEnumerating, @unchecked Sendable {
                   let id = derivedUID(fromAddress: record.address ?? "")
             else { continue }
             seenMACs.insert(key)
+            let name = record.name ?? record.address ?? id
             snapshots.append(BTDeviceSnapshot(
-                id: id, name: record.name ?? record.address ?? id,
+                id: id, name: name,
                 isConnected: false, lastUsed: record.lastUsed,
-                deviceClassMinor: record.deviceClassMinor))
+                deviceClassMinor: record.deviceClassMinor,
+                model: model(vendorID: record.vendorID, productID: record.productID,
+                             name: name)))
         }
         return snapshots.sorted { $0.id < $1.id }
+    }
+
+    /// The speaker's product identity: its own reported vendor and product
+    /// when the Device ID record is cached, and only then a phrase matched
+    /// against the name. The ids are the better fact — they are what the
+    /// firmware says — so the name is never consulted while they are there.
+    static func model(vendorID: UInt16?, productID: UInt16?, name: String) -> String? {
+        if let vendorID, let productID {
+            return String(format: "bt:%04x:%04x", vendorID, productID)
+        }
+        return Device.bluetoothProductModel(forName: name)
     }
 
     /// The Core Audio UID a Bluetooth output gets on this platform:
@@ -342,6 +373,16 @@ final class BTDeviceEnumerator: BTDeviceEnumerating, @unchecked Sendable {
                 transportType: transport,
                 hasOutputStreams: hasOutputStreams(device))
         }
+    }
+
+    /// The object id to pin a sink to for `uid`, or `nil` when no live one
+    /// exists. macOS can list two objects for one Bluetooth speaker, and
+    /// `kAudioHardwarePropertyTranslateUIDToDevice` picks either, so a dead twin
+    /// can pin the engine to a zombie: prefer an alive object with output
+    /// streams, else any alive one.
+    static func liveDeviceID(forUID uid: String) -> AudioObjectID? {
+        let alive = allDeviceIDs().filter { deviceUID($0) == uid && BTDeviceSink.halDeviceIsAlive($0) }
+        return alive.first(where: hasOutputStreams) ?? alive.first
     }
 
     private static func allDeviceIDs() -> [AudioObjectID] {
@@ -425,7 +466,9 @@ final class BTDeviceEnumerator: BTDeviceEnumerating, @unchecked Sendable {
         let paired = (IOBluetoothDevice.pairedDevices() as? [IOBluetoothDevice]) ?? []
         // Diagnostic: nobody has established what AirPods report in the MINOR
         // class field, and the glyph mapping in `Device.symbolName` rests on
-        // it. The CLASS NUMBERS are the whole answer, so that is all this
+        // it; nor whether a speaker's Device ID record is cached at all, which
+        // `model` rests on. The CLASS AND ID NUMBERS are the whole answer, so
+        // that is all this
         // writes — one `.debug` line for the whole enumeration, which
         // `refreshLocked` runs on every Core Audio device-list change. Device
         // NAMES stay out of it entirely: a unified-log entry is readable by
@@ -433,22 +476,54 @@ final class BTDeviceEnumerator: BTDeviceEnumerating, @unchecked Sendable {
         // says a speaker's name never leaves the machine.
         log.notice("paired audio device classes: \(pairedClassSummary(paired), privacy: .public)")
         return paired.map { device in
-            BTPairedRecord(
+            let ids = deviceIDs(device)
+            return BTPairedRecord(
                 name: device.name,
                 address: device.addressString,
                 isAudioCapable: isAudioCapable(device),
                 lastUsed: device.recentAccessDate(),
-                deviceClassMinor: device.deviceClassMinor)
+                deviceClassMinor: device.deviceClassMinor,
+                vendorID: ids?.vendor,
+                productID: ids?.product)
         }
     }
 
-    /// Every pairing's major/minor class pair as one hex string — the only
-    /// part of the paired list the glyph question needs. Audio-capable
-    /// pairings only, so a keyboard or a mouse is not in the answer.
+    /// The vendor and product the speaker's own firmware reports, from its
+    /// cached Device ID (PnP Information) record. `nil` when the record is not
+    /// cached, which is what the name fallback in ``model(vendorID:productID:name:)``
+    /// exists for.
+    ///
+    /// razor: reads the CACHED record only, like ``BTAbsoluteVolumeSDP``; a
+    /// live `performSDPQuery:` is the upgrade path if a missing cache proves
+    /// to matter.
+    ///
+    /// Real-Mac check pending (2026-10): whether macOS caches the PnP record
+    /// for A2DP speakers at all is unverified. The `.notice` line below is the
+    /// check — one `log show` with a real speaker paired answers it.
+    private static func deviceIDs(_ device: IOBluetoothDevice) -> (vendor: UInt16, product: UInt16)? {
+        // 0x1200 = kBluetoothSDPUUID16ServiceClassPnPInformation; 0x0201 and
+        // 0x0202 are its VendorID and ProductID attributes.
+        guard let record = device.getServiceRecord(for: IOBluetoothSDPUUID(uuid16: 0x1200)),
+              let vendor = record.getAttributeDataElement(0x0201)?.getNumberValue()?.uint16Value,
+              let product = record.getAttributeDataElement(0x0202)?.getNumberValue()?.uint16Value
+        else { return nil }
+        return (vendor, product)
+    }
+
+    /// Every pairing's major/minor class pair and its reported vendor:product
+    /// as one hex string — the only parts of the paired list the glyph and
+    /// model questions need. Audio-capable pairings only, so a keyboard or a
+    /// mouse is not in the answer. `-:-` means no cached Device ID record,
+    /// which is the fact the real-Mac check above is looking for.
     private static func pairedClassSummary(_ paired: [IOBluetoothDevice]) -> String {
         paired
             .filter { isAudioCapable($0) }
-            .map { String(format: "%02x/%02x", $0.deviceClassMajor, $0.deviceClassMinor) }
+            .map { device in
+                let classes = String(format: "%02x/%02x",
+                                     device.deviceClassMajor, device.deviceClassMinor)
+                guard let ids = deviceIDs(device) else { return classes + "/-:-" }
+                return classes + String(format: "/%04x:%04x", ids.vendor, ids.product)
+            }
             .joined(separator: " ")
     }
 

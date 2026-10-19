@@ -1,5 +1,6 @@
 import Testing
 import Foundation
+import AVFoundation
 @testable import AudioutCore
 
 /// T-SINK: the synced local sink stays silent until the output device's clock
@@ -422,6 +423,54 @@ import Foundation
         return ramp
     }
 
+    /// The render block rebases `mHostTime` with a fresh two-clock sample
+    /// instead of the sink's cached offset: with the cached offset seeded
+    /// 300 ms ahead of the real one, a cycle whose cached rebase lands exactly
+    /// on the release target must open the gate, while a fresh sample lands
+    /// 300 ms early and stays silent.
+    @Test func renderUsesTheCachedRebaseOffset_notAFreshTwoClockSample() {
+        let sink = Self.rampSink()
+
+        let real = CoreAudioSystemTap.sampleMachToMonotonicOffsetNanos()
+        sink.machToMonotonicOffsetNanos = real + 300_000_000
+
+        let host = mach_absolute_time()
+        let cycleStart = Int64(CoreAudioSystemTap.machNanoseconds(fromHostTime: host))
+            + sink.machToMonotonicOffsetNanos
+
+        let delayNanos: Int64 = 87_000_000   // rampSink()'s 100ms - 10ms - 3ms
+        let ptsNanos = cycleStart - delayNanos
+        let pts = timespec(tv_sec: Int(ptsNanos / 1_000_000_000),
+                            tv_nsec: Int(ptsNanos % 1_000_000_000))
+        var ramp = [Float](repeating: 0, count: 20_000)
+        for i in 0..<ramp.count { ramp[i] = Float(i + 1) }
+        ramp.withUnsafeBufferPointer { buf in
+            sink.enqueue(interleavedFrames: buf.baseAddress!, frameCount: ramp.count, pts: pts)
+        }
+
+        var stamp = AudioTimeStamp()
+        stamp.mHostTime = host
+        stamp.mFlags = .hostTimeValid
+        var out = [Float](repeating: 0, count: 512)
+        let abl = AudioBufferList.allocate(maximumBuffers: 1)
+        var status: OSStatus = noErr
+        var isSilence = ObjCBool(false)
+        out.withUnsafeMutableBufferPointer { ob in
+            abl[0] = AudioBuffer(
+                mNumberChannels: 1,
+                mDataByteSize: UInt32(512 * MemoryLayout<Float>.size),
+                mData: ob.baseAddress)
+            status = sink.render(
+                isSilence: &isSilence, timestamp: &stamp,
+                frameCount: 512, audioBufferList: abl.unsafeMutablePointer)
+        }
+        free(abl.unsafeMutablePointer)
+
+        #expect(status == noErr)
+        #expect(isSilence.boolValue == false)
+        #expect(out.first(where: { $0 != 0 }) == ramp[0])
+    }
+
     @Test func noAudioBeforeEnqueue_isSilent() {
         let sink = SyncedLocalSink(
             renderSampleRate: 48_000, channelCount: 1,
@@ -432,6 +481,18 @@ import Foundation
         }
         #expect(!produced)
         #expect(out.allSatisfy { $0 == 0 })
+    }
+
+    /// A stopped sink must be freed. The render block used to capture `self`
+    /// strongly, so the sink kept itself alive and `deinit` never ran.
+    @Test func sinkDeinitsAfterStop() {
+        weak var weakSink: SyncedLocalSink?
+        do {
+            let sink = Self.rampSink()
+            weakSink = sink
+            sink.stop()
+        }
+        #expect(weakSink == nil, "the render block captures the sink strongly, so it can never be freed")
     }
 
     // MARK: T-LIFECYCLE — device-change + sleep/wake rebuild
@@ -1033,16 +1094,26 @@ extension SerializedSharedState {
 
             var ramp = [Float](repeating: 0, count: 20_000)
             for i in 0..<ramp.count { ramp[i] = Float(i + 1) }
+            // A pts no other test uses. `SerializedSharedState` orders this suite
+            // against the other suites that install the process-global sink, but
+            // NOT against `SyncedLocalSinkTests`, which runs in parallel and
+            // anchors ten sessions of its own at `rampAnchorPtsSec` (1_000) — the
+            // value this test used to enqueue and assert. Those lines landed in
+            // this capture, and the count below failed on whichever interleaving
+            // lost the race.
+            let anchorPtsSec = 4_242
             ramp.withUnsafeBufferPointer {
                 sink.enqueue(interleavedFrames: $0.baseAddress!, frameCount: ramp.count,
-                             pts: timespec(tv_sec: 1_000, tv_nsec: 0))
+                             pts: timespec(tv_sec: anchorPtsSec, tv_nsec: 0))
             }
 
             Telemetry._installTestSink(nil)   // flush barrier
-            let anchored = captured.snapshot.filter { $0.contains("\"evt\":\"sync_session_anchored\"") }
+            let anchorPtsNanos = Int64(anchorPtsSec) * 1_000_000_000
+            let anchored = captured.snapshot.filter {
+                $0.contains("\"evt\":\"sync_session_anchored\"")
+                    && $0.contains("\"anchorPtsNanos\":\"\(anchorPtsNanos)\"")
+            }
             #expect(anchored.count == 1, "got: \(captured.snapshot)")
-            #expect(anchored.first?.contains("\"anchorPtsNanos\":\"1000000000000\"") == true,
-                    "got: \(anchored)")
         }
     }
 }

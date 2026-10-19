@@ -26,6 +26,16 @@ AudioutCore/.swiftpm/
 dev/audiocap/.build/
 dev/audiocap/.swiftpm/
 
+# Root-level build and tooling scratch: a top-level SwiftPM build directory, the
+# worktree parking spot some scripts use, and Wrangler's local state. Hand-added
+# entries in .git/info/exclude hid these until 2026-09-10, which made
+# release.sh's clean-tree gate pass for the wrong reason.
+.build/
+.worktrees/
+.wrangler/
+# scripts/review-branch.sh: reviewer prompts and replies waiting for --continue.
+.review-pending/
+
 # Xcode / SwiftPM local state, in case anyone opens this via Xcode.
 xcuserdata/
 *.xcodeproj/xcuserdata/
@@ -50,3 +60,13 @@ __pycache__/
 # at assembly (scripts/fetch-wordmark-font.sh). Never commit a copy.
 *.otf
 ClashDisplay-*
+
+# Impeccable ships a platform-specific engine binary; the launcher fetches
+# and checksum-verifies the right one per platform.
+.claude/skills/impeccable/scripts/bin/
+
+# Other agent harnesses' local config, generated per machine and never shared.
+# They sit at the repo root, so an uncommitted copy makes the tree dirty and
+# scripts/release.sh refuses to cut a release.
+.agents/
+.codex/

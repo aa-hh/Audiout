@@ -1,7 +1,7 @@
 // Copyright (C) 2026 ahh and contributors.
 //
 // LICENSE-CLEAN by design: this file carries NO GPL SPDX header, unlike most
-// siblings. It is original parameter/allocation math written for this project,
+// siblings. It is original parameter math written for this project,
 // kept free of GPL-derived code so the license-clean Bluetooth sink
 // (`BTSyncedSink.swift`) can hold the same `DeviceEQ` values the AirPlay path
 // does. Do not add a GPL header to this file, and do not move GPL-derived code
@@ -92,121 +92,5 @@ public struct DeviceEQ: Codable, Hashable, Sendable {
             normalized.append(contentsOf: Array(repeating: 0, count: bandCount - normalized.count))
         }
         return normalized
-    }
-}
-
-// MARK: - Stream-id allocation
-
-/// Which AirPlay stream id each EQ group owns, remembered across recomputes.
-///
-/// Keyed by the group's DEVICE-ID SET rather than by its values: editing a lone
-/// device's EQ keeps the same members, so it keeps the same stream and costs a
-/// coefficient swap instead of a rebind (and its ~1 s audible gap). Ids are
-/// never reused — a released id stays retired for the session.
-public struct EQStreamAllocator: Equatable, Sendable {
-
-    /// EQ stream ids live in the top half of the `UInt32` space; `AppRouteMixer`
-    /// allocates its per-app ids upward from 1, so the two can never collide.
-    public static let idBase: UInt32 = 0x8000_0000
-
-    public private(set) var idsByMembers: [Set<String>: UInt32]
-    public private(set) var nextCounter: UInt32
-
-    public init(idsByMembers: [Set<String>: UInt32] = [:], nextCounter: UInt32 = 0) {
-        self.idsByMembers = idsByMembers
-        self.nextCounter = nextCounter
-    }
-
-    fileprivate mutating func id(forMembers members: Set<String>) -> UInt32 {
-        if let existing = idsByMembers[members] { return existing }
-        let id = Self.idBase | nextCounter
-        nextCounter &+= 1
-        idsByMembers[members] = id
-        return id
-    }
-}
-
-// MARK: - Topology
-
-/// Pure: which whole-system AirPlay stream each device should be on, given
-/// everyone's EQ and how many streams are left in the engine's budget.
-///
-/// Devices sharing an identical `DeviceEQ` share one stream (one ALAC encode);
-/// flat devices stay on stream 0 and are byte-identical passthrough. When more
-/// distinct settings exist than the budget allows, the losers keep their stored
-/// values but stream flat — `bypassed` is what the UI reads to say so out loud
-/// rather than pretending an inaudible EQ is applied.
-public enum EQStreamTopology {
-
-    /// One entry of the plan the capture coordinator writes: which stream, and
-    /// the EQ it carries. `eq == nil` is stream 0 — main EQ only, no per-device
-    /// stage.
-    public struct Entry: Equatable, Sendable {
-        public let streamID: UInt32
-        public let eq: DeviceEQ?
-
-        public init(streamID: UInt32, eq: DeviceEQ?) {
-            self.streamID = streamID
-            self.eq = eq
-        }
-    }
-
-    public struct Result: Equatable, Sendable {
-        /// Always leads with stream 0; then one entry per admitted EQ group.
-        public let entries: [Entry]
-        /// Every active device, including the ones left on stream 0.
-        public let streamIDByDevice: [String: UInt32]
-        /// Non-flat devices that did not fit the budget and stream flat anyway.
-        public let bypassed: Set<String>
-        public let allocator: EQStreamAllocator
-    }
-
-    /// - Parameters:
-    ///   - budget: how many EQ streams may exist beyond stream 0. Negative is
-    ///     treated as none.
-    public static func resolve(
-        activeDeviceIDs: Set<String>,
-        eqByDevice: [String: DeviceEQ],
-        budget: Int,
-        allocator: EQStreamAllocator
-    ) -> Result {
-        var groups: [DeviceEQ: Set<String>] = [:]
-        for id in activeDeviceIDs {
-            let eq = eqByDevice[id] ?? .flat
-            guard !eq.isFlat else { continue }
-            groups[eq, default: []].insert(id)
-        }
-
-        // Deterministic admission: bigger groups first (one stream serving more
-        // speakers is worth more), ties broken by the lexicographically smallest
-        // member. Groups are disjoint and non-empty, so that tie-break is total.
-        let ordered = groups.sorted { left, right in
-            if left.value.count != right.value.count { return left.value.count > right.value.count }
-            return left.value.min()! < right.value.min()!
-        }
-
-        var allocator = allocator
-        var entries = [Entry(streamID: 0, eq: nil)]
-        var streamIDByDevice: [String: UInt32] = [:]
-        var bypassed: Set<String> = []
-        let admissions = Swift.max(0, budget)
-
-        for (index, group) in ordered.enumerated() {
-            guard index < admissions else {
-                bypassed.formUnion(group.value)
-                continue
-            }
-            let streamID = allocator.id(forMembers: group.value)
-            entries.append(Entry(streamID: streamID, eq: group.key))
-            for member in group.value { streamIDByDevice[member] = streamID }
-        }
-
-        for id in activeDeviceIDs where streamIDByDevice[id] == nil { streamIDByDevice[id] = 0 }
-
-        return Result(
-            entries: entries,
-            streamIDByDevice: streamIDByDevice,
-            bypassed: bypassed,
-            allocator: allocator)
     }
 }

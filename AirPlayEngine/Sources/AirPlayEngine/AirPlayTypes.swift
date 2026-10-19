@@ -67,6 +67,16 @@ public struct DeviceDescriptor: Sendable {
     /// `keyval` so the vendored `features_parse`/`device_id_colon_parse` run.
     public var txtRecord: [String: String]
 
+    /// Served to the vendored sender as its per-device config password; nil = none.
+    public var password: String?
+
+    /// The HomeKit pairing key this sender earned from the receiver (the
+    /// `pair_setup_result` hex string `AirPlayEngine.authorize` returns). The feed
+    /// writes it to the vendored device's `auth_key` on every appearing feed, a
+    /// value replacing the one held and nil clearing it, so the receiver's pairing
+    /// lives in the app's store and nowhere else.
+    public var authKey: String?
+
     public init(
         name: String,
         hostname: String = "",
@@ -74,7 +84,9 @@ public struct DeviceDescriptor: Sendable {
         family: AddressFamily,
         port: Int,
         kind: ServiceKind = .airplay,
-        txtRecord: [String: String]
+        txtRecord: [String: String],
+        password: String? = nil,
+        authKey: String? = nil
     ) {
         self.name = name
         self.hostname = hostname
@@ -83,6 +95,8 @@ public struct DeviceDescriptor: Sendable {
         self.port = port
         self.kind = kind
         self.txtRecord = txtRecord
+        self.password = password
+        self.authKey = authKey
     }
 
     /// The device id parsed from the `deviceid` TXT key, if present/valid.
@@ -367,5 +381,26 @@ public struct WriteSchedulingSnapshot: Sendable, Equatable {
         self.wakeLatency = wakeLatency
         self.inCycleWork = inCycleWork
         self.interArrivalGap = interArrivalGap
+    }
+}
+
+/// What one content stream carried since the previous snapshot: the loudest
+/// sample in the window as dBFS, and how long the stream has been silent in a
+/// row (`silentSeconds`, running across windows until a write above −60 dBFS
+/// resets it). A stream "connected" with packets flowing and `silentSeconds`
+/// climbing is exactly the shape that could not be told apart from healthy
+/// playback on 2026-09-05 (docs/plans/PLAN-LIVE-DIAGNOSTICS.md C3).
+/// `peakDBFS` floors at −120 for an all-zero window.
+public struct StreamLevelSnapshot: Sendable, Equatable {
+    public var streamId: UInt32
+    public var peakDBFS: Double
+    public var silentSeconds: Double
+    public var writes: UInt64
+
+    public init(streamId: UInt32, peakDBFS: Double, silentSeconds: Double, writes: UInt64) {
+        self.streamId = streamId
+        self.peakDBFS = peakDBFS
+        self.silentSeconds = silentSeconds
+        self.writes = writes
     }
 }

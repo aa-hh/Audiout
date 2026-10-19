@@ -1276,6 +1276,22 @@ airplay_test_master_session_input_buffer_samples(const void *ams)
   return ((const struct airplay_master_session *)ams)->input_buffer_samples;
 }
 
+// [AirPlayEngine vendored change 2026-09-15] TEST SEAM, same P2b family: the
+// master session's RTP write position. packets_send() advances it by
+// samples_per_packet through rtp_packet_commit(), and only after alac_encode()
+// returned a length -- a failed encode returns early and leaves pos alone. So
+// the DELTA in pos across a headless run counts the packets the ALAC encoder
+// really produced, which is what the 16-stream encode benchmark
+// (MultiStreamEncodeLoadTests) needs to prove it timed encoding rather than a
+// no-op. Read the DELTA, never the absolute value: rtp_session_new() seeds pos
+// from gcry_randomize(), so a fresh session starts at a random uint32 and wraps.
+// Not reachable from any shipping path. Prototype in shims/engine_bridge.h.
+uint32_t
+airplay_test_master_session_rtp_pos(const void *ams)
+{
+  return ((const struct airplay_master_session *)ams)->rtp_session->pos;
+}
+
 int
 airplay_test_master_session_count(void)
 {

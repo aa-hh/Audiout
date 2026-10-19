@@ -87,16 +87,26 @@ public enum CompanionSnapshotBuilder {
     ///     startBufferOptionsMs: the Mac-authoritative settings slice —
     ///     passed through as-is so the phone always renders the Mac's
     ///     current range/options (`Snapshot.settings`).
-    ///   - alignmentFor: how fresh a Bluetooth device's stored sync
-    ///     calibration is (`BTAlignmentFreshness.report(uid:hasStoreEntry:)`
-    ///     on the caller's side, because the store and the connect edges live
-    ///     in the backend). `nil` — the default, and every non-native backend
+    ///   - alignmentFor: what the Mac publishes about a Bluetooth device's
+    ///     timing (`BTSpeakerTiming.report(uid:)` on the caller's side,
+    ///     because the store and the connect edges live in the backend). `nil` — the default, and every non-native backend
     ///     — leaves `DeviceState.alignment` unset, which the phone reads as
     ///     "not reported". The reference half of that wire struct is NOT
     ///     injected: it is a function of the whole live device list, so
     ///     ``alignmentReferenceID(forTarget:among:isAudible:)`` computes it
     ///     here and the phone's CTA and the Mac's staging can never disagree
     ///     about which speaker a run would measure against.
+    ///   - speakerRecord: the speaker library's record for a device
+    ///     (`SpeakerLibraryController.record(for:)` on the caller's side),
+    ///     backing each `DeviceState.mixerVisibility` and `isVisibleInMixer`.
+    ///     `nil` leaves both unset, which the phone reads as an older Mac.
+    ///   - missingSpeakers: the speakers the Mac remembers but cannot find
+    ///     right now, backing `Snapshot.missingSpeakers`; sorted by id here.
+    ///   - note: the Mac's note slot, backing `Snapshot.note`; `severity` is
+    ///     `"info"` or `"warning"`.
+    ///   - macAppVersion: passthrough to `Snapshot.macAppVersion`, the Mac
+    ///     app's `CFBundleShortVersionString`. `nil` from a dev run with no
+    ///     bundle to read; the phone only names it in a problem report.
     public static func build(
         devices: [Device],
         groupController: GroupController,
@@ -116,13 +126,21 @@ public enum CompanionSnapshotBuilder {
         connectVolumeMax: Int,
         startBufferMs: Int,
         startBufferOptionsMs: [Int],
-        alignmentFor: (Device) -> BTAlignmentReport? = { _ in nil }
+        alignmentFor: (Device) -> BTSpeakerTimingReport? = { _ in nil },
+        speakerRecord: (Device) -> SpeakerPresentationRecord? = { _ in nil },
+        missingSpeakers: [(id: String, name: String, kind: String?)] = [],
+        note: (text: String, severity: String)? = nil,
+        macAppVersion: String? = nil
     ) -> Snapshot {
         let deviceStates = devices.map { device in
             deviceState(for: device, groupController: groupController, iconFor: iconFor,
                         alignment: alignmentState(for: device, among: devices,
                                                   groupController: groupController,
-                                                  alignmentFor: alignmentFor))
+                                                  alignmentFor: alignmentFor),
+                        record: speakerRecord(device),
+                        hasLiveApps: !(device.isLocalDevice
+                            ? appRouting.routedAppNames(for: device.id, isLocalDevice: true)
+                            : liveRoutedAppNames[device.id] ?? []).isEmpty)
         }
 
         // Live names win over the caller's last-known map — a rename arriving
@@ -191,6 +209,13 @@ public enum CompanionSnapshotBuilder {
             localFallbackActive: localFallbackActive,
             takeoverStatus: takeoverStatus,
             systemDefaultIsAirPlayActive: systemDefaultIsAirPlayActive,
+            // Sorted by id for the same Equatable-stability reason as
+            // `addableApps` above.
+            missingSpeakers: missingSpeakers
+                .sorted { $0.id < $1.id }
+                .map { MissingSpeakerState(id: $0.id, name: $0.name, kind: $0.kind) },
+            note: note.map { NoteState(text: $0.text, severity: $0.severity) },
+            macAppVersion: macAppVersion,
             settings: SettingsState(
                 connectVolume: connectVolume,
                 connectVolumeMin: connectVolumeMin,
@@ -231,14 +256,14 @@ public enum CompanionSnapshotBuilder {
         return candidates.first?.id
     }
 
-    /// The wire alignment struct for one device: the caller's freshness report
+    /// The wire alignment struct for one device: the caller's timing report
     /// plus the reference this builder computes. `nil` for every non-Bluetooth
     /// device, and for a Bluetooth one the caller has no report for.
     private static func alignmentState(
         for device: Device,
         among devices: [Device],
         groupController: GroupController,
-        alignmentFor: (Device) -> BTAlignmentReport?
+        alignmentFor: (Device) -> BTSpeakerTimingReport?
     ) -> DeviceState.AlignmentState? {
         guard device.kind == .bluetooth, let report = alignmentFor(device) else { return nil }
         return DeviceState.AlignmentState(
@@ -248,16 +273,28 @@ public enum CompanionSnapshotBuilder {
                 forTarget: device.id, among: devices,
                 isAudible: groupController.isMainOutMember),
             settleRemainingSeconds: report.settleRemainingSeconds,
-            clockState: report.clockState.rawValue)
+            clockState: report.clockState.rawValue,
+            source: report.source?.rawValue)
     }
 
     private static func deviceState(
         for device: Device,
         groupController: GroupController,
         iconFor: (Device) -> String,
-        alignment: DeviceState.AlignmentState?
+        alignment: DeviceState.AlignmentState?,
+        record: SpeakerPresentationRecord?,
+        hasLiveApps: Bool
     ) -> DeviceState {
-        DeviceState(
+        let isMember = groupController.isMainOutMember(device.id)
+        // The popover's sounding-row rule (`PopoverController.refreshCardHeaderLiveness`
+        // with `drawsConnected`) is the reference, and a change there must change this too.
+        let connectedForPlayback = device.connectionState == .connected
+            || (device.isLocalDevice && device.isAvailable && device.connectionState == .off
+                && (isMember || hasLiveApps))
+        let isPlaying = (isMember || hasLiveApps) && connectedForPlayback
+            && !groupController.isMuted(device.id)
+            && (isMember ? !groupController.isMainOutMuted : true)
+        return DeviceState(
             id: device.id,
             name: device.name,
             kind: device.kind.rawValue,
@@ -278,26 +315,48 @@ public enum CompanionSnapshotBuilder {
             isMuted: groupController.isMuted(device.id),
             isSelected: groupController.isSpeakerSelected(device.id),
             isMainOutMember: groupController.isMainOutMember(device.id),
-            connection: connectionInfo(device.connectionState),
-            alignment: alignment
+            connection: connectionInfo(device),
+            alignment: alignment,
+            mixerVisibility: record?.visibility.rawValue,
+            isVisibleInMixer: record?.isVisibleInMixer,
+            isPlaying: isPlaying,
+            model: device.model
         )
     }
 
-    private static func connectionInfo(_ state: ConnectionState) -> DeviceState.ConnectionInfo {
-        switch state {
+    /// `credentialKind` is `"password"` in every state while a password
+    /// speaker has none on file, and `"onScreenCode"` while a speaker that
+    /// shows a code has no pairing on file, so the phone can offer to enter one.
+    /// An every-time code receiver takes no code (`.codeEveryTimeUnsupported`), so it has none.
+    /// A password wait is `"awaitingPassword"` with no failure fields: it is
+    /// not a failure; a refused password is `"failed"` with its cause.
+    private static func connectionInfo(_ device: Device) -> DeviceState.ConnectionInfo {
+        let credentialKind: String?
+        switch device.airPlayAccess {
+        case .password where !device.hasStoredPassword: credentialKind = "password"
+        case .onScreenCode where !device.hasStoredPassword: credentialKind = "onScreenCode"
+        default: credentialKind = nil
+        }
+        let access = device.airPlayAccess.rawValue
+        switch device.connectionState {
         case .off:
-            return DeviceState.ConnectionInfo(state: "off")
+            return DeviceState.ConnectionInfo(state: "off", credentialKind: credentialKind, access: access)
         case .connecting:
-            return DeviceState.ConnectionInfo(state: "connecting")
+            return DeviceState.ConnectionInfo(state: "connecting", credentialKind: credentialKind, access: access)
         case .connected:
-            return DeviceState.ConnectionInfo(state: "connected")
+            return DeviceState.ConnectionInfo(state: "connected", credentialKind: credentialKind, access: access)
         case .reconnecting:
-            return DeviceState.ConnectionInfo(state: "reconnecting")
+            return DeviceState.ConnectionInfo(state: "reconnecting", credentialKind: credentialKind, access: access)
+        case .awaitingPassword:
+            return DeviceState.ConnectionInfo(state: "awaitingPassword", credentialKind: credentialKind, access: access)
         case .failed(let failure):
             return DeviceState.ConnectionInfo(
                 state: "failed",
                 failureHeadline: failure.headline,
-                failureSuggestion: failure.suggestion
+                failureSuggestion: failure.suggestion,
+                failureCause: String(describing: failure.cause),
+                credentialKind: credentialKind,
+                access: access
             )
         }
     }

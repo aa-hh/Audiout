@@ -111,6 +111,15 @@ repo. `AudioutCore` pins it by version.
   `AirPlayEngine/docs/VENDORED-DIFFS.md` with license, rationale and hunk.
 - **UI targets depend on the model, never the reverse.** The
   `AudioutCore` library target imports no AppKit, and that is verified.
+- **The iPhone companion is switched off at the build level** until Audiout
+  Remote is approved: `AppSettings.remoteAppIsOffered`. Everything that names
+  the phone app reads the resolution it feeds — the Setup card, the Settings
+  switch with its QR row and phone list, the alignment wizard's iPhone panel,
+  and the companion server itself. A NEW surface mentioning the phone must ask
+  it too, or a release ships an invitation to an app nobody can download.
+  A dev build (bundle id `com.audiout.Audiout.<suffix>`) is always offered it,
+  with the Settings switch defaulting OFF; `AUDIOUT_COMPANION=on` still
+  overrides everything.
 - **Read `dev/notes/` before a non-trivial phase** — briefs exist to de-risk work
   before it starts.
 - **"Does this code exist anywhere?" needs more than `git grep`.**
@@ -149,6 +158,38 @@ repo. `AudioutCore` pins it by version.
      just wrote. One review found six in a single day's work; they read as
      coverage and cover nothing. If the intent is real, rewrite it to read the
      DRAWN or observed result.
+  5. A test that waits for time drives the backend's `uptimeClock`/`delayClock`
+     through `ManualDelayClock.advance(by:)`, never the wall clock. Guard 11
+     refuses sleeps, `asyncAfter`, `SuiteWait.settle(`, every `.wait(timeout:`
+     and fractional-second Timeout/Delay/Deadline/Interval/Grace/Window/Seconds
+     values; a hang ceiling is a valid `real-time-ok:` reason.
+- **How a test waits without the wall clock.** Each case has one helper:
+  1. When the delay is a background queue rather than a timer, wait for the
+     event with `pollUntil` or `SuiteWait.until`. Both return the moment the
+     condition holds; the 120 s ceiling only bites when it never does. The
+     test telemetry sink delivers on its own queue, so wait for a log line
+     before reading it.
+  2. `ManualDelayClock` runs fired jobs on the caller's thread. When the job
+     touches state owned by `stateQueue`, `captureControlQueue` or main, pass
+     its `queueHoppingClock` instead of `clock`.
+  3. A fake engine call has finished only when `opsInFlight(for:)` reads 0,
+     not when its side effects show.
+  4. Drain a queue that holds a lock before acting on what it guards, as
+     `test_waitForPendingRebuild()` drains the Bluetooth sink's graph queue.
+  5. UI timers do not run in tests: they check `HeadlessRuntime.isActive`.
+  6. When real-time timing is the thing under test, keep it real and mark the
+     line `// real-time-ok: <reason>`; never fake it.
+- **Touching code a real-time test drives means fixing that test.** When a
+  change edits production code that a test still exercises through the real
+  clock (a line Guard 11 would refuse today, or one carrying `real-time-ok:`),
+  the same PR converts that test to the helpers above. If that is out of
+  scope, add a roadmap entry naming the test (file:line), its wait, and the
+  code that drives it:
+  `echo '{"title":"...","why":"...","what":"...","source":"claude-suggested","status":"planned"}' | node ~/.claude/plugins/cache/foundry/foreman/0.46.0-alpha/scripts/roadmap.js add`.
+  Never hand-edit `ROADMAP.jsonl`. `bash scripts/real-time-tests.sh <changed
+  source files>` lists those tests' waits: it matches the types the files
+  declare at top level against test files, so read each hit before acting.
+  `bash scripts/test-real-time-tests.sh` tests it.
 - **Flag finished worktrees `.prunable`; never hand-delete them.** Fifteen
   worktrees' SwiftPM caches once filled the disk to zero bytes free mid-build.
   `scripts/housekeeping.sh` (invoked automatically by `scripts/run-tests.sh`
@@ -176,6 +217,32 @@ repo. `AudioutCore` pins it by version.
   pushed), `touch .claude/worktrees/<slug>/.prunable` and let the system
   collect it. The flag is a request, not a command — a dirty or unpushed
   worktree is refused with the reason printed.
+- **Every compile and test takes one capacity permit from a machine-wide pool.**
+  Local pool (this machine): `git config audiout.localSlots` (set to 2).
+  Mule pool (remote M3 Air): `git config audiout.remoteSlots` (set to 2).
+  Entry points: `scripts/run-tests.sh`, `scripts/build.sh`, `scripts/make-app.sh`,
+  `scripts/ios.sh`, `scripts/run-app.sh`, and pre-commit Guard 6 all acquire a
+  permit before work starts. A full suite run on the mule takes one permit per
+  shard (up to three). Mule-full falls back to local at once (no wait).
+  Local-full waits up to 1800s, printing progress; ceiling reached → proceeds
+  uncapped with a loud warning (never refuses). While it waits, a build or test
+  run checks the mule once a minute and moves there if a mule permit frees
+  first (build.sh and run-tests.sh only). Sweep on acquire reclaims stale
+  permits (dead holder, unrecognised job, or held >45 min). `bash scripts/capacity.sh status`
+  shows local and mule permits; `bash scripts/test-capacity.sh` self-tests the pool.
+- **A green run is reused, not repeated.** `run-tests.sh` stamps each pass by
+  source hash and what it covered, so a later run on the same sources skips
+  what already passed: a full pass covers any filter, and a `--filter A` pass
+  leaves a later `--filter A|B` running only `B`. Run the filter for what you
+  changed once; Guard 4 at commit reuses it. `bash scripts/test-suite-cache.sh`
+  and `bash scripts/test-guard-test-scope.sh` self-test the cache and the
+  commit-time scoping.
+- **The full suite runs on GitHub, not at a local merge.** The `tests`
+  workflow runs it on every pull request and again in the merge queue; it and
+  the `review` status are the two checks `main` requires. A test that fails in
+  the queue and passes on rerun is quarantined: skipped with a dated reason
+  and a GitHub issue. `AUDIOUT_TEST_MODE=serial` is for flake hunting only,
+  never for a gate.
 - **Hold the live-test slot before building or launching the shared dev id.**
   Only one native Audiout can run at a time (the PTP helper binds UDP 319/320
   exclusively) and the dev loop reuses one bundle id,
@@ -201,14 +268,15 @@ repo. `AudioutCore` pins it by version.
   human can enter the password. Never `--apply` while a live Audiout session is
   actively streaming: it unloads the running helper too. It only ever touches
   `*.ptphelper` jobs. `--keep <label>` spares one exact label.
-- **Uninstall dead hand-off builds with `scripts/purge-dev-installs.sh`.** The
-  one-bundle-id-per-build rule above is correct and stays, but each throwaway id
-  leaves permanent residue that trashing the `.app` does not remove: a
+- **Uninstall dead hand-off builds with `scripts/purge-dev-installs.sh`.** Each
+  throwaway id leaves permanent residue that trashing the `.app` does not remove: a
   preferences domain, TCC grants (a dead row in System Settings › Privacy &
   Security forever), a PUBLIC aggregate audio device that keeps appearing in
-  Sound settings, and a root PTP-helper daemon. This script finds every
-  non-shipping `com.audiout.*` identity across all four surfaces, unions
-  them, and removes the lot — plus the preference domains leaked by the test
+  Sound settings, a root PTP-helper daemon, and, in the login keychain, a stored
+  AirPlay speaker password plus the licence key and companion token under
+  `<bundle id>.license`. This script finds every non-shipping
+  `com.audiout.*` identity across all five surfaces, unions them, and removes
+  the lot — plus the preference domains leaked by the test
   suites (`swift test` creates a per-test `UserDefaults` suite and never
   removes it; this had reached **48,769 plists**, 98% of everything in
   `~/Library/Preferences`). Dry-run by default; `--apply` to act. The shipping
@@ -238,12 +306,30 @@ repo. `AudioutCore` pins it by version.
   inside the app's own Application Support directory, and (c) be added to
   `scripts/purge-dev-installs.sh` in the same change that introduces it.
 
-## `main` is MERGE-ONLY (HARD RULE)
+## `main` accepts nothing but the merge queue (HARD RULE)
 
-**Never `git commit` while standing on `main`.** Everything — code, docs,
+**Never commit, merge or push onto `main` yourself.** Everything — code, docs,
 one-line fixes — is authored and committed in your own worktree and reaches
-`main` only as a **merge**. Guard 1 enforces exactly this: merges pass, a bare
-commit on `main` is refused.
+`main` only through a pull request and GitHub's merge queue. Guard 1 refuses
+any commit on `main`; GitHub's ruleset refuses a push. End every task with:
+
+```bash
+git push -u origin HEAD
+gh pr create --fill
+bash scripts/review-branch.sh   # run the passes it prints as subagents, then: bash scripts/review-branch.sh --continue
+```
+
+Then **stop and ask the owner before merging.** Only after a clear yes, run
+`gh pr merge --merge --auto`.
+
+Local `main` is a fast-forward mirror of `origin/main`, kept by
+`scripts/sync-main.sh` on a 2-minute launchd timer; never commit on it (Guard 1
+still refuses), and cut worktrees from `origin/main` after `git fetch`.
+
+`tests` (the full suite, on GitHub) and `review` (the status
+`review-branch.sh --continue` posts) are the two required checks; `--auto`
+queues the PR to land on its own once both are green, which is why it waits for
+the owner's yes. The merge-approval hook asks on `gh pr merge` either way.
 
 **Do not work in the `main` checkout at all.** Merely *editing* it starts the
 accident, even if you never commit.
@@ -263,29 +349,67 @@ The code survived only as a dropped stash; recovering it cost a full session.
 **The half-save was the shape of the accident, not anyone's intent — committing
 loose edits looks like helpfulness.**
 
-Merge-only makes docs-ahead-of-code structurally impossible: a doc and its code
-ride the same branch and become true on `main` in the same instant.
+Landing only through the queue makes docs-ahead-of-code structurally
+impossible: a doc and its code ride the same branch and become true on `main`
+in the same instant.
 
 **Pre-commit guards** (`.githooks/pre-commit`; enable once per clone with
 `git config core.hooksPath .githooks`, override once with `--no-verify`). The
-two that shape how you work, plus the review gate; the rest (test suites 4/6,
+ones that shape how you work, plus the review; the rest (test suites 4/6,
 warn-only 3/5) are documented in the hook file itself:
 
-- **Guard 1 blocks** a direct commit on `main`. Merges are unaffected; it never
-  fires in a worktree.
+- **Guard 1 blocks** any commit on `main`, merges included; it never fires in a
+  worktree.
 - **Guard 2 warns** when an AGENTS.md names a symbol absent from that commit's
   own source — catching a name wrong from birth (`d033466`) or a doc left stale
   after a deletion. It checks the commit you are creating: not `main` (unmerged
   truth is still true) and not the working tree (which would have let `f1f3e94`
   through). Known false positives: AppKit types named as design guidance but used
   nowhere.
-- **Guard 7 blocks** a Swift commit until the staged-diff readability
-  self-review has run: `scripts/self-review.sh` shows the checklist and writes
-  a receipt keyed to the exact staged bytes — READ your staged diff against
-  [docs/REVIEW-RUBRIC.md](docs/REVIEW-RUBRIC.md) (change-log narration, stale
-  claims, misleading names, reviewer-speak) before committing; restaging
-  invalidates the receipt on purpose. It also hard-blocks near-certain slop
-  patterns in added comments (trailing `slop-ok` exempts a legitimate line).
+- **Guard 7 blocks** a Swift commit whose added comments match near-certain
+  slop patterns (`slop-ok` exempts a line; rubric
+  [docs/REVIEW-RUBRIC.md](docs/REVIEW-RUBRIC.md)).
+- **Guard 11 blocks** a commit whose new `@Test` has no comment sentence naming
+  the code change that turns it red, a `print(` in a test (`print-ok` exempts),
+  a new test file holding one test (`new-suite-ok` exempts), or a real-time
+  wait in a test (`Task.sleep`, `Thread.sleep`, `usleep`, `sleep(`,
+  `asyncAfter`, `SuiteWait.settle(`, any `.wait(timeout:`, or a
+  Timeout/Delay/Deadline/Interval/Grace/Window/Seconds value set to a fraction
+  of a second; `real-time-ok: <reason>` exempts a line, and a hang ceiling is a
+  reason);
+  `bash scripts/test-guard-test-discipline.sh` self-tests it.
+- **Guard 12 blocks** a folder AGENTS.md that gains ruling phrasing or grows
+  while over its 300-word budget, and any removed line in an AGENTS-HISTORY.md;
+  it warns on a new date. Root `AGENTS.md` and merges are exempt;
+  `bash scripts/test-guard-agents-docs.sh` self-tests it.
+- **The review** (`scripts/review-branch.sh`, not a hook) posts the `review`
+  status. It picks skip, cheap (one sonnet pass) or full (four parallel
+  reviewers plus a confidence scorer, instructions in `docs/review/`) from the
+  diff, thresholds and risk paths at the top of the script. The reviewers run
+  as subagents of the session, because headless `claude -p` is refused on this
+  account: the script prints each pass's model, prompt file and reply path,
+  the session runs them and saves the replies, and `--continue` reads them
+  (exit 3 means more passes to run). It then logs one line to
+  `.git/audiout-branch-reviews.log`, posts one PR comment with the findings
+  grouped HIGH, MEDIUM, LOW, and sets the status on HEAD. Only a surviving HIGH
+  fails it (exit 1, with fix groups, one per file, for builder subagents);
+  fix, commit, push and run it again, and round 2 reviews only the fix. A
+  third run refuses. The round is read from a marker line at the top of the
+  script's own PR comments, not from local files, so a fresh checkout counts
+  the same. A push clears the status, since a status belongs to one commit;
+  run the script again, and if the branch's own non-Markdown lines are
+  unchanged (the marker's `changes=` patch id, e.g. after merging main in) it
+  re-posts the last round's status on the new HEAD without using a round. `bash scripts/test-review-branch.sh` self-tests it.
+- **A change inside a review risk path is scoped before it is built.** The
+  paths are the `is_risk_path` list at the top of `scripts/review-branch.sh`
+  (the Bluetooth sinks, the sync and drift code, `NativeBackend*`, the capture
+  coordinators, the stores, licence and trial, AirPlayEngine). However small
+  the finding reads, the first launch is a scoper (`fable-scoper` or
+  `/scope-and-run`) that states the function's invariants and enumerates the
+  cases; the builder writes those cases as tests first, then the code. On
+  2026-10-04 a "one-line" safety-margin clamp in `BTSyncedSink` took six
+  builder rounds and six reviews because each review's smallest fix became
+  the next spec instead of one design pass up front.
 
 ## UI / Design Conventions (all targets)
 
@@ -321,8 +445,9 @@ This app must feel like a native macOS citizen, not a cross-platform port.
 - **`DESIGN.md` records the shipped design; nothing mirrors it elsewhere.**
   The Figma design system was abandoned on 2026-09-03. When a change to
   `Tokens`, `PopoverColumnGrid`, a custom-drawn view, or a screen lands, the
-  record is regenerated from the code by the `impeccable-documenter` agent
-  (`.claude/agents/impeccable-documenter.md`), never hand-mirrored.
+  same commit updates the sections of `DESIGN.md` that describe it, written
+  from the code as shipped; it never describes a planned change, and never
+  restates a rule into a folder AGENTS.md.
 - Deviating is fine when the system has no equivalent — but note *why* in the
   nearest AGENTS.md, so the next agent doesn't "fix" it back to a system control
   that doesn't fit.

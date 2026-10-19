@@ -130,17 +130,25 @@ public final class AboutViewController: NSViewController {
     /// Built from ``AboutLinks/supportEmail`` so the address lives in one place.
     static let supportText = "Questions or problems? Email \(AboutLinks.supportEmail)."
 
+    /// Shown under the support line when the About row has somewhere to send
+    /// a bundle. Same copy for the row and for what the file holds, so the
+    /// user reads what they are about to attach before they save it.
+    static let diagnosticsText = "Saves a file you can attach to your email. It contains your speaker names, your app list and the app’s recent activity. Nothing is sent until you attach it."
+
     private let info: AboutInfo
     private let openURL: (URL) -> Void
+    private let saveDiagnostics: (() -> Void)?
     private let sourceCodeButton = NSButton()
+    private let diagnosticsButton = NSButton()
     private let creditsTextView = NSTextView()
     /// The background's Reduce Transparency cover (nil before `loadView`).
     /// Public only for its `test_` seams.
     public private(set) var backgroundFallback: ReduceTransparencyFallbackView?
 
-    public init(info: AboutInfo, openURL: @escaping (URL) -> Void) {
+    public init(info: AboutInfo, openURL: @escaping (URL) -> Void, saveDiagnostics: (() -> Void)? = nil) {
         self.info = info
         self.openURL = openURL
+        self.saveDiagnostics = saveDiagnostics
         super.init(nibName: nil, bundle: nil)
         title = "About"
     }
@@ -248,6 +256,16 @@ public final class AboutViewController: NSViewController {
         // The address is only useful if it can be copied.
         supportBody.isSelectable = true
         rows.append(supportBody)
+        if saveDiagnostics != nil {
+            diagnosticsButton.title = "Save diagnostics…"
+            diagnosticsButton.bezelStyle = .rounded
+            diagnosticsButton.target = self
+            diagnosticsButton.action = #selector(saveDiagnosticsTapped)
+            rows.append(SettingsForm.row(
+                title: "Diagnostics",
+                subtitle: Self.diagnosticsText,
+                control: diagnosticsButton))
+        }
 
         // An explicit opaque, appearance-adaptive background — matching
         // `SettingsRootViewController`'s own convention (this window is
@@ -311,6 +329,7 @@ public final class AboutViewController: NSViewController {
     }
 
     @objc private func viewSourceCodeTapped() { openURL(AboutLinks.sourceCodeURL) }
+    @objc private func saveDiagnosticsTapped() { saveDiagnostics?() }
 
     // MARK: Test-support hooks
 
@@ -363,8 +382,9 @@ public final class AboutWindowController: NSWindowController {
     ///   - openURL: opens the "View Source Code…" link; defaults to
     ///     `NSWorkspace`, injected as a recording closure in tests.
     public init(info: AboutInfo = .current(),
-                openURL: @escaping (URL) -> Void = { NSWorkspace.shared.open($0) }) {
-        aboutVC = AboutViewController(info: info, openURL: openURL)
+                openURL: @escaping (URL) -> Void = { NSWorkspace.shared.open($0) },
+                saveDiagnostics: (() -> Void)? = nil) {
+        aboutVC = AboutViewController(info: info, openURL: openURL, saveDiagnostics: saveDiagnostics)
         let window = NSWindow(contentViewController: aboutVC)
         window.styleMask = [.titled, .closable]
         window.title = "About Audiout"

@@ -84,6 +84,8 @@ struct ControlPanelWindowControllerTests {
         #expect(panel.level == .floating)
         #expect(panel.hidesOnDeactivate)
         #expect(!panel.becomesKeyOnlyIfNeeded)
+        // Tab has no loop to follow when this is off.
+        #expect(panel.autorecalculatesKeyViewLoop)
         #expect(!panel.isReleasedWhenClosed)
         // Decided policy (P3/W7): menu-bar app, no window restoration.
         #expect(!panel.isRestorable)
@@ -419,6 +421,37 @@ struct ControlPanelWindowControllerTests {
         #expect(!panel.hasShadow)
         #expect(controller.test_backingWindow?.parent === panel,
                 "the beak/bubble window is re-attached on un-pin")
+    }
+
+    /// Defect this catches: the shell tucks away when the mic dialog
+    /// deactivates the app, or a pin flip during the ask re-arms the
+    /// tuck-away, or a pinned shell comes out of the ask with
+    /// `hidesOnDeactivate` true.
+    @Test func aPermissionPromptInFlightKeepsTheUnpinnedShellOnScreenAcrossAPinFlip() throws {
+        let name = uniqueAutosaveName()
+        defer { clearSavedFrame(name) }
+        let controller = makeController(frameAutosaveName: name)
+        let panel = try #require(controller.test_panel)
+        let backing = try #require(controller.test_backingWindow)
+
+        controller.setPermissionPromptInFlight(true)
+        #expect(!panel.hidesOnDeactivate)
+        #expect(!backing.hidesOnDeactivate)
+
+        controller.setPinned(true)
+        #expect(!panel.hidesOnDeactivate)
+        controller.setPinned(false)
+        #expect(!panel.hidesOnDeactivate, "the re-stamp on un-pin must honour the ask")
+        #expect(!backing.hidesOnDeactivate)
+
+        controller.setPermissionPromptInFlight(false)
+        #expect(panel.hidesOnDeactivate)
+        #expect(backing.hidesOnDeactivate)
+
+        controller.setPinned(true)
+        controller.setPermissionPromptInFlight(true)
+        controller.setPermissionPromptInFlight(false)
+        #expect(!panel.hidesOnDeactivate, "a pinned shell never ends the ask tucking away")
     }
 
     /// R6, the rule the whole flip is built around: the profile changes

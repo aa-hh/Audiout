@@ -17,6 +17,7 @@ it is a licensing boundary. Discovery is app-owned.
 - Firewall verdicts stick to already-bound sockets: allowlist the binary before it binds, or PTP dies silently.
 - The engine is a deferred PTP client, never a binder; the root helper owns the privileged bind.
 - Two sender backends share one registry, and AirPlay 1 is not an unsupported gate.
+- The C logger has no default file path; the host names one through `AirPlayEngine.setLogFile`, and a host that never calls it (tests, `engine-probe`) writes no file.
 - Long-form traps, dated decisions and the changelog: [AGENTS-HISTORY.md](AGENTS-HISTORY.md). Grep it before debugging anything here.
 
 ## Map

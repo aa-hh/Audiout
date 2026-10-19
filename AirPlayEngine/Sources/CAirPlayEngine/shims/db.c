@@ -1,12 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 //
-// db.c — no-op shim (T-BUILD-1). Metadata/persist path is cut (Q6), so these
-// are permanent no-ops, not placeholders. db_queue_fetch_byitemid returns NULL
-// (so airplay_metadata_prepare early-returns NULL), db_speaker_save returns 0
-// (fire-and-forget; does not block the volume-set callback), free_queue_item
-// does nothing.
-//
-// TODO(T-SHIM-1): keep as no-ops. Volume persistence, if wanted, lives in Swift.
+// db.c — no-ops by design. The metadata/persist path is cut (Q6):
+// db_queue_fetch_byitemid returns NULL (so airplay_metadata_prepare
+// early-returns NULL), db_speaker_save returns 0 (fire-and-forget; does not
+// block the volume-set callback), free_queue_item does nothing. Volume
+// persistence, if wanted, lives in Swift.
 
 #include "db.h"
 

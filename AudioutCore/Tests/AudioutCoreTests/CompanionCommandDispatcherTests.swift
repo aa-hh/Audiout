@@ -14,6 +14,46 @@ import AudioutProtocol
 @MainActor
 @Suite final class CompanionCommandDispatcherTests: IsolatedSuite {
 
+    @Test func interceptedTickUsesTheExistingAlignmentIDLimit() {
+        #expect(CompanionCommandDispatcher.alignmentTargetIDRefusal("") == "Unknown speaker.")
+        #expect(CompanionCommandDispatcher.alignmentTargetIDRefusal(
+            String(repeating: "a", count: 128)) == nil)
+        #expect(CompanionCommandDispatcher.alignmentTargetIDRefusal(
+            String(repeating: "a", count: 129)) == "Unknown speaker.")
+    }
+
+    /// A cancel that does not carry the asking client cannot tell one phone's
+    /// run from another's, so the wiring layer had no way to stop phone B's
+    /// cancel ending phone A's.
+    @Test func cancelProbeReceivesTheAskingClient() async throws {
+        let seen = DispatcherCancelSpy()
+        let actions = CompanionAlignmentActions(
+            startProbe: { _, _ in nil },
+            cancelProbe: { targetID, clientID in
+                seen.calls.append((targetID, clientID))
+                return nil
+            },
+            reportMeasurement: { _, _, _ in nil },
+            setTick: { _, _, _ in nil },
+            nudgeTrim: { _, _ in nil },
+            revertNudge: { _ in nil },
+            clearTuning: { _ in nil },
+            playDemo: { _, _ in nil })
+        let context = try await makeContext(alignmentActions: actions)
+        let phone = UUID()
+        let result = context.dispatcher.execute(
+            .cancelAlignmentProbe(targetID: "speaker-1"), clientID: phone)
+        #expect(result.applied)
+        #expect(seen.calls.count == 1)
+        #expect(seen.calls.first?.0 == "speaker-1")
+        #expect(seen.calls.first?.1 == phone,
+                "the wiring layer needs the caller to refuse another phone's cancel")
+    }
+
+    private final class DispatcherCancelSpy {
+        var calls: [(String, UUID?)] = []
+    }
+
     /// Records everything the two injected closures were called with, so tests
     /// can assert on them without a mock framework.
     private final class Spy {
@@ -33,9 +73,11 @@ import AudioutProtocol
         let settings: AppSettings
         let backend: MockBackend
         let spy: Spy
+        let speakerLibrary: SpeakerLibraryController
     }
 
-    private func makeContext(fleet: [Device] = .demoFleet) async throws -> Context {
+    private func makeContext(fleet: [Device] = .demoFleet,
+                            alignmentActions: CompanionAlignmentActions? = nil) async throws -> Context {
         let backend = MockBackend(fleet: fleet, staggerDiscovery: false,
                                   emitsLevels: false, simulatesDropouts: false)
         try await waitForFleet(backend, count: fleet.count)
@@ -46,6 +88,9 @@ import AudioutProtocol
         let appRouting = AppRoutingController(store: AppRouteStore(directory: scratchDir), loadPersisted: false)
         let settings = AppSettings(defaults: isolatedDefaults)
         let spy = Spy()
+        let speakerLibrary = SpeakerLibraryController(store: SpeakerLibraryStore(directory: scratchDir),
+                                                      loadPersisted: false)
+        speakerLibrary.update(liveDevices: backend.devices, groups: [])
 
         let dispatcher = CompanionCommandDispatcher(
             groupController: groupController,
@@ -60,10 +105,12 @@ import AudioutProtocol
                 while spy.holdStartBuffer {
                     try? await Task.sleep(nanoseconds: 5_000_000)
                 }
-            }
+            },
+            alignmentActions: alignmentActions,
+            speakerLibrary: speakerLibrary
         )
         return Context(dispatcher: dispatcher, groupController: groupController, appRouting: appRouting,
-                       settings: settings, backend: backend, spy: spy)
+                       settings: settings, backend: backend, spy: spy, speakerLibrary: speakerLibrary)
     }
 
     private func waitForFleet(_ backend: MockBackend, count: Int) async throws {
@@ -123,6 +170,63 @@ import AudioutProtocol
         #expect(ctx.groupController.isSpeakerSelected("office"), "falls back to setDeviceSelected(_, true)")
     }
 
+    // MARK: submitSpeakerPassword
+
+    /// Dropping the trim-and-empty check sends a blank password to the
+    /// speaker instead of refusing it; this turns red.
+    @Test func submitSpeakerPasswordRefusesABlankPassword() async throws {
+        let ctx = try await makeContext()
+        let result = ctx.dispatcher.execute(.submitSpeakerPassword(id: "office", password: "  "))
+        #expect(!result.applied)
+        #expect(result.refusalReason == "Enter the speaker's password.")
+        #expect(!ctx.groupController.isSpeakerSelected("office"))
+    }
+
+    /// Turns red if a password submitted from the phone selects a speaker the
+    /// user never joined; the phone's submit must match the Mac sheet's, which
+    /// retries without inventing membership.
+    @Test func submitSpeakerPasswordRetriesTheSpeaker() async throws {
+        let ctx = try await makeContext()
+        let result = ctx.dispatcher.execute(.submitSpeakerPassword(id: "office", password: "secret"))
+        #expect(result.applied)
+        #expect(!ctx.groupController.isSpeakerSelected("office"), "the retry never selects; membership stays the checkbox's job")
+    }
+
+    // MARK: setSpeakerVisibility / forgetSpeakers
+
+    /// Turns red if `setSpeakerVisibility` stops writing the speaker library,
+    /// or lets the phone change This Mac's Show in Mixer choice.
+    @Test func setSpeakerVisibilityWritesTheLibraryAndRefusesThisMac() async throws {
+        let ctx = try await makeContext()
+        let result = ctx.dispatcher.execute(.setSpeakerVisibility(id: "office", visibility: "hideWhenNotInUse"))
+        #expect(result.applied)
+        #expect(ctx.speakerLibrary.visibility(for: "office") == .hideWhenNotInUse)
+
+        let mac = ctx.dispatcher.execute(.setSpeakerVisibility(id: "local-mac", visibility: "hideWhenNotInUse"))
+        #expect(!mac.applied)
+        #expect(mac.refusalReason == "This Mac is always shown in the Mixer.")
+    }
+
+    /// Turns red if `forgetSpeakers` stops reaching the speaker library, or a
+    /// speaker Main Audio names gets forgotten along with the missing one.
+    @Test func forgetSpeakersForgetsARememberedSpeakerAndSkipsARoutedOne() async throws {
+        let ctx = try await makeContext()
+        try ctx.groupController.saveGroup(Group(id: "g1", name: "Pair", memberIDs: ["office", "garage"],
+                                                memberVolumes: [:]))
+        try ctx.groupController.saveGroup(Group(id: "g2", name: "Upstairs", memberIDs: ["office", "attic"],
+                                                memberVolumes: [:]))
+        ctx.speakerLibrary.update(liveDevices: ctx.backend.devices, groups: ctx.groupController.groups,
+                                  mainOut: .group(id: "g2"), selectedDeviceIDs: [], appRouteDestinations: [],
+                                  routedAppNamesByDeviceID: [:], recoveryIDs: [])
+
+        let result = ctx.dispatcher.execute(.forgetSpeakers(ids: ["garage", "attic"]))
+        #expect(result.applied)
+        #expect(ctx.speakerLibrary.record(for: "garage") == nil)
+        #expect(ctx.groupController.groups.first { $0.id == "g1" }?.memberIDs == ["office"])
+        #expect(ctx.speakerLibrary.record(for: "attic") != nil, "Main Audio names it, so Forget skips it")
+        #expect(ctx.groupController.groups.first { $0.id == "g2" }?.memberIDs == ["office", "attic"])
+    }
+
     // MARK: setMainOut — selected / group / refusals
 
     @Test func setMainOutSelectedDevices() async throws {
@@ -140,6 +244,30 @@ import AudioutProtocol
         let result = ctx.dispatcher.execute(.setMainOut(MainOutState(kind: "group", groupID: "g1")))
         #expect(result.applied)
         #expect(ctx.groupController.mainOut == .group(id: "g1"))
+    }
+
+    /// Red if the phone could turn a group on for an install limited to one
+    /// speaker, or refused it without saying why.
+    @Test func setMainOutGroupIsRefusedUnderTheOneSpeakerLimit() async throws {
+        let ctx = try await makeContext()
+        try ctx.groupController.saveGroup(Group(id: "g1", name: "Pair", memberIDs: ["office"], memberVolumes: [:]))
+        ctx.groupController.limitsToOneSpeaker = true
+        let result = ctx.dispatcher.execute(.setMainOut(MainOutState(kind: "group", groupID: "g1")))
+        #expect(!result.applied)
+        #expect(result.refusalReason == "Scenes need more than one speaker. Buy Audiout to use them.")
+        #expect(ctx.groupController.mainOut == .selectedDevices)
+    }
+
+    /// Red if the phone shows the analytics code `one_speaker_limit` as the
+    /// reason a second speaker was refused.
+    @Test func setDeviceSelectedRefusalUnderTheOneSpeakerLimitIsASentence() async throws {
+        let ctx = try await makeContext()
+        _ = ctx.groupController.setDeviceSelected("office", true)
+        ctx.groupController.limitsToOneSpeaker = true
+        let result = ctx.dispatcher.execute(.setDeviceSelected(id: "homepod-bed", selected: true))
+        #expect(!result.applied)
+        #expect(result.refusalReason == "Audiout plays on one speaker at a time until you buy.")
+        #expect(ctx.groupController.selectedDeviceIDs == ["office"])
     }
 
     @Test func setMainOutUnknownGroupIsRefused() async throws {
@@ -327,6 +455,15 @@ import AudioutProtocol
         #expect(ctx.groupController.isGroupMuted("g1"))
     }
 
+    /// Defect this catches: the dispatcher replied "applied" for a scene mute
+    /// on a group the Mac doesn't have, so the phone showed a mute that never happened.
+    @Test func setGroupMutedRefusesUnknownGroup() async throws {
+        let ctx = try await makeContext()
+        let result = ctx.dispatcher.execute(.setGroupMuted(id: "nope", muted: true))
+        #expect(!result.applied)
+        #expect(result.refusalReason == "That scene no longer exists on the Mac.")
+    }
+
     // MARK: addAppRoute — success + excluded refusal
 
     @Test func addAppRouteSucceeds() async throws {
@@ -353,6 +490,15 @@ import AudioutProtocol
         let result = ctx.dispatcher.execute(.removeAppRoute(bundleID: "com.apple.Music"))
         #expect(result.applied)
         #expect(!ctx.appRouting.appRoutes.contains { $0.bundleID == "com.apple.Music" })
+    }
+
+    /// Defect this catches: a removal for a bundle with no route replied
+    /// "applied" though nothing was removed.
+    @Test func removeAppRouteRefusesUnknownBundle() async throws {
+        let ctx = try await makeContext()
+        let result = ctx.dispatcher.execute(.removeAppRoute(bundleID: "com.apple.Music"))
+        #expect(!result.applied)
+        #expect(result.refusalReason == "That app identifier isn't valid.")
     }
 
     // MARK: setAppDestination — noRedirect / currentDevice / device + refusals

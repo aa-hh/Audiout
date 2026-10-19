@@ -1,6 +1,6 @@
 # Pricing & licensing model — research and recommendation
 
-Status: research + recommendation, not yet a decision. Owner sign-off pending.
+Status: **Settled**. The €30 one-time price (Recommendation §3 below, confirmed 2026-08-24) stands.
 Date: 2026-08-12. Related roadmap item: 051. Grounds the question the owner raised:
 how to charge for Audiout given the GPL-2.0-or-later constraint the vendored
 OwnTone sender forces on the whole work.

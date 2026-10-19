@@ -19,10 +19,21 @@ import Testing
     private static let key = "AUDT-AAAAA-BBBBB-CCCCC-DDDDD"
     private static let buy = URL(string: "https://audiout.app/buy")!
 
-    private func settings(withServer: Bool = true, withBuy: Bool = false) -> AppSettings {
-        AppSettings(defaults: defaults,
+    /// `store` is for the tests that need two independent Macs in one test —
+    /// one mid-trial and one whose trial ran out — since the trial fields live
+    /// in the store, not in the struct.
+    private func settings(withServer: Bool = true, withBuy: Bool = false,
+                          store: UserDefaults? = nil) -> AppSettings {
+        AppSettings(defaults: store ?? defaults,
                     licenseServerURL: withServer ? Self.server : nil,
                     buyURL: withBuy ? Self.buy : nil)
+    }
+
+    /// A trial that began `daysAgo` days ago. The dates are relative to the
+    /// real clock because every question here is about right now: 1 day ago is
+    /// mid-trial and 20 is long over, so no plausible clock skew moves either.
+    private func startTrial(_ settings: AppSettings, daysAgo: Double) {
+        TrialClock.start(settings: settings, now: Date(timeIntervalSinceNow: -daysAgo * 86_400))
     }
 
     // MARK: The decision
@@ -52,18 +63,101 @@ import Testing
         #expect(!LicenseGate.shouldPresent(settings: settings, presentation: .auto))
     }
 
+    /// A refunded or revoked key keeps the app running on one speaker. Red if
+    /// a declined verdict brought the blocking window back, whose only exit is
+    /// Quit.
     @Test(arguments: [LicenseStatus.revoked, .unknown, .invalid])
-    func declinedKeyGates(status: LicenseStatus) {
+    func declinedKeyLimitsInsteadOfGating(status: LicenseStatus) {
         let settings = settings()
         settings.licenseKey = Self.key
         settings.licenseStatus = status
+        #expect(!LicenseGate.shouldPresent(settings: settings, presentation: .auto))
+        #expect(LicenseGate.limitsToOneSpeaker(settings: settings))
+    }
+
+    /// A trial started on this Mac but not yet answered for by the server has
+    /// no key to read, so the old rule called it unregistered. Red if the
+    /// trial clause went away — every trial user would meet the wall on day
+    /// one, which is the whole thing the trial exists to remove.
+    @Test func aRunningTrialWithoutAKeyPassesTheGate() {
+        let settings = settings()
+        startTrial(settings, daysAgo: 1)
+        #expect(settings.licenseKey == nil)
+        #expect(!LicenseGate.shouldPresent(settings: settings, presentation: .auto))
+    }
+
+    /// The trial ends by the one-speaker limit, not the gate. Red if a spent
+    /// trial met the blocking window again, or ran unlimited for good.
+    @Test func anExpiredTrialIsLimitedNotGated() {
+        let settings = settings()
+        startTrial(settings, daysAgo: 20)
+        #expect(!LicenseGate.shouldPresent(settings: settings, presentation: .auto))
+        #expect(LicenseGate.limitsToOneSpeaker(settings: settings))
+    }
+
+    /// Red if a key typed after the trial ended were limited before the server
+    /// answered — an offline buyer would pay and still get one speaker.
+    @Test func anUnverifiedKeyAfterAnExpiredTrialIsNotLimited() {
+        let settings = settings()
+        startTrial(settings, daysAgo: 20)
+        settings.licenseKey = Self.key
+        #expect(settings.licenseStatus == nil)
+        #expect(!LicenseGate.limitsToOneSpeaker(settings: settings))
+    }
+
+    /// Red if an expired trial key whose last verdict was `.active` escaped
+    /// the limit — the stored trial key would keep every speaker for good.
+    @Test func anExpiredTrialWithAnActiveLastVerdictIsLimited() {
+        let settings = settings()
+        startTrial(settings, daysAgo: 20)
+        settings.licenseKey = Self.key
+        settings.licenseStatus = .active
+        #expect(LicenseGate.limitsToOneSpeaker(settings: settings))
+    }
+
+    /// Red if day one of a trial, before its key arrives, were gated or
+    /// limited — the trial exists to remove both.
+    @Test func aRunningTrialWithoutAKeyIsNeitherGatedNorLimited() {
+        let settings = settings()
+        startTrial(settings, daysAgo: 1)
+        #expect(!LicenseGate.shouldPresent(settings: settings, presentation: .auto))
+        #expect(!LicenseGate.limitsToOneSpeaker(settings: settings))
+    }
+
+    /// Red if a build from source ever limited speakers — GPL keeps that path
+    /// free.
+    @Test func aSourceBuildIsNeverLimited() {
+        let settings = settings(withServer: false)
+        startTrial(settings, daysAgo: 20)
+        #expect(!LicenseGate.limitsToOneSpeaker(settings: settings))
+        #expect(!LicenseGate.limitsToOneSpeaker(settings: self.settings(withServer: false, store: isolation.makeDefaults())))
+    }
+
+    /// Red if a fresh official install with no key and no trial skipped the
+    /// welcome, or ran unlimited behind it.
+    @Test func noKeyAndNoTrialGatesAndIsLimited() {
+        let settings = settings()
         #expect(LicenseGate.shouldPresent(settings: settings, presentation: .auto))
+        #expect(LicenseGate.limitsToOneSpeaker(settings: settings))
     }
 
     @Test func forceOverridesEvenASourceBuild() {
         #expect(LicenseGate.shouldPresent(settings: settings(withServer: false),
                                           presentation: .forceShow))
         #expect(!LicenseGate.shouldPresent(settings: settings(), presentation: .forceHide))
+    }
+
+    /// The dev knob answers on its own whatever the trial says. Red if the
+    /// trial clause leaked into the override path, which is how the gate stops
+    /// being reachable for anyone iterating on it.
+    @Test func forceOverridesTheTrialInBothDirections() {
+        let running = settings()
+        startTrial(running, daysAgo: 1)
+        #expect(LicenseGate.shouldPresent(settings: running, presentation: .forceShow))
+
+        let spent = settings(store: isolation.makeDefaults())
+        startTrial(spent, daysAgo: 20)
+        #expect(!LicenseGate.shouldPresent(settings: spent, presentation: .forceHide))
     }
 
     @Test func environmentKnobResolves() {
@@ -74,6 +168,155 @@ import Testing
             environment: ["AUDIOUT_LICENSE_GATE": "skip"]) == .forceHide)
         #expect(LicenseGatePresentation.resolved(
             environment: ["AUDIOUT_LICENSE_GATE": "gibberish"]) == .auto)
+    }
+
+    // Turns red if a shipping build reads the Developer popup's stored value,
+    // which would let a leftover dev preference hide the gate in a release.
+    @Test func shippingBuildIgnoresTheStoredGateSetting() {
+        let stored = settings(store: isolation.makeDefaults())
+        stored.licenseGatePresentation = .forceShow
+        #expect(LicenseGatePresentation.resolved(
+            environment: [:], settings: stored, isDevBuild: false) == .auto)
+    }
+
+    // Turns red if the resolver stops reading the Developer popup on a dev build.
+    @Test func devBuildStoredGateSettingBeatsAuto() {
+        let stored = settings(store: isolation.makeDefaults())
+        stored.licenseGatePresentation = .forceHide
+        #expect(LicenseGatePresentation.resolved(
+            environment: [:], settings: stored, isDevBuild: true) == .forceHide)
+    }
+
+    // Turns red if the stored setting is checked before `AUDIOUT_LICENSE_GATE`.
+    @Test func environmentKnobBeatsTheStoredGateSetting() {
+        let stored = settings(store: isolation.makeDefaults())
+        stored.licenseGatePresentation = .forceHide
+        #expect(LicenseGatePresentation.resolved(
+            environment: ["AUDIOUT_LICENSE_GATE": "force"], settings: stored, isDevBuild: true) == .forceShow)
+    }
+
+    // MARK: Remote waiver
+
+    /// A purchased build whose key the server revoked: limited to one speaker
+    /// until something waives it.
+    private func revokedSettings() -> AppSettings {
+        let settings = settings()
+        settings.licenseKey = Self.key
+        settings.licenseStatus = .revoked
+        return settings
+    }
+
+    /// The website's app-config with the Mac licence switch set as given.
+    private func appConfig(disabled: Bool, upToBuild: String = "null") -> Data {
+        Data("""
+        {"v": 1,
+         "ios": {"sync": {"disabled": false, "upToBuild": null, "message": null},
+                 "licenseCheck": {"disabled": false, "upToBuild": null}},
+         "mac": {"licenseCheck": {"disabled": \(disabled), "upToBuild": \(upToBuild)}}}
+        """.utf8)
+    }
+
+    /// Red if a revoked key stopped being limited when no config was ever
+    /// fetched, which would make the waiver the default instead of the
+    /// exception.
+    @Test func aRevokedKeyWithNoCachedConfigIsLimited() {
+        #expect(LicenseGate.limitsToOneSpeaker(settings: revokedSettings()))
+    }
+
+    /// Red if a fresh file with `mac.licenseCheck.disabled` true stopped
+    /// lifting the limit, which is the whole point of the switch.
+    @Test func aFreshWaiverLiftsTheLimit() {
+        let settings = revokedSettings()
+        settings.remoteConfigData = appConfig(disabled: true)
+        settings.remoteConfigFetchedAt = Date()
+        #expect(!LicenseGate.limitsToOneSpeaker(settings: settings))
+    }
+
+    /// Red if a file fetched eight days ago still waived the limit, which would
+    /// let one forgotten switch unlicense the app for good.
+    @Test func aWaiverFetchedEightDaysAgoNoLongerCounts() {
+        let settings = revokedSettings()
+        settings.remoteConfigData = appConfig(disabled: true)
+        settings.remoteConfigFetchedAt = Date(timeIntervalSinceNow: -8 * 86_400)
+        #expect(LicenseGate.limitsToOneSpeaker(settings: settings))
+    }
+
+    /// Red if `upToBuild` stopped being inclusive or stopped being checked: a
+    /// build above the cut-off must stay limited, and the cut-off build itself
+    /// must be waived.
+    @Test func theWaiverStopsAtItsBuildCutOff() {
+        let settings = revokedSettings()
+        settings.remoteConfigFetchedAt = Date()
+
+        settings.remoteConfigData = appConfig(disabled: true, upToBuild: "4")
+        #expect(!RemoteAppConfig.licenseCheckWaived(settings: settings, build: 5, now: Date()))
+
+        settings.remoteConfigData = appConfig(disabled: true, upToBuild: "5")
+        #expect(RemoteAppConfig.licenseCheckWaived(settings: settings, build: 5, now: Date()))
+    }
+
+    // MARK: The thank-you card and the consent ask
+
+    /// A trial that converted to a paid key: started, then cleared of its end
+    /// date when the bought key arrived.
+    private func convert(_ s: AppSettings) {
+        startTrial(s, daysAgo: 3)
+        s.trialExpiresAt = nil
+        s.licenseKey = Self.key
+        s.licenseStatus = .active
+    }
+
+    /// Fails if the card stops being owed to a converted trial, or is owed again once shown.
+    @Test func aConvertedTrialIsOwedTheThankYouCardOnce() {
+        let s = settings()
+        convert(s)
+        #expect(LicenseGate.owesThankYouCard(settings: s))
+        s.licenseThankYouShown = true
+        #expect(!LicenseGate.owesThankYouCard(settings: s))
+    }
+
+    /// Fails if the `licenseServerURL` clause is dropped: a source build has no purchase to thank.
+    @Test func aSourceBuildIsNeverOwedTheThankYouCard() {
+        let s = settings(withServer: false)
+        convert(s)
+        #expect(!LicenseGate.owesThankYouCard(settings: s))
+    }
+
+    /// Fails if the `trialStartedAt` clause is dropped: a direct buyer never had a trial to convert.
+    @Test func aDirectBuyerIsNeverOwedTheThankYouCard() {
+        let s = settings()
+        s.licenseKey = Self.key
+        s.licenseStatus = .active
+        #expect(!LicenseGate.owesThankYouCard(settings: s))
+    }
+
+    /// Fails if the `trialExpiresAt == nil` clause is dropped: a running trial has not converted.
+    @Test func aRunningTrialIsNeverOwedTheThankYouCard() {
+        let s = settings()
+        startTrial(s, daysAgo: 1)
+        s.licenseKey = Self.key
+        s.licenseStatus = .active
+        #expect(!LicenseGate.owesThankYouCard(settings: s))
+    }
+
+    /// Fails if the consent ask comes before the thank-you card, after an
+    /// answer, or a second time.
+    @Test func theConsentAskIsOwedOnlyAfterTheCardAndOnlyOnce() {
+        let s = settings()
+        convert(s)
+        s.licenseThankYouShown = true
+        #expect(LicenseGate.owesConversionConsentAsk(settings: s))
+
+        s.licenseThankYouShown = false
+        #expect(!LicenseGate.owesConversionConsentAsk(settings: s))
+        s.licenseThankYouShown = true
+
+        s.telemetryAsked = true
+        #expect(!LicenseGate.owesConversionConsentAsk(settings: s))
+        s.telemetryAsked = false
+
+        s.telemetryConversionAskShown = true
+        #expect(!LicenseGate.owesConversionConsentAsk(settings: s))
     }
 
     // MARK: The window
@@ -159,7 +402,7 @@ import Testing
         #expect(passed == 0)
         #expect(!gate.test_didFinish)
         #expect(gate.test_contentViewController.test_resultText
-            == LicenseCopy.statusLine(for: .unknown))
+            == LicenseCopy.statusLine(for: .unknown, reason: nil))
     }
 
     /// An unreachable server saves the key AND opens the gate — "couldn't
@@ -222,6 +465,30 @@ import Testing
         await drainMain()
         #expect(passed == 1)
         #expect(settings.licenseKey == Self.key)
+    }
+
+    /// Red if the phone-verified pass stopped opening the gate exactly once.
+    @MainActor
+    @Test func aPhoneVerifiedKeyOpensTheGateExactlyOnce() async {
+        var passed = 0
+        var aborted = 0
+        let gate = makeGate(settings(), Transport(),
+                            onPassed: { passed += 1 }, onAbort: { aborted += 1 })
+        gate.passWithStoredKey()
+        gate.passWithStoredKey()
+        #expect(passed == 1)
+        #expect(aborted == 0)
+    }
+
+    /// Red if `isChecking` stopped reporting a Register check in flight, which
+    /// let the phone's key race the gate's own check on the stored key.
+    @MainActor
+    @Test func isCheckingCoversOnlyARegisterInFlight() async {
+        let gate = makeGate(settings(), Transport())
+        #expect(!gate.isChecking)
+        gate.submit(key: Self.key)
+        #expect(gate.isChecking, "the validator has not answered until the next main-queue turn")
+        await drainMain()
     }
 
     // MARK: The one surface's states
@@ -387,7 +654,7 @@ import Testing
         content.test_tapRegister()
         await drainMain()
 
-        #expect(content.test_resultText == LicenseCopy.statusLine(for: .revoked))
+        #expect(content.test_resultText == LicenseCopy.statusLine(for: .revoked, reason: nil))
         #expect(content.test_buyIsVisible)
         #expect(content.test_buyAlpha == 1)
     }
@@ -411,6 +678,89 @@ import Testing
         held.test_tapRegister()
         await drainMain()
         #expect(held.test_fieldScene == .quiet)
+    }
+
+    // MARK: The trial offer
+
+    /// The offer is for someone who has never had a trial, and for nobody
+    /// else. Red if it came back for a trial already running or already spent
+    /// — a second trial is not a thing this app has.
+    @MainActor
+    @Test func theTrialOfferIsOnlyThereBeforeAnyTrial() {
+        let fresh = makeContent(settings(), Transport())
+        #expect(fresh.test_trialIsVisible)
+        #expect(fresh.test_trialTitle == "Try Audiout free for 14 days")
+
+        let running = settings(store: isolation.makeDefaults())
+        startTrial(running, daysAgo: 1)
+        #expect(!makeContent(running, Transport()).test_trialIsVisible)
+
+        let spent = settings(store: isolation.makeDefaults())
+        startTrial(spent, daysAgo: 20)
+        #expect(!makeContent(spent, Transport()).test_trialIsVisible)
+    }
+
+    /// The tap starts the 14 days and opens the gate in the same turn. Red if
+    /// anything network-shaped got between the button and `onPassed` — telling
+    /// the licence server is a later, silent job, and a start that waited on a
+    /// server would put the wall back in front of someone who has not seen the
+    /// app yet.
+    @MainActor
+    @Test func startingTheTrialOpensTheGateAtOnce() {
+        let settings = settings()
+        var passed = 0
+        let content = makeContent(settings, Transport(), onPassed: { passed += 1 })
+        content.test_tapTrial()
+
+        #expect(passed == 1)
+        #expect(content.test_didPass)
+        #expect(settings.trialStartedAt != nil)
+        #expect(!settings.trialRegistered)
+        #expect(settings.licenseKey == nil)
+        // And the next launch does not ask again.
+        #expect(!LicenseGate.shouldPresent(settings: settings, presentation: .auto))
+    }
+
+    /// A converted trial keeps its start date and loses its expiry — that is
+    /// what the validator writes when the paid key answers — so it reads as no
+    /// trial at all. Red if the offer were driven off that reading again: a
+    /// refund brings this window back, `TrialClock.start` refuses a Mac that
+    /// has trialled before, and the user would be let through on no trial and
+    /// no valid key, every launch.
+    @MainActor
+    @Test func aTrialThatConvertedIsNeverOfferedASecondOne() {
+        let settings = settings()
+        startTrial(settings, daysAgo: 3)
+        settings.trialExpiresAt = nil
+        #expect(TrialClock.state(settings: settings) == .none, "reads as no trial")
+
+        var passed = 0
+        let content = makeContent(settings, Transport(), onPassed: { passed += 1 })
+        #expect(!content.test_trialIsVisible)
+
+        content.test_tapTrial()
+        #expect(passed == 0)
+        #expect(!content.test_didPass)
+        #expect(settings.trialExpiresAt == nil, "no second trial was written")
+    }
+
+    /// Every gate welcomes. Red if the words changed per trial state — the
+    /// gate is first-open only, so no other copy belongs on it.
+    @MainActor
+    @Test func theGateAlwaysWelcomes() {
+        let welcome = "Welcome to Audiout"
+        let why = "It takes one key to open. Yours is in your receipt email, starting with AUDT."
+        let fresh = makeContent(settings(store: isolation.makeDefaults()), Transport())
+        #expect(fresh.test_headlineText == welcome)
+        #expect(fresh.test_bodyText == why)
+
+        // A running trial never reaches the gate (the rule above), but if one
+        // ever did it gets the same words.
+        let running = settings(store: isolation.makeDefaults())
+        startTrial(running, daysAgo: 1)
+        let midTrial = makeContent(running, Transport())
+        #expect(midTrial.test_headlineText == welcome)
+        #expect(midTrial.test_bodyText == why)
     }
 
     // MARK: LicenseResend (Core)
@@ -470,9 +820,16 @@ import Testing
     /// grow. The column has to clear the Quit/Buy row pinned to the bottom
     /// edge — an overlap here is two controls drawn on top of each other, not
     /// a scroll.
+    ///
+    /// The trial state is the axis that varies: each of the three draws a
+    /// different column — the trial offer and its line are only in the first,
+    /// and the ending's body copy is longer than the welcome's.
     @MainActor
-    @Test func theContentColumnClearsTheBottomButtonRow() {
-        let gate = makeContent(settings(withBuy: true), Transport())
+    @Test(arguments: [nil, 1.0, 20.0] as [Double?])
+    func theContentColumnClearsTheBottomButtonRow(trialStartedDaysAgo: Double?) {
+        let settings = settings(withBuy: true, store: isolation.makeDefaults())
+        if let trialStartedDaysAgo { startTrial(settings, daysAgo: trialStartedDaysAgo) }
+        let gate = makeContent(settings, Transport())
         gate.view.frame = NSRect(origin: .zero, size: LicenseGateViewController.contentSize)
         gate.view.layoutSubtreeIfNeeded()
 
@@ -487,5 +844,124 @@ import Testing
                 "the column reaches down to \(column.frame.minY), into a button row topping out at \(rowTop)")
         #expect(column.frame.maxY < LicenseGateViewController.contentSize.height,
                 "the column overflows the top of a window that cannot grow")
+    }
+
+    /// The glass panel backs the brand mark down through the quiet links. It has
+    /// to clear the Quit/Buy row at the bottom (the trial offer that sits below
+    /// it is what leaves that room) and not overflow the fixed window at the
+    /// top. The trial axis varies the content it wraps, same as the column test.
+    @MainActor
+    @Test(arguments: [nil, 1.0, 20.0] as [Double?])
+    func theGlassPanelClearsTheButtonRowAndTop(trialStartedDaysAgo: Double?) {
+        let settings = settings(withBuy: true, store: isolation.makeDefaults())
+        if let trialStartedDaysAgo { startTrial(settings, daysAgo: trialStartedDaysAgo) }
+        let gate = makeContent(settings, Transport())
+        gate.view.frame = NSRect(origin: .zero, size: LicenseGateViewController.contentSize)
+        gate.view.layoutSubtreeIfNeeded()
+
+        let glass = gate.test_glassPanel
+        let buttons = gate.view.subviews.compactMap { $0 as? NSButton }
+        guard let rowTop = buttons.map(\.frame.maxY).max() else { return }
+
+        // Unflipped root: y counts up from the bottom edge.
+        #expect(glass.frame.minY > rowTop,
+                "the glass panel reaches down to \(glass.frame.minY), into a button row topping out at \(rowTop)")
+        #expect(glass.frame.maxY < LicenseGateViewController.contentSize.height,
+                "the glass panel overflows the top of a window that cannot grow")
+    }
+
+    /// The glass panel's bottom edge keeps a clear gap above the trial button,
+    /// rather than crowding it — the trial button only exists on a fresh
+    /// install (no trial ever started), so this case is not parametrized.
+    @MainActor
+    @Test
+    func theGlassPanelKeepsClearOfTheTrialButton() {
+        let settings = settings(withBuy: true, store: isolation.makeDefaults())
+        let gate = makeContent(settings, Transport())
+        gate.view.frame = NSRect(origin: .zero, size: LicenseGateViewController.contentSize)
+        gate.view.layoutSubtreeIfNeeded()
+
+        let glass = gate.test_glassPanel
+        let column = gate.view.subviews.compactMap { $0 as? NSStackView }.first
+        #expect(column != nil, "expected the content column on the root view")
+        guard let column else { return }
+        let trial = column.arrangedSubviews.compactMap { $0 as? NSButton }.first
+        #expect(trial != nil, "expected the trial button arranged directly in the column")
+        guard let trial else { return }
+
+        let trialInRoot = trial.convert(trial.bounds, to: gate.view)
+
+        // Unflipped root: y counts up from the bottom edge.
+        #expect(glass.frame.minY - trialInRoot.maxY >= 10,
+                "the glass panel's bottom edge crowds the trial button: gap is \(glass.frame.minY - trialInRoot.maxY)")
+    }
+}
+
+/// The gate's trial events, asserted on the real `Analytics` calls rather
+/// than on a hook only a test can see.
+///
+/// Nested under `SerializedSharedState` because `Analytics.install` mutates
+/// process-global state — the rule in `SerializedSharedStateSuite.swift`. The
+/// suite above stays parallel; only this test pays for the global sink.
+extension SerializedSharedState {
+    @MainActor
+    @Suite struct LicenseGateTrialAnalyticsTests {
+
+        private final class Captured: @unchecked Sendable {
+            private let lock = NSLock()
+            private var items: [(String, [String: String])] = []
+            func append(_ name: String, _ properties: [String: String] = [:]) {
+                lock.withLock { items.append((name, properties)) }
+            }
+            func names() -> [String] { lock.withLock { items }.map(\.0) }
+            func properties() -> [[String: String]] { lock.withLock { items }.map(\.1) }
+        }
+
+        private let isolation = TestIsolation(owner: "LicenseGateTrialAnalyticsTests")
+
+        private static let key = "AUDT-AAAAA-BBBBB-CCCCC-DDDDD"
+
+        private func gateSettings(_ store: UserDefaults) -> AppSettings {
+            AppSettings(defaults: store,
+                        licenseServerURL: URL(string: "https://license.example.com"))
+        }
+
+        /// Installs a sink for the body and puts `Analytics` back afterwards.
+        private func withSink(_ body: (Captured) -> Void) {
+            let captured = Captured()
+            Analytics.install(Analytics.Sink(capture: { name, props in
+                captured.append(name, props)
+            }, captureError: { _, _ in }, consentChanged: { _ in }), consent: true)
+            defer { Analytics.install(nil, consent: false) }
+            body(captured)
+        }
+
+        /// Red if starting a trial stopped reporting it. This name is read as
+        /// a string by the PostHog insight behind the trial funnel, so it is
+        /// pinned here rather than left to whatever the call site says.
+        @Test func startingTheTrialIsCaptured() {
+            let settings = gateSettings(isolation.isolatedDefaults)
+            let content = LicenseGateViewController(settings: settings,
+                                                    openURL: { _ in }, onPassed: {})
+            withSink { captured in
+                content.test_tapTrial()
+                #expect(captured.names() == ["license:trial_started"])
+            }
+        }
+
+        /// Red if either banner stopped reporting, or if the two stopped being
+        /// told apart — the funnel could then not say which warning converts.
+        @Test func showingABannerReportsWhichDayItWas() {
+            withSink { captured in
+                let settings = gateSettings(isolation.makeDefaults())
+                TrialClock.start(settings: settings)
+                TrialClock.markBannerShown(.threeDays, settings: settings)
+                TrialClock.markBannerShown(.lastDay, settings: settings)
+
+                #expect(captured.names()
+                        == ["license:banner_shown", "license:banner_shown"])
+                #expect(captured.properties().map { $0["day"] } == ["3", "1"])
+            }
+        }
     }
 }

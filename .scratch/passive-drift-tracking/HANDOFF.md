@@ -1,0 +1,506 @@
+# Handoff — passive drift tracking (roadmap 085)
+
+Rewritten 2026-09-14 19:10 UTC. **Read this section first; everything below it
+is the chronology and only needed when a detail here is not enough.** Then
+`spec.md` (18 decisions) and the ticket files in `issues/`.
+
+## Start here
+
+**Where the code is.** Mac repo branch `claude/bluetooth-latency-drift-6c2d59`,
+worktree `.claude/worktrees/bluetooth-latency-drift-6c2d59`, head `2e7ec3ba`,
+pushed, level with main as of `b8d74312`, NOT merged. It pins audiout-shared
+`from: "0.15.0"` (shared main `6dc9e34`). The tap fix (PR #200) is ON MAIN.
+Rules: never a bare `swift` command in this repo (use `scripts/run-tests.sh
+--filter`, `scripts/build.sh`, `scripts/make-app.sh`); `swift test` is fine
+inside `~/Projects/audiout-shared`; hold `scripts/livetest.sh acquire` before
+building or launching the dev id; never compile on this Mac while a live
+music block plays (load 138 broke the capture in live test 4).
+
+**What is true now (verified live 2026-09-14).**
+- The sender's dropped capture cycles were the main cause of "drift": fixed
+  (PR #200, `NativeCaptureCoordinator.handleBuffer` pads unarmed holes ≤ 50 ms;
+  `tap_feed_gap cause:"dropped_cycle"` in the log; `write_cadence_drift`
+  `netDriftTotalSeconds` must stay near 0 — if it climbs, stop and look there).
+- With that fixed, two Sonos Moves held their separation within ~1 ms over 90
+  min of music; the tracker had nothing to correct. Remaining jumps are
+  event-shaped: a relaunch/reconnect re-rolled one link by ~10 ms; a bad link
+  shows as `bt_clock_jump` storms (one Move, every second) and a speaker
+  power-cycle clears it.
+- The measurement (shared 0.15.0: whitening 0.7, gates margin ≥ 1.2 / local
+  ≥ 2.4, four sub-bands 3-of-4, per-speaker second-peak search) accepted three
+  live windows within 1 ms at normal level and read a labelled +40 ms trim jump
+  as 39–41 ms offline. The old plain filter never resolved a peak.
+- Corrections have NEVER been exercised correctly live. The only live
+  corrections ever fired were wrong ones (the merged-peak bug, now fixed:
+  decision 14). Verify-before-apply is the default (decision 17).
+- Decision 18 (Alec, 2026-09-14): the mic listens on events + one sparse
+  periodic check per 20–30 min, not every 3 min. Not built yet (ticket 17).
+
+**Owed, in order, with what each needs.**
+
+1. **Ticket 17 — event-driven cadence** (`issues/17-mac-event-driven-cadence.md`).
+   Code: `PassiveDriftTracker` in `AudioutCore/Sources/AudioutCore/PassiveDriftSampler.swift`
+   (`periodicIntervalSeconds`, `trigger(_:)`, `takeWindow`, the blind counter);
+   triggers arrive via `NativeBackend.noteDriftTrigger` from
+   `OwnToneBackend.swift` (clock steps, ~line 1010) and wherever reconnect /
+   silence→audio edges live (`btProgramIsSilent`, sink rebuild causes). Rate-limit
+   clock-step triggers (one per speaker per 60 s; a storm = bad link, log it,
+   do not window). Tests: `PassiveDriftTrackerTests` with the injected recorder.
+2. **The live test that proves the loop** — never done. With Alec home: dev
+   build, both Moves selected (the hook `audiout.devSelectOnLaunch` is set on
+   this Mac and reselects them after any relaunch), music at his normal level
+   (Spotify volume 85, playlist `spotify:playlist:37i9dQZF1E35FDDWYtEKBa`),
+   then turn ONE Move off and on. Expect: `bt_sink_rebuild` / reconnect trigger
+   → a window → two peaks (one moved) → `drift_correction_started` for that
+   speaker only after a second agreeing window → `drift_correction_landed` →
+   Alec hears it land. Watch with:
+   `tail -n 0 -F ~/Library/Logs/Audiout/telemetry.jsonl | grep --line-buffered -E '"evt":"(drift_window_result|drift_correction|drift_verify|bt_clock_jump|tap_feed_gap)' | awk '{print substr($0,1,600); fflush()}'`
+   (`cut` buffers; end pipelines in awk with fflush). Window log format:
+   `candidates`/`peaks` = `delay@score/local/margin`; `result` ∈ observations |
+   aligned | merged | rebaselined | unusable | blind.
+3. **Ruling owed (Alec): sub-band agreement 3-of-4 vs 2-of-4.** At 3-of-4 the
+   quietest real window (2026-09-13 21:16:33, capture −48 dBFS) is refused
+   although both gates pass; at 2-of-4 it is accepted and no garbage window
+   passes. Constant lives in audiout-shared `PassiveDriftCorrelator.swift`
+   (the ticket-11 commit `3b37ecf` names it); the fixture test pins the
+   numbers. Changing it = a shared 0.15.x tag + Mac pin bump.
+4. **Tickets 12, 14, 15** (`issues/`). 12's accumulator is less pressing under
+   decision 18 (its near-miss retry folded into 17); 14 (clock-step
+   calibration + rate limit) overlaps 17 — build 17 first, then 14's fit
+   script over `bt_clock_jump` + `drift_window_result` (needs `hostNanos` on the
+   result line to join them); 15 (ambient-noise slice) is cheap and last.
+5. **audiout-remote pin bump** to shared 0.15.0 (ProbeKit only; the protocol
+   is unchanged, so no `CompanionProto.version` bump). Repo `aa-hh/audiout-remote`.
+6. **Before this branch merges to main:** `windows-2026-09-13/` and
+   `windows-2026-09-14/` hold 63 MB of raw Float32 windows whose `-meta.json`
+   carry the Moves' Bluetooth addresses, in a PUBLIC GPL repo. Options: drop
+   them from history before merge (the compact fixtures in audiout-shared keep
+   only expected delays), or move them to a private location. Alec decides.
+7. **Flaky test:** `aSlewLeavesNoStepBiggerThanTheProgrammesOwn`
+   (`DriftCorrectionApplierTests.swift` ~503, timing-sensitive, 1.5× tolerance)
+   failed once and passed on rerun twice on 2026-09-14. Guard 4 may refuse a
+   commit on it; `AUDIOUT_FULL_SUITE=1 bash scripts/run-tests.sh` warms the pass
+   cache. Fix or de-flake before merge.
+8. Ticket 06 (field logging: the PostHog events need Alec's approval; local
+   lines are all in place) and ticket 07 (iPhone re-sync button) untouched.
+
+**Traps a fresh agent will hit.**
+- The live-test slot may be held by a finished session; `scripts/livetest.sh
+  status` names the worktree; `done` from that worktree frees it.
+- Every reselect of a speaker restarts the window timer; the first window is
+  3 min after tracking turns on, then a sparse check every 25 min, plus
+  windows on reconnect, silence into audio, rate-limited clock steps, and
+  the existing verify trigger (ticket 17).
+- A wrong correction persists to `~/Library/Application Support/
+  com.audiout.Audiout.dev/bt-sync-trims.json` (`latencyMs`); edit it back with
+  the app quit. The production app's store is a different file.
+- Windows are dumped to `~/Library/Logs/Audiout/drift-windows/` while the
+  defaults key `audiout.driftDumpWindows` is set (it is, on this Mac); the
+  harness is `dev/drift-window-analysis.py` (needs a venv with numpy+scipy;
+  `--fixtures` reads the shared repo's compact fixtures).
+- With the app quit, macOS's default output is a Bluetooth Move; the app makes
+  its own "Audiout Dev" device the default when it runs. If `stream_health`
+  lines are absent while music plays, the app is not receiving audio at all.
+- A Mac left alone sleeps once `caffeinate` expires; empty mic windows
+  (`drift_window_dropped empty_capture`) for hours meant the Mac was asleep,
+  not a bug.
+- Claude's shell cannot use Bluetooth (no usage entry in the helper app), not
+  even through Terminal; `blueutil` only works from Alec's own terminal.
+- Third Bluetooth devices (AirPods) on the radio raised the dropped-cycle rate
+  from one per hour to one per 40 s before the fix; keep them off during
+  timing tests anyway.
+
+---
+
+## What this is
+
+The app keeps Bluetooth speakers aligned during playback by listening to the
+music itself: the Mac's microphone records a few seconds, the recording is
+compared against the audio the app actually sent, each speaker's arrival time
+is found, and a speaker that has moved gets its stored measured latency
+nudged back. AirPlay speakers are never adjusted; they are the fixed
+reference (decision 13).
+
+## Where the code is
+
+- **Mac repo branch:** `claude/bluetooth-latency-drift-6c2d59`, worktree
+  `.claude/worktrees/bluetooth-latency-drift-6c2d59`, pushed to origin.
+  Not merged to main; main was merged INTO it three times, last at
+  `99813077`. Head `69912ea2` (live test 2 fixes, scoped suites 397 passed;
+  full suite not rerun since `99813077`). Nothing uncommitted.
+- **audiout-shared:** everything committed on `main`. Tag `0.12.0`
+  (`d4e96b2`) holds the bass filter and `analyzeWithCandidates`. The Mac
+  branch now pins `from: "0.13.0"` (main's emitter-field constants), which
+  is built on 0.12.0 and keeps the fix. That checkout has uncommitted changes
+  that are NOT ours: `docs/analytics-events.md`, untracked
+  `.github/workflows/`, `worktrees/`. Leave them.
+- **Worktree `drift-correction-policy`:** obsolete helper worktree, reset to
+  match origin and flagged `.prunable`; housekeeping removes it.
+- **audiout-remote:** still pinned to shared 0.9.0; bump owed.
+
+## Ticket state
+
+| Ticket | State |
+|---|---|
+| 01 outgoing-audio ring | built, reviewed; live check owed |
+| 02 correlator (shared) | built; 0.12.0 bass filter; scores marginal on real music at normal level — see brief |
+| 03 Mac mic sampler | built, reviewed |
+| 04 Bluetooth keep-alive through silence | built; ruled OUT as the cause of the link dips; re-roll prevention still unverified |
+| 05 corrections | built; merged-peak rule added `69912ea2`; verify half of decision 7 is a no-op (see below) |
+| 06 field logging | partly done ad hoc in `4b191c25` (see Logging); the ticket as written is still open. Read its Comments first: the PostHog correction event already exists, it fires too early for a slew, and a window-count event needs Alec's approval |
+| 07 iPhone re-sync button | not started |
+| 08 roadmap swap | done |
+
+Suites at `99813077`: full suite 3,879 tests passed. Build clean.
+
+The latest merge brought in main's wizard mic-permission focus fix and its
+analytics (#196, #194). They touched `MicProbeSession.swift`, which this branch
+also changed; it auto-merged, and the recorder-restart handling (timestamp
+withheld after a restart) is intact.
+
+Main's #193 (merged in) makes the alignment wizard lead with the automatic mic
+measurement; it writes the same stored measured latency that drift
+corrections adjust. Not a conflict, but the live test now runs on that wizard.
+
+## Live test 2 (2026-09-13, 18:18–20:00 UTC) — what was learned
+
+Owner played pop and dance music on two Sonos Moves over Bluetooth
+(`54-2A-1B-79-08-9E` "Sonos Move 089E", `C4-38-75-0E-BF-4A` "Move 2 BF4A"),
+Mac's built-in mic, normal listening level ≈ 50 dBA at the Mac. Commit
+`69912ea2` holds every change below; branch pushed, level with origin.
+
+**Not the feature: a bad Bluetooth link.** For the first hour one Move's
+pacing clock stepped > 2 ms nearly every second, only while BOTH Moves were
+selected (zero steps with either alone), audible as a volume dip that came
+back re-timed. Production did the same. Keep-alive off and AirPods
+disconnected changed nothing; a power cycle of the speakers cleared it.
+The new `bt_clock_jump` line (uid, size) makes this visible next time.
+
+**Defects found and fixed (all in `69912ea2`):**
+
+1. *Wrong correction on a merged peak.* Two speakers trimmed into sync by
+   ear arrive as ONE peak. Nearest-baseline assignment gave it to one
+   speaker and slewed it −11.5 ms, then −47.6 ms, out of sync. Ruling
+   (owner): a peak that is the only one inside more than one Bluetooth
+   baseline's window is `.merged` — both baselines take it as the sync
+   point, nothing is corrected. Test
+   `speakersArrivingTogetherAreTakenAsTheSyncPointAndNeverCorrected`.
+   Seen live afterwards: `merged` at 479.5 (score 4.18) and 526.8 (2.52).
+2. *Wizard Keep never re-evaluated tracking* — the second speaker's
+   measurement left tracking off until a trim nudge. Fixed in the keep path.
+3. *Threshold.* True arrivals ON their baseline scored 2.5–2.9 at normal
+   level, 3.1–4.2 at 60 dBA (75 % of the Moves' hardware volume — not a
+   product answer); refused windows' best garbage scored ≤ 1.9, scattered.
+   Ruling (owner): `PassiveDriftSampler.minPeakToSidelobe = 2.3` for this
+   build. The research brief argues for gates instead (below).
+4. *8-second windows scored no higher than 4* (2.49 vs 2.56): the score's
+   background is the music's own structure, which grows with the window.
+   Window stays 4 s.
+
+**Still open, in order of weight:**
+
+- *Scores are marginal on ordinary music at normal volume* (pop, not only
+  loops). Input level 48 → 83 changed nothing. Moving the Mac closer changed
+  nothing. The owner suspects a pipeline fault; nothing found by reading
+  (ring source and rates check out) but NOT proven either way. The window
+  dump exists for exactly this: `defaults write com.audiout.Audiout.dev
+  audiout.driftDumpWindows -bool YES` (already set on this Mac) writes
+  `~/Library/Logs/Audiout/drift-windows/<stamp>-{ref,cap}.f32` (Float32
+  mono LE) + `-meta.json`. **No window was ever dumped** — the dump build
+  was launched at 19:58 UTC but no speakers were selected on it. First job
+  next session: get 3+ dumped windows and analyse them offline (numpy venv
+  at the session scratchpad is gone; `python3 -m venv` + `pip install numpy
+  scipy` takes a minute). Check: is the arrival there, how sharp, does the
+  capture clip, what does partial whitening do to the score.
+- *A real ≈ 11 ms desync at ~19:51 UTC was caught by nothing*: no clock
+  step (threshold 2 ms/s), and the window at 19:53 was refused (1.29). The
+  owner re-trimmed by ear. The cheap detector and the mic both missed it.
+- *The verify half of spec decision 7 never runs.* `DriftCorrectionApplier`
+  treats `.scheduleVerify` as a no-op ("ticket 06 logs these"), so a guessed
+  correction is applied and never checked.
+- *The Mac never passes `ambientNoise`* to the correlator, so its SNR
+  weighting has never engaged. Recording ~1 s of room sound whenever
+  `programIsSilent` and handing it to each window is a Mac-side ticket.
+  The brief ranks it last for lag choice, but it is cheap.
+- *A false merged peak would move the sync point* (2.3 lets more through).
+  Guard idea, not approved: require two consecutive windows to agree.
+- `dev/notes/drift-tde-algorithms-brief.md` (committed): ranked research.
+  First in ProbeKit: partial whitening by the reference's own spectrum
+  (exponent ≈ 0.5); second: peak vs second-best peak inside the ±120 ms
+  window as an extra gate; third: sub-band agreement. It advises against
+  the 2.3 threshold once those exist.
+- Ticket 06 properly, ticket 07, audiout-remote pin bump, merge (owner's
+  go-ahead only).
+
+## Live test 3 (2026-09-13, 21:04–21:16 UTC) — the dumped windows
+
+Four windows dumped (`windows-2026-09-13/` beside this file; harness
+`dev/drift-window-analysis.py`, needs numpy+scipy). Findings, offline:
+
+- **Pipeline is sound.** Reference and capture clocks agree (a stretch sweep
+  peaks at 0 ppm); over the full lag range every strong peak sits at
+  548–630 ms where the speakers are; a reversed-reference null scores ~1.
+- **The mic hears the music well — as bass.** Correlation coefficient at the
+  best lag: 0.67 (100–300 Hz) and 0.42 (300–1000 Hz) in window 1, 0.50/0.43 in
+  window 3. In 1–8 kHz the capture is at −50 to −59 dBFS, the mic's floor.
+- **Bass gives a comb, treble picks the tooth — and the treble is not there.**
+  Bass-band peaks repeat every ~10 ms (558/569/579/588). Window 1's 1–8 kHz
+  whitened correlation resolved 555.1 (local score 4.0); windows 2 and 3 had
+  nothing in the treble at all (window 3's music had 5 dB less treble; window
+  2 was near-field noise at the Mac, +6.6 dBFS peaks, correlation ~0.1).
+- **Full whitening (exponent 1.0) is the lever, seen in this room.** Window 4
+  (21:16:33, the quietest music: capture −48 dBFS): plain filter local score
+  1.85, whitened 4.52, 38 % above the next peak, two of four sub-bands on it,
+  at 570.6 ms. Window 1's four-band whitened product → 569.2 (1.9:1); window
+  3's app answer 574.3. An arrival near 570 ms recurs in 3 of 4 windows once
+  whitened; the plain filter the app runs never resolves it. Window 2 was
+  noise. Four windows dumped, all in `windows-2026-09-13/`.
+- **The 2.3 threshold accepted garbage within three windows** (21:13:33,
+  `merged` at 574.3 @ 2.40; offline: 4 % above its neighbour, local 1.6) and
+  moved the sync point to it. Recommend 3 again before any merge.
+- Treble is noise-limited (not structure-limited), so longer windows DO help
+  in that band specifically; the ensemble brief's plan stands, with these
+  windows as fixtures; acceptance = repeatable arrival at normal level.
+- `dev/notes/drift-ensemble-design-brief.md` (committed): ranked plan —
+  labelled set first, whitening + second-peak gate, sub-band agreement,
+  3-window accumulation, clock-step calibration, verify step.
+
+## Live test 4 runbook (2026-09-14, unattended — Alec is out; agreed 2026-09-13 22:00 UTC)
+
+Agreed with Alec: **2 hours of music maximum**, in 12-minute blocks with
+silence between; his daily playlist `spotify:playlist:37i9dQZF1E35FDDWYtEKBa`;
+first block at tonight's level (Spotify volume 100, Moves' app volumes as
+left), then a few dB quieter for the neighbours (Spotify ~85) and keep it
+there while windows still resolve. Log the level per block. Nothing else in
+the house is touched: not the production app, not system settings, not the
+Mac's position, not the mic input level (83).
+
+Blocks: 5 × known-good at Alec's level → 1 × one Move muted (garbage) →
+2 × forced jump (+40 ms trim on `54-2A…`, before/after) → 2 × validation of
+whitening + gates once built. Every window is dumped
+(`audiout.driftDumpWindows` is set) and copied to `windows-2026-09-14/`.
+
+Commands (dev bundle id `com.audiout.Audiout.dev`; hold the live-test slot
+first: `bash scripts/livetest.sh acquire --label bluetooth-latency-drift-6c2d59`):
+
+```
+# keep the Mac awake for a block (no settings change)
+caffeinate -dims -t 800 &
+# relaunch with both Moves self-selected (key already set; verified 2026-09-13 21:29 UTC)
+defaults write com.audiout.Audiout.dev audiout.devSelectOnLaunch -array "54-2A-1B-79-08-9E:output" "C4-38-75-0E-BF-4A:output"
+open "build/Audiout Dev.app"          # 2 s later: dev_select_on_launch selected=2, tracking running
+# music
+osascript -e 'tell application "Spotify" to set sound volume to 100'
+osascript -e 'tell application "Spotify" to play track "spotify:playlist:37i9dQZF1E35FDDWYtEKBa"'
+osascript -e 'tell application "Spotify" to pause'
+# forced, labelled jump: quit the app, edit trims, relaunch (the hook reselects)
+osascript -e 'tell application "Audiout Dev" to quit'
+python3 - <<'PY'
+import json;p='/Users/alechenderson/Library/Application Support/com.audiout.Audiout.dev/bt-sync-trims.json'
+d=json.load(open(p)); d['trims']['54-2A-1B-79-08-9E:output']+=40; json.dump(d,open(p,'w'),indent=2)
+PY
+# if a Move drops off Bluetooth (Alec was asked to `brew install blueutil`)
+blueutil --connect 54-2A-1B-79-08-9E
+# analyse
+python3 dev/drift-window-analysis.py      # needs a venv with numpy+scipy
+```
+
+Stop rules: pause music on any error line, on a clock-step storm (bad link:
+stop, do not power-cycle anything), or when the 120-minute budget is spent;
+quit the dev app and release the slot at the end. The first window is 3 min
+after the hook selects; do not reselect mid-block (it restarts the timer).
+
+## Live test 4 progress (2026-09-14, unattended)
+
+- **Block 1 (07:11–07:23 UTC, volume 100) is INVALID after its first window.** I ran
+  three build agents on this Mac in parallel; load average hit 138 and the
+  whole-system capture writer fell behind (`write_cadence_drift`
+  `netDriftTotalSeconds` climbed 0 → 0.15 s at ~13 ms/min, still climbing during
+  silence). The reference timeline slid: windows at 07:19 and 07:22 read the
+  arrival 40 and 58 ms EARLY, the merged rule re-baselined both speakers to that
+  garbage, and the mic recorder restarted at the start of both windows. Window
+  07:13:29 (before the load) is good: merged at 537.7, whitened local score 10.5.
+  Labels in `windows-2026-09-14/labels.txt` mark the two as INVALID.
+  **Rule: no compiles or test runs on this Mac while a block plays.** The
+  cadence drift never resets on its own; a relaunch resets it (done 07:41:41).
+  Yesterday's netDriftTotal stayed at 0.011 s all evening.
+- Also seen at 07:08: the owner heard the MacBook's own speakers for a moment
+  after the hook selected the Moves; the default output flapped between five
+  devices in 6 s (built-in → two Bluetooth → built-in) while the sinks came up.
+  Not reproduced on the 07:10 and 07:41 relaunches.
+- Blocks 2–8 resumed 07:41:52 via `lt4-resume.sh` (same as the runbook minus
+  block 1): five good blocks at Spotify 85, then +40 ms trim jump, then −40.
+
+**Phase 2 code landed on branches this morning (none merged, none live-tested):**
+
+- audiout-shared `claude/drift-fixtures` @ `7783226`: ticket 16. Fixtures
+  (200 Hz–8 kHz, 24 kHz Int16, 1.32 MB for four windows), loader test,
+  `Package.swift` resources entry. Harness parity 0.02 % via the Mac harness's
+  new `--fixtures` / `--swift` modes (Mac commit `7ae7ca01` on this branch).
+  Caveat: the raw `.f32` dumps committed in this PUBLIC repo carry the speakers'
+  Bluetooth addresses in their sidecars — owner to decide whether they stay.
+- audiout-shared `claude/drift-whitening` @ `4d3fdbe`: ticket 09. Whitening
+  exponent on `SyncProbeCorrelator.correlate` (default 0, chirp path proven
+  bit-identical), `PassiveDriftCorrelator.whiteningExponent = 0.7` (sweep:
+  window 4 score 2.52 → 5.12; 1.0 accepted a 10 %-margin lobe in window 1),
+  `peakSeparationSeconds` 5 → 1 ms. Caveats: windows 1/3/4 still do not cluster
+  within 2 ms (spread 8.6 ms) — tickets 10–12 must carry that; with ±120 ms
+  search windows both baselines pick the same global maximum so the separation
+  constant barely bites until per-speaker windows narrow.
+- Mac `claude/drift-verify-step` @ `8a4a1dca` (forked from this branch): ticket
+  13. `DriftCorrectionPolicy.VerifyMode` (`verifyBeforeApply` default,
+  `applyThenVerify` one-line switch in the init default), `scheduleVerify`
+  now arms a tracker `Trigger.verify` after the slew lands + 5 s, new local
+  lines `drift_verify_scheduled` / `drift_verify_result`, swap label by batch
+  size. 419 tests green in the covering suites. Caveat: verify-before-apply
+  catches a spurious peak, not a systematically wrong attribution (same
+  arithmetic on the same baselines agrees with itself). Its commit is
+  attributed to Opus 5.
+
+- **ROOT CAUSE of the early readings (and the creep): the whole-system tap
+  drops an IOProc cycle now and then and NEVER pads it.** Diagnosed read-only
+  08:00 UTC: pts are honest, but every sink is fed by sample count (BT sink
+  anchors on its first buffer only; AirPlay packet time = sample count), so each
+  lost 11.6 ms cycle advances all later audio on every sink. Today one drop per
+  ~40 s (a third Bluetooth link, Alec's AirPods Pro, on the radio), yesterday one
+  per hour. `netDriftTotalSeconds` in `write_cadence_drift` is the tell.
+  **Fixed on `claude/tap-feed-gap` (from main) @ `ace6f8ff`**, merged into this
+  branch at `b8d74312`: `handleBuffer` now pads any unarmed hole between half a
+  block and 50 ms through `fillFeedGap`, logging `tap_feed_gap` with
+  `cause:"dropped_cycle"` and `gapMs`. Verified live 08:39: netDrift −0.002 over
+  3 silent minutes (was +0.05), two fills at launch. This also explains the
+  11 ms inter-speaker desync of 2026-09-13 19:51 (one lost cycle padded by the
+  keep-alive on one BT sink and not the other) and answers spec decision 11's
+  creep question: real, and the sender's fault. Memory:
+  `tap-dropped-cycles-never-padded`. Blocks 3–8 resumed 08:42:42 on this build.
+- audiout-shared `claude/drift-gates` @ `6990309` (stacked on fixtures +
+  whitening): ticket 10. `DriftPeak.margin` (peak over best rival > 3 ms away
+  inside the window) and `DriftPeak.localConfidence` (±300 ms robust
+  background); gates margin ≥ 1.2, local ≥ 2.4, chosen mid-gap on the fixtures
+  (false accept 21-13-33Z: margin 1.017 / local 1.90 → refused; real arrival
+  21-16-33Z: 1.309 / 3.06 → accepted). Parity 0.03 %. Says the Mac should
+  delete `PassiveDriftSampler.minPeakToSidelobe = 2.3` (decision 15) and print
+  margin + local in the `candidates` log field. Caveat: the brief's 1.5 margin
+  refuses the only true arrival; and the Mac harness's `swift_plain` replica
+  predates whitening (one-line fix given in the agent report, not applied).
+
+**2026-09-14 18:50 UTC: merged.** audiout-shared main @ `6dc9e34`, tag `0.15.0`
+(fixtures + whitening + gates + sub-band); Mac drift branch merged
+`claude/drift-verify-step` and pins `from: "0.15.0"` (`72230998`). PR #200 (tap
+fix) MERGED to main by Alec. Decisions 17 and 18 settled; ticket 17 (event-driven
+cadence) written. Still owed: sub-band 3-of-4 vs 2-of-4 ruling; tickets 12, 14,
+15, 17; the never-done live test of a real reconnect jump being CORRECTED;
+audiout-remote pin bump (shared 0.15.0 changes ProbeKit only, protocol untouched);
+the 63 MB of raw windows + Bluetooth addresses on this branch before any merge
+to main. Flaky test to fix: `aSlewLeavesNoStepBiggerThanTheProgrammesOwn`
+(DriftCorrectionApplierTests, timing-sensitive; failed once and passed on rerun
+twice today).
+
+### Live test 4 result (blocks 3–8 on the tap-fix build, 08:42–10:10 UTC)
+
+Offline, whitened (exponent 0.7, 300 Hz–8 kHz, ±3 ms rival exclusion), top
+two peaks per window resolve BOTH speakers in every non-quiet window:
+
+| block | windows (top two peaks, ms) | separation |
+|---|---|---|
+| 6 good | 567/551, 568/553, 562/546, 556/541 | ~15 ms |
+| 7 +40 ms trim on `54-2A` | 587/531, (garbage), 588/532, 586/533 | ~56 ms |
+| 8 trim restored | 559/531, (garbage), 550/523, 548/523 | ~26 ms |
+
+The +40 ms jump reads as +41 ms of separation. The app's plain filter saw ONE
+lobe per window and called it `merged`, alternating between the two speakers
+(587.4 then 532.4), moving both baselines each time; no correction fired.
+Two windows (09:48:55, 10:04:16) score < 1 everywhere and are garbage the
+ticket-10 gates would refuse. A slow common slide of ~1 ms/min persists in
+block 6 (567 → 556 over 9 min) with the tap counter flat; unexplained (real
+speaker drift, or mic). Labels: `windows-2026-09-14/labels.txt`; blocks 1–2 and
+the aborted first block 2 are INVALID (timeline slid before the tap fix).
+
+### Validation attempt (11:16–14:40 UTC) — FAILED, cause open
+
+Gates build `b82d381b` (shared pin 6990309: fixtures + whitening 0.7 + gates;
+2.3 override removed; log now `delay@score/local/margin`). First attempt died
+at once on a script edit of mine (a stray line quit the app at 11:16). Second
+attempt launched 11:38:33 cleanly by the log (tap capturing, both sinks built,
+links settled), but from then on EVERY window was dropped `empty_capture`
+(mic recorder starts, zero samples) and no AirPlay `stream_health` lines
+appear during the block, i.e. the app received no program audio either.
+Nobody home, lid open (`AppleClamshellState = No`), mic device normal
+(48 kHz, 1 ch), app-side mic permission check passed, no TCC line found.
+The Mac then slept (caffeinate expired 11:52; `pmset -g log` shows
+maintenance sleep / dark-wake cycles from 14:14 UTC). Relaunch at 14:37 showed
+the same empty capture. System default output with the app quit = "Sonos Move
+(SONOS 089E)" (a Bluetooth device), not the Mac's speakers — at 07:11 with the
+app running it was "Audiout Dev". **Open question for the next session with
+the owner present:** does the app on this build receive audio and mic at all
+when launched with the system default output on a Bluetooth Move? Reproduce
+by launching from that state and watching `stream_health` + one window.
+Blocks 9–10 unusable that afternoon. **Retried 15:53–16:05 UTC with the owner
+home (Mac awake): audio and mic both fine — the afternoon failure was the
+Mac's sleep state, not the build.** Gates build, 4 windows: merged 530.2
+(score 8.9 / local 5.8 / margin 1.2), refused too-periodic, merged 529.3
+(3.0 / 2.5 / 1.3), merged 529.3 (6.6 / 4.5 / 1.5). Three accepted windows
+within 1 ms of each other and one honest refusal; still one lobe per window
+because the per-speaker second-peak search is on `claude/drift-subband`, not
+in this build. Music budget fully used. Slot released, app quit.
+
+PR for the tap fix: https://github.com/aa-hh/Audiout/pull/200 (open, mergeable,
+no CI checks in this repo; owner merges).
+
+## Logging (local only, `~/Library/Logs/Audiout/telemetry.jsonl`)
+
+All `cat: localPlayback`:
+
+- `drift_tracking_state`: tracking on/off, selected vs measured Bluetooth
+  count, anchors, room delay, baselines
+- `drift_window_started`, `drift_window_skipped` (reason),
+  `drift_window_dropped` (reason)
+- `drift_window_result`: `result` (`observations` | `aligned` | `merged` |
+  `rebaselined` | `unusable` | `blind`), `rejection`, `peaks`, `candidates`
+  (best per speaker even when refused), `errors`, `baselines`; `merged` adds
+  `devices`, `delayMs`. `peaks` and `candidates` print
+  `delay@score/local/margin`: the whole-tape score, then the two gates a peak
+  has to clear (local 2.4, margin 1.2), so a refused window says which one
+  stopped it
+- `drift_correction_started`, `drift_correction_landed`,
+  `drift_correction_refused`
+- `bt_clock_jump`: `uid`, `ms` — every pacing-clock step > 2 ms, one poll
+  per second per sink. A storm of these on one speaker = a bad link, not
+  drift; power-cycle the speaker.
+
+Watch live with:
+
+```
+tail -n 0 -F ~/Library/Logs/Audiout/telemetry.jsonl | grep --line-buffered -E '"evt":"(drift_window_result|drift_correction|bt_clock_jump)' | awk '{print substr($0,1,600); fflush()}'
+```
+
+## Traps hit (both sessions)
+
+- **A Monitor pipeline ending in `cut` delivers nothing:** `cut` buffers.
+  Finish with `awk '{...; fflush()}'`.
+- **Helper agents leave CPU burners running.** `pgrep -x yes` before
+  trusting timings.
+- **Unused listening windows count toward the blind limit.** 5 unusable in a
+  row turns tracking off until baselines are reset (reselect speakers or
+  relaunch).
+- **The first window runs 3 minutes after tracking turns on**, then only a
+  sparse check every 25 minutes (ticket 17) — plus a window on reconnect
+  (15 s after baseband connect), on silence holding 60 s and then giving way
+  to audio, on a rate-limited clock step, or on the existing verify trigger.
+  EVERY reselect restarts the 3-minute first-window timer. Tell the owner not
+  to touch the selection while waiting.
+- **A clock step now takes at most one window per speaker per minute**, and
+  ten steps on one speaker inside a minute marks the link bad and stops
+  triggering until it has been quiet for 60 s (ticket 17). A refused
+  near-miss window gets one retry 30 s later; the retry never itself
+  retries and never counts toward the 5-in-a-row blind limit.
+- **A wrong correction persists to disk** (`~/Library/Application
+  Support/com.audiout.Audiout.dev/bt-sync-trims.json`, `latencyMs`). Quit
+  the app, edit the number back, relaunch. The production app's store is a
+  different file — don't read the wrong one.
+- **Live-test slot was held by a finished session** (this worktree's
+  earlier VM work); `livetest.sh done` from that worktree frees it.
+- **Recorder restarts (from main's mic-probe fix) withhold the mic
+  timestamp**, so a window with a restart is dropped (`reference_not_aligned`).
+- **`com.audiout.Audiout.dev` has builds in several worktrees.** Don't run
+  `purge-dev-installs.sh --apply` without asking.

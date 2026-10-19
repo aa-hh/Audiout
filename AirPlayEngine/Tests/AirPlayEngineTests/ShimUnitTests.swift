@@ -178,7 +178,8 @@ extension SerializedEngineState {
     // (conffile_unknown_key_assert) to disable ONLY the abort while still
     // counting + logging + returning the safe default. This test flips it off,
     // confirms an unknown lookup bumps the counter and returns the default, and
-    // confirms a KNOWN key does NOT trip the counter.
+    // confirms a KNOWN key does NOT trip the counter. Turns red if `cfg_getbool`
+    // answers a per-device bool key silently for the root or sentinel section.
     @Test func conffileUnknownKeyIsLoudAndCounted() {
         let savedAssert = conffile_unknown_key_assert
         conffile_unknown_key_assert = false
@@ -206,6 +207,55 @@ extension SerializedEngineState {
         // ipv6 is served -> no additional miss.
         _ = cfg_getbool(general, "ipv6")
         #expect(conffile_unknown_key_count == before + 3, "ipv6 is a served bool key")
+
+        // A per-device bool key asked of a global section is a miss: only a
+        // table section from cfg_gettsec may answer it silently.
+        #expect(cfg_getbool(general, "exclude") == 0)
+        #expect(conffile_unknown_key_count == before + 4,
+                "a per-device bool key on a global section must register one miss")
+    }
+
+    // MARK: - per-device password table
+
+    // Turns red if cfg_gettsec stops returning a section for a device with a
+    // password, or if that section's per-device keys fall through to the
+    // unknown-key path instead of their defaults.
+    @Test func devicePasswordServesASectionUntilCleared() {
+        let savedAssert = conffile_unknown_key_assert
+        conffile_unknown_key_assert = false
+        defer {
+            conffile_set_device_password("Kitchen", nil)
+            conffile_unknown_key_assert = savedAssert
+        }
+
+        conffile_set_device_password("Kitchen", "secret")
+        let before = conffile_unknown_key_count
+        let sec = cfg_gettsec(cfg, "airplay", "Kitchen")
+        #expect(sec != nil)
+        #expect(cfg_getstr(sec, "password").map { String(cString: $0) } == "secret")
+        #expect(cfg_getstr(sec, "nickname") == nil)
+        #expect(cfg_getbool(sec, "exclude") == 0)
+        #expect(cfg_getbool(sec, "raop_disable") == 0)
+        #expect(conffile_unknown_key_count == before)
+        #expect(cfg_getint(sec, "max_volume") == 11)
+        #expect(cfg_getopt(sec, "reconnect") == nil)
+        #expect(cfg_gettsec(cfg, "airplay", "Other") == nil)
+
+        conffile_set_device_password("Kitchen", nil)
+        #expect(cfg_gettsec(cfg, "airplay", "Kitchen") == nil)
+    }
+
+    // Turns red if conffile_set_device_password frees the string it replaces,
+    // which the C device and session still point at.
+    @Test func replacedDevicePasswordStaysReadable() {
+        defer { conffile_set_device_password("Kitchen", nil) }
+
+        conffile_set_device_password("Kitchen", "first")
+        let old = cfg_getstr(cfg_gettsec(cfg, "airplay", "Kitchen"), "password")
+        conffile_set_device_password("Kitchen", "second")
+
+        #expect(old.map { String(cString: $0) } == "first")
+        #expect(cfg_getstr(cfg_gettsec(cfg, "airplay", "Kitchen"), "password").map { String(cString: $0) } == "second")
     }
 
     // MARK: - gcry_check_version min-version floor (first-light hardening #5d)
@@ -237,6 +287,47 @@ extension SerializedEngineState {
         // Restore libevent's default writer so we don't leave a dangling adapter
         // pointer installed for other tests in this process image.
         event_set_log_callback(nil)
+    }
+
+    // MARK: - Engine log file (PLAN-LIVE-DIAGNOSTICS.md C2)
+    //
+    // The defects this catches: a line written without the ISO timestamp the
+    // host's decision log uses (the two files could no longer interleave by
+    // eye), or a file that grows past its cap because rotation never fires or
+    // fires without reopening (the tail of a live session would be lost).
+    @Test func engineLogFileStampsLinesAndRotatesAtTheCap() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("engine-log-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer {
+            engine_logger_set_file(nil, 0)
+            try? FileManager.default.removeItem(at: dir)
+        }
+        let active = dir.appendingPathComponent("engine.log")
+        let backup = dir.appendingPathComponent("engine.log.1")
+
+        // `DPRINTF` is C-variadic, which Swift cannot call; `DVPRINTF` is the
+        // same path one step in.
+        func emit(_ fmt: String, _ args: CVarArg...) {
+            withVaList(args) { DVPRINTF(E_LOG, L_RAOP, fmt, $0) }
+        }
+
+        // A cap two lines wide: the third line lands in a fresh file.
+        engine_logger_set_file(active.path, 120)
+        emit("first %d\n", 1)
+        let firstLine = try String(contentsOf: active, encoding: .utf8)
+        let stamp = try #require(firstLine.split(separator: " ").first)
+        #expect(stamp.wholeMatch(of: #/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z/#) != nil,
+                "expected an ISO-8601 UTC stamp, got \(stamp)")
+        #expect(firstLine.contains("[raop] first 1"))
+
+        emit("second, long enough to cross one hundred and twenty bytes of cap\n")
+        emit("third\n")
+        #expect(FileManager.default.fileExists(atPath: backup.path), "reaching the cap must rotate")
+        let rotated = try String(contentsOf: backup, encoding: .utf8)
+        #expect(rotated.contains("first 1") && rotated.contains("second"))
+        let fresh = try String(contentsOf: active, encoding: .utf8)
+        #expect(fresh.contains("third") && !fresh.contains("first 1"), "the active file restarts after rotation")
     }
 
     // MARK: - SIGPIPE masking (first-light backlog #2)
@@ -360,6 +451,42 @@ extension SerializedEngineState {
         // round-trip). Pin it so a planar/interleaved or channel-count regression
         // in the shim is caught.
         #expect(firstFrameByte == 0x20, "unexpected ALAC element header — channel layout / frame shape changed")
+    }
+
+    // MARK: - uuid_make
+
+    // Every session calls uuid_make twice back to back (airplay.c:1624-1625,
+    // session_uuid then group_uuid). Seeding srand() from time(NULL) on each
+    // call made both strings identical within the same wall-clock second.
+    @Test func uuidMakeProducesDistinctValuesOnConsecutiveCalls() {
+        var first = [CChar](repeating: 0, count: 37)
+        var second = [CChar](repeating: 0, count: 37)
+        first.withUnsafeMutableBufferPointer { uuid_make($0.baseAddress) }
+        second.withUnsafeMutableBufferPointer { uuid_make($0.baseAddress) }
+
+        let a = String(cString: first)
+        let b = String(cString: second)
+        #expect(a != b, "two consecutive uuid_make calls returned the same string, so session_uuid == group_uuid for every session")
+
+        for s in [a, b] {
+            let c = Array(s)
+            #expect(c.count == 36, "uuid_make wrote \(c.count) characters, expected 36: \(s)")
+            guard c.count == 36 else { continue }
+            #expect(c[8] == "-" && c[13] == "-" && c[18] == "-" && c[23] == "-", "dashes are not at offsets 8/13/18/23: \(s)")
+            #expect(c[14] == "4", "version nibble at offset 14 is not 4: \(s)")
+        }
+    }
+
+    // O_CLOEXEC handed to F_SETFL is ignored (it is a descriptor flag, set with
+    // F_SETFD), so every RTSP/data socket used to survive into any child the
+    // process execs. UDP connect() to loopback returns immediately, so this
+    // opens a real socket with no listener and no firewall prompt.
+    @Test func netConnectSocketIsCloseOnExec() throws {
+        let fd = net_connect("127.0.0.1", 9, SOCK_DGRAM, "cloexec-test")
+        try #require(fd >= 0)
+        defer { close(fd) }
+
+        #expect(fcntl(fd, F_GETFD) & FD_CLOEXEC != 0, "net_connect socket is not close-on-exec")
     }
 }
 

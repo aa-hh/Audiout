@@ -966,7 +966,12 @@ extension SerializedSharedState {
         await pollUntil { releaser.calls == 1 }
         #expect(releaser.calls == 1)
         #expect(!engine.removedOutputs.isEmpty)
-        #expect(sink.snapshot().contains { $0.contains(#""evt":"handoff_release""#) && $0.contains(#""reason":"blockedAttempt""#) },
+        // The sink delivers on its own queue, so wait for the line before reading it.
+        func releaseLogged() -> Bool {
+            sink.snapshot().contains { $0.contains(#""evt":"handoff_release""#) && $0.contains(#""reason":"blockedAttempt""#) }
+        }
+        await pollUntil { releaseLogged() }
+        #expect(releaseLogged(),
                 "Telemetry._installTestSink: the release's own log line records the blockedAttempt reason")
     }
 

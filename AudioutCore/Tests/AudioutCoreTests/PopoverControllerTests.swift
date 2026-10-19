@@ -4795,6 +4795,168 @@ extension SerializedSharedState {
             #expect(popover.test_noteViewIsThankYouCard)
         }
 
+        // MARK: Expired-trial survey invite
+
+        /// Wires an owed survey invite whose done flag behaves like the host's.
+        @MainActor private final class Invite {
+            var owed = true
+            var spentCalls = 0
+            var answered: [ExpiredTrialSurvey] = []
+            /// What the host's unanswered-close count answers; `nil` leaves it unwired.
+            var unansweredIsLast: Bool?
+            var unansweredCalls = 0
+            func wire(_ popover: PopoverController) {
+                popover.surveyInviteProvider = { [unowned self] in owed ? ExpiredTrialSurveyFixture.survey : nil }
+                popover.onSurveyInviteSpent = { [unowned self] in spentCalls += 1; owed = false }
+                popover.onSurveyAnswer = { [unowned self] in answered.append($0) }
+                if let isLast = unansweredIsLast {
+                    popover.onSurveyInviteUnanswered = { [unowned self] in unansweredCalls += 1; return isLast }
+                }
+            }
+        }
+
+        private func trialEndedPopover(invite: Invite?) -> PopoverController {
+            let (popover, _) = makePopover()
+            invite?.wire(popover)
+            popover.setUnregisteredNote(.trialEnded)
+            return popover
+        }
+
+        /// Red if an owed invite stopped taking the trial-ended note's place on
+        /// open, lost its Answer button or Not now link, or reported itself
+        /// shown again on a later rebuild in the same open.
+        @Test func theOwedInviteMountsOnOpenAndReportsOnce() {
+            let invite = Invite()
+            let popover = trialEndedPopover(invite: invite)
+            let seen = StructuredEvents.recording {
+                popover.test_simulateOpen()
+                popover.rebuild()
+            }
+            #expect(popover.test_systemAirPlayNoteText == PopoverController.surveyInviteText)
+            #expect(popover.test_systemAirPlayNoteHasActionButton)
+            #expect(popover.test_systemAirPlayNoteHasTextAction)
+            #expect(seen.names() == ["survey shown"])
+            #expect(invite.spentCalls == 0, "raising the invite does not spend it")
+        }
+
+        /// Red if the invite rung showed (or reported) without a survey from
+        /// the host, replacing the trial-ended note with nothing behind it.
+        @Test func withNoSurveyTheTrialEndedNoteStays() {
+            let popover = trialEndedPopover(invite: nil)
+            let seen = StructuredEvents.recording { popover.test_simulateOpen() }
+            #expect(popover.test_systemAirPlayNoteText == PopoverController.unregisteredTrialEndedNoteText)
+            #expect(seen.names().isEmpty)
+        }
+
+        /// Red if Not now stopped sending `survey dismissed` with no answers,
+        /// stopped marking the invite done, left the invite in the slot, or
+        /// went through the unanswered-close count instead of spending at once.
+        @Test func notNowDismissesSpendsAndRestoresTheTrialNote() {
+            let invite = Invite()
+            invite.unansweredIsLast = false
+            let popover = trialEndedPopover(invite: invite)
+            popover.test_simulateOpen()
+            let seen = StructuredEvents.recording { popover.test_tapSystemAirPlayNoteTextAction() }
+            #expect(seen.names() == ["survey dismissed"])
+            #expect(seen.all.first?.1["$survey_partially_completed"] as? Bool == false)
+            #expect(invite.spentCalls == 1)
+            #expect(invite.unansweredCalls == 0)
+            #expect(popover.test_systemAirPlayNoteText == PopoverController.unregisteredTrialEndedNoteText)
+        }
+
+        /// Red if Answer stopped handing the survey to the host's card, or left
+        /// the invite owed so it would come back on the next open.
+        @Test func answerHandsTheSurveyToTheHostAndSpendsTheInvite() {
+            let invite = Invite()
+            let popover = trialEndedPopover(invite: invite)
+            popover.test_simulateOpen()
+            popover.test_tapSystemAirPlayNoteAction()
+            #expect(invite.answered == [ExpiredTrialSurveyFixture.survey])
+            #expect(invite.spentCalls == 1)
+            #expect(popover.test_systemAirPlayNoteText == PopoverController.unregisteredTrialEndedNoteText)
+        }
+
+        /// Red if the last allowed unanswered close (`onSurveyInviteUnanswered`
+        /// returning true) stopped counting as a decline: no `survey
+        /// dismissed`, or the invite left owed for the next open.
+        @Test func hidingOnTheLastUnansweredLookDismissesAndSpendsItOnce() {
+            let invite = Invite()
+            invite.unansweredIsLast = true
+            let popover = trialEndedPopover(invite: invite)
+            popover.test_simulateOpen()
+            let seen = StructuredEvents.recording {
+                popover.surfaceDidHide()
+                popover.surfaceDidHide()
+            }
+            #expect(seen.names() == ["survey dismissed"])
+            #expect(invite.spentCalls == 1)
+            #expect(invite.unansweredCalls == 1)
+        }
+
+        /// Red if a hide before the last unanswered look (`surfaceDidHide`
+        /// ignoring `onSurveyInviteUnanswered` returning false) spends the
+        /// invite or sends `survey dismissed`, or the invite stops coming back
+        /// on the next open.
+        @Test func hidingBeforeTheLastLookBringsTheInviteBackNextOpen() {
+            let invite = Invite()
+            invite.unansweredIsLast = false
+            let popover = trialEndedPopover(invite: invite)
+            popover.test_simulateOpen()
+            let hidden = StructuredEvents.recording { popover.surfaceDidHide() }
+            #expect(hidden.names().isEmpty)
+            #expect(invite.spentCalls == 0)
+            #expect(invite.unansweredCalls == 1)
+            let reopened = StructuredEvents.recording { popover.test_simulateOpen() }
+            #expect(reopened.names() == ["survey shown"])
+            #expect(popover.test_systemAirPlayNoteText == PopoverController.surveyInviteText)
+        }
+
+        /// Red if the invite pushed a capture-failure note out of the slot, or
+        /// reported itself shown while hidden behind one.
+        @Test func anInviteOutrankedByAFailureNoteIsNotRaised() {
+            let invite = Invite()
+            let popover = trialEndedPopover(invite: invite)
+            popover.setCaptureFailureMessage("Audiout can't capture system audio.")
+            let seen = StructuredEvents.recording { popover.test_simulateOpen() }
+            #expect(popover.test_systemAirPlayNoteText != PopoverController.surveyInviteText)
+            #expect(seen.names().isEmpty)
+            #expect(invite.spentCalls == 0)
+        }
+
+        /// Red if `setUnregisteredNote` stops clearing `raisedSurveyInvite`, or
+        /// clears it through `spendSurveyInvite`: a purchase with the popover
+        /// open would leave the invite up, or mark it done unanswered.
+        @Test func aPurchaseWithTheInviteUpRetiresItUnspent() {
+            let invite = Invite()
+            let popover = trialEndedPopover(invite: invite)
+            popover.test_simulateOpen()
+            #expect(popover.test_systemAirPlayNoteText == PopoverController.surveyInviteText)
+            let seen = StructuredEvents.recording { popover.setUnregisteredNote(nil) }
+            #expect(popover.test_systemAirPlayNoteText != PopoverController.surveyInviteText)
+            #expect(seen.names().isEmpty)
+            #expect(invite.spentCalls == 0)
+        }
+
+        /// Red if raising `limitNoteRaised` stops retiring the invite (its
+        /// `didSet`), or retires it through `spendSurveyInvite`: the limit text
+        /// would stay hidden behind the invite, or the invite marked done.
+        @Test func aLimitHitWithTheInviteUpShowsTheLimitTextUnspent() {
+            let invite = Invite()
+            let (popover, controller) = makePopover()
+            invite.wire(popover)
+            _ = controller.setDeviceSelected("office", true)
+            controller.limitsToOneSpeaker = true
+            popover.setUnregisteredNote(.trialEnded)
+            popover.test_simulateOpen()
+            #expect(popover.test_systemAirPlayNoteText == PopoverController.surveyInviteText)
+            let seen = StructuredEvents.recording {
+                popover.test_deviceRow(for: "kitchen")?.test_fireCheckboxAction(settingStateTo: true)
+            }
+            #expect(popover.test_systemAirPlayNoteText == PopoverController.oneSpeakerLimitNoteText)
+            #expect(seen.names().isEmpty)
+            #expect(invite.spentCalls == 0)
+        }
+
         /// Red if "Play here" left two speakers selected (the limit
         /// would then be broken by its own offer) or stopped reporting its use.
         @Test func theSwitchOfferLeavesOnlyTheClickedSpeaker() {
@@ -4810,5 +4972,43 @@ extension SerializedSharedState {
             #expect(seen.names().filter { $0.hasPrefix("license:") }
                     == ["license:limit_hit", "license:switch_offer_used"])
         }
+    }
+}
+
+/// A parsed expired-trial survey with question ids `q1`…`q5`, shared by the
+/// invite tests above and the survey card tests in `AppSurfaceControllerTests`.
+enum ExpiredTrialSurveyFixture {
+    static let id = "0190bbbb-0000-0000-0000-000000000002"
+    static let survey: ExpiredTrialSurvey = {
+        let types = ["single_choice", "multiple_choice", "single_choice", "single_choice", "open"]
+        let json: [String: Any] = ["surveys": [[
+            "id": id, "name": "Mac expired trial", "type": "api",
+            "start_date": "2026-01-01T00:00:00Z", "end_date": NSNull(),
+            "current_iteration": NSNull(), "current_iteration_start_date": NSNull(),
+            "questions": types.enumerated().map { ["id": "q\($0.offset + 1)", "type": $0.element, "question": "Question \($0.offset + 1)"] },
+        ]]]
+        let data = try! JSONSerialization.data(withJSONObject: json)
+        return ExpiredTrialSurvey.parse(data, surveyID: id, now: Date(timeIntervalSince1970: 1_800_000_000))!
+    }()
+}
+
+/// Records `Analytics.captureStructured` events. Only for suites nested under
+/// `SerializedSharedState`: it installs the process-global sink.
+final class StructuredEvents: @unchecked Sendable {
+    private let lock = NSLock()
+    private var items: [(String, [String: any Sendable])] = []
+    var all: [(String, [String: any Sendable])] { lock.withLock { items } }
+    func names() -> [String] { all.map(\.0) }
+
+    static func recording(_ body: () -> Void) -> StructuredEvents {
+        let events = StructuredEvents()
+        Analytics.install(Analytics.Sink(capture: { _, _ in }, captureError: { _, _ in },
+                                         consentChanged: { _ in },
+                                         captureStructured: { name, props in
+                                             events.lock.withLock { events.items.append((name, props)) }
+                                         }), consent: true)
+        defer { Analytics.install(nil, consent: false) }
+        body()
+        return events
     }
 }

@@ -12115,6 +12115,7 @@ extension SerializedSharedState {
         let line = lines().first ?? ""
         #expect(line.contains("\"op\":\"bind\""))
         #expect(line.contains("\"cause\":\"unknown\""))
+        #expect(line.contains("\"reason\":\"sessionFailed\""), "the engine case name rides along as `reason`")
         #expect(!box.snapshot().contains { $0.contains("\"evt\":\"bind_failed\"") })
     }
 
@@ -13278,6 +13279,35 @@ extension SerializedSharedState {
         #expect(lines.first?["will_wait"] as? String == "true")
         #expect(lines.first?["switch_away"] as? String == "none", "no defaultOutputSwitcher was injected")
         #expect(Int(lines.first?["elapsed_ms"] as? String ?? "") != nil, "elapsed_ms must be an integer")
+
+        // The refusal's `connect_failed` names which gate outcome refused it,
+        // so busy timing ports read apart from an unapproved helper.
+        await pollUntil { !telemetryLines(box, evt: "airplay:connect_failed", device: device.id).isEmpty }
+        let failed = telemetryLines(box, evt: "airplay:connect_failed", device: device.id).first
+        #expect(failed?["cause"] as? String == "timingUnavailable")
+        #expect(failed?["reason"] as? String == "timingPortsUnavailable")
+    }
+
+    /// Turns red if the whole-system converge catch stops sending the engine
+    /// error's case name as `reason`, which leaves every non-password,
+    /// non-timeout connect failure reading only `cause: unknown` in PostHog.
+    @Test func wholeSystemConnectFailureSharesTheEngineErrorAsReason() async {
+        let (backend, engine, discovery) = makeBackend()
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:CA", name: "Rejecting Speaker")
+        engine.addFailures = [device.outputID.rawValue]
+        engine.addFailureError = .operationRejected
+        await startAndDiscover(backend, engine, discovery, device)
+
+        let box = TelemetryLineBox()
+        Telemetry._installTestSink { box.append($0) }
+        defer { Telemetry._installTestSink(nil) }
+
+        backend.setOutputSet([device.id])
+        await pollUntil { !telemetryLines(box, evt: "airplay:connect_failed", device: device.id).isEmpty }
+        let failed = telemetryLines(box, evt: "airplay:connect_failed", device: device.id).first
+        #expect(failed?["cause"] as? String == "unknown")
+        #expect(failed?["reason"] as? String == "operationRejected")
     }
 
     /// Turns red if the arm's `updateDiscovery` catch returns silently: the row
@@ -13337,7 +13367,8 @@ extension SerializedSharedState {
         #expect(binds() == 2)
         // The telemetry sink is delivered on its own queue, so wait for the line.
         await pollUntil { !telemetryLines(box, evt: "airplay:connect_failed", device: device.id).isEmpty }
-        #expect(!telemetryLines(box, evt: "airplay:connect_failed", device: device.id).isEmpty)
+        #expect(telemetryLines(box, evt: "airplay:connect_failed", device: device.id).first?["reason"] as? String
+                == "sessionFailed")
     }
 
 }

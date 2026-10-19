@@ -143,6 +143,7 @@ public struct AppSettings {
         static let syncOffsetMs = "audio.syncOffsetMs"
         static let btKeepAliveMinutes = "audio.btKeepAliveMinutes"
         static let allowRemoteControl = "companion.allowRemoteControl"
+        static let licenseGatePresentation = "dev.licenseGatePresentation"
         static let surfacePinned = "surface.pinned"
         static let eqAdvancedExpanded = "eq.advancedExpanded"
         static let licenseKey = "license.key"
@@ -164,6 +165,9 @@ public struct AppSettings {
         static let telemetryAsked = "telemetry.asked"
         static let telemetryConversionAskShown = "telemetry.conversionAskShown"
         static let licenseThankYouShown = "license.thankYouShown"
+        static let trialEndedStreamingDays = "survey.trialEndedStreamingDays"
+        static let expiredTrialSurveyDone = "survey.expiredTrialDone"
+        static let expiredTrialUnansweredLooks = "survey.expiredTrialUnansweredLooks"
         static let telemetryDailyActiveDay = "telemetry.dailyActiveDay"
         static let touchBarControls = "general.touchBarControls"
         static let mixerMembershipHintDismissed = "mixer.membershipHintDismissed"
@@ -426,29 +430,37 @@ public struct AppSettings {
     }
 
     /// Whether the iPhone companion app may connect to and control this Mac
-    /// (Settings › General "Allow control from iPhone on this network").
-    /// Defaults to **`true`** when unset (T22 flip, the owner's call
+    /// (Settings › Audiout Remote "Allow control from iPhone on this network").
+    /// On a shipping build it defaults to **`true`** when unset (T22 flip, the owner's call
     /// 2026-08-06): the phone app ships alongside the Mac app now, and the
     /// per-phone approval gate (T24) means an enabled listener still admits
-    /// nobody the user hasn't explicitly approved. Unchecking the Settings ›
-    /// General checkbox stores `false` and wins. See
+    /// nobody the user hasn't explicitly approved. A dev build
+    /// (``isDevBuild``) defaults to `false`, so it listens only once its
+    /// owner turns the switch on. Unchecking the switch stores `false` and wins. See
     /// ``resolvedAllowRemoteControl(explicit:environment:offered:settings:)``
     /// for the env-var override and the ``remoteAppIsOffered`` build switch
     /// that sit above it, which is what AppDelegate actually reads at launch.
     public var allowRemoteControl: Bool {
         get {
-            guard defaults.object(forKey: Keys.allowRemoteControl) != nil else { return true }
+            guard defaults.object(forKey: Keys.allowRemoteControl) != nil else {
+                return Self.defaultAllowRemoteControl(isDevBuild: Self.isDevBuild)
+            }
             return defaults.bool(forKey: Keys.allowRemoteControl)
         }
         nonmutating set { defaults.set(newValue, forKey: Keys.allowRemoteControl) }
     }
 
+    /// ``allowRemoteControl`` when nothing is stored: on for the shipping app,
+    /// off for a dev build until its owner turns the switch on.
+    static func defaultAllowRemoteControl(isDevBuild: Bool) -> Bool { !isDevBuild }
+
     /// The env var that force-overrides ``allowRemoteControl`` for one launch,
     /// mirroring `BackendKind.environmentVariableName`'s dev-convenience idiom.
     public static let allowRemoteControlEnvironmentVariableName = "AUDIOUT_COMPANION"
 
-    /// Whether this build offers the iPhone companion at all — `false` until
-    /// Audiout Remote is approved and on the App Store.
+    /// Whether this build offers the iPhone companion at all: `false` for the
+    /// shipping app until Audiout Remote is approved and on the App Store,
+    /// `true` for every dev build (``isDevBuild``).
     ///
     /// Every surface that mentions the phone app is an invitation to download
     /// it, and until it exists each one is a dead end: the Setup window's
@@ -457,11 +469,29 @@ public struct AppSettings {
     /// read this and stay off the screen. The companion server does not start
     /// either — there is nothing on any phone to connect with.
     ///
-    /// Flip this to `true` on the release that follows the phone app's
-    /// approval; nothing else moves. `AUDIOUT_COMPANION=on` still wins over
-    /// it, so a dev build can turn the whole feature back on to test against
-    /// a TestFlight phone.
-    public static let remoteAppIsOffered = false
+    /// Return `true` here on the release that follows the phone app's
+    /// approval; nothing else moves. `AUDIOUT_COMPANION` still wins over it.
+    public static var remoteAppIsOffered: Bool { isDevBuild }
+
+    /// Dev builds only: the Settings › General › Developer "Licence gate"
+    /// popup. ``LicenseGatePresentation/resolved(environment:settings:isDevBuild:)``
+    /// reads it only when ``isDevBuild``; a shipping build never does.
+    public var licenseGatePresentation: LicenseGatePresentation {
+        get {
+            defaults.string(forKey: Keys.licenseGatePresentation)
+                .flatMap(LicenseGatePresentation.init(rawValue:)) ?? .auto
+        }
+        nonmutating set { defaults.set(newValue.rawValue, forKey: Keys.licenseGatePresentation) }
+    }
+
+    /// Whether this process is a dev build: the shipping id plus a suffix
+    /// (`.dev`, `.staging`, a fresh handover id). The shipping app and the
+    /// test runner never match.
+    public static var isDevBuild: Bool { isDevBundleID(Bundle.main.bundleIdentifier) }
+
+    static func isDevBundleID(_ id: String?) -> Bool {
+        id?.hasPrefix("com.audiout.Audiout.") ?? false
+    }
 
     /// What decided a ``resolvedAllowRemoteControlWithSource(explicit:environment:settings:)``
     /// call — carried alongside the resolved value so a caller that needs to
@@ -516,9 +546,9 @@ public struct AppSettings {
     /// uses, but returned alongside ``RemoteControlResolution`` so a UI can
     /// render the override honestly instead of just reading the raw setting.
     ///
-    /// The two overrides sit ABOVE `offered` on purpose: a build with no
-    /// companion is the shipping default, and `AUDIOUT_COMPANION=on` is how a
-    /// dev build gets the feature back to test it.
+    /// The two overrides sit ABOVE `offered` on purpose: `AUDIOUT_COMPANION`
+    /// forces the companion on or off for one launch whatever the build
+    /// offers.
     ///
     /// This is an explicit knob, never a silent fallback (mirrors
     /// `BackendKind.resolved`'s policy, OutputBackend.swift): an unrecognized
@@ -527,8 +557,9 @@ public struct AppSettings {
     /// to go.
     ///
     /// - Parameter offered: whether this build carries the companion at all.
-    ///   Injectable so a test pins it instead of inheriting the shipping
-    ///   constant, the way `SetupModel` takes `remoteAppAvailable`.
+    ///   Injectable so a test pins it instead of inheriting the value worked
+    ///   out from this process's bundle id, the way `SetupModel` takes
+    ///   `remoteAppAvailable`.
     public static func resolvedAllowRemoteControlWithSource(
         explicit: Bool? = nil,
         environment: [String: String] = ProcessInfo.processInfo.environment,
@@ -828,20 +859,31 @@ public struct AppSettings {
     /// it. Two cases deliberately get the plain page: a trial that has not
     /// registered yet holds no key, and an invented `t` would name nothing; and
     /// a converted trial (state `.none`) holds a paid key, not a trial id.
+    ///
+    /// Every Buy link also carries `?s=mac-app`, the website's source tag
+    /// (`src/AGENTS.md` "Attribution rides the URL" in the site repo), so the
+    /// site's analytics and the Paddle sale itself say the buyer came from
+    /// the app rather than from a page on the site.
     public var buyURL: URL? {
-        guard let page = buyPageURL else { return nil }
+        guard let page = buyPageURL,
+              var components = URLComponents(url: page, resolvingAgainstBaseURL: false)
+        else { return buyPageURL }
+        var items = (components.queryItems ?? []) + [URLQueryItem(name: "s", value: Self.buySourceTag)]
         let trialHoldsKey: Bool
         switch TrialClock.state(settings: self) {
         case .active, .expired: trialHoldsKey = true
         case .none: trialHoldsKey = false
         }
-        guard trialHoldsKey,
-              let key = licenseKey, !key.isEmpty,
-              var components = URLComponents(url: page, resolvingAgainstBaseURL: false)
-        else { return page }
-        components.queryItems = (components.queryItems ?? []) + [URLQueryItem(name: "t", value: key)]
+        if trialHoldsKey, let key = licenseKey, !key.isEmpty {
+            items.append(URLQueryItem(name: "t", value: key))
+        }
+        components.queryItems = items
         return components.url ?? page
     }
+
+    /// The `s` value on every Buy link. Must match the site's tag shape,
+    /// `^[a-z0-9-]{1,32}$`, or the site ignores it.
+    public static let buySourceTag = "mac-app"
 
     /// The purchase page as configured, before the trial id is added.
     private var buyPageURL: URL? {
@@ -937,6 +979,28 @@ public struct AppSettings {
     public var licenseThankYouShown: Bool {
         get { defaults.bool(forKey: Keys.licenseThankYouShown) }
         nonmutating set { defaults.set(newValue, forKey: Keys.licenseThankYouShown) }
+    }
+
+    /// The distinct local days audio reached a speaker after the trial ended.
+    /// Defaults to 0.
+    public var trialEndedStreamingDays: Int {
+        get { defaults.integer(forKey: Keys.trialEndedStreamingDays) }
+        nonmutating set { defaults.set(newValue, forKey: Keys.trialEndedStreamingDays) }
+    }
+
+    /// How many times the popover closed with the expired-trial survey invite
+    /// up and neither button clicked. Defaults to 0.
+    public var expiredTrialUnansweredLooks: Int {
+        get { defaults.integer(forKey: Keys.expiredTrialUnansweredLooks) }
+        nonmutating set { defaults.set(newValue, forKey: Keys.expiredTrialUnansweredLooks) }
+    }
+
+    /// Whether the expired-trial survey invite was answered, declined, or
+    /// closed unanswered on its last allowed open; never shown again.
+    /// Defaults to `false`.
+    public var expiredTrialSurveyDone: Bool {
+        get { defaults.bool(forKey: Keys.expiredTrialSurveyDone) }
+        nonmutating set { defaults.set(newValue, forKey: Keys.expiredTrialSurveyDone) }
     }
 
     /// The local-calendar day (`yyyy-MM-dd`) the `streaming:daily_active` event

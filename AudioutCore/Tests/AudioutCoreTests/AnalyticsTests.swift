@@ -49,6 +49,30 @@ extension SerializedSharedState {
             #expect(captured.events().isEmpty)
         }
 
+        /// Red if `captureStructured` stopped checking consent (a survey answer
+        /// would leave a Mac that opted out) or stopped reaching the sink.
+        @Test func captureStructuredIsConsentGated() {
+            let captured = Captured()
+            let sink = Analytics.Sink(capture: { _, _ in }, captureError: { _, _ in }, consentChanged: { _ in },
+                                      captureStructured: { name, props in
+                                          captured.append(name, ["count": "\(props.count)"])
+                                      })
+            defer { Analytics.install(nil, consent: false) }
+
+            Analytics.install(sink, consent: false)
+            Analytics.captureStructured("survey dismissed", ["$set": ["k": true]])
+            #expect(captured.events().isEmpty)
+
+            Analytics.install(Analytics.Sink(capture: { _, _ in }, captureError: { _, _ in },
+                                             consentChanged: { _ in }), consent: true)
+            Analytics.captureStructured("survey dismissed", ["$set": ["k": true]])
+            #expect(captured.events().isEmpty)
+
+            Analytics.install(sink, consent: true)
+            Analytics.captureStructured("survey sent", ["$set": ["k": true]])
+            #expect(captured.events().map(\.0) == ["survey sent"])
+        }
+
         @Test func installedSinkWithConsentTrueDeliversNameAndProperties() {
             let captured = Captured()
             Analytics.install(Analytics.Sink(capture: { name, props in

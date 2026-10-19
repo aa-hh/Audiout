@@ -27,14 +27,17 @@ final class SystemAirPlayNoteBannerView: TintedNoteBackgroundView {
 
     /// Tint tier (T-UI, routing-blocked-needs-default). `.info` is a note the
     /// reader can act on later, so it wears `ring`; `.warning` is a real
-    /// problem — routing is dead — so it wears `failure`.
+    /// problem — routing is dead — so it wears `failure`. `.question` is an
+    /// info note that asks the reader something (the expired-trial survey
+    /// invite): `ring` like `.info`, with a speech bubble for its glyph.
     enum Severity {
         case info
         case warning
+        case question
 
         var tintColor: NSColor {
             switch self {
-            case .info: return Tokens.Color.ring
+            case .info, .question: return Tokens.Color.ring
             case .warning: return Tokens.Color.failure
             }
         }
@@ -42,12 +45,14 @@ final class SystemAirPlayNoteBannerView: TintedNoteBackgroundView {
             switch self {
             case .info: return "info.circle.fill"
             case .warning: return "exclamationmark.triangle.fill"
+            case .question: return "bubble.left.fill"
             }
         }
         var accessibilityDescription: String {
             switch self {
             case .info: return "Note"
             case .warning: return "Warning"
+            case .question: return "Question"
             }
         }
     }
@@ -76,11 +81,21 @@ final class SystemAirPlayNoteBannerView: TintedNoteBackgroundView {
         icon.setContentCompressionResistancePriority(.required, for: .horizontal)
         self.iconView = icon
 
+        // An info or question note's button is the gold call to action
+        // (owner's call, 2026-10-19); a warning's stays the plain small bezel,
+        // so gold never sits on the failure tint.
         var button: NSButton?
         if let action {
-            let b = NSButton(title: action.title, target: nil, action: nil)
-            b.bezelStyle = .rounded
-            b.controlSize = .small
+            let b: NSButton
+            if severity == .warning {
+                b = NSButton(title: action.title, target: nil, action: nil)
+                b.bezelStyle = .rounded
+                b.controlSize = .small
+            } else {
+                // Large draws a 24 pt bezel, the library's ProminentButton.
+                b = ProminentButton(title: action.title, target: nil, action: nil)
+                b.controlSize = .large
+            }
             b.translatesAutoresizingMaskIntoConstraints = false
             b.setContentHuggingPriority(.required, for: .horizontal)
             b.setContentCompressionResistancePriority(.required, for: .horizontal)
@@ -135,9 +150,19 @@ final class SystemAirPlayNoteBannerView: TintedNoteBackgroundView {
         leading.spacing = 10
         leading.translatesAutoresizingMaskIntoConstraints = false
         addSubview(leading)
+        // The text keeps 10 pt above and below, but the banner also grows to
+        // hold the button with 8 pt to spare, so a one-line note with the
+        // gold button is 44 pt tall (the library's NoteBanner). The low
+        // priority pins keep the banner as short as both allow.
+        let hugTop = leading.topAnchor.constraint(equalTo: topAnchor, constant: 10)
+        let hugBottom = leading.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -10)
+        hugTop.priority = .defaultLow
+        hugBottom.priority = .defaultLow
         NSLayoutConstraint.activate([
-            leading.topAnchor.constraint(equalTo: topAnchor, constant: 10),
-            leading.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -10),
+            hugTop, hugBottom,
+            leading.topAnchor.constraint(greaterThanOrEqualTo: topAnchor, constant: 10),
+            leading.bottomAnchor.constraint(lessThanOrEqualTo: bottomAnchor, constant: -10),
+            leading.centerYAnchor.constraint(equalTo: centerYAnchor),
             leading.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
         ])
         if let linkButton {
@@ -166,6 +191,13 @@ final class SystemAirPlayNoteBannerView: TintedNoteBackgroundView {
             ])
         } else {
             leading.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14).isActive = true
+        }
+
+        if let button {
+            NSLayoutConstraint.activate([
+                button.topAnchor.constraint(greaterThanOrEqualTo: topAnchor, constant: 8),
+                button.bottomAnchor.constraint(lessThanOrEqualTo: bottomAnchor, constant: -8),
+            ])
         }
 
         button?.target = self

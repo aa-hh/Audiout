@@ -784,7 +784,7 @@ extension NativeBackend {
                     } catch {
                         Telemetry.fail(.airplay, "airplay:connect_failed",
                                        local: ["device": id, "detail": String(describing: error)],
-                                       shared: ["cause": "unknown"])
+                                       shared: ["cause": "unknown", "reason": Self.failureReason(error)])
                         self.stateQueue.sync {
                             self.setPerAppConnectionStateLocked(
                                 .failed(ConnectionFailure(cause: .unknown, detail: String(describing: error))), for: id)

@@ -477,7 +477,9 @@ extension SerializedEngineState {
             #expect(device.pointee.stream_id == 1)
 
             async let b: OutputBindResult = engine.addOutput(id, streamId: 2)
-            for _ in 0..<50 { try await Task.sleep(nanoseconds: 1_000_000) } // 50ms in 1ms steps
+            await SuiteWait.until("bind B waits at the gate") {
+                engine.opWaiterCountForTest(id) == 1
+            }
             #expect(device.pointee.stream_id == 1,
                 "a second bind wrote stream_id before taking the per-output gate")
 

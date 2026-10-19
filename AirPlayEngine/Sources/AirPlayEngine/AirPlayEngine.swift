@@ -174,6 +174,10 @@ public actor AirPlayEngine {
     // waiter can block at most that long behind an in-flight op on the same id.
     private var opsInFlight: Set<OutputID> = []
     private var opWaiters: [OutputID: [CheckedContinuation<Void, Never>]] = [:]
+    // Test-only nonisolated copy of `opWaiters[id]?.count`, so a `SuiteWait.until`
+    // condition can see an op parked at the gate without awaiting the actor.
+    // `acquireOp`/`releaseOp` keep it current.
+    private nonisolated let opWaiterCounts = OSAllocatedUnfairLock<[OutputID: Int]>(initialState: [:])
     // A nonisolated mirror of `started` the hot write path can read without an
     // actor hop. Kept in lock-step with `started`.
     private nonisolated let startedFlag = AtomicBool(false)
@@ -1666,6 +1670,8 @@ public actor AirPlayEngine {
         while opsInFlight.contains(id) {
             await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
                 opWaiters[id, default: []].append(cont)
+                let count = opWaiters[id]?.count ?? 0
+                opWaiterCounts.withLock { $0[id] = count }
             }
         }
         opsInFlight.insert(id)
@@ -1676,6 +1682,7 @@ public actor AirPlayEngine {
     private func releaseOp(_ id: OutputID) {
         opsInFlight.remove(id)
         if let waiters = opWaiters.removeValue(forKey: id) {
+            opWaiterCounts.withLock { $0[id] = nil }
             for w in waiters { w.resume() }
         }
     }
@@ -1794,6 +1801,12 @@ public actor AirPlayEngine {
     /// for a `SuiteWait.until` condition, which cannot await the actor.
     nonisolated func waiterIsArmedForTest(callbackId: Int32) -> Bool {
         completions.hasWaiter(callbackId: callbackId)
+    }
+
+    /// Test-only: how many ops are parked at the per-output gate for `id`
+    /// (`opWaiters[id]?.count`), readable from a `SuiteWait.until` condition.
+    nonisolated func opWaiterCountForTest(_ id: OutputID) -> Int {
+        opWaiterCounts.withLock { $0[id] ?? 0 }
     }
 
     /// Test-only: make the armed op's real timeout timer fire now. Returns

@@ -708,8 +708,8 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// The alignment wizard's first-tick ARM gate (roadmap 056 Part B): the
     /// in-flight poll, on `captureControlQueue` (which owns both sinks).
     var wizardArmPollWork: DispatchWorkItem?   // captureControlQueue
-    /// The three arm-gate timings, `var` so a suite can shrink them rather than
-    /// sleeping through the production values.
+    /// The three arm-gate timings, in ``delayClock`` and ``uptimeClock``
+    /// seconds, `var` so a suite can set its own.
     var wizardArmPollInterval: TimeInterval = 0.1
     /// A floor of bed-only time before the first tick, however fast the sinks
     /// release — the Sonos Move's amplifier needs it (live finding 2026-08-07).
@@ -1593,9 +1593,9 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     }
 
     /// Runs the backed-off retries, the companion audition's deadlines and
-    /// liveness poll, and the Bluetooth hold, sink-recovery and synced-local
-    /// settle timers, among others. Only the tests pass anything but
-    /// ``dispatchDelayClock``:
+    /// liveness poll, the wizard's arm-gate poll, and the Bluetooth hold,
+    /// sink-recovery and synced-local settle timers, among others. Only the
+    /// tests pass anything but ``dispatchDelayClock``:
     /// on the wall clock, a loaded test run let a 0.05 s backoff burn every
     /// rebind attempt before the test's next step, and a 4 s stop deadline
     /// expire mid-restoration.
@@ -1610,8 +1610,8 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     }
 
     /// The backend's reading of "now" for the Bluetooth hold and sink-death
-    /// deadlines, the synced-local churn horizon and the companion audition
-    /// deadlines. Tests pass a manual one.
+    /// deadlines, the synced-local churn horizon, the companion audition
+    /// deadlines and the wizard's arm gate. Tests pass a manual one.
     let uptimeClock: UptimeClock
 
     /// Times the meter's level drain and the coalescer's trailing flush. Kept

@@ -316,6 +316,16 @@ extension SerializedSharedState {
                 }
             }
         }
+        /// Whether a `.deviceUpdated` for `id` at `volume` has been collected.
+        /// The stream keeps emission order, so every earlier event is in too.
+        func sawVolume(_ volume: Int, for id: String) -> Bool {
+            lock.withLock {
+                _events.contains {
+                    if case .deviceUpdated(let device) = $0 { return device.id == id && device.volume == volume }
+                    return false
+                }
+            }
+        }
         func promptedDeviceIDs() -> [String] {
             lock.withLock {
                 _events.compactMap {
@@ -379,7 +389,7 @@ extension SerializedSharedState {
         // The 4 s production start deadline is wall time, and a stalled GitHub
         // runner has taken longer than that to answer the holds, so every start
         // was refused as "The speaker pair changed". A test about the deadline
-        // itself sets a short one.
+        // itself moves a `ManualDelayClock` past it.
         backend.companionAuditionPreparationSeconds = 60
         let sink = SpyBTSink()
         backend.btSyncedSinkFactory = { sink }
@@ -397,6 +407,46 @@ extension SerializedSharedState {
 
     private func device(_ backend: NativeBackend, _ id: String) -> Device? {
         backend.devices.first { $0.id == id }
+    }
+
+    /// Whether the audition's cleanup has begun. Cleanup schedules its stop
+    /// deadline in the same main-queue turn, so a test on main that sees this
+    /// can move the clock past that deadline.
+    private func cleanupStarted(_ backend: NativeBackend) -> Bool {
+        backend.btTrimLock.withLock { backend.companionAudition?.cleanupStarted == true }
+    }
+
+    /// Whether the audition reservation is gone.
+    private func auditionRetired(_ backend: NativeBackend) -> Bool {
+        backend.btTrimLock.withLock { backend.companionAudition == nil }
+    }
+
+    /// Run everything already queued on `stateQueue`, then everything that
+    /// work queued on main, where the lifetime callbacks are delivered.
+    @MainActor private func drainStateThenMain(_ backend: NativeBackend) async {
+        backend.stateQueue.sync {}
+        await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
+            DispatchQueue.main.async { done.resume() }
+        }
+    }
+
+    /// Run everything already queued on `stateQueue`, then everything that
+    /// work queued on `captureControlQueue`, where the sink pushes land.
+    private func drainStateThenCapture(_ backend: NativeBackend) {
+        backend.stateQueue.sync {}
+        backend.captureControlQueue.sync {}
+    }
+
+    /// Whether the wizard's arm gate is still waiting: a poll that does not arm
+    /// schedules the next one.
+    private func armGatePolling(_ backend: NativeBackend) -> Bool {
+        backend.captureControlQueue.sync { backend.wizardArmPollWork != nil }
+    }
+
+    /// Move `clock` one arm-gate interval and run the poll that fires.
+    private func runArmPoll(_ backend: NativeBackend, _ clock: ManualDelayClock) {
+        clock.advance(by: backend.wizardArmPollInterval)
+        backend.captureControlQueue.sync {}
     }
 
     /// The sink gain is the composed `Main × Group × Device` product; drive the
@@ -589,14 +639,17 @@ extension SerializedSharedState {
     }
 
     @Test @MainActor func preparationDeadlineRejectsJoinedStartsAndLateLocalCompletion() async {
-        let (backend, bt, _, _) = makeBackend()
+        // The start deadline expires when the test moves this clock past it.
+        let clock = ManualDelayClock()
+        let (backend, bt, _, _) = makeBackend(delayClock: clock.queueHoppingClock,
+                                              uptimeClock: clock.uptime)
         defer { backend.stop() }
         let capture = ProbeStagingCapture()
         let local = ScriptedLocalPlayback()
         local.holdsCompletions = true
         backend.captureCoordinator = capture
         backend.localPlaybackEngine = local
-        backend.companionAuditionPreparationSeconds = 0.1
+        backend.companionAuditionPreparationSeconds = 5
         backend.start()
         bt.fire([btMove, btFlip])
         await SuiteWait.until { self.device(backend, self.btFlip.id) != nil }
@@ -609,6 +662,10 @@ extension SerializedSharedState {
         backend.startCompanionAlignmentAudition(targetID: btMove.id, referenceID: btFlip.id) {
             second.value = .some($0)
         }
+        // Both starts have run on main once preparation reaches the local setter.
+        await SuiteWait.until { local.suppressions.contains(true) }
+        #expect(first.value == nil && second.value == nil)
+        clock.advance(by: backend.companionAuditionPreparationSeconds)
         await SuiteWait.until { first.value != nil && second.value != nil }
         #expect(first.value.flatMap { $0 }?.contains("too long") == true)
         #expect(second.value.flatMap { $0 }?.contains("too long") == true)
@@ -800,10 +857,14 @@ extension SerializedSharedState {
     @Test @MainActor func timedOutStopKeepsReservationUntilAirPlayRestorationDrains() async {
         let engine = RecordingEngine()
         let discovery = FakeDiscovery()
-        let (backend, bt, _, _) = makeBackend(engine: engine, discovery: discovery)
+        // The stop deadline expires when the test moves this clock past it.
+        let clock = ManualDelayClock()
+        let (backend, bt, _, _) = makeBackend(engine: engine, discovery: discovery,
+                                              delayClock: clock.queueHoppingClock,
+                                              uptimeClock: clock.uptime)
         defer { engine.releaseWrites(); backend.stop() }
         backend.captureCoordinator = ProbeStagingCapture()
-        backend.companionAuditionStopSeconds = 0.1
+        backend.companionAuditionStopSeconds = 5
         backend.start()
         let ap1 = airPlay1()
         discovery.fire(.appeared(ap1))
@@ -823,6 +884,8 @@ extension SerializedSharedState {
         await SuiteWait.until { self.device(backend, ap1.id)?.volume == 75 }
         let stop = LockedBox<String??>(nil)
         backend.endCompanionAlignmentAudition(targetID: btMove.id) { stop.value = .some($0) }
+        await SuiteWait.until { self.cleanupStarted(backend) }
+        clock.advance(by: backend.companionAuditionStopSeconds)
         await SuiteWait.until { stop.value != nil }
         #expect(stop.value.flatMap { $0 }?.contains("took too long") == true)
         #expect(backend.startCompanionAlignmentProbe(targetID: btMove.id,
@@ -842,12 +905,15 @@ extension SerializedSharedState {
     }
 
     @Test @MainActor func timedOutLocalRestorationNamesTheLocalOutputAndStaysBusy() async {
-        let (backend, bt, _, _) = makeBackend()
+        // The stop deadline expires when the test moves this clock past it.
+        let clock = ManualDelayClock()
+        let (backend, bt, _, _) = makeBackend(delayClock: clock.queueHoppingClock,
+                                              uptimeClock: clock.uptime)
         defer { backend.stop() }
         let local = ScriptedLocalPlayback()
         backend.localPlaybackEngine = local
         backend.captureCoordinator = ProbeStagingCapture()
-        backend.companionAuditionStopSeconds = 0.1
+        backend.companionAuditionStopSeconds = 5
         backend.start()
         bt.fire([btMove, btFlip])
         await SuiteWait.until { self.device(backend, self.btFlip.id) != nil }
@@ -864,6 +930,8 @@ extension SerializedSharedState {
         backend.endCompanionAlignmentAudition(targetID: btMove.id) {
             replies.value = replies.value + [$0]
         }
+        await SuiteWait.until { self.cleanupStarted(backend) }
+        clock.advance(by: backend.companionAuditionStopSeconds)
         await SuiteWait.until { replies.value.count == 1 }
         #expect(replies.value[0]?.contains(localName) == true)
         #expect(backend.startCompanionAlignmentProbe(targetID: btMove.id,
@@ -1038,7 +1106,9 @@ extension SerializedSharedState {
         #expect(backend.btHasSyncTrim(forDevice: btMove.id) == true)
 
         backend.clearCompanionAlignmentTuning(targetID: btMove.id)
-        SuiteWait.settle(0.3)
+        // The drain persists the nudge before it retires the audition, so once
+        // the audition is gone no write-back can still be on its way.
+        await SuiteWait.until { self.auditionRetired(backend) }
         #expect(backend.btHasSyncTrim(forDevice: btMove.id) == false)
         #expect((try? BTTrimStore(directory: dir).load())?[btMove.id] == nil)
     }
@@ -1149,7 +1219,7 @@ extension SerializedSharedState {
         await SuiteWait.until { released.value == 1 }
         await SuiteWait.until { backend.startCompanionAlignmentProbe(targetID: self.btMove.id,
             referenceID: self.btFlip.id, onStarted: {}, onFinished: {}) == nil }
-        SuiteWait.settle(0.3)
+        await drainStateThenMain(backend)
         #expect(released.value == 1, "the lifetime signal fires exactly once")
         #expect(refusedReleased.value == 1)
         backend.cancelCompanionAlignmentProbe(targetID: btMove.id)
@@ -1174,7 +1244,7 @@ extension SerializedSharedState {
         #expect(start.value == .some(nil))
         backend.stop()
         await SuiteWait.until { released.value == 1 }
-        SuiteWait.settle(0.3)
+        await drainStateThenMain(backend)
         #expect(released.value == 1)
     }
 
@@ -1295,7 +1365,10 @@ extension SerializedSharedState {
         waitFor { self.device(backend, self.btFlip.id) != nil }
 
         backend.setOutputSet([btMove.id])
-        SuiteWait.settle(0.5)   // settle; nothing should fire
+        // A later event on the same stream: once it is collected, any prompt
+        // the solo select emitted has been collected too.
+        backend.setVolume(37, for: btMove.id)
+        waitFor { events.sawVolume(37, for: self.btMove.id) }
         #expect(events.promptedDeviceIDs().isEmpty)
 
         backend.setOutputSet([btMove.id, btFlip.id])
@@ -1339,7 +1412,10 @@ extension SerializedSharedState {
         waitFor { events.promptedDeviceIDs().count == 2 }
         backend.setOutputSet([btMove.id])
         backend.setOutputSet([btMove.id, btFlip.id])
-        SuiteWait.settle(0.5)   // settle
+        // A later event on the same stream: once it is collected, any re-prompt
+        // has been collected too.
+        backend.setVolume(37, for: btMove.id)
+        waitFor { events.sawVolume(37, for: self.btMove.id) }
 
         #expect(events.promptedDeviceIDs().count == 2, "no re-prompt on re-forming the mix")
     }
@@ -2001,7 +2077,7 @@ extension SerializedSharedState {
 
         // The Done click.
         backend.setBTWizardTickActive(false, btTargetDeviceID: btMove.id, btReferenceDeviceID: nil)
-        waitFor(timeout: 0.2) { sink.reanchors.count > baseline + 2 }
+        drainStateThenCapture(backend)
         #expect(sink.reanchors.count == baseline + 2,
                 "one edge on, one edge off — got \(sink.reanchors)")
         #expect(backend.localSinkReferenceDelayMs() == 2_000,
@@ -2015,9 +2091,12 @@ extension SerializedSharedState {
     /// alone at the start while a Bluetooth engine was still coming up.
     @Test func theTicksArmOnlyOnceEverySinkIsPlaying() {
         let capture = LineCapture()
-        let (backend, bt, sink, _) = makeBackend()
+        // The arm gate polls when the test moves this clock.
+        let clock = ManualDelayClock()
+        let (backend, bt, sink, _) = makeBackend(delayClock: clock.queueHoppingClock,
+                                                 uptimeClock: clock.uptime)
         defer { backend.stop(); Telemetry._installTestSink(nil) }
-        backend.wizardArmPollInterval = 0.01
+        backend.wizardArmPollInterval = 1
         backend.wizardArmMinimumBedSeconds = 0
         backend.wizardArmCeilingSeconds = 60      // far out of reach: only a
                                                   // real release can arm here
@@ -2034,11 +2113,14 @@ extension SerializedSharedState {
 
         Telemetry._installTestSink { capture.append($0) }
         backend.setBTWizardTickActive(true, btTargetDeviceID: btMove.id, btReferenceDeviceID: nil)
+        backend.captureControlQueue.sync {}   // the gate has scheduled its first poll
         // Nothing is rendering yet, so the gate keeps polling.
-        waitFor(timeout: 0.3) { !capture.armedLines().isEmpty }
-        #expect(capture.armedLines().isEmpty, "no tick while a participant is silent")
+        for _ in 0..<3 { runArmPoll(backend, clock) }
+        #expect(armGatePolling(backend), "no tick while a participant is silent")
+        #expect(capture.armedLines().isEmpty)
 
         sink.rendering = [btMove.id]
+        runArmPoll(backend, clock)
         waitFor { !capture.armedLines().isEmpty }
         let line = capture.armedLines().first
         #expect(line != nil, "the ticks arm once everyone is playing")
@@ -2059,10 +2141,13 @@ extension SerializedSharedState {
     /// floor now runs from the release, however long the gate waited for it.
     @Test func theBedFloorIsTimedFromTheReleaseNotTheGateOpening() {
         let capture = LineCapture()
-        let (backend, bt, sink, _) = makeBackend()
+        // The arm gate polls when the test moves this clock.
+        let clock = ManualDelayClock()
+        let (backend, bt, sink, _) = makeBackend(delayClock: clock.queueHoppingClock,
+                                                 uptimeClock: clock.uptime)
         defer { backend.stop(); Telemetry._installTestSink(nil) }
-        backend.wizardArmPollInterval = 0.01
-        backend.wizardArmMinimumBedSeconds = 0.4
+        backend.wizardArmPollInterval = 1
+        backend.wizardArmMinimumBedSeconds = 3
         backend.wizardArmCeilingSeconds = 60
         backend.start()
         bt.fire([btMove])
@@ -2072,21 +2157,25 @@ extension SerializedSharedState {
 
         Telemetry._installTestSink { capture.append($0) }
         backend.setBTWizardTickActive(true, btTargetDeviceID: btMove.id, btReferenceDeviceID: nil)
+        backend.captureControlQueue.sync {}   // the gate has scheduled its first poll
         // The gate waits longer than the whole floor with nothing released.
-        waitFor(timeout: 0.6) { !capture.armedLines().isEmpty }
-        #expect(capture.armedLines().isEmpty, "no tick while the speaker is silent")
+        for _ in 0..<4 { runArmPoll(backend, clock) }
+        #expect(armGatePolling(backend), "no tick while the speaker is silent")
 
-        let releasedAt = Date()
+        // The first poll after the release dates it; the floor runs from there.
         sink.rendering = [btMove.id]
+        for _ in 0..<3 {
+            runArmPoll(backend, clock)
+            #expect(armGatePolling(backend),
+                    "the arm waits a full floor after the release, not after the gate")
+        }
+        runArmPoll(backend, clock)
         waitFor { !capture.armedLines().isEmpty }
-        let bedHeard = Date().timeIntervalSince(releasedAt)
-        #expect(bedHeard >= 0.4,
-                "the arm waited a full floor after the release, not after the gate: \(bedHeard) s")
         let line = capture.armedLines().first ?? ""
         #expect(line.contains("\"timedOut\":\"0\""), "\(line)")
         let bedMs = line.range(of: #""bedMs":"(\d+)""#, options: .regularExpression)
             .map { String(line[$0]).filter(\.isNumber) }.flatMap { Int($0) }
-        #expect((bedMs ?? 0) >= 400, "the line records the audible bed: \(line)")
+        #expect((bedMs ?? 0) >= 3_000, "the line records the audible bed: \(line)")
 
         backend.setBTWizardTickActive(false, btTargetDeviceID: btMove.id, btReferenceDeviceID: nil)
     }
@@ -2095,11 +2184,14 @@ extension SerializedSharedState {
     /// ceiling arms it anyway, and says so.
     @Test func theArmGateHasACeiling() {
         let capture = LineCapture()
-        let (backend, bt, sink, _) = makeBackend()
+        // The arm gate polls when the test moves this clock.
+        let clock = ManualDelayClock()
+        let (backend, bt, sink, _) = makeBackend(delayClock: clock.queueHoppingClock,
+                                                 uptimeClock: clock.uptime)
         defer { backend.stop(); Telemetry._installTestSink(nil) }
-        backend.wizardArmPollInterval = 0.01
+        backend.wizardArmPollInterval = 1
         backend.wizardArmMinimumBedSeconds = 0
-        backend.wizardArmCeilingSeconds = 0.05
+        backend.wizardArmCeilingSeconds = 5
         backend.start()
         bt.fire([btMove])
         waitFor { self.device(backend, self.btMove.id) != nil }
@@ -2113,6 +2205,8 @@ extension SerializedSharedState {
 
         Telemetry._installTestSink { capture.append($0) }
         backend.setBTWizardTickActive(true, btTargetDeviceID: btMove.id, btReferenceDeviceID: nil)
+        backend.captureControlQueue.sync {}   // the gate has scheduled its first poll
+        for _ in 0..<5 { runArmPoll(backend, clock) }
         waitFor { !capture.armedLines().isEmpty }
         #expect(capture.armedLines().first?.contains("\"timedOut\":\"1\"") == true,
                 "the ceiling arms regardless, and the line records that it did")
@@ -2298,11 +2392,11 @@ extension SerializedSharedState {
         backend.setOutputSet([sonos.id])                                 // 19:59:41
         backend.setBTSyncTrim(-205, forDevice: sonos.id, persist: true)  // 21:36:52
         backend.setOutputSet([])                                         // 21:46:57
-        SuiteWait.settle(0.3)
+        drainStateThenCapture(backend)
         let pushesBefore = sink.offsets.count
         backend.setOutputSet([sonos.id])                                 // 21:54:24
         await SuiteWait.until { sink.offsets.count > pushesBefore }
-        SuiteWait.settle(0.3)
+        drainStateThenCapture(backend)
 
         #expect(try store.loadLatencies()?[sonos.id] == 295, "deselect/reselect kept the latency")
         #expect(try store.load()?[sonos.id] == -205, "deselect/reselect kept the trim")

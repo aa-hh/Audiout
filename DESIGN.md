@@ -832,7 +832,9 @@ round at **control** (10pt).
 ### ProminentButton (signature component)
 The one call-to-action button in the app: `Tokens.Color.gold` fill via
 `bezelColor`, `Tokens.Color.inkOnFill` ink, `Tokens.Font.body` (or the
-emphasized weight for a finale CTA). Fill and ink are pinned to their DARK
+emphasized weight for a finale CTA). On macOS 26 and later it sets
+`tintProminence` to primary: at the automatic default AppKit draws the
+`bezelColor` muted, and the gold came out a dark olive in the popover. Fill and ink are pinned to their DARK
 values (`#E8B84B` with `#171104`) in both appearances: one light gold with dark
 text everywhere, the same pin as the alignment wizard's primary plates. Light
 mode's paper gold `#A67C1E` is shaded by the rounded bezel into a muddy olive
@@ -1117,9 +1119,11 @@ severities:
 
 It may carry a trailing button, pinned to the trailing edge, and an
 underlined `TextLinkButton` left of it; never more than one link beside a
-button. An info or question banner's button is the gold call to action; a
-warning banner's stays plain, so gold never sits on the failure tint. A
-banner is not dismissible.
+button. An info or question banner's button is the gold call to action at
+the large control size (a 24 pt bezel), and the banner grows to hold it with
+8 pt above and below, so a one-line note with a button is 44 pt tall; a
+warning banner's stays plain and small, so gold never sits on the failure
+tint. A banner is not dismissible.
 
 `TintedNoteBackgroundView` (`AudioutSharedUI`) is the ground every tinted
 notice shares: the tint at 12 % (`PopoverColumnGrid.insetCardTintAlpha`), a

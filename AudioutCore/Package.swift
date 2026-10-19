@@ -192,7 +192,9 @@ let package = Package(
         // speaker's product model in the snapshot; 0.26.0 is protocol version 2
         // (TLS, the phone's signed `hello`, `CompanionPairing`); 0.27.0 adds
         // `hello`'s optional `checksPairingCode`; 0.28.0 adds the `removed`
-        // goodbye reason.
+        // goodbye reason; 0.29.0 adds the run's `referenceID` on
+        // `startAlignmentProbe`/`setAlignmentTick` and the snapshot's
+        // `referenceCandidateIDs`.
         .package(url: "https://github.com/aa-hh/audiout-shared.git",
                  from: "0.29.0"),
         // Sparkle 2 (MIT) — in-app updates for the paid, notarised build only.

@@ -205,9 +205,11 @@ public final class CompanionCoordinator {
     private let alignmentOwners = CompanionAlignmentOwnership()
 
     /// Device ids this coordinator selected so a phone's run could hear them,
-    /// per target, in the order they were selected. Released in reverse, so
-    /// `GroupController`'s auto-swap and empty-set floor put the user's
-    /// Selected Devices back exactly. The generation tells one engagement
+    /// per target, in the order they were selected. They are put back on the
+    /// owner's cancel, the phone's disconnect, a lease expiry, or a refusal
+    /// inside the same call; released in reverse, so `GroupController`'s
+    /// auto-swap and empty-set floor put the user's Selected Devices back
+    /// exactly. The generation tells one engagement
     /// from the next, so a late refusal from an ended run cannot release
     /// the selections of the run that replaced it.
     private var engagedByTarget: [String: (generation: Int, ids: [String])] = [:]
@@ -441,11 +443,15 @@ public final class CompanionCoordinator {
                         (self?.backend as? BTOutputControlling)?
                             .cancelCompanionAlignmentProbe(targetID: id)
                     })
-                // razor: one phone at a time — any phone's disconnect puts back
-                // every selection a run made. Key `engagedByTarget` by client
-                // if two phones may ever measure at once.
+                // razor: with several phones, one phone's disconnect leaves
+                // another phone's run alone; only runs it owned, or nobody
+                // owns, give their selections back. Key `engagedByTarget` by
+                // client if two phones may ever measure the same speaker.
                 for targetID in Array(self.engagedByTarget.keys) {
-                    self.releaseEngaged(forTarget: targetID)
+                    let owner = self.alignmentOwners.current(targetID: targetID)
+                    if owner == nil || owner?.clientID == clientID {
+                        self.releaseEngaged(forTarget: targetID)
+                    }
                 }
             }
         }
@@ -798,7 +804,6 @@ public final class CompanionCoordinator {
                                 generation: Int? = nil) {
         guard let entry = engagedByTarget[targetID],
               generation == nil || generation == entry.generation else { return }
-        if only == nil { engagementGeneration += 1 }
         let released = only.map { only in entry.ids.filter(only.contains) } ?? entry.ids
         let kept = entry.ids.filter { !released.contains($0) }
         engagedByTarget[targetID] = kept.isEmpty ? nil : (entry.generation, kept)
@@ -997,9 +1002,14 @@ public final class CompanionCoordinator {
         DispatchQueue.main.asyncAfter(deadline: .now() + max(0, deadline.timeIntervalSinceNow)) {
             [weak self] in
             guard let self else { return }
+            // The phone may never follow an expiry with a cancel, so the
+            // run's selections go back here.
             self.alignmentOwners.expireAudition(
                 targetID: targetID, requestID: requestID,
-                stopAudition: { [weak self] id in self?.stopAudition(targetID: id) })
+                stopAudition: { [weak self] id in
+                    self?.releaseEngaged(forTarget: id)
+                    self?.stopAudition(targetID: id)
+                })
         }
     }
 
@@ -1271,10 +1281,10 @@ public final class CompanionCoordinator {
             })
     }
 
-    /// The speaker a run for `targetID` would be measured against — the SAME
-    /// rule, over the same inputs, that puts `referenceID` in every snapshot.
-    /// One function, so the phone's CTA and what a run actually plays can
-    /// never be two different speakers.
+    /// The Mac's default speaker for a run on `targetID` to be measured
+    /// against — the SAME rule, over the same inputs, that puts `referenceID`
+    /// in every snapshot. The phone may name another candidate for its run;
+    /// the demo always plays this default.
     ///
     /// `isMainOutMember` is the audible read, never `isSpeakerSelected`: under
     /// a saved-group Main Out target the latter is wrong in both directions,

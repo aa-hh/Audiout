@@ -66,7 +66,7 @@ private let audioProcessResolver = AudioProcessResolver(
 /// drives `AppSurfaceController`'s click policy, and the surface hosts the
 /// Mixer panel built by `PopoverController`.
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
 
     /// The one place that talks to a concrete backend type. Resolved via
     /// `makeBackend()`: explicit arg (none) → `AIRPLAY_BACKEND` env → `.native`.
@@ -985,6 +985,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     }
 
+    // Dev builds only: the Developer "Licence server" choice overrides the
+    // baked feed. `nil` keeps the bundle's `SUFeedURL`.
+    func feedURLString(for updater: SPUUpdater) -> String? {
+        settings.licenseServerChoiceAppcastURL?.absoluteString
+    }
+
     /// Sparkle, the licence state and the analytics identity — after the
     /// status item, because none of it puts a pixel on screen by itself.
     @MainActor
@@ -1002,7 +1008,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // the updater is never even started.
         if Bundle.main.object(forInfoDictionaryKey: "SUFeedURL") != nil {
             updaterController = SPUStandardUpdaterController(startingUpdater: true,
-                                                             updaterDelegate: nil,
+                                                             updaterDelegate: self,
                                                              userDriverDelegate: nil)
         }
 
@@ -2561,6 +2567,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // window; the backend is already running, so its onFinished is a
         // guarded no-op.
         general.onRunSetupAgain = { [weak self] in self?.presentSetup() }
+        // Dev builds only. The verdict was just cleared, so the first apply
+        // drops the speaker limit, the Mixer note and the phones' token at
+        // once; the validator's answer from the newly chosen server restores
+        // whatever it says (`.noKey`/`.noServer` make no request).
+        general.onLicenseServerChanged = { [weak self, settings] in
+            self?.applyLicenseState()
+            LicenseValidator(settings: settings).validate { [weak self] _ in
+                self?.applyLicenseState()
+            }
+            LicenseCheckIn(settings: settings).checkInIfNeeded()
+        }
         // Left nil in a build with no updater, which hides the button.
         if let updaterController {
             general.onCheckForUpdates = { updaterController.checkForUpdates(nil) }

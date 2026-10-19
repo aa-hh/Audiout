@@ -645,8 +645,9 @@ public final class NativeDiscovery: @unchecked Sendable {
     /// and `sf` (`_raop._tcp`) as hex status flags, plus `pw` and `act` on
     /// either record. `pw` counts when present, non-empty and not "false",
     /// the same test as the vendored `raop_device_cb` (`raop.c` ~:4446).
-    /// Precedence: Home-only (`act=2`, bit 10), then on-screen code (bits 3,
-    /// 9), then password (`pw`, bit 7).
+    /// Precedence: Home-only (`act=2`, bit 10), then on-screen code on every
+    /// join (bit 3), then on-screen code the first time only (bit 9), then
+    /// password (`pw`, bit 7).
     static func access(airplay: ResolvedService?, raop: ResolvedService?) -> AirPlayAccess {
         let records = [airplay?.txtRecord, raop?.txtRecord].compactMap { $0 }
         let flags = [airplay?.txtRecord["flags"], raop?.txtRecord["sf"]]
@@ -659,7 +660,8 @@ public final class NativeDiscovery: @unchecked Sendable {
         }
         let homeOnly = records.contains { $0["act"] == "2" }
         if homeOnly || bit(10) { return .homeMembersOnly }
-        if bit(3) || bit(9) { return .onScreenCode }
+        if bit(3) { return .onScreenCodeEveryTime }
+        if bit(9) { return .onScreenCode }
         if pw || bit(7) { return .password }
         return .open
     }

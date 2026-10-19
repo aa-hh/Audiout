@@ -55,6 +55,11 @@ private final class UnconstrainedDeviceRowWindow: NSWindow {
         let row = DeviceRowView(device: device)
         #expect(row.test_lockGlyphIsVisible)
         #expect(row.lockGlyphView.accessibilityLabel() == "Password protected")
+
+        device.airPlayAccess = .onScreenCodeEveryTime
+        let everyTimeRow = DeviceRowView(device: device)
+        #expect(everyTimeRow.test_lockGlyphIsVisible)
+        #expect(everyTimeRow.lockGlyphView.accessibilityLabel() == "Code required")
     }
 
     // MARK: Four states → four ring renderings (+ failed-only sublabel)
@@ -218,6 +223,25 @@ private final class UnconstrainedDeviceRowWindow: NSWindow {
         #expect(row.test_statusKind == .connecting)
         #expect(row.test_ringForm == .connecting)
         #expect(row.test_accessibilityLabel?.hasSuffix(", waiting for password") == true)
+    }
+
+    // Turns red if `updateRemovalUndo` stops choosing the link's title and spoken label from `airPlayAccess`.
+    @Test func awaitingLinkTitleFollowsTheAccessKind() {
+        var code = makeDevice(connectionState: .awaitingPassword)
+        code.airPlayAccess = .onScreenCode
+        let codeRow = DeviceRowView(device: code, showsBus: true)
+        codeRow.apply(code, selected: true)
+        #expect(codeRow.test_enterPasswordOffered)
+        #expect(codeRow.test_enterPasswordLinkTitle == "Enter Code…")
+        #expect(codeRow.enterPasswordButton.accessibilityLabel() == "Enter the code for Test Speaker")
+
+        var password = makeDevice(connectionState: .awaitingPassword)
+        password.airPlayAccess = .password
+        let passwordRow = DeviceRowView(device: password, showsBus: true)
+        passwordRow.apply(password, selected: true)
+        #expect(passwordRow.test_enterPasswordOffered)
+        #expect(passwordRow.test_enterPasswordLinkTitle == "Enter Password…")
+        #expect(passwordRow.enterPasswordButton.accessibilityLabel() == "Enter the password for Test Speaker")
     }
 
     // Announcing a placeholder volume or retaining its omission after reapply would break this label.

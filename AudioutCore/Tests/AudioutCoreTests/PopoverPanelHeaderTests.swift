@@ -129,7 +129,7 @@ import AppKit
         let notes = panel.test_cardNotes(title: title)
         #expect(notes.count == 1)
         #expect(notes.first?.stringValue == text)
-        #expect(notes.first?.textColor == Tokens.Color.secondaryLabel)
+        #expect(notes.first?.textColor == Tokens.Color.label2)
     }
 
     // MARK: Card-title liveness tint

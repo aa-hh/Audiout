@@ -333,8 +333,9 @@ import AirPlayEngine
         }
         #expect(access(raop: ["pw": "true"]) == .password)
         #expect(access(airplay: ["flags": "0x80"]) == .password)
-        #expect(access(airplay: ["flags": "0x8"]) == .onScreenCode)
+        #expect(access(airplay: ["flags": "0x8"]) == .onScreenCodeEveryTime)
         #expect(access(airplay: ["flags": "0x200"]) == .onScreenCode)
+        #expect(access(airplay: ["flags": "0x208"]) == .onScreenCodeEveryTime)
         #expect(access(airplay: ["act": "2"]) == .homeMembersOnly)
         #expect(access(raop: ["pw": "false"]) == .open)
         #expect(access(airplay: ["act": "2", "flags": "0x80"]) == .homeMembersOnly)

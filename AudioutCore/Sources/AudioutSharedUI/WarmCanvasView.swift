@@ -3,11 +3,9 @@
 import AppKit
 
 /// The **Warm Signal canvas** (spec `dev/notes/warm-signal-v3.md` §5.1): the
-/// single continuous background a de-nested surface's sections sit directly
-/// on. Introduced by warm-signal-v2 (the popover canvas + card de-nest) to
-/// replace `PopoverPanelViewController`'s old `NSVisualEffectView`
-/// (`.menu`, `.behindWindow`) background and `CardView`'s own per-card
-/// material/shadow/rim.
+/// background of the windows that open outside the surface, the Setup window
+/// and the alignment wizard sheet. Every screen inside the surface sits on
+/// `WarmPanelView`'s flat `panel` instead.
 ///
 /// A plain, layer-backed `NSView` with a custom `draw(_:)` — deliberately
 /// NOT an `NSVisualEffectView` — so it is **always fully opaque**, in every

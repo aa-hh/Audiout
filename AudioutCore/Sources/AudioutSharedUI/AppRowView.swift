@@ -203,19 +203,15 @@ public final class AppRowView: NSView {
     /// left-aligned — the under-name meter, same anatomy as the device rows so
     /// the columns line up across sections.
     private let identityStack = NSStackView()
-    private let slider = NSSlider()
-    /// The Warm Signal fader skin over `slider` (drawing-only `NSSliderCell`
-    /// swap — behavior/keyboard/VoiceOver stay stock): recessed `well` trough,
-    /// gold `ember → gold` fill iff this app's redirect route is armed — the
-    /// app-row armed predicate, routed (destination ≠ standalone) ∧ running
-    /// (spec §5.1's app-row gold-dot predicate; this row hosts no corner dot,
-    /// so the fader is where the armed state renders) — rounded-rect `raised`
-    /// thumb. See ``WarmFaderCell``.
-    private let faderCell = WarmFaderCell()
-    private let readoutLabel = NSTextField(labelWithString: "")
+    /// The volume slider and its `%` readout. Gold iff this app's redirect
+    /// route is armed — routed (destination ≠ standalone) ∧ running (spec
+    /// §5.1; this row hosts no corner dot, so the fader carries the state).
+    private let fader = RowVolumeFader()
     private let destinationPopUp = NSPopUpButton(frame: .zero, pullsDown: false)
 
-    private var isDraggingSlider = false
+    /// The slider's frame in this row's coordinates, for the click and cursor
+    /// carve-outs (the readout beside it stays part of the selectable body).
+    private var sliderFrame: NSRect { convert(fader.slider.frame, from: fader) }
 
     /// Single-selection render state (T1 seam). The HOST owns which bundleID is
     /// selected across the whole Applications list — this view only renders
@@ -231,8 +227,10 @@ public final class AppRowView: NSView {
     /// draw in different colours (neutral hover vs accent selection). Reconciled
     /// against the true pointer position (sticky-hover discipline) and cleared
     /// on every `apply` and re-parenting.
-    private var isHovered: Bool = false {
-        didSet { if isHovered != oldValue { setNeedsDisplay(bounds) } }
+    private var isHovered: Bool { hoverTracker.isHovered }
+    private lazy var hoverTracker = HoverTracker(view: self) { [weak self] _ in
+        guard let self else { return }
+        self.setNeedsDisplay(self.bounds)
     }
 
     public init(showsMeter: Bool = false) {
@@ -260,30 +258,25 @@ public final class AppRowView: NSView {
         // (T3) re-asserts selection across a `rebuild()` by calling
         // `apply(_:isSelected:)` or `test_setSelected` right after `apply`.
         self.isSelected = false
-        self.isHovered = false
+        hoverTracker.setHovered(false)
 
         iconView.image = configuration.icon
         self.appName = configuration.name
         self.isRunning = configuration.isRunning
 
-        if !isDraggingSlider {
-            slider.integerValue = configuration.volume
-            readoutLabel.stringValue = VolumePercent.label(configuration.volume)
-        }
+        fader.value = configuration.volume   // ignored mid-drag
         // Live for EVERY destination. "This Mac" (Bug T2) and AirPlay routes
         // each level their own stream; an un-redirected app is intercepted below
         // 100 and summed back into the whole-system mix at that volume, so there
         // is no destination left whose volume does nothing.
-        slider.isEnabled = true
+        fader.isAdjustable = true
         // Fader armed state (the app-row equivalent of the device rows' §3.3
         // predicate — spec §5.1: routed ∧ running, pure model): the gold fill
         // renders only while the redirect route is live; an unrouted or idle
         // row keeps the neutral warm fill.
-        faderCell.isRouteArmed = !isNoRedirect && configuration.isRunning
         // The readout never hides: it reads `goldText` while the route is
         // actually sounding and `emberText` while it only holds a stored level.
-        readoutLabel.textColor = faderCell.isRouteArmed
-            ? Tokens.Color.goldText : Tokens.Color.emberText
+        fader.isRouteArmed = !isNoRedirect && configuration.isRunning
 
         // Name treatment (iOS rule 1): the name colour follows LIVENESS, not
         // mere list presence — a live exception route is the bright anchor of
@@ -557,23 +550,10 @@ public final class AppRowView: NSView {
         nameLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
         nameLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
-        slider.translatesAutoresizingMaskIntoConstraints = false
-        // Warm fader skin: install the drawing-only cell BEFORE the value/
-        // target configuration below (a cell swap resets cell-held state, so
-        // everything after re-lands on the new cell). Tracking, keyboard,
-        // scroll-wheel, `isContinuous`, and VoiceOver stay stock NSSlider.
-        slider.cell = faderCell
-        slider.minValue = 0
-        slider.maxValue = 100
-        slider.isContinuous = true
-        slider.target = self
-        slider.action = #selector(volumeChanged(_:))
-
-        readoutLabel.translatesAutoresizingMaskIntoConstraints = false
-        readoutLabel.font = Tokens.Font.readout
-        readoutLabel.textColor = Tokens.Color.emberText
-        readoutLabel.alignment = .right
-        readoutLabel.setContentHuggingPriority(.required, for: .horizontal)
+        fader.onChange = { [weak self] volume in
+            guard let self else { return }
+            self.delegate?.appRow(self, didSetVolume: volume, for: self.appID)
+        }
 
         destinationPopUp.translatesAutoresizingMaskIntoConstraints = false
         destinationPopUp.pullsDown = false
@@ -605,7 +585,7 @@ public final class AppRowView: NSView {
         identityStack.translatesAutoresizingMaskIntoConstraints = false
         identityStack.orientation = .vertical
         identityStack.alignment = .leading
-        identityStack.spacing = 2
+        identityStack.spacing = Tokens.Layout.titleSubtitleSpacing
         identityStack.distribution = .fill
         identityStack.addArrangedSubview(nameLabel)
         if showsMeter { identityStack.addArrangedSubview(meterView) }
@@ -613,8 +593,7 @@ public final class AppRowView: NSView {
         addSubview(iconView)
         addSubview(offlineBadge)
         addSubview(identityStack)
-        addSubview(slider)
-        addSubview(readoutLabel)
+        addSubview(fader)
         addSubview(destinationPopUp)
 
         // Laid out against the shared `PopoverColumnGrid` exactly like
@@ -643,18 +622,12 @@ public final class AppRowView: NSView {
                                                    constant: PopoverColumnGrid.iconToName),
             identityStack.centerYAnchor.constraint(equalTo: centerYAnchor),
             identityStack.trailingAnchor.constraint(
-                lessThanOrEqualTo: slider.leadingAnchor,
+                lessThanOrEqualTo: fader.leadingAnchor,
                 constant: -PopoverColumnGrid.nameToSlider),
 
-            slider.centerYAnchor.constraint(equalTo: centerYAnchor),
-            slider.widthAnchor.constraint(equalToConstant: PopoverColumnGrid.sliderWidth),
-            slider.trailingAnchor.constraint(equalTo: trailingAnchor,
-                                             constant: -PopoverColumnGrid.sliderTrailing),
-
-            readoutLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
-            readoutLabel.widthAnchor.constraint(equalToConstant: PopoverColumnGrid.readoutWidth),
-            readoutLabel.leadingAnchor.constraint(
-                equalTo: slider.trailingAnchor, constant: PopoverColumnGrid.sliderToReadout),
+            fader.centerYAnchor.constraint(equalTo: centerYAnchor),
+            fader.trailingAnchor.constraint(equalTo: trailingAnchor,
+                                            constant: -PopoverColumnGrid.readoutTrailing),
 
             destinationPopUp.centerYAnchor.constraint(equalTo: centerYAnchor),
             destinationPopUp.widthAnchor.constraint(
@@ -677,7 +650,7 @@ public final class AppRowView: NSView {
 
     // MARK: Drawing
 
-    /// Row highlight colour, `nil` when neither state applies. The order is
+    /// Row highlight alpha, `nil` when neither state applies. The order is
     /// keyboard selection > hover: `isSelected` is the host's single-selection
     /// focus, so it keeps the neutral selection wash; hover paints the fainter
     /// neutral wash only when the row is not selected. A sounding row paints
@@ -685,48 +658,20 @@ public final class AppRowView: NSView {
     /// opaque system background, which would obscure the row's slider /
     /// readout / destination popup. Factored out of `draw(_:)` so offscreen
     /// tests (which never rasterize `draw(_:)`'s actual pixels) can assert it.
-    private var currentHighlightColor: NSColor? {
-        if isSelected {
-            return Tokens.Color.engagedChrome.withAlphaComponent(PopoverColumnGrid.rowSelectionWashAlpha)
-        } else if isHovered {
-            return Tokens.Color.engagedChrome.withAlphaComponent(PopoverColumnGrid.rowHoverWashAlpha)
-        } else {
-            return nil
-        }
+    private var currentHighlightAlpha: CGFloat? {
+        if isSelected { return PopoverColumnGrid.rowSelectionWashAlpha }
+        if isHovered { return PopoverColumnGrid.rowHoverWashAlpha }
+        return nil
     }
 
     public override func draw(_ dirtyRect: NSRect) {
-        if let highlight = currentHighlightColor {
-            let rect = bounds.insetBy(
-                dx: PopoverColumnGrid.selectionHighlightInsetX,
-                dy: PopoverColumnGrid.selectionHighlightInsetY)
-            let path = NSBezierPath(
-                roundedRect: rect,
-                xRadius: PopoverColumnGrid.selectionHighlightCornerRadius,
-                yRadius: PopoverColumnGrid.selectionHighlightCornerRadius)
-            highlight.setFill()
-            path.fill()
+        if let alpha = currentHighlightAlpha {
+            PopoverColumnGrid.fillRowWash(in: bounds, alpha: alpha)
         }
         super.draw(dirtyRect)
     }
 
     // MARK: Actions
-
-    @objc private func volumeChanged(_ sender: NSSlider) {
-        // `isDraggingSlider` exists so `apply(...)` won't yank the thumb out from
-        // under a live MOUSE drag. Read it from whether a drag is actually in
-        // flight: a keyboard or VoiceOver change is a single event that is never
-        // a `.leftMouseUp`, so the old "set always, clear only on .leftMouseUp"
-        // latched the flag forever (stability-audit-2026-07-18 §D4).
-        switch NSApp?.currentEvent?.type {
-        case .leftMouseDown, .leftMouseDragged:
-            isDraggingSlider = true
-        default:
-            isDraggingSlider = false
-        }
-        readoutLabel.stringValue = VolumePercent.label(sender.integerValue)
-        delegate?.appRow(self, didSetVolume: sender.integerValue, for: appID)
-    }
 
     @objc private func destinationChanged(_ sender: NSMenuItem) {
         guard let id = sender.representedObject as? String else { return }
@@ -812,34 +757,16 @@ public final class AppRowView: NSView {
 
     public override func updateTrackingAreas() {
         super.updateTrackingAreas()
-        for area in trackingAreas { removeTrackingArea(area) }
-        addTrackingArea(NSTrackingArea(
-            rect: bounds,
-            options: [.mouseEnteredAndExited, .mouseMoved, .activeInActiveApp, .inVisibleRect],
-            owner: self))
-    }
-
-    public override func mouseEntered(with event: NSEvent) { isHovered = true }
-    public override func mouseExited(with event: NSEvent) { isHovered = false }
-
-    /// Sticky-hover fix (shared row idiom): a bottom-most row can miss
-    /// `mouseExited` when the pointer leaves into an untracked dead-zone below
-    /// the card, so reconcile against the true pointer position — fed by the
-    /// tracking area's own `.mouseMoved` option (P2-1), not an app-wide
-    /// `NSEvent` monitor.
-    public override func mouseMoved(with event: NSEvent) {
-        guard let window else { return }
-        let point = convert(window.mouseLocationOutsideOfEventStream, from: nil)
-        isHovered = bounds.contains(point)
+        hoverTracker.update()
     }
 
     public override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        isHovered = false
+        hoverTracker.setHovered(false)
     }
 
     /// Test hooks for the hover wash.
-    public func test_setHovered(_ hovered: Bool) { isHovered = hovered }
+    public func test_setHovered(_ hovered: Bool) { hoverTracker.setHovered(hovered) }
     public var test_isHovered: Bool { isHovered }
 
     /// The alpha component of the row-highlight colour `draw(_:)` currently
@@ -848,11 +775,11 @@ public final class AppRowView: NSView {
     /// (`PopoverColumnGrid.rowSelectionWashAlpha`/`rowHoverWashAlpha`) differ.
     /// Exposed because offscreen tests can't rasterize `draw(_:)`'s output to
     /// inspect the painted pixels directly.
-    public var test_highlightAlpha: CGFloat? { currentHighlightColor?.alphaComponent }
+    public var test_highlightAlpha: CGFloat? { currentHighlightAlpha }
 
     /// The destination `%` readout's current text colour (V7: tertiary while
     /// "Follows main output", secondary otherwise).
-    public var test_readoutTextColor: NSColor? { readoutLabel.textColor }
+    public var test_readoutTextColor: NSColor? { fader.readoutLabel.textColor }
 
     // MARK: Test-support hooks — APP EXCEPTIONS treatment (S6)
 
@@ -975,7 +902,7 @@ public final class AppRowView: NSView {
     /// `test_simulateBodyClick`/`test_simulateSliderClick` hooks do, with no
     /// real window to hit-test through).
     private func isInSelectableDeadZone(_ point: NSPoint) -> Bool {
-        if slider.frame.contains(point) { return false }
+        if sliderFrame.contains(point) { return false }
         if destinationPopUp.frame.contains(point) { return false }
         return bounds.contains(point)
     }
@@ -1005,7 +932,7 @@ public final class AppRowView: NSView {
     /// selectable per `isInSelectableDeadZone` but not cursor-rect-covered
     /// here — an acceptable trade for a much simpler rect union).
     private func selectableCursorRects() -> [NSRect] {
-        let excluded = [slider.frame, destinationPopUp.frame].sorted { $0.minX < $1.minX }
+        let excluded = [sliderFrame, destinationPopUp.frame].sorted { $0.minX < $1.minX }
         var rects: [NSRect] = []
         var cursorX = bounds.minX
         for rect in excluded {
@@ -1040,7 +967,7 @@ public final class AppRowView: NSView {
         // Composition (S6 item 6): an UNROUTED app reads "…, follows main
         // output" (the bridge phrase, spec §5.1); a routed app reads
         // "…, routed to <destination>".
-        var label = "\(appName), volume \(VolumePercent.spoken(slider.integerValue))"
+        var label = "\(appName), volume \(VolumePercent.spoken(fader.value))"
         if isNoRedirect {
             label += ", follows main output"
         } else if let destinationTitle = destinationPopUp.selectedItem?.title,
@@ -1052,8 +979,8 @@ public final class AppRowView: NSView {
         }
         setAccessibilityLabel(label)
 
-        slider.setAccessibilityRole(.slider)
-        slider.setAccessibilityLabel("\(appName) volume")
+        fader.slider.setAccessibilityRole(.slider)
+        fader.slider.setAccessibilityLabel("\(appName) volume")
         destinationPopUp.setAccessibilityLabel("\(appName) destination")
     }
 
@@ -1073,10 +1000,7 @@ public final class AppRowView: NSView {
     /// after setting its value. Unlike ``test_setVolume(_:)``, which only
     /// calls the delegate, this drives the control's wiring end-to-end.
     public func test_fireSliderAction(settingValueTo value: Int) {
-        slider.integerValue = value
-        guard let action = slider.action,
-              let target = slider.target as? NSObject else { return }
-        _ = target.perform(action, with: slider)
+        fader.test_fireSliderAction(settingValueTo: value)
     }
 
     /// Simulate the user picking `destinationID` from the trailing popup.
@@ -1092,16 +1016,16 @@ public final class AppRowView: NSView {
     }
 
     /// The currently displayed volume (structural assertions).
-    public var test_volume: Int { slider.integerValue }
+    public var test_volume: Int { fader.value }
     /// Whether the volume slider is currently dimmed/disabled. Always false: every
     /// destination — "Follows main output" included — has a volume that does something.
-    public var test_isSliderDimmed: Bool { !slider.isEnabled }
+    public var test_isSliderDimmed: Bool { !fader.isAdjustable }
     /// Whether the Warm fader would render its ENGAGED (gold-gradient) fill —
     /// the app-row armed predicate (routed ∧ running) ∧ slider enabled, read
     /// from the cell's own gate so the test can't drift from the pixels.
-    public var test_isFaderEngaged: Bool { faderCell.test_isEngagedFill }
+    public var test_isFaderEngaged: Bool { fader.faderCell.test_isEngagedFill }
     /// Whether the slider is wearing the Warm fader skin (structural).
-    public var test_hasWarmFaderSkin: Bool { slider.cell is WarmFaderCell }
+    public var test_hasWarmFaderSkin: Bool { fader.slider.cell is WarmFaderCell }
     /// Whether the offline badge (T4) is currently visible — true when the
     /// routed app's process is not running.
     public var test_isOfflineBadgeVisible: Bool { !offlineBadge.isHidden }
@@ -1203,7 +1127,7 @@ public final class AppRowView: NSView {
     /// real subview hit-testing enforces.
     public func test_simulateSliderClick() {
         layoutSubtreeIfNeeded()
-        mouseDown(with: mouseEvent(at: NSPoint(x: slider.frame.midX, y: slider.frame.midY)))
+        mouseDown(with: mouseEvent(at: NSPoint(x: sliderFrame.midX, y: sliderFrame.midY)))
     }
 
     /// Simulate a real click landing on the destination popup's frame — same

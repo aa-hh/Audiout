@@ -92,24 +92,22 @@ func run() -> Int32 {
     window.update(devices: backend.devices)
 
     // --- 1. Baseline sidebar: the device fleet beside the Speakers page
-    //        (saved scenes are cards on the Scenes screen).
+    //        (saved scenes have their own sidebar on the Scenes screen).
     print("\n[1] Baseline sidebar (zero groups)")
     checks.expectEqual(window.test_sidebar.test_sectionTitles,
                        ["System Audio", "Speakers", "Shown in Mixer"],
-                       "'System Audio', 'Speakers' and 'Shown in Mixer' — scenes left the sidebar")
+                       "'System Audio', 'Speakers' and 'Shown in Mixer' in the Speakers sidebar")
     checks.expect(window.test_isShowingSpeakersPage,
                   "with nothing selected the sidebar's content is the Speakers page")
     checks.expectEqual(window.test_sidebar.test_deviceRowCount, 7,
                        "all 7 devices listed (Speakers section lists every device, flat model)")
     checks.expect(!window.test_isShowingEditor, "no editor shows with zero groups")
 
-    // --- 2. Baseline content: with zero groups the AUTO-SELECT rule lands on
-    //        the overview, which draws its own zero-groups canvas.
-    print("\n[2] Baseline content pane (the overview's empty canvas at zero groups)")
-    checks.expect(window.test_isShowingScenesOverview,
-                  "the Scenes screen starts on the card overview")
-    checks.expect(window.test_overview.test_isShowingEmptyCanvas,
-                  "with zero groups the overview IS the empty state — no separate pane")
+    // --- 2. Zero scenes shows the separate empty page and sidebar placeholder.
+    print("\n[2] Baseline Scenes page (zero scenes)")
+    checks.expect(window.test_isShowingScenesEmptyPage, "zero scenes shows the empty page")
+    checks.expect(window.test_scenesSidebar.test_hasPlaceholderRow, "zero scenes shows the sidebar placeholder")
+    checks.expect(window.test_scenesSidebar.test_rowIDs.isEmpty, "zero scenes has no scene rows")
 
     // --- 3. Create sheet: enablement gating, member count, commit creates a
     //        group WITHOUT activating it.
@@ -141,7 +139,7 @@ func run() -> Int32 {
         checks.expectEqual(Set(createdGroup.memberIDs), Set([candidateA, candidateB]),
                            "created group's members are exactly the ones checked")
         checks.expect(window.test_sidebar.currentSelection == nil,
-                      "the sidebar has no scene row, so creating one leaves it untouched")
+                      "creating a scene leaves the Speakers sidebar untouched")
         checks.expect(window.test_isShowingEditor, "editor shows the newly-created group")
         checks.expectEqual(window.test_editor.editingGroupID, createdGroup.id,
                            "editor is editing the created group")
@@ -220,26 +218,21 @@ func run() -> Int32 {
     drain()
     checks.expect(window.test_isShowingSpeakersPage,
                   "deselecting the sidebar lands on the Speakers page")
-    checks.expectEqual(window.test_overview.test_cardGroupIDs, [saved.id],
-                       "the saved group has a card")
+    checks.expectEqual(window.test_scenesSidebar.test_rowIDs, [saved.id],
+                       "the saved scene has a sidebar row")
     checks.expect(window.test_sidebar.currentSelection == nil,
                   "the sidebar stays deselected")
     checks.expectEqual(controller.activeGroupID, nil,
                        "auto-selection does NOT activate (config-only)")
 
-    // --- 7b. A card opens its editor in place on the Scenes screen; the
-    //         sidebar is untouched (the fleet must not move under the pointer).
-    print("\n[7b] Clicking a card pushes that group's editor")
-    window.test_overview.test_clickCard(id: saved.id)
+    // --- 7b. Selecting a scene keeps its row and editor together.
+    print("\n[7b] Selecting a scene opens its page")
+    window.test_scenesSidebar.test_select(sceneID: saved.id)
     drain()
-    checks.expect(window.test_isShowingEditor, "the card opened the editor")
-    checks.expectEqual(window.test_editor.editingGroupID, saved.id,
-                       "the editor is editing the clicked card's group")
-    checks.expect(window.test_sidebar.currentSelection == nil,
-                  "the push leaves the sidebar untouched")
-    window.test_editor.test_goBack()
-    drain()
-    checks.expect(window.test_isShowingScenesOverview, "'‹ Scenes' pops back to the card field")
+    checks.expect(window.test_isShowingEditor, "the scene row opened the editor")
+    checks.expectEqual(window.test_editor.editingGroupID, saved.id, "the editor shows the selected scene")
+    checks.expectEqual(window.test_scenesSidebar.selectedSceneID, saved.id, "the scene row stays selected")
+    checks.expect(window.test_sidebar.currentSelection == nil, "the Speakers sidebar stays untouched")
 
     // --- 8. Cancelling a presented create sheet clears it.
     print("\n[8] Cancelling the create sheet clears it")
@@ -271,20 +264,18 @@ func run() -> Int32 {
     checks.expect(window.test_isShowingSpeakersPage,
                   "deselecting lands on the Speakers page (never a blank pane)")
 
-    // --- 10. Delete: removes the group, the overview returns as its own empty
-    //        canvas.
-    print("\n[10] Delete group → deleteGroup, the overview's empty canvas returns")
+    // --- 10. Deleting the last scene returns the empty page and placeholder.
+    print("\n[10] Delete scene returns the empty page")
     window.test_select(.group(id: saved.id))
     drain()
     checks.expect(window.test_isShowingEditor, "editor shown before delete")
     window.test_editor.test_confirmDelete()
     drain()
-    checks.expectEqual(controller.groups.count, 0, "deleteGroup removed the group")
+    checks.expectEqual(controller.groups.count, 0, "deleteGroup removed the scene")
     checks.expect(!window.test_isShowingEditor, "the editor clears after delete")
-    checks.expect(window.test_isShowingScenesOverview,
-                  "with the last group gone, the overview returns")
-    checks.expect(window.test_overview.test_isShowingEmptyCanvas,
-                  "drawing its own zero-groups canvas")
+    checks.expect(window.test_isShowingScenesEmptyPage, "the last deletion returns the empty page")
+    checks.expect(window.test_scenesSidebar.test_hasPlaceholderRow, "the sidebar shows the placeholder")
+    checks.expect(window.test_scenesSidebar.test_rowIDs.isEmpty, "the deleted scene row is gone")
 
     print("\n----------------------------------------")
     if checks.failures == 0 {

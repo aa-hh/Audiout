@@ -5,7 +5,7 @@ import Testing
 
     private let allCauses: [ConnectionFailure.Cause] = [
         .notResponding, .vanished, .refusedOrBusy, .authRequired,
-        .codeRequired, .homeMembersOnly,
+        .codeRequired, .codeEveryTimeUnsupported, .homeMembersOnly,
         .droppedMidStream, .timedOut, .unknown,
     ]
 
@@ -58,8 +58,12 @@ import Testing
                 "The speaker didn't accept that password. Enter it again to connect."
             ),
             .codeRequired: (
-                "Code required",
-                "This Apple TV shows a code on its screen when a new device connects. Entering it here isn't supported yet."
+                "Code didn't work",
+                "The code wasn't accepted. Try again and enter the code shown on the screen."
+            ),
+            .codeEveryTimeUnsupported: (
+                "Needs a code every time",
+                "This speaker asks for a new code on every connection. Audiout can't do that yet."
             ),
             .homeMembersOnly: (
                 "Home members only",

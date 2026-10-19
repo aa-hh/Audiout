@@ -118,6 +118,8 @@ public final class AppSurfaceController {
 
     private let popoverController: PopoverController
     private let settings: AppSettings
+    /// The expired-trial survey, over the shell's content view while up.
+    private var surveyCard: TrialSurveyCardView?
     /// The shell window's one header strip (D1): four icon-only tabs + Pin,
     /// as a real unified `NSToolbar`.
     private let toolbarController = SurfaceToolbarController()
@@ -144,10 +146,9 @@ public final class AppSurfaceController {
 
     public private(set) var selectedScreen: SurfaceScreen = .mixer
 
-    /// Asked when Escape reaches the surface while the Scenes screen is
-    /// showing. Return `true` when the screen stepped back a level (the app
-    /// wires `MixerWindowController.dismissEditor()`); `false` lets the press
-    /// close the surface.
+    /// Asked when Escape reaches the surface while the Scenes screen shows.
+    /// A screen may consume the key by returning `true`; `false` lets the
+    /// surface close.
     public var groupsCancelHandler: (() -> Bool)?
 
     /// The one frame's content size for THIS open session — measured on every
@@ -277,6 +278,7 @@ public final class AppSurfaceController {
         // system dialog's focus.
         popoverController.onMicPromptInFlightChanged = { [weak self] in self?.shell.setPermissionPromptInFlight($0) }
         popoverController.onMicPromptAnswered = { [weak self] in self?.shell.returnToFront() }
+        popoverController.onSurveyAnswer = { [weak self] in self?.presentSurveyCard(for: $0) }
 
         // The one header (D1): a real unified NSToolbar on the shell window,
         // both profiles. Attaching here — before anything shows — means the
@@ -341,12 +343,11 @@ public final class AppSurfaceController {
             self?.select(screen)
             return true
         }
-        // Escape on the Scenes screen steps back one level first (a scene
-        // editor pops to the overview); anything else, Speakers included, and
-        // the next Escape, closes the surface.
+        // Escape closes Scenes unless its optional cancel handler consumes it.
         // On the Mixer, a showing thank-you card takes the first Escape.
         shell.cancelHandler = { [weak self] in
             guard let self else { return false }
+            if let surveyCard { return surveyCard.handleEscape() }
             if selectedScreen == .mixer, popoverController.dismissThankYouCardForEscape() {
                 return true
             }
@@ -384,6 +385,7 @@ public final class AppSurfaceController {
     private func applyPixelVisibility(_ visible: Bool) {
         guard isShown, selectedScreen == .mixer, !isRevealPending else { return }
         if !visible, !surfaceCoveredHidden {
+            dismissSurveyCard()
             surfaceCoveredHidden = true
             popoverController.surfaceDidHide()
         } else if visible, surfaceCoveredHidden {
@@ -552,6 +554,7 @@ public final class AppSurfaceController {
     }
 
     private func handleShellClosed() {
+        dismissSurveyCard()
         // A Mixer already asleep behind the latch has had its `surfaceDidHide()`;
         // a second one would run the teardown twice.
         if isShown, selectedScreen == .mixer, !surfaceCoveredHidden {
@@ -563,6 +566,39 @@ public final class AppSurfaceController {
         cancelPendingReveal()
         publishVisibleScreen()
         onClose?()
+    }
+
+    // MARK: Expired-trial survey
+
+    /// Raise the survey card over the current screen and send its answers.
+    private func presentSurveyCard(for survey: ExpiredTrialSurvey) {
+        guard surveyCard == nil, let host = shell.window?.contentView else { return }
+        let card = TrialSurveyCardView(survey: survey)
+        card.onSent = { Analytics.captureStructured("survey sent", survey.sentProperties($0)) }
+        card.onDismissed = { [weak self] in
+            Analytics.captureStructured("survey dismissed", survey.dismissedProperties($0))
+            self?.removeSurveyCard()
+        }
+        card.onDone = { [weak self] in self?.removeSurveyCard() }
+        host.addSubview(card)
+        NSLayoutConstraint.activate([
+            card.leadingAnchor.constraint(equalTo: host.leadingAnchor),
+            card.trailingAnchor.constraint(equalTo: host.trailingAnchor),
+            card.topAnchor.constraint(equalTo: host.topAnchor),
+            card.bottomAnchor.constraint(equalTo: host.bottomAnchor),
+        ])
+        surveyCard = card
+        card.appear()
+    }
+
+    /// End a card that is up, reporting it the way its own Not now would.
+    private func dismissSurveyCard() {
+        surveyCard?.dismiss()
+    }
+
+    private func removeSurveyCard() {
+        surveyCard?.removeFromSuperview()
+        surveyCard = nil
     }
 
     /// Drop a pending first-open reveal (a close during the settle wait). The
@@ -634,6 +670,8 @@ public final class AppSurfaceController {
     /// size. Selecting the current screen is a no-op.
     public func select(_ screen: SurfaceScreen) {
         guard screen != selectedScreen else { return }
+        // `setContent` replaces the content view the card sits on.
+        dismissSurveyCard()
         Analytics.capture("surface:screen_selected", ["screen": String(describing: screen)])
         if selectedScreen == .mixer, isShown, !surfaceCoveredHidden {
             // The panel is leaving the window: drop what must not outlive a
@@ -1014,6 +1052,7 @@ public final class AppSurfaceController {
     var test_toolbarController: SurfaceToolbarController { toolbarController }
     /// The lazily-built pieces, `nil` until their tab is first selected.
     var test_mixerPanel: PopoverPanelViewController? { mixerPanel }
+    var test_surveyCard: TrialSurveyCardView? { surveyCard }
     var test_groupsScreen: SurfaceScreenViewController? { groupsScreen }
     var test_speakersScreen: SurfaceScreenViewController? { speakersScreen }
     var test_settingsScreen: SurfaceScreenViewController? { settingsScreen }

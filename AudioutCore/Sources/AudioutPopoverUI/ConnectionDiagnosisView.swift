@@ -36,18 +36,12 @@ public final class ConnectionDiagnosisView: NSView {
     private static let verticalInset: CGFloat = 4
     /// Padding between the tinted background's edge and its content.
     private static let contentPadding: CGFloat = 10
-    /// Corner radius of the failure-tinted background (spec §5.6's warm inset
-    /// card): the control radius the two note banners share, so the three
-    /// inset cards in the popover wear one corner.
-    private static let backgroundCornerRadius: CGFloat = Tokens.Layout.Radius.control
     /// Gap between the headline and the wrapping suggestion body.
     private static let headlineToSuggestion: CGFloat = 3
     /// Gap between the suggestion body and the buttons row.
     private static let suggestionToButtons: CGFloat = 8
     /// Gap between the two buttons.
     private static let buttonSpacing: CGFloat = 8
-    /// Inset of the dismiss button from the tinted background's top-trailing corner.
-    private static let dismissButtonInset: CGFloat = 6
 
     /// Called when the user clicks "Try again". The host owns the actual retry
     /// (re-adding the device to the Selected Devices set — brief §7.3).
@@ -66,12 +60,15 @@ public final class ConnectionDiagnosisView: NSView {
     private var failure: ConnectionFailure
     private var deviceName: String
 
-    private let background = NSView()
+    /// `failure` on the shared inset-card ground (spec §5.6's warm inset card),
+    /// the same recipe as the warning banner.
+    private let background = TintedNoteBackgroundView(tint: Tokens.Color.failure)
     private let headlineLabel = NSTextField(labelWithString: "")
     private let suggestionLabel = NSTextField(wrappingLabelWithString: "")
     private let retryButton = NSButton()
     private let copyDetailsButton = NSButton()
-    private let dismissButton = NSButton()
+    private lazy var dismissButton = NSButton.noticeDismissButton(
+        target: self, action: #selector(dismissClicked(_:)))
 
     /// Pinned wrapping width for the suggestion label, kept in sync with the
     /// panel's own width in `layout()` so Auto Layout can self-size the row's
@@ -118,10 +115,6 @@ public final class ConnectionDiagnosisView: NSView {
         wantsLayer = true
 
         background.translatesAutoresizingMaskIntoConstraints = false
-        background.wantsLayer = true
-        background.layer?.cornerRadius = Self.backgroundCornerRadius
-        background.layer?.cornerCurve = .continuous
-        applyBackgroundTint()
         addSubview(background)
 
         headlineLabel.translatesAutoresizingMaskIntoConstraints = false
@@ -130,7 +123,7 @@ public final class ConnectionDiagnosisView: NSView {
         background.addSubview(headlineLabel)
 
         suggestionLabel.translatesAutoresizingMaskIntoConstraints = false
-        suggestionLabel.font = .systemFont(ofSize: NSFont.systemFontSize)
+        suggestionLabel.font = Tokens.Font.body
         suggestionLabel.textColor = Tokens.Color.label2
         background.addSubview(suggestionLabel)
 
@@ -144,7 +137,6 @@ public final class ConnectionDiagnosisView: NSView {
         background.addSubview(retryButton)
         background.addSubview(copyDetailsButton)
 
-        configureDismissButton()
         background.addSubview(dismissButton)
 
         let suggestionWidth = suggestionLabel.widthAnchor.constraint(equalToConstant: 300)
@@ -156,11 +148,10 @@ public final class ConnectionDiagnosisView: NSView {
             background.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.leadingInset),
             background.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Self.horizontalInset),
 
-            dismissButton.topAnchor.constraint(equalTo: background.topAnchor, constant: Self.dismissButtonInset),
+            dismissButton.topAnchor.constraint(
+                equalTo: background.topAnchor, constant: NSButton.noticeDismissInset),
             dismissButton.trailingAnchor.constraint(
-                equalTo: background.trailingAnchor, constant: -Self.dismissButtonInset),
-            dismissButton.widthAnchor.constraint(greaterThanOrEqualToConstant: 24),
-            dismissButton.heightAnchor.constraint(greaterThanOrEqualToConstant: 24),
+                equalTo: background.trailingAnchor, constant: -NSButton.noticeDismissInset),
 
             headlineLabel.topAnchor.constraint(equalTo: background.topAnchor, constant: Self.contentPadding),
             headlineLabel.leadingAnchor.constraint(equalTo: background.leadingAnchor, constant: Self.contentPadding),
@@ -195,63 +186,6 @@ public final class ConnectionDiagnosisView: NSView {
         button.action = action
         button.setContentHuggingPriority(.required, for: .horizontal)
         button.setContentCompressionResistancePriority(.required, for: .horizontal)
-    }
-
-    /// The dismiss ("x") control pinned to the tinted background's
-    /// top-trailing corner: `bezelStyle = .accessoryBar` + `isBordered = false`
-    /// (no box at rest, matching the popover's borderless icon-glyph
-    /// convention — e.g. the card accessory buttons), a standard-size bold
-    /// glyph at a `secondaryLabel` tint and a ≥24×24 hit target (P1-6), and
-    /// Escape as its key equivalent so the panel dismisses without a click.
-    private func configureDismissButton() {
-        dismissButton.translatesAutoresizingMaskIntoConstraints = false
-        dismissButton.bezelStyle = .accessoryBar
-        dismissButton.isBordered = false
-        dismissButton.imagePosition = .imageOnly
-        dismissButton.imageScaling = .scaleProportionallyDown
-        dismissButton.contentTintColor = Tokens.Color.label2
-        dismissButton.target = self
-        dismissButton.action = #selector(dismissClicked(_:))
-        dismissButton.keyEquivalent = "\u{1b}"
-
-        let symbolConfig = NSImage.SymbolConfiguration(pointSize: 12, weight: .bold)
-        if let image = NSImage(systemSymbolName: "xmark", accessibilityDescription: "Dismiss")?
-            .withSymbolConfiguration(symbolConfig) {
-            dismissButton.image = image
-        }
-        dismissButton.setAccessibilityLabel("Dismiss")
-    }
-
-    /// Fraction of the failure-exclusive red mixed into the panel seat —
-    /// spec §5.6's "warm-tinted inset card (`failure` at ~12% alpha)".
-    private static let failureTintFraction: CGFloat = 0.12
-
-    /// Resolve the warm failure tint (spec §5.6) against the *current*
-    /// effective appearance and stamp it onto the layer: the inset card sits
-    /// on `Tokens.Color.panel` — one ladder-step lighter than the canvas the
-    /// popover paints — washed with the FAILURE-EXCLUSIVE `Tokens.Color.failure`
-    /// at ~12% (warm, not alarm-orange; house rule 8 keeps this red off every
-    /// non-failure surface). Blending here is equivalent to compositing
-    /// `failure` at 12% alpha over the opaque `panel` seat, but yields an
-    /// opaque color so the tint reads identically regardless of what's behind
-    /// the row. `CALayer.backgroundColor` is a static `CGColor` and both
-    /// tokens are appearance-/Increase-Contrast-dynamic, so this must re-run
-    /// on every appearance change, not just at build time.
-    private func applyBackgroundTint() {
-        effectiveAppearance.performAsCurrentDrawingAppearance {
-            let seat = Tokens.Color.panel
-            let tinted = seat.blended(withFraction: Self.failureTintFraction,
-                                      of: Tokens.Color.failure) ?? seat
-            background.layer?.backgroundColor = tinted.cgColor
-        }
-    }
-
-    /// Re-resolve the appearance-dependent chrome on a live light/dark switch —
-    /// the same pattern as `CardView`'s shadow/rim (the rest of this view is
-    /// semantic `NSColor`s on views, which AppKit re-resolves itself).
-    public override func viewDidChangeEffectiveAppearance() {
-        super.viewDidChangeEffectiveAppearance()
-        applyBackgroundTint()
     }
 
     // MARK: Layout — keep the wrapping label's pinned width equal to the
@@ -335,4 +269,38 @@ public final class ConnectionDiagnosisView: NSView {
     public func test_tapCopyDetails() { copyDetailsClicked(copyDetailsButton) }
     /// Simulate a dismiss ("x") click.
     public func test_tapDismiss() { dismissClicked(dismissButton) }
+}
+
+extension NSButton {
+
+    /// Inset of a notice's ✕ from its card's top-trailing corner.
+    static let noticeDismissInset: CGFloat = 6
+
+    /// The ✕ that closes a dismissible Mixer notice (the diagnosis card, the
+    /// alignment note): borderless `.accessoryBar`, the `xmark` glyph at 12 pt
+    /// bold in `label2`, and a hit area of at least 24×24 pt (P1-6). Escape is
+    /// its key equivalent only when `closesOnEscape`: the alignment note passes
+    /// false so Escape keeps `AppSurfaceController`'s order (thank-you card,
+    /// then the Scenes editor, then the surface closes).
+    static func noticeDismissButton(target: AnyObject, action: Selector,
+                                    closesOnEscape: Bool = true) -> NSButton {
+        let button = NSButton()
+        button.translatesAutoresizingMaskIntoConstraints = false
+        button.bezelStyle = .accessoryBar
+        button.isBordered = false
+        button.imagePosition = .imageOnly
+        button.imageScaling = .scaleProportionallyDown
+        button.contentTintColor = Tokens.Color.label2
+        button.target = target
+        button.action = action
+        if closesOnEscape { button.keyEquivalent = "\u{1b}" }
+        button.image = NSImage(systemSymbolName: "xmark", accessibilityDescription: "Dismiss")?
+            .withSymbolConfiguration(.init(pointSize: 12, weight: .bold))
+        button.setAccessibilityLabel("Dismiss")
+        NSLayoutConstraint.activate([
+            button.widthAnchor.constraint(greaterThanOrEqualToConstant: 24),
+            button.heightAnchor.constraint(greaterThanOrEqualToConstant: 24),
+        ])
+        return button
+    }
 }

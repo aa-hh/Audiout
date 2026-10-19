@@ -172,7 +172,7 @@ public final class WarmFaderCell: NSSliderCell {
         // a 1 px band clipped to the trough along its visual top edge)…
         NSGraphicsContext.current?.saveGraphicsState()
         trough.addClip()
-        Tokens.Color.shadow.withAlphaComponent(Self.insetShadeAlpha).setFill()
+        Tokens.Color.shadow.withAlphaComponent(Tokens.Color.insetShadeAlpha).setFill()
         let topEdgeY = flipped ? track.minY : track.maxY - Self.hairlineWidth
         NSRect(x: track.minX, y: topEdgeY,
                width: track.width, height: Self.hairlineWidth).fill()
@@ -344,8 +344,6 @@ public final class WarmFaderCell: NSSliderCell {
 
     /// 1 px in points at 1x — hairline shading/highlight/outline width.
     private static let hairlineWidth: CGFloat = 1
-    /// Alpha of the trough's inner top shade (`shadow` token over `well`).
-    private static let insetShadeAlpha: CGFloat = 0.18
     /// How far the armed gradient's dim end pre-blends `ember` toward `gold`
     /// (0 = raw ember). At 0.5 the dim end measures 6.96:1 (dark) / 3.97:1
     /// (light) vs `well` — raw ember measured 3.86:1 / 1.98:1, muddy at the

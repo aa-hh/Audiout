@@ -128,7 +128,7 @@ satellite specifically to align their phase.
 
 **TOJ acuity is roughly 20-40 ms of onset asynchrony for 75 % correct**, and it
 is dominated by *duration* of the stimulus, not by its frequency, spectrum or
-location. Szymaszek et al. found *no* difference in mean TOJ thresholds across
+location. Fostick, Lifshitz-Ben-Basat and Babkoff (2019) found *no* difference in mean TOJ thresholds across
 frequency, spectrum and location conditions, while the long-duration condition
 was significantly worse
 ([Psychological Research](https://link.springer.com/article/10.1007/s00426-017-0915-1)).

@@ -33,13 +33,8 @@ public struct RunningAppInfo: Equatable {
 /// actions route back through `onAdd`/`onRemove` closures so
 /// `PopoverController` stays the only thing that talks to the controllers.
 ///
-/// Two users, ONE construction so the popover has a single "add a thing to
-/// this list" affordance: Applications ("+" opens the running-app picker, "−"
-/// removes the selected row) and Output Devices ("+" fronts the add MENU, "−"
-/// fronts the hide menu — 2026-09-15, replacing the add-only strip: a device
-/// still leaves the LIST by going away; "−" only hides it from display).
-/// Segment metrics are identical either way, so the two "+" glyphs sit on the
-/// same left edge at the same size.
+/// One user, the Applications card: "+" opens the running-app picker, "−"
+/// removes the selected row.
 final class CardFooterView: NSView {
 
     enum Segment: Int { case add = 0, remove = 1 }
@@ -478,10 +473,11 @@ public final class PopoverController: NSObject {
     /// The wizard's stimulus tempo (BPM), driven by the estimator's stage.
     /// Wired to `setBTWizardTickTempo`.
     public var onBTWizardTempo: ((_ bpm: Double) -> Void)?
-    /// Stage the mic-probe calibration sweeps on the live wizard feed
+    /// Stage the mic-probe calibration lanes on the live wizard feed
     /// (roadmap 064). Wired to `stageBTMicProbe`; nil (mock/dev backends)
     /// means no probe and the run stays purely by-ear.
-    public var onStageBTMicProbe: ((_ onStarted: @escaping () -> Void,
+    public var onStageBTMicProbe: ((_ levelStepDB: @escaping () -> Int,
+                                    _ onStarted: @escaping (_ pipelineDelaySeconds: TimeInterval) -> Void,
                                     _ onFinished: @escaping () -> Void) -> Void)?
     /// The mic permission answer, asked from the wizard's Start (the system
     /// prompt when it is still undecided). Overridden in tests so no suite
@@ -545,8 +541,8 @@ public final class PopoverController: NSObject {
     var btWizardMicProbe: MicProbeSession?
     /// Bumped on every live preview push. The probe result is only trusted if
     /// the preview it was measured under is STILL the one applied — an answer
-    /// (or a reference swap) mid-probe moves the sink under the sweep, and a
-    /// measurement across that splice would be about two different timelines.
+    /// mid-probe moves the sink under the sweep, and a measurement across that
+    /// splice would be about two different timelines.
     var btWizardPreviewGeneration = 0
     /// The preview value in force when the probe's sweeps started — the
     /// measured Δ corrects THIS value into the proposal.
@@ -628,13 +624,18 @@ public final class PopoverController: NSObject {
     var diagnosisPanelsByID: [String: ConnectionDiagnosisView] = [:]
 
     /// The AirPlay password sheet while it is up, and the speaker it asks for.
-    /// Opened only by a user act (the diagnosis panel's button or a join of a
-    /// protected speaker), never by a background reconnect.
+    /// Opened only by a user act (the diagnosis panel's button, the row's link,
+    /// a join of a password speaker, or a join of a code speaker reaching its
+    /// wait through `codeJoinClickedIDs`), never by a background reconnect.
     var passwordSheet: SpeakerPasswordSheetViewController?
     var passwordSheetDeviceID: String?
     /// Set on Connect, cleared by the next failure edge for that speaker, so a
     /// failure that happened before the submit never reads as its answer.
     var passwordSheetSubmitted = false
+    /// Speakers whose join the user clicked in this popover and that show a
+    /// code. Consumed by the first `.awaitingPassword` edge, dropped by any
+    /// `.connected`, `.failed` or `.off` edge for that speaker and by Cancel.
+    var codeJoinClickedIDs: Set<String> = []
 
     /// Name-click Bluetooth attempts retain their outcome until the surface closes.
     var btConnectAttemptIDs: Set<String> = []
@@ -1196,6 +1197,8 @@ public final class PopoverController: NSObject {
 
     /// The password sheet's answer to a refused password; the phone shows its own copy.
     static let passwordRejectedText = "That password didn't work. Check it and try again."
+    /// The code sheet's answer to a refused code; the phone shows its own copy.
+    static let codeRejectedText = "That code didn't work. Check the screen and try again."
 
     /// Whether the generalized silence watchdog (R11) has fallen back to local
     /// playback because zero desired devices stayed connected. Drives the banner;
@@ -1257,7 +1260,9 @@ public final class PopoverController: NSObject {
     // speaker is silent while its row still says Connected) outranks routing-blocked
     // (T-UI, WARNING — audio is dead right now), which outranks the takeover status,
     // which outranks the double-path guard note, which outranks a one-time trial
-    // banner, which outranks the trial pill, which outranks the one-speaker-limit
+    // banner, which outranks the trial pill, which outranks the expired-trial
+    // survey invite (raised in place of the plain trial-ended note, retired unspent
+    // by a limit hit or a licence change), which outranks the one-speaker-limit
     // note (`unregisteredNote`, lowest — a standing condition, never something
     // happening right now; it reads the limit text for the rest of an open once the
     // limit is hit, `limitNoteRaised`). With no note at all, the slot may hold the
@@ -1265,7 +1270,7 @@ public final class PopoverController: NSObject {
     // instant the one above it clears. Each condition keeps its own idempotence-check
     // state var (`captureFailureMessage` / `routingBlockedNeedsDefault` /
     // `takeoverStatus` / `systemAirPlayNoteActive` / `raisedTrialBanner` /
-    // `trialDaysLeft` / `unregisteredNote`); `applyNoteSlot()` is the one place that
+    // `trialDaysLeft` / `raisedSurveyInvite` / `unregisteredNote`); `applyNoteSlot()` is the one place that
     // resolves precedence and actually pushes to the panel, called by every setter
     // and by the tail of `rebuild()`.
 
@@ -1346,7 +1351,7 @@ public final class PopoverController: NSObject {
         public static func resolve(settings: AppSettings) -> UnregisteredNote? {
             guard LicenseGate.limitsToOneSpeaker(settings: settings) else { return nil }
             if TrialClock.hasEnded(settings: settings) { return .trialEnded }
-            if (settings.licenseKey ?? "").isEmpty { return .noKey }
+            if !settings.hasLicenseKey { return .noKey }
             switch settings.licenseStatus {
             case .revoked: return .keyRefused(reason: settings.licenseReason)
             case .unknown, .invalid: return .keyUnrecognized
@@ -1374,7 +1379,11 @@ public final class PopoverController: NSObject {
 
     /// Session state: the limit was hit during this open, so a trial-ended
     /// note reads the limit text. Cleared on every open and every hide.
-    var limitNoteRaised = false
+    /// Raising it retires a raised survey invite, unspent, so the limit text
+    /// shows.
+    var limitNoteRaised = false {
+        didSet { if limitNoteRaised { raisedSurveyInvite = nil } }
+    }
 
     /// Opens the purchase page. The host owns the URL (`AppSettings.buyURL`),
     /// exactly as it owns every other note action's remedy.
@@ -1388,18 +1397,58 @@ public final class PopoverController: NSObject {
     /// `GroupController`. Idempotent: a repeat is a no-op.
     ///
     /// A change retires everything the old licence state raised in this open:
-    /// the limit text, "Play here" (clicked after a purchase it would
-    /// cut a legal multi-speaker selection to one) and the Main Out menu's
-    /// dimmed scenes.
+    /// the limit text, the survey invite (unspent, so not marked done), "Play
+    /// here" (clicked after a purchase it would cut a legal multi-speaker
+    /// selection to one) and the Main Out menu's dimmed scenes.
     public func setUnregisteredNote(_ note: UnregisteredNote?) {
         guard note != unregisteredNote else { return }
         unregisteredNote = note
         limitNoteRaised = false
+        raisedSurveyInvite = nil
         clearSwitchOffer()
         if isEffectivelyShown {
             refreshDeviceRows()
             refreshMainOutRow()
         }
+        applyNoteSlot()
+    }
+
+    // MARK: Expired-trial survey invite
+
+    /// The survey this install is owed, or `nil` (the host checks
+    /// `ExpiredTrialSurvey.isOwed` and holds the fetched definition).
+    public var surveyInviteProvider: (() -> ExpiredTrialSurvey?)?
+    /// The invite was answered, declined, or closed unanswered on its last
+    /// allowed open: the host marks it done.
+    public var onSurveyInviteSpent: (() -> Void)?
+    /// The popover closed with the invite up and nothing clicked: the host
+    /// counts it and returns whether that was the last allowed close (spent
+    /// as declined). `nil` spends on the first close.
+    public var onSurveyInviteUnanswered: (() -> Bool)?
+    /// "Answer" was clicked: the host raises the survey card.
+    public var onSurveyAnswer: ((ExpiredTrialSurvey) -> Void)?
+    /// Session state: the invite raised in this open.
+    var raisedSurveyInvite: ExpiredTrialSurvey?
+    static let surveyInviteText = "What’s missing from Audiout? Two quick questions."
+
+    /// Raise the invite in place of the plain trial-ended note, once per
+    /// open: only while that note is what the slot would show, so no higher note and no
+    /// limit text is displaced. A limit hit or a licence change later in the
+    /// open retires it unspent (`limitNoteRaised`, `setUnregisteredNote`).
+    private func refreshSurveyInvite() {
+        guard raisedSurveyInvite == nil,
+              unregisteredNote == .trialEnded,
+              !limitNoteRaised,
+              isRebuildingForOpen || isEffectivelyShown,
+              resolvedSystemAirPlayNote.text == Self.unregisteredTrialEndedNoteText,
+              let survey = surveyInviteProvider?() else { return }
+        raisedSurveyInvite = survey
+        Analytics.captureStructured("survey shown", survey.shownProperties())
+    }
+
+    func spendSurveyInvite() {
+        raisedSurveyInvite = nil
+        onSurveyInviteSpent?()
         applyNoteSlot()
     }
 
@@ -1509,7 +1558,7 @@ public final class PopoverController: NSObject {
     /// The pill's copy. Singular on the last day: the spec's example reads
     /// "Trial · 9 days left", and "1 days left" is not English.
     static func trialPillText(daysLeft: Int) -> String {
-        "Trial · \(daysLeft) day\(daysLeft == 1 ? "" : "s") left"
+        LicenseCopy.trialPillText(daysLeft: daysLeft)
     }
 
     /// Each banner's copy, verbatim from the trial spec's § Copy.
@@ -1591,8 +1640,9 @@ public final class PopoverController: NSObject {
     /// `.needsApproval` (state 1) and `.timedOut` (state 4, "Try Again"), for
     /// both trial nudges, the trial pill and the one-speaker note ("Buy
     /// Audiout") — the states with an actual remedy a button can offer. Those
-    /// same trial states, and only they, carry a `textAction` ("I have a
-    /// key"). The capture-failure message
+    /// same trial states carry a `textAction` ("I have a key"). The survey
+    /// invite carries "Answer" as its action and "Not now" as its
+    /// `textAction`. The capture-failure message
     /// names its own remedy in prose, so it has none.
     private var resolvedSystemAirPlayNote: (text: String?, action: SystemAirPlayNoteBannerView.Action?, textAction: SystemAirPlayNoteBannerView.Action?, severity: SystemAirPlayNoteBannerView.Severity) {
         if let captureFailureMessage {
@@ -1617,6 +1667,23 @@ public final class PopoverController: NSObject {
         }
         if let trialDaysLeft {
             return (Self.trialPillText(daysLeft: trialDaysLeft), trialBuyAction, enterLicenseKeyAction, .info)
+        }
+        if let survey = raisedSurveyInvite {
+            let answer = SystemAirPlayNoteBannerView.Action(
+                title: "Answer",
+                accessibilityLabel: "Answer two questions about Audiout",
+                handler: { [weak self] in
+                    self?.spendSurveyInvite()
+                    self?.onSurveyAnswer?(survey)
+                })
+            let notNow = SystemAirPlayNoteBannerView.Action(
+                title: "Not now",
+                accessibilityLabel: "Don't ask again",
+                handler: { [weak self] in
+                    Analytics.captureStructured("survey dismissed", survey.dismissedProperties(.init()))
+                    self?.spendSurveyInvite()
+                })
+            return (Self.surveyInviteText, answer, notNow, .question)
         }
         if let text = unregisteredNoteText {
             return (text, trialBuyAction, enterLicenseKeyAction, .info)
@@ -1992,7 +2059,7 @@ public final class PopoverController: NSObject {
         // show a single non-interactive placeholder BEFORE the ± footer.
         applicationsPlaceholderShown = false
         if renderedRoutes.isEmpty {
-            panel.addRow(makePlaceholderRow(text: Self.applicationsEmptyPlaceholderText))
+            panel.addRow(CardMessageRow(message: Self.applicationsEmptyPlaceholderText))
             applicationsPlaceholderShown = true
         }
         applicationsFooter.isRemoveEnabled = selectedAppBundleID != nil
@@ -2028,6 +2095,7 @@ public final class PopoverController: NSObject {
         // The trial's own two rungs are re-read first: this is the cycle the pill
         // follows, and the one that raises a one-time banner.
         refreshTrialNudge()
+        refreshSurveyInvite()
         mountNoteSlot()
         // The device list this rebuild just re-mounted is a fresh scrolling card,
         // and a fresh one starts at height 0. Callers that publish a size get the
@@ -2165,11 +2233,8 @@ public final class PopoverController: NSObject {
     static let speakerPermissionDeniedHintText =
         "Allow Local Network for Audiout in System Settings \u{203A} Privacy & Security."
 
-    /// The AirPlay subsection's empty body, built the same way the Bluetooth
-    /// Connect row is: a wrapper on the name column whose CONTENT is the empty
-    /// state. Secondary, never tertiary — this is live state text explaining why
-    /// the list is empty, and dimming the explanation of the dimming reads as
-    /// broken (folder rule).
+    /// The AirPlay subsection's empty body: a `CardMessageRow`, with a spinner
+    /// while the search runs.
     private func makeSpeakerSearchStateRow(_ state: SpeakerSearchState) -> NSView {
         let message: String
         let hint: String?
@@ -2185,68 +2250,7 @@ public final class PopoverController: NSObject {
             hint = Self.speakerPermissionDeniedHintText
         }
         renderedSpeakerSearchText = message
-
-        let label = NSTextField(labelWithString: message)
-        label.translatesAutoresizingMaskIntoConstraints = false
-        label.font = Tokens.Font.menuItem
-        label.textColor = Tokens.Color.secondaryLabel
-        label.lineBreakMode = .byTruncatingTail
-        label.maximumNumberOfLines = 1
-
-        let wrapper = NSView()
-        wrapper.translatesAutoresizingMaskIntoConstraints = false
-        wrapper.addSubview(label)
-        let nameColumnLeading = PopoverColumnGrid.nameColumnLeading
-        let trailingInset = -PopoverColumnGrid.leadingInset
-        var constraints: [NSLayoutConstraint] = [
-            label.leadingAnchor.constraint(equalTo: wrapper.leadingAnchor, constant: nameColumnLeading),
-            label.trailingAnchor.constraint(lessThanOrEqualTo: wrapper.trailingAnchor,
-                                            constant: trailingInset),
-        ]
-
-        if let hint {
-            // Two stacked labels: the wrapper GROWS to fit rather than being
-            // pinned to `rowHeight`, or the hint would be clipped out of a row
-            // sized for one line.
-            let hintLabel = NSTextField(wrappingLabelWithString: hint)
-            hintLabel.translatesAutoresizingMaskIntoConstraints = false
-            hintLabel.font = Tokens.Font.captionMedium
-            hintLabel.textColor = Tokens.Color.secondaryLabel
-            hintLabel.isSelectable = false
-            hintLabel.preferredMaxLayoutWidth =
-                SurfaceLayout.width - nameColumnLeading - PopoverColumnGrid.leadingInset
-            wrapper.addSubview(hintLabel)
-            constraints += [
-                label.topAnchor.constraint(equalTo: wrapper.topAnchor, constant: 8),
-                hintLabel.topAnchor.constraint(equalTo: label.bottomAnchor, constant: 2),
-                hintLabel.leadingAnchor.constraint(equalTo: label.leadingAnchor),
-                hintLabel.trailingAnchor.constraint(lessThanOrEqualTo: wrapper.trailingAnchor,
-                                                    constant: trailingInset),
-                hintLabel.bottomAnchor.constraint(equalTo: wrapper.bottomAnchor, constant: -8),
-            ]
-        } else {
-            // One line: a spinner beside it, so "looking" is visibly a process
-            // and not a stuck string. Reduce Motion gets the words alone.
-            constraints += [
-                wrapper.heightAnchor.constraint(equalToConstant: DeviceRowView.rowHeight),
-                label.centerYAnchor.constraint(equalTo: wrapper.centerYAnchor),
-            ]
-            if !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
-                let spinner = NSProgressIndicator()
-                spinner.translatesAutoresizingMaskIntoConstraints = false
-                spinner.style = .spinning
-                spinner.controlSize = .small
-                spinner.isIndeterminate = true
-                wrapper.addSubview(spinner)
-                spinner.startAnimation(nil)
-                constraints += [
-                    spinner.leadingAnchor.constraint(equalTo: label.trailingAnchor, constant: 8),
-                    spinner.centerYAnchor.constraint(equalTo: wrapper.centerYAnchor),
-                ]
-            }
-        }
-        NSLayoutConstraint.activate(constraints)
-        return wrapper
+        return CardMessageRow(message: message, hint: hint, showsSpinner: state == .searching)
     }
 
     private var currentSpeakerUse: SpeakerCurrentUse {
@@ -3374,6 +3378,11 @@ public final class PopoverController: NSObject {
     public var remoteInviteStateProvider:
         (() -> BTAlignmentWizardView.RemoteInviteState)?
 
+    /// Fired when the wizard sheet comes on screen with its iPhone panel
+    /// inviting a phone (the code is showing). The app opens a pairing window
+    /// then, so a phone that scans the code may ask to pair with this Mac.
+    public var onRemoteInviteShown: (() -> Void)?
+
     /// Where a speaker's applied offset came from, asked of the app layer on
     /// every push. Unset until T14 publishes a source, and the drawer's
     /// caption line is then empty and still reserved.
@@ -3414,30 +3423,6 @@ public final class PopoverController: NSObject {
         onOpenSpeakerSettings?(id)
     }
 
-    /// A non-interactive placeholder body row (V2 Devices empty state / V11
-    /// Applications empty state; copy carried by both to the §5.9 spec text
-    /// under V9): `text` in a tertiary-label, row-height view whose label
-    /// leading edge aligns with the name column (past the icon).
-    private func makePlaceholderRow(text: String) -> NSView {
-        let label = NSTextField(labelWithString: text)
-        label.translatesAutoresizingMaskIntoConstraints = false
-        label.font = Tokens.Font.menuItem
-        label.textColor = Tokens.Color.inkTertiary
-        label.lineBreakMode = .byTruncatingTail
-        label.maximumNumberOfLines = 1
-        let wrapper = NSView()
-        wrapper.translatesAutoresizingMaskIntoConstraints = false
-        wrapper.addSubview(label)
-        let nameColumnLeading = PopoverColumnGrid.nameColumnLeading
-        NSLayoutConstraint.activate([
-            wrapper.heightAnchor.constraint(equalToConstant: DeviceRowView.rowHeight),
-            label.leadingAnchor.constraint(equalTo: wrapper.leadingAnchor, constant: nameColumnLeading),
-            label.trailingAnchor.constraint(lessThanOrEqualTo: wrapper.trailingAnchor,
-                                            constant: -PopoverColumnGrid.leadingInset),
-            label.centerYAnchor.constraint(equalTo: wrapper.centerYAnchor),
-        ])
-        return wrapper
-    }
 
     private func makePairBluetoothRow() -> NSView {
         let button = PointingHandButton(title: "Pair Bluetooth speaker…",
@@ -3450,7 +3435,7 @@ public final class PopoverController: NSObject {
         button.image = NSImage(systemSymbolName: "plus", accessibilityDescription: nil)
         button.image?.isTemplate = true
         button.imagePosition = .imageLeading
-        button.contentTintColor = Tokens.Color.secondaryLabel
+        button.contentTintColor = Tokens.Color.label2
         button.attributedTitle = NSAttributedString(string: button.title,
             attributes: [.font: Tokens.Font.menuItem, .foregroundColor: Tokens.Color.label2])
         pairBluetoothButton = button
@@ -3475,32 +3460,10 @@ public final class PopoverController: NSObject {
     }
 
     private func makeBluetoothAccessRow(_ explanation: String) -> NSView {
-        let label = NSTextField(labelWithString: explanation)
-        label.translatesAutoresizingMaskIntoConstraints = false
-        label.font = Tokens.Font.menuItem
-        label.textColor = Tokens.Color.label2
-        let button = NSButton(title: bluetoothPermissionProvider?() == .denied
-                              ? "Open Bluetooth privacy…" : "Allow Bluetooth access…",
-                              target: self, action: #selector(bluetoothAccessClicked(_:)))
-        button.translatesAutoresizingMaskIntoConstraints = false
-        button.bezelStyle = .accessoryBar
-        button.controlSize = .small
-        button.setAccessibilityLabel(button.title)
-        let row = NSView()
-        row.translatesAutoresizingMaskIntoConstraints = false
-        row.addSubview(label)
-        row.addSubview(button)
-        NSLayoutConstraint.activate([
-            row.heightAnchor.constraint(equalToConstant: DeviceRowView.rowHeight),
-            label.leadingAnchor.constraint(equalTo: row.leadingAnchor,
-                                           constant: PopoverColumnGrid.firstElementLeading(indented: false)),
-            label.centerYAnchor.constraint(equalTo: row.centerYAnchor),
-            button.leadingAnchor.constraint(equalTo: label.trailingAnchor, constant: 8),
-            button.centerYAnchor.constraint(equalTo: row.centerYAnchor),
-            button.trailingAnchor.constraint(lessThanOrEqualTo: row.trailingAnchor,
-                                              constant: -PopoverColumnGrid.trailingInset),
-        ])
-        return row
+        CardMessageRow(message: explanation, action: .init(
+            title: bluetoothPermissionProvider?() == .denied
+                ? "Open Bluetooth privacy…" : "Allow Bluetooth access…",
+            target: self, selector: #selector(bluetoothAccessClicked(_:))))
     }
 
     @objc private func bluetoothAccessClicked(_ sender: Any?) { onBluetoothAccess?() }
@@ -3542,6 +3505,7 @@ public final class PopoverController: NSObject {
                 // what keeps a mid-episode dismissal honored — a still-`.failed`
                 // re-report breaks here, so the panel never pops back.
                 guard !previous.isFailedState else { break }
+                codeJoinClickedIDs.remove(device.id)
                 // Only a speaker the user asked for is worth an event —
                 // selected, a redirect target, or a member of the playing
                 // group. The backend fails every speaker it can see, wanted or
@@ -3568,11 +3532,14 @@ public final class PopoverController: NSObject {
                 if device.id == passwordSheetDeviceID, passwordSheetSubmitted,
                    case .failed(let failure) = current {
                     passwordSheetSubmitted = false
-                    passwordSheet?.showResult(failure.cause == .authRequired
-                        ? Self.passwordRejectedText
-                        : failure.headline)
+                    switch failure.cause {
+                    case .codeRequired: passwordSheet?.showResult(Self.codeRejectedText)
+                    case .authRequired: passwordSheet?.showResult(Self.passwordRejectedText)
+                    default: passwordSheet?.showResult(failure.headline)
+                    }
                 }
             case .connected, .off:
+                codeJoinClickedIDs.remove(device.id)
                 if current == .connected && device.id == passwordSheetDeviceID {
                     dismissPasswordSheet()
                 }
@@ -3591,6 +3558,15 @@ public final class PopoverController: NSObject {
                 // the door, so no panel.
                 openDiagnosisIDs.remove(device.id)
                 dismissedDiagnosisIDs.remove(device.id)
+                // A code speaker the user just clicked opens its sheet once,
+                // as the wait begins; a repeat report is not a new wait. A
+                // hidden popover cannot present the sheet, and a retained one
+                // would refuse every later link click, so a hidden wait spends
+                // the click and the row's link opens the sheet later.
+                if previous != .awaitingPassword, codeJoinClickedIDs.remove(device.id) != nil,
+                   isEffectivelyShown {
+                    presentPasswordSheet(for: device.id)
+                }
             case .connecting, .reconnecting:
                 // In-flight: leave any open panel alone (a retry keeps its
                 // context on screen until the attempt resolves). Deliberately
@@ -3697,18 +3673,29 @@ public final class PopoverController: NSObject {
         Analytics.capture("connection:retry_clicked")
         let result = groupController?.retryConnection(for: id) ?? .ok
         handleSelection(result, deviceID: id)
+        if result.refusalReason == nil, showsCode(id) { codeJoinClickedIDs.insert(id) }
     }
 
-    /// Ask for `id`'s AirPlay password. Connect stores it and retries through
-    /// `GroupController.submitAirPlayPassword`; the sheet stays up until the
+    /// Whether `id` is a receiver that shows a code on its screen once and keeps
+    /// the pairing. An every-time code receiver takes no code (`.codeEveryTimeUnsupported`).
+    private func showsCode(_ id: String) -> Bool {
+        devicesByID[id]?.airPlayAccess == .onScreenCode
+    }
+
+    /// Ask for `id`'s AirPlay password or on-screen code. Connect goes through
+    /// `GroupController.submitAirPlayPassword`: a password is stored and the
+    /// speaker retried; a code speaker's digits go to `engine.authorize` and only
+    /// the pairing key that earns is stored. The sheet stays up until the
     /// speaker connects (dismiss) or fails again (`showResult`), both read off
     /// the connection edges in `handleConnectionTransitions`. While the sheet
     /// is up its speaker's diagnosis panel does not open; Cancel on a
     /// still-failed speaker opens it.
     func presentPasswordSheet(for id: String) {
-        guard passwordSheet == nil else { return }
-        Analytics.capture("airplay:code_prompt_shown", ["kind": "password"])
-        let sheet = SpeakerPasswordSheetViewController(deviceName: devicesByID[id]?.name ?? "")
+        guard passwordSheet == nil, devicesByID[id]?.airPlayAccess != .onScreenCodeEveryTime else { return }
+        let isCode = showsCode(id)
+        Analytics.capture("airplay:code_prompt_shown", ["kind": isCode ? "onScreenCode" : "password"])
+        let sheet = SpeakerPasswordSheetViewController(deviceName: devicesByID[id]?.name ?? "",
+                                                       kind: isCode ? .onScreenCode : .password)
         sheet.onSubmit = { [weak self] text in
             guard let self else { return }
             self.passwordSheetSubmitted = true
@@ -3735,6 +3722,7 @@ public final class PopoverController: NSObject {
 
     private func dismissPasswordSheet() {
         let sheet = passwordSheet
+        if let id = passwordSheetDeviceID { codeJoinClickedIDs.remove(id) }
         passwordSheet = nil
         passwordSheetDeviceID = nil
         passwordSheetSubmitted = false
@@ -3831,6 +3819,9 @@ extension PopoverController: DeviceRowView.Delegate {
         if on, result.refusalReason == nil, let device = devicesByID[id],
            device.airPlayAccess == .password, !device.hasStoredPassword {
             presentPasswordSheet(for: id)
+        }
+        if on, result.refusalReason == nil, showsCode(id) {
+            codeJoinClickedIDs.insert(id)
         }
     }
 

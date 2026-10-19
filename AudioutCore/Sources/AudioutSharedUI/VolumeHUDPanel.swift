@@ -40,10 +40,8 @@ public final class VolumeHUDPanel: NSPanel {
     /// to match.
     public static func content(volumePercent: Int, isMuted: Bool) -> Content {
         if isMuted {
-            // SharedUI rule S3 ("glyph NEVER swaps to a slash",
-            // `AudioutSharedUI/AGENTS.md`) governs a row's mute BUTTON, which
-            // is a control; this HUD is a transient readout carrying no
-            // number, and the slash is what macOS's own volume HUD shows.
+            // The slash is what macOS's own volume HUD shows. The row's
+            // mute button draws a slash too (`RowAccessorySymbol.muteEngaged`).
             return Content(symbolName: "speaker.slash.fill", variableValue: 0, text: "Muted",
                            spokenDescription: "Volume muted")
         }

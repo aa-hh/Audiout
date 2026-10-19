@@ -381,30 +381,6 @@ extension SerializedEngineState {
         #expect(snapshot.deficitSeconds > 0.1, "underfed real writes through the public API must show a deficit")
     }
 
-    /// A nominal feed through the public API stays ~zero, mirroring the unit
-    /// test above but exercised through the actual hot path.
-    @Test(.enabled(if: ProcessInfo.processInfo.environment["CI"] == nil, "Quarantined on GitHub runners 2026-10-04: measures real Task.sleep pacing through the engine hot path and AirPlayEngine.cadence has no clock seam; the paced arithmetic is pinned by nominalFeedStaysNearZero and the wiring by engineWritePathFeedsCadenceTracker. Issue #258.")) func engineWritePathNominalFeedStaysNearZero() async throws {
-        let engine = AirPlayEngine()
-        await engine.enterHeadlessTestMode()
-
-        let samplesPerWrite = 352
-        let sampleRate = 44100
-        let audioSeconds = Double(samplesPerWrite) / Double(sampleRate)
-        let pcm = Data(repeating: 0, count: samplesPerWrite * 4)
-        let pts = timespec(tv_sec: 0, tv_nsec: 0)
-
-        engine.write(pcm: pcm, pts: pts)
-        for _ in 0..<10 {
-            try await Task.sleep(nanoseconds: UInt64(audioSeconds * 1e9))
-            engine.write(pcm: pcm, pts: pts)
-        }
-
-        let snapshot = engine.writeCadenceSnapshot()
-        #expect(snapshot.writeCount == 11)
-        #expect(snapshot.deficitSeconds < 0.15)
-        #expect(snapshot.overrunSeconds < 0.15)
-    }
-
     /// Wiring proof for the refusal accounting through the REAL public write
     /// path: a write the backpressure guard refuses (stream preloaded to the
     /// cap, same idiom as `WriteBacklogTests.engineDropsSaturatedStreamThenSelfHeals`)

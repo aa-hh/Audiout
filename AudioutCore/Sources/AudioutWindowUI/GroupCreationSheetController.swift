@@ -660,12 +660,6 @@ public final class GroupCreationSheetController: NSViewController {
     public var test_pencilBadgeRestampCount: Int { iconWellPencilBadge.test_restampCount }
 }
 
-/// A flipped document view so the checklist scrolls from the top rather than
-/// bottom-gravitating with dead space above the rows. File-scoped on purpose.
-private final class FlippedView: NSView {
-    override var isFlipped: Bool { true }
-}
-
 /// The creation sheet's icon-well corner pencil — a cosmetic echo of
 /// `DeviceIconWellView`'s badge (`../../AGENTS.md`'s "bordered + pencil =
 /// editable"), NOT a second custom control: no hover step-up, no keyboard

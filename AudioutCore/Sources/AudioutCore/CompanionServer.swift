@@ -254,7 +254,6 @@ public final class CompanionServer: @unchecked Sendable {
     private static let preHelloTimeout: TimeInterval = 5
     /// Test-only: overrides ``preHelloTimeout`` so a cancellation test
     /// doesn't wait real seconds. Nil (default) uses the real value.
-    /// Same seam as `DACPServer.test_idleReceiveTimeoutOverride`.
     public var test_handshakeTimeoutOverride: TimeInterval?
 
     /// More phones than any household plausibly has; a bound so a

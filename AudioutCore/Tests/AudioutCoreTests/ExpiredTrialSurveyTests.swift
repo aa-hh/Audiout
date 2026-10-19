@@ -91,8 +91,37 @@ import Testing
         #expect(!ExpiredTrialSurvey.isOwed(settings: settings, consent: true))
     }
 
+    /// Red if `countStreamingDay` stops incrementing `trialEndedStreamingDays`
+    /// for an unlicensed Mac past its trial: the invite would never come due.
+    @Test func countStreamingDayCountsAfterTheTrialEnds() {
+        let ended = AppSettings(defaults: isolation.makeDefaults(), licenseServerURL: Self.server)
+        TrialClock.start(settings: ended, now: Date().addingTimeInterval(-30 * 86_400))
+        #expect(ExpiredTrialSurvey.countStreamingDay(settings: ended))
+        #expect(ended.trialEndedStreamingDays == 1)
+    }
+
+    /// Red if `countStreamingDay` drops its `TrialClock.hasEnded` check: days
+    /// streamed during the trial would count toward the invite.
+    @Test func countStreamingDaySkipsADayInTheTrial() {
+        let running = AppSettings(defaults: isolation.makeDefaults(), licenseServerURL: Self.server)
+        TrialClock.start(settings: running, now: Date().addingTimeInterval(-1 * 86_400))
+        #expect(!ExpiredTrialSurvey.countStreamingDay(settings: running))
+        #expect(running.trialEndedStreamingDays == 0)
+    }
+
+    /// Red if `countStreamingDay` drops its `LicenseGate.limitsToOneSpeaker`
+    /// check: a Mac that bought a key would keep counting toward the invite.
+    @Test func countStreamingDaySkipsALicensedInstall() {
+        let settings = AppSettings(defaults: isolation.makeDefaults(), licenseServerURL: Self.server)
+        TrialClock.start(settings: settings, now: Date().addingTimeInterval(-30 * 86_400))
+        settings.licenseKey = "AUDT-AAAAA-BBBBB-CCCCC-DDDDD"
+        #expect(!ExpiredTrialSurvey.countStreamingDay(settings: settings))
+        #expect(settings.trialEndedStreamingDays == 0)
+    }
+
     /// Red if the missing-something details stop going to question 2 as an
-    /// array, leak into questions 3 or 4, or the responded `$set` key changes.
+    /// array, leak into questions 3 or 4, or a `$set` comes back (PostHog drops
+    /// it for an install with no person profile).
     @Test func sentPropertiesForMissingSomething() {
         let props = Self.ours().sentProperties(.init(reason: "It's missing something I need",
                                                      detail: ["A", "B"], text: "More speakers"))
@@ -101,23 +130,22 @@ import Testing
         #expect(props["$survey_response_q3"] == nil)
         #expect(props["$survey_response_q4"] == nil)
         #expect(props["$survey_response_q5"] as? String == "More speakers")
-        #expect(props["$set"] as? [String: Bool] == ["$survey_responded/\(Self.ourID)": true])
+        #expect(props["$set"] == nil)
         #expect((props["$survey_questions"] as? [[String: any Sendable]])?.count == 5)
     }
 
     /// Red if a dismissal with nothing answered reads as partly completed, or
-    /// the dismissed `$set` key changes.
+    /// a `$set` comes back.
     @Test func dismissedPropertiesWithNoAnswers() {
         let props = Self.ours().dismissedProperties(.init())
         #expect(props["$survey_partially_completed"] as? Bool == false)
-        #expect(props["$set"] as? [String: Bool] == ["$survey_dismissed/\(Self.ourID)": true])
+        #expect(props["$set"] == nil)
     }
 
-    /// Red if the iteration stops being appended to the `$set` key, which would
-    /// mark a later round of the survey as already answered.
-    @Test func iterationSuffixesTheSetKey() {
+    /// Red if `baseProperties` stops sending `$survey_iteration`, which would
+    /// fold a later round of the survey into the first in PostHog's results.
+    @Test func sentPropertiesCarryTheIteration() {
         let props = Self.ours(iteration: 2).sentProperties(.init(reason: "Too expensive"))
-        #expect(props["$set"] as? [String: Bool] == ["$survey_responded/\(Self.ourID)/2": true])
         #expect(props["$survey_iteration"] as? Int == 2)
     }
 }

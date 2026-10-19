@@ -113,6 +113,15 @@ public struct ExpiredTrialSurvey: Equatable, Sendable {
             && LicenseGate.limitsToOneSpeaker(settings: settings)
     }
 
+    /// Counts one streaming day toward the invite when the trial has ended
+    /// and no licence was bought. Returns whether it counted.
+    public static func countStreamingDay(settings: AppSettings) -> Bool {
+        guard TrialClock.hasEnded(settings: settings),
+              LicenseGate.limitsToOneSpeaker(settings: settings) else { return false }
+        settings.trialEndedStreamingDays += 1
+        return true
+    }
+
     // MARK: - Event properties
 
     /// The reasons whose follow-up question applies, by question index.
@@ -129,15 +138,12 @@ public struct ExpiredTrialSurvey: Equatable, Sendable {
 
     /// Properties for `survey sent`.
     public func sentProperties(_ answers: Answers) -> [String: any Sendable] {
-        var props = answerProperties(answers)
-        props["$set"] = [setKey("$survey_responded"): true]
-        return props
+        answerProperties(answers)
     }
 
     /// Properties for `survey dismissed`, including a partly answered one.
     public func dismissedProperties(_ answers: Answers) -> [String: any Sendable] {
         var props = answerProperties(answers)
-        props["$set"] = [setKey("$survey_dismissed"): true]
         props["$survey_partially_completed"] = !responses(answers).isEmpty
         return props
     }
@@ -178,10 +184,5 @@ public struct ExpiredTrialSurvey: Equatable, Sendable {
         }
         props["$survey_questions"] = questionList
         return props
-    }
-
-    private func setKey(_ prefix: String) -> String {
-        if let currentIteration, currentIteration > 0 { return "\(prefix)/\(id)/\(currentIteration)" }
-        return "\(prefix)/\(id)"
     }
 }

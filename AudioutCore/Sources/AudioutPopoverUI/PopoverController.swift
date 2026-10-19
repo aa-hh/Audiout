@@ -1260,7 +1260,9 @@ public final class PopoverController: NSObject {
     // speaker is silent while its row still says Connected) outranks routing-blocked
     // (T-UI, WARNING — audio is dead right now), which outranks the takeover status,
     // which outranks the double-path guard note, which outranks a one-time trial
-    // banner, which outranks the trial pill, which outranks the one-speaker-limit
+    // banner, which outranks the trial pill, which outranks the expired-trial
+    // survey invite (raised in place of the plain trial-ended note, retired unspent
+    // by a limit hit or a licence change), which outranks the one-speaker-limit
     // note (`unregisteredNote`, lowest — a standing condition, never something
     // happening right now; it reads the limit text for the rest of an open once the
     // limit is hit, `limitNoteRaised`). With no note at all, the slot may hold the
@@ -1268,7 +1270,7 @@ public final class PopoverController: NSObject {
     // instant the one above it clears. Each condition keeps its own idempotence-check
     // state var (`captureFailureMessage` / `routingBlockedNeedsDefault` /
     // `takeoverStatus` / `systemAirPlayNoteActive` / `raisedTrialBanner` /
-    // `trialDaysLeft` / `unregisteredNote`); `applyNoteSlot()` is the one place that
+    // `trialDaysLeft` / `raisedSurveyInvite` / `unregisteredNote`); `applyNoteSlot()` is the one place that
     // resolves precedence and actually pushes to the panel, called by every setter
     // and by the tail of `rebuild()`.
 
@@ -1377,7 +1379,11 @@ public final class PopoverController: NSObject {
 
     /// Session state: the limit was hit during this open, so a trial-ended
     /// note reads the limit text. Cleared on every open and every hide.
-    var limitNoteRaised = false
+    /// Raising it retires a raised survey invite, unspent, so the limit text
+    /// shows.
+    var limitNoteRaised = false {
+        didSet { if limitNoteRaised { raisedSurveyInvite = nil } }
+    }
 
     /// Opens the purchase page. The host owns the URL (`AppSettings.buyURL`),
     /// exactly as it owns every other note action's remedy.
@@ -1391,13 +1397,14 @@ public final class PopoverController: NSObject {
     /// `GroupController`. Idempotent: a repeat is a no-op.
     ///
     /// A change retires everything the old licence state raised in this open:
-    /// the limit text, "Play here" (clicked after a purchase it would
-    /// cut a legal multi-speaker selection to one) and the Main Out menu's
-    /// dimmed scenes.
+    /// the limit text, the survey invite (unspent, so not marked done), "Play
+    /// here" (clicked after a purchase it would cut a legal multi-speaker
+    /// selection to one) and the Main Out menu's dimmed scenes.
     public func setUnregisteredNote(_ note: UnregisteredNote?) {
         guard note != unregisteredNote else { return }
         unregisteredNote = note
         limitNoteRaised = false
+        raisedSurveyInvite = nil
         clearSwitchOffer()
         if isEffectivelyShown {
             refreshDeviceRows()
@@ -1421,7 +1428,8 @@ public final class PopoverController: NSObject {
 
     /// Raise the invite in place of the plain trial-ended note, once: only
     /// while that note is what the slot would show, so no higher note and no
-    /// limit text is displaced.
+    /// limit text is displaced. A limit hit or a licence change later in the
+    /// open retires it unspent (`limitNoteRaised`, `setUnregisteredNote`).
     private func refreshSurveyInvite() {
         guard raisedSurveyInvite == nil,
               unregisteredNote == .trialEnded,
@@ -1627,8 +1635,9 @@ public final class PopoverController: NSObject {
     /// `.needsApproval` (state 1) and `.timedOut` (state 4, "Try Again"), for
     /// both trial nudges, the trial pill and the one-speaker note ("Buy
     /// Audiout") — the states with an actual remedy a button can offer. Those
-    /// same trial states, and only they, carry a `textAction` ("I have a
-    /// key"). The capture-failure message
+    /// same trial states carry a `textAction` ("I have a key"). The survey
+    /// invite carries "Answer" as its action and "Not now" as its
+    /// `textAction`. The capture-failure message
     /// names its own remedy in prose, so it has none.
     private var resolvedSystemAirPlayNote: (text: String?, action: SystemAirPlayNoteBannerView.Action?, textAction: SystemAirPlayNoteBannerView.Action?, severity: SystemAirPlayNoteBannerView.Severity) {
         if let captureFailureMessage {

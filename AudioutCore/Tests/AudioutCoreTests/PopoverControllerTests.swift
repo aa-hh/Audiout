@@ -4893,6 +4893,40 @@ extension SerializedSharedState {
             #expect(invite.spentCalls == 0)
         }
 
+        /// Red if `setUnregisteredNote` stops clearing `raisedSurveyInvite`, or
+        /// clears it through `spendSurveyInvite`: a purchase with the popover
+        /// open would leave the invite up, or mark it done unanswered.
+        @Test func aPurchaseWithTheInviteUpRetiresItUnspent() {
+            let invite = Invite()
+            let popover = trialEndedPopover(invite: invite)
+            popover.test_simulateOpen()
+            #expect(popover.test_systemAirPlayNoteText == PopoverController.surveyInviteText)
+            let seen = StructuredEvents.recording { popover.setUnregisteredNote(nil) }
+            #expect(popover.test_systemAirPlayNoteText != PopoverController.surveyInviteText)
+            #expect(seen.names().isEmpty)
+            #expect(invite.spentCalls == 0)
+        }
+
+        /// Red if raising `limitNoteRaised` stops retiring the invite (its
+        /// `didSet`), or retires it through `spendSurveyInvite`: the limit text
+        /// would stay hidden behind the invite, or the invite marked done.
+        @Test func aLimitHitWithTheInviteUpShowsTheLimitTextUnspent() {
+            let invite = Invite()
+            let (popover, controller) = makePopover()
+            invite.wire(popover)
+            _ = controller.setDeviceSelected("office", true)
+            controller.limitsToOneSpeaker = true
+            popover.setUnregisteredNote(.trialEnded)
+            popover.test_simulateOpen()
+            #expect(popover.test_systemAirPlayNoteText == PopoverController.surveyInviteText)
+            let seen = StructuredEvents.recording {
+                popover.test_deviceRow(for: "kitchen")?.test_fireCheckboxAction(settingStateTo: true)
+            }
+            #expect(popover.test_systemAirPlayNoteText == PopoverController.oneSpeakerLimitNoteText)
+            #expect(seen.names().isEmpty)
+            #expect(invite.spentCalls == 0)
+        }
+
         /// Red if "Play here" left two speakers selected (the limit
         /// would then be broken by its own offer) or stopped reporting its use.
         @Test func theSwitchOfferLeavesOnlyTheClickedSpeaker() {

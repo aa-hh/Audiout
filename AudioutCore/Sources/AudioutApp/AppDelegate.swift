@@ -181,10 +181,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// The one event per launch that carries coarse location. It overrides the
     /// registered opt-out for itself only; every other event stays clean.
     ///
-    /// Called directly rather than through ``Analytics`` because the facade
-    /// carries `[String: String]` and this property has to reach PostHog as a
-    /// real `false` — and because `AppDelegate` is the one place allowed to
-    /// touch `PostHogSDK`. The SDK's own opt-out still gates it, so a build
+    /// Called directly rather than through ``Analytics`` because the
+    /// `$geoip_disable` override has to reach the SDK on this one event — and
+    /// because `AppDelegate` is the one place allowed to touch `PostHogSDK`. The SDK's own opt-out still gates it, so a build
     /// without consent sends nothing.
     private nonisolated static func captureCoarseLocationOnce() {
         PostHogSDK.shared.capture("app:launched", properties: [geoipDisableKey: false])
@@ -203,7 +202,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// The expired-trial survey's definition, once fetched; the popover's
     /// invite reads it.
     private var activeTrialSurvey: ExpiredTrialSurvey?
-    /// One fetch per launch at most.
+    /// Set while a fetch runs or after one succeeded; a failed fetch clears
+    /// it so the next daily-active or licence pass tries again.
     private var trialSurveyFetchStarted = false
 
     /// Fetch the survey once this install is owed it.
@@ -213,7 +213,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         trialSurveyFetchStarted = true
         ExpiredTrialSurvey.fetch(host: postHogHost, token: postHogProjectToken,
                                  surveyID: ExpiredTrialSurvey.surveyID) { survey in
-            DispatchQueue.main.async { [weak self] in self?.activeTrialSurvey = survey }
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.activeTrialSurvey = survey
+                if survey == nil { self.trialSurveyFetchStarted = false }
+            }
         }
     }
 
@@ -3256,9 +3260,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                           lastDay: settings.telemetryDailyActiveDay) {
             settings.telemetryDailyActiveDay = due.day
             Analytics.capture("streaming:daily_active", ["speaker_count": String(due.speakerCount)])
-            if TrialClock.hasEnded(settings: settings),
-               LicenseGate.limitsToOneSpeaker(settings: settings) {
-                settings.trialEndedStreamingDays += 1
+            if ExpiredTrialSurvey.countStreamingDay(settings: settings) {
                 refreshExpiredTrialSurvey()
             }
         }

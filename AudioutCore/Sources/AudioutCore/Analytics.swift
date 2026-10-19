@@ -173,7 +173,7 @@ public enum Analytics {
 
     /// Sends an event whose properties are not all strings. It exists for
     /// PostHog survey events (``ExpiredTrialSurvey``), whose properties carry
-    /// arrays and a nested `$set` dictionary that ``capture(_:_:)`` cannot.
+    /// arrays of strings and of dictionaries that ``capture(_:_:)`` cannot.
     /// No sink, no consent, or a sink without `captureStructured`: no send.
     ///
     /// Like ``captureError(_:_:)``, nothing is held while consent is off.

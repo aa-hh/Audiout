@@ -67,31 +67,49 @@ final class TrialSurveyCardView: NSView {
         static let ringDiameter: CGFloat = 72
         static let ringLineWidth: CGFloat = 3.8
         static let dotDiameter: CGFloat = 19
-        static let glowSize = NSSize(width: 150, height: 96)
-        static let glowBlur: CGFloat = 36
-        static let glowOpacity: Float = 0.22
-        /// Radial stops of the glow layer standing in for the blurred ellipse:
-        /// full, full, half at the ellipse's edge, clear at edge + blur.
-        static var glowStops: [NSNumber] { [0, 0.3, 0.62, 1] }
-        // Thank-you motion (Figma frame 70:7077)
-        static let ringDrawDuration: CFTimeInterval = 0.42
-        static var ringDrawCurve: CAMediaTimingFunction { CAMediaTimingFunction(controlPoints: 0.33, 1, 0.68, 1) }
-        /// The lit stretch behind the drawing tip.
+        /// The unfilled ring under the drawing one: `rim` at this opacity.
+        static let trackOpacity: Float = 0.28
+        /// The empty dot's `rim` outline before the ring reaches it.
+        static let dotRimWidth: CGFloat = 1.5
+        /// The dot's own `glow`, a radial gradient about three dots wide that
+        /// stays on at `dotGlowOpacity` once the dot has turned gold.
+        static let dotGlowDiameter: CGFloat = 56
+        static let dotGlowOpacity: Float = 0.55
+        // Thank-you motion: the Mixer's connect moment, replayed. Times count
+        // from the step appearing; contact is when the ring's tip meets the dot.
+        /// A hold that lets the step's slide land before the ring moves.
+        static let ringDrawBegin: CFTimeInterval = 0.08
+        static let ringDrawDuration: CFTimeInterval = 0.56
+        /// Speeds up into contact so the tip reaches the dot with energy; the
+        /// steeper (0.55, 0.05, 0.8, 0.4) covered only 16° in its first 150 ms.
+        static var ringDrawCurve: CAMediaTimingFunction { CAMediaTimingFunction(controlPoints: 0.45, 0.05, 0.75, 0.5) }
+        static var contactTime: CFTimeInterval { ringDrawBegin + ringDrawDuration }
+        /// The lit stretch behind the drawing tip, fully lit until contact.
         static let highlighterSweep: CGFloat = .pi / 4
-        /// The lit stretch fades to grey over the last 120 ms of the draw, so
-        /// it is gone when the dot pops.
-        static let highlighterFadeBegin: CFTimeInterval = 0.30
-        static let highlighterFadeDuration: CFTimeInterval = 0.12
-        static let dotPopBegin: CFTimeInterval = 0.42
-        static let dotStiffness: CGFloat = 400
-        static let dotDamping: CGFloat = 21
-        static let dotMass: CGFloat = 1
-        /// Damping ratio 21 / (2 * sqrt(400)) = 0.525: from rest, the scale
-        /// peaks near 1.15 about 185 ms after the pop starts.
-        static let dotInitialVelocity: CGFloat = 0
-        static let glowBegin: CFTimeInterval = 0.6
-        static let glowDuration: CFTimeInterval = 0.24
-        static let reduceMotionFadeDuration: CFTimeInterval = 0.2
+        static let highlighterFadeDuration: CFTimeInterval = 0.16
+        /// The empty dot's outline fades out from contact while the fill
+        /// blooms `ember → gold` over `PopoverColumnGrid.routeArmedBloomDuration`.
+        static let dotRimFadeDuration: CFTimeInterval = 0.12
+        /// The dot's snap at contact: 1 → 1.32 → 0.96 → 1, one overshoot.
+        static let dotSnapPeakScale: CGFloat = 1.32
+        static let dotSnapDipScale: CGFloat = 0.96
+        static let dotSnapRiseDuration: CFTimeInterval = 0.09
+        static let dotSnapDipDuration: CFTimeInterval = 0.11
+        static let dotSnapSettleDuration: CFTimeInterval = 0.12
+        /// One `gold` ring leaving the dot at contact, never repeated.
+        static let shockwaveLineWidth: CGFloat = 1.5
+        static let shockwaveEndScale: CGFloat = 2.6
+        static let shockwaveOpacity: Float = 0.55
+        static let shockwaveDuration: CFTimeInterval = 0.42
+        static var shockwaveCurve: CAMediaTimingFunction { CAMediaTimingFunction(controlPoints: 0.16, 1, 0.3, 1) }
+        /// The dot glow peaks 120 ms after contact, then eases down to
+        /// `dotGlowOpacity` 460 ms after contact.
+        static let dotGlowPeakOpacity: Float = 0.9
+        static let dotGlowPeakDelay: CFTimeInterval = 0.12
+        static let dotGlowDuration: CFTimeInterval = 0.46
+        /// Under Reduce Motion only colour moves: the dot's bloom, and the
+        /// glow fading up over this.
+        static let reduceMotionGlowDuration: CFTimeInterval = 0.3
     }
 
     // MARK: Copy
@@ -881,24 +899,30 @@ final class SurveyTileButton: NSButton {
 
 // MARK: - Thank-you mark
 
-/// The thank-you mark: a speaker glyph inside an open `rim` ring whose gap
-/// holds a `gold` dot, over a soft `glow`. On `play()` the ring draws in one
-/// clockwise sweep from its bottom opening to the dot with a lit stretch at
-/// its tip, the dot pops, then the glow fades up.
+/// The thank-you mark replays the Mixer's connect moment: a speaker glyph
+/// inside a faint `rim` track whose gap holds an empty dot. On `play()` the
+/// ring draws clockwise from its bottom opening to the dot with a lit stretch
+/// at its tip; at contact the dot blooms `ember → gold` like
+/// `RouteArmedDotView`, snaps past full size, sends out one `gold` ring, and
+/// keeps a soft `glow` of its own.
 final class SurveyThanksMarkView: NSView {
     private typealias M = TrialSurveyCardView.Metrics
 
-    /// Holds every layer below the glyph, so Reduce Motion fades them as one.
     private let layersView = NSView()
     private let glyph = NSImageView()
-    private let glowLayer = CAGradientLayer()
+    private let trackLayer = CAShapeLayer()
     private let ringLayer = CAShapeLayer()
     /// The lit stretch: a conic gradient (rotated to follow the tip) inside a
     /// container masked to the stroke behind the tip.
     private let highlighterContainer = CALayer()
     private let highlighterGradient = CAGradientLayer()
     private let highlighterMask = CAShapeLayer()
+    private let dotGlowLayer = CAGradientLayer()
+    private let shockwaveLayer = CAShapeLayer()
     private let dotLayer = CAShapeLayer()
+    /// The shockwave's path at contact and at its widest.
+    private var shockwaveStartPath: CGPath?
+    private var shockwaveEndPath: CGPath?
 
     /// Where the sweep starts: the gap's edge just right of the bottom. The
     /// gap is the halo ring's, centred on the dot.
@@ -928,15 +952,12 @@ final class SurveyThanksMarkView: NSView {
         ])
         setAccessibilityElement(false)
 
-        glowLayer.type = .radial
-        glowLayer.startPoint = CGPoint(x: 0.5, y: 0.5)
-        glowLayer.endPoint = CGPoint(x: 1, y: 1)
-        glowLayer.locations = M.glowStops
-        glowLayer.opacity = M.glowOpacity
-
-        ringLayer.fillColor = nil
-        ringLayer.lineWidth = M.ringLineWidth
-        ringLayer.lineCap = .round
+        for ring in [trackLayer, ringLayer] {
+            ring.fillColor = nil
+            ring.lineWidth = M.ringLineWidth
+            ring.lineCap = .round
+        }
+        trackLayer.opacity = M.trackOpacity
 
         highlighterGradient.type = .conic
         highlighterGradient.startPoint = CGPoint(x: 0.5, y: 0.5)
@@ -950,13 +971,32 @@ final class SurveyThanksMarkView: NSView {
         highlighterMask.strokeColor = NSColor.black.cgColor
         highlighterMask.lineWidth = M.ringLineWidth
         highlighterMask.lineCap = .round
+        // Settled at the dot, where the lit stretch fades out after contact.
+        highlighterMask.strokeStart = 1 - M.highlighterSweep / Self.sweep
+        highlighterGradient.transform = CATransform3DMakeRotation(Self.startAngle - Self.sweep, 0, 0, 1)
         highlighterContainer.mask = highlighterMask
         highlighterContainer.addSublayer(highlighterGradient)
         highlighterContainer.opacity = 0
 
+        dotGlowLayer.type = .radial
+        dotGlowLayer.startPoint = CGPoint(x: 0.5, y: 0.5)
+        dotGlowLayer.endPoint = CGPoint(x: 1, y: 1)
+        dotGlowLayer.opacity = M.dotGlowOpacity
+
+        shockwaveLayer.fillColor = nil
+        shockwaveLayer.lineWidth = M.shockwaveLineWidth
+        shockwaveLayer.opacity = 0
+
+        // Settled: a gold dot with no outline. The empty outline exists only
+        // inside `play()`'s animations.
+        dotLayer.lineWidth = M.dotRimWidth
+        dotLayer.strokeColor = nil
+
         let layer = layersView.layer!
         layer.masksToBounds = false
-        for sublayer in [glowLayer, ringLayer, highlighterContainer, dotLayer] { layer.addSublayer(sublayer) }
+        for sublayer in [trackLayer, ringLayer, highlighterContainer, dotGlowLayer, shockwaveLayer, dotLayer] {
+            layer.addSublayer(sublayer)
+        }
         restampColors()
     }
 
@@ -970,19 +1010,16 @@ final class SurveyThanksMarkView: NSView {
         let bounds = layersView.bounds
         let center = CGPoint(x: bounds.midX, y: bounds.midY)
         let radius = M.ringDiameter / 2
-        let glowExtent = NSSize(width: M.glowSize.width + 2 * M.glowBlur, height: M.glowSize.height + 2 * M.glowBlur)
-        glowLayer.frame = CGRect(x: center.x - glowExtent.width / 2, y: center.y - glowExtent.height / 2,
-                                 width: glowExtent.width, height: glowExtent.height)
         // `layersView` is unflipped, so its layers are y-up and `clockwise:
         // true` runs with decreasing angle: clockwise on screen.
         let path = CGMutablePath()
         path.addArc(center: center, radius: radius, startAngle: Self.startAngle,
                     endAngle: Self.startAngle - Self.sweep, clockwise: true)
-        ringLayer.frame = bounds
-        ringLayer.path = path
+        for ring in [trackLayer, ringLayer, highlighterMask] {
+            ring.frame = bounds
+            ring.path = path
+        }
         highlighterContainer.frame = bounds
-        highlighterMask.frame = bounds
-        highlighterMask.path = path
         let side = M.ringDiameter + 2 * M.ringLineWidth
         highlighterGradient.bounds = CGRect(x: 0, y: 0, width: side, height: side)
         highlighterGradient.position = center
@@ -991,6 +1028,16 @@ final class SurveyThanksMarkView: NSView {
         dotLayer.bounds = CGRect(x: 0, y: 0, width: M.dotDiameter, height: M.dotDiameter)
         dotLayer.position = dotCenter
         dotLayer.path = CGPath(ellipseIn: dotLayer.bounds, transform: nil)
+        dotGlowLayer.bounds = CGRect(x: 0, y: 0, width: M.dotGlowDiameter, height: M.dotGlowDiameter)
+        dotGlowLayer.position = dotCenter
+        func circle(_ diameter: CGFloat) -> CGPath {
+            CGPath(ellipseIn: CGRect(x: dotCenter.x - diameter / 2, y: dotCenter.y - diameter / 2,
+                                     width: diameter, height: diameter), transform: nil)
+        }
+        shockwaveStartPath = circle(M.dotDiameter)
+        shockwaveEndPath = circle(M.dotDiameter * M.shockwaveEndScale)
+        shockwaveLayer.frame = bounds
+        shockwaveLayer.path = shockwaveStartPath
         CATransaction.commit()
     }
 
@@ -1002,10 +1049,12 @@ final class SurveyThanksMarkView: NSView {
     func restampColors() {
         effectiveAppearance.performAsCurrentDrawingAppearance {
             let glow = Tokens.Color.glow
-            glowLayer.colors = [glow.cgColor, glow.cgColor, glow.withAlphaComponent(0.5).cgColor,
-                                glow.withAlphaComponent(0).cgColor]
-            ringLayer.strokeColor = Tokens.Color.rim.cgColor
-            highlighterGradient.colors = [glow.cgColor, Tokens.Color.rim.cgColor, Tokens.Color.rim.cgColor, glow.cgColor]
+            let rim = Tokens.Color.rim.cgColor
+            trackLayer.strokeColor = rim
+            ringLayer.strokeColor = rim
+            highlighterGradient.colors = [glow.cgColor, rim, rim, glow.cgColor]
+            dotGlowLayer.colors = [glow.cgColor, glow.withAlphaComponent(0).cgColor]
+            shockwaveLayer.strokeColor = Tokens.Color.gold.cgColor
             dotLayer.fillColor = Tokens.Color.gold.cgColor
         }
         glyph.contentTintColor = Tokens.Color.label
@@ -1017,21 +1066,44 @@ final class SurveyThanksMarkView: NSView {
         guard !HeadlessRuntime.isActive, let host = layersView.layer else { return }
         layoutSubtreeIfNeeded()
         let now = host.convertTime(CACurrentMediaTime(), from: nil)
+        let clear = NSColor.clear.cgColor
+        var ember = clear
+        var rim = clear
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            ember = Tokens.Color.ember.cgColor
+            rim = Tokens.Color.rim.cgColor
+        }
+        // The `RouteArmedDotView` bloom, under Reduce Motion too: colour only.
+        func bloom(at begin: CFTimeInterval) {
+            let fill = CABasicAnimation(keyPath: "fillColor")
+            fill.fromValue = ember
+            fill.beginTime = begin
+            fill.duration = PopoverColumnGrid.routeArmedBloomDuration
+            fill.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            dotLayer.add(fill, forKey: "dotBloom")
+        }
+
         if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
-            let fade = CABasicAnimation(keyPath: "opacity")
-            fade.fromValue = 0
-            fade.toValue = 1
-            fade.duration = M.reduceMotionFadeDuration
-            fade.timingFunction = CAMediaTimingFunction(name: .easeOut)
-            host.add(fade, forKey: "markFade")
+            bloom(at: now)
+            let glowIn = CABasicAnimation(keyPath: "opacity")
+            glowIn.fromValue = 0
+            glowIn.toValue = M.dotGlowOpacity
+            glowIn.duration = M.reduceMotionGlowDuration
+            glowIn.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            dotGlowLayer.add(glowIn, forKey: "dotGlowIn")
             return
         }
+
+        let drawBegin = now + M.ringDrawBegin
+        let contact = now + M.contactTime
 
         let draw = CABasicAnimation(keyPath: "strokeEnd")
         draw.fromValue = 0
         draw.toValue = 1
+        draw.beginTime = drawBegin
         draw.duration = M.ringDrawDuration
         draw.timingFunction = M.ringDrawCurve
+        draw.fillMode = .backwards
         ringLayer.add(draw, forKey: "ringDraw")
 
         // The lit stretch rides the tip: the mask's end follows the ring's,
@@ -1046,42 +1118,80 @@ final class SurveyThanksMarkView: NSView {
         maskStart.toValue = 1 - trail
         let maskGroup = CAAnimationGroup()
         maskGroup.animations = [maskEnd, maskStart]
+        maskGroup.beginTime = drawBegin
         maskGroup.duration = M.ringDrawDuration
         maskGroup.timingFunction = M.ringDrawCurve
+        maskGroup.fillMode = .backwards
         highlighterMask.add(maskGroup, forKey: "highlighterTrack")
         let turn = CABasicAnimation(keyPath: "transform.rotation.z")
         turn.fromValue = Self.startAngle
         turn.toValue = Self.startAngle - Self.sweep
+        turn.beginTime = drawBegin
         turn.duration = M.ringDrawDuration
         turn.timingFunction = M.ringDrawCurve
+        turn.fillMode = .backwards
         highlighterGradient.add(turn, forKey: "highlighterTurn")
-        let lit = CABasicAnimation(keyPath: "opacity")
-        lit.fromValue = 1
-        lit.toValue = 0
-        lit.beginTime = now + M.highlighterFadeBegin
-        lit.duration = M.highlighterFadeDuration
-        lit.fillMode = .backwards
-        highlighterContainer.add(lit, forKey: "highlighterFade")
+        // Lit from the draw's start until contact, then out.
+        let litTotal = M.contactTime + M.highlighterFadeDuration
+        let lit = CAKeyframeAnimation(keyPath: "opacity")
+        lit.values = [0, 1, 1, 0]
+        lit.keyTimes = [0, M.ringDrawBegin / litTotal, M.contactTime / litTotal, 1].map { NSNumber(value: $0) }
+        lit.duration = litTotal
+        lit.beginTime = now
+        highlighterContainer.add(lit, forKey: "highlighterLit")
 
-        let pop = CASpringAnimation(keyPath: "transform.scale")
-        pop.stiffness = M.dotStiffness
-        pop.damping = M.dotDamping
-        pop.mass = M.dotMass
-        pop.initialVelocity = M.dotInitialVelocity
-        pop.fromValue = 0
-        pop.toValue = 1
-        pop.beginTime = now + M.dotPopBegin
-        pop.duration = pop.settlingDuration
-        pop.fillMode = .backwards
-        dotLayer.add(pop, forKey: "dotPop")
+        // Empty until contact: a clear fill and a `rim` outline, which fades
+        // as the fill blooms. The bloom has no backwards fill, so the clear
+        // hold shows before it.
+        let hollow = CABasicAnimation(keyPath: "fillColor")
+        hollow.fromValue = clear
+        hollow.toValue = clear
+        hollow.beginTime = now
+        hollow.duration = M.contactTime
+        dotLayer.add(hollow, forKey: "dotHollow")
+        bloom(at: contact)
+        let rimTotal = M.contactTime + M.dotRimFadeDuration
+        let rimFade = CAKeyframeAnimation(keyPath: "strokeColor")
+        rimFade.values = [rim, rim, clear]
+        rimFade.keyTimes = [0, NSNumber(value: M.contactTime / rimTotal), 1]
+        rimFade.duration = rimTotal
+        rimFade.beginTime = now
+        dotLayer.add(rimFade, forKey: "dotRimFade")
 
-        let glowIn = CABasicAnimation(keyPath: "opacity")
-        glowIn.fromValue = 0
-        glowIn.toValue = M.glowOpacity
-        glowIn.beginTime = now + M.glowBegin
-        glowIn.duration = M.glowDuration
-        glowIn.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        let snapTotal = M.dotSnapRiseDuration + M.dotSnapDipDuration + M.dotSnapSettleDuration
+        let snap = CAKeyframeAnimation(keyPath: "transform.scale")
+        snap.values = [1, M.dotSnapPeakScale, M.dotSnapDipScale, 1]
+        snap.keyTimes = [0, M.dotSnapRiseDuration / snapTotal,
+                         (M.dotSnapRiseDuration + M.dotSnapDipDuration) / snapTotal, 1].map { NSNumber(value: $0) }
+        snap.timingFunctions = [CAMediaTimingFunction(name: .easeOut),
+                                CAMediaTimingFunction(name: .easeInEaseOut),
+                                CAMediaTimingFunction(name: .easeInEaseOut)]
+        snap.beginTime = contact
+        snap.duration = snapTotal
+        dotLayer.add(snap, forKey: "dotSnap")
+
+        // The model opacity is 0 and there is no backwards fill, so the
+        // shockwave is unseen until contact.
+        let spread = CABasicAnimation(keyPath: "path")
+        spread.fromValue = shockwaveStartPath
+        spread.toValue = shockwaveEndPath
+        let fadeOut = CABasicAnimation(keyPath: "opacity")
+        fadeOut.fromValue = M.shockwaveOpacity
+        fadeOut.toValue = 0
+        let shockwave = CAAnimationGroup()
+        shockwave.animations = [spread, fadeOut]
+        shockwave.beginTime = contact
+        shockwave.duration = M.shockwaveDuration
+        shockwave.timingFunction = M.shockwaveCurve
+        shockwaveLayer.add(shockwave, forKey: "shockwave")
+
+        let glowIn = CAKeyframeAnimation(keyPath: "opacity")
+        glowIn.values = [0, M.dotGlowPeakOpacity, M.dotGlowOpacity]
+        glowIn.keyTimes = [0, NSNumber(value: M.dotGlowPeakDelay / M.dotGlowDuration), 1]
+        glowIn.timingFunctions = [CAMediaTimingFunction(name: .easeOut), CAMediaTimingFunction(name: .easeOut)]
+        glowIn.beginTime = contact
+        glowIn.duration = M.dotGlowDuration
         glowIn.fillMode = .backwards
-        glowLayer.add(glowIn, forKey: "glowIn")
+        dotGlowLayer.add(glowIn, forKey: "dotGlowIn")
     }
 }

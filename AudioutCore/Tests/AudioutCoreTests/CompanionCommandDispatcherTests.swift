@@ -64,6 +64,10 @@ import AudioutProtocol
         /// returning — simulates the real ~3-5s teardown/reconnect so tests can
         /// observe the dispatcher's in-flight serialization.
         var holdStartBuffer = false
+        /// How many applyStartBuffer calls have returned. The dispatcher clears
+        /// its in-flight flag on the main actor straight after the call returns,
+        /// so a test that sees this count has also seen the flag clear.
+        var finishedStartBufferApplies = 0
     }
 
     private struct Context {
@@ -103,8 +107,9 @@ import AudioutProtocol
             applyStartBuffer: { ms in
                 spy.appliedStartBufferMs.append(ms)
                 while spy.holdStartBuffer {
-                    try? await Task.sleep(nanoseconds: 5_000_000)
+                    await Task.yield()
                 }
+                spy.finishedStartBufferApplies += 1
             },
             alignmentActions: alignmentActions,
             speakerLibrary: speakerLibrary
@@ -114,31 +119,16 @@ import AudioutProtocol
     }
 
     private func waitForFleet(_ backend: MockBackend, count: Int) async throws {
-        let stream = backend.makeEventStream()
-        let box = DispatcherTestCountBox()
-        try await confirmation("fleet discovered") { discovered in
-            let task = Task {
-                for await event in stream {
-                    if case .deviceAdded = event, await box.increment() >= count {
-                        discovered(); break
-                    }
-                }
-            }
-            defer { task.cancel() }
-            backend.start()
-            try await withThrowingTaskGroup(of: Void.self) { group in
-                group.addTask { _ = await task.value }
-                group.addTask { try await Task.sleep(for: .seconds(2)) }
-                try await group.next()
-                group.cancelAll()
-            }
-        }
+        backend.start()
+        await SuiteWait.until("the fleet to be discovered") { backend.devices.count >= count }
     }
 
-    /// Let a fire-and-forget `Task` (the `setStartBufferMs` apply path) run
-    /// before asserting on its side effect.
-    private func settle() async throws {
-        try await Task.sleep(nanoseconds: 100_000_000)
+    /// Wait until `count` fire-and-forget `setStartBufferMs` apply Tasks have
+    /// returned, before asserting on their side effect.
+    private func waitForFinishedApplies(_ ctx: Context, count: Int) async {
+        await SuiteWait.until("\(count) start-buffer applies to finish") {
+            ctx.spy.finishedStartBufferApplies >= count
+        }
     }
 
     // MARK: setDeviceSelected — round-trips SelectionResult, incl. auto-swap
@@ -599,7 +589,7 @@ import AudioutProtocol
         let ms = AppSettings.startBufferOptionsMs[1]
         let result = ctx.dispatcher.execute(.setStartBufferMs(ms: ms))
         #expect(result.applied)
-        try await settle()
+        await waitForFinishedApplies(ctx, count: 1)
         #expect(ctx.spy.appliedStartBufferMs == [ms])
     }
 
@@ -608,8 +598,12 @@ import AudioutProtocol
         let result = ctx.dispatcher.execute(.setStartBufferMs(ms: 42))
         #expect(!result.applied)
         #expect(result.refusalReason != nil)
-        try await settle()
-        #expect(ctx.spy.appliedStartBufferMs.isEmpty, "never fired for a rejected value")
+        // A valid apply queued after the rejected one: once it has run, any
+        // apply the rejected value had queued would have run before it.
+        let later = AppSettings.startBufferOptionsMs[1]
+        #expect(ctx.dispatcher.execute(.setStartBufferMs(ms: later)).applied)
+        await waitForFinishedApplies(ctx, count: 1)
+        #expect(ctx.spy.appliedStartBufferMs == [later], "never fired for a rejected value")
     }
 
     // MARK: createGroup — trust-boundary validation (findings 1, 6, 7)
@@ -821,8 +815,12 @@ import AudioutProtocol
         ctx.settings.startBufferMs = AppSettings.startBufferOptionsMs[2]
         let result = ctx.dispatcher.execute(.setStartBufferMs(ms: AppSettings.startBufferOptionsMs[2]))
         #expect(result.applied)
-        try await settle()
-        #expect(ctx.spy.appliedStartBufferMs.isEmpty, "no ~3-5s stream teardown for a value already in effect")
+        // A different value queued after the no-op: once its apply has run, any
+        // apply the no-op had queued would have run before it.
+        let later = AppSettings.startBufferOptionsMs[1]
+        #expect(ctx.dispatcher.execute(.setStartBufferMs(ms: later)).applied)
+        await waitForFinishedApplies(ctx, count: 1)
+        #expect(ctx.spy.appliedStartBufferMs == [later], "no ~3-5s stream teardown for a value already in effect")
     }
 
     @Test func setStartBufferMsRefusesWhileApplyInFlight() async throws {
@@ -834,11 +832,11 @@ import AudioutProtocol
         #expect(!second.applied, "overlapping applies would keep audio dead for the whole flood")
         #expect(second.refusalReason != nil)
         ctx.spy.holdStartBuffer = false
-        try await settle()
+        await waitForFinishedApplies(ctx, count: 1)
         #expect(ctx.spy.appliedStartBufferMs == [AppSettings.startBufferOptionsMs[1]], "the refused value never fired")
         let third = ctx.dispatcher.execute(.setStartBufferMs(ms: AppSettings.startBufferOptionsMs[2]))
         #expect(third.applied, "a fresh apply is allowed once the previous one finished")
-        try await settle()
+        await waitForFinishedApplies(ctx, count: 2)
         #expect(ctx.spy.appliedStartBufferMs == [AppSettings.startBufferOptionsMs[1], AppSettings.startBufferOptionsMs[2]])
     }
 
@@ -920,13 +918,5 @@ import AudioutProtocol
         #expect(ctx.groupController.groups.count == groupsBefore)
         #expect(ctx.appRouting.appRoutes.count == appRoutesBefore)
         #expect(ctx.groupController.selectedDeviceIDs == selectedBefore)
-    }
-}
-
-private actor DispatcherTestCountBox {
-    private var count = 0
-    func increment() -> Int {
-        count += 1
-        return count
     }
 }

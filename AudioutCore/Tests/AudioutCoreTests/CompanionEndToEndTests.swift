@@ -186,25 +186,8 @@ import AudioutProtocol
     }
 
     private func waitForFleet(_ backend: MockBackend, count: Int) async throws {
-        let stream = backend.makeEventStream()
-        let box = E2ECountBox()
-        try await confirmation("fleet discovered") { discovered in
-            let task = Task {
-                for await event in stream {
-                    if case .deviceAdded = event, await box.increment() >= count {
-                        discovered(); break
-                    }
-                }
-            }
-            defer { task.cancel() }
-            backend.start()
-            try await withThrowingTaskGroup(of: Void.self) { group in
-                group.addTask { _ = await task.value }
-                group.addTask { try await Task.sleep(for: .seconds(2)) }
-                try await group.next()
-                group.cancelAll()
-            }
-        }
+        backend.start()
+        await SuiteWait.until("the fleet to be discovered") { backend.devices.count >= count }
     }
 
     // MARK: - Concurrency-safe test plumbing (copied from CompanionServerTests)
@@ -563,13 +546,5 @@ import AudioutProtocol
             #expect(await waitUntil { log.containsState { $0.mainOut.kind == "selected" } },
                     "client \(name) never saw Main Out fall back after its target group was deleted")
         }
-    }
-}
-
-private actor E2ECountBox {
-    private var count = 0
-    func increment() -> Int {
-        count += 1
-        return count
     }
 }

@@ -1164,16 +1164,24 @@ past that) where Return starts a new line and ⌘Return sends, with the hint
 fading in over 200 ms.
 
 The thank-you step is a 160×100 pt mark, 36 pt below the progress line, over
-"Thanks." and one line, 14 pt apart, then **Done**. The mark is a 30 pt
-`hifispeaker` glyph inside a 72 pt `rim` ring (3.8 pt stroke) open across the
-halo ring's 70° gap, a 19 pt `gold` dot in the gap, and a `glow` ellipse
-(150×96 pt, softened 36 pt) behind it at 0.22. Over 420 ms the ring draws in
-one clockwise sweep from the gap's lower edge to the dot on an ease-out curve
-(0.33, 1, 0.68, 1), its trailing 45° lit from grey toward `glow` like a
-highlighter; the lit stretch fades from 300 ms to 420 ms; at 420 ms the dot
-springs from 0 to full size (stiffness 400, damping 21, peaking near 1.15);
-from 600 ms to 840 ms the glow fades up. Under Reduce Motion the ring, dot
-and glow fade in together over 200 ms with no sweep.
+"Thanks." and one line, 14 pt apart, then **Done**. The mark replays the
+Mixer's connect moment. A 30 pt `hifispeaker` glyph sits inside a 72 pt ring
+(3.8 pt stroke) open across the halo ring's 70° gap. When the step appears
+the ring is a faint track (`rim` at 0.28) and the 19 pt dot in the gap is
+empty, a 1.5 pt `rim` outline. After an 80 ms hold, the ring fills in `rim`
+over 500 ms in one clockwise sweep from the gap's lower edge to the dot,
+starting gently and speeding up all the way into the dot (0.6, 0, 0.92,
+0.55), its leading 45° lit from grey toward `glow` like a highlighter and
+fully lit until the tip arrives. At contact (580 ms) the lit stretch fades
+over 100 ms; the dot fills with the Mixer's `ember → gold` bloom compressed
+to 180 ms (ease-out) as its outline fades over 60 ms; it snaps to 1.36× in
+50 ms, dips to 0.97× over 70 ms and settles over 80 ms; and one 1.5 pt
+`gold` ring leaves it, widening to 2.6× the dot and fading from 0.55 over
+340 ms (0.16, 1, 0.3, 1). A 56 pt radial `glow` centred on the dot rises to
+0.9 by 640 ms and eases down to 0.55 by 900 ms, where it stays: the finished
+mark is a gold dot with a soft halo. Nothing else moves. Under Reduce Motion
+the ring and dot are drawn finished at once; only colour moves, the dot's
+`ember → gold` bloom and its glow fading up to 0.55 over 300 ms.
 
 **Inset cards under a device row**: the first-join alignment note (a `well`
 card with a `containerEdge` edge; one wrapping sentence in `detail` /

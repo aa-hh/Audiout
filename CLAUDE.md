@@ -93,7 +93,9 @@ automatically), and TCC then stores a signature-based requirement that
   `com.audiout.Audiout.staging` id, pointed at `license-staging.audiout.app`,
   approved once and silent after. It is a different daemon identity from the
   dev id, so it needs no live-test slot and cannot clobber a dev build someone
-  else is testing.
+  else is testing. A dev build can also be pointed at staging or production at
+  run time from Settings › General › Developer › "Licence server" (dev ids
+  only; a plain dev build starts with no server).
 
 Reusing one dev id also dodges a second wall: since 2026-08-28 macOS refuses
 `SMAppService` daemon registration for every NEW bundle id until someone

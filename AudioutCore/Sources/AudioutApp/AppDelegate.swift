@@ -112,6 +112,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         config.getAnonymousId = { UUID(uuidString: installID) ?? $0 }
         PostHogSDK.shared.setup(config)
         analyticsAvailable = true
+        postHogProjectToken = projectToken
+        postHogHost = host
         // GeoIP is enrichment PostHog does SERVER-side from the request IP, so
         // it lands on every event unless each one opts out — which put a city,
         // a postal code and a lat/long on every feature count. Registering the
@@ -165,7 +167,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // the Setup card would never contribute one.
                 Self.captureCoarseLocationOnce()
             },
-            captureAt: { PostHogSDK.shared.capture($0, properties: $1, timestamp: $2) }
+            captureAt: { PostHogSDK.shared.capture($0, properties: $1, timestamp: $2) },
+            captureStructured: { PostHogSDK.shared.capture($0, properties: $1.mapValues { $0 as Any }) }
         ), consent: settings.telemetryEnabled)
         if settings.telemetryEnabled { Self.captureCoarseLocationOnce() }
     }
@@ -178,10 +181,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// The one event per launch that carries coarse location. It overrides the
     /// registered opt-out for itself only; every other event stays clean.
     ///
-    /// Called directly rather than through ``Analytics`` because the facade
-    /// carries `[String: String]` and this property has to reach PostHog as a
-    /// real `false` — and because `AppDelegate` is the one place allowed to
-    /// touch `PostHogSDK`. The SDK's own opt-out still gates it, so a build
+    /// Called directly rather than through ``Analytics`` because the
+    /// `$geoip_disable` override has to reach the SDK on this one event — and
+    /// because `AppDelegate` is the one place allowed to touch `PostHogSDK`. The SDK's own opt-out still gates it, so a build
     /// without consent sends nothing.
     private nonisolated static func captureCoarseLocationOnce() {
         PostHogSDK.shared.capture("app:launched", properties: [geoipDisableKey: false])
@@ -192,6 +194,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// `applicationShouldTerminate`) so they no-op when analytics never came
     /// up (headless runtime, or missing env config).
     private var analyticsAvailable = false
+    /// The PostHog project token and host `configurePostHog()` set up with;
+    /// the expired-trial survey is fetched with the same pair.
+    private var postHogProjectToken = ""
+    private var postHogHost = ""
+
+    /// The expired-trial survey's definition, once fetched; the popover's
+    /// invite reads it.
+    private var activeTrialSurvey: ExpiredTrialSurvey?
+    /// Set while a fetch runs or after one succeeded; a failed fetch clears
+    /// it so the next daily-active or licence pass tries again.
+    private var trialSurveyFetchStarted = false
+
+    /// Fetch the survey once this install is owed it.
+    private func refreshExpiredTrialSurvey() {
+        guard analyticsAvailable, !trialSurveyFetchStarted,
+              ExpiredTrialSurvey.isOwed(settings: settings, consent: settings.telemetryEnabled) else { return }
+        trialSurveyFetchStarted = true
+        ExpiredTrialSurvey.fetch(host: postHogHost, token: postHogProjectToken,
+                                 surveyID: ExpiredTrialSurvey.surveyID) { survey in
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.activeTrialSurvey = survey
+                if survey == nil { self.trialSurveyFetchStarted = false }
+            }
+        }
+    }
 
     /// Owns the status item's `.button` (SPEC §9 / brief §4 — customize ONLY
     /// via `.button`, never the deprecated `.view`/`.title`/`.image`).
@@ -1219,6 +1247,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         popoverController.onThankYouShown = { [settings] in
             settings.licenseThankYouShown = true
+        }
+        popoverController.surveyInviteProvider = { [weak self] in
+            guard let self, ExpiredTrialSurvey.isOwed(settings: settings, consent: settings.telemetryEnabled) else { return nil }
+            return activeTrialSurvey
+        }
+        popoverController.onSurveyInviteSpent = { [settings] in
+            settings.expiredTrialSurveyDone = true
+        }
+        popoverController.onSurveyInviteUnanswered = { [settings] in
+            ExpiredTrialSurvey.recordUnansweredLook(settings: settings)
         }
         // The trial's own two rungs of the same note slot, above the
         // one-speaker note `applyLicenseState()` drives: a Mac mid-trial is
@@ -2780,6 +2818,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // time — `setConsent` ignores an unchanged value.
             Analytics.setConsent(settings.telemetryEnabled)
         }
+        refreshExpiredTrialSurvey()
     }
 
     /// The one-time ask a trial user gets right after their paid key is
@@ -3224,6 +3263,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                           lastDay: settings.telemetryDailyActiveDay) {
             settings.telemetryDailyActiveDay = due.day
             Analytics.capture("streaming:daily_active", ["speaker_count": String(due.speakerCount)])
+            if ExpiredTrialSurvey.countStreamingDay(settings: settings) {
+                refreshExpiredTrialSurvey()
+            }
         }
         // Keep the Scenes and Speakers screens in lockstep with the same
         // snapshot. Nil until either tab has been visited, and its own hidden-means-idle gate drops

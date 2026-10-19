@@ -165,6 +165,9 @@ public struct AppSettings {
         static let telemetryAsked = "telemetry.asked"
         static let telemetryConversionAskShown = "telemetry.conversionAskShown"
         static let licenseThankYouShown = "license.thankYouShown"
+        static let trialEndedStreamingDays = "survey.trialEndedStreamingDays"
+        static let expiredTrialSurveyDone = "survey.expiredTrialDone"
+        static let expiredTrialUnansweredLooks = "survey.expiredTrialUnansweredLooks"
         static let telemetryDailyActiveDay = "telemetry.dailyActiveDay"
         static let touchBarControls = "general.touchBarControls"
         static let mixerMembershipHintDismissed = "mixer.membershipHintDismissed"
@@ -976,6 +979,28 @@ public struct AppSettings {
     public var licenseThankYouShown: Bool {
         get { defaults.bool(forKey: Keys.licenseThankYouShown) }
         nonmutating set { defaults.set(newValue, forKey: Keys.licenseThankYouShown) }
+    }
+
+    /// The distinct local days audio reached a speaker after the trial ended.
+    /// Defaults to 0.
+    public var trialEndedStreamingDays: Int {
+        get { defaults.integer(forKey: Keys.trialEndedStreamingDays) }
+        nonmutating set { defaults.set(newValue, forKey: Keys.trialEndedStreamingDays) }
+    }
+
+    /// How many times the popover closed with the expired-trial survey invite
+    /// up and neither button clicked. Defaults to 0.
+    public var expiredTrialUnansweredLooks: Int {
+        get { defaults.integer(forKey: Keys.expiredTrialUnansweredLooks) }
+        nonmutating set { defaults.set(newValue, forKey: Keys.expiredTrialUnansweredLooks) }
+    }
+
+    /// Whether the expired-trial survey invite was answered, declined, or
+    /// closed unanswered on its last allowed open; never shown again.
+    /// Defaults to `false`.
+    public var expiredTrialSurveyDone: Bool {
+        get { defaults.bool(forKey: Keys.expiredTrialSurveyDone) }
+        nonmutating set { defaults.set(newValue, forKey: Keys.expiredTrialSurveyDone) }
     }
 
     /// The local-calendar day (`yyyy-MM-dd`) the `streaming:daily_active` event

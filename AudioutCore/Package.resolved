@@ -6,8 +6,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/aa-hh/audiout-shared.git",
       "state" : {
-        "revision" : "b9006cea66b3cc85e7fcfb297e4a71fa4922e4c4",
-        "version" : "0.27.0"
+        "revision" : "56e27ec528ca86d59bc905572103a222d53fa1bc",
+        "version" : "0.28.0"
       }
     },
     {

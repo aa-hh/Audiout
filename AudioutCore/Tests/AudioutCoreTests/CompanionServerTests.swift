@@ -1244,11 +1244,21 @@ import AudioutProtocol
 
         server.dropClient(clientID: CompanionPairing.clientID(forPublicKey: revokedKey.publicKey.rawRepresentation))
 
+        // Turns red if dropClient goes back to a bare cancel: the phone then never hears "removed" and redials forever.
+        #expect(await waitUntil { revokedLog.contains(.goodbye(reason: "removed")) },
+                "the removed phone was never told it was removed")
+        #expect(!keptLog.contains(.goodbye(reason: "removed")))
         #expect(await waitUntil { revokedLog.closed }, "revoking never dropped the live client")
         #expect(await waitUntil { !disconnected.value.isEmpty },
                 "the revoked drop must fire the normal disconnect signal (orphaned-drag cleanup)")
         #expect(!keptLog.closed, "an unrelated client must survive another phone's revocation")
         #expect(await waitUntil { server.test_clientNames() == ["kept"] })
+
+        // Turns red if stop re-greets a client dropClient already said goodbye to.
+        let goodbyesBefore = revokedLog.messages.count
+        server.stop(reason: CompanionGoodbyeReason.disabled)
+        #expect(await waitUntil { keptLog.contains(.goodbye(reason: CompanionGoodbyeReason.disabled)) })
+        #expect(revokedLog.messages.count == goodbyesBefore, "stop sent a second goodbye to the removed client")
     }
 
     // MARK: - App icon pages

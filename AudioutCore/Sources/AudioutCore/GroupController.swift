@@ -13,9 +13,12 @@ import Foundation
 ///    `Main × Group × Device`, multiplied at the backend's write boundary
 ///    (``OutputBackend/setMasterGain(mainOut:group:mirrorToSystemVolume:)``);
 ///    moving Main rewrites nobody's stored level.
-/// 3. **Mute** — volume-based (Q4): mute stores the pre-mute volume and drops
-///    to 0; unmute restores the stashed level. (Solo was removed 2026-07-13 —
-///    confusing jargon for a consumer app; mute is the only per-device silence.)
+/// 3. **Mute** — for every member except the Mac, volume-based: mute stores the
+///    pre-mute volume and drops to 0; unmute restores the stashed level. The
+///    Mac's mute is the system hardware mute, written through
+///    ``OutputBackend/setMuted(_:for:)`` and read back from `Device.isMuted` on
+///    each ``updateDevices(_:)`` push. (Solo was removed 2026-07-13 — confusing
+///    jargon for a consumer app; mute is the only per-device silence.)
 ///
 /// All mutation methods call through to the injected ``OutputBackend`` (real
 /// or mock) via `setVolume`/`setOutputSet`; `GroupController` never invents a
@@ -35,8 +38,9 @@ public final class GroupController {
     // MARK: Mute semantics
     //
     // A member is *effectively silent* when `explicitMute[id] == true`.
-    // Effective silence is realized as volume 0 on the backend; the volume from
-    // just before muting is stashed and restored on unmute. Concretely:
+    // For every member except the Mac, effective silence is realized as volume 0
+    // on the backend; the volume from just before muting is stashed and restored
+    // on unmute. Concretely:
     //
     // - `setMuted(true, id)` sets `explicitMute[id] = true`, stashes the current
     //   volume, and zeroes it on the backend.
@@ -45,6 +49,11 @@ public final class GroupController {
     //
     // The stash is written only on the silence *edge* (a false→true transition),
     // so re-muting an already-muted member doesn't overwrite the original level.
+    //
+    // The Mac is the exception: its mute is the system hardware mute, written
+    // through `backend.setMuted` with no volume stash, and read back from
+    // `Device.isMuted` on each `updateDevices` push, which overwrites the intent
+    // held here. It survives `clearMuteBookkeeping`.
     // (Solo was removed 2026-07-13 — see the type doc.)
 
     private struct MemberState {
@@ -67,7 +76,8 @@ public final class GroupController {
 
     /// Keyed by device id. Cleared WHOLESALE on group-activation transitions
     /// (`syncActiveGroupToSelection()`, `activateGroup(id:)`,
-    /// `deactivateGroup()` — search `memberState.removeAll()`), never pruned
+    /// `deactivateGroup()` — all through `clearMuteBookkeeping()`, which
+    /// restores each muted member's volume first), never pruned
     /// per-device. Growth is bounded (one entry per distinct real device id
     /// this controller has ever muted, not unbounded), but a device that's
     /// muted once and then permanently leaves the fleet keeps its entry
@@ -211,6 +221,17 @@ public final class GroupController {
     /// deliberate selection that was later cleared to empty.
     private var loadedPersistedRouting = false
 
+    /// How long a restored Bluetooth id may wait to appear in the device snapshot
+    /// before it is dropped from the selection. Bounded so a speaker that is off
+    /// or out of range leaves the selection instead of lingering in it; 30 s
+    /// covers a slow Bluetooth enumeration after the permission grant lands.
+    public var bluetoothRestoreWindow: TimeInterval = 30
+
+    /// Restored Bluetooth ids not yet in the device snapshot, and when they stop
+    /// waiting. See ``settleBluetoothRestore()``.
+    private var pendingBluetoothRestoreIDs: Set<String> = []
+    private var bluetoothRestoreDeadline: Date?
+
     /// Establish the out-of-the-box default once the fleet is known (SPEC §9b):
     /// **Current Device toggled ON**, Main Out = Selected Devices ⇒ passthrough.
     /// No-op once established or if a selection already exists. The app calls
@@ -224,7 +245,12 @@ public final class GroupController {
     /// volume, so the gain is pushed with `mirrorToSystemVolume: false` and no
     /// hardware write happens at launch. (`init` deliberately reads nothing back;
     /// see the decision note there.)
+    ///
+    /// A restored Bluetooth id that is not yet discovered waits up to
+    /// ``bluetoothRestoreWindow`` to appear, is applied and connected when it
+    /// does, and is dropped from the selection if it never does.
     public func ensureDefaultSelection() {
+        settleBluetoothRestore()
         guard !loadedPersistedRouting, selectedDeviceIDs.isEmpty else { return }
         guard let local = devices.first(where: \.isLocalDevice) else { return }
         // Opt-in resume (Settings › General "Reconnect last speakers when
@@ -237,6 +263,19 @@ public final class GroupController {
            let stored = try? routingStore.load(),
            !stored.selectedDeviceIDs.isEmpty {
             selectedDeviceIDs = Set(stored.selectedDeviceIDs)
+            // A Bluetooth id already listed but unavailable here used to get the
+            // output set and never `retryOutput`, so the reconnect hung on whether
+            // the enumeration landed before or after this first call
+            // (`reconnectAtLaunchRetriesBluetoothIdListedButUnavailable`).
+            pendingBluetoothRestoreIDs = selectedDeviceIDs.filter {
+                device($0)?.isAvailable != true && BTDeviceEnumerator.derivedUID(fromAddress: $0) == $0
+            }
+            if pendingBluetoothRestoreIDs.contains(where: { device($0) == nil }) {
+                bluetoothRestoreDeadline = Date().addingTimeInterval(bluetoothRestoreWindow)
+                DispatchQueue.main.asyncAfter(deadline: .now() + bluetoothRestoreWindow) { [weak self] in
+                    self?.settleBluetoothRestore()
+                }
+            }
             if case .group(let id) = stored.mainOut, !groups.contains(where: { $0.id == id }) {
                 mainOut = .selectedDevices
             } else {
@@ -246,12 +285,67 @@ public final class GroupController {
             selectedDeviceIDs = [local.id]
             mainOut = .selectedDevices
         }
+        if limitsToOneSpeaker {
+            var isGroup = false
+            if case .group = mainOut { isGroup = true }
+            if selectedDeviceIDs.count > 1 || isGroup {
+                if case .group(let id) = mainOut {
+                    pendingLaunchClamp = ("scene", groups.first { $0.id == id }?.memberIDs.count ?? 0)
+                } else {
+                    pendingLaunchClamp = ("speakers", selectedDeviceIDs.count)
+                }
+                selectedDeviceIDs = [local.id]
+                pendingBluetoothRestoreIDs.formIntersection(selectedDeviceIDs)
+                mainOut = .selectedDevices
+            }
+        }
         loadedPersistedRouting = true
         mainOutMasterVolume = (backend.systemOutputVolume ?? settings.mainOutVolume).clampedToVolume
         pushMasterGain(mirrorToSystemVolume: false)
         applyRouting()
+        let listedUnavailable = pendingBluetoothRestoreIDs.filter { device($0) != nil }
+        pendingBluetoothRestoreIDs.subtract(listedUnavailable)
+        for id in listedUnavailable.sorted() { backend.retryOutput(id) }
         persistRouting()
         onStateDidChange?()
+    }
+
+    /// Finish the launch restore for Bluetooth ids that were not yet discovered.
+    ///
+    /// Only Bluetooth ids wait: a paired speaker loses its link when the app
+    /// quits, reaches the snapshot only after the Bluetooth enumeration lands
+    /// (after the first update), and the app must open the link itself. AirPlay
+    /// ids stay one-shot on purpose (the 2026-07-17 decision note in `init`).
+    /// An id that appears gets the output set first, so the backend already
+    /// expects it, then `retryOutput`, the same connect a click on a greyed row
+    /// sends; `setOutputSet` alone never opens a Bluetooth link
+    /// (`NativeBackend.retryBTOutput`). An id the user deselected while it
+    /// waited stops waiting and gets no connect.
+    private func settleBluetoothRestore() {
+        guard !pendingBluetoothRestoreIDs.isEmpty else { return }
+        pendingBluetoothRestoreIDs.formIntersection(selectedDeviceIDs)
+        let appeared = pendingBluetoothRestoreIDs.filter { device($0) != nil }
+        pendingBluetoothRestoreIDs.subtract(appeared)
+        if !appeared.isEmpty {
+            applyRouting()
+            for id in appeared.sorted() { backend.retryOutput(id) }
+            onStateDidChange?()
+        }
+        if pendingBluetoothRestoreIDs.isEmpty {
+            bluetoothRestoreDeadline = nil
+        } else if let deadline = bluetoothRestoreDeadline, Date() >= deadline {
+            selectedDeviceIDs.subtract(pendingBluetoothRestoreIDs)
+            // A selection of only never-appearing Bluetooth ids emptied here, breaking the
+            // never-zero-selected floor `setDeviceSelected` keeps, so fall back to the Mac.
+            if selectedDeviceIDs.isEmpty, let local = localDeviceID {
+                selectedDeviceIDs.insert(local)
+            }
+            pendingBluetoothRestoreIDs = []
+            bluetoothRestoreDeadline = nil
+            applyRouting()
+            persistRouting()
+            onStateDidChange?()
+        }
     }
 
     // MARK: Routing persistence
@@ -315,6 +409,10 @@ public final class GroupController {
     /// which on `NativeBackend` is a `sync` the main thread would wait on.
     public func updateDevices(_ devices: [Device]) {
         pushedDevices = devices
+        // The Mac's hardware mute flag overwrites any mute intent held here.
+        if let local = devices.first(where: \.isLocalDevice) {
+            memberState[local.id] = MemberState(explicitMute: local.isMuted, priorVolume: nil)
+        }
     }
 
     /// The current device snapshot. Normally whatever the app layer last pushed
@@ -354,12 +452,53 @@ public final class GroupController {
         }
     }
 
+    /// Set by the host when the install is limited to one Selected Speaker
+    /// (`LicenseGate.limitsToOneSpeaker`). Refuses a second speaker and a group
+    /// target; never trims a live set — the limit lands on the next edit or
+    /// launch.
+    public var limitsToOneSpeaker = false {
+        didSet {
+            let pending = pendingLaunchClamp
+            pendingLaunchClamp = nil
+            if let pending, oldValue, !limitsToOneSpeaker {
+                Analytics.capture("license:launch_clamp_lifted",
+                                  ["clamped": pending.clamped, "speaker_count": String(pending.speakerCount)])
+            }
+        }
+    }
+
+    /// Set by the launch clamp in `ensureDefaultSelection`, consumed by the
+    /// first assignment to `limitsToOneSpeaker` afterwards, so only the licence
+    /// answer of the same launch can report a lift. Never persisted.
+    private var pendingLaunchClamp: (clamped: String, speakerCount: Int)?
+
+    /// The refusal reason `setDeviceSelected` returns under the limit.
+    public static let oneSpeakerLimitReason = "one_speaker_limit"
+
     /// The local (Mac's own) device id in the current fleet, if discovered.
     private var localDeviceID: String? { devices.first(where: \.isLocalDevice)?.id }
 
     /// Whether `id` is in the "Selected Speakers" set. (Membership, NOT "is it
     /// receiving audio" — routing is decided by Main Out.)
     public func isSpeakerSelected(_ id: String) -> Bool { selectedDeviceIDs.contains(id) }
+
+    /// Replace the whole Selected Devices set with `id` in one routing apply —
+    /// "Play here". A deselect-then-select would apply twice and leave
+    /// This Mac briefly live between them. Always a one-member result, so it
+    /// holds under `limitsToOneSpeaker`. No-op (`.ok`) if unknown.
+    /// Main Out moves to Selected Speakers too: under a scene target the click
+    /// would otherwise change nothing audible.
+    @discardableResult
+    public func switchSelection(to id: String) -> SelectionResult {
+        guard device(id) != nil else { return .ok }
+        selectedDeviceIDs = [id]
+        mainOut = .selectedDevices
+        pushMasterGain(mirrorToSystemVolume: false)
+        applyRouting()
+        persistRouting()
+        onStateDidChange?()
+        return .ok
+    }
 
     /// Add or remove a device from "Selected Speakers" (SPEC §9b). Composes the
     /// persistent set; live-applies the output set when Main Out targets
@@ -408,14 +547,19 @@ public final class GroupController {
             // Auto-swap: an AirPlay device turning ON while the local device is
             // the sole selected member drops the local device. Once the Mac is
             // already mixed with AirPlay, this guard is false and the Mac stays.
+            var next = selectedDeviceIDs
             var autoSwapped = false
             if !d.isLocalDevice, let local = localDeviceID,
                selectedDeviceIDs == [local] {
-                selectedDeviceIDs.remove(local)
+                next.remove(local)
                 autoSwapped = true
             }
+            next.insert(id)
+            if limitsToOneSpeaker, next.count > 1 {
+                return .refused(Self.oneSpeakerLimitReason)
+            }
 
-            selectedDeviceIDs.insert(id)
+            selectedDeviceIDs = next
             persistRouting()
             if mainOut == .selectedDevices { applyRouting() }
             onStateDidChange?()
@@ -482,6 +626,24 @@ public final class GroupController {
         return setDeviceSelected(id, true)
     }
 
+    /// Store the AirPlay password the user typed for `id`, then retry it once
+    /// the backend has written it, on the main thread. A speaker Main Out
+    /// currently names retries through `retryConnection(for:)`; any other
+    /// speaker, selected-but-remembered included, goes through
+    /// `requestReconnect(for:)`, because membership stays
+    /// the checkbox's job and the backend re-binds a per-app-only speaker
+    /// itself. `source` is `"mac"` or `"phone"`, for analytics only.
+    public func submitAirPlayPassword(_ password: String, for id: String, source: String) {
+        backend.submitAirPlayPassword(password, for: id, source: source) { [weak self] in
+            guard let self else { return }
+            if self.isMainOutMember(id) {
+                self.retryConnection(for: id)
+            } else {
+                self.requestReconnect(for: id)
+            }
+        }
+    }
+
     /// A membership-FREE reconnect kick (BT-UI): clicking a greyed
     /// paired-but-disconnected Bluetooth row connects it (the macOS
     /// Bluetooth-menu behavior) WITHOUT selecting it — `retryConnection(for:)`
@@ -536,6 +698,7 @@ public final class GroupController {
     /// possibly louder — product was still in force would get one burst at the
     /// wrong level.
     public func setMainOut(_ target: MainOutTarget) {
+        if limitsToOneSpeaker, case .group = target { return }
         mainOut = target
         pushMasterGain(mirrorToSystemVolume: false)
         applyRouting()
@@ -619,7 +782,7 @@ public final class GroupController {
         guard case .group = mainOut else {
             if activeGroupID != nil {
                 activeGroupID = nil
-                memberState.removeAll()
+                clearMuteBookkeeping()
                 onStateDidChange?()
             }
             return activeGroupID
@@ -629,7 +792,7 @@ public final class GroupController {
             activeGroupID = derived
             // A different (or no) active group invalidates mute bookkeeping
             // tied to the previous group's membership.
-            memberState.removeAll()
+            clearMuteBookkeeping()
             onStateDidChange?()
         }
         return activeGroupID
@@ -648,15 +811,47 @@ public final class GroupController {
     public func saveGroup(_ group: Group) throws -> Group {
         guard !group.memberIDs.isEmpty else { throw GroupError.emptyMembership }
         var updated = groups
+        var previousMembers: Set<String>?
         if let index = updated.firstIndex(where: { $0.id == group.id }) {
+            previousMembers = Set(updated[index].memberIDs)
             updated[index] = group
         } else {
             updated.append(group)
         }
         try store.save(updated)
         groups = updated
+        // Only a membership change re-routes the ACTIVE scene: `setOutputSet` probes permissions and
+        // ends a handoff to macOS even when nothing changed, so a rename must not call it.
+        // `activateGroup` is deliberately not used because it clears mute bookkeeping and replays
+        // remembered volumes.
+        if mainOut == .group(id: group.id), previousMembers != Set(group.memberIDs) {
+            let airplayMembers = routableOutputs(in: group.memberIDs)
+            backend.setOutputSet(airplayMembers)
+            onMainOutMembersChanged?(airplayMembers)
+        }
         onStateDidChange?()
         return group
+    }
+
+    /// Removes every id in `ids` from every group's members and volumes in one write. Throws
+    /// ``GroupError/emptyMembership`` before writing if any group would be left empty. Never touches
+    /// routing or the active group. Returns how many groups changed.
+    @discardableResult
+    public func removeDevices(_ ids: Set<String>) throws -> Int {
+        var changed = 0
+        var updated = groups
+        for index in updated.indices {
+            let before = updated[index].memberIDs.count
+            updated[index].memberIDs.removeAll { ids.contains($0) }
+            for id in ids { updated[index].memberVolumes.removeValue(forKey: id) }
+            if updated[index].memberIDs.isEmpty { throw GroupError.emptyMembership }
+            if updated[index].memberIDs.count != before { changed += 1 }
+        }
+        guard changed > 0 else { return 0 }
+        try store.save(updated)
+        groups = updated
+        onStateDidChange?()
+        return changed
     }
 
     /// Outcome of a create/save-current operation, so the UI can tell "made a new
@@ -760,7 +955,7 @@ public final class GroupController {
     public func activateGroup(id: String) {
         guard let group = groups.first(where: { $0.id == id }) else { return }
         activeGroupID = id
-        memberState.removeAll()
+        clearMuteBookkeeping()
         // Only the group's REAL (AirPlay) members reach the backend output set —
         // the same local-device filter `applyRouting()`'s Selected-Devices branch
         // applies, and the contract `NativeBackend.setOutputSet` documents ("the
@@ -799,7 +994,7 @@ public final class GroupController {
     public func deactivateGroup() {
         guard activeGroupID != nil else { return }
         activeGroupID = nil
-        memberState.removeAll()
+        clearMuteBookkeeping()
         onStateDidChange?()
     }
 
@@ -1016,9 +1211,30 @@ public final class GroupController {
         setMain(volume, writeBackToSystem: false)
     }
 
-    // MARK: Mute (Q4 — volume-based; see "Mute semantics" above)
+    // MARK: Mute (volume-based except the Mac's hardware mute; see "Mute semantics" above)
+
+    /// Clearing the bookkeeping is an unmute, otherwise the member stays at 0 with no mute to lift.
+    /// The Mac's entry is left alone: its mute is the hardware flag and survives target switches.
+    private func clearMuteBookkeeping() {
+        let local = localDeviceID
+        for (id, state) in memberState where state.explicitMute && id != local {
+            var unmuted = state
+            unmuted.explicitMute = false
+            applySilence(for: id, state: &unmuted, wasSilent: true)
+        }
+        memberState = memberState.filter { $0.key == local }
+    }
 
     public func setMuted(_ muted: Bool, for id: String) {
+        if id == localDeviceID {
+            // The Mac's mute is the hardware flag: always forwarded, even when the
+            // intent is unchanged, so a mute made outside the app can be lifted here.
+            let wasSilent = isMuted(id)
+            memberState[id] = MemberState(explicitMute: muted, priorVolume: nil)
+            backend.setMuted(muted, for: id)
+            if muted != wasSilent { onStateDidChange?() }
+            return
+        }
         var state = memberState[id] ?? MemberState()
         let wasSilent = state.explicitMute
         state.explicitMute = muted

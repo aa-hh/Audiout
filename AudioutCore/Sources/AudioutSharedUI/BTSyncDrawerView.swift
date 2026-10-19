@@ -6,12 +6,11 @@ import AudioutCore
 /// Reports every gesture out of a ``BTSyncDrawerView`` (PLAN-BT-SYNC-DRAWER
 /// T5) back to its host.
 public protocol BTSyncDrawerViewDelegate: AnyObject {
-    /// A committed trim change — a stepper click or a typed field commit.
-    /// Apply AND persist. (There is no longer a live-scrub /
-    /// don't-persist case: the scrubbing ruler that needed it was cut. Every
-    /// change the drawer now makes is a discrete, complete gesture, so
-    /// `committed` is always true — the parameter stays for the host's
-    /// existing wiring and in case a live control returns later.)
+    /// A trim change. `committed == false` is one tick of a held `−`/`+` or
+    /// a repeating ↑/↓ in the field: apply it live, do not persist it.
+    /// `committed == true` is a finished gesture — a click, the release that
+    /// ends a hold (carrying the final value, once), a key-up after arrow
+    /// nudges, a typed Return or focus loss: apply AND persist.
     func syncDrawer(_ d: BTSyncDrawerView, didChangeTrimMs ms: Double, committed: Bool)
     /// The tick (metronome) toggle, moved off the row into the drawer (D9).
     func syncDrawer(_ d: BTSyncDrawerView, didToggleAlignTick active: Bool)
@@ -130,9 +129,13 @@ public final class BTSyncDrawerView: NSView {
     private let resetButton = NSButton()
     private let hintLabel = NSTextField(labelWithString: "")
     private let captionLabel = NSTextField(labelWithString: "")
-    private let minusButton = NSButton()
-    private let plusButton = NSButton()
+    private let minusButton = StepperButton()
+    private let plusButton = StepperButton()
     private let valueField = NSTextField()
+    /// Glow behind the value field while a Cast offset waits out the stream
+    /// lag. The bottom-most subview, so it shows only as a ring past the
+    /// field's opaque bezel and never sits over a button's click area.
+    private let pendingGlowView = NSView()
 
     private lazy var valueFieldEditor = SyncValueFieldEditor(field: valueField, initialValue: 0)
 
@@ -162,6 +165,8 @@ public final class BTSyncDrawerView: NSView {
     /// line from the source until the host clears it, which the host does when
     /// the drawer closes.
     private var movedSinceLastTimeMs: Double?
+    /// Whether the host is holding this device's offset as not yet audible.
+    private var pendingApply = false
     /// The band's leading anchor, swapped when "Align again…" is hidden: the
     /// metronome takes its place rather than leaving a 110 pt hole.
     private var alignLeadingToAlignAgain: NSLayoutConstraint?
@@ -176,6 +181,9 @@ public final class BTSyncDrawerView: NSView {
     public init() {
         super.init(frame: .zero)
         commonInit()
+        // `draw(_:)` reads `containerEdge`, whose Increase Contrast hex the
+        // toggle swaps without an appearance change.
+        redrawOnAccessibilityDisplayChange()
     }
 
     @available(*, unavailable)
@@ -207,6 +215,7 @@ public final class BTSyncDrawerView: NSView {
             addSubview(subview)
         }
         installConstraints()
+        installPendingGlow()
 
         valueFieldEditor.delegate = self
         // Reads `usableRangeMs` LIVE on every call (closes over `self`, not a
@@ -263,7 +272,7 @@ public final class BTSyncDrawerView: NSView {
         // glyph says best. (The four labelled `[−10] [−1] [+1] [+10]` pills
         // this replaces had to spell their amounts out, and that is what made
         // them too wide to bind to the value.)
-        let steppers: [(button: NSButton, symbol: String, fallback: String, label: String)] = [
+        let steppers: [(button: StepperButton, symbol: String, fallback: String, label: String)] = [
             (minusButton, "minus", "\u{2212}", "Decrease sync offset"),
             (plusButton, "plus", "+", "Increase sync offset"),
         ]
@@ -293,6 +302,7 @@ public final class BTSyncDrawerView: NSView {
             (button.cell as? NSButtonCell)?.setPeriodicDelay(Self.stepperRepeatDelay,
                                                              interval: Self.stepperRepeatInterval)
             button.target = self
+            button.onRelease = { [weak self] in self?.stepperReleased() }
         }
         minusButton.action = #selector(minusTapped)
         plusButton.action = #selector(plusTapped)
@@ -508,6 +518,97 @@ public final class BTSyncDrawerView: NSView {
     }
 
 
+    // MARK: Pending glow
+
+    private func installPendingGlow() {
+        pendingGlowView.translatesAutoresizingMaskIntoConstraints = false
+        pendingGlowView.wantsLayer = true
+        pendingGlowView.layer?.cornerRadius = Self.pendingGlowCornerRadius
+        pendingGlowView.isHidden = true
+        addSubview(pendingGlowView, positioned: .below, relativeTo: nil)
+        let outset = Self.pendingGlowOutset
+        NSLayoutConstraint.activate([
+            pendingGlowView.leadingAnchor.constraint(equalTo: valueField.leadingAnchor, constant: -outset),
+            pendingGlowView.trailingAnchor.constraint(equalTo: valueField.trailingAnchor, constant: outset),
+            pendingGlowView.topAnchor.constraint(equalTo: valueField.topAnchor, constant: -outset),
+            pendingGlowView.bottomAnchor.constraint(equalTo: valueField.bottomAnchor, constant: outset),
+        ])
+    }
+
+    /// Text colour has no layer key path, so one timer drives both the halo
+    /// and the digits from `PendingPulse`, the curve the fader thumb reads.
+    private var pulse = PendingPulse()
+    private var pulseTimer: Timer?
+
+    deinit { pulseTimer?.invalidate() }
+
+    private func setPendingApply(_ pending: Bool) {
+        guard pending != pendingApply else { return }
+        pendingApply = pending
+        let now = CACurrentMediaTime()
+        if pending {
+            pulse.begin(at: now)
+        } else {
+            pulse.finish(at: now, reduceMotion: reduceMotion)
+        }
+        renderPendingGlow()
+    }
+
+    /// Paint the halo and digits at the current strength, and keep the
+    /// timer running only while there is motion to show.
+    private func renderPendingGlow() {
+        let strength = pulse.value(at: CACurrentMediaTime(), reduceMotion: reduceMotion)
+        pendingGlowView.isHidden = strength == nil
+        if let strength {
+            pendingGlowView.layer?.backgroundColor = PendingPulse.light(in: effectiveAppearance)
+                .withAlphaComponent(Self.pendingGlowAlpha * strength).cgColor
+        }
+        valueField.textColor = pendingApply
+            ? PendingPulse.ink(strength: reduceMotion ? nil : strength, in: effectiveAppearance)
+            : Tokens.Color.label
+        let needsFrames = pulse.isArriving || (pendingApply && !reduceMotion)
+        if !needsFrames {
+            pulseTimer?.invalidate()
+            pulseTimer = nil
+        } else if pulseTimer == nil {
+            let timer = Timer(timeInterval: PendingPulse.frameInterval, repeats: true) { [weak self] _ in
+                self?.renderPendingGlow()
+            }
+            timer.tolerance = 0.01
+            RunLoop.main.add(timer, forMode: .common)
+            pulseTimer = timer
+        }
+    }
+
+    public override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        renderPendingGlow()
+    }
+
+    /// The drawer hears a hold's end only through `configure`, which stops
+    /// once it is unmounted. Leaving a window mid-hold would keep the timer
+    /// running on a detached view and play the arrival on the next device's
+    /// field, so unmounting drops the hold at once, with no arrival.
+    public override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        guard window == nil, pendingApply || pulse.isArriving else { return }
+        pendingApply = false
+        pulse = PendingPulse()
+        renderPendingGlow()
+        refreshDisplay()
+    }
+
+    private var reduceMotion: Bool {
+        test_reduceMotionOverride ?? NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+    }
+
+    /// The halo's alpha at full strength, its reach past the field, and its
+    /// corners. The stock bezel exposes no border colour, so the field's own
+    /// edge does not light.
+    private static let pendingGlowAlpha: CGFloat = 0.40
+    private static let pendingGlowOutset: CGFloat = 2.5
+    private static let pendingGlowCornerRadius: CGFloat = 3
+
     // MARK: Public API (T7)
 
     /// Push a fresh model snapshot. Guards the value field's DISPLAYED text
@@ -519,7 +620,8 @@ public final class BTSyncDrawerView: NSView {
                           usableRangeMs: ClosedRange<Double>, alignTickActive: Bool,
                           canReset: Bool = false, canAlignAgain: Bool = false,
                           offsetSource: BTOffsetSource? = nil,
-                          movedSinceLastTimeMs: Double? = nil) {
+                          movedSinceLastTimeMs: Double? = nil,
+                          pendingApply: Bool = false) {
         self.deviceName = deviceName
         self.trimMs = trimMs
         self.isSet = isSet
@@ -528,6 +630,7 @@ public final class BTSyncDrawerView: NSView {
         self.canAlignAgain = canAlignAgain
         self.offsetSource = offsetSource
         self.movedSinceLastTimeMs = movedSinceLastTimeMs
+        setPendingApply(pendingApply)
         alignButton.state = alignTickActive ? .on : .off
         alignButton.contentTintColor = alignTickActive
             ? Tokens.Color.engagedChrome : Tokens.Color.label2
@@ -593,8 +696,12 @@ public final class BTSyncDrawerView: NSView {
 
     // MARK: Actions
 
-    @objc private func minusTapped() { stepTrim(by: -stepAmountMs) }
-    @objc private func plusTapped() { stepTrim(by: stepAmountMs) }
+    @objc private func minusTapped(_ sender: StepperButton) {
+        stepTrim(by: -stepAmountMs, held: sender.isTracking)
+    }
+    @objc private func plusTapped(_ sender: StepperButton) {
+        stepTrim(by: stepAmountMs, held: sender.isTracking)
+    }
 
     /// One millisecond, or ten while ⇧ is held — the coarse/fine pair the two
     /// cut `±10` buttons used to carry.
@@ -602,11 +709,28 @@ public final class BTSyncDrawerView: NSView {
         shiftIsHeld ? BTSyncTrim.coarseStepMs : BTSyncTrim.fineStepMs
     }
 
-    private func stepTrim(by deltaMs: Double) {
+    /// True between the first step of a mouse hold and its release.
+    private var stepCommitPending = false
+
+    /// `held` steps come from inside the button's mouse tracking — the first
+    /// action of a click and every auto-repeat tick — and apply live only;
+    /// ``stepperReleased()`` commits once. Any other step (keyboard Space,
+    /// `performClick`) is a whole gesture and commits at once.
+    private func stepTrim(by deltaMs: Double, held: Bool) {
         // `snap`, not `quantise`: the host's usable range is the ONE bound a
         // drawer answers to (a Cast row's reaches past ±`BTSyncTrim.rangeMs`),
         // and `clampToUsableRange` right here is what applies it.
-        applyCommit(clampToUsableRange(BTSyncTrim.snap(trimMs + deltaMs)))
+        let ms = clampToUsableRange(BTSyncTrim.snap(trimMs + deltaMs))
+        if held { stepCommitPending = true }
+        apply(ms, committed: !held)
+    }
+
+    /// The mouse came up. A press released outside the button sent no step,
+    /// so it has nothing to commit.
+    private func stepperReleased() {
+        guard stepCommitPending else { return }
+        stepCommitPending = false
+        apply(trimMs, committed: true)
     }
 
     @objc private func alignAgainTapped(_ sender: NSButton) {
@@ -651,19 +775,19 @@ public final class BTSyncDrawerView: NSView {
         Swift.min(usableRangeMs.upperBound, Swift.max(usableRangeMs.lowerBound, ms))
     }
 
-    /// A discrete, complete gesture (stepper click or typed commit): apply
-    /// AND persist.
+    /// Apply a value and report it: live only, or (`committed`) apply AND
+    /// persist.
     ///
     /// `fromField` marks the typed-Return / focus-loss path, which arrives via
     /// the field editor's own commit and has already written the field. Every
     /// OTHER gesture has to say so, because `refreshDisplay` cannot write text
     /// the user is editing — see `SyncValueFieldEditor.overrideEditedValue`.
-    private func applyCommit(_ ms: Double, fromField: Bool = false) {
+    private func apply(_ ms: Double, committed: Bool, fromField: Bool = false) {
         trimMs = ms
         isSet = true
         refreshDisplay()
         if !fromField { valueFieldEditor.overrideEditedValue(ms) }
-        delegate?.syncDrawer(self, didChangeTrimMs: ms, committed: true)
+        delegate?.syncDrawer(self, didChangeTrimMs: ms, committed: committed)
     }
 
     private func refreshDisplay() {
@@ -684,7 +808,9 @@ public final class BTSyncDrawerView: NSView {
         // from jumping) and a real element when it is not.
         captionLabel.setAccessibilityElement(!captionText.isEmpty)
         spokenValue = isSet ? BTSyncTrim.spokenOffset(trimMs) : "Not set"
-        valueField.setAccessibilityLabel("Sync offset for \(deviceName)")
+        valueField.setAccessibilityLabel(pendingApply
+            ? "Sync offset for \(deviceName), applying"
+            : "Sync offset for \(deviceName)")
         valueField.setAccessibilityValue(spokenValue)
         valueField.toolTip = "\(deviceName): \(isSet ? BTSyncTrim.spokenOffset(trimMs) : "not tuned yet"). Type an exact value in whole milliseconds."
     }
@@ -720,6 +846,11 @@ public final class BTSyncDrawerView: NSView {
     // reads it via `?`, never force-unwrapped.)
 
     public var test_shiftModifierOverride: Bool?
+
+    /// Stands in for the system Reduce Motion setting.
+    public var test_reduceMotionOverride: Bool?
+    public var test_isPendingGlowShown: Bool { !pendingGlowView.isHidden }
+    public var test_isPulseTimerRunning: Bool { pulseTimer != nil }
 
     private var shiftIsHeld: Bool {
         test_shiftModifierOverride ?? (NSApp?.currentEvent?.modifierFlags.contains(.shift) ?? false)
@@ -772,6 +903,12 @@ public final class BTSyncDrawerView: NSView {
 
     public func test_fireMinusClick() { minusButton.performClick(nil) }
     public func test_firePlusClick() { plusButton.performClick(nil) }
+    /// A mouse hold on `+`: the same tracking bracket `mouseDown` runs, with
+    /// `repeats` actions fired inside it the way AppKit's auto-repeat fires
+    /// them, then the release.
+    public func test_holdPlus(repeats: Int) {
+        plusButton.track { for _ in 0..<repeats { plusButton.performClick(nil) } }
+    }
     public func test_fireAlignAgainClick() { alignAgainButton.performClick(nil) }
     public func test_fireAlignClick() { alignButton.performClick(nil) }
     public func test_fireResetClick() { resetButton.performClick(nil) }
@@ -782,6 +919,31 @@ public final class BTSyncDrawerView: NSView {
 
 extension BTSyncDrawerView: SyncValueFieldEditorDelegate {
     public func syncValueFieldEditor(_ editor: SyncValueFieldEditor, didCommit ms: Double) {
-        applyCommit(ms, fromField: true)
+        apply(ms, committed: true, fromField: true)
+    }
+
+    public func syncValueFieldEditor(_ editor: SyncValueFieldEditor, didNudgeLive ms: Double) {
+        apply(ms, committed: false, fromField: true)
+    }
+}
+
+/// `−`/`+`. A continuous button's whole press — the first action, every
+/// auto-repeat tick, the release — runs inside `NSButton.mouseDown`, which
+/// returns only when the mouse comes up. So that return IS the release, and
+/// the drawer commits there. (A `.leftMouseUp` local monitor cannot do this:
+/// the tracking loop consumes the mouse-up before monitors see it.)
+final class StepperButton: NSButton {
+    private(set) var isTracking = false
+    var onRelease: (() -> Void)?
+
+    override func mouseDown(with event: NSEvent) {
+        track { super.mouseDown(with: event) }
+    }
+
+    func track(_ press: () -> Void) {
+        isTracking = true
+        press()
+        isTracking = false
+        onRelease?()
     }
 }

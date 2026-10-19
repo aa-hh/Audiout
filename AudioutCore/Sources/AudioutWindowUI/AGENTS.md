@@ -2,40 +2,37 @@
 
 ## Purpose
 
-The Groups screen's content: a configuration-only tree for viewing and editing
-saved groups and for tuning speakers. It owns no window and talks to no
-backend.
+Speakers and Scenes configuration: no window or backend.
 
 ## Rules
 
-- Configuration-only: selection is not activation, and nothing here calls `activateGroup`.
-- Every way out of the editor lands in `MixerWindowController.dismissEditor()`: “‹ Groups”, ⌘[, the primary button, the Groups plate re-click, and the surface's Escape (which closes the window only when there is no editor to pop).
-- Hosts drive visibility through `setHostVisible(_:)`; a hidden host still stores snapshots.
-- The sidebar split must never collapse: nothing in the UI brings it back.
-- The `mixer-4-device-detail` goldens are unreproducible on macOS 27; never regenerate them.
-- Every fitting width derives from `SurfaceLayout`; raising one widens a window that must not.
-- Header parity is geometric, in `GroupsPaneLayout`; half-point misses are the run's rounding grid.
-- The rail overlay and the delete button anchor to the column, not the container.
-- `viewDidAppear` Tab seeding never runs headless; do not delete it as dead code.
-- Gold means LIVE, per row; it is never decoration here.
-- Magenta is identity, never state: `GroupIdentityGlowView` sits behind every group seat, active or not.
-- Persistence failures go through `saveOrReport(_:)`, reported in plain words, never swallowed.
-- An unavailable speaker may join a group; `orderedDevices()` is the one ordering rule (2026-08-28).
-- Ink carries temperature (C5, 2026-09-03): `labelCool` on idle names and glyphs, `label` on the live one; chrome and the sidebar stay stock. `GroupsInkTemperatureTests` pins it.
-- `GroupedSectionView`'s `.well` style is this folder's custom-drawn piece: the `Tokens.Color.shadow` inset-shade band, flat and clipped at 0.18, along the box's top edge. Both Equalizer pages wear it — `DeviceDetailViewController` and `MainOutDetailViewController` — because `raised` resolves to the pane's own ground in light, so a `.card` there is an outline around nothing (2026-09-04).
-- `DeviceIcon` is the single resolution point for a device or group symbol.
-- The three swapped panes are built and laid out in `MixerWindowController.init`, not on the
-  first swap that shows one: this controller is itself built off the click path, so its panes
-  ride along and the Equalizer door stops paying for a view tree inside the click.
-- Long-form traps, dated decisions and the changelog: [AGENTS-HISTORY.md](AGENTS-HISTORY.md). Grep it before debugging anything here.
+- Selection and editing never activate scenes or request playback.
+- Global visibility never changes membership, routing or saved intent; membership controls never set visibility.
+- Sidebars and pages share identity; remembered records never enter backend collections or route pickers.
+- Speakers sidebar groups express visibility; show reachability, never routing.
+- Unavailable members stay editable; unknown IDs remain Missing speaker, without invented transport or playback.
+- Keep hidden snapshots fresh; repaint only visible screens.
+- Neither sidebar may collapse; nothing restores it.
+- Panes fit shared surface geometry; never widen the shell.
+- Gold means live audio, and membership on the scene page; magenta, group identity; green, a reachable speaker. Stock sidebar chrome remains native.
+- Custom-drawn: `IconPickerViewController` cells, `EqualizerMarkView`.
+- Report persistence failures plainly; never swallow them.
+- Preserve visible-host keyboard focus; headless absence is not dead code.
+- Never regenerate the unreproducible macOS 27 device-detail goldens.
+- Device and group glyphs share `DeviceIcon` resolution.
+- History: [AGENTS-HISTORY.md](AGENTS-HISTORY.md).
 
 ## Map
 
-- `MixerWindowController` → screen-content controller: split view, sheets, auto-select rule.
-- `ContentPaneHostViewController` → swapped overview, editor and detail pane, plus footer.
-- `GroupsOverviewViewController` → the group list: card grid with seats, absorbed empty state.
-- `SidebarViewController` → source list: Groups plate, System Audio, Speakers. A click on the already-selected Groups plate re-reports `.groupsOverview` (the click action, not the selection delegate).
-- `GroupEditorViewController` → edit-only pane: a top band carrying “‹ Groups” and the primary, then rename, membership, delete. Edits autosave, so the primary reads “Done”; it reads “Save” only while the name field holds text that has not been committed, and pressing it then commits before leaving.
-- `GroupCreationSheetController` → standard sheet for new groups; never activates.
-- `DeviceDetailViewController` → device pane: identity, Equalizer, Groups, About.
-- `MainOutDetailViewController` → Main Audio page, non-editable icon well.
+- `MixerWindowController` → Scenes and Speakers navigation.
+- `ContentPaneHostViewController` → Swapped content and footer.
+- `SpeakersPageViewController` → Overview; shimmer: AppKit has none.
+- `SidebarViewController` → Speaker list; cells and add button also serve Scenes.
+- `ScenesSidebarViewController` → Scene list beside the scene page.
+- `GroupEditorViewController` → Scene page: rename, membership, delete.
+- `ScenesEmptyPageViewController` → Empty page with one add action.
+- `GroupCreationSheetController` → Scene creation.
+- `DeviceDetailViewController` → Speaker page.
+- `MainOutDetailViewController` → Main Audio configuration.
+- `FlippedView` → Top-down page document.
+- `EqualizerMarkView` → Equalizer heading icon.

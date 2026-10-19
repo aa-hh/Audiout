@@ -125,8 +125,8 @@ extension SerializedSharedState {
     }
 
     private final class FakeDACPEndpoint: DACPEndpoint, @unchecked Sendable {
-        var onVolume: (@Sendable (_ activeRemote: UInt32, _ level: Double) -> Void)?
-        var onVolumeStep: (@Sendable (_ activeRemote: UInt32, _ direction: Int) -> Void)?
+        var onVolume: (@Sendable (_ remoteHost: String?, _ activeRemote: UInt32, _ level: Double) -> Void)?
+        var onVolumeStep: (@Sendable (_ remoteHost: String?, _ activeRemote: UInt32, _ direction: Int) -> Void)?
         func start(dacpID: UInt64) {}
         func stop() {}
     }
@@ -181,11 +181,16 @@ extension SerializedSharedState {
         func start() {}
         func stop() {}
         func setAlignTickMode(_ mode: AlignTickMode) { lock.withLock { _modes.append(mode) } }
-        func stageCompanionMicProbe(staggered: Bool, referenceOnEngine: Bool,
-                                    downWindowUID: String?, upWindowUID: String?,
+        func stageCompanionMicProbe(routed: Bool, referenceOnEngine: Bool,
+                                    targetWindowUID: String?, referenceWindowUID: String?,
                                     onStarted: @escaping () -> Void,
                                     onFinished: @escaping () -> Void) {
             lock.withLock { _stages += 1 }
+            onStarted()
+        }
+        func stageWizardMicProbe(levelStepDB: @escaping () -> Int,
+                                 onStarted: @escaping () -> Void,
+                                 onFinished: @escaping () -> Void) {
             onStarted()
         }
     }
@@ -268,6 +273,11 @@ extension SerializedSharedState {
         func setTrimMs(_ ms: Double, forDeviceUID uid: String) {
             lock.withLock { _trims.append((ms, uid)) }
         }
+        private var _clampChecks: [String] = []
+        func reanchorIfTrimClamped(forDeviceUID uid: String) {
+            lock.withLock { _clampChecks.append(uid) }
+        }
+        var clampChecks: [String] { lock.withLock { _clampChecks } }
         /// Hold every `setGain` on the queue that calls it, so a test can assert
         /// what happens while a Bluetooth hold has not yet reached the sink.
         private let gate = NSCondition()
@@ -345,7 +355,9 @@ extension SerializedSharedState {
         storeDirectory: URL? = nil,
         engine: RecordingEngine? = nil,
         discovery: FakeDiscovery? = nil,
-        perAppCapture: PerAppCaptureCoordinator? = nil
+        perAppCapture: PerAppCaptureCoordinator? = nil,
+        delayClock: @escaping NativeBackend.DelayClock = NativeBackend.dispatchDelayClock,
+        uptimeClock: @escaping NativeBackend.UptimeClock = NativeBackend.dispatchUptimeClock
     ) -> (NativeBackend, FakeBTEnumerator, SpyBTSink, EventCollector) {
         let bt = FakeBTEnumerator()
         let backend = NativeBackend(
@@ -357,11 +369,18 @@ extension SerializedSharedState {
             systemVolume: NoOpSystemVolume(),
             ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
             injectedPerAppCapture: perAppCapture,
+            delayClock: delayClock,
+            uptimeClock: uptimeClock,
             systemDefaultOutputIsAirPlayClass: { false },
             aggregateControl: NoOpAggregateControl(),
             handoffWatcherFactory: { onBlockedAttempt in
                 AirPlayHandoffWatcher(spawn: NoOpLogStream(), onBlockedAttempt: onBlockedAttempt)
             })
+        // The 4 s production start deadline is wall time, and a stalled GitHub
+        // runner has taken longer than that to answer the holds, so every start
+        // was refused as "The speaker pair changed". A test about the deadline
+        // itself sets a short one.
+        backend.companionAuditionPreparationSeconds = 60
         let sink = SpyBTSink()
         backend.btSyncedSinkFactory = { sink }
         backend.btDeviceIDForUID = { uid in AudioObjectID(1000 + UInt32(abs(uid.hashValue % 1000))) }
@@ -392,6 +411,12 @@ extension SerializedSharedState {
         let (backend, bt, _, _) = makeBackend()
         defer { backend.stop() }
         backend.captureCoordinator = ProbeStagingCapture()
+        // Preparation waits for every Bluetooth hold to reach the sink on
+        // `captureControlQueue`. That queue is immediate on a real Mac but can
+        // be starved for seconds under a full parallel test run, and this test
+        // is not about the deadline — so it does not race one.
+        backend.companionAuditionPreparationSeconds = 60
+        backend.companionAuditionStopSeconds = 60
         backend.start()
         bt.fire([btMove, btFlip])
         await SuiteWait.until { self.device(backend, self.btMove.id) != nil && self.device(backend, self.btFlip.id) != nil }
@@ -415,10 +440,21 @@ extension SerializedSharedState {
     /// Replacing the wizard pacer with capture-fed companion ticks loses clicks when music is paused.
     @Test @MainActor func auditionUsesIndependentWizardPacerAndKeepsOnlyPairAudible() async {
         let dir = scratchDir
-        let (backend, bt, sink, _) = makeBackend(storeDirectory: dir)
+        // The audition's start deadline runs on this clock, so a stalled runner cannot expire it.
+        let clock = ManualDelayClock()
+        let (backend, bt, sink, _) = makeBackend(
+            storeDirectory: dir,
+            delayClock: clock.queueHoppingClock,
+            uptimeClock: clock.uptime)
         defer { backend.stop() }
         let capture = ProbeStagingCapture()
         backend.captureCoordinator = capture
+        // Preparation waits for every Bluetooth hold to reach the sink on
+        // `captureControlQueue`. That queue is immediate on a real Mac but can
+        // be starved for seconds under a full parallel test run, and this test
+        // is not about the deadline — so it does not race one.
+        backend.companionAuditionPreparationSeconds = 60
+        backend.companionAuditionStopSeconds = 60
         backend.start()
         bt.fire([btMove, btFlip, btExtra])
         await SuiteWait.until { self.device(backend, self.btExtra.id) != nil }
@@ -697,6 +733,9 @@ extension SerializedSharedState {
         let local = ScriptedLocalPlayback()
         defer { sink.openGainGate(); backend.stop() }
         backend.captureCoordinator = capture
+        // The deadline is not what this test checks; a starved runner needs the
+        // headroom (see auditionZerosRedirectedCaptureWithoutDroppingFrames).
+        backend.companionAuditionPreparationSeconds = 60
         backend.localPlaybackEngine = local
         backend.start()
         bt.fire([btMove, btFlip, btExtra])
@@ -792,9 +831,13 @@ extension SerializedSharedState {
         engine.releaseWrites()
         await SuiteWait.until { backend.startCompanionAlignmentProbe(targetID: self.btMove.id,
             referenceID: self.btFlip.id, onStarted: {}, onFinished: {}) == nil }
+        await SuiteWait.until { engine.writes.last { $0.0 == ap1.outputID }?.1 == -1.0 }
+        #expect(engine.writes.last { $0.0 == ap1.outputID }?.1 == -1.0,
+                "the phone's probe silences every speaker outside the pair")
+        backend.cancelCompanionAlignmentProbe(targetID: btMove.id)
+        await SuiteWait.until { engine.writes.last { $0.0 == ap1.outputID }?.1 != -1.0 }
         #expect(engine.writes.last { $0.0 == ap1.outputID }?.1 != -1.0,
                 "the final write uses the user's current level, after the old hold finishes")
-        backend.cancelCompanionAlignmentProbe(targetID: btMove.id)
         #expect(start.value != .some(nil), "the cancelled preparation cannot report success late")
     }
 
@@ -1006,7 +1049,12 @@ extension SerializedSharedState {
     @Test @MainActor func aFailedUserEditDuringCleanupIsNotBlamedOnTheRestoration() async {
         let engine = RecordingEngine()
         let discovery = FakeDiscovery()
-        let (backend, bt, _, _) = makeBackend(engine: engine, discovery: discovery)
+        // The audition's deadlines fire only when the test says. This test is
+        // about whose failure the stop reports, and on the wall clock a loaded
+        // run let the 4 s stop deadline expire while the restoration was held.
+        let deadlines = ManualDelayClock()
+        let (backend, bt, _, _) = makeBackend(engine: engine, discovery: discovery,
+                                              delayClock: deadlines.clock, uptimeClock: deadlines.uptime)
         defer { engine.releaseWrites(); backend.stop() }
         backend.captureCoordinator = ProbeStagingCapture()
         backend.start()
@@ -1046,10 +1094,15 @@ extension SerializedSharedState {
     @Test @MainActor func theLifetimeCallbackFiresOnceAfterTheRealDrainNotTheTimeout() async {
         let engine = RecordingEngine()
         let discovery = FakeDiscovery()
-        let (backend, bt, _, _) = makeBackend(engine: engine, discovery: discovery)
+        let clock = ManualDelayClock()
+        // Each fired job hops to the queue the backend named: the Bluetooth
+        // render poll also runs on this clock and must run on `stateQueue`.
+        let (backend, bt, _, _) = makeBackend(
+            engine: engine, discovery: discovery,
+            delayClock: clock.queueHoppingClock,
+            uptimeClock: clock.uptime)
         defer { engine.releaseWrites(); backend.stop() }
         backend.captureCoordinator = ProbeStagingCapture()
-        backend.companionAuditionStopSeconds = 0.1
         backend.start()
         let ap1 = airPlay1()
         discovery.fire(.appeared(ap1))
@@ -1082,6 +1135,10 @@ extension SerializedSharedState {
         engine.blockWrites = true
         let stop = LockedBox<String??>(nil)
         backend.endCompanionAlignmentAudition(targetID: btMove.id) { stop.value = .some($0) }
+        // The stop refuses on its timeout because the test moved the clock past
+        // it, not because real time elapsed.
+        await SuiteWait.until { engine.heldCount > 0 }
+        clock.advance(by: backend.companionAuditionStopSeconds)
         await SuiteWait.until { stop.value != nil }
         #expect(stop.value.flatMap { $0 }?.contains("took too long") == true)
         #expect(released.value == 0, "a refused stop does not consume the lifetime signal")
@@ -1518,6 +1575,10 @@ extension SerializedSharedState {
         #expect(report()?.staleReason == nil)
         #expect(report()?.clockState == .unknown, "a new link, and no verdict on its clock yet")
         #expect(report()?.settleRemainingSeconds == nil)
+        // `BTSpeakerTiming.noteConnected` writes the report under its lock and
+        // fires the change after releasing it, so the report can read
+        // `.fromLastTime` before the callback has run.
+        waitFor { changes.value == base + 2 }
         #expect(changes.value == base + 2)
 
         backend.endBTWizardLatencyPreview(forDevice: uid, keepMs: 300)
@@ -1636,6 +1697,51 @@ extension SerializedSharedState {
                 "…and only the selected ones count")
     }
 
+    /// A negative trim is a speaker asking to play earlier, which on the
+    /// speaker that sets the floor only "every other speaker later" can give:
+    /// it counts as extra latency when the floor is chosen.
+    @Test func aNegativeTrimRaisesTheBTOnlyReferenceLikeLatency() {
+        let latencies = ["move2": 483.0, "move": 295.0]
+        #expect(NativeBackend.btOnlyReferenceMs(latencies: latencies, trims: ["move2": -10],
+                                                uids: ["move2", "move"]) == 593)
+        #expect(NativeBackend.btOnlyReferenceMs(latencies: latencies, trims: ["move2": 40],
+                                                uids: ["move2", "move"]) == 583,
+                "a positive trim plays later — it never needs the floor to move")
+        #expect(NativeBackend.btOnlyReferenceMs(latencies: latencies, trims: ["move": -150],
+                                                uids: ["move2", "move"]) == 583,
+                "a speaker still inside the floor leaves it alone")
+    }
+
+    /// DEFECT (customer, 1.2.0): Move 2 set the floor (483 + 100 = 583), sat
+    /// 100 ms behind it, and every committed −10 ms was stored while the sink
+    /// applied none of it. The commit must raise the floor so the trim plays.
+    /// A speaker whose trim leaves the floor where it is gets the sink's own
+    /// clamp check instead; the one that moved the floor does not need it — a
+    /// floor move re-anchors every sink already.
+    @Test func aCommittedNegativeTrimOnTheFloorSpeakerRaisesTheReference() throws {
+        let dir = scratchDir
+        try BTTrimStore(directory: dir).saveLatencies([btMove.id: 483, btFlip.id: 295])
+        let (backend, bt, sink, _) = makeBackend(storeDirectory: dir)
+        defer { backend.stop() }
+        backend.start()
+        bt.fire([btMove, btFlip])
+        waitFor { self.device(backend, self.btMove.id) != nil
+            && self.device(backend, self.btFlip.id) != nil }
+        backend.setOutputSet([btMove.id, btFlip.id])
+        waitFor { sink.buffers.last == 583 }
+
+        backend.setBTSyncTrim(-10, forDevice: btMove.id, persist: false)
+        backend.setBTSyncTrim(-10, forDevice: btMove.id, persist: true)
+        waitFor { sink.buffers.last == 593 }
+        #expect(sink.buffers.last == 593, "483 + 10 + 100: the other speaker plays 10 ms later")
+
+        backend.setBTSyncTrim(-20, forDevice: btFlip.id, persist: true)
+        waitFor { sink.clampChecks.contains(self.btFlip.id) }
+        #expect(sink.clampChecks == [btFlip.id],
+                "only the commit that left the floor alone asks the sink")
+        #expect(sink.buffers.last == 593)
+    }
+
     // MARK: - Passive drift tracking (roadmap 085 ticket 05)
 
     /// DEFECT: the baseline guard asked `btStoredAlignmentOffsetMs`, which
@@ -1713,6 +1819,47 @@ extension SerializedSharedState {
         #expect(sink.buffers.last == 740)
     }
 
+    /// DEFECT (customer log, 1.2.0): deselecting one of two measured speakers
+    /// moved the reference, and the move rebuilt EVERY sink the manager still
+    /// held, the departing one included, before `setDevices` dropped it. So a
+    /// speaker the user had just turned off restarted its engine once, and on
+    /// that night the restart failed with -10851 into the log.
+    @Test func aDeselectedSpeakerIsDroppedBeforeTheReferenceMoves() throws {
+        let dir = scratchDir
+        try BTTrimStore(directory: dir).saveLatencies([btMove.id: 583, btFlip.id: 527])
+        let (backend, bt, _, _) = makeBackend(storeDirectory: dir)
+        defer { backend.stop() }
+        // Object id 0 is not a live HAL device; without this the alive check at
+        // first start would drop both sinks before the reference could move.
+        let real = BTSyncedSink(renderSampleRate: 48_000, channelCount: 1, presentationDelayMs: { 100 },
+                                deviceIsAlive: { _ in true })
+        backend.btSyncedSinkFactory = { real }
+        backend.btDeviceIDForUID = { _ in AudioObjectID(0) }
+        backend.start()
+        bt.fire([btMove, btFlip])
+        waitFor { self.device(backend, self.btMove.id) != nil
+            && self.device(backend, self.btFlip.id) != nil }
+        backend.setOutputSet([btMove.id, btFlip.id])
+        waitFor { real.sinkForTesting(uid: self.btMove.id) != nil
+            && real.sinkForTesting(uid: self.btFlip.id) != nil }
+        real.sinkForTesting(uid: btMove.id)?.test_waitForPendingRebuild()
+        real.sinkForTesting(uid: btFlip.id)?.test_waitForPendingRebuild()
+
+        let capture = LineCapture()
+        Telemetry._installTestSink { capture.append($0) }
+        defer { Telemetry._installTestSink(nil) }
+        backend.setOutputSet([btFlip.id])   // reference 683 → 627 ms
+        waitFor { real.sinkForTesting(uid: self.btMove.id) == nil
+            && capture.lines(evt: "bt_sink_rebuild").contains { $0.contains(self.btFlip.id) } }
+        Telemetry._installTestSink(nil)     // flush barrier
+
+        let rebuilds = capture.lines(evt: "bt_sink_rebuild")
+        #expect(!rebuilds.contains { $0.contains(btMove.id) },
+                "the deselected speaker must not be rebuilt on its way out: \(rebuilds)")
+        #expect(rebuilds.contains { $0.contains(btFlip.id) },
+                "positive control: the reference moved, so the remaining speaker re-anchors")
+    }
+
     /// Selecting a device whose measured latency is past the floor moves the
     /// reference for the BT sinks AND for the Mac's own, which rides it.
     @Test func aStoredLatencyRaisesTheReferenceOnSelect() throws {
@@ -1775,6 +1922,24 @@ extension SerializedSharedState {
         backend.setBTWizardTickActive(true, btTargetDeviceID: nil, btReferenceDeviceID: nil)
         #expect(backend.localSinkReferenceDelayMs() == 500)
         backend.setBTWizardTickActive(false, btTargetDeviceID: nil, btReferenceDeviceID: nil)
+    }
+
+    /// The mic probe's listening tail is sized from the room delay `onStarted`
+    /// reports. Turns red if `NativeBackend.stageBTMicProbe` hands `onStarted`
+    /// the delay in milliseconds, or anything but the room delay.
+    @Test func theWizardMicProbeReportsTheRoomDelayInSeconds() {
+        let (backend, _, _, _) = makeBackend()
+        defer { backend.stop() }
+        backend.captureCoordinator = ProbeStagingCapture()
+        backend.start()
+        let reported = LockedBox<TimeInterval?>(nil)
+        backend.stageBTMicProbe(levelStepDB: { 0 },
+                                onStarted: { reported.value = $0 },
+                                onFinished: {})
+        waitFor { reported.value != nil }
+        let roomMs = backend.localSinkReferenceDelayMs()
+        #expect(roomMs > 0, "positive control: a zero room delay reads the same in any unit")
+        #expect(reported.value == Double(roomMs) / 1000)
     }
 
     /// Keep writes the measurement BEFORE the reference comes down, so the new
@@ -1881,6 +2046,47 @@ extension SerializedSharedState {
                 "…and the line names who released: \(line ?? "none")")
         #expect(line?.contains("\"waitedMs\"") == true)
         #expect(line?.contains("\"timedOut\":\"0\"") == true, "released, not timed out")
+
+        backend.setBTWizardTickActive(false, btTargetDeviceID: btMove.id, btReferenceDeviceID: nil)
+    }
+
+    /// THE DEFECT (live, freshly connected speaker: the sweeps never came out
+    /// until music had played once). The bed floor used to be counted from the
+    /// gate opening, and a sink plays nothing until its delay gate releases —
+    /// most of two seconds under the wizard's raised reference. So the floor
+    /// had always run out before release and the sweeps followed half a second
+    /// after the first audible frame, into a link and amp still waking up. The
+    /// floor now runs from the release, however long the gate waited for it.
+    @Test func theBedFloorIsTimedFromTheReleaseNotTheGateOpening() {
+        let capture = LineCapture()
+        let (backend, bt, sink, _) = makeBackend()
+        defer { backend.stop(); Telemetry._installTestSink(nil) }
+        backend.wizardArmPollInterval = 0.01
+        backend.wizardArmMinimumBedSeconds = 0.4
+        backend.wizardArmCeilingSeconds = 60
+        backend.start()
+        bt.fire([btMove])
+        waitFor { self.device(backend, self.btMove.id) != nil }
+        backend.setOutputSet([btMove.id])
+        waitFor { !sink.buffers.isEmpty }
+
+        Telemetry._installTestSink { capture.append($0) }
+        backend.setBTWizardTickActive(true, btTargetDeviceID: btMove.id, btReferenceDeviceID: nil)
+        // The gate waits longer than the whole floor with nothing released.
+        waitFor(timeout: 0.6) { !capture.armedLines().isEmpty }
+        #expect(capture.armedLines().isEmpty, "no tick while the speaker is silent")
+
+        let releasedAt = Date()
+        sink.rendering = [btMove.id]
+        waitFor { !capture.armedLines().isEmpty }
+        let bedHeard = Date().timeIntervalSince(releasedAt)
+        #expect(bedHeard >= 0.4,
+                "the arm waited a full floor after the release, not after the gate: \(bedHeard) s")
+        let line = capture.armedLines().first ?? ""
+        #expect(line.contains("\"timedOut\":\"0\""), "\(line)")
+        let bedMs = line.range(of: #""bedMs":"(\d+)""#, options: .regularExpression)
+            .map { String(line[$0]).filter(\.isNumber) }.flatMap { Int($0) }
+        #expect((bedMs ?? 0) >= 400, "the line records the audible bed: \(line)")
 
         backend.setBTWizardTickActive(false, btTargetDeviceID: btMove.id, btReferenceDeviceID: nil)
     }
@@ -2065,6 +2271,79 @@ extension SerializedSharedState {
         // Keep, not on the preview path.
         #expect(sink.offsets.contains { $0.uid == self.btMove.id && $0.ms == -96 },
                 "got \(sink.offsets)")
+    }
+
+    /// A customer's 1.2.0 session (two Sonos Moves) replayed: deselecting and
+    /// reselecting a speaker keeps both stored halves, and the reselected sink
+    /// is handed reference − latency + trim. That trim was −205, reached by 76
+    /// persisted steps the live sink refused, and the reselect anchored it at
+    /// 0. A negative trim now counts as latency when the floor is chosen, so
+    /// the floor rises to 295 + 205 + 100 and the speaker keeps a 100 ms delay.
+    @Test @MainActor func aReselectedSpeakerKeepsItsStoredAlignment() async throws {
+        let dir = scratchDir
+        let sonos = BTDeviceSnapshot(id: "54-2A-1B-79-08-9E:output", name: "Sonos Move", isConnected: true)
+        let move2 = BTDeviceSnapshot(id: "C4-38-75-0E-BF-4A:output", name: "Move 2", isConnected: true)
+        let store = BTTrimStore(directory: dir)
+        try store.saveLatencies([sonos.id: 295, move2.id: 483])
+        try store.save([sonos.id: 80, move2.id: 0])
+        try store.saveSpeakerIndex([move2.id: 1, sonos.id: 2])
+
+        let (backend, bt, sink, _) = makeBackend(storeDirectory: dir)
+        defer { backend.stop() }
+        backend.start()
+        bt.fire([move2, sonos])
+        await SuiteWait.until { self.device(backend, sonos.id) != nil && self.device(backend, move2.id) != nil }
+        backend.setOutputSet([move2.id, sonos.id])
+        await SuiteWait.until { sink.offsets.contains { $0.uid == sonos.id } }
+        backend.setOutputSet([sonos.id])                                 // 19:59:41
+        backend.setBTSyncTrim(-205, forDevice: sonos.id, persist: true)  // 21:36:52
+        backend.setOutputSet([])                                         // 21:46:57
+        SuiteWait.settle(0.3)
+        let pushesBefore = sink.offsets.count
+        backend.setOutputSet([sonos.id])                                 // 21:54:24
+        await SuiteWait.until { sink.offsets.count > pushesBefore }
+        SuiteWait.settle(0.3)
+
+        #expect(try store.loadLatencies()?[sonos.id] == 295, "deselect/reselect kept the latency")
+        #expect(try store.load()?[sonos.id] == -205, "deselect/reselect kept the trim")
+        let offset = try #require(sink.offsets.last { $0.uid == sonos.id }?.ms)
+        let trim = try #require(sink.trims.last { $0.uid == sonos.id }?.ms)
+        let buffer = try #require(sink.buffers.last)
+        #expect((offset, trim, buffer) == (295, -205, 600))
+        // 600 − 295 + (−205): the stored trim is honoured with headroom left.
+        let delay = BTReferenceTimeline.delayNanos(
+            composition: BTGroupComposition(airPlayPresent: false, macLocalPresent: false),
+            presentationDelayMs: 0, btOnlyBufferMs: buffer,
+            deviceOffsetMs: offset, trimMs: trim)
+        #expect(delay == 100_000_000)
+    }
+
+    /// A Reset on a playing speaker left no line at all (both of its seeks run
+    /// backward, and only a clamped forward seek logs), so a customer's emptied
+    /// trims file was first blamed on a code path that never ran.
+    @Test @MainActor func aResetLeavesALineNamingWhoAskedAndWhatItDeleted() async throws {
+        let dir = scratchDir
+        let store = BTTrimStore(directory: dir)
+        try store.saveLatencies([btMove.id: 295, btFlip.id: 483])
+        try store.save([btMove.id: -205, btFlip.id: 0])
+        let (backend, _, _, _) = makeBackend(storeDirectory: dir)
+        defer { backend.stop() }
+        let capture = LineCapture()
+        Telemetry._installTestSink { capture.append($0) }
+        defer { Telemetry._installTestSink(nil) }
+
+        backend.resetBTAlignment(forDevice: btMove.id)
+        backend.clearCompanionAlignmentTuning(targetID: btFlip.id)
+
+        await SuiteWait.until { capture.lines(evt: "bt_alignment_reset").count == 2 }
+        let lines = capture.lines(evt: "bt_alignment_reset")
+        #expect(lines.count == 2, "got \(lines)")
+        let drawer = try #require(lines.first { $0.contains(btMove.id) })
+        #expect(drawer.contains("\"source\":\"drawer\""), "\(drawer)")
+        #expect(drawer.contains("\"latencyMs\":\"295\""), "\(drawer)")
+        #expect(drawer.contains("\"trimMs\":\"-205\""), "\(drawer)")
+        let phone = try #require(lines.first { $0.contains(btFlip.id) })
+        #expect(phone.contains("\"source\":\"phone\""), "\(phone)")
     }
 }
 

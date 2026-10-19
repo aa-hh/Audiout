@@ -81,9 +81,8 @@ func bluetoothRuneImage(height: CGFloat) -> NSImage? {
 /// the same neutral `Tokens.Color.raised` well with a `containerEdge` rim (Q3
 /// of the colour-return pass — the FILL/RIM are never coloured, only the
 /// glyph). A tile's own edge is always `containerEdge`; `hairline` is never
-/// drawn on `raised`, where it measures 1.154:1 and disappears. The Groups
-/// window's device seats (`MemberChipView`,
-/// `DeviceIconWellView`) draw that same edge on the same well, tuned for a
+/// drawn on `raised`, where it measures 1.154:1 and disappears. The page
+/// icon well (`DeviceIconWellView`) draws that same edge on the same well, tuned for a
 /// `label` glyph rather than a permission hue;
 /// the SYMBOL's tint is caller-supplied (`color`, one of the four
 /// `Tokens.Color.permission*` hues for the onboarding rows) and PERMANENT —
@@ -186,7 +185,7 @@ final class RoundedContainerView: NSView {
 
     init(fill: NSColor = Tokens.Color.panel,
          border: NSColor = Tokens.Color.hairline,
-         radius: CGFloat = Tokens.Layout.groupedSectionCornerRadius) {
+         radius: CGFloat = Tokens.Layout.permissionCardCornerRadius) {
         self.fill = fill
         self.border = border
         self.radius = radius

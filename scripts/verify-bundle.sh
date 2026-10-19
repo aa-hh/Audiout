@@ -117,7 +117,7 @@ HITS="$(scan -name '*.sh' -type f)"
 # The names this repo's own dev tooling uses, plus the watchdog shape of the
 # 2026-09-05 incident. Belt-and-braces over check 3: a watchdog with no .sh
 # suffix, or a compiled one, still gets caught here.
-HITS="$(scan \( -name 'perfwatch*' -o -name '*watchdog*' -o -name 'purge-*' -o -name 'livetest*' -o -name 'self-review*' -o -name 'guard-*' \))"
+HITS="$(scan \( -name 'perfwatch*' -o -name '*watchdog*' -o -name 'purge-*' -o -name 'livetest*' -o -name 'review-branch*' -o -name 'guard-*' \))"
 [ -z "$HITS" ] || fail "dev tooling inside the bundle" "$HITS"
 
 # --- 5. repo docs -----------------------------------------------------------

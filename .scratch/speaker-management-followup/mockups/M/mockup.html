@@ -1,0 +1,329 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Speakers Tab, M</title>
+<style>
+/* Tokens: Tokens.swift values (DESIGN.md scaffolding). Sidebar ground, selection pills and labelColor are
+   system colours, estimated (the source-list ground is unmeasured since the 2026-09-03 migration).
+   meter = Tokens.swift:327; glint = meter blended toward white, 70 % light / 30 % dark. */
+:root{
+  --canvas:#FAFAFB; --panel:#FAFAFB; --raised:#FAFAFB;
+  --label:#1D1D1F; --label2:#6B5F4E; --label3:#6B6459;
+  --hairline:#CBCED4; --containerEdge:#AEB3BB;
+  --rim:#66717A; --rimIC:#586269; --meter:#C6C9CE; --glint:#EEEFF0;
+  --sidebar:#EEEEEF; --toolbar:#F4F4F5; --sideSel:#DCDCDE; --accentSel:#2F6FD9; --onAccent:#FFFFFF;
+  --menu:#F6F6F7; --menuEdge:rgba(0,0,0,.14); --menuHi:#2F6FD9;
+  --popFill:#FFFFFF; --popEdge:rgba(0,0,0,.16); --popShadow:0 .5px 1px rgba(0,0,0,.12);
+  --page:#E4E5E8; --frame:rgba(0,0,0,.18); --box:#FAFAFB; --note:#5F6A73;
+  color-scheme:light;
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    --canvas:#0A0A0C; --panel:#15171A; --raised:#1F232A;
+    --label:#E9E9EA; --label2:#B7AC95; --label3:#9E947F;
+    --hairline:#2A2E33; --containerEdge:#3D4247;
+    --rim:#6B767D; --rimIC:#818B90; --meter:#464C55; --glint:#7E8288;
+    --sidebar:#232325; --toolbar:#18191C; --sideSel:#464646; --accentSel:#2459C2; --onAccent:#FFFFFF;
+    --menu:#2A2B2E; --menuEdge:rgba(255,255,255,.14); --menuHi:#2459C2;
+    --popFill:rgba(255,255,255,.12); --popEdge:rgba(255,255,255,.10); --popShadow:none;
+    --page:#050507; --frame:rgba(255,255,255,.16); --box:#15171A; --note:#818C94;
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --canvas:#0A0A0C; --panel:#15171A; --raised:#1F232A;
+  --label:#E9E9EA; --label2:#B7AC95; --label3:#9E947F;
+  --hairline:#2A2E33; --containerEdge:#3D4247;
+  --rim:#6B767D; --rimIC:#818B90; --meter:#464C55; --glint:#7E8288;
+  --sidebar:#232325; --toolbar:#18191C; --sideSel:#464646; --accentSel:#2459C2; --onAccent:#FFFFFF;
+  --menu:#2A2B2E; --menuEdge:rgba(255,255,255,.14); --menuHi:#2459C2;
+  --popFill:rgba(255,255,255,.12); --popEdge:rgba(255,255,255,.10); --popShadow:none;
+  --page:#050507; --frame:rgba(255,255,255,.16); --box:#15171A; --note:#818C94;
+  color-scheme:dark;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{background:var(--page)}
+body{font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","Helvetica Neue",sans-serif;font-size:13px;color:var(--label);-webkit-font-smoothing:antialiased;padding:16px;width:1400px}
+::selection{background:var(--accentSel);color:var(--onAccent)}
+svg.i{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.35;stroke-linecap:round;stroke-linejoin:round;flex:none}
+h2{font-size:12px;font-weight:600;color:var(--label2);margin:0 0 8px 2px}
+h2 span{font-weight:400;color:var(--note)}
+.note{font-size:10.5px;color:var(--note);line-height:1.45;margin-top:6px}
+.note b{color:var(--label2);font-weight:600}
+code{font:10px ui-monospace,Menlo,monospace;color:var(--label2)}
+.top{display:flex;gap:24px;align-items:flex-start}
+.colW{width:653px;flex:none}
+.colS{width:691px;flex:none;display:flex;flex-direction:column;gap:16px}
+
+/* ---------- window chrome: 653 pt wide, 210 pt sidebar ---------- */
+.win{width:653px;border-radius:12px;overflow:hidden;background:var(--canvas);box-shadow:0 0 0 .5px var(--frame),0 18px 40px rgba(0,0,0,.18)}
+.tb{height:52px;background:var(--toolbar);border-bottom:1px solid var(--hairline);display:flex;align-items:center;padding:0 14px;position:relative}
+.dotR{width:12px;height:12px;border-radius:50%;background:#FF5F57;margin-right:14px}
+.seg{display:flex;align-items:center;gap:2px;padding:3px;border-radius:999px;border:1px solid var(--containerEdge)}
+.seg span{display:flex;align-items:center;gap:6px;height:26px;padding:0 9px;border-radius:999px;color:var(--label2);font-size:12px}
+.seg span.on{background:var(--sideSel);color:var(--label)}
+.seg svg{width:17px;height:17px}
+.tb .tbt{position:absolute;left:0;right:0;text-align:center;font-weight:700;font-size:17px;color:var(--label2);pointer-events:none}
+.tb .pin{margin-left:auto;color:var(--label2)}
+.body{display:grid;grid-template-columns:210px 443px}
+
+/* ---------- sidebar: x 18 = titles, plate icons, dots; x 34 = subsection headers, device icons; x 64 = names ---------- */
+.sb{background:var(--sidebar);border-right:1px solid var(--hairline);display:flex;flex-direction:column;overflow:hidden;position:relative}
+.list{flex:1;padding-top:6px}
+.title{height:28px;display:flex;align-items:center;padding-left:18px;font-size:11px;font-weight:600;color:var(--label2)}
+.plateRow{height:36px;padding:0 10px}
+.plate{height:36px;border-radius:10px;border:1px solid var(--containerEdge);background:var(--raised);display:flex;align-items:center;padding:0 9px 0 7px;font-size:13px;font-weight:600}
+.plate.sel{background:var(--sideSel);border-color:transparent}
+.plate .ib{margin-right:8px}
+.plate .chev{margin-left:auto;color:var(--label3);display:flex}
+.plate .chev svg{width:11px;height:11px;stroke-width:2}
+.gap{height:16px}
+.sub{height:28px;display:flex;align-items:center;padding-left:34px;padding-right:18px;font-size:11px;color:var(--label3)}
+.row{height:28px;padding:0 10px}
+.row.cap{height:40px}
+.cell{height:100%;display:flex;align-items:center;padding:0 8px;border-radius:6px}
+.d{width:9px;height:9px;border-radius:50%;flex:none;margin-right:7px}
+.d.on{background:var(--rim)}
+.d.off{border:2px solid var(--rim)}
+.ib{width:22px;height:22px;display:grid;place-items:center;flex:none;margin-right:8px;color:var(--label)}
+.lb{min-width:0;flex:1;display:flex;flex-direction:column;gap:2px}
+.n{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:13px;color:var(--label)}
+.c{font-size:11px;color:var(--label3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.row.dim .n,.row.dim .ib{color:var(--label3)}
+.addbar{height:28px;border-top:1px solid var(--hairline);display:flex;align-items:center;gap:6px;padding:0 10px;font-size:13px;flex:none}
+.addbar svg{width:13px;height:13px}
+
+/* ---------- Speakers overview pane ---------- */
+.ct{background:var(--panel)}
+.pane{padding:44px 28px 20px}
+.ph{display:flex;align-items:center;gap:12px}
+.idw{width:48px;height:48px;border-radius:14px;border:1px solid var(--containerEdge);display:grid;place-items:center;color:var(--label2);flex:none;background:var(--raised)}
+.idw svg{width:26px;height:26px;stroke-width:1.3}
+.ph h1{font-size:16px;font-weight:600;line-height:20px}
+.tot{font-size:11px;color:var(--label2);margin-top:2px;display:flex;align-items:center;gap:4px;white-space:nowrap;height:14px}
+/* GroupedSectionView .card: raised fill, containerEdge edge and in-card dividers, radius 26, 415 pt column */
+.oc{border:1px solid var(--containerEdge);background:var(--raised);border-radius:26px;margin:36px -14px 0;overflow:hidden}
+.kinds{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));padding:12px 10px 11px 18px;row-gap:4px}
+.kinds .cap{grid-column:1/5;grid-row:1;font-size:11px;font-weight:600;color:var(--label2);line-height:14px}
+.kinds .k{grid-row:2;min-width:0}
+.kinds .k.un{grid-column:5;grid-row:1/3;display:flex;flex-direction:column;justify-content:flex-end;padding-left:12px;position:relative}
+.kinds .k.un::before{content:"";position:absolute;left:0;top:2px;bottom:2px;border-left:1px solid var(--containerEdge)}
+.kinds .top{display:flex;align-items:center;gap:6px;color:var(--label2);height:20px}
+.kinds .top svg{width:16px;height:16px;stroke-width:1.4}
+.num{font-size:16px;font-weight:600;color:var(--label);font-variant-numeric:tabular-nums;line-height:20px}
+.num.zero{color:var(--label3)}
+.kinds .lab{font-size:11px;color:var(--label2);margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.gl{width:16px;height:16px;display:grid;place-items:center;flex:none}
+.ring{width:9px;height:9px;border-radius:50%;border:2px solid var(--rim);display:block}
+.li{display:flex;align-items:center;gap:10px;min-height:44px;padding:0 16px 0 0;margin-left:18px;border-top:1px solid var(--containerEdge)}
+.li .t{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.li .g{color:var(--label2);display:flex}
+.li .g svg{width:16px;height:16px;stroke-width:1.4}
+.li .go{color:var(--label2);display:flex}
+.li .go svg{width:12px;height:12px;stroke-width:1.8}
+.btn{font:inherit;font-size:12px;height:22px;padding:0 10px;border-radius:6px;background:var(--popFill);border:.5px solid var(--popEdge);box-shadow:var(--popShadow);display:inline-flex;align-items:center;color:var(--label);white-space:nowrap;flex:none}
+
+/* the placeholder a number lands in, and the one moving highlight that crosses the pane */
+.slot{display:inline-block;width:20px;height:12px;border-radius:3px;background:var(--meter);position:relative;overflow:hidden;flex:none}
+.slot.sm{width:16px;height:8px;border-radius:2.5px;margin-right:1px}
+.slot::after{content:"";position:absolute;top:0;bottom:0;left:0;width:44px;
+  background:linear-gradient(90deg,transparent,var(--glint) 50%,transparent);
+  transform:translateX(calc(-44px - var(--x,0px)));animation:sweep 1.6s infinite}
+@keyframes sweep{
+  0%{transform:translateX(calc(-44px - var(--x,0px)));animation-timing-function:cubic-bezier(.45,0,.55,1)}
+  68.75%{transform:translateX(calc(var(--w,443px) - var(--x,0px)))}
+  100%{transform:translateX(calc(var(--w,443px) - var(--x,0px)))}
+}
+.capture .slot::after{animation:none;transform:translateX(calc(var(--pos,-99px) - var(--x,0px)))}
+@media (prefers-reduced-motion:reduce){.slot::after{display:none}}
+
+/* ---------- side column ---------- */
+.box{background:var(--box);border-radius:12px;box-shadow:0 0 0 .5px var(--frame),0 8px 20px rgba(0,0,0,.10);padding:14px 16px}
+.box h3{font-size:12px;font-weight:600;color:var(--label);margin-bottom:10px}
+.spec{display:grid;grid-template-columns:150px repeat(3,1fr);gap:6px 8px;align-items:center;font-size:11px}
+.spec .hd{color:var(--note);font-size:10.5px}
+.spec .k{color:var(--label2)}
+.sw{height:28px;border-radius:7px;display:flex;align-items:center;justify-content:center;gap:10px}
+.sw.g{background:var(--sidebar)} .sw.p{background:var(--sideSel)} .sw.a{background:var(--accentSel)}
+.sw .d{margin:0}
+.sw.p .d.on{background:var(--label)} .sw.p .d.off{border-color:var(--label)}
+.sw.a .d.on{background:var(--onAccent)} .sw.a .d.off{border-color:var(--onAccent)}
+.sw .d.ic.on{background:var(--rimIC)} .sw .d.ic.off{border-color:var(--rimIC)}
+.zoom{display:flex;gap:22px;align-items:center;margin-top:10px;padding:9px 12px;border-radius:8px;background:var(--sidebar)}
+.zoom .z{display:flex;align-items:center;gap:8px;font-size:11px;color:var(--label2)}
+.zoom .zd{width:36px;height:36px;border-radius:50%;flex:none}
+.zoom .zd.on{background:var(--rim)}
+.zoom .zd.off{border:8px solid var(--rim)}
+.tl{display:flex;flex-direction:column;gap:8px}
+.tlr{display:grid;grid-template-columns:200px 415px;gap:14px;align-items:center}
+.when{font-size:10.5px;color:var(--note);line-height:1.4}
+.when b{display:block;font-size:12px;color:var(--label);font-weight:600;font-variant-numeric:tabular-nums}
+.when .hd{display:flex;align-items:center;gap:4px;margin-top:3px;color:var(--label2);font-size:11px}
+.mini{position:relative}
+.mini .oc{margin:0}
+.two{display:flex;gap:14px;align-items:flex-start}
+.crop{flex:none;position:relative;width:210px;background:var(--sidebar);border-radius:8px;box-shadow:0 0 0 .5px var(--frame)}
+.cap2{font-size:10.5px;color:var(--note);line-height:1.45;margin-top:6px}
+.menu{flex:none;width:213px;background:var(--menu);border-radius:8px;box-shadow:0 0 0 .5px var(--menuEdge),0 10px 24px rgba(0,0,0,.22);padding:5px;font-size:13px;z-index:2}
+.menu div{height:22px;display:flex;align-items:center;padding:0 9px;border-radius:4px;white-space:nowrap}
+.menu hr{border:0;border-top:1px solid var(--menuEdge);margin:5px 9px}
+.menu .hi{background:var(--menuHi);color:#fff}
+.tip{position:absolute;left:84px;top:25px;background:var(--menu);border-radius:5px;box-shadow:0 0 0 .5px var(--menuEdge),0 4px 10px rgba(0,0,0,.18);font-size:11px;padding:3px 7px;color:var(--label);z-index:3;white-space:nowrap}
+.row.ctx .cell{box-shadow:inset 0 0 0 2px var(--accentSel)}
+.meas{position:relative;height:6px;margin:4px 0 0 64px;width:128px;border:1px solid var(--note);border-top:0;opacity:.8}
+.meas i{position:absolute;left:0;top:-3px;height:3px;background:var(--rim);width:106px}
+
+/* ---------- state strip ---------- */
+.strip{margin-top:30px}
+.panels{display:grid;grid-template-columns:repeat(4,330px);gap:16px}
+.panel h3{font-size:12px;font-weight:600;color:var(--label2);margin:0 0 8px 2px;white-space:nowrap}
+.pc{width:443px;zoom:.745;border-radius:13px;overflow:hidden;background:var(--panel);box-shadow:0 0 0 .7px var(--frame),0 8px 20px rgba(0,0,0,.12)}
+.pc .pane{padding:22px 28px 24px}
+</style>
+</head>
+<body>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+ <defs>
+  <symbol id="laptop" viewBox="0 0 24 24"><rect x="4.5" y="6" width="15" height="10" rx="1.2"/><path d="M2.5 18.5h19"/></symbol>
+  <symbol id="spk" viewBox="0 0 24 24"><rect x="7" y="3" width="10" height="18" rx="2"/><circle cx="12" cy="14.5" r="3"/><circle cx="12" cy="7.2" r="1.2"/></symbol>
+  <symbol id="radio" viewBox="0 0 24 24"><rect x="3.5" y="8" width="17" height="11.5" rx="2"/><path d="M7 8 16 4"/><circle cx="9" cy="13.8" r="2.6"/><path d="M15 12h3M15 15.5h3"/></symbol>
+  <symbol id="tv" viewBox="0 0 24 24"><rect x="2.5" y="5" width="14" height="10" rx="1.2"/><path d="M6 18h7"/><rect x="15.5" y="10" width="6" height="9.5" rx="1.2"/><circle cx="18.5" cy="16.5" r="1.4"/></symbol>
+  <symbol id="atv" viewBox="0 0 24 24"><rect x="3" y="6" width="18" height="12" rx="2.5"/><path d="M8 12h2M13 10.5v3M15 10.5l1.2 3 1.2-3"/></symbol>
+  <symbol id="phones" viewBox="0 0 24 24"><path d="M4 15v-3a8 8 0 0 1 16 0v3"/><rect x="3.5" y="14" width="4" height="6.5" rx="1.5"/><rect x="16.5" y="14" width="4" height="6.5" rx="1.5"/></symbol>
+  <symbol id="buds" viewBox="0 0 24 24"><circle cx="7" cy="7" r="3"/><path d="M8 10v9"/><circle cx="17" cy="7" r="3"/><path d="M16 10v9"/></symbol>
+  <symbol id="spkOut" viewBox="0 0 24 24"><path d="M5 9.5h3l5-4v13l-5-4H5z"/></symbol>
+  <symbol id="airplay" viewBox="0 0 24 24"><path d="M6.4 17.2a8 8 0 1 1 11.2 0"/><path d="M9.2 14.4a4 4 0 1 1 5.6 0"/><path d="M12 14.6 16 20H8z"/></symbol>
+  <symbol id="main" viewBox="0 0 24 24"><rect x="9" y="3.5" width="9" height="17" rx="1.6"/><path d="M3 12h9M9.5 9l3 3-3 3"/></symbol>
+  <symbol id="speakers" viewBox="0 0 24 24"><rect x="4" y="4" width="8" height="16" rx="1.6"/><circle cx="8" cy="14" r="2.2"/><rect x="14" y="7" width="6" height="13" rx="1.4"/><circle cx="17" cy="15.5" r="1.4"/></symbol>
+  <symbol id="scenes" viewBox="0 0 24 24"><rect x="3" y="5" width="8" height="14" rx="1.4"/><rect x="13" y="5" width="8" height="14" rx="1.4"/></symbol>
+  <symbol id="chev" viewBox="0 0 24 24"><path d="m9 5 7 7-7 7"/></symbol>
+  <symbol id="plus" viewBox="0 0 24 24"><path d="M12 4v16M4 12h16"/></symbol>
+  <symbol id="plusC" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 8v8M8 12h8"/></symbol>
+  <symbol id="pinS" viewBox="0 0 24 24"><path d="M8 3h8M9 3v6l-3 4h12l-3-4V3M12 13v8"/></symbol>
+  <symbol id="bars" viewBox="0 0 24 24"><path d="M4 9v6M8 6v12M12 4v16M16 7v10M20 10v4"/></symbol>
+  <symbol id="gear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 3.5l1.6 2.3 2.7-.8.6 2.8 2.7.9-.8 2.7 2.3 1.6-2.3 1.6.8 2.7-2.7.9-.6 2.8-2.7-.8L12 20.5l-1.6-2.3-2.7.8-.6-2.8-2.7-.9.8-2.7L2.9 12l2.3-1.6-.8-2.7 2.7-.9.6-2.8 2.7.8z"/></symbol>
+ </defs>
+</svg>
+
+<div class="top">
+ <div class="colW">
+  <h2>Speakers tab, search finished <span>(the owner's 20 speakers, Overview selected)</span></h2>
+  <div class="win" id="win"></div>
+  <p class="note"><b>Everything adds up.</b> 8 filled dots in the sidebar = Available 4 + 0 + 3 + 1. 12 rings = Unavailable 12. The header's 20 = every sidebar row. The 6 that can't be found are part of the 12, not extra. Which speakers sit under Hidden unless playing is illustrative (the owner hides none today). Drawn tall enough for all 20 rows; a shorter window scrolls the list.</p>
+ </div>
+
+ <div class="colS">
+  <div class="box">
+   <h3>Sidebar dot: filled or ring, one colour</h3>
+   <div class="spec">
+    <span></span><span class="hd">On the sidebar</span><span class="hd">Selected row</span><span class="hd">Selected, list in focus</span>
+    <span class="k">Reachable on the network</span>
+    <span class="sw g"><span class="d on"></span></span><span class="sw p"><span class="d on"></span></span><span class="sw a"><span class="d on"></span></span>
+    <span class="k">Not reachable: unavailable, or can't be found</span>
+    <span class="sw g"><span class="d off"></span></span><span class="sw p"><span class="d off"></span></span><span class="sw a"><span class="d off"></span></span>
+    <span class="k">Increase Contrast</span>
+    <span class="sw g"><span class="d ic on"></span><span class="d ic off"></span></span><span class="sw p"><span class="d on"></span><span class="d off"></span></span><span class="sw a"><span class="d on"></span><span class="d off"></span></span>
+   </div>
+   <div class="zoom"><span class="z"><span class="zd on"></span>9 pt disc, <code>rim</code></span><span class="z"><span class="zd off"></span>9 pt, 2 pt <code>rim</code> stroke inside the edge</span></div>
+   <p class="note">The same ring is the Unavailable glyph and the can't-be-found row's glyph on the overview. No gold, no red, no warning triangle in the sidebar. A selected row draws the dot in the row's own text colour, because <code>rim</code> fails on both selection pills.</p>
+  </div>
+
+  <div class="box">
+   <h3>How the numbers fill in <span style="font-weight:400;color:var(--note)">(one launch, the owner's 20 speakers)</span></h3>
+   <div class="tl" id="tl"></div>
+  </div>
+
+  <div class="box">
+   <h3>Sidebar strings that change</h3>
+   <div class="two">
+    <div><div class="crop" id="cA"></div>
+     <p class="cap2" style="width:210px"><b>Shown while playing</b> is 106 pt at the 11 pt caption font in a 128 pt column (bar above). The old caption, In the Mixer while it plays, was 132 pt and cut off.</p></div>
+    <div style="flex:1"><div style="display:flex;gap:12px;align-items:flex-start"><div class="crop" id="cB"></div><div class="menu"><div>Hide from Mixer</div><div>Show even when unavailable</div><hr><div>Speaker settings…</div><hr><div class="hi">Forget “teevee”…</div></div></div>
+     <p class="cap2">A speaker the Mac can't find: the same ring as unavailable and tooltip <b>Can't be found</b>. Right-click it (outlined) for the menu: the new <b>Show even when unavailable</b>, and the Forget item only these speakers get.</p></div>
+   </div>
+  </div>
+ </div>
+</div>
+
+<div class="strip">
+ <h2>Overview states <span>(content pane only, drawn at 75 %)</span></h2>
+ <div class="panels">
+  <div class="panel"><h3>Mid-search, 1.5 s after launch</h3><div class="pc" id="p1" data-z=".745"></div>
+   <p class="note">This Mac, Bluetooth and AirPlay are known. Cast, Unavailable and the total still show the moving highlight. No can't-be-found row until the search ends.</p></div>
+  <div class="panel"><h3>Finished, some unavailable</h3><div class="pc" id="p2" data-z=".745"></div>
+   <p class="note"><b>3 + 1 + 0 + 1 + 4 = 9.</b> The speaker that can't be found is one of the 4. Row tooltip: "1 of the 4 unavailable speakers hasn't appeared since Audiout opened."</p></div>
+  <div class="panel"><h3>Finished, every speaker reachable</h3><div class="pc" id="p3" data-z=".745"></div>
+   <p class="note">Unavailable reads 0 in the quieter ink. No success line: the zero is the answer.</p></div>
+  <div class="panel"><h3>Bluetooth access off</h3><div class="pc" id="p4" data-z=".745"></div>
+   <p class="note">Paired speakers macOS won't list without access count as unavailable but stay out of Forget.</p></div>
+ </div>
+</div>
+
+<script>
+if(/HeadlessChrome/.test(navigator.userAgent)) document.body.classList.add('capture');
+var u=function(id){return '<svg class="i"><use href="#'+id+'"/></svg>'};
+
+/* ---------- sidebar ---------- */
+var MIX=[['on','laptop','MacBook Pro Speakers'],['on','spk','Alec’s MacBook Pro'],['on','atv','casty'],['on','tv','casty'],['off','phones','ION Speaker'],['off','radio','isaac'],['off','radio','JBL Flip 5'],['on','tv','Mac Cast Receiver'],['off','spkOut','Missing speaker'],['off','radio','Move 2 (SONOS Bedroom)'],['off','phones','Onkyo TX-8220'],['on','spk','Sonos Move'],['off','radio','Sonos Move (SONOS Kitchen)'],['off','spk','teevee'],['on','tv','TV']];
+var HID=[['off','phones','A AirPods Max'],['off','buds','AirPods Pro'],['off','buds','Alec’s AirPods Pro'],['on','spk','Fancyy','Shown while playing'],['off','phones','WH-1000XM3']];
+function row(r){var cls='row'+(r[0]=='off'?' dim':'')+(r[3]?' cap':'');
+ return '<div class="'+cls+'"><div class="cell"><span class="d '+r[0]+'"></span><span class="ib">'+u(r[1])+'</span><span class="lb"><span class="n">'+r[2]+'</span>'+(r[3]?'<span class="c">'+r[3]+'</span>':'')+'</span></div></div>'}
+function plate(icon,text,sel){return '<div class="plateRow"><div class="plate'+(sel?' sel':'')+'"><span class="ib">'+u(icon)+'</span>'+text+'<span class="chev">'+u('chev')+'</span></div></div>'}
+var SIDEBAR='<div class="list"><div class="title">System Audio</div>'+plate('main','Main Audio')+'<div class="gap"></div><div class="title">Speakers</div>'+plate('speakers','Overview',true)+
+ '<div class="sub">Shown in Mixer</div>'+MIX.map(row).join('')+'<div class="sub">Hidden unless playing</div>'+HID.map(row).join('')+'</div><div class="addbar">'+u('plus')+'Add scene</div>';
+
+/* ---------- overview ---------- */
+var KINDS=[['airplay','AirPlay'],['radio','Bluetooth'],['tv','Cast'],['laptop','This Mac']];
+var RING='<span class="gl"><span class="ring"></span></span>';
+function num(n){return n==null?'<span class="slot"></span>':'<span class="num'+(n===0?' zero':'')+'">'+n+'</span>'}
+/* c = [airplay, bluetooth, cast, mac, unavailable]; null = still looking */
+function strip(c){
+ var h='<div class="cap">Available</div>'+KINDS.map(function(k,i){return '<div class="k"><div class="top">'+u(k[0])+num(c[i])+'</div><div class="lab">'+k[1]+'</div></div>'}).join('');
+ return '<div class="kinds">'+h+'<div class="k un"><div class="top">'+RING+num(c[4])+'</div><div class="lab">Unavailable</div></div></div>'}
+function total(t){return t==null?'<span class="slot sm"></span>speakers':(t==1?'1 speaker':t+' speakers')}
+var PAIR='<div class="li"><span class="g">'+u('plusC')+'</span><span class="t">Pair Bluetooth speaker…</span><span class="go">'+u('chev')+'</span></div>';
+function lost(n){return '<div class="li"><span class="g">'+RING+'</span><span class="t">'+(n==1?'1 speaker':n+' speakers')+' can’t be found</span><button class="btn" type="button">Forget '+(n==1?'1 speaker':n+' speakers')+'…</button></div>'}
+var BTOFF='<div class="li"><span class="g">'+u('radio')+'</span><span class="t">Bluetooth access is off</span><button class="btn" type="button">Open Privacy Settings…</button></div>';
+function pane(t,body){return '<div class="pane"><div class="ph"><div class="idw">'+u('speakers')+'</div><div><h1>Speakers</h1><div class="tot">'+total(t)+'</div></div></div><div class="oc">'+body+'</div></div>'}
+
+document.getElementById('win').innerHTML=
+ '<div class="tb"><span class="dotR"></span><div class="seg"><span>'+u('bars')+'</span><span>'+u('scenes')+'</span><span class="on">'+u('speakers')+'Speakers</span><span>'+u('gear')+'</span></div><div class="tbt">Audiout</div><div class="pin">'+u('pinS')+'</div></div>'+
+ '<div class="body"><aside class="sb">'+SIDEBAR+'</aside><section class="ct">'+pane(20,strip([4,0,3,1,12])+lost(6)+PAIR)+'</section></div>';
+
+/* fill-in timeline */
+var STEPS=[[0,[null,null,null,1,null],null,'0.0 s','This Mac: in the device list before any search starts.'],
+ [600,[null,0,null,1,null],null,'0.6 s','Bluetooth: macOS lists it in one pass; known after 0.5&nbsp;s with no change. 0 of 6 connected.'],
+ [1500,[4,0,null,1,null],null,'1.5 s','AirPlay: no new AirPlay speaker for 0.5&nbsp;s.'],
+ [2100,[4,0,3,1,12],20,'2.1 s','Cast settles, and that was the last change anywhere: the search is done, so Unavailable and the total fill in.']];
+document.getElementById('tl').innerHTML=STEPS.map(function(s){
+ return '<div class="tlr"><div class="when"><b>'+s[3]+'</b>'+s[4]+'<span class="hd">Header: '+total(s[2])+'</span></div><div class="mini"><div class="oc">'+strip(s[1])+'</div></div></div>'}).join('');
+
+/* sidebar detail crops */
+document.getElementById('cA').innerHTML='<div class="list" style="padding:4px 0 8px"><div class="sub">Hidden unless playing</div>'+row(HID[2])+row(HID[3])+'<div class="meas"><i></i></div>'+row(HID[4])+'</div>';
+document.getElementById('cB').innerHTML='<div class="list" style="padding:4px 0 8px">'+row(MIX[11])+row(MIX[12])+'<div style="position:relative">'+row(MIX[13]).replace('class="row dim"','class="row dim ctx"')+'<span class="tip">Can’t be found</span></div>'+row(MIX[14])+'</div>';
+
+/* state strip */
+document.getElementById('p1').innerHTML=pane(null,strip([4,0,null,1,null])+PAIR);
+document.getElementById('p2').innerHTML=pane(9,strip([3,1,0,1,4])+lost(1)+PAIR);
+document.getElementById('p3').innerHTML=pane(12,strip([7,2,2,1,0])+PAIR);
+document.getElementById('p4').innerHTML=pane(14,strip([6,1,2,1,4])+lost(2)+BTOFF+PAIR);
+
+/* every placeholder reads one moving highlight in its container's coordinates, so one band crosses the pane */
+document.querySelectorAll('.slot').forEach(function(el){
+ var box=el.closest('.pane')||el.closest('.tlr'), z=parseFloat((el.closest('[data-z]')||{dataset:{}}).dataset.z||1);
+ var r=box.getBoundingClientRect();
+ el.style.setProperty('--x',((el.getBoundingClientRect().left-r.left)/z)+'px');
+ el.style.setProperty('--w',(r.width/z)+'px');
+});
+/* PNG only: park the band 7 pt into the first placeholder after the header in each container */
+document.querySelectorAll('.pane, .tlr').forEach(function(c){
+ var s=c.querySelectorAll('.kinds .slot'); if(!s.length) return;
+ var pos=parseFloat(s[0].style.getPropertyValue('--x'))+7-22;
+ c.querySelectorAll('.slot').forEach(function(el){el.style.setProperty('--pos',pos+'px')});
+});
+</script>
+</body>
+</html>

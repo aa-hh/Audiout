@@ -386,6 +386,47 @@ import Testing
         return (ReferenceAudioRing(), pcm)
     }
 
+    /// The periodic timer, stepped by hand: `advance(to:)` runs every fire
+    /// due by then on the tracker's queue and returns once they have run, so
+    /// a busy suite can never slip a fire in before the test looks.
+    private final class HandDrivenPeriodicClock: @unchecked Sendable {
+        private let lock = NSLock()
+        private var queue: DispatchQueue?
+        private var fire: (@Sendable () -> Void)?
+        private var nowSeconds = 0.0
+        private var nextFireSeconds = 0.0
+        private var intervalSeconds = 0.0
+
+        /// What `PassiveDriftTracker(periodicClock:)` takes.
+        var clock: PassiveDriftTracker.PeriodicClock {
+            { [self] firstSeconds, intervalSeconds, queue, fire in
+                lock.withLock {
+                    self.queue = queue
+                    self.fire = fire
+                    self.nextFireSeconds = nowSeconds + firstSeconds
+                    self.intervalSeconds = intervalSeconds
+                }
+                return { [self] in lock.withLock { self.fire = nil } }
+            }
+        }
+
+        func advance(to seconds: Double) {
+            while true {
+                let due: (DispatchQueue, @Sendable () -> Void)? = lock.withLock {
+                    guard let queue, let fire, nextFireSeconds <= seconds else {
+                        nowSeconds = seconds
+                        return nil
+                    }
+                    nowSeconds = nextFireSeconds
+                    nextFireSeconds += intervalSeconds
+                    return (queue, fire)
+                }
+                guard let due else { return }
+                due.0.sync(execute: due.1)
+            }
+        }
+    }
+
     /// THE DEFECT. The first window used to land at the periodic interval
     /// itself (decision 18 wants a window soon after start, then far apart),
     /// or the periodic timer kept firing every interval from the start
@@ -396,6 +437,7 @@ import Testing
         let (ring, program) = Self.silenceProgram(rate: rate)
         let silence = [Float](repeating: 0, count: Int(rate))
         let windowCount = UncheckedBox<Int>(0)
+        let clock = HandDrivenPeriodicClock()
         let tracker = PassiveDriftTracker(
             ring: ring,
             windowSeconds: 0.05,
@@ -408,21 +450,31 @@ import Testing
                                 feed: { ring.append(program, pts: timespec(tv_sec: 500, tv_nsec: 0)) })
             },
             permissionIsGranted: { true },
+            periodicClock: clock.clock,
             onObservations: { _ in })
         tracker.setBaselines([PassiveDriftSampler.Baseline(
             deviceUID: "bt", kind: .bluetooth, expectedDelayMs: 100)])
         tracker.start()
+        // A read goes through the tracker's queue, so it returns only once
+        // start() has armed the clock.
+        _ = tracker.isBlind
 
-        // Waited for, not slept past, so a 1 s sleep that resumes late cannot
-        // let the 10 s periodic window fire first. KNOWN GAP: this still reads
-        // a real clock. Under a full-suite run heavy enough to starve the
-        // process past 10 s, both windows land before the first poll and the
-        // count reads 2. Pinning that needs an injected clock, not a longer
-        // wait.
-        await SuiteWait.until("the first window to run at its start delay",
-                              timeout: 5) { windowCount.value >= 1 }
+        clock.advance(to: 0.1)
         #expect(windowCount.value == 1,
                 "exactly one window inside the first interval — got \(windowCount.value)")
+
+        // The first window has to finish before another can start; its
+        // unusable verdict is the sign it has.
+        try await Self.waitUntil("the first window to finish") {
+            tracker.consecutiveUnusableWindows == 1
+        }
+        clock.advance(to: 10.0)
+        #expect(windowCount.value == 1,
+                "no second window before the periodic interval — got \(windowCount.value)")
+
+        clock.advance(to: 10.1)
+        #expect(windowCount.value == 2,
+                "the second window lands at the periodic interval — got \(windowCount.value)")
     }
 
     /// THE DEFECT. Every clock step used to take its own window; the rate
@@ -920,3 +972,134 @@ private final class UncheckedBox<Value>: @unchecked Sendable {
         set { lock.lock(); stored = newValue; lock.unlock() }
     }
 }
+
+/// What one drift window sends to PostHog. Nested under
+/// ``SerializedSharedState`` because `Analytics.install(_:consent:)` is
+/// process-global.
+extension SerializedSharedState {
+
+@Suite struct PassiveDriftSamplerAnalyticsTests {
+
+    private static let uidA = "C4-38-75-0E-BF-4A:output"
+    private static let uidB = "00-1A-7D-DA-71-13:output"
+
+    /// `PassiveDriftTrackerTests` run in parallel with this suite and their
+    /// windows reach this sink too. `Analytics` calls the sink on the
+    /// caller's thread, so an event a test sent synchronously is the one
+    /// captured on that test's own thread.
+    private final class Events: @unchecked Sendable {
+        private let lock = NSLock()
+        private var items: [(name: String, properties: [String: String], thread: Thread)] = []
+        func append(_ name: String, _ properties: [String: String]) {
+            lock.withLock { items.append((name, properties, Thread.current)) }
+        }
+        func named(_ name: String, onThread thread: Thread? = nil) -> [[String: String]] {
+            lock.withLock {
+                items.filter { $0.name == name && (thread == nil || $0.thread === thread) }
+                    .map(\.properties)
+            }
+        }
+    }
+
+    /// Installs a recording sink; the caller uninstalls it with
+    /// `Analytics.install(nil, consent: false)`.
+    private func recording() -> Events {
+        let events = Events()
+        Analytics.install(Analytics.Sink(capture: { events.append($0, $1) },
+                                         captureError: { _, _ in },
+                                         consentChanged: { _ in }), consent: true)
+        return events
+    }
+
+    /// Every value these events may carry; anything else is a leak.
+    private static let fencedValues: Set<String> = [
+        "aligned", "observations", "merged", "rebaselined", "unusable", "blind",
+        "periodic", "clock_jump", "reconnect", "audio_mode_change", "silence_to_audio",
+        "verify", "retry",
+        "reference_too_quiet", "reference_too_narrowband", "reference_too_periodic",
+        "slices_too_short", "no_convincing_peak",
+        "0-9", "10-39", "40-99", "100+", "true", "false",
+        "window_in_flight", "no_baselines", "no_mic_permission", "mic_start_failed",
+        "empty_capture", "no_mic_timestamp", "reference_not_aligned", "clock_step_storm",
+    ]
+
+    private func expectFenced(_ properties: [String: String],
+                              sourceLocation: SourceLocation = #_sourceLocation) {
+        for (key, value) in properties {
+            if key == "speaker_count" {
+                #expect(Int(value).map { (0...16).contains($0) } == true,
+                        "speaker_count=\(value)", sourceLocation: sourceLocation)
+            } else {
+                #expect(Self.fencedValues.contains(value), "\(key)=\(value)",
+                        sourceLocation: sourceLocation)
+            }
+        }
+    }
+
+    private func baselines(withAnchor: Bool) -> [PassiveDriftSampler.Baseline] {
+        [.init(deviceUID: Self.uidA, kind: .bluetooth, expectedDelayMs: 160),
+         .init(deviceUID: Self.uidB, kind: .bluetooth, expectedDelayMs: 210)]
+            + (withAnchor ? [.init(deviceUID: "airplay-den", kind: .homePod, expectedDelayMs: 90)] : [])
+    }
+
+    // Turns red if an accepted window stops reporting its worst error as a
+    // bucket, counts the AirPlay anchor as a Bluetooth speaker, or lets a raw
+    // millisecond figure or device id through.
+    @Test func anAcceptedWindowReportsItsWorstErrorAsABucket() {
+        let events = recording()
+        defer { Analytics.install(nil, consent: false) }
+        PassiveDriftTracker.logWindow(
+            .observations([
+                .init(deviceUID: Self.uidA, errorMs: -25, hostNanos: 1, isBestGuess: false),
+                .init(deviceUID: Self.uidB, errorMs: 3, hostNanos: 1, isBestGuess: false),
+            ]),
+            peaks: [], candidates: [], baselines: baselines(withAnchor: true),
+            hostNanos: 1, reason: .clockJump(uid: Self.uidA))
+        let sent = events.named("bt_sync:drift_window_ended", onThread: Thread.current)
+        #expect(sent == [[
+            "result": "observations", "trigger": "clock_jump",
+            "error_ms_bucket": "10-39", "speaker_count": "2", "has_reference": "true",
+        ]])
+        sent.forEach { expectFenced($0) }
+    }
+
+    // Turns red if a refused window loses its refusal reason, or carries an
+    // error bucket it never measured.
+    @Test func aTooQuietWindowReportsItsRefusalAndNoError() {
+        let events = recording()
+        defer { Analytics.install(nil, consent: false) }
+        PassiveDriftTracker.logWindow(
+            .unusable(.referenceTooQuiet), peaks: [], candidates: [],
+            baselines: baselines(withAnchor: false), hostNanos: 1, reason: .periodic)
+        let sent = events.named("bt_sync:drift_window_ended", onThread: Thread.current)
+        #expect(sent == [[
+            "result": "unusable", "trigger": "periodic",
+            "refusal": "reference_too_quiet", "speaker_count": "2", "has_reference": "false",
+        ]])
+        sent.forEach { expectFenced($0) }
+    }
+
+    // Turns red if a window the tracker could not take goes unreported, which
+    // is what left a two-hour session unable to tell a tracker that never ran
+    // from one that ran and found nothing.
+    @Test func aWindowWithNoMicPermissionReportsTheSkip() async {
+        let events = recording()
+        defer { Analytics.install(nil, consent: false) }
+        let tracker = PassiveDriftTracker(
+            ring: ReferenceAudioRing(),
+            permissionIsGranted: { false },
+            onObservations: { _ in })
+        tracker.setBaselines(baselines(withAnchor: false))
+        tracker.trigger(.verify)
+        // This skip runs on the tracker's queue, not this test's thread; no
+        // other tracker in the suite is denied the mic, so the reason is
+        // what tells this test's skip apart.
+        let mine = { events.named("bt_sync:drift_window_skipped")
+            .filter { $0["reason"] == "no_mic_permission" } }
+        await SuiteWait.until("the skip is captured") { !mine().isEmpty }
+        #expect(mine() == [["reason": "no_mic_permission"]])
+        mine().forEach { expectFenced($0) }
+    }
+}
+
+} // extension SerializedSharedState

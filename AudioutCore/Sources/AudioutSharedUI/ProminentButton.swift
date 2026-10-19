@@ -71,6 +71,10 @@ public final class ProminentButton: NSButton {
         self.action = action
         bezelStyle = .rounded
         controlSize = .regular
+        // macOS 26+ draws a `bezelColor` at full strength only at primary
+        // prominence; the automatic default blended it toward the window
+        // background, so the gold came out a dark olive in the popover.
+        if #available(macOS 26.0, *) { tintProminence = .primary }
         setContentHuggingPriority(.required, for: .horizontal)
         applyColours()
         NotificationCenter.default.addObserver(

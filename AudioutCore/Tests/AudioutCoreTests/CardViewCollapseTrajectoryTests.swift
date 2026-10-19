@@ -4,6 +4,7 @@ import Foundation
 import Testing
 import AppKit
 @testable import AudioutPopoverUI
+@testable import AudioutSharedUI
 
 /// Regression coverage for the **first-collapse jump** (`CardView.setBodyCollapsed`).
 ///
@@ -28,9 +29,8 @@ import AppKit
 /// progress (see `BusRailCollapseResolveTests` behavior 3), identical start +
 /// end + timing ⇒ identical intermediate geometry ⇒ no first-collapse jump.
 ///
-/// `CardView.setBodyCollapsed(animated:)` has no Reduce-Motion gate of its own
-/// (the controller decides `animated`), so the animated path runs deterministically
-/// here regardless of the CI machine's accessibility settings.
+/// `CardView.setBodyCollapsed(animated:)` runs the fold on `FoldAnimator.shared`,
+/// which answers Reduce Motion, so the animated test pins its override.
 @MainActor
 @Suite final class CardViewCollapseTrajectoryTests: IsolatedSuite {
 
@@ -105,6 +105,11 @@ import AppKit
     /// geometry at every animation progress point. This is the property whose
     /// absence the user saw as "the first collapse jumps, the rest are fine".
     @Test func firstAndSecondCollapseShareIdenticalStartHeight() throws {
+        defer {
+            FoldAnimator.shared.test_reduceMotionOverride = nil
+            FoldAnimator.shared.test_settleNow()
+        }
+        FoldAnimator.shared.test_reduceMotionOverride = false
         let card = makeLaidOutExpandedCard()
 
         let expandedHeight = card.bodyFittingHeight

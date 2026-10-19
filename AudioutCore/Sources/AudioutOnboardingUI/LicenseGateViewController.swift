@@ -48,18 +48,15 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
     private let gutterLine = NSTextField(wrappingLabelWithString: "")
     private var registerButton: ProminentButton!
     private var resendButton: ProminentButton!
-    private let pasteKeyButton = NSButton()
-    private let lostKeyButton = NSButton()
+    /// The quiet tier's two links. Underlined so they read as tappable text,
+    /// the one signal that separates them from the plain sentence above; gold
+    /// stays spent on Register alone.
+    private let pasteKeyButton = TextLinkButton(title: "Paste key")
+    private let lostKeyButton = TextLinkButton(title: "I lost my key")
     private let buyButton = NSButton()
     private let quitButton = NSButton()
     private let trialButton = NSButton()
     private var didPass = false
-
-    /// Whether this gate is the one a finished trial lands on. Read ONCE, in
-    /// `loadView`: it decides the headline and the body line, and neither may
-    /// change while the window is up — the surface's whole contract is that
-    /// nothing on it moves.
-    private var trialHasEnded = false
 
     /// What the shared controls currently mean. The lost-key path MORPHS this
     /// one field and one button rather than opening anything: same geometry,
@@ -106,9 +103,8 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
     private static let glassVInset: CGFloat = 12
 
     /// The gate's trial copy, owner-verbatim from
-    /// `dev/notes/trial-spec-2026-09-05.md` § Copy. The expired pair replaces
-    /// the welcome; the offer is only ever shown to a Mac that has never
-    /// started a trial.
+    /// `dev/notes/trial-spec-2026-09-05.md` § Copy. The offer is only ever
+    /// shown to a Mac that has never started a trial.
     ///
     /// The spec's caption under the offer — "No card, no email. Every feature.
     /// Buy any time." — is NOT here: at 560 x 440 the column has room for the
@@ -116,10 +112,6 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
     /// `theContentColumnClearsTheBottomButtonRow` measures it). Either the
     /// window grows or the caption borrows the gutter, and both are the
     /// owner's call, not this ticket's.
-    private static let expiredHeadline = "Your 14-day trial has ended."
-    private static let expiredBody =
-        "Buy Audiout for €30, once, and keep everything you set up. "
-        + "Your scenes and speaker settings are still here."
     private static let trialTitle = "Try Audiout free for 14 days"
 
     /// Rest and lifted opacity for the bottom-edge pair. They sit under the
@@ -150,13 +142,6 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
     public required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     public override func loadView() {
-        trialHasEnded = TrialClock.hasEnded(settings: settings)
-        if trialHasEnded {
-            // The gate is only ever built in order to be shown, so building it
-            // IS the impression — and it is the one moment a test can reach,
-            // since nothing here may put a window on screen.
-            Analytics.capture("license:expired_gate_shown")
-        }
         field.translatesAutoresizingMaskIntoConstraints = false
 
         let mark = NSImageView()
@@ -180,37 +165,22 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
         // path under `swift run`, `swift test` and the snapshot tools.
         let centred = NSMutableParagraphStyle()
         centred.alignment = .center
-        let line: NSMutableAttributedString
-        if trialHasEnded {
-            // The expired headline names no product, so it has no wordmark run
-            // and stays one plain run at the same size.
-            line = NSMutableAttributedString(
-                string: Self.expiredHeadline,
-                attributes: [.font: Tokens.Font.displayLarge,
-                             .foregroundColor: Tokens.Color.label])
-        } else {
-            line = NSMutableAttributedString(
-                string: "Welcome to ",
-                attributes: [.font: Tokens.Font.displayLarge,
-                             .foregroundColor: Tokens.Color.label])
-            line.append(NSAttributedString(
-                string: "Audiout",
-                attributes: [.font: Tokens.Font.wordmark(size: 25),
-                             .foregroundColor: Tokens.Color.label]))
-        }
+        let line = NSMutableAttributedString(
+            string: "Welcome to ",
+            attributes: [.font: Tokens.Font.displayLarge,
+                         .foregroundColor: Tokens.Color.label])
+        line.append(NSAttributedString(
+            string: "Audiout",
+            attributes: [.font: Tokens.Font.wordmark(size: 25),
+                         .foregroundColor: Tokens.Color.label]))
         line.addAttribute(.paragraphStyle, value: centred,
                           range: NSRange(location: 0, length: line.length))
         headlineLabel.attributedStringValue = line
         headlineLabel.alignment = .center
-        headlineLabel.setAccessibilityRole(.staticText)
-        headlineLabel.setAccessibilitySubrole(NSAccessibility.Subrole(rawValue: "AXHeading"))
+        headlineLabel.setAccessibilityHeading()
 
-        if trialHasEnded {
-            whyLabel.stringValue = Self.expiredBody
-        } else {
-            whyLabel.stringValue =
-                "It takes one key to open. Yours is in your receipt email, starting with AUDT."
-        }
+        whyLabel.stringValue =
+            "It takes one key to open. Yours is in your receipt email, starting with AUDT."
         whyLabel.font = Tokens.Font.titleLarge
         whyLabel.textColor = Tokens.Color.label2
         whyLabel.alignment = .center
@@ -255,17 +225,11 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
         gutter.translatesAutoresizingMaskIntoConstraints = false
         gutter.addSubview(gutterLine)
 
-        pasteKeyButton.isBordered = false
-        pasteKeyButton.controlSize = .regular
         pasteKeyButton.target = self
         pasteKeyButton.action = #selector(pasteKeyTapped)
-        setPasteKeyEnabled(true)
 
-        lostKeyButton.isBordered = false
-        lostKeyButton.controlSize = .regular
         lostKeyButton.target = self
         lostKeyButton.action = #selector(lostKeyTapped)
-        setQuietLinkTitle("I lost my key", on: lostKeyButton)
 
         buyButton.title = "Buy Audiout"
         buyButton.bezelStyle = .rounded
@@ -399,28 +363,6 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
         return button
     }
 
-    /// The quiet tier's two links. `ProminentButton` stamps its own title, so
-    /// these carry their ink themselves.
-    private func setQuietLinkTitle(_ title: String, on button: NSButton,
-                                   ink: NSColor = Tokens.Color.label2) {
-        // Underlined so "Paste key" / "I lost my key" read as tappable text —
-        // the one signal that separates them from the plain sentence above. No
-        // colour change: gold stays spent on Register alone.
-        button.attributedTitle = NSAttributedString(
-            string: title,
-            attributes: [.foregroundColor: ink,
-                         .font: Tokens.Font.body,
-                         .underlineStyle: NSUnderlineStyle.single.rawValue])
-    }
-
-    /// The ink IS the disabled look: an attributed title carries its own
-    /// colour, so `isEnabled` alone leaves the link at full strength.
-    private func setPasteKeyEnabled(_ enabled: Bool) {
-        pasteKeyButton.isEnabled = enabled
-        setQuietLinkTitle("Paste key", on: pasteKeyButton,
-                          ink: enabled ? Tokens.Color.label2
-                                       : Tokens.Color.label3)
-    }
 
     /// Authored rather than inferred from frames: field, the commit button,
     /// the two links, the trial offer where there is one, then the two
@@ -575,8 +517,8 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
         registerButton.keyEquivalent = ""
         resendButton.isHidden = false
         resendButton.keyEquivalent = "\r"
-        setQuietLinkTitle("Back to your key", on: lostKeyButton)
-        setPasteKeyEnabled(false)
+        lostKeyButton.linkTitle = "Back to your key"
+        pasteKeyButton.isEnabled = false
         show("Enter the email you bought with.")
         applyTabOrder()
         view.window?.makeFirstResponder(keyField)
@@ -594,8 +536,8 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
         resendButton.keyEquivalent = ""
         registerButton.isHidden = false
         registerButton.keyEquivalent = "\r"
-        setQuietLinkTitle("I lost my key", on: lostKeyButton)
-        setPasteKeyEnabled(true)
+        lostKeyButton.linkTitle = "I lost my key"
+        pasteKeyButton.isEnabled = true
         if !keepingLine { show("") }
         applyTabOrder()
         updateSceneForText()
@@ -659,7 +601,7 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
             Analytics.capture("license:key_submitted", ["outcome": outcome, "source": "gate"])
             switch result {
             case .verified(.active):
-                self.show(LicenseCopy.statusLine(for: .active))
+                self.show(LicenseCopy.statusLine(for: .active, reason: nil))
                 self.field.surge(intensity: 1.0)
                 self.field.setScene(.farewell)
                 self.pass(afterBeat: true)
@@ -667,7 +609,7 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
                 self.keyField.isEnabled = true
                 self.registerButton.isEnabled = true
                 self.keyField.stringValue = self.settings.licenseKey ?? ""
-                self.show(LicenseCopy.statusLine(for: status))
+                self.show(LicenseCopy.statusLine(for: status, reason: self.settings.licenseReason))
                 self.field.setScene(.quiet)
                 // A refunded key has one useful answer left, so the offer
                 // stops being quiet.
@@ -754,6 +696,9 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
         keyField.stringValue = key
         registerTapped()
     }
+
+    /// True while a Register check is waiting on the licence server.
+    public var isChecking: Bool { !registerButton.isEnabled }
 
     // MARK: Test-support hooks
 

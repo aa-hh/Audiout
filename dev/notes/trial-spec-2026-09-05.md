@@ -12,8 +12,8 @@ the trial; PRODUCT.md § Business Model is amended by it.
 | Length | 14 days from first start. |
 | Identity | One trial per Mac, keyed on a one-way hash of the Mac's hardware UUID. The server refuses a second trial for the same hash. |
 | Offline | A trial may start offline. It registers with the server on the first connection. The server's record wins over the local clock. |
-| After day 14 | The official build returns to the welcome gate (Buy, Enter key). Source builds never gate. |
-| Nudges | A days-left pill in the popover from day one; one-time banner at 3 days left; one-time banner on the last day; then the gate. Buy always carries the trial id. |
+| After day 14 | The official build keeps running on one speaker at a time, with a standing note carrying Buy Audiout and I have a key. The gate is first-open only. Source builds never gate or limit. See `dev/notes/unregistered-mode-spec-2026-09-26.md` (owner's call 2026-09-26). |
+| Nudges | A days-left pill in the popover from day one; one-time banner at 3 days left; one-time banner on the last day; then the one-speaker limit and its standing note. Buy carries the trial id, before and after expiry. |
 | Purchase link | Trial id rides Paddle checkout custom data; the webhook marks the trial converted; the app activates on its next check without pasting a key. |
 | Measurement | Server sends PostHog events (trial_started, trial_resumed, trial_refused, trial_converted, trial_expired, license_purchased) and the admin route reports counts and lookups. |
 | Download | The current signed .dmg becomes a public download. Sparkle updates stay tied to a valid trial or paid key. |
@@ -25,8 +25,8 @@ the trial; PRODUCT.md § Business Model is amended by it.
 for purchases, from a second table. Every downstream path the app already has (validate,
 check-in, Sparkle bearer header, companion token, download) works on a trial key with no
 new client concepts. A trial ends by the server answering `revoked` with
-`reason: "trial_expired"`, which the app already treats as unregistered, so the gate
-returns at next launch. A trial converts by the server answering the validate call with
+`reason: "trial_expired"`, which the app already treats as unregistered, so from the
+next check it plays on one speaker at a time (`dev/notes/unregistered-mode-spec-2026-09-26.md`). A trial converts by the server answering the validate call with
 the *paid* key in the `key` field, which `LicenseValidator` already stores back
 (`LicenseValidator.swift:76-81`: status is written, then the returned key).
 
@@ -197,13 +197,16 @@ migration (SQLite: rebuild the table) so check-ins from trial keys are stored.
 - Popover pill, from day one: **Trial · 9 days left**. Click opens /buy with `?t=`.
 - Banner at 3 days left, once: "Your trial ends in 3 days. €30 once keeps everything,
   including updates." Button: Buy Audiout. Dismiss.
-- Banner on the last day, once: "Last day of your trial. Tomorrow Audiout asks for a
-  key." Button: Buy Audiout.
-- Expired gate: headline "Your 14-day trial has ended." Body: "Buy Audiout for €30,
-  once, and keep everything you set up. Your scenes and speaker settings are still
-  here." Buttons: Buy Audiout, Enter key, Quit. No second trial button.
+- Banner on the last day, once: "Last day of your trial. From tomorrow Audiout
+  plays on one speaker at a time." Button: Buy Audiout.
+- Standing note after the trial (replaces the expired gate, 2026-09-26; see
+  `dev/notes/unregistered-mode-spec-2026-09-26.md` J2): trial ended, "Your trial has
+  ended. Audiout plays on one speaker at a time until you buy."; key refunded or
+  revoked, "This key was refunded or revoked, so Audiout plays on one speaker at a
+  time." Actions: Buy Audiout, I have a key. No second trial button.
 - Offline at start: no message. The trial starts locally and registers later. If the
-  server later answers `refused` with an expired row, the app shows the expired gate.
+  server later answers `refused` with an expired row, the app plays on one speaker
+  at a time with the standing note.
 
 ## Measurement
 

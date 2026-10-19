@@ -112,6 +112,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         config.getAnonymousId = { UUID(uuidString: installID) ?? $0 }
         PostHogSDK.shared.setup(config)
         analyticsAvailable = true
+        postHogProjectToken = projectToken
+        postHogHost = host
         // GeoIP is enrichment PostHog does SERVER-side from the request IP, so
         // it lands on every event unless each one opts out — which put a city,
         // a postal code and a lat/long on every feature count. Registering the
@@ -165,7 +167,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // the Setup card would never contribute one.
                 Self.captureCoarseLocationOnce()
             },
-            captureAt: { PostHogSDK.shared.capture($0, properties: $1, timestamp: $2) }
+            captureAt: { PostHogSDK.shared.capture($0, properties: $1, timestamp: $2) },
+            captureStructured: { PostHogSDK.shared.capture($0, properties: $1.mapValues { $0 as Any }) }
         ), consent: settings.telemetryEnabled)
         if settings.telemetryEnabled { Self.captureCoarseLocationOnce() }
     }
@@ -178,10 +181,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// The one event per launch that carries coarse location. It overrides the
     /// registered opt-out for itself only; every other event stays clean.
     ///
-    /// Called directly rather than through ``Analytics`` because the facade
-    /// carries `[String: String]` and this property has to reach PostHog as a
-    /// real `false` — and because `AppDelegate` is the one place allowed to
-    /// touch `PostHogSDK`. The SDK's own opt-out still gates it, so a build
+    /// Called directly rather than through ``Analytics`` because the
+    /// `$geoip_disable` override has to reach the SDK on this one event — and
+    /// because `AppDelegate` is the one place allowed to touch `PostHogSDK`. The SDK's own opt-out still gates it, so a build
     /// without consent sends nothing.
     private nonisolated static func captureCoarseLocationOnce() {
         PostHogSDK.shared.capture("app:launched", properties: [geoipDisableKey: false])
@@ -192,6 +194,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// `applicationShouldTerminate`) so they no-op when analytics never came
     /// up (headless runtime, or missing env config).
     private var analyticsAvailable = false
+    /// The PostHog project token and host `configurePostHog()` set up with;
+    /// the expired-trial survey is fetched with the same pair.
+    private var postHogProjectToken = ""
+    private var postHogHost = ""
+
+    /// The expired-trial survey's definition, once fetched; the popover's
+    /// invite reads it.
+    private var activeTrialSurvey: ExpiredTrialSurvey?
+    /// Set while a fetch runs or after one succeeded; a failed fetch clears
+    /// it so the next daily-active or licence pass tries again.
+    private var trialSurveyFetchStarted = false
+
+    /// Fetch the survey once this install is owed it.
+    private func refreshExpiredTrialSurvey() {
+        guard analyticsAvailable, !trialSurveyFetchStarted,
+              ExpiredTrialSurvey.isOwed(settings: settings, consent: settings.telemetryEnabled) else { return }
+        trialSurveyFetchStarted = true
+        ExpiredTrialSurvey.fetch(host: postHogHost, token: postHogProjectToken,
+                                 surveyID: ExpiredTrialSurvey.surveyID) { survey in
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.activeTrialSurvey = survey
+                if survey == nil { self.trialSurveyFetchStarted = false }
+            }
+        }
+    }
 
     /// Owns the status item's `.button` (SPEC §9 / brief §4 — customize ONLY
     /// via `.button`, never the deprecated `.view`/`.title`/`.image`).
@@ -208,18 +236,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// `applicationDidFinishLaunching` so it binds to the resolved `backend`.
     private var groupController: GroupController!
 
-    /// Owns the Groups screen's content (SPEC §9). Created lazily the first
-    /// time the Groups tab is visited, then reused; it is a pure content
+    /// Owns the Scenes and Speakers screens' content (SPEC §9). Created lazily
+    /// the first time either tab is visited, then reused; it is a pure content
     /// controller (its standalone window was retired in U6). Holds the same
     /// `GroupController` as the Mixer, so the two screens stay in lockstep.
     private var mixerWindowController: MixerWindowController?
 
-    /// The Settings screen and its General pane, once built (`makeSettingsRoot`
-    /// runs on the first visit). Weak — the surface owns them; these exist only
-    /// so `audiout://register` can reach the license sheet without the user
-    /// navigating there first.
+    /// The Settings screen and its License pane, once built
+    /// (`makeSettingsRoot` runs on the first visit). Weak — the surface owns
+    /// them; these references let `audiout://register` reach the license sheet
+    /// without the user navigating to the License pane first.
     private weak var settingsRootController: SettingsRootViewController?
-    private weak var generalSettingsController: GeneralSettingsViewController?
+    private weak var licenseSettingsController: LicenseSettingsViewController?
 
     /// The one surface (U4): a single window hosting the Mixer, Groups and
     /// Settings screens behind the header's tab switcher. Owns the menu-bar
@@ -372,14 +400,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// `pruneRoutesForExcludedApps()`, inside `applicationDidFinishLaunching`.
     private lazy var excludedApps = ExcludedAppsController(store: ExcludedAppsStore())
 
-    /// The user's hidden-speakers list (popover footer "−" / "+" menu), lazy
-    /// for the same Application Support-read reason as `excludedApps` above.
-    private lazy var hiddenSpeakers = HiddenSpeakersController(store: HiddenSpeakersStore())
+    /// Shared speaker identity and Mixer visibility, loaded after app startup.
+    private lazy var speakerLibrary = SpeakerLibraryController()
+    private var updatingSpeakerSnapshot = false
+    /// Built at launch, not with the Speakers page, so its once-per-launch
+    /// counts event fires for people who never open that page.
+    private lazy var speakerSearch = SpeakerSearch(library: speakerLibrary)
+    private var primingSpeakerBluetooth = false
 
     /// The app's device model, kept as a pure function of backend events. Keyed
     /// by `Device.id`. T-U2 reads this to build rows; for now it just backs the
     /// placeholder master-volume value the status symbol tracks.
-    private var devicesByID: [String: Device] = [:]
+    private var devicesByID: [String: Device] = [:] {
+        // The Touch Bar play button pulses while any speaker is still starting
+        // (a Cast receiver loading). The bar drops repeats of the same value.
+        didSet {
+            if hasTouchBar {
+                touchBarFullBar.setAwaitingPlayback(devicesByID.values.hasDeviceStillConnecting)
+            }
+        }
+    }
 
     /// The live per-device CONFIRMED per-app streaming map (`BackendEvent
     /// .routedApps`), mirroring `PopoverController`'s own `liveRoutedAppNames`
@@ -402,6 +442,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         appRouting: appRouting,
         settings: settings,
         excludedBundleIDs: { [excludedApps] in excludedApps.excludedBundleIDs },
+        speakerLibrary: speakerLibrary,
         serverName: Host.current().localizedName ?? "Mac",
         host: self)
 
@@ -409,6 +450,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// `withdrawApprovalPrompt(clientID:)` find and close the one whose
     /// connection just died.
     private var companionApprovalAlerts: [String: NSAlert] = [:]
+
+    /// Open pairing-code alerts for approved phones, keyed by clientID.
+    private var companionCodeCheckAlerts: [String: NSAlert] = [:]
+    /// Closes a pairing-code alert on Escape, which a non-modal one-button
+    /// `NSAlert` ignores. Installed with the first alert.
+    private var companionCodeCheckEscapeMonitor: Any?
 
     /// AIRPLAY_DEBUG_LEVELS=1 → log capture RMS ~1/sec (see the `.level` case).
     private let debugLevels = ProcessInfo.processInfo.environment["AIRPLAY_DEBUG_LEVELS"] == "1"
@@ -483,6 +530,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// whole bar means every control on it is one we drive.
     private lazy var touchBarFullBar: TouchBarFullBar = {
         let bar = TouchBarFullBar()
+        bar.slowOutputDelay = { [weak self] reply in
+            guard let native = self?.backend as? NativeBackend else { return reply(nil) }
+            native.slowOutputDelayMs { ms in
+                DispatchQueue.main.async { reply(ms.map { TimeInterval($0) / 1000 }) }
+            }
+        }
+        bar.onPresentedChange = { [weak self] presented in
+            (self?.backend as? MeteringControlling)?.setDeviceLevelsWanted(presented)
+        }
         bar.onVolumeStep = { [weak self] up in
             guard let self else { return }
             // Same step feel as the volume keys — one shared definition, so the
@@ -626,7 +682,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Launching` is still building the surface. Drained at the end of it.
     private var pendingLicenseKeyFromURL: String?
 
-    /// Bring up Settings ▸ General with the license sheet open on `key`.
+    /// Bring up Settings ▸ License with the license sheet open on `key`.
     @MainActor
     private func openLicenseSheet(registering key: String) {
         // While the first-open gate is up it IS the licence surface: the
@@ -646,11 +702,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // all — and a REJECTED key would then leave the sheet held but
         // invisible, wedging "Enter License…" for the rest of the session.
         surface.whenRevealed { [weak self] in
-            // General is the first section (`makeSettingsRoot`), and it has to
-            // be the MOUNTED one: an unmounted pane has no window to host a
-            // sheet.
-            self?.settingsRootController?.selectSection(at: 0)
-            self?.generalSettingsController?.presentLicenseSheet(registering: key)
+            // The License section has to be the MOUNTED one: an unmounted
+            // pane has no window to host a sheet. A build with no license
+            // server has no License section, and nothing to register against.
+            guard let root = self?.settingsRootController,
+                  let index = root.sectionTitles.firstIndex(of: "License") else { return }
+            root.selectSection(at: index)
+            self?.licenseSettingsController?.presentLicenseSheet(registering: key)
         }
     }
 
@@ -777,6 +835,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // too — and `GroupController` keeps that to the master's change edge.
         groupController.onStateDidChange = { [weak self] in
             guard let self else { return }
+            self.updateSpeakerLibrary()
             self.popoverController.refreshMainOutMaster()
             self.statusItemController.updateMasterVolume(self.popoverController.statusMasterVolume)
             self.repaintStructuralStateIfChanged()
@@ -955,7 +1014,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // a direct call beside it posts the same registration a second time.
         // The case the monitor cannot see — a trial started at the gate while
         // the app is already running, which follows no path change — belongs to
-        // the gate's own pass handler.
+        // the gate's own pass handler. The monitor also re-asks about a stored
+        // key the server never answered about, and pushes the resulting token
+        // to connected phones through `applyLicenseState`.
         //
         // The check-in and validate calls below run on the state as it stands
         // now: nothing waits on an answer here, so a key that arrives later is
@@ -963,6 +1024,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         trialReachability = TrialReachability(settings: settings,
                                               onRegistered: { [weak self] in
             self?.useNewTrialKey()
+        }, onValidated: { [weak self] in
+            self?.applyLicenseState()
         })
         trialReachability?.start()
 
@@ -980,6 +1043,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.applyLicenseState()
         }
         applyLicenseState()
+        RemoteAppConfigFetcher(settings: settings).refresh { [weak self] in self?.applyLicenseState() }
 
     }
 
@@ -991,6 +1055,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // to the model. From here the popover drives all group/master/mute/
         // routing math.
         groupController = GroupController(backend: backend)
+        // The licence step ran before the controller existed.
+        groupController.limitsToOneSpeaker = LicenseGate.limitsToOneSpeaker(settings: settings)
         // T-BACKEND: NativeBackend needs to know when the Mac is ALSO part of
         // what Main Out points at (not just which AirPlay devices are) to detect
         // "play everywhere" — neither `GroupController.applyRouting` nor
@@ -1008,6 +1074,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // optional-capability pattern used below.
         (backend as? NativeBackend)?.selectedDevicesQuery = { [weak self] id in
             self?.groupController?.isMainOutMember(id) ?? false
+        }
+        (backend as? NativeBackend)?.localRowDrivesMainQuery = { [weak self] in
+            self?.groupController?.localRowDrivesMain ?? true
         }
         // T6-rev: every user action that routes audio funnels into exactly two
         // backend methods (`setOutputSet` / `updateAppRoutes`), and both fire
@@ -1032,6 +1101,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // mutation (no lock held) → no deadlock with the backend's internal queues.
         appRouting.onRoutesDidChange = { [weak self] in
             self?.pushAppRoutesToBackend()
+            self?.updateSpeakerLibrary()
             // Companion (T7): a route add/remove/redirect/volume change moves
             // `appRoutes` AND `addableApps` in the snapshot. Extended IN PLACE —
             // this closure is single-assignment, never reassigned elsewhere.
@@ -1078,11 +1148,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // in the OTHER window — which, pinned, leaves this one on screen
             // with stale menus (the live "my new group isn't in the per-app
             // menu" report). No-ops while the surface is closed.
+            self.updateSpeakerLibrary()
             self.popoverController.groupsDidChange()
         }
-        popoverController = PopoverController(appRouting: appRouting, hiddenSpeakers: hiddenSpeakers)
+        popoverController = PopoverController(appRouting: appRouting, speakerLibrary: speakerLibrary)
         popoverController.deviceIconController = deviceIconController
         popoverController.configure(groupController: groupController)
+        speakerLibrary.onChange = { [weak self] in
+            guard let self, !self.updatingSpeakerSnapshot else { return }
+            self.popoverController.refreshSpeakerPresentation()
+            self.mixerWindowController?.refreshSpeakerPresentation()
+            self.companionCoordinator.scheduleBroadcast()
+        }
+        speakerSearch.onChange = { [weak self] in self?.mixerWindowController?.refreshSpeakerPresentation() }
+        speakerSearch.isBluetoothAccessGranted = { [weak self] in
+            self?.permissionProviders.bluetoothReader.currentStatus() == .granted
+        }
+        speakerSearch.isLocalNetworkDenied = { [weak self] in
+            self?.permissionAuditModel?.localNetworkStatus == .denied
+        }
+        popoverController.onSpeakerRecoveryChanged = { [weak self] in
+            self?.updateSpeakerLibrary()
+        }
+        popoverController.onManageSpeakers = { [weak self] in
+            guard let self else { return }
+            self.showSurface(.speakers)
+            if let c = self.mixerWindowController { c.select(c.firstSpeakerSelection) }
+            Analytics.capture("speaker:settings_opened", ["door": "manage_speakers"])
+        }
+        popoverController.onOpenSpeakerSettings = { [weak self] id in
+            self?.showSurface(.speakers, selecting: .device(id: id))
+        }
+        popoverController.bluetoothPermissionProvider = { [weak self] in
+            self?.permissionProviders.bluetoothReader.currentStatus() ?? .unknown
+        }
+        popoverController.onBluetoothAccess = { [weak self] in
+            self?.requestSpeakerBluetoothAccess()
+        }
+        updateSpeakerLibrary()
         // T6 (takeover status strip, state 1's "Open Login Items…" button): the
         // same `PTPHelperManaging` seam `registerPTPHelperIfNeeded()` already
         // reads, reused rather than standing up a second instance.
@@ -1116,18 +1219,49 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             Analytics.capture("takeover:retry_tapped")
         }
-        // The unregistered note's "Buy…" button. Nil URL (a build with no
-        // `AudioutBuyURL`) never gets the note in the first place, since
-        // `applyLicenseState()` needs a license server to arm it.
+        // "Buy Audiout" on the one-speaker note and the trial nudges. Only a
+        // build with a license server is ever limited, so a build with no
+        // `AudioutBuyURL` never shows the one-speaker note.
         popoverController.onBuyAudiout = { [settings] in
             guard let url = settings.buyURL else { return }
-            Analytics.capture("license:buy_link_opened", ["source": "mixer_note"])
+            Analytics.capture("license:buy_link_opened", ["source": "note"])
             NSWorkspace.shared.open(url)
         }
+        // "I have a key" on the one-speaker note, the trial pill and the
+        // trial nudges: the Enter License sheet on
+        // License, once the surface is really on screen to host it.
+        popoverController.onEnterLicenseKey = { [weak self] in
+            guard let self else { return }
+            showSurface(.settings)
+            surface.whenRevealed { [weak self] in
+                guard let root = self?.settingsRootController,
+                      let index = root.sectionTitles.firstIndex(of: "License") else { return }
+                root.selectSection(at: index)
+                self?.licenseSettingsController?.presentLicenseSheetFromNote()
+            }
+        }
+        // The one-time thank-you card, owed to a trial that converted to a
+        // paid key and has not seen it yet.
+        popoverController.thankYouCardOwedProvider = { [settings] in
+            LicenseGate.owesThankYouCard(settings: settings)
+        }
+        popoverController.onThankYouShown = { [settings] in
+            settings.licenseThankYouShown = true
+        }
+        popoverController.surveyInviteProvider = { [weak self] in
+            guard let self, ExpiredTrialSurvey.isOwed(settings: settings, consent: settings.telemetryEnabled) else { return nil }
+            return activeTrialSurvey
+        }
+        popoverController.onSurveyInviteSpent = { [settings] in
+            settings.expiredTrialSurveyDone = true
+        }
+        popoverController.onSurveyInviteUnanswered = { [settings] in
+            ExpiredTrialSurvey.recordUnansweredLook(settings: settings)
+        }
         // The trial's own two rungs of the same note slot, above the
-        // unregistered note `applyLicenseState()` drives: a Mac mid-trial is
-        // not an unregistered install. Both are asked fresh on every rebuild,
-        // so the pill follows every open with no clock of its own.
+        // one-speaker note `applyLicenseState()` drives: a Mac mid-trial is
+        // not limited. Both are asked fresh on every rebuild, so the pill
+        // follows every open with no clock of its own.
         popoverController.trialStateProvider = { [settings] in
             TrialClock.state(settings: settings)
         }
@@ -1153,22 +1287,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             (self?.backend as? AppRouteConfiguring)?.setLocalPlaybackVolume(
                 volume: volume, bundleID: bundleID)
         }
-        // EQ lives on the GROUPS screen, never on the Mixer (owner decision
+        // EQ lives on the Speakers screen, never on the Mixer (owner decision
         // 2026-08-22): a row's "Equalizer…" is a DOOR, and this is the hinge —
-        // it opens the surface on the speaker's own page (or the whole mix's).
+        // it opens the surface on the speaker's own page (or Main Audio's,
+        // which sits in the Speakers sidebar).
         popoverController.onOpenEqualizer = { [weak self] id in
-            self?.showSurface(.groups,
+            self?.showSurface(.speakers,
                               selecting: id == PopoverController.mainOutEQID
                                   ? .mainOut : .device(id: id))
         }
-        // BT-UI: the OUTPUT DEVICES "+" menu's "Pair a Bluetooth speaker…" —
-        // pairing is Apple-owned, so the one-tap Settings trip is the whole
-        // affordance; the fresh row auto-appears on return (connect
-        // notification → enumerator refresh).
-        popoverController.onPairBluetoothSpeaker = {
-            Analytics.capture("mixer:bt_pairing_settings_opened")
-            NSWorkspace.shared.open(SystemSettingsPane.bluetooth.url)
-        }
+        // Pairing opens the macOS Bluetooth pane.
+        popoverController.onPairBluetoothSpeaker = Self.openBluetoothPairing
         // BT-UI ghost pairings: recency feed for the Bluetooth subsection's
         // stale-to-the-bottom sort. Capability-gated like the hooks above —
         // nil on MockBackend, which sorts by name alone.
@@ -1208,7 +1337,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         // The row's Equalizer door wears one mark when the curve is not flat.
         // The answer comes off `Device.eq` on the device model — the same
-        // field the Groups screen's detail pane reads, seeded by the backend
+        // field the Speakers screen's detail pane reads, seeded by the backend
         // from `DeviceEQStore` — so the Mixer holds no tone state of its own.
         popoverController.deviceEQIsShaped = { [weak self] deviceID in
             self?.devicesByID[deviceID]?.eq.isFlat == false
@@ -1238,9 +1367,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // ONLY when the backend can actually stage it, so a mock/dev run can
         // never reach the mic-permission prompt from the wizard.
         if backend is BTOutputControlling {
-            popoverController.onStageBTMicProbe = { [weak self] started, finished in
+            popoverController.onStageBTMicProbe = { [weak self] levelStepDB, started, finished in
                 (self?.backend as? BTOutputControlling)?
-                    .stageBTMicProbe(onStarted: started, onFinished: finished)
+                    .stageBTMicProbe(levelStepDB: levelStepDB,
+                                     onStarted: started, onFinished: finished)
             }
         }
         // Roadmap 056 Part A: a Bluetooth run measures the speaker's own
@@ -1248,6 +1378,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // overwriting it.
         popoverController.remoteInviteStateProvider = { [weak self] in
             self?.remoteInviteState() ?? .notConnected
+        }
+        // The wizard's iPhone panel showing its code is a pairing window.
+        popoverController.onRemoteInviteShown = { [weak self] in
+            self?.companionCoordinator.openPairingWindow()
         }
         popoverController.btLatencyProvider = { [weak self] deviceID in
             (self?.backend as? BTOutputControlling)?.btMeasuredLatencyMs(forDevice: deviceID)
@@ -1342,30 +1476,49 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.permissionAuditModel?.localNetworkStatus == .denied
         }
 
-        // The one surface (U4). Both screen providers are lazy — the Groups and
-        // Settings trees are only built when their tab is first visited — and
+        // The one surface (U4). Every screen provider is lazy — the Scenes,
+        // Speakers and Settings trees are only built when their tab is first
+        // visited (Scenes and Speakers share one `MixerWindowController`) — and
         // the Mixer panel is claimed from the popover on its first mount.
         surface = AppSurfaceController(
             popoverController: popoverController,
             settings: settings,
             groupsContent: { [unowned self] in self.groupsScreenContent() },
+            speakersContent: { [unowned self] in self.speakersScreenContent() },
             settingsContent: { [unowned self] in self.makeSettingsRoot() })
-        // The Groups content skips its rebuild while hidden (B8) and has no
+        // The Scenes and Speakers content skips its rebuild while hidden (B8) and has no
         // window of its own to ask about visibility any more, so the surface
         // tells it which screen the user is looking at.
-        // Escape in a group's editor steps back to the overview; the next
-        // Escape closes the surface.
-        surface.groupsCancelHandler = { [weak self] in
-            self?.mixerWindowController?.dismissEditor() ?? false
-        }
+        // The screen published before this one; `nil` means the window was closed.
+        var previousScreen: SurfaceScreen?
         surface.onVisibleScreenChange = { [weak self] screen in
-            self?.mixerWindowController?.setHostVisible(screen == .groups)
+            let openedOntoMixer = previousScreen == nil && screen == .mixer
+            previousScreen = screen
+            self?.mixerWindowController?.setVisibleTab(
+                screen == .groups ? .scenes : screen == .speakers ? .speakers : nil)
             // Settings' panes are built once and cached for the process's
             // life, so a phone-driven connect-volume/buffer change would show
             // the launch-time value forever. Reconciled on appearance rather
             // than on the write: nobody can be dragging a control on a screen
             // that is only now becoming visible.
             if screen == .settings { self?.settingsRootController?.reloadFromSettings() }
+            if screen == .mixer, let self {
+                RemoteAppConfigFetcher(settings: settings).refresh(minimumInterval: 3600) { [weak self] in
+                    self?.applyLicenseState()
+                }
+                // A limited install re-asks the server on every open, so a key
+                // bought elsewhere lifts the limit without a relaunch.
+                if LicenseGate.limitsToOneSpeaker(settings: settings) {
+                    LicenseValidator(settings: settings).validate { [weak self] _ in
+                        self?.applyLicenseState()
+                    }
+                }
+                // The consent ask comes on the open after the thank-you card.
+                // Only an open from closed counts: a tab switch away from the
+                // Mixer retires the card, and switching back must not raise the
+                // ask seconds after the thanks.
+                if openedOntoMixer { presentConversionConsentAskIfDue() }
+            }
         }
 
     }
@@ -1483,12 +1636,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// revocation watch — whichever of them this launch needs.
     @MainActor
     private func runGateOrStart() {
-        // First-open licence gate (owner decision 2026-08-30): a purchased
-        // build (`AudioutLicenseServerURL` in Info.plist) links itself to a
-        // licence before anything else runs. Its pass runs the exact first-run
-        // block this used to be, so Setup's permission priming and the backend
-        // deferral are preserved behind it; its abort quits. A build from
-        // source carries no server URL and never gates (`LicenseGate`).
+        // First-open licence gate: the welcome for a purchased build
+        // (`AudioutLicenseServerURL` in Info.plist) with no key and no trial.
+        // Its pass runs the exact first-run block this used to be, so Setup's
+        // permission priming and the backend deferral are preserved behind it;
+        // its abort quits. An ended trial or a refused key never meets it — it
+        // runs limited to one speaker (`LicenseGate.limitsToOneSpeaker`). A
+        // build from source carries no server URL and never gates.
         if LicenseGate.shouldPresent(settings: settings) {
             log("Audiout launched — first-open license gate")
             presentLicenseGate()
@@ -1536,6 +1690,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             MainActor.assumeIsolated {
                 guard let self else { return }
                 self.auditRequiredPermissionsIfNeeded()
+                self.refreshSpeakerBluetoothAccess()
                 // Re-check the grant out-of-process, exactly as the wake
                 // handler below does — and for a sharper reason here. Coming
                 // back from System Settings IS the reactivation: it is the one
@@ -1675,7 +1830,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 guard let self else { return }
                 self.licenseGateWindowController = nil
                 self.applyLicenseState()
-                // Same as `general.onLicenseChanged` below: a key entered at
+                // Same as `license.onLicenseChanged` below: a key entered at
                 // the gate registers the device now, not at the next launch.
                 LicenseCheckIn(settings: self.settings).checkInIfNeeded()
                 // A trial handed out by the gate has no key yet, and the launch
@@ -1980,6 +2135,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self else { return }
             let unmet = await model.auditRequiredPermissions()
             self.isAuditingRequiredPermissions = false
+            // The audit re-read Local Network; the Speakers screens show it.
+            self.mixerWindowController?.refreshSpeakerPresentation()
             // Re-check onboarding isn't already open — the audit's awaits give a
             // window for another trigger (or the user) to have opened it since.
             guard !unmet.isEmpty, self.onboardingWindowController == nil else { return }
@@ -2183,6 +2340,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // menu-bar icon themselves.
             self.showSurface(.mixer)
         }
+        // The Setup window's iPhone card on screen is a pairing window.
+        controller.onRemoteInviteShown = { [weak self] in
+            self?.companionCoordinator.openPairingWindow()
+        }
         onboardingWindowController = controller
         controller.present()
     }
@@ -2190,18 +2351,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: Menu-bar secondary menu + app main menu (Quit / Settings discoverability)
 
     /// The menu shown on a right/control-click of the status item — the
-    /// discoverable path to Settings, Groups, and Quit for a Dock-less app whose
+    /// discoverable path to Settings, Scenes, Speakers and Quit for a Dock-less app whose
     /// only other quit affordance is the small power glyph in the surface header.
     @MainActor
     private func makeStatusMenu() -> NSMenu {
         let menu = NSMenu()
-        // No ellipsis (HIG): both switch tabs on the surface, they don't open a
+        // No ellipsis (HIG): these switch tabs on the surface, they don't open a
         // window — the app menu's own "Settings…" below keeps its ellipsis,
         // that one IS the macOS menu-bar convention (⌘,), unrelated to this rule.
         let settings = menu.addItem(withTitle: "Settings", action: #selector(menuOpenSettings), keyEquivalent: ",")
         settings.target = self
         let groups = menu.addItem(withTitle: "Scenes", action: #selector(menuOpenGroups), keyEquivalent: "")
         groups.target = self
+        // No key equivalent: the surface's ⌘3 is the Speakers shortcut.
+        let speakers = menu.addItem(withTitle: "Speakers", action: #selector(menuOpenSpeakers), keyEquivalent: "")
+        speakers.target = self
         menu.addItem(.separator())
         // About carries NO ellipsis — it opens the About window and asks the
         // user nothing, which is the whole rule. "Check for Updates…" does
@@ -2286,6 +2450,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @MainActor @objc private func menuOpenSettings() { showSurface(.settings) }
     @MainActor @objc private func menuOpenGroups() { showSurface(.groups) }
+    @MainActor @objc private func menuOpenSpeakers() { showSurface(.speakers) }
     @MainActor @objc private func menuOpenAbout() { aboutWindowController.show() }
     @MainActor @objc private func menuCheckForUpdates() { updaterController?.checkForUpdates(nil) }
 
@@ -2293,31 +2458,65 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// affordance now shares (right-click menu, ⌘,, the header tabs' pre-claim
     /// fallbacks, and the post-Setup landing).
     ///
-    /// `selecting` deep-links INTO the Groups screen (the popover's
-    /// "Equalizer…"), applied after the screen is up so the pane it names is
-    /// built and mounted. A device the Groups screen has not seen yet pends
-    /// there rather than being dropped.
+    /// `selecting` deep-links INTO the Scenes or Speakers screen (the popover's
+    /// "Equalizer…" opens Speakers on a speaker's page), applied after the
+    /// screen is up so the pane it names is built and mounted. A device the
+    /// `MixerWindowController` has not seen yet pends there rather than being
+    /// dropped.
     @MainActor
     private func showSurface(_ screen: SurfaceScreen, selecting: SidebarSelection? = nil) {
+        refreshSpeakerBluetoothAccess()
         surface.select(screen)
         surface.show(anchorRect: statusAnchorRect())
         if let selecting { mixerWindowController?.select(selecting) }
     }
 
-    /// The Groups screen's content: `MixerWindowController`'s split view. The
-    /// controller owns the sidebar/editor plumbing and nothing else. Built on
-    /// the first visit to the Groups tab and reused; seeded with the current
-    /// device snapshot so it is correct the instant it appears.
+    /// The Scenes sidebar beside the scene page or empty page.
     @MainActor
     private func groupsScreenContent() -> NSViewController {
-        let controller = mixerWindowController ?? MixerWindowController(
+        builtMixerWindowController().scenesContentController
+    }
+
+    /// The Speakers screen's content: `MixerWindowController`'s split view
+    /// (speaker sidebar beside the speaker pages).
+    @MainActor
+    private func speakersScreenContent() -> NSViewController {
+        builtMixerWindowController().speakersContentController
+    }
+
+    /// The one controller behind both the Scenes and Speakers screens. It
+    /// owns the sidebar/editor plumbing and nothing else. Built on the first
+    /// visit to either tab and reused; seeded with the current device snapshot
+    /// so it is correct the instant it appears.
+    @MainActor
+    private func builtMixerWindowController() -> MixerWindowController {
+        if let mixerWindowController { return mixerWindowController }
+        let controller = MixerWindowController(
             groupController: groupController,
             deviceIconController: deviceIconController,
             appRouting: appRouting,
             // The SAME instance the backend decides with (BT-HW-VOL): the
             // toggle's write is the backend's re-decide trigger.
-            btHardwareVolumeStore: (backend as? NativeBackend)?.btHardwareVolumeStore)
+            btHardwareVolumeStore: (backend as? NativeBackend)?.btHardwareVolumeStore,
+            settings: settings, speakerLibrary: speakerLibrary)
         mixerWindowController = controller
+        // A scene created from the Speakers sidebar opens in the Scenes tab.
+        controller.onRequestScenesTab = { [weak self] in self?.surface.select(.groups) }
+        controller.speakersPage.onBluetoothAccess = { [weak self] in
+            self?.requestSpeakerBluetoothAccess()
+        }
+        controller.speakersPage.onPairBluetooth = Self.openBluetoothPairing
+        controller.speakersPage.onLocalNetworkAccess = {
+            if NSWorkspace.shared.open(SystemSettingsPane.localNetwork.url) {
+                Analytics.capture("speaker:privacy_settings_opened", ["access": "local_network"])
+            }
+        }
+        controller.speakerSearch = speakerSearch
+        // A speaker the Mac can't find has no backend entry to ask, so its
+        // saved tone is read from the same store the backend writes.
+        controller.storedDeviceEQ = { id in (try? DeviceEQStore().load())?.devices[id] }
+        updateSpeakerLibrary()
+        refreshSpeakerBluetoothAccess()
         // The two Equalizer seams. This screen owns no backend (its own
         // AGENTS.md); the tone it reports is applied here, at the one place
         // that holds one. A live scrub applies without persisting; the
@@ -2334,9 +2533,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         controller.onSetMainOutEQ = { [weak self] eq, committed in
             self?.backend.setMainOutEQ(eq, commit: committed)
         }
+        controller.onForgetAirPlayPassword = { [weak self] deviceID in
+            self?.backend.forgetAirPlayPassword(for: deviceID)
+            self?.devicesByID[deviceID]?.hasStoredPassword = false
+            self?.repaintFromCurrentState()
+        }
         controller.mainOutEQProvider = { [weak self] in self?.backend.mainOutEQ ?? .flat }
         controller.update(devices: Array(devicesByID.values))
-        return controller.contentController
+        return controller
+    }
+
+    /// The one "Pair Bluetooth speaker…" action, shared by the Mixer's footer
+    /// and the Speakers page: opens the macOS Bluetooth pane.
+    private static let openBluetoothPairing: () -> Void = {
+        Analytics.capture("mixer:bt_pairing_settings_opened")
+        NSWorkspace.shared.open(SystemSettingsPane.bluetooth.url)
     }
 
     /// The Settings screen's content, built on the first visit: a Groups-style
@@ -2345,22 +2556,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func makeSettingsRoot() -> SettingsRootViewController {
         let general = GeneralSettingsViewController(loginItem: SMAppServiceLoginItem(),
                                                     settings: settings,
-                                                    approvals: companionCoordinator.approvals,
                                                     saveDiagnostics: { [weak self] in self?.saveDiagnostics() })
-        // The way back in for `audiout://register` — weak because the surface
-        // owns both for as long as the Settings screen exists.
-        generalSettingsController = general
-        // "Open Setup…" (General pane) re-opens the first-run priming window;
-        // the backend is already running, so its onFinished is a guarded no-op.
+        // "Run setup again…" (General pane) re-opens the first-run priming
+        // window; the backend is already running, so its onFinished is a
+        // guarded no-op.
         general.onRunSetupAgain = { [weak self] in self?.presentSetup() }
-        // Companion (T7): the General pane's "Allow control from iPhone"
-        // checkbox has already persisted the setting; this starts/stops the
-        // server to match.
-        general.onAllowRemoteControlChanged = { [weak self] in
+        // Left nil in a build with no updater, which hides the button.
+        if let updaterController {
+            general.onCheckForUpdates = { updaterController.checkForUpdates(nil) }
+        }
+
+        let remote = RemoteSettingsViewController(settings: settings,
+                                                  approvals: companionCoordinator.approvals)
+        // Companion (T7): the "Allow control from iPhone" switch has already
+        // persisted the setting; this starts/stops the server to match.
+        remote.onAllowRemoteControlChanged = { [weak self] in
             self?.companionCoordinator.updateServerState()
         }
+        // "Pair an iPhone" opens the pairing window; the button reads the
+        // window's state and repaints when it opens or lapses.
+        remote.onPairRequested = { [weak self] in self?.companionCoordinator.openPairingWindow() }
+        remote.isPairingOpen = { [weak self] in self?.companionCoordinator.pairingWindowOpen ?? false }
+        companionCoordinator.onPairingWindowChanged = { [weak remote] in remote?.refreshPairingState() }
+
+        let license = LicenseSettingsViewController(settings: settings)
+        // The way back in for `audiout://register`.
+        licenseSettingsController = license
         // A committed key changes both the note and the update feed's header.
-        general.onLicenseChanged = { [weak self, settings] in
+        license.onLicenseChanged = { [weak self, settings] in
             self?.applyLicenseState()
             // A key entered mid-session registers the device now rather than at
             // the next launch. This closure fires a few times around one
@@ -2368,10 +2591,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // fire-and-forget, /v1/checkin always 204s, and the device-spread
             // metric counts distinct install ids.
             LicenseCheckIn(settings: settings).checkInIfNeeded()
-        }
-        // Left nil in a build with no updater, which hides the button.
-        if let updaterController {
-            general.onCheckForUpdates = { updaterController.checkForUpdates(nil) }
         }
 
         let appearance = AppearanceSettingsViewController(settings: settings)
@@ -2392,11 +2611,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // slice of the snapshot, so re-broadcast it.
         audio.onSettingChanged = { [weak self] in self?.companionCoordinator.scheduleBroadcast() }
 
-        let root = SettingsRootViewController(sections: [
+        var sections: [SettingsRootViewController.Section] = [
             .init(title: "General", symbolName: "gearshape", viewController: general),
+        ]
+        // A build with no companion shows no Audiout Remote section at all.
+        if remote.isOffered {
+            sections.append(.init(title: "Audiout Remote", symbolName: "iphone", viewController: remote))
+        }
+        sections += [
             .init(title: "Appearance", symbolName: "paintpalette", viewController: appearance),
             .init(title: "Audio", symbolName: "speaker.wave.2", viewController: audio),
-        ])
+        ]
+        // A build with no license server has nothing to verify and nothing to sell.
+        if license.isAvailable {
+            sections.append(.init(title: "License", symbolName: "key", viewController: license))
+        }
+        let root = SettingsRootViewController(sections: sections)
         settingsRootController = root
         return root
     }
@@ -2533,28 +2763,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// Push the stored licence state at the two things that read it: the
-    /// Mixer's lowest-precedence note, and the update feed's authorization
-    /// header (the server serves the appcast and the download only to a key).
-    /// Called at launch, on every validator answer, and whenever the General
-    /// pane commits a key. Idempotent by construction — both writes are plain
-    /// assignments of a computed value.
+    /// Push the stored licence state at the things that read it: the
+    /// one-speaker limit on `GroupController`, the Mixer's standing note that
+    /// explains it, and the update feed's authorization header (the server
+    /// serves the appcast and the download only to a key). Called at launch,
+    /// on every validator answer, on a popover open while limited, and whenever
+    /// the License pane commits a key. Idempotent by construction — every write
+    /// is a plain assignment of a computed value.
     ///
-    /// A build with no licence server is the free build: no note, no matter
-    /// what is stored. `popoverController` is still nil at the launch call
-    /// (it is built later in `applicationDidFinishLaunching`); the validator's
-    /// answer always lands after that, so the note is never missed.
+    /// A build with no licence server is the free build: no limit and no note,
+    /// no matter what is stored. `groupController` and `popoverController` are
+    /// still nil at the launch call; the controller takes the limit when it is
+    /// built, and the validator's answer always lands after the popover exists,
+    /// so the note is never missed.
     private func applyLicenseState() {
         let key = settings.licenseKey ?? ""
         let status = settings.licenseStatus
-        let unregistered = settings.licenseServerURL != nil
-            && (key.isEmpty || status == .unknown || status == .invalid || status == .revoked)
-        popoverController?.setUnregisteredNoteActive(unregistered)
+        let limited = LicenseGate.limitsToOneSpeaker(settings: settings)
+        groupController?.limitsToOneSpeaker = limited
+        popoverController?.setUnregisteredNote(.resolve(settings: settings))
         updaterController?.updater.httpHeaders = key.isEmpty ? nil : ["Authorization": "Bearer \(key)"]
 
         // A licence that lands while phones are connected: push the token
-        // their welcome would have carried, once per distinct token.
-        if let token = settings.companionToken {
+        // their welcome would have carried, once per distinct token. The first
+        // pass runs from `installUpdatesAndLicence()` before `groupController`
+        // exists, and building the lazy coordinator then traps on its
+        // force-unwrap — a launch crash on any Mac holding a stored token
+        // (2026-09-26). No phone is connected that early, so there is nobody
+        // to push to; the passes after wiring cover every later licence change.
+        if groupController != nil, let token = settings.companionToken {
             companionCoordinator.pushCompanionToken(token)
         }
 
@@ -2580,8 +2817,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // trial keeps its default-on across every answer. Safe to call every
             // time — `setConsent` ignores an unchanged value.
             Analytics.setConsent(settings.telemetryEnabled)
-            presentConversionConsentAskIfDue()
         }
+        refreshExpiredTrialSurvey()
     }
 
     /// The one-time ask a trial user gets right after their paid key is
@@ -2593,12 +2830,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @MainActor
     private func presentConversionConsentAskIfDue() {
         guard !HeadlessRuntime.isActive,
-              settings.licenseStatus == .active,
-              !(settings.licenseKey ?? "").isEmpty,
-              settings.trialStartedAt != nil,
-              settings.trialExpiresAt == nil,
-              !settings.telemetryAsked,
-              !settings.telemetryConversionAskShown
+              LicenseGate.owesConversionConsentAsk(settings: settings)
         else { return }
         settings.telemetryConversionAskShown = true
 
@@ -2617,6 +2849,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         settings.telemetryOptIn = granted
         Analytics.setConsent(granted)
         if granted { Analytics.capture("license:conversion_consent_opted_in") }
+    }
+
+    /// Quitting with the thank-you card up counts as seen, the same as hiding
+    /// the popover with it up.
+    func applicationWillTerminate(_ notification: Notification) {
+        popoverController?.retireThankYouCardOnHide()
     }
 
     /// Gives graceful AirPlay teardown a bounded window before the process exits
@@ -2705,18 +2943,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// AppKit work and stays on main. Upgrade path if a cold first connect
     /// ever visibly hitches: move the fetch + encode to a serial background
     /// queue. Gated on `isTerminating` like every other deferred main-queue
-    /// hop in this file.
+    /// hop in this file. `completion` runs once the last page is handed to
+    /// the server, and also when quitting cuts the pages short.
     @MainActor
-    private func sendAppIconPage(_ pages: [[String]], index: Int, to clientID: UUID) {
-        guard !isTerminating, index < pages.count else { return }
+    private func sendAppIconPage(_ pages: [[String]], index: Int, to clientID: UUID,
+                                 completion: @escaping @MainActor () -> Void) {
+        guard !isTerminating, index < pages.count else {
+            completion()
+            return
+        }
         let payloads = pages[index].map {
             AppIconPayload(bundleID: $0, png: AppIconCache.pngData(forBundleID: $0))
         }
         companionCoordinator.server.sendAppIcons(payloads, page: index,
                                                  pageCount: pages.count, to: clientID)
-        guard index + 1 < pages.count else { return }
+        guard index + 1 < pages.count else {
+            completion()
+            return
+        }
         DispatchQueue.main.async { [weak self] in
-            self?.sendAppIconPage(pages, index: index + 1, to: clientID)
+            self?.sendAppIconPage(pages, index: index + 1, to: clientID, completion: completion)
         }
     }
     // MARK: Backend event plumbing
@@ -2875,6 +3121,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // while its row still reads "Connected". Show or clear the popover's
             // note; no device model changed — handle it and return.
             popoverController.setCaptureFailureMessage(message)
+            companionCoordinator.noteCaptureFailure(message)
+            companionCoordinator.scheduleBroadcast()
             log("event: \(describe(event))")
             return
         case .routingBlockedNeedsDefault(let active):
@@ -2883,6 +3131,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // back. Show or clear the popover's routing-blocked warning; a whole-app
             // condition with no home on a `Device` — handle it and return.
             popoverController.setRoutingBlockedNeedsDefault(active)
+            companionCoordinator.noteRoutingBlocked(active)
+            companionCoordinator.scheduleBroadcast()
             logEvent(event)
             return
         case .systemVolumeOwnershipChanged(let weOwnIt):
@@ -2916,11 +3166,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var structuralStateGate = StructuralStateGate()
 
     /// Repaint the surfaces that render membership — the popover's device rows
-    /// and the Groups screen — for the changes that reach the model with no
+    /// and the Scenes and Speakers screens — for the changes that reach the model with no
     /// `BackendEvent` behind them, so nothing else would ever repaint them: a
     /// phone toggling a speaker while a GROUP carries Main Out (see
     /// `PopoverController.refreshDeviceMembership`), and phone-driven group
-    /// create/rename/membership/delete, which the Groups screen otherwise
+    /// create/rename/membership/delete, which the Scenes screen otherwise
     /// showed stale until the user navigated away and back.
     @MainActor
     private func repaintStructuralStateIfChanged() {
@@ -2928,18 +3178,53 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                                 groups: groupController.groups,
                                                 target: groupController.mainOut) else { return }
         popoverController.refreshDeviceMembership()
-        // NEVER with an empty fleet. This hook fires off model changes, which
-        // are not synchronised with device discovery, so `devicesByID` can
-        // still be empty here — and the Groups editor rebuilds its membership
-        // list from exactly the array it is handed, so an empty one blanks the
-        // pane outright (`GroupEditorViewController.rebuildCandidates`). The
-        // fleet arriving is itself a repaint via `repaintFromCurrentState`, so
-        // skipping costs nothing.
-        //
-        // Its own hidden-means-idle gate drops this whenever the user is
-        // looking at another screen, so this costs a dictionary rebuild there.
-        guard !devicesByID.isEmpty else { return }
         mixerWindowController?.update(devices: Array(devicesByID.values))
+    }
+
+    @MainActor
+    private func updateSpeakerLibrary() {
+        speakerLibrary.update(liveDevices: Array(devicesByID.values), groups: groupController.groups,
+            mainOut: groupController.mainOut, selectedDeviceIDs: groupController.selectedDeviceIDs,
+            appRouteDestinations: appRouting.appRoutes.map(\.destination),
+            routedAppNamesByDeviceID: routedAppNamesByDeviceID,
+            recoveryIDs: popoverController?.speakerRecoveryIDs ?? [])
+        speakerSearch.libraryDidChange()
+    }
+
+    @MainActor
+    private func refreshSpeakerBluetoothAccess() {
+        let access = SpeakerBluetoothAccessPresentation(status: permissionProviders.bluetoothReader.currentStatus(),
+                                                        priming: primingSpeakerBluetooth)
+        mixerWindowController?.setSpeakerBluetoothAccess(access)
+        popoverController?.refreshSpeakerPresentation()
+    }
+
+    @MainActor
+    private func requestSpeakerBluetoothAccess() {
+        let access = SpeakerBluetoothAccessPresentation(status: permissionProviders.bluetoothReader.currentStatus(),
+                                                        priming: primingSpeakerBluetooth)
+        switch access.action {
+        case .openSettings(let pane):
+            NSWorkspace.shared.open(pane.url)
+        case .none:
+            return
+        case .prime:
+            guard !primingSpeakerBluetooth else { return }
+            primingSpeakerBluetooth = true
+            surface.shell.setPermissionPromptInFlight(true)
+            refreshSpeakerBluetoothAccess()
+            permissionProviders.bluetoothPrimer.prime { [weak self] in
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    self.surface.shell.setPermissionPromptInFlight(false)
+                    self.primingSpeakerBluetooth = false
+                    self.refreshSpeakerBluetoothAccess()
+                    if self.surface.isShown {
+                        self.surface.shell.returnToFront()
+                    }
+                }
+            }
+        }
     }
 
     private func repaintFromCurrentState() {
@@ -2947,6 +3232,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // included, so its device reads stop hopping onto the backend's state
         // queue. `devicesByID` is folded from the backend's own events, so it is
         // already current here.
+        updatingSpeakerSnapshot = true
+        defer { updatingSpeakerSnapshot = false }
         let devices = Array(devicesByID.values)
         groupController.updateDevices(devices)
         // Establish the out-of-the-box default (current device selected ⇒
@@ -2954,6 +3241,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // time / if a persisted selection was loaded. Seeded from the snapshot
         // above, so it sees this event's fleet rather than the previous one's.
         groupController.ensureDefaultSelection()
+        updateSpeakerLibrary()
         // Feed the popover (repaints open rows in place, or caches for next
         // open), then drive the status symbol from the Main Out master.
         popoverController.update(devices: devices)
@@ -2975,9 +3263,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                           lastDay: settings.telemetryDailyActiveDay) {
             settings.telemetryDailyActiveDay = due.day
             Analytics.capture("streaming:daily_active", ["speaker_count": String(due.speakerCount)])
+            if ExpiredTrialSurvey.countStreamingDay(settings: settings) {
+                refreshExpiredTrialSurvey()
+            }
         }
-        // Keep the Groups screen in lockstep with the same snapshot. Nil until
-        // that tab has been visited, and its own hidden-means-idle gate drops
+        // Keep the Scenes and Speakers screens in lockstep with the same
+        // snapshot. Nil until either tab has been visited, and its own hidden-means-idle gate drops
         // the rebuild whenever the user is looking at another screen — so a
         // backend event never builds or repaints a screen nobody can see.
         mixerWindowController?.update(devices: devices)
@@ -3108,34 +3399,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 /// enumeration, app icons, popover repaints, and the app's own lifecycle flag.
 extension AppDelegate: CompanionCoordinatorHost {
 
-    /// The T24 approval alert: names the phone, explains the stakes, and
-    /// reports the answer back to `CompanionApprovalController` (which
-    /// persists it and settles every connection waiting on it). Main-actor
-    /// and modal — the SERVER never blocks (its queue keeps running; only
-    /// this app's own UI waits), and the controller guarantees one open
-    /// prompt per clientID, so a reconnecting phone can't stack duplicates.
+    /// The T24 approval alert: shows the pairing code the phone is showing,
+    /// explains the stakes, and reports the answer back to
+    /// `CompanionApprovalController` (which persists it and settles every
+    /// connection waiting on it). Main-actor and modal — the SERVER never
+    /// blocks (its queue keeps running; only this app's own UI waits), and
+    /// the controller shows one prompt at a time. The phone's self-reported
+    /// name is not in the question: the code is what identifies it.
+    /// "Don't Allow" is the default button, and the alert floats at
+    /// `.floating` level and requests attention without activating the app,
+    /// so a Return or click aimed at something else never approves a phone.
     /// An abort from `withdrawApprovalPrompt` is not the user's answer and
     /// records nothing.
     @MainActor
-    func presentApprovalPrompt(clientID: String, clientName: String,
+    func presentApprovalPrompt(clientID: String, clientName: String, pairingCode: String,
                                respond: @escaping (Bool) -> Void) {
         // Headless harnesses must never flash real UI; not answering leaves
         // the decision unmade (no persisted denial) and the server's own
         // approval deadline closes the connection.
         guard !HeadlessRuntime.isActive, !isTerminating else { return }
+        let code = Self.formattedPairingCode(pairingCode)
         let alert = NSAlert()
-        alert.messageText = "Allow \u{201C}\(clientName)\u{201D} to control audio on this Mac?"
-        alert.informativeText = "It will be able to see and control what's playing on this Mac's speakers, including which apps are playing audio. You can change this later in Settings."
-        alert.addButton(withTitle: "Allow")
+        alert.messageText = "Allow an iPhone to control audio on this Mac?"
+        alert.informativeText = "The iPhone is showing a code. Allow only if it shows \(code) too.\n\nIt will be able to see and control what's playing on this Mac's speakers, including which apps are playing audio. You can change this later in Settings › Audiout Remote."
         alert.addButton(withTitle: "Don't Allow")
-        // A menu-bar app usually has no key window; activate so the alert is
-        // actually seen (same treatment as SettingsWindowController.showWindow).
-        NSApp.activate(ignoringOtherApps: true)
+        alert.addButton(withTitle: "Allow")
+        alert.window.level = .floating
+        NSApp.requestUserAttention(.criticalRequest)
         companionApprovalAlerts[clientID] = alert
         let outcome = alert.runModal()
         companionApprovalAlerts.removeValue(forKey: clientID)
         guard outcome != .abort else { return }
-        respond(outcome == .alertFirstButtonReturn)
+        respond(outcome == .alertSecondButtonReturn)
     }
 
     /// Close the prompt shown for `clientID`, if it's still the one on
@@ -3149,6 +3444,70 @@ extension AppDelegate: CompanionCoordinatorHost {
     func withdrawApprovalPrompt(clientID: String) {
         guard let alert = companionApprovalAlerts[clientID], NSApp.modalWindow === alert.window else { return }
         NSApp.abortModal()
+    }
+
+    /// "482913" → "482 913", as both pairing-code alerts show it.
+    private static func formattedPairingCode(_ pairingCode: String) -> String {
+        "\(pairingCode.prefix(3)) \(pairingCode.dropFirst(3))"
+    }
+
+    /// An approved phone forgot this Mac and is asking its user to compare
+    /// the pairing code: show it, with only an OK button. Not modal, so it
+    /// never holds up the app or the phone, which is already welcomed;
+    /// `withdrawPairingCodeCheck` closes it. The empty-name fallback is the
+    /// "an iPhone" the approval prompt uses. Ordered front without
+    /// activating the app, at the approval prompt's `.floating` level, on
+    /// every Space and over a full-screen app, since the user may be anywhere
+    /// when the phone asks.
+    @MainActor
+    func presentPairingCodeCheck(clientID: String, clientName: String, pairingCode: String) {
+        guard !HeadlessRuntime.isActive, !isTerminating else { return }
+        withdrawPairingCodeCheck(clientID: clientID)
+        let name = clientName.isEmpty ? "An iPhone" : clientName
+        let alert = NSAlert()
+        alert.messageText = "\(name) is checking it reached this Mac"
+        alert.informativeText = "Its screen should show:\n\n\(Self.formattedPairingCode(pairingCode))\n\nIf it shows a different code, tap Cancel on the iPhone."
+        let ok = alert.addButton(withTitle: "OK")
+        ok.target = self
+        ok.action = #selector(closePairingCodeCheck(_:))
+        alert.layout()
+        let window = alert.window
+        window.level = .floating
+        // A panel hides when its app loses focus; this one stays up until
+        // OK or its phone closes it.
+        window.hidesOnDeactivate = false
+        window.collectionBehavior.formUnion([.canJoinAllSpaces, .fullScreenAuxiliary])
+        window.center()
+        // A second phone checking at the same time: step down and right
+        // from the first rather than cover it.
+        if let shown = companionCodeCheckAlerts.values.first(where: { $0.window.isVisible })?.window {
+            window.cascadeTopLeft(from: shown.cascadeTopLeft(from: .zero))
+        }
+        window.orderFrontRegardless()
+        NSApp.requestUserAttention(.informationalRequest)
+        companionCodeCheckAlerts[clientID] = alert
+        if companionCodeCheckEscapeMonitor == nil {
+            companionCodeCheckEscapeMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+                MainActor.assumeIsolated {
+                    guard event.keyCode == 53, let self,
+                          let clientID = self.companionCodeCheckAlerts.first(where: { $0.value.window === event.window })?.key
+                    else { return event }
+                    self.withdrawPairingCodeCheck(clientID: clientID)
+                    return nil
+                }
+            }
+        }
+    }
+
+    @MainActor
+    @objc private func closePairingCodeCheck(_ sender: NSButton) {
+        guard let clientID = companionCodeCheckAlerts.first(where: { $0.value.buttons.first === sender })?.key else { return }
+        withdrawPairingCodeCheck(clientID: clientID)
+    }
+
+    @MainActor
+    func withdrawPairingCodeCheck(clientID: String) {
+        companionCodeCheckAlerts.removeValue(forKey: clientID)?.window.orderOut(nil)
     }
 
     /// The `.regular` running apps. Mirrors
@@ -3168,7 +3527,8 @@ extension AppDelegate: CompanionCoordinatorHost {
             }
     }
 
-    /// Answer one phone's `requestAppIcons` with paged icon frames.
+    /// Answer one phone's `requestAppIcons` with paged icon frames, then
+    /// call `completion` — at once when nothing is left to send.
     ///
     /// TRUST BOUNDARY: the only bundle IDs answered are ones this phone can
     /// already see in the snapshot — its routed apps plus the coordinator's
@@ -3178,7 +3538,8 @@ extension AppDelegate: CompanionCoordinatorHost {
     /// bundle-ID alphabet): the id becomes a cache filename downstream, so a
     /// malformed one is refused here rather than relied on being caught later.
     @MainActor
-    func serveAppIconPages(_ requested: [String], to clientID: UUID) {
+    func serveAppIconPages(_ requested: [String], to clientID: UUID,
+                           completion: @escaping @MainActor () -> Void) {
         var allowed = Set(appRouting.appRoutes.map(\.bundleID))
         allowed.formUnion(companionCoordinator.addableApps().map(\.bundleID))
         let wanted = requested.filter { bundleID in
@@ -3186,30 +3547,42 @@ extension AppDelegate: CompanionCoordinatorHost {
                 && !bundleID.isEmpty && bundleID.count <= 128
                 && bundleID.unicodeScalars.allSatisfy { Self.bundleIDAllowed.contains($0) }
         }.prefix(CompanionAppIcons.maxRequestedBundleIDs)
-        sendAppIconPage(AppIconCache.chunk(Array(wanted)), index: 0, to: clientID)
+        guard !wanted.isEmpty else {
+            completion()
+            return
+        }
+        sendAppIconPage(AppIconCache.chunk(Array(wanted)), index: 0, to: clientID,
+                        completion: completion)
     }
 
     /// A licence key bought on the phone. Kept in this target
     /// because it needs `LicenseValidator`, the gate window and
-    /// `applyLicenseState`, none of which an AppKit-free type owns.
+    /// `applyLicenseState`, none of which an AppKit-free type owns. The phone
+    /// is answered only after the licence server's verdict; with the gate up,
+    /// an accepted key then opens it, and the gate's own pass runs
+    /// `applyLicenseState` and the check-in.
     @MainActor
     func activateLicenseKey(_ key: String,
                             reply: @escaping (CompanionServer.CommandResult) -> Void) {
-        if let gate = licenseGateWindowController {
-            // The gate is still up: its own field already runs the
-            // validate/store/pass sequence, so hand the key to it rather than
-            // racing it with a second validator.
-            gate.submit(key: key)
-            reply(CompanionServer.CommandResult(applied: true))
+        // The gate's check and the phone's must not race on the same stored
+        // key, so the phone is told to retry rather than silently dropped or
+        // falsely accepted.
+        if licenseGateWindowController?.isChecking == true {
+            reply(CompanionServer.CommandResult(applied: false, refusalReason: "Your Mac is checking another licence key. Try again in a moment."))
             return
         }
         CompanionLicenseActivation(settings: settings).activate(key: key) { [weak self] result in
             reply(result)
+            guard let self, !self.isTerminating else { return }
+            if result.applied, let gate = self.licenseGateWindowController {
+                gate.passWithStoredKey()
+                return
+            }
             // `applyLicenseState` is what pushes the companion token that
-            // unlocks the phone.
-            guard result.applied, let self, !self.isTerminating else { return }
+            // unlocks the phone. A refusal re-reads state too, because the
+            // activation may have restored the previous key.
             self.applyLicenseState()
-            LicenseCheckIn(settings: self.settings).checkInIfNeeded()
+            if result.applied { LicenseCheckIn(settings: self.settings).checkInIfNeeded() }
         }
     }
 

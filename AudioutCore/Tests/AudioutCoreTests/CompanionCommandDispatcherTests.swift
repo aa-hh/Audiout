@@ -73,6 +73,7 @@ import AudioutProtocol
         let settings: AppSettings
         let backend: MockBackend
         let spy: Spy
+        let speakerLibrary: SpeakerLibraryController
     }
 
     private func makeContext(fleet: [Device] = .demoFleet,
@@ -87,6 +88,9 @@ import AudioutProtocol
         let appRouting = AppRoutingController(store: AppRouteStore(directory: scratchDir), loadPersisted: false)
         let settings = AppSettings(defaults: isolatedDefaults)
         let spy = Spy()
+        let speakerLibrary = SpeakerLibraryController(store: SpeakerLibraryStore(directory: scratchDir),
+                                                      loadPersisted: false)
+        speakerLibrary.update(liveDevices: backend.devices, groups: [])
 
         let dispatcher = CompanionCommandDispatcher(
             groupController: groupController,
@@ -102,10 +106,11 @@ import AudioutProtocol
                     try? await Task.sleep(nanoseconds: 5_000_000)
                 }
             },
-            alignmentActions: alignmentActions
+            alignmentActions: alignmentActions,
+            speakerLibrary: speakerLibrary
         )
         return Context(dispatcher: dispatcher, groupController: groupController, appRouting: appRouting,
-                       settings: settings, backend: backend, spy: spy)
+                       settings: settings, backend: backend, spy: spy, speakerLibrary: speakerLibrary)
     }
 
     private func waitForFleet(_ backend: MockBackend, count: Int) async throws {
@@ -165,6 +170,63 @@ import AudioutProtocol
         #expect(ctx.groupController.isSpeakerSelected("office"), "falls back to setDeviceSelected(_, true)")
     }
 
+    // MARK: submitSpeakerPassword
+
+    /// Dropping the trim-and-empty check sends a blank password to the
+    /// speaker instead of refusing it; this turns red.
+    @Test func submitSpeakerPasswordRefusesABlankPassword() async throws {
+        let ctx = try await makeContext()
+        let result = ctx.dispatcher.execute(.submitSpeakerPassword(id: "office", password: "  "))
+        #expect(!result.applied)
+        #expect(result.refusalReason == "Enter the speaker's password.")
+        #expect(!ctx.groupController.isSpeakerSelected("office"))
+    }
+
+    /// Turns red if a password submitted from the phone selects a speaker the
+    /// user never joined; the phone's submit must match the Mac sheet's, which
+    /// retries without inventing membership.
+    @Test func submitSpeakerPasswordRetriesTheSpeaker() async throws {
+        let ctx = try await makeContext()
+        let result = ctx.dispatcher.execute(.submitSpeakerPassword(id: "office", password: "secret"))
+        #expect(result.applied)
+        #expect(!ctx.groupController.isSpeakerSelected("office"), "the retry never selects; membership stays the checkbox's job")
+    }
+
+    // MARK: setSpeakerVisibility / forgetSpeakers
+
+    /// Turns red if `setSpeakerVisibility` stops writing the speaker library,
+    /// or lets the phone change This Mac's Show in Mixer choice.
+    @Test func setSpeakerVisibilityWritesTheLibraryAndRefusesThisMac() async throws {
+        let ctx = try await makeContext()
+        let result = ctx.dispatcher.execute(.setSpeakerVisibility(id: "office", visibility: "hideWhenNotInUse"))
+        #expect(result.applied)
+        #expect(ctx.speakerLibrary.visibility(for: "office") == .hideWhenNotInUse)
+
+        let mac = ctx.dispatcher.execute(.setSpeakerVisibility(id: "local-mac", visibility: "hideWhenNotInUse"))
+        #expect(!mac.applied)
+        #expect(mac.refusalReason == "This Mac is always shown in the Mixer.")
+    }
+
+    /// Turns red if `forgetSpeakers` stops reaching the speaker library, or a
+    /// speaker Main Audio names gets forgotten along with the missing one.
+    @Test func forgetSpeakersForgetsARememberedSpeakerAndSkipsARoutedOne() async throws {
+        let ctx = try await makeContext()
+        try ctx.groupController.saveGroup(Group(id: "g1", name: "Pair", memberIDs: ["office", "garage"],
+                                                memberVolumes: [:]))
+        try ctx.groupController.saveGroup(Group(id: "g2", name: "Upstairs", memberIDs: ["office", "attic"],
+                                                memberVolumes: [:]))
+        ctx.speakerLibrary.update(liveDevices: ctx.backend.devices, groups: ctx.groupController.groups,
+                                  mainOut: .group(id: "g2"), selectedDeviceIDs: [], appRouteDestinations: [],
+                                  routedAppNamesByDeviceID: [:], recoveryIDs: [])
+
+        let result = ctx.dispatcher.execute(.forgetSpeakers(ids: ["garage", "attic"]))
+        #expect(result.applied)
+        #expect(ctx.speakerLibrary.record(for: "garage") == nil)
+        #expect(ctx.groupController.groups.first { $0.id == "g1" }?.memberIDs == ["office"])
+        #expect(ctx.speakerLibrary.record(for: "attic") != nil, "Main Audio names it, so Forget skips it")
+        #expect(ctx.groupController.groups.first { $0.id == "g2" }?.memberIDs == ["office", "attic"])
+    }
+
     // MARK: setMainOut — selected / group / refusals
 
     @Test func setMainOutSelectedDevices() async throws {
@@ -182,6 +244,30 @@ import AudioutProtocol
         let result = ctx.dispatcher.execute(.setMainOut(MainOutState(kind: "group", groupID: "g1")))
         #expect(result.applied)
         #expect(ctx.groupController.mainOut == .group(id: "g1"))
+    }
+
+    /// Red if the phone could turn a group on for an install limited to one
+    /// speaker, or refused it without saying why.
+    @Test func setMainOutGroupIsRefusedUnderTheOneSpeakerLimit() async throws {
+        let ctx = try await makeContext()
+        try ctx.groupController.saveGroup(Group(id: "g1", name: "Pair", memberIDs: ["office"], memberVolumes: [:]))
+        ctx.groupController.limitsToOneSpeaker = true
+        let result = ctx.dispatcher.execute(.setMainOut(MainOutState(kind: "group", groupID: "g1")))
+        #expect(!result.applied)
+        #expect(result.refusalReason == "Scenes need more than one speaker. Buy Audiout to use them.")
+        #expect(ctx.groupController.mainOut == .selectedDevices)
+    }
+
+    /// Red if the phone shows the analytics code `one_speaker_limit` as the
+    /// reason a second speaker was refused.
+    @Test func setDeviceSelectedRefusalUnderTheOneSpeakerLimitIsASentence() async throws {
+        let ctx = try await makeContext()
+        _ = ctx.groupController.setDeviceSelected("office", true)
+        ctx.groupController.limitsToOneSpeaker = true
+        let result = ctx.dispatcher.execute(.setDeviceSelected(id: "homepod-bed", selected: true))
+        #expect(!result.applied)
+        #expect(result.refusalReason == "Audiout plays on one speaker at a time until you buy.")
+        #expect(ctx.groupController.selectedDeviceIDs == ["office"])
     }
 
     @Test func setMainOutUnknownGroupIsRefused() async throws {

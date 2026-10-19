@@ -414,10 +414,14 @@ extension NativeBackend {
                 // stream for a row that says connected — a speaker fed nothing
                 // but idle fill, with the loop already settled at `want == isOn`.
                 // A speaker with a live session releases at its teardown instead
-                // (`removeFromAddedLocked`).
-                if previous != wantOn, !wantOn,
-                   !self.added.contains(id), !self.converging.contains(id) {
-                    self.wholeSystemStreamByDevice.removeValue(forKey: id)
+                // (`removeFromAddedLocked`); one whose op is still in flight
+                // releases when that op's slot does (`streamReleaseOnSettle`).
+                if previous != wantOn, !wantOn, !self.added.contains(id) {
+                    if self.converging.contains(id) {
+                        self.streamReleaseOnSettle.insert(id)
+                    } else {
+                        self.wholeSystemStreamByDevice.removeValue(forKey: id)
+                    }
                 }
 
                 // Connection-status brief §1/§3 semantics: a device newly
@@ -465,6 +469,11 @@ extension NativeBackend {
             // mid-apply. Runs inside this critical section so the enqueued
             // start/stop order matches the decision order exactly.
             self.reconcileCaptureGate()
+            // Main Out gaining or losing its last non-local output flips who owns
+            // the Mac's level, so the local players' gain follows. The query is
+            // read only here, while main is parked on this `sync`.
+            self.localRowDrivesMainLatched = self.localRowDrivesMainQuery?() ?? ids.isEmpty
+            self.pushLocalPlaybackGainLocked()
             // Intent changed: re-evaluate the silence watchdog. Selecting a device (or
             // activating a group) with nothing yet `.connected` arms the countdown;
             // deselecting everything (or dropping to a local-only selection) clears any
@@ -519,7 +528,9 @@ extension NativeBackend {
             where self.known[id]?.isBluetooth == true {
                 if ids.contains(id) {
                     if self.known[id]?.isAvailable == true { self.beginBTConnectingLocked(id) }
-                } else {
+                } else if !self.btPerAppClaimedUIDs.contains(id) {
+                    // The per-app claim owns the story until its own release at
+                    // the claim reconcile (`NativeBackend+PerAppRouting.swift` claim loop).
                     self.btConnectingDeadlines[id] = nil
                     if case .failed = self.known[id]?.connectionState {} else {
                         self.setConnectionState(.off, for: id)
@@ -585,7 +596,7 @@ extension NativeBackend {
                 let gains = self.btSinkGains(forUIDs: armedUIDs)
                 // Derived AFTER the new selection is committed — the reference
                 // is a function of the selected devices' measured latencies.
-                let referenceMs = self.updateBTReferenceBufferLocked()
+                let referenceMs = self.updateBTReferenceBufferLocked(pushToSink: false)
                 let eqs = self.btSinkEQs(forUIDs: armedUIDs)
                 self.captureControlQueue.async { [weak self] in
                     self?.applyBTSinkTransition(
@@ -615,10 +626,11 @@ extension NativeBackend {
             // timeline by the time the Cast device starts filling its buffer.
             if castTermMoved {
                 self.roomDelayChangedLocked(cause: "cast_selection")
-            } else if self._castTermMs != nil {
+            } else if self._castTermMs != nil || self.btRoomTermMs != nil {
                 // The room did not move, but who has to meet it may have: an
-                // AirPlay device joining a Cast room needs the line from its
-                // first buffer, and re-publishing the same depth costs nothing.
+                // AirPlay device joining a room a Cast or Bluetooth term already
+                // holds needs the line from its first buffer, and re-publishing
+                // the same depth costs nothing.
                 self.publishAirPlayPreDelayLocked()
             }
 
@@ -686,9 +698,11 @@ extension NativeBackend {
         // (Q1): the app takes the Mac's default output only when the user actually
         // routes (whole-system selection becomes non-empty), never at launch. It
         // also (re)evaluates the routing-blocked warning for the new steady state.
-        // Scheduled `async` (not inside the critical section above) so the HAL
-        // default-output write never extends the main-thread `sync` block; still
-        // serial on `stateQueue`, so it observes the just-written `expectedSelected`.
+        // Scheduled `async` (not inside the critical section above). The reconcile
+        // decides on `stateQueue`, so it observes the just-written
+        // `expectedSelected`, and does its default-output reads and the
+        // set-default write on `captureControlQueue`, so a slow coreaudiod never
+        // holds `stateQueue` and the main-thread `sync` above.
         stateQueue.async { self.reconcileAggregateDefault() }
 
         // The synced-local transition is no longer enqueued here — it fires from
@@ -715,11 +729,23 @@ extension NativeBackend {
         // CAST-OUT: a Cast row's "Try again" re-runs the whole session recipe in
         // the manager — no engine OutputID exists for it either.
         if retryCastOutput(id) { return }
-        let kick: OutputID? = stateQueue.sync {
+        enum Kick { case wholeSystem(OutputID), perAppPassword }
+        let kick: Kick? = stateQueue.sync {
             // Only a still-DESIRED id can be retried — intent lives in
             // `expectedSelected` (what the routing brain last asked for), and a
             // retry never invents membership. An already-`.connected` id has
-            // nothing to retry.
+            // nothing to retry. The one exception is a per-app route target
+            // waiting for a password: it is re-driven without membership.
+            if !self.expectedSelected.contains(id),
+               let device = self.known[id], !device.isLocalDevice,
+               self.routesTargetDeviceLocked(id),
+               Self.waitsForPasswordEntry(device.connectionState) {
+                // An offline speaker has nothing to feed, and making it
+                // available would replay the route into a bind that cannot succeed.
+                guard self.lastDescriptors[id] != nil else { return nil }
+                Telemetry.log(.airplay, "connect_requested", ["device": id, "trigger": "retry"])
+                return .perAppPassword
+            }
             guard self.expectedSelected.contains(id),
                   let device = self.known[id], !device.isLocalDevice,
                   device.connectionState != .connected,
@@ -740,10 +766,40 @@ extension NativeBackend {
             // F-REBIND: the USER asked for this connect, same as a fresh toggle.
             self.userConnectSeed.insert(id)
             Telemetry.log(.airplay, "connect_requested", ["device": id, "trigger": "retry"])
-            return outputID
+            return .wholeSystem(outputID)
         }
-        guard let kick else { return }
-        Task { [weak self] in await self?.convergeDevice(id: id, outputID: kick) }
+        switch kick {
+        case .wholeSystem(let outputID)?:
+            Task { [weak self] in await self?.convergeDevice(id: id, outputID: outputID) }
+        case .perAppPassword?:
+            // Feed the typed password, then write `.off` so the row is available
+            // and reachable again; the route replay issues the `.bind`, and
+            // `performBindOp` writes `.connecting` when it does. An app that is
+            // not running issues no bind and the row stays `.off`.
+            Task { [weak self] in
+                guard let self else { return }
+                if let descriptor = self.descriptorToFeed(id: id) {
+                    do {
+                        try await self.engine.updateDiscovery(descriptor)
+                    } catch {
+                        Telemetry.fail(.airplay, "airplay:connect_failed",
+                                       local: ["device": id, "detail": String(describing: error)],
+                                       shared: ["cause": "unknown", "reason": Self.failureReason(error)])
+                        self.stateQueue.sync {
+                            self.setPerAppConnectionStateLocked(
+                                .failed(ConnectionFailure(cause: .unknown, detail: String(describing: error))), for: id)
+                        }
+                        return
+                    }
+                    self.stateQueue.sync { self.fedDescriptors[id] = descriptor }
+                }
+                self.stateQueue.sync {
+                    self.setPerAppConnectionStateLocked(.off, for: id, makingAvailable: true)
+                }
+            }
+        case nil:
+            return
+        }
     }
 
     /// BT-RECONNECT (Wave 4): handle `retryOutput` for a `.bluetooth` id.
@@ -990,8 +1046,9 @@ extension NativeBackend {
         // No AirPlay device, no line: nothing would read it, and it is a
         // megabyte and a memcpy per buffer. An output also cannot be delayed by
         // less than nothing — and `0` publishes NO line rather than an empty
-        // one, which is the whole bypass: a room that leaves Cast is back to
-        // today's exact bytes on the very next buffer.
+        // one, which is the whole bypass: a room that leaves Cast and holds
+        // no Bluetooth term either is back to today's exact bytes on the very
+        // next buffer.
         //
         // Read from the SELECTION, never from `btComposition`: that memo is
         // only refreshed when the Bluetooth side moves, so in an AirPlay+Cast
@@ -1007,9 +1064,10 @@ extension NativeBackend {
     }
 
     /// Fold one `BTConnectionManager.connect` outcome into the row's
-    /// connection state (and, on success, the sink set). Availability itself
-    /// still arrives via the enumerator refresh the connect notification fires —
-    /// this is the row's lifecycle answer, not a parallel availability source.
+    /// connection state (and, on success, the sink set). Availability otherwise
+    /// arrives via the enumerator refresh the connect notification fires, but a
+    /// success commits it here too: a row a sink death marked gone may not
+    /// change the enumerator's list, so no refresh would ever bring it back.
     func finishBTReconnect(id: String, outcome: BTConnectOutcome) {
         stateQueue.async {
             switch outcome {
@@ -1023,17 +1081,27 @@ extension NativeBackend {
                 // the row onto last time's number.
                 self.btSpeakerTiming.noteConnected(uid: id)
                 // BT-LIFECYCLE: a baseband connect is not yet audio. A SELECTED
-                // id keeps breathing until its sink renders; an UNSELECTED one
-                // goes straight to `.off` — nothing will flow to it by design,
+                // id keeps breathing until its sink renders; an unselected,
+                // unclaimed one goes straight to `.off` — nothing will flow to it by design,
                 // so a hold there could only spin forever.
                 if self.expectedSelected.contains(id) {
                     self.beginBTConnectingLocked(id)
+                } else if self.btPerAppClaimedUIDs.contains(id) {
+                    self.beginBTConnectingLocked(id, perApp: true)
                 } else {
                     self.setConnectionState(.off, for: id)
                 }
                 // Wave-3 known gap, closed: a SELECTED id that just came back
                 // re-enters the per-device sink set now, not at the next
                 // selection change.
+                if var device = self.known[id], !device.isAvailable {
+                    device.isAvailable = true
+                    self.commitKnownDevice(id, device)
+                    // The loss unwatched the speaker's hardware volume, and
+                    // the enumerator sees no availability edge to re-arm it.
+                    self.reevaluateBTHardwareControlLocked(id)
+                    self.logBTAvailabilityLocked(id)
+                }
                 self.reapplyBTSinkLocked()
                 // Each reconnect lands 20–90 ms from last time
                 // (`bt-latency-stability-research-2026-09-05.md`), so this is

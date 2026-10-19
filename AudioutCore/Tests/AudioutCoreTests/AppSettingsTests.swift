@@ -19,6 +19,16 @@ import Testing
         #expect(settings.reconnectAtLaunch == false)
     }
 
+    /// Generating a fresh seed on every read, or ignoring the store it was
+    /// given, turns it red.
+    @Test func engineInstallSeedIsStablePerStoreAndDiffersAcrossStores() {
+        let first = AppSettings(defaults: defaults).engineInstallSeed
+        #expect(first != 0)
+        #expect(AppSettings(defaults: defaults).engineInstallSeed == first)
+        let other = TestIsolation(owner: "AppSettingsTests.seed")
+        #expect(AppSettings(defaults: other.isolatedDefaults).engineInstallSeed != first)
+    }
+
     @Test func themeRoundTrips() {
         let settings = AppSettings(defaults: defaults)
         settings.theme = .dark
@@ -307,6 +317,13 @@ import Testing
 
     // MARK: Companion — allow remote control (T6)
 
+    // Turns red if a dev build starts listening on the network before its
+    // owner turns the switch on, or the shipping app stops defaulting on.
+    @Test func allowRemoteControlDefaultsOffOnlyOnDevBuilds() {
+        #expect(AppSettings.defaultAllowRemoteControl(isDevBuild: false))
+        #expect(!AppSettings.defaultAllowRemoteControl(isDevBuild: true))
+    }
+
     @Test func allowRemoteControlDefaultsTrueWhenUnset() {
         // T22 flip: enabled out of the box — the per-phone approval gate is
         // what protects the listener, not the checkbox. Unchecking still
@@ -322,6 +339,16 @@ import Testing
 
         settings.allowRemoteControl = false
         #expect(!AppSettings(defaults: defaults).allowRemoteControl)
+    }
+
+    // Turns red if the shipping app (or the test runner) counts as a dev build,
+    // which would put the companion switch and a listening server in a release.
+    @Test func onlySuffixedBundleIDsAreDevBuilds() {
+        #expect(AppSettings.isDevBundleID("com.audiout.Audiout.dev"))
+        #expect(AppSettings.isDevBundleID("com.audiout.Audiout.staging"))
+        #expect(!AppSettings.isDevBundleID("com.audiout.Audiout"))
+        #expect(!AppSettings.isDevBundleID("com.apple.dt.xctest.tool"))
+        #expect(!AppSettings.isDevBundleID(nil))
     }
 
     @Test func resolvedAllowRemoteControlExplicitWins() {
@@ -507,6 +534,130 @@ import Testing
         #expect(AppSettings(defaults: defaults).licenseKey == nil)
     }
 
+    /// A bare dictionary standing in for the Keychain, so these tests never touch it.
+    /// `failWrites` and `refuseReads` make it refuse every write or read, as a
+    /// locked keychain does.
+    private final class InMemorySecretStore: SecretStoring {
+        var values: [String: String] = [:]
+        var failWrites = false
+        var refuseReads = false
+        func read(_ key: String) -> SecretRead {
+            guard !refuseReads else { return .refused }
+            return values[key].map(SecretRead.value) ?? .missing
+        }
+        func write(_ value: String?, for key: String) -> Bool {
+            guard !failWrites else { return false }
+            values[key] = value
+            return true
+        }
+    }
+
+    /// Turns red if the first read stops moving a key an older build left in
+    /// `UserDefaults` into the secret store (leaving it as plain text), or if
+    /// clearing the key lets the leftover copy migrate back.
+    @Test func aLicenceKeyLeftInDefaultsMovesToTheSecretStoreOnFirstRead() {
+        let store = InMemorySecretStore()
+        defaults.set("OLD-KEY", forKey: "license.key")
+        let settings = AppSettings(defaults: defaults, secrets: store)
+        #expect(settings.licenseKey == "OLD-KEY")
+        #expect(store.read("license.key") == .value("OLD-KEY"))
+        #expect(defaults.string(forKey: "license.key") == nil)
+        settings.licenseKey = nil
+        #expect(store.read("license.key") == .missing)
+        #expect(settings.licenseKey == nil)
+    }
+
+    /// Turns red if `readSecret` removes the `UserDefaults` copy after the
+    /// secret store refused the migration write, which deletes the only copy
+    /// of the licence key, or if a later read stops retrying the move.
+    @Test func aRefusedMigrationKeepsTheLicenceKeyInDefaultsAndRetries() {
+        let store = InMemorySecretStore()
+        store.failWrites = true
+        defaults.set("OLD-KEY", forKey: "license.key")
+        let settings = AppSettings(defaults: defaults, secrets: store)
+        #expect(settings.licenseKey == "OLD-KEY")
+        #expect(defaults.string(forKey: "license.key") == "OLD-KEY")
+        #expect(AppSettings(defaults: defaults, secrets: store).licenseKey == "OLD-KEY")
+        store.failWrites = false
+        #expect(settings.licenseKey == "OLD-KEY")
+        #expect(store.read("license.key") == .value("OLD-KEY"))
+        #expect(defaults.string(forKey: "license.key") == nil)
+    }
+
+    /// Turns red if `writeSecret` drops a value the secret store refused
+    /// instead of keeping it in `UserDefaults`.
+    @Test func aRefusedWriteKeepsTheLicenceKeyReadableFromDefaults() {
+        let store = InMemorySecretStore()
+        store.failWrites = true
+        let settings = AppSettings(defaults: defaults, secrets: store)
+        settings.licenseKey = "NEW-KEY"
+        #expect(store.read("license.key") == .missing)
+        #expect(defaults.string(forKey: "license.key") == "NEW-KEY")
+        #expect(settings.licenseKey == "NEW-KEY")
+        #expect(AppSettings(defaults: defaults, secrets: store).licenseKey == "NEW-KEY")
+    }
+
+    /// Turns red if a read the secret store refused (a locked login keychain)
+    /// makes a registered Mac look unregistered, so it plays on one speaker
+    /// and sees the first-open gate, or if that read moves or deletes the
+    /// copy in `UserDefaults`.
+    @Test func aRefusedReadKeepsARegisteredMacRegistered() {
+        let store = InMemorySecretStore()
+        store.values["license.key"] = "PAID-KEY"
+        let settings = AppSettings(defaults: defaults,
+                                   licenseServerURL: URL(string: "https://license.example.com")!,
+                                   secrets: store)
+        settings.licenseStatus = .active
+        store.refuseReads = true
+
+        #expect(!LicenseGate.limitsToOneSpeaker(settings: settings))
+        #expect(!LicenseGate.shouldPresent(settings: settings, presentation: .auto))
+
+        defaults.set("old-token", forKey: "license.companionToken")
+        #expect(settings.companionToken == "old-token")
+        #expect(defaults.string(forKey: "license.companionToken") == "old-token",
+                "a refused read leaves the defaults copy where it is")
+    }
+
+    /// Turns red if `hasLicenseKey` counts every refused read as a stored key,
+    /// which makes a Mac that never had one read as registered whenever its
+    /// keychain is locked.
+    @Test func aRefusedReadWithNoVerdictAndNoDefaultsCopyIsNoKey() {
+        let store = InMemorySecretStore()
+        store.refuseReads = true
+        let settings = AppSettings(defaults: defaults, secrets: store)
+        #expect(!settings.hasLicenseKey)
+        #expect(settings.licenseUnregistered)
+    }
+
+    /// Turns red if a read that finds a value in the secret store ignores the
+    /// newer copy a refused write left in `UserDefaults`, which brings back the
+    /// key the user replaced, or if that copy is removed before the store has
+    /// taken it.
+    @Test func aDefaultsCopyLeftByARefusedWriteWinsOverTheStoredKey() {
+        let store = InMemorySecretStore()
+        store.values["license.key"] = "OLD-KEY"
+        defaults.set("NEW-KEY", forKey: "license.key")
+        store.failWrites = true
+        let settings = AppSettings(defaults: defaults, secrets: store)
+        #expect(settings.licenseKey == "NEW-KEY")
+        #expect(defaults.string(forKey: "license.key") == "NEW-KEY")
+        store.failWrites = false
+        #expect(settings.licenseKey == "NEW-KEY")
+        #expect(store.read("license.key") == .value("NEW-KEY"))
+        #expect(defaults.string(forKey: "license.key") == nil)
+    }
+
+    /// Turns red if the companion token skips the migration the licence key gets.
+    @Test func companionTokenFollowsTheSameMigration() {
+        let store = InMemorySecretStore()
+        defaults.set("old-token", forKey: "license.companionToken")
+        let settings = AppSettings(defaults: defaults, secrets: store)
+        #expect(settings.companionToken == "old-token")
+        #expect(store.read("license.companionToken") == .value("old-token"))
+        #expect(defaults.string(forKey: "license.companionToken") == nil)
+    }
+
     /// The bundle key is what a real build reads; under a test run
     /// `Bundle.main` is the runner, so the honest default here is "no server"
     /// — which IS the free build's state — and the init override is the only
@@ -596,6 +747,9 @@ import Testing
 
     private static let buyPage = URL(string: "https://audiout.app/buy")!
     private static let trialKey = "AUDT-AAAAA-BBBBB-CCCCC-DDDDD"
+    /// The Buy page as the app opens it: tagged so the site knows the click
+    /// came from the app.
+    private static let taggedBuyPage = URL(string: "https://audiout.app/buy?s=mac-app")!
 
     private func buySettings() -> AppSettings {
         AppSettings(defaults: defaults, buyURL: Self.buyPage)
@@ -607,7 +761,7 @@ import Testing
         let settings = buySettings()
         settings.licenseKey = Self.trialKey
         settings.licenseStatus = .active
-        #expect(settings.buyURL == Self.buyPage)
+        #expect(settings.buyURL == Self.taggedBuyPage)
 
         #expect(AppSettings(defaults: defaults).buyURL == nil,
                 "a build with no purchase page still has none")
@@ -622,23 +776,37 @@ import Testing
                          expiresAt: Date(timeIntervalSinceNow: 9 * 86_400),
                          key: Self.trialKey)
         #expect(settings.buyURL
-                == URL(string: "https://audiout.app/buy?t=\(Self.trialKey)"))
+                == URL(string: "https://audiout.app/buy?s=mac-app&t=\(Self.trialKey)"))
     }
 
     /// Red if a trial that has not reached the server yet started inventing a
-    /// `t` for the checkout to look up, or if an expired trial kept sending
-    /// its dead key.
-    @Test func buyURLCarriesNoTrialIDBeforeAKeyOrAfterExpiry() {
+    /// `t` for the checkout to look up.
+    @Test func buyURLCarriesNoTrialIDBeforeAKey() {
         let settings = buySettings()
         TrialClock.start(settings: settings)
-        #expect(settings.buyURL == Self.buyPage, "an unregistered trial has no key to send")
+        #expect(settings.buyURL == Self.taggedBuyPage, "an unregistered trial has no key to send")
+    }
 
+    /// Red if an expired trial stopped sending its key — the checkout could no
+    /// longer activate that Mac without a pasted key.
+    @Test func buyURLCarriesTheTrialIDAfterExpiry() {
         let expired = AppSettings(defaults: isolation.makeDefaults(), buyURL: Self.buyPage)
         TrialClock.apply(settings: expired,
                          startedAt: Date(timeIntervalSinceNow: -20 * 86_400),
                          expiresAt: Date(timeIntervalSinceNow: -6 * 86_400),
                          key: Self.trialKey)
-        #expect(expired.buyURL == Self.buyPage, "a spent trial converts nothing")
+        #expect(expired.buyURL == URL(string: "https://audiout.app/buy?s=mac-app&t=\(Self.trialKey)"))
+    }
+
+    /// Red if a converted trial sent its paid key as a trial id.
+    @Test func buyURLCarriesNoTrialIDAfterConversion() {
+        let converted = AppSettings(defaults: isolation.makeDefaults(), buyURL: Self.buyPage)
+        TrialClock.apply(settings: converted,
+                         startedAt: Date(timeIntervalSinceNow: -3 * 86_400),
+                         expiresAt: Date(timeIntervalSinceNow: 11 * 86_400),
+                         key: Self.trialKey)
+        converted.trialExpiresAt = nil
+        #expect(converted.buyURL == Self.taggedBuyPage)
     }
 
     @Test func checkInURLDefaultsNilAndRoundTrips() {

@@ -27,15 +27,19 @@ import AppKit
 /// `engagedSeatCornerRadius`, retired 2026-09-04. Two views, two layers, two
 /// appearance re-stamps and a size that had to be pinned by hand because an
 /// `.accessoryBar` `NSButton` frames larger than its alignment rect. The
-/// enclosing square is part of the symbol now, so the mark is ONE image: the
-/// `.fill` variant when engaged, the outline variant at rest.
+/// enclosing square is part of the symbol now, so the mark is ONE image.
 ///
-/// HOW THE ENGAGED STATES PUNCH THROUGH, and why this draws MONOCHROME.
-/// In each `.fill` template the marks are not paint — they are erase actions
-/// (`-sfsymbols-clear-behind`), so the speaker, the slash and the two sliders
-/// cut holes in the enclosing square and the row's own background shows
-/// through them. That is the approved look, and it survives only under
-/// monochrome rendering.
+/// Mute draws two OUTLINE symbols that share one square: at rest
+/// `custom.speaker.square`, the speaker with no slash, in the row's neutral
+/// ink; muted `custom.speaker.slash.square`, the same square with the slash
+/// added, in ``Tokens/Color/muted``. The slash and the ink both change, so the
+/// state does not rest on colour alone.
+///
+/// HOW THE EQUALIZER'S `.fill` PUNCHES THROUGH, and why this draws
+/// MONOCHROME. In `custom.slider.horizontal.2.square.fill` the marks are not
+/// paint — they are erase actions (`-sfsymbols-clear-behind`), so the two
+/// sliders cut holes in the enclosing square and the row's own background
+/// shows through them. That survives only under monochrome rendering.
 ///
 /// A palette configuration destroys it, which is what shipped on 2026-09-04
 /// and what the owner saw: palette rendering treats every layer as paintable,
@@ -45,13 +49,15 @@ import AppKit
 /// instead of cutting them. So: one ink, monochrome, and the tint is applied
 /// through the alpha channel below rather than by a configuration.
 public enum RowAccessorySymbol {
-    /// Mute at rest — the outline square.
-    public static let muteRest = "custom.speaker.slash.square"
-    /// Mute engaged — the filled square.
-    public static let muteEngaged = "custom.speaker.slash.square.fill"
-    /// The Equalizer door on a flat curve — the outline square.
+    /// Mute at rest — the outline square with the speaker and no slash.
+    public static let muteRest = "custom.speaker.square"
+    /// Mute engaged — the same outline square with the slash added.
+    public static let muteEngaged = "custom.speaker.slash.square"
+    /// The outline square — the Equalizer door in both states (rest ink flat,
+    /// green shaped) and the heading icon on a flat curve.
     public static let equalizerRest = "custom.slider.horizontal.2.square"
-    /// The Equalizer door on a shaped curve — the filled square.
+    /// The filled square — the Equalizer heading icon's shaped state only,
+    /// never drawn on the door.
     public static let equalizerEngaged = "custom.slider.horizontal.2.square.fill"
 
     /// Every name above, for the load test that guards the catalogue.
@@ -92,9 +98,18 @@ public enum RowAccessorySymbol {
     public static let pointSize: CGFloat = 20
     /// See ``pointSize``.
     public static let weight: NSFont.Weight = .light
+    /// The Equalizer heading icon's point size: the door's 20 pt scaled by the
+    /// heading font over the body font, 20 × 16/13 = 24.6, rounded to the
+    /// nearest whole point.
+    public static let headingPointSize: CGFloat = 25
+    /// The distance, in points, from the left edge of a ``headingPointSize``
+    /// box in which the symbol image is centred unscaled to the left edge of
+    /// the drawn square. Measured from the compiled symbol by
+    /// `RowAccessorySymbolTests`.
+    public static let headingMarkSquareInset: CGFloat = 1.0
 
     /// The raw symbol image, or `nil` when the catalogue did not make it into
-    /// the bundle. Callers use ``image(named:ink:)``; this is separate so
+    /// the bundle. Callers use ``image(named:ink:pointSize:)``; this is separate so
     /// the load test can prove the resource resolves without also asserting a
     /// rendering configuration.
     /// Test seam: the suite runs with no `.app`, so `NSImage(named:)` has no
@@ -116,15 +131,16 @@ public enum RowAccessorySymbol {
         return NSImage(named: name)
     }
 
-    /// The symbol in one ink, with the `.fill` variants' erased marks left as
-    /// transparent holes.
+    /// The symbol in one ink, with the Equalizer `.fill` variant's erased
+    /// marks left as transparent holes.
     ///
     /// The tint is painted through the rendered symbol's alpha channel — fill
     /// the bounds with `ink`, then keep only the pixels the symbol covers. A
     /// symbol configuration cannot do this: every colour-carrying
     /// configuration is a palette or hierarchical one, and both paint the
     /// erased marks instead of cutting them (see the type's doc comment).
-    public static func image(named name: String, ink: NSColor) -> NSImage? {
+    public static func image(named name: String, ink: NSColor,
+                             pointSize: CGFloat = RowAccessorySymbol.pointSize) -> NSImage? {
         guard let symbol = rawImage(named: name)?.withSymbolConfiguration(
             NSImage.SymbolConfiguration(pointSize: pointSize, weight: weight))
         else { return nil }
@@ -142,5 +158,69 @@ public enum RowAccessorySymbol {
         // in the control colour and throw the state away.
         tinted.isTemplate = false
         return tinted
+    }
+
+    // MARK: The row accessories' inks and images
+
+    /// `ink` resolved to a fixed colour in `appearance`. A dynamic `NSColor`
+    /// would otherwise resolve against whatever appearance is current when the
+    /// image is composited, and the ink is baked into the image.
+    public static func resolvedInk(_ ink: NSColor, in appearance: NSAppearance) -> NSColor {
+        var resolved = ink
+        appearance.performAsCurrentDrawingAppearance { resolved = ink.usingColorSpace(.sRGB) ?? ink }
+        return resolved
+    }
+
+    /// The at-rest ink: `label`, one neutral line for the square and the
+    /// mark inside it.
+    public static func restInk(in appearance: NSAppearance) -> NSColor {
+        resolvedInk(Tokens.Color.label, in: appearance)
+    }
+
+    /// Mute: the slashed outline in ``Tokens/Color/muted`` when engaged, the
+    /// unslashed outline in the rest ink otherwise.
+    public static func mute(engaged: Bool, in appearance: NSAppearance) -> NSImage? {
+        engaged
+            ? image(named: muteEngaged, ink: resolvedInk(Tokens.Color.muted, in: appearance))
+            : image(named: muteRest, ink: restInk(in: appearance))
+    }
+
+    /// The Equalizer door: the outline square in both states, in
+    /// ``Tokens/Color/equalizer`` when the curve is shaped. Never the filled
+    /// square.
+    public static func equalizerDoor(shaped: Bool, in appearance: NSAppearance) -> NSImage? {
+        image(named: equalizerRest,
+              ink: shaped ? resolvedInk(Tokens.Color.equalizer, in: appearance)
+                          : restInk(in: appearance))
+    }
+
+    /// The icon leading an Equalizer heading: the filled square in
+    /// ``Tokens/Color/equalizer`` when shaped, the outline in the rest ink
+    /// when flat.
+    public static func equalizerHeading(shaped: Bool, in appearance: NSAppearance,
+                                        pointSize: CGFloat = headingPointSize) -> NSImage? {
+        shaped
+            ? image(named: equalizerEngaged,
+                    ink: resolvedInk(Tokens.Color.equalizer, in: appearance), pointSize: pointSize)
+            : image(named: equalizerRest, ink: restInk(in: appearance), pointSize: pointSize)
+    }
+
+    /// The setup every row accessory button shares (device-row mute and
+    /// Equalizer door, Main Audio mute): a borderless `.accessoryBar` push-on/
+    /// push-off button showing `image` unscaled — the symbol's image box is
+    /// wider than its 24 pt column by empty side bearings, and the default
+    /// `.scaleProportionallyDown` would shrink the mark to fit them.
+    public static func configure(_ button: NSButton, image: NSImage?,
+                                 target: AnyObject?, action: Selector) {
+        button.translatesAutoresizingMaskIntoConstraints = false
+        button.bezelStyle = .accessoryBar
+        button.setButtonType(.pushOnPushOff)
+        button.isBordered = false
+        button.image = image
+        button.imagePosition = .imageOnly
+        button.imageScaling = .scaleNone
+        button.contentTintColor = Tokens.Color.label2
+        button.target = target
+        button.action = action
     }
 }

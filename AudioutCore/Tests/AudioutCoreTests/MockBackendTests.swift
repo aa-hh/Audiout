@@ -11,103 +11,83 @@ import Testing
         MockBackend(fleet: fleet, staggerDiscovery: false, emitsLevels: false, simulatesDropouts: false)
     }
 
+    /// A backend whose scripted connect steps wait on `clock` instead of the
+    /// wall clock: nothing runs until the test calls `clock.fireAll()`.
+    private func makeScriptedBackend(_ scripts: [String: ConnectScript]) -> (MockBackend, QueuedDelayClock) {
+        let clock = QueuedDelayClock()
+        let backend = MockBackend(
+            fleet: [Device(id: "a", name: "A", kind: .generic)],
+            staggerDiscovery: false, emitsLevels: false, simulatesDropouts: false,
+            connectScripts: scripts, outputObserver: nil, delayClock: clock.clock)
+        return (backend, clock)
+    }
+
+    /// Let the backend take what the test just asked of it, then run every
+    /// delayed step it scheduled, to completion.
+    private func run(_ backend: MockBackend, _ clock: QueuedDelayClock) {
+        _ = backend.devices
+        clock.fireAll()
+    }
+
     /// Collect the next `count` non-level events. Fails if they don't arrive in time.
-    private func collect(_ count: Int, from backend: MockBackend, timeout: TimeInterval = 2) async throws -> [BackendEvent] {
-        let stream = backend.makeEventStream()
-        let box = EventBox()
-        try await confirmation("received \(count) events") { received in
-            let task = Task {
-                for await event in stream {
-                    if case .level = event { continue }
-                    if await box.append(event) >= count { received(); break }
-                }
-            }
-            defer { task.cancel() }
-            backend.start()
-            // The body must do the waiting itself — `confirmation` does not.
-            try await withThrowingTaskGroup(of: Void.self) { group in
-                group.addTask { _ = await task.value }
-                group.addTask { try await Task.sleep(for: .seconds(timeout)) }
-                try await group.next()
-                group.cancelAll()
-            }
+    private func collect(_ count: Int, from backend: MockBackend) async -> [BackendEvent] {
+        let (box, task) = record(backend.makeEventStream()) { event in
+            if case .level = event { return false }
+            return true
         }
-        return await box.events
+        defer { task.cancel() }
+        backend.start()
+        await SuiteWait.until("\(count) events") { box.events.count >= count }
+        return Array(box.events.prefix(count))
     }
 
     @Test func discoveryEmitsWholeFleet() async throws {
         let backend = makeBackend()
-        let events = try await collect(demoFleet.count, from: backend)
+        let events = await collect(demoFleet.count, from: backend)
         let added = events.compactMap { if case .deviceAdded(let d) = $0 { return d.id } else { return nil } }
         #expect(Set(added) == Set(demoFleet.map(\.id)))
     }
 
     @Test func devicesSnapshotMatchesFleetAfterDiscovery() async throws {
         let backend = makeBackend()
-        _ = try await collect(demoFleet.count, from: backend)
+        _ = await collect(demoFleet.count, from: backend)
         #expect(backend.devices.map(\.id) == demoFleet.map(\.id))
     }
 
     @Test func setVolumeClampsAndEchoes() async throws {
         let backend = makeBackend([Device(id: "a", name: "A", kind: .generic, volume: 50)])
-        let stream = backend.makeEventStream()
-        backend.start()
-
-        let box = DeviceBox()
-        try await confirmation("volume echoed") { echoed in
-            let task = Task {
-                for await event in stream {
-                    if case .deviceUpdated(let d) = event, d.id == "a" {
-                        await box.set(d); echoed(); break
-                    }
-                }
-            }
-            defer { task.cancel() }
-            // wait for discovery, then over-drive the volume past the ceiling
-            try await Task.sleep(nanoseconds: 200_000_000)
-            backend.setVolume(150, for: "a")
-            try await withThrowingTaskGroup(of: Void.self) { group in
-                group.addTask { _ = await task.value }
-                group.addTask { try await Task.sleep(for: .seconds(2)) }
-                try await group.next()
-                group.cancelAll()
-            }
+        let (box, task) = record(backend.makeEventStream()) { event in
+            if case .deviceUpdated(let d) = event, d.id == "a" { return true }
+            return false
         }
-        let updated = await box.value
+        defer { task.cancel() }
+        backend.start()
+        // wait for discovery, then over-drive the volume past the ceiling
+        await SuiteWait.until("discovery of a") { backend.devices.count == 1 }
+        backend.setVolume(150, for: "a")
+        await SuiteWait.until("the volume echo") { !box.devices.isEmpty }
+        let updated = box.devices.first
         #expect(updated?.volume == 100, "volume should clamp to 100")
     }
 
     @Test func setEQEchoesTheSettingsBack() async throws {
         let backend = makeBackend([Device(id: "a", name: "A", kind: .generic)])
-        let stream = backend.makeEventStream()
-        backend.start()
         let eq = DeviceEQ(bassDB: 5, balance: -0.25, loudness: true)
-
-        let box = DeviceBox()
-        try await confirmation("eq echoed") { echoed in
-            let task = Task {
-                for await event in stream {
-                    if case .deviceUpdated(let d) = event, d.id == "a" {
-                        await box.set(d); echoed(); break
-                    }
-                }
-            }
-            defer { task.cancel() }
-            try await Task.sleep(nanoseconds: 200_000_000)   // let discovery settle
-            backend.setEQ(eq, for: "a", commit: true)
-            try await withThrowingTaskGroup(of: Void.self) { group in
-                group.addTask { _ = await task.value }
-                group.addTask { try await Task.sleep(for: .seconds(2)) }
-                try await group.next()
-                group.cancelAll()
-            }
+        let (box, task) = record(backend.makeEventStream()) { event in
+            if case .deviceUpdated(let d) = event, d.id == "a" { return true }
+            return false
         }
-        #expect(await box.value?.eq == eq)
+        defer { task.cancel() }
+        backend.start()
+        await SuiteWait.until("discovery of a") { backend.devices.count == 1 }   // let discovery settle
+        backend.setEQ(eq, for: "a", commit: true)
+        await SuiteWait.until("the EQ echo") { !box.devices.isEmpty }
+        #expect(box.devices.first?.eq == eq)
     }
 
     @Test func setMainOutEQIsRecordedNotApplied() async throws {
         let backend = makeBackend([Device(id: "a", name: "A", kind: .generic)])
-        _ = try await collect(1, from: backend)
+        _ = await collect(1, from: backend)
         #expect(backend.mainOutEQ == .flat)
 
         backend.setMainOutEQ(DeviceEQ(trebleDB: -3), commit: false)
@@ -120,7 +100,7 @@ import Testing
 
     @Test func setOutputSetSelectsExactlyTheGivenDevices() async throws {
         let backend = makeBackend()
-        _ = try await collect(demoFleet.count, from: backend)
+        _ = await collect(demoFleet.count, from: backend)
 
         backend.setOutputSet(["office", "homepod-bed"])
         await SuiteWait.until("the output set to become exactly the given devices") {
@@ -134,19 +114,19 @@ import Testing
     @Test func noOpChangeDoesNotEmit() async throws {
         // Setting a device's volume to the value it already has must not echo.
         let backend = makeBackend([Device(id: "a", name: "A", kind: .generic, volume: 42)])
-        _ = try await collect(1, from: backend)   // the initial deviceAdded
+        _ = await collect(1, from: backend)   // the initial deviceAdded
 
-        let stream = backend.makeEventStream()
-        let box = FlagBox()
-        let task = Task {
-            for await event in stream {
-                if case .deviceUpdated = event { await box.raise() }
-            }
+        let (box, task) = record(backend.makeEventStream()) { event in
+            if case .deviceUpdated = event { return true }
+            return false
         }
+        defer { task.cancel() }
         backend.setVolume(42, for: "a")            // same value → no-op
-        try await Task.sleep(nanoseconds: 300_000_000)
-        task.cancel()
-        let sawUpdate = await box.value
+        // Events arrive in order, so once this real change echoes, a no-op echo
+        // would already be in the box ahead of it.
+        backend.setVolume(43, for: "a")
+        await SuiteWait.until("the real change to echo") { !box.events.isEmpty }
+        let sawUpdate = box.devices.count > 1
         #expect(!sawUpdate, "a no-op change should not emit deviceUpdated")
     }
 
@@ -155,66 +135,39 @@ import Testing
         // keeps the exact current one-event-per-toggle behaviour, just now
         // also carrying `.connected`/`.off` in that same event.
         let backend = makeBackend([Device(id: "a", name: "A", kind: .generic)])
-        _ = try await collect(1, from: backend)   // initial deviceAdded
+        _ = await collect(1, from: backend)   // initial deviceAdded
 
-        let stream = backend.makeEventStream()
-        let box = DeviceBox()
-        try await confirmation("enabled") { enabled in
-            let task = Task {
-                for await event in stream {
-                    if case .deviceUpdated(let d) = event, d.id == "a" {
-                        await box.set(d); enabled(); break
-                    }
-                }
-            }
-            defer { task.cancel() }
-            backend.setOutputSet(["a"])
-            try await withThrowingTaskGroup(of: Void.self) { group in
-                group.addTask { _ = await task.value }
-                group.addTask { try await Task.sleep(for: .seconds(2)) }
-                try await group.next()
-                group.cancelAll()
-            }
+        let (box, task) = record(backend.makeEventStream()) { event in
+            if case .deviceUpdated(let d) = event, d.id == "a" { return true }
+            return false
         }
-        let enabledDevice = await box.value
+        defer { task.cancel() }
+        backend.setOutputSet(["a"])
+        await SuiteWait.until("the enable echo") { !box.devices.isEmpty }
+        let enabledDevice = box.devices.first
         #expect(enabledDevice?.isSelected == true)
         #expect(enabledDevice?.connectionState == .connected)
 
-        let stream2 = backend.makeEventStream()
-        let box2 = DeviceBox()
-        try await confirmation("disabled") { disabled in
-            let task2 = Task {
-                for await event in stream2 {
-                    if case .deviceUpdated(let d) = event, d.id == "a" {
-                        await box2.set(d); disabled(); break
-                    }
-                }
-            }
-            defer { task2.cancel() }
-            backend.setOutputSet([])
-            try await withThrowingTaskGroup(of: Void.self) { group in
-                group.addTask { _ = await task2.value }
-                group.addTask { try await Task.sleep(for: .seconds(2)) }
-                try await group.next()
-                group.cancelAll()
-            }
+        let (box2, task2) = record(backend.makeEventStream()) { event in
+            if case .deviceUpdated(let d) = event, d.id == "a" { return true }
+            return false
         }
-        let disabledDevice = await box2.value
+        defer { task2.cancel() }
+        backend.setOutputSet([])
+        await SuiteWait.until("the disable echo") { !box2.devices.isEmpty }
+        let disabledDevice = box2.devices.first
         #expect(disabledDevice?.isSelected == false)
         #expect(disabledDevice?.connectionState == .off)
     }
 
     @Test func scriptedConnectGoesConnectingThenConnected() async throws {
         let script = ConnectScript(attempts: [.connect(after: 0.1)])
-        let backend = MockBackend(
-            fleet: [Device(id: "a", name: "A", kind: .generic)],
-            staggerDiscovery: false, emitsLevels: false, simulatesDropouts: false,
-            connectScripts: ["a": script]
-        )
-        _ = try await collectFleetDiscovery(backend)
+        let (backend, clock) = makeScriptedBackend(["a": script])
+        _ = await collectFleetDiscovery(backend)
 
-        let updates = try await collectUpdates(for: "a", count: 2, from: backend) {
+        let updates = await collectUpdates(for: "a", count: 2, from: backend) {
             backend.setOutputSet(["a"])
+            run(backend, clock)
         }
         #expect(updates.map(\.connectionState) == [.connecting, .connected])
         #expect(updates.last?.isSelected == true)
@@ -222,15 +175,12 @@ import Testing
 
     @Test func scriptedFailGoesConnectingThenFailedWithIsSelectedFalse() async throws {
         let failure = ConnectionFailure(cause: .notResponding)
-        let backend = MockBackend(
-            fleet: [Device(id: "a", name: "A", kind: .generic)],
-            staggerDiscovery: false, emitsLevels: false, simulatesDropouts: false,
-            connectScripts: ["a": ConnectScript(attempts: [.fail(after: 0.1, failure)])]
-        )
-        _ = try await collectFleetDiscovery(backend)
+        let (backend, clock) = makeScriptedBackend(["a": ConnectScript(attempts: [.fail(after: 0.1, failure)])])
+        _ = await collectFleetDiscovery(backend)
 
-        let updates = try await collectUpdates(for: "a", count: 2, from: backend) {
+        let updates = await collectUpdates(for: "a", count: 2, from: backend) {
             backend.setOutputSet(["a"])
+            run(backend, clock)
         }
         #expect(updates.map(\.connectionState) == [.connecting, .failed(failure)])
         #expect(updates.last?.isSelected == false)
@@ -240,18 +190,16 @@ import Testing
         // §1: dropping a failed device from the expected set (the popover's
         // honest-toggle cleanup) must not erase the warning.
         let failure = ConnectionFailure(cause: .vanished)
-        let backend = MockBackend(
-            fleet: [Device(id: "a", name: "A", kind: .generic)],
-            staggerDiscovery: false, emitsLevels: false, simulatesDropouts: false,
-            connectScripts: ["a": ConnectScript(attempts: [.fail(after: 0.1, failure)])]
-        )
-        _ = try await collectFleetDiscovery(backend)
-        _ = try await collectUpdates(for: "a", count: 2, from: backend) {
+        let (backend, clock) = makeScriptedBackend(["a": ConnectScript(attempts: [.fail(after: 0.1, failure)])])
+        _ = await collectFleetDiscovery(backend)
+        _ = await collectUpdates(for: "a", count: 2, from: backend) {
             backend.setOutputSet(["a"])
+            run(backend, clock)
         }
 
-        let cleanup = try await collectUpdates(for: "a", count: 1, from: backend) {
+        let cleanup = await collectUpdates(for: "a", count: 1, from: backend) {
             backend.setOutputSet([])   // remove from expected set without retrying
+            run(backend, clock)
         }
         #expect(cleanup.last?.connectionState == .failed(failure), "sticky-failed must survive deselect")
         #expect(cleanup.last?.isSelected == false)
@@ -259,23 +207,22 @@ import Testing
 
     @Test func retryAfterFailureUsesTheSecondScriptedAttempt() async throws {
         let failure = ConnectionFailure(cause: .notResponding)
-        let backend = MockBackend(
-            fleet: [Device(id: "a", name: "A", kind: .generic)],
-            staggerDiscovery: false, emitsLevels: false, simulatesDropouts: false,
-            connectScripts: ["a": ConnectScript(attempts: [
+        let (backend, clock) = makeScriptedBackend(["a": ConnectScript(attempts: [
                 .fail(after: 0.1, failure),
                 .connect(after: 0.1),
-            ])]
-        )
-        _ = try await collectFleetDiscovery(backend)
-        _ = try await collectUpdates(for: "a", count: 2, from: backend) {
+            ])])
+        _ = await collectFleetDiscovery(backend)
+        _ = await collectUpdates(for: "a", count: 2, from: backend) {
             backend.setOutputSet(["a"])       // attempt 1: fails
+            run(backend, clock)
         }
-        _ = try await collectUpdates(for: "a", count: 1, from: backend) {
+        _ = await collectUpdates(for: "a", count: 1, from: backend) {
             backend.setOutputSet([])          // cleanup (sticky-failed)
+            run(backend, clock)
         }
-        let retry = try await collectUpdates(for: "a", count: 2, from: backend) {
+        let retry = await collectUpdates(for: "a", count: 2, from: backend) {
             backend.setOutputSet(["a"])       // attempt 2: connects
+            run(backend, clock)
         }
         #expect(retry.map(\.connectionState) == [.connecting, .connected])
         #expect(retry.last?.isSelected == true)
@@ -290,66 +237,58 @@ import Testing
     /// `GroupController.retryConnection(for:)` now calls.
     @Test func membershipNeutralSetOutputSetDoesNotRetryButRetryOutputDoes() async throws {
         let failure = ConnectionFailure(cause: .notResponding)
-        let backend = MockBackend(
-            fleet: [Device(id: "a", name: "A", kind: .generic)],
-            staggerDiscovery: false, emitsLevels: false, simulatesDropouts: false,
-            connectScripts: ["a": ConnectScript(attempts: [
+        let (backend, clock) = makeScriptedBackend(["a": ConnectScript(attempts: [
                 .fail(after: 0.1, failure),
                 .connect(after: 0.1),
-            ])]
-        )
-        _ = try await collectFleetDiscovery(backend)
-        _ = try await collectUpdates(for: "a", count: 2, from: backend) {
+            ])])
+        _ = await collectFleetDiscovery(backend)
+        _ = await collectUpdates(for: "a", count: 2, from: backend) {
             backend.setOutputSet(["a"])       // attempt 1: fails
+            run(backend, clock)
         }
 
         // "a" is still in the requested set (R12 never dropped it). Re-issuing
         // the SAME set is routing noise, not a retry — the device must stay in
         // its resting `.failed`, with attempt 2 left unconsumed.
         backend.setOutputSet(["a"])
-        try await Task.sleep(nanoseconds: 300_000_000)
+        run(backend, clock)   // no step is pending, so nothing may change
         let resting = try #require(backend.devices.first { $0.id == "a" })
         #expect(resting.connectionState == .failed(failure),
                 "a membership-neutral setOutputSet must not restart a .failed device's script")
 
         // The dedicated retry entry point consumes attempt 2 and connects.
-        let retry = try await collectUpdates(for: "a", count: 2, from: backend) {
+        let retry = await collectUpdates(for: "a", count: 2, from: backend) {
             backend.retryOutput("a")
+            run(backend, clock)
         }
         #expect(retry.map(\.connectionState) == [.connecting, .connected])
         #expect(retry.last?.isSelected == true)
     }
 
     @Test func connectThenDropRecovers() async throws {
-        let backend = MockBackend(
-            fleet: [Device(id: "a", name: "A", kind: .generic)],
-            staggerDiscovery: false, emitsLevels: false, simulatesDropouts: false,
-            connectScripts: ["a": ConnectScript(attempts: [
+        let (backend, clock) = makeScriptedBackend(["a": ConnectScript(attempts: [
                 .connectThenDrop(connectAfter: 0.1, dropAfter: 0.1, recovers: true),
-            ])]
-        )
-        _ = try await collectFleetDiscovery(backend)
+            ])])
+        _ = await collectFleetDiscovery(backend)
 
         // connecting -> connected -> reconnecting -> connected
-        let updates = try await collectUpdates(for: "a", count: 4, from: backend, timeout: 5) {
+        let updates = await collectUpdates(for: "a", count: 4, from: backend) {
             backend.setOutputSet(["a"])
+            run(backend, clock)
         }
         #expect(updates.map(\.connectionState) == [.connecting, .connected, .reconnecting, .connected])
         #expect(updates.last?.isSelected == true)
     }
 
     @Test func connectThenDropFails() async throws {
-        let backend = MockBackend(
-            fleet: [Device(id: "a", name: "A", kind: .generic)],
-            staggerDiscovery: false, emitsLevels: false, simulatesDropouts: false,
-            connectScripts: ["a": ConnectScript(attempts: [
+        let (backend, clock) = makeScriptedBackend(["a": ConnectScript(attempts: [
                 .connectThenDrop(connectAfter: 0.1, dropAfter: 0.1, recovers: false),
-            ])]
-        )
-        _ = try await collectFleetDiscovery(backend)
+            ])])
+        _ = await collectFleetDiscovery(backend)
 
-        let updates = try await collectUpdates(for: "a", count: 4, from: backend, timeout: 5) {
+        let updates = await collectUpdates(for: "a", count: 4, from: backend) {
             backend.setOutputSet(["a"])
+            run(backend, clock)
         }
         #expect(
             updates.map(\.connectionState) ==
@@ -410,31 +349,17 @@ import Testing
     /// given — same channel every other `BackendEvent` travels.
     @Test func emitRoutedAppsFixtureFiresThroughTheEventStream() async throws {
         let backend = makeBackend()
-        _ = try await collect(demoFleet.count, from: backend)   // drain discovery
+        _ = await collect(demoFleet.count, from: backend)   // drain discovery
 
-        let stream = backend.makeEventStream()
-        let box = EventBox()
-        try await confirmation("routedApps event received") { received in
-            let task = Task {
-                for await event in stream {
-                    if case .routedApps = event {
-                        _ = await box.append(event)
-                        received()
-                        break
-                    }
-                }
-            }
-            defer { task.cancel() }
-            backend.test_emitRoutedApps(deviceID: "office", appNames: ["Music", "Safari"])
-            try await withThrowingTaskGroup(of: Void.self) { group in
-                group.addTask { _ = await task.value }
-                group.addTask { try await Task.sleep(for: .seconds(2)) }
-                try await group.next()
-                group.cancelAll()
-            }
+        let (box, task) = record(backend.makeEventStream()) { event in
+            if case .routedApps = event { return true }
+            return false
         }
+        defer { task.cancel() }
+        backend.test_emitRoutedApps(deviceID: "office", appNames: ["Music", "Safari"])
+        await SuiteWait.until("routedApps event received") { !box.events.isEmpty }
 
-        guard case .routedApps(let deviceID, let appNames) = await box.events.first else {
+        guard case .routedApps(let deviceID, let appNames) = box.events.first else {
             Issue.record("expected a .routedApps event")
             return
         }
@@ -447,31 +372,17 @@ import Testing
     /// fixture can produce it too, not just the non-empty case.
     @Test func emitRoutedAppsFixtureCanEmitAnEmptyMapping() async throws {
         let backend = makeBackend()
-        _ = try await collect(demoFleet.count, from: backend)
+        _ = await collect(demoFleet.count, from: backend)
 
-        let stream = backend.makeEventStream()
-        let box = EventBox()
-        try await confirmation("empty routedApps event received") { received in
-            let task = Task {
-                for await event in stream {
-                    if case .routedApps = event {
-                        _ = await box.append(event)
-                        received()
-                        break
-                    }
-                }
-            }
-            defer { task.cancel() }
-            backend.test_emitRoutedApps(deviceID: "office", appNames: [])
-            try await withThrowingTaskGroup(of: Void.self) { group in
-                group.addTask { _ = await task.value }
-                group.addTask { try await Task.sleep(for: .seconds(2)) }
-                try await group.next()
-                group.cancelAll()
-            }
+        let (box, task) = record(backend.makeEventStream()) { event in
+            if case .routedApps = event { return true }
+            return false
         }
+        defer { task.cancel() }
+        backend.test_emitRoutedApps(deviceID: "office", appNames: [])
+        await SuiteWait.until("empty routedApps event received") { !box.events.isEmpty }
 
-        guard case .routedApps(let deviceID, let appNames) = await box.events.first else {
+        guard case .routedApps(let deviceID, let appNames) = box.events.first else {
             Issue.record("expected a .routedApps event")
             return
         }
@@ -487,31 +398,17 @@ import Testing
     /// `test_emitRoutedApps`.
     @Test func emitAppLevelFixtureFiresThroughTheEventStream() async throws {
         let backend = makeBackend()
-        _ = try await collect(demoFleet.count, from: backend)   // drain discovery
+        _ = await collect(demoFleet.count, from: backend)   // drain discovery
 
-        let stream = backend.makeEventStream()
-        let box = EventBox()
-        try await confirmation("appLevel event received") { received in
-            let task = Task {
-                for await event in stream {
-                    if case .appLevel = event {
-                        _ = await box.append(event)
-                        received()
-                        break
-                    }
-                }
-            }
-            defer { task.cancel() }
-            backend.test_emitAppLevel(bundleID: "com.apple.Music", rms: 0.42)
-            try await withThrowingTaskGroup(of: Void.self) { group in
-                group.addTask { _ = await task.value }
-                group.addTask { try await Task.sleep(for: .seconds(2)) }
-                try await group.next()
-                group.cancelAll()
-            }
+        let (box, task) = record(backend.makeEventStream()) { event in
+            if case .appLevel = event { return true }
+            return false
         }
+        defer { task.cancel() }
+        backend.test_emitAppLevel(bundleID: "com.apple.Music", rms: 0.42)
+        await SuiteWait.until("appLevel event received") { !box.events.isEmpty }
 
-        guard case .appLevel(let bundleID, let rms) = await box.events.first else {
+        guard case .appLevel(let bundleID, let rms) = box.events.first else {
             Issue.record("expected an .appLevel event")
             return
         }
@@ -530,17 +427,17 @@ import Testing
             fleet: demoFleet, staggerDiscovery: false, emitsLevels: true, simulatesDropouts: false
         )
         backend.test_setMeteredApps(["com.apple.Music", "com.apple.Podcasts"])
-        _ = try await collect(demoFleet.count, from: backend)   // drain discovery; metering still inactive
+        _ = await collect(demoFleet.count, from: backend)   // drain discovery; metering still inactive
 
-        let stream = backend.makeEventStream()
-        let box = EventBox()
-        let collector = Task {
-            for await event in stream { _ = await box.append(event) }
+        let (box, collector) = record(backend.makeEventStream())
+        defer { collector.cancel() }
+
+        // Default: metering inactive, so no `.appLevel` should show up yet. The
+        // level timer ticks every 0.1 s on the real clock, so give it three ticks.
+        await SuiteWait.until("an .appLevel the gate should have blocked", timeout: 0.3) {
+            box.events.contains { if case .appLevel = $0 { return true } else { return false } }
         }
-
-        // Default: metering inactive, so no `.appLevel` should show up yet.
-        try? await Task.sleep(nanoseconds: 200_000_000)
-        var seen = await box.events
+        var seen = box.events
         #expect(
             !seen.contains { if case .appLevel = $0 { return true } else { return false } },
             "no .appLevel may be emitted while metering is inactive"
@@ -548,67 +445,81 @@ import Testing
 
         // Flip metering on: both registered apps must start showing up.
         backend.setMeteringActive(true)
-        try? await Task.sleep(nanoseconds: 500_000_000)
-        seen = await box.events
+        await SuiteWait.until("both apps to emit an .appLevel") {
+            Set(box.events.compactMap { event -> String? in
+                if case .appLevel(let bundleID, _) = event { return bundleID } else { return nil }
+            }) == ["com.apple.Music", "com.apple.Podcasts"]
+        }
+        seen = box.events
         let seenBundleIDs = Set(seen.compactMap { event -> String? in
             if case .appLevel(let bundleID, _) = event { return bundleID } else { return nil }
         })
         #expect(seenBundleIDs == ["com.apple.Music", "com.apple.Podcasts"])
-
-        collector.cancel()
     }
 }
 
 extension MockBackendTests {
     /// Discover the (single-device) fleet used by the scripted-choreography
     /// tests above, starting the backend.
-    func collectFleetDiscovery(_ backend: MockBackend, timeout: TimeInterval = 2) async throws -> [BackendEvent] {
-        try await collect(1, from: backend, timeout: timeout)
+    func collectFleetDiscovery(_ backend: MockBackend) async -> [BackendEvent] {
+        await collect(1, from: backend)
     }
 
     /// Run `action`, then collect the next `count` `deviceUpdated` events for
     /// `id` that follow it.
     func collectUpdates(
-        for id: String, count: Int, from backend: MockBackend, timeout: TimeInterval = 4,
+        for id: String, count: Int, from backend: MockBackend,
         after action: () -> Void
-    ) async throws -> [Device] {
-        let stream = backend.makeEventStream()
-        let box = EventBox()
-        try await confirmation("\(count) updates for \(id)") { received in
-            let task = Task {
-                for await event in stream {
-                    if case .deviceUpdated(let d) = event, d.id == id {
-                        if await box.append(event) >= count { received(); break }
-                    }
-                }
-            }
-            defer { task.cancel() }
-            action()
-            try await withThrowingTaskGroup(of: Void.self) { group in
-                group.addTask { _ = await task.value }
-                group.addTask { try await Task.sleep(for: .seconds(timeout)) }
-                try await group.next()
-                group.cancelAll()
-            }
+    ) async -> [Device] {
+        let (box, task) = record(backend.makeEventStream()) { event in
+            if case .deviceUpdated(let d) = event, d.id == id { return true }
+            return false
         }
-        let events = await box.events
-        return events.compactMap { if case .deviceUpdated(let d) = $0 { return d } else { return nil } }
+        defer { task.cancel() }
+        action()
+        await SuiteWait.until("\(count) updates for \(id)") { box.events.count >= count }
+        return Array(box.devices.prefix(count))
     }
 }
 
-// Small actors to carry mutable state across the async boundary without races.
+// Small thread-safe boxes to carry mutable state across the async boundary without races.
 
-private actor EventBox {
-    private(set) var events: [BackendEvent] = []
-    func append(_ event: BackendEvent) -> Int { events.append(event); return events.count }
+private final class EventBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var all: [BackendEvent] = []
+    var events: [BackendEvent] { lock.withLock { all } }
+    var devices: [Device] {
+        events.compactMap { if case .deviceUpdated(let d) = $0 { return d } else { return nil } }
+    }
+    func append(_ event: BackendEvent) { lock.withLock { all.append(event) } }
 }
 
-private actor DeviceBox {
-    private(set) var value: Device?
-    func set(_ device: Device) { value = device }
+/// Feed every event of `stream` that passes `keep` into a box, until the task is cancelled.
+private func record(
+    _ stream: AsyncStream<BackendEvent>, where keep: @escaping @Sendable (BackendEvent) -> Bool = { _ in true }
+) -> (EventBox, Task<Void, Never>) {
+    let box = EventBox()
+    let task = Task { for await event in stream where keep(event) { box.append(event) } }
+    return (box, task)
 }
 
-private actor FlagBox {
-    private(set) var value = false
-    func raise() { value = true }
+/// A delay clock that holds every scheduled step until `fireAll()`, then runs
+/// them on the queue they were scheduled for, in order, including steps they
+/// schedule in turn — so a scripted choreography finishes in one call.
+private final class QueuedDelayClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var jobs: [(queue: DispatchQueue, work: DispatchWorkItem)] = []
+    var clock: NativeBackend.DelayClock {
+        { [self] _, queue, work in lock.withLock { jobs.append((queue, work)) } }
+    }
+    func fireAll() {
+        while true {
+            let batch = lock.withLock { () -> [(queue: DispatchQueue, work: DispatchWorkItem)] in
+                defer { jobs = [] }; return jobs
+            }
+            if batch.isEmpty { return }
+            for job in batch { job.queue.async(execute: job.work) }
+            for job in batch { job.queue.sync {} }   // everything queued above has run
+        }
+    }
 }

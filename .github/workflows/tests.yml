@@ -1,0 +1,207 @@
+name: Tests
+
+# The full suite on GitHub-hosted Macs, once per PR and once more in the merge
+# queue. No path filter on purpose: a required check that does not run leaves
+# the PR stuck at "expected". Free on this public repo, same as the licence
+# gate's macOS job.
+#
+# Caches: PR and push runs save; a PR's saved cache is visible to that PR's
+# later pushes and is searched before main's, so a second push rebuilds only
+# its own diff. A merge-queue run can read only main's caches so it does not
+# save; the 10 GB repo limit evicts by last access, and main's cache is
+# re-saved on every merge.
+
+on:
+  pull_request:
+  merge_group:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: read
+  statuses: write
+
+env:
+  DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+  HOMEBREW_NO_AUTO_UPDATE: "1"
+  HOMEBREW_NO_INSTALL_CLEANUP: "1"
+  HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK: "1"
+  HOMEBREW_NO_INSTALL_UPGRADE: "1"
+  # The runner has neither of the owner's Macs: no mule probe (no
+  # audiout.remoteHost either), no /tmp pass cache, and the permit pool in
+  # /tmp is empty on a fresh runner.
+  AUDIOUT_BUILD_LOCAL: "1"
+  AUDIOUT_TEST_PREFER: local
+  AUDIOUT_TEST_NO_CACHE: "1"
+  # Best effort: the toolchain's test helper may lack the entitlement the
+  # backtracer needs. The crash-report upload below is the reliable record.
+  SWIFT_BACKTRACE: enable=yes
+
+jobs:
+  suite:
+    runs-on: macos-26
+    timeout-minutes: 60
+    name: suite (shard ${{ matrix.shard }})
+    strategy:
+      fail-fast: false
+      matrix:
+        # The shard lists live in scripts/lib/suite-shards.sh, which the
+        # runner reads for `--shard N`. Shard 1 is the suites whose files
+        # still hold blocking waits (Thread.sleep, RunLoop.run(until:),
+        # .wait(timeout:)); those hold a cooperative thread and starve Swift
+        # concurrency process-wide (see SuiteWait.swift and 8a1016d9), so
+        # they get a process of their own. Shard 2 is the alphabetical first
+        # half of the rest plus three main-actor suites moved in to balance
+        # it. Shard 3 is the serialized chains. Shard 4 is everything else,
+        # via `--skip`, so a new suite file needs no edit here.
+        shard: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@v4
+
+      # AirPlayEngine/Package.swift names these; ffmpeg too, because the
+      # gitignored vendor/ffmpeg-min is absent here so it links Homebrew's.
+      - name: Install missing build dependencies
+        run: |
+          missing=
+          for f in libevent libsodium libgcrypt libgpg-error libplist ffmpeg; do
+            brew list --versions "$f" >/dev/null 2>&1 || missing="$missing $f"
+          done
+          echo "missing:${missing:- none}"
+          [ -z "$missing" ] || brew install $missing
+
+      - name: Restore SwiftPM build caches
+        uses: actions/cache/restore@v4
+        with:
+          path: AudioutCore/.build
+          key: ${{ runner.os }}-${{ runner.arch }}-xcode26.6-spm-${{ hashFiles('**/Package.resolved') }}-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-xcode26.6-spm-${{ hashFiles('**/Package.resolved') }}-
+            ${{ runner.os }}-${{ runner.arch }}-xcode26.6-spm-
+
+      - name: Check the compiler knows file hashing
+        run: |
+          swiftc --version
+          echo "in -help: $(swiftc -help | grep -c file-hashing || true)"
+          echo "in -help-hidden: $(swiftc -help-hidden | grep -c file-hashing || true)"
+
+      - name: AudioutCore suite
+        run: bash scripts/run-tests.sh --shard ${{ matrix.shard }} --disable-index-store -Xswiftc -enable-incremental-file-hashing -Xswiftc -driver-show-incremental
+
+      - name: Upload crash reports
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: crash-reports-shard-${{ matrix.shard }}
+          path: /Users/runner/Library/Logs/DiagnosticReports/*.ips
+          if-no-files-found: ignore
+
+      # One saver, so four shards do not race on one key.
+      - name: Save SwiftPM build caches
+        # !cancelled(): the build products are valid whether or not a test
+        # failed, and a cache that saves only on green never warms up.
+        if: ${{ !cancelled() && github.event_name != 'merge_group' && strategy.job-index == 0 }}
+        uses: actions/cache/save@v4
+        with:
+          path: AudioutCore/.build
+          key: ${{ runner.os }}-${{ runner.arch }}-xcode26.6-spm-${{ hashFiles('**/Package.resolved') }}-${{ github.sha }}
+
+  airplayengine:
+    runs-on: macos-26
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install missing build dependencies
+        run: |
+          missing=
+          for f in libevent libsodium libgcrypt libgpg-error libplist ffmpeg; do
+            brew list --versions "$f" >/dev/null 2>&1 || missing="$missing $f"
+          done
+          echo "missing:${missing:- none}"
+          [ -z "$missing" ] || brew install $missing
+
+      # Its own cache: the suite jobs never build AirPlayEngine/.build.
+      - name: Restore AirPlayEngine build cache
+        uses: actions/cache/restore@v4
+        with:
+          path: AirPlayEngine/.build
+          key: ${{ runner.os }}-${{ runner.arch }}-xcode26.6-airplayengine-${{ hashFiles('AirPlayEngine/Package.swift', 'AirPlayEngine/Package.resolved') }}-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-xcode26.6-airplayengine-${{ hashFiles('AirPlayEngine/Package.swift', 'AirPlayEngine/Package.resolved') }}-
+            ${{ runner.os }}-${{ runner.arch }}-xcode26.6-airplayengine-
+
+      # Guard 6's suite, through the same runner (it takes the package name).
+      - name: AirPlayEngine suite
+        run: AUDIOUT_TEST_PACKAGE=AirPlayEngine bash scripts/run-tests.sh --disable-index-store -Xswiftc -enable-incremental-file-hashing -Xswiftc -driver-show-incremental
+
+      - name: Upload crash reports
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: crash-reports-airplayengine
+          path: /Users/runner/Library/Logs/DiagnosticReports/*.ips
+          if-no-files-found: ignore
+
+      - name: Save AirPlayEngine build cache
+        if: ${{ !cancelled() && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') }}
+        uses: actions/cache/save@v4
+        with:
+          path: AirPlayEngine/.build
+          key: ${{ runner.os }}-${{ runner.arch }}-xcode26.6-airplayengine-${{ hashFiles('AirPlayEngine/Package.swift', 'AirPlayEngine/Package.resolved') }}-${{ github.sha }}
+
+  # The one required check the ruleset names.
+  tests:
+    runs-on: ubuntu-latest
+    needs: [suite, airplayengine]
+    if: always()
+    steps:
+      - name: Every suite job passed
+        run: |
+          echo "suite=${{ needs.suite.result }} airplayengine=${{ needs.airplayengine.result }}"
+          [ "${{ needs.suite.result }}" = success ] && [ "${{ needs.airplayengine.result }}" = success ]
+
+  # The ruleset requires a `review` commit status, which the session posts on
+  # the PR head. A merge-queue run checks its own temporary merge commit,
+  # where that status never appears, so copy the PR head's verdict onto it.
+  review-relay:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'merge_group'
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      QUEUE_REF: ${{ github.ref }}
+      QUEUE_SHA: ${{ github.sha }}
+    steps:
+      - name: Relay the review status from the PR head
+        run: |
+          set -eu
+          echo "queue ref: $QUEUE_REF"
+          echo "queue sha: $QUEUE_SHA"
+          # refs/heads/gh-readonly-queue/main/pr-255-<sha>
+          pr=$(printf '%s\n' "$QUEUE_REF" | sed -n 's|.*/pr-\([0-9][0-9]*\)-[0-9a-f]*$|\1|p')
+          echo "pr: ${pr:-<none>}"
+          if [ -z "$pr" ]; then
+            echo "could not read a PR number from $QUEUE_REF" >&2
+            exit 1
+          fi
+          head=$(gh api "repos/$REPO/pulls/$pr" -q .head.sha)
+          short=$(printf '%s' "$head" | cut -c1-8)
+          echo "pr head: $head"
+          state=$(gh api "repos/$REPO/commits/$head/status" -q '[.statuses[] | select(.context == "review")][0].state // ""')
+          echo "review state on pr head: ${state:-<none>}"
+          if [ "$state" = success ]; then
+            gh api "repos/$REPO/statuses/$QUEUE_SHA" -f context=review -f state=success \
+              -f description="relayed from PR head $short" >/dev/null
+            echo "posted review=success on $QUEUE_SHA"
+          else
+            gh api "repos/$REPO/statuses/$QUEUE_SHA" -f context=review -f state=failure \
+              -f description="no passing review on PR head $short" >/dev/null
+            echo "posted review=failure on $QUEUE_SHA" >&2
+            exit 1
+          fi

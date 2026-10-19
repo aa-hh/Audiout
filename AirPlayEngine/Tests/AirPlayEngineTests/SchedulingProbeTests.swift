@@ -83,19 +83,19 @@ import CAirPlayEngine
     }
 
     /// Inter-arrival gap is derived from successive `recordWriteArrival()`
-    /// calls (no explicit timestamps to inject), so this test uses real
-    /// `Thread.sleep` gaps instead — checking ORDER/relative magnitude
-    /// (a long gap must show up as the max, short gaps as the low
-    /// percentiles) rather than exact synthetic values.
+    /// calls, so this test injects the probe's clock and advances it by
+    /// known gaps — checking ORDER/relative magnitude (a long gap must show
+    /// up as the max, short gaps as the low percentiles).
     @Test func interArrivalGapReflectsRealGaps() {
-        let probe = WriteSchedulingProbe(logInterval: 3600, ringCapacity: 128)
+        var simulatedMs: Double = 0
+        let probe = WriteSchedulingProbe(logInterval: 3600, ringCapacity: 128, nowMs: { simulatedMs })
         probe.recordWriteArrival() // seeds baseline, no gap recorded yet
 
         for _ in 0..<5 {
-            Thread.sleep(forTimeInterval: 0.005) // ~5ms
+            simulatedMs += 5
             probe.recordWriteArrival()
         }
-        Thread.sleep(forTimeInterval: 0.05) // one much larger ~50ms gap
+        simulatedMs += 50 // one much larger gap
         probe.recordWriteArrival()
 
         let snapshot = probe.snapshot()

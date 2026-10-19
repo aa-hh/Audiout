@@ -17,22 +17,32 @@ extension NativeBackend {
     /// `kAudioHardwarePropertyDefaultOutputDevice`, so it captures nothing unless
     /// the default is our aggregate. Per-app `.device` redirects tap the app's
     /// PROCESS directly (independent of the default output), so they deliberately
-    /// do NOT arm the aggregate takeover or the warning. On `stateQueue`.
+    /// do NOT arm the aggregate takeover or the warning.
+    ///
+    /// Decides on `stateQueue`; the default-output reads and the set-default write
+    /// run on `captureControlQueue`, because `stateQueue` never makes a Core Audio
+    /// call (an unanswering coreaudiod would otherwise hold every main-thread
+    /// `stateQueue.sync` behind it).
     func reconcileAggregateDefault() {   // on stateQueue
-        if !expectedSelected.isEmpty {
-            takeOverDefaultAndReflect()
-        } else {
-            // Not routing: never take the Mac's default output (Q1) — and hand it
-            // back whenever it IS our aggregate, however it got there, or the Mac
-            // keeps playing through a device that swallows every volume write. The
-            // slider and the hardware volume keys then move nothing the user can hear.
-            restoreDefaultFromAggregate()
-            // The warning is off by definition.
-            evaluateRoutingBlocked()
-        }
+        let wantTakeover = !expectedSelected.isEmpty
         // Seamless handoff T3.6: `expectedSelected` just settled — re-decide
         // whether the blocked-attempt watcher should be running.
         reconcileHandoffWatcherLocked()
+        captureControlQueue.async { [weak self] in
+            guard let self else { return }
+            if wantTakeover {
+                self.takeOverDefaultAndReflect()
+            } else {
+                // Not routing: never take the Mac's default output (Q1) — and hand it
+                // back whenever it IS our aggregate, however it got there, or the Mac
+                // keeps playing through a device that swallows every volume write. The
+                // slider and the hardware volume keys then move nothing the user can hear.
+                let current = self.currentDefaultOutputUIDProvider()
+                self.restoreDefaultFromAggregate(current: current)
+                // The warning is off by definition.
+                self.stateQueue.sync { self.evaluateRoutingBlocked(currentDefaultUID: current) }
+            }
+        }
     }
 
     /// Take the Mac's default output for the aggregate and reflect the resulting
@@ -43,42 +53,72 @@ extension NativeBackend {
     /// (`blocked = false`) OPTIMISTICALLY rather than reading the default straight
     /// back: the HAL default-device change lands asynchronously, so an immediate
     /// read can still return the PRE-write device and emit a transient `true` that
-    /// the echo-guard would then leave stuck. The listener's echo settles the real
-    /// change, and any genuine later user override re-evaluates to `true`. When no
-    /// write was issued (aggregate already default, or unresolvable) we evaluate
-    /// normally. On `stateQueue`.
-    private func takeOverDefaultAndReflect() {   // on stateQueue
-        if pointDefaultAtAggregate() {
-            setRoutingBlocked(false)
+    /// the echo-guard would then leave stuck. The optimistic reflect happens only
+    /// while the echo guard is still armed for the aggregate: once the listener has
+    /// handled a change it has cleared the guard and already decided the warning
+    /// (our own echo reflects `false` there; a user's switch-away evaluates it), so
+    /// the commit leaves it alone. When no write was issued (aggregate already
+    /// default, or unresolvable) we read the default again and evaluate normally.
+    /// On `captureControlQueue`: it reads the default output (a Core Audio call)
+    /// here and commits the warning through `stateQueue.sync`.
+    private func takeOverDefaultAndReflect() {   // on captureControlQueue
+        let current = currentDefaultOutputUIDProvider()
+        if pointDefaultAtAggregate(current: current) {
+            stateQueue.sync {
+                guard expectedDefaultWriteUID == AggregateOutputDevice.productUID else { return }
+                setRoutingBlocked(false)
+            }
         } else {
-            evaluateRoutingBlocked()
+            let now = currentDefaultOutputUIDProvider()
+            stateQueue.sync { evaluateRoutingBlocked(currentDefaultUID: now) }
         }
     }
 
     /// Point the Mac's default output at the public aggregate, capturing the prior
     /// default ONCE (for the quit-time restore) the first time we take over.
-    /// Returns `true` iff it issued a SUCCESSFUL set-default write THIS call (so the
-    /// caller can reflect the intended state without racing the async change
-    /// notification); `false` when the aggregate is already the default or can't be
-    /// resolved. The write is echo-guarded via ``expectedDefaultWriteUID`` (set only
-    /// on success, so a refused write can't leave a stale guard). Used by both the
-    /// activation seam and the user's re-select — both legitimate (app routing vs.
-    /// the user's own click); neither is Q2's forbidden PROGRAMMATIC re-select
-    /// ("re-select without the user asking"). On `stateQueue`.
-    private func pointDefaultAtAggregate() -> Bool {   // on stateQueue
+    /// Returns `true` iff it issued a SUCCESSFUL set-default write THIS call;
+    /// `false` when the aggregate is already the default, can't be resolved, or the
+    /// backend has stopped. The guard is armed before the write, and the caller's
+    /// commit defers to the listener when the guard is already gone. The guard is
+    /// ``expectedDefaultWriteUID``, cleared again if the write is refused, so a
+    /// refused write can't leave a stale guard. Used by both the activation seam
+    /// and the user's re-select — both legitimate (app routing vs. the user's own
+    /// click); neither is Q2's forbidden PROGRAMMATIC re-select
+    /// ("re-select without the user asking").
+    ///
+    /// On `captureControlQueue`: the resolve and the write are Core Audio calls and
+    /// `stateQueue` never makes one. Backend state is read and written through
+    /// `stateQueue.sync`. The guard is armed BEFORE the write is issued, because the
+    /// listener's echo hops onto `stateQueue` on its own and can now land before a
+    /// commit made after the write returns.
+    private func pointDefaultAtAggregate(current: String?) -> Bool {   // on captureControlQueue
         guard let aggregateID = aggregateControl.resolveDeviceID(forUID: AggregateOutputDevice.productUID) else { return false }
-        let current = currentDefaultOutputUIDProvider()
-        if !aggregateDefaultActive {
-            // Capture what the user had so `stop()` can restore it. Never remember
-            // the aggregate itself as the "prior" (we're about to destroy it).
-            if let current, current != AggregateOutputDevice.productUID {
-                priorDefaultUID = current
+        let running: Bool = stateQueue.sync {
+            // stop() can run between the hop and the write.
+            guard started else { return false }
+            if !aggregateDefaultActive {
+                // Capture what the user had so `stop()` can restore it. Never remember
+                // the aggregate itself as the "prior" (we're about to destroy it).
+                if let current, current != AggregateOutputDevice.productUID {
+                    priorDefaultUID = current
+                }
+                aggregateDefaultActive = true
             }
-            aggregateDefaultActive = true
+            if current != AggregateOutputDevice.productUID {
+                expectedDefaultWriteUID = AggregateOutputDevice.productUID
+            }
+            return true
         }
+        guard running else { return false }
         guard current != AggregateOutputDevice.productUID else { return false }   // already ours
-        guard aggregateControl.setDefaultOutputDevice(aggregateID) else { return false }
-        expectedDefaultWriteUID = AggregateOutputDevice.productUID
+        guard aggregateControl.setDefaultOutputDevice(aggregateID) else {
+            stateQueue.sync {
+                if expectedDefaultWriteUID == AggregateOutputDevice.productUID {
+                    expectedDefaultWriteUID = nil
+                }
+            }
+            return false
+        }
         return true
     }
 
@@ -118,24 +158,31 @@ extension NativeBackend {
     /// `priorDefaultUID` is deliberately KEPT (`stop()` clears it). The HAL's
     /// default-device change lands asynchronously, so a fast re-select can still
     /// read the aggregate as the current default and skip
-    /// ``pointDefaultAtAggregate()``'s prior-capture — the standing value is then
-    /// the only good prior left. On `stateQueue`.
-    private func restoreDefaultFromAggregate(attempt: Int = 1) {   // on stateQueue
-        guard currentDefaultOutputUIDProvider() == AggregateOutputDevice.productUID else { return }
+    /// ``pointDefaultAtAggregate(current:)``'s prior-capture — the standing value is
+    /// then the only good prior left.
+    ///
+    /// On `captureControlQueue`: `current` is the default output the caller already
+    /// read, the target resolve and the write are Core Audio calls, and backend
+    /// state goes through `stateQueue.sync`. The echo guard is armed before the
+    /// write for the same reason as in ``pointDefaultAtAggregate(current:)``.
+    private func restoreDefaultFromAggregate(current: String?, attempt: Int = 1) {   // on captureControlQueue
+        guard current == AggregateOutputDevice.productUID else { return }
+        // stop() can run between the hop and the write.
+        let (running, storedPrior) = stateQueue.sync { (started, priorDefaultUID) }
+        guard running else { return }
         // What the user had, else the Mac's built-in output — the same sub-device
         // the aggregate itself wraps, so it is the one target that is still there
         // when the prior device was unplugged mid-session.
-        let prior = priorDefaultUID.flatMap { $0 == AggregateOutputDevice.productUID ? nil : $0 }
+        let prior = storedPrior.flatMap { $0 == AggregateOutputDevice.productUID ? nil : $0 }
         guard let target = Self.firstResolvableDevice(
             uids: [prior, aggregateControl.builtInOutputDeviceUID()], using: aggregateControl) else {
             Telemetry.log(.airplay, "aggregate_default_restore", [
                 "outcome": "no_target", "prior": prior ?? "none", "attempt": "\(attempt)"])
             return
         }
-        // Written inline on `stateQueue`, the same way `pointDefaultAtAggregate()`
-        // writes its own default.
-        restoreWriteReturned(aggregateControl.setDefaultOutputDevice(target.id),
-                             target: target, attempt: attempt)
+        stateQueue.sync { expectedDefaultWriteUID = target.uid }
+        let wrote = aggregateControl.setDefaultOutputDevice(target.id)
+        stateQueue.sync { restoreWriteReturned(wrote, target: target, attempt: attempt) }
     }
 
     /// VOLUME CONTINUITY: bring the device we just handed the default back to up
@@ -176,53 +223,60 @@ extension NativeBackend {
         Telemetry.log(.airplay, "aggregate_default_restore", [
             "outcome": wrote ? "wrote" : "write_refused",
             "target": target.uid, "attempt": "\(attempt)"])
-        guard wrote else { return }
-        // Echo-guard our own write, exactly as the takeover does. This is the ONE
-        // write that targets something other than the aggregate; the
-        // default-changed handler only clears the guard, it pushes no volume.
-        expectedDefaultWriteUID = target.uid
+        guard wrote else {
+            if expectedDefaultWriteUID == target.uid { expectedDefaultWriteUID = nil }
+            return
+        }
         aggregateDefaultActive = false
         pushMainToRestoredDevice(target)
-        stateQueue.asyncAfter(deadline: .now() + Self.restoreLandingCheckDelay) { [weak self] in
+        captureControlQueue.asyncAfter(deadline: .now() + Self.restoreLandingCheckDelay) { [weak self] in
             self?.verifyRestoreLanded(target: target, attempt: attempt)
         }
     }
 
     /// Read the default back: did the write we were told succeeded actually move
-    /// it? On `stateQueue`.
+    /// it? On `captureControlQueue`: the read-back is a Core Audio call, and the
+    /// flags are written through `stateQueue.sync`.
     ///
     /// razor: exactly ONE retry. A write ignored twice is a HAL state this app
     /// cannot argue with, and a loop here would fight the user; the telemetry line
     /// is what a live session is meant to leave behind. Upgrade path if the log
     /// ever shows a second attempt landing: schedule off the capture-stopped edge
     /// instead of a fixed delay.
-    private func verifyRestoreLanded(target: (uid: String, id: AudioObjectID), attempt: Int) {   // on stateQueue
+    private func verifyRestoreLanded(target: (uid: String, id: AudioObjectID), attempt: Int) {   // on captureControlQueue
         let current = currentDefaultOutputUIDProvider()
-        guard current == AggregateOutputDevice.productUID else {
+        let retry: Bool = stateQueue.sync {
+            // stop() can run between the hop and the write.
+            guard started else { return false }
+            guard current == AggregateOutputDevice.productUID else {
+                Telemetry.log(.airplay, "aggregate_default_restore", [
+                    "outcome": "landed", "default": current ?? "unreadable", "attempt": "\(attempt)"])
+                return false
+            }
             Telemetry.log(.airplay, "aggregate_default_restore", [
-                "outcome": "landed", "default": current ?? "unreadable", "attempt": "\(attempt)"])
-            return
+                "outcome": "did_not_land", "target": target.uid, "attempt": "\(attempt)"])
+            // The aggregate is still the Mac's default, so we still hold it whatever
+            // the write reported.
+            aggregateDefaultActive = true
+            expectedDefaultWriteUID = nil
+            // A re-select in the meantime is the user asking for the aggregate back —
+            // never fight it.
+            return attempt == 1 && expectedSelected.isEmpty
         }
-        Telemetry.log(.airplay, "aggregate_default_restore", [
-            "outcome": "did_not_land", "target": target.uid, "attempt": "\(attempt)"])
-        // The aggregate is still the Mac's default, so we still hold it whatever
-        // the write reported.
-        aggregateDefaultActive = true
-        expectedDefaultWriteUID = nil
-        // A re-select in the meantime is the user asking for the aggregate back —
-        // never fight it.
-        guard attempt == 1, expectedSelected.isEmpty else { return }
-        restoreDefaultFromAggregate(attempt: 2)
+        if retry {
+            restoreDefaultFromAggregate(current: current, attempt: 2)
+        }
     }
 
     /// Compute the routing-blocked steady state — actively routing AND the current
     /// default output is not our aggregate — and push it. Reuses the pure
     /// ``AggregateOutputDevice/classifyOffSwitch(newDefaultUID:)`` decision. On
-    /// `stateQueue`.
-    func evaluateRoutingBlocked() {   // on stateQueue
+    /// `stateQueue`. `currentDefaultUID` is the default output the caller already
+    /// read off `stateQueue`, so this makes no Core Audio call.
+    func evaluateRoutingBlocked(currentDefaultUID: String?) {   // on stateQueue
         let blocked: Bool
         if !expectedSelected.isEmpty {
-            let outcome = publicAggregate.classifyOffSwitch(newDefaultUID: currentDefaultOutputUIDProvider())
+            let outcome = publicAggregate.classifyOffSwitch(newDefaultUID: currentDefaultUID)
             blocked = outcome != .stillOurs
         } else {
             blocked = false
@@ -232,7 +286,7 @@ extension NativeBackend {
 
     /// Edge-triggered emit of the routing-blocked warning: a repeat of the current
     /// state is a no-op, so it can never thrash the event stream. On `stateQueue`.
-    private func setRoutingBlocked(_ blocked: Bool) {   // on stateQueue
+    func setRoutingBlocked(_ blocked: Bool) {   // on stateQueue
         guard blocked != routingBlockedEmitted else { return }
         routingBlockedEmitted = blocked
         emit(.routingBlockedNeedsDefault(blocked))
@@ -248,17 +302,19 @@ extension NativeBackend {
     /// Seamless handoff T3.7: this is also the resume button — if a handoff release
     /// is in force, put EVERYTHING back (whole-system AND per-app redirects).
     public func reselectAggregateAsDefault() {
-        stateQueue.async {
+        captureControlQueue.async {
             self.takeOverDefaultAndReflect()
-            let (kicks, teardown) = self.resumeFromHandoffLocked()
-            for (id, outputID) in kicks {
-                Task { [weak self] in
-                    // D2 (adversarial review): await the release's own teardown
-                    // before converging — otherwise a stale `removeOutput` is
-                    // unordered against the engine actor relative to this resumed
-                    // `addOutput` and could land after it, killing the fresh session.
-                    await teardown?.value
-                    await self?.convergeDevice(id: id, outputID: outputID)
+            self.stateQueue.async {
+                let (kicks, teardown) = self.resumeFromHandoffLocked()
+                for (id, outputID) in kicks {
+                    Task { [weak self] in
+                        // D2 (adversarial review): await the release's own teardown
+                        // before converging — otherwise a stale `removeOutput` is
+                        // unordered against the engine actor relative to this resumed
+                        // `addOutput` and could land after it, killing the fresh session.
+                        await teardown?.value
+                        await self?.convergeDevice(id: id, outputID: outputID)
+                    }
                 }
             }
         }

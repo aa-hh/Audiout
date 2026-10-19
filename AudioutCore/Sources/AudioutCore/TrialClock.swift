@@ -26,7 +26,7 @@ public enum TrialBanner: String, Equatable {
     /// Three days left.
     case threeDays = "3"
 
-    /// The last day. Tomorrow the welcome gate is back.
+    /// The last day. Tomorrow the one-speaker limit is in force.
     case lastDay = "1"
 }
 

@@ -76,8 +76,12 @@ import AppKit
 
     private final class CommitRecorder: SyncValueFieldEditorDelegate {
         var commits: [Double] = []
+        var live: [Double] = []
         func syncValueFieldEditor(_ editor: SyncValueFieldEditor, didCommit ms: Double) {
             commits.append(ms)
+        }
+        func syncValueFieldEditor(_ editor: SyncValueFieldEditor, didNudgeLive ms: Double) {
+            live.append(ms)
         }
     }
 
@@ -171,7 +175,8 @@ import AppKit
             fieldEditor.insertText(text, replacementRange: fieldEditor.selectedRange())
         }
 
-        func press(_ key: Key, modifiers: NSEvent.ModifierFlags = []) throws {
+        func press(_ key: Key, modifiers: NSEvent.ModifierFlags = [],
+                   isARepeat: Bool = false) throws {
             let event = try #require(NSEvent.keyEvent(
                 with: .keyDown,
                 location: .zero,
@@ -181,10 +186,14 @@ import AppKit
                 context: nil,
                 characters: key.characters,
                 charactersIgnoringModifiers: key.characters,
-                isARepeat: false,
+                isARepeat: isARepeat,
                 keyCode: key.code), "AppKit refused to build the key event")
             window.sendEvent(event)
         }
+
+        /// The key coming up. See `SyncValueFieldEditor.test_keyUp` for why
+        /// this is not a key-up sent through the window.
+        func release() { editor.test_keyUp() }
     }
 
     // MARK: The routing precondition every case below rests on
@@ -252,6 +261,7 @@ import AppKit
         harness.clickIn()
 
         try harness.press(.up)
+        harness.release()
 
         #expect(harness.recorder.commits == [12 + BTSyncTrim.resolutionMs],
                 "↑ nudges by resolutionMs; got \(harness.recorder.commits)")
@@ -263,6 +273,7 @@ import AppKit
         harness.clickIn()
 
         try harness.press(.down)
+        harness.release()
 
         #expect(harness.recorder.commits == [12 - BTSyncTrim.resolutionMs],
                 "↓ nudges by resolutionMs; got \(harness.recorder.commits)")
@@ -282,6 +293,7 @@ import AppKit
         harness.clickIn()
 
         try harness.press(.up, modifiers: .shift)
+        harness.release()
 
         #expect(harness.recorder.commits == [12 + BTSyncTrim.coarseStepMs],
                 "⇧↑ nudges by coarseStepMs; got \(harness.recorder.commits)")
@@ -293,10 +305,32 @@ import AppKit
         harness.clickIn()
 
         try harness.press(.down, modifiers: .shift)
+        harness.release()
 
         #expect(harness.recorder.commits == [12 - BTSyncTrim.coarseStepMs],
                 "⇧↓ nudges by coarseStepMs; got \(harness.recorder.commits)")
         #expect(harness.witness.sawNothing, "\(harness.witness.summary)")
+    }
+
+    /// A held ↑ used to commit every key repeat. Each repeat now applies live
+    /// only, and the key-up commits the final value once.
+    @Test func heldUpArrowAppliesEachRepeatLiveAndCommitsOnceOnKeyUp() throws {
+        let harness = Harness(initialValue: 12, restingText: "12 ms later")
+        harness.clickIn()
+
+        try harness.press(.up)
+        try harness.press(.up, isARepeat: true)
+        try harness.press(.up, isARepeat: true)
+
+        #expect(harness.recorder.live == [13, 14, 15], "got \(harness.recorder.live)")
+        #expect(harness.recorder.commits.isEmpty,
+                "nothing commits while the key is down; got \(harness.recorder.commits)")
+
+        harness.release()
+
+        #expect(harness.recorder.commits == [15], "got \(harness.recorder.commits)")
+        harness.release()
+        #expect(harness.recorder.commits == [15], "a second key-up has nothing left to commit")
     }
 
     /// ⇧↑/⇧↓ must ALSO leave the text selection alone. The selectors Cocoa

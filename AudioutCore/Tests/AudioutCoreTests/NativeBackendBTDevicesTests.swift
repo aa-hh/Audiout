@@ -73,8 +73,8 @@ import CoreAudio
     /// `NWListener` (Local Network prompt) — same reason `NativeBackendTests`
     /// injects its own copy of this.
     private final class FakeDACPEndpoint: DACPEndpoint, @unchecked Sendable {
-        var onVolume: (@Sendable (_ activeRemote: UInt32, _ level: Double) -> Void)?
-        var onVolumeStep: (@Sendable (_ activeRemote: UInt32, _ direction: Int) -> Void)?
+        var onVolume: (@Sendable (_ remoteHost: String?, _ activeRemote: UInt32, _ level: Double) -> Void)?
+        var onVolumeStep: (@Sendable (_ remoteHost: String?, _ activeRemote: UInt32, _ direction: Int) -> Void)?
         func start(dacpID: UInt64) {}
         func stop() {}
     }
@@ -218,6 +218,34 @@ import CoreAudio
         waitFor { self.device(backend, self.sonos.id)?.name == "Renamed" }
         #expect(device(backend, sonos.id)?.symbolName == "headphones",
                 "a snapshot with no class read keeps the last one, it does not erase it")
+    }
+
+    /// Turns red if a read `bt:` id can be replaced by the weaker name-matched
+    /// phrase, or erased by a snapshot carrying no model at all: one speaker
+    /// would then be counted under two `speaker_model` strings in a session.
+    @Test func aReadBluetoothIDIsNeverDowngradedByALaterSnapshot() {
+        let (backend, bt) = makeBackend()
+        defer { backend.stop() }
+        backend.start()
+
+        bt.fire([BTDeviceSnapshot(id: sonos.id, name: sonos.name, isConnected: true,
+                                  model: "bt:004c:2002")])
+        waitFor { self.device(backend, self.sonos.id)?.model == "bt:004c:2002" }
+
+        // Same trick as the class test above: the rename is what makes each
+        // later fold observable, since snapshots are applied on `stateQueue`.
+        // First the phrase fallback, which is the weaker read.
+        bt.fire([BTDeviceSnapshot(id: sonos.id, name: "Renamed", isConnected: true,
+                                  model: "sonosmove")])
+        waitFor { self.device(backend, self.sonos.id)?.name == "Renamed" }
+        #expect(device(backend, sonos.id)?.model == "bt:004c:2002",
+                "a name phrase must not replace ids the speaker itself reported")
+
+        // Then a snapshot that read nothing at all.
+        bt.fire([BTDeviceSnapshot(id: sonos.id, name: "Renamed again", isConnected: true)])
+        waitFor { self.device(backend, self.sonos.id)?.name == "Renamed again" }
+        #expect(device(backend, sonos.id)?.model == "bt:004c:2002",
+                "a snapshot with no model read keeps the last one, it does not erase it")
     }
 
     /// A device that leaves the merged list entirely (unpaired mid-session)

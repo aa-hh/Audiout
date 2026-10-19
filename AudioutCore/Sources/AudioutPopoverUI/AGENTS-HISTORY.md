@@ -18,6 +18,8 @@ The menu-bar popover UI (pure AppKit), and — since U3 — the **one-surface ho
 - Every delegate callback mutates then calls `rebuild()`; rows aren't mutated in place after a structural change, except the refreshers used for mid-open repaints.
 - Collapse state is keyed by the exact card header string — collapse calls must pass the same title the card was built with. The device-type SUBSECTIONS ("AirPlay Devices" / "Cast Devices" / "Bluetooth Devices", in that shipped order) ride the identical `collapsedState(for:default:)` machinery under their own titles, so the two rebuild flavors below govern them too. The Mac's own row has NO subsection since 2026-08-28: it is pinned directly under the card header, inside the card's collapsible BODY (never the header region — a header-region row would survive the card's collapse), so only the card fold can hide it; `deviceSections()` still lists a "This Mac" section as the grouping key that keeps the rail's full order intact.
 - **A subsection collapses by animating its OWN clip's height, never by rebuilding** (live report, 2026-08-10 — the drawer read right while sections "snapped/juddered"). Its rows live in a `SubsectionBody` clip and travel on the one shared `collapseRevealDuration` (bullet below). A `rebuild()` toggle put the content at its final height INSTANTLY and left only the surface gliding — content jumping under a sliding window is exactly the judder. The choreography is `insertRow`'s and inherits both its traps (seed the current height before retargeting to 0; lay the collapsed START state out before animating open), plus one of its own: mark the clip `isClosing` so a re-expand landing inside the close does not have its constraint deactivated out from under it. A collapse snapshots the rows it hid and tears down only those, so a re-expand inside the same duration keeps its fresh ones. **The MODEL must move synchronously even though the teardown is deferred**: `toggleSubsection` drops the row model, reconciles the drawer and re-runs the rail extents in the same turn, because `renderedDeviceOrder()` feeds the structural-change compare and the drawer reconcile — and a deferred teardown under the instant path (bullet below) would strand the rows forever.
+- **SUPERSEDED 2026-10-04 by the owner's rail-extent ruling (DESIGN.md "Membership rail extent").** The entry below described ONE cut, landing on the header's bottom edge despite saying "at the header"; now every collapsed subsection hiding a reached speaker gets its own dot on its header's text line, `setRailRows` takes `foldedSubsectionTitles`, `deviceSection`/`deviceSectionRowsDropped` are gone, and the adapter no longer defers to the card (the overlay sees a folded header leave the list's band and dots the card instead).
+- **Rail extent, owner's ruling of 2026-10-04 (moved from AGENTS.md).** DESIGN.md "Membership rail extent" holds the eight rules. In short: every collapsed header — subsection or the Output Speakers card — hiding a selected connected/connecting speaker gets a dot on its text line; the rail ends at the lower of the lowest visible such node and the lowest dot; nothing draws outside the list's visible band, and a member scrolled below it ends the rail on the lowest fully visible on-spine row with no dot.
 - **A collapsed SUBSECTION cuts the rail exactly as a collapsed CARD does** (live bug, 2026-08-11). The rail's channel still runs to the band's LAST device — `updateRailRows` indexes the FULL `deviceSections()` order, never `renderedDeviceOrder()` — and when a collapse has hidden that device the rail is CUT at THAT subsection's header with the terminus dot. Indexing the rendered order instead silently shortened the rail to a higher visible row with no dot, and, when every device sat inside the collapsed subsection, left no terminus at all: the rail rendered as a hook curling off Main Audio and ending in mid-air. The host names the cutting subsection to `setRailRows`, which points `BusRailOverlayView.deviceSection` at that subsection's own `RailSectionProviding` adapter (its header + body clip) instead of the card's — so the mid-collapse squeeze rides the clip's live height for free. **TRAP: `deviceSection` is `weak`** — the adapter is stored in `subsectionBodies` or it deallocates the instant it is assigned and the cut silently reverts to the card. The adapter also DEFERS to the enclosing card while the CARD is the collapsed one, because a card collapse never re-runs these extents and the subsection's own header has gone off screen with it.
 - **Two DISPLAY-only filters sit between the device snapshot and the rows: subsection collapse, and the Bluetooth CONNECTED-ONLY listing (BT-LIST, replaced the per-device hide 2026-08-08).** Neither touches selection, membership or routing — the R12 spirit. macOS never forgets a pairing, so an opt-OUT (hide) list opened as a wall of dead rows; `isBluetoothRowListed(_:)` is opt-IN: `isAvailable`, OR an explicit "+"-menu connect attempt THIS session (`btConnectAttemptIDs`), OR `wantsAudio(_:)`, OR `isMainOutMember(_:)` (the group case `wantsAudio` misses). **TRAP: attempts are session-scoped, NOT `connectionState != .off`.** `.failed` is sticky and never clears for a paired device (no availability edge, no disappearance), so a state clause minted a PERMANENT row out of any failed attempt (off speaker, `.notPaired`, `.unauthorized`) — and no diagnosis panel with it (that intent is pruned for anything failing `wantsAudio`): unexplainable, undismissable. Bluetooth-scoped only: a playing device with no row means no volume, no mute, no way to stop it. ONE list expresses the result (`deviceSections()` → `renderedDeviceOrder()`), read by `rebuild()` and `update(devices:)`'s change test, which must weigh what SHOULD render, never the fleet, which reads an unlisted row as a permanent change and rebuilds on every backend event. The rail reads the SECTIONS, not the rendered order (bullet above): an UNLISTED device is not in `deviceSections()` at all, so it can never be the terminus, while one merely hidden by a subsection collapse still is; `rendersHeader(_:)` folds the always-on Bluetooth header into it. An unbuilt row takes its sync drawer (`reconcileSyncDrawer` retracts the intent, stops the align tick) and diagnosis panel with it, but the panel's INTENT survives and returns if it lists again mid-episode. The unlisted history keeps the two Connect surfaces below, both firing the membership-free reconnect a greyed row's click uses. AirPlay-fleet overflow stays out of scope — no `NSScrollView`, ever (rule below); only Bluetooth is bounded, by macOS's few simultaneous BT links.
 - Two rebuild flavors, not interchangeable: `rebuildForOpen()` resets collapse defaults, discarding this open's manual toggles; plain `rebuild()` preserves them.
@@ -84,3 +86,96 @@ The menu-bar popover UI (pure AppKit), and — since U3 — the **one-surface ho
 | `AlignmentWizardViewController` | Sheet content controller hosting the wizard (canvas + room spill); presented on the panel via `presentAsSheet`. |
 | `GroupRowView` | Group's master row; built for the window, unused here. Its `draw(_:)` paints the same inset rounded active/hover pill as the `AudioutSharedUI` rows (unified `PopoverColumnGrid` alphas) — its stack host provides no system row highlight. |
 | `RunningAppInfo` | Snapshot of a running app for the add picker. |
+| `SpeakerPasswordSheetViewController` | The AirPlay password sheet; opens on a user join or the panel's button, never on a background reconnect. |
+
+2026-10-04, AirPlay passwords: the diagnosis panel never opens on a `.failed` edge for the speaker whose password sheet is up (`passwordSheetDeviceID`); Cancel on a speaker still `.failed` opens it. A panel already open when its "Enter Password…" button raises the sheet stays open.
+2026-10-04, AirPlay passwords, password wait on the row: a row in `.awaitingPassword` draws the connecting ring and node with an underlined caption-size "Enter Password…" link in the trailing slot (FEED and SYNC yield to it as they do to the two offers). The link, and a click on the selected waiting row's name or checkbox, open the sheet through `deviceRowDidRequestPasswordEntry`; the click never deselects. The wait opens no diagnosis panel and sends no `connection:diagnosis_shown`; `handleConnectionTransitions` clears any open panel on entering it. The red panel is reserved for a refused password (`.failed(.authRequired)`).
+
+## Archived folder rules
+
+# AudioutPopoverUI
+
+## Purpose
+
+The menu-bar popover UI, and the one-surface host: `AppSurfaceController` owns
+the shell and swaps the Mixer, Groups and Settings screens through it. This
+folder renders; routing arithmetic lives in Core.
+
+## Rules
+
+- Reacts to `Device.connectionState` EDGES, never polling; a failed device stays selected.
+- Open intent is pruned against MEMBERSHIP too (2026-08-06); `.failed` is sticky.
+- Every delegate callback mutates, then calls `rebuild()`; no in-place mutation afterwards.
+- The popover is the only host of `PopoverPanelViewController`, in dev and shipping.
+- The surface claims the panel through `claimPanelForSurfaceHosting()`, the one handover door.
+- Height flows through `preferredContentSize`, pinned top and bottom. Exactly ONE `NSScrollView` exists in the panel: the Output Devices card's body (roadmap 039), which stops at `deviceListMaxHeight` (12 rows) or at what the screen leaves, whichever is lower. Its height is a constraint `fittingSizeSettled()` reconciles from the ROWS — a scroll view has no natural height, so measuring the scroll view instead gives a zero-height or screen-height panel. Every other card still pins its rows straight into its clip; do not add a second one.
+- `insertRow`/`removeRow` own the re-fit; never add your own height republish.
+- Two rebuild flavors: `rebuildForOpen()` discards manual toggles, `rebuild()` preserves them.
+- A subsection collapses by animating its own clip height, never rebuilding (2026-08-10).
+- A collapsed subsection cuts the rail exactly as a collapsed card does (2026-08-11).
+- It cuts only when it hides the lowest device the rail reaches, in full order; hidden nodes come from `DeviceRowView.busNode` (2026-09-13).
+- Hidden means idle: ingest skips behind `isEffectivelyShown`, and every open rebuilds.
+- The footer "−" hides a speaker from the LIST only (`HiddenSpeakersController`, display-only, persisted); a SELECTED speaker always renders and its "Hide" item disables — nothing may play from an invisible row (2026-09-15). The way back is the "+" menu's "Hidden speakers" section, discovered devices only.
+- At most one sync drawer is open; `expandedSyncDeviceID` is the single owner.
+- A live scrub applies to audio but must not persist until committed.
+- The alignment wizard is a sheet the popover cannot close under; its two lights are the emitter field's settled state (`SettledLightLayer`, audiout-shared `AudioutField.settled`), tinted green and steel blue (`wireCore`/`ring`), never magenta (C1); no outline ring is drawn on any rung. Its mic probe is a screen (`.listening`), entered only after the host's mic-permission answer; the stored value is a recalled proposal only when listening never started; a rejected proposal never ends a run. A measured proposal's reject reads "Try again" once (mic runs again) then "Align by ear" (the questions); an earned or recalled proposal reads "Still off".
+- The wizard's mic ask goes quiet like Setup's: only an undecided mic (`micPermissionIsUndecided`) marks a prompt in flight, the answer ALWAYS restores the shell's manners, and the app returns to front only while the run that asked is still live — an abandoned run must never reopen a closed surface.
+- A selected Bluetooth device that loses availability is deselected here, on the edge.
+- The Mixer carries an equalizer DOOR (the row button beside mute, and the row menu) and one mark (magenta border when the curve is not flat). No editor, no curve, no tone control on the Mixer (2026-08-22, amended 2026-09-03).
+- A never-aligned Bluetooth row's chip IS the wizard's door; a measured one opens the drawer.
+- A first-join alignment note is session state: ✕ hides it, nothing is written down.
+- The header strip is BORDERED `NSToolbarItem`s — every tab and Pin alike — and the
+  current screen is AppKit's own `selectedItemIdentifier`, never an authored fill
+  (2026-09-05, replacing the custom-drawn capsule that stood here). Two defects killed
+  the drawn version: every cue sat behind `if #available(macOS 26.0, *)` while the
+  package deploys to 14.2, so macOS 14-25 showed three identical circles and no current
+  screen at all; and the authored fill had to clear the UNSELECTED capsule, which in dark
+  mode was already the same grey, so the current tab rendered as the darkest thing in the
+  strip. Never put a cue behind `#available`, and never re-author this chrome: a custom
+  view is nested INSIDE the system's own rounded-square wrapper, which is why a
+  hand-drawn Pin could never come out a circle. Pin's pinned state reads off the glyph
+  (`pin` / `pin.fill`) for the same reason — the system owns that item's chrome.
+- Below macOS 26, `SurfaceToolbarTabCapsule` moves its own toolbar container so its
+  left edge sits at x=50 (close dot shown) or x=26 (hidden), because macOS 14
+  reserves leading room for all three window buttons and puts the first item at
+  x=91, while 26+ lays out after the visible close button. It re-applies on every
+  container frame change and on pin flip, since AppKit re-places the container on
+  each toolbar layout pass. It is layout, not a cue, so the `#available` ban above
+  does not cover it.
+- The animated tab-name reveal is GONE (2026-09-05), removed with the custom capsule it
+  was built on. Tabs now carry a plain `item.label` and AppKit decides what it shows. The
+  constraint that produced the reveal still stands if anyone rebuilds it: never let three
+  translated labels widen the strip, which on 2026-09-03 pushed the tabs into the overflow
+  chevron. One name at a time, clamped and truncated, was the shape that worked.
+- The Mixer tab does NOT draw `slider.horizontal.3`: that is the device row's equalizer
+  door (`DeviceRowView.eqSymbolName`), and sliders are what an equalizer looks like. The
+  tab draws `waveform` (2026-09-04).
+- Groups and Settings are BUILT a turn after the surface opens, never on the click that
+  selects them (`prewarmScreens`). Building is not mounting — neither reaches `setContent`.
+- A screen swap dissolves the incoming screen in: opacity 0 → 1 on `FoldAnimator`, the app's
+  one reveal clock, which is also where Reduce Motion is answered. Opacity is the ONLY thing
+  that travels, and every tick puts the session frame back, because showing the fade makes
+  the window lay out and a freshly mounted split view takes that as its chance to widen it.
+- An App Routing row may target a saved GROUP. The one-role-per-speaker filter hides a Main Out member from the DEVICE list but never the group containing it — the group entry discloses how much of itself the app gets, and only greys out when no member is free.
+- A group's membership is read LIVE on every rebuild (`groupRouteTargets()`); never cache it.
+- A group edit reaches the surface ONLY through `groupsDidChange()`; no other trigger watches it.
+- No `STABILITY(id)` markers remain in this target; the audit's findings and fix sketches are history in [../../../dev/notes/stability-audit-2026-07-18.md](../../../dev/notes/stability-audit-2026-07-18.md).
+- Long-form traps, dated decisions and the changelog: [AGENTS-HISTORY.md](AGENTS-HISTORY.md). Grep it before debugging anything here.
+
+## Map
+
+- `PopoverController` → the Mixer brain: card stack, device ingest, controller calls. Wizard, sync-drawer, Applications-card and test-hook members live in `PopoverController+<Name>.swift`.
+- `PopoverPanelViewController` → the panel view controller every host mounts.
+- `AppSurfaceController` → owns the shell, swaps the three screens.
+- `SurfaceToolbar` → the window's header strip, built from bordered `NSToolbarItem`s.
+- 2026-10-04: the Speakers screen split from Scenes, so the surface has four tabs (Mixer, Scenes, Speakers, Settings; ⌘1–⌘4). `SurfaceScreen.groups` remains the Scenes case so the `surface:screen_selected` analytics value "groups" is unchanged; the new screen sends "speakers".
+- 2026-10-06: the AirPlay password sheet has a code variant, chosen by the speaker's `AirPlayAccess` (`.onScreenCode` or `.onScreenCodeEveryTime`). It opens by itself only for a join clicked in this popover (the row or the panel's Try again, recorded in `codeJoinClickedIDs` and consumed by the first `.awaitingPassword` edge), never for a launch restore or a group activation.
+- 2026-10-06: the AirPlay code variant is four one-digit boxes that submit on the fourth digit; four exactly by owner ruling. The engine passes the code to the pairing step byte for byte, so only ASCII digits ever reach a box.
+- 2026-10-06: the AirPlay code sheet centres four 52×48 pt boxes, keeps an empty one-line result line from the start so the sheet never grows, colours only the host's refusal `failure` red, and announces each result line to VoiceOver. The partial-code line names the device ("Enter all 4 digits shown on “<name>”."), mirrored on the phone.
+- 2026-10-07: the AirPlay code boxes draw their own `well` fill and 1 pt `rim` edge in `CodeBoxCell`, because the stock bezel fell under 3:1 against the sheet background, and the cell centres the digit and caret vertically, because a stock single-line cell top-aligns them. Spec sources: dev/notes/code-entry-box-spec-2026-10-07.md.
+- 2026-10-07: on the alignment wizard's listening screen (the measuring rung) each speaker's light follows the mic: during its turn it grows with the level above the room (84 pt resting, 116 pt at +24 dB), a heard verdict seats it 40 pt beside the centre at 72 pt, a missed one shrinks it to 72 pt at its range end, dims it to 0.35 and mixes its hue 80 % toward `stageRule`, and the measured proposal brings both together. The fused look is 64 pt with the reference at 1.285× keeping variant 1, so the two lights read as one ring with a green inner edge and a blue outer edge. The mic flow enters it through `.gather` (0.6 s, no camera seed) and the by-ear flow through `.fuse` (0.40 s). No light is drawn wider than 120 pt, which keeps it 18 pt clear of the plate's top and bottom edges.
+- 2026-10-07: after a live test the owner raised the listening screen's full-growth light to 126 pt and the cap to 130 pt (about 14 pt clear of the plate's top and bottom edges), superseding the 116 pt and 120 pt figures above. Near full growth a turn light now shimmers: `SettledLightLayer` adds a second, 2.5× faster curl term scaled by the light's listening value (0 below 0.6 growth, 1 at full), which fades over 0.3 s when the turn ends or a verdict lands, and is 0 on every other light, every other rung and under Reduce Motion.
+- 2026-10-14: the alignment wizard's title row carries a `BetaChipView` between the name and the click count, because alignment ships as a beta and the window that offers it has to say so. It is custom-drawn (layer-backed `well` fill, 1 pt `rim` border, `microLabel` `label2` text) because no stock AppKit control is a label on a tinted capsule: `NSButton`'s recessed bezel is the nearest look and it is a control, which this is not. It is fixed-width chrome at hugging and compression resistance `.required`, so the truncating name is the half that gives way; the chip is the one accessibility element, and its inner label is not. The iPhone draws the same capsule as `BetaBadge` on its three alignment doors.
+- 2026-10-19: the expired-trial survey card is session state over the shell's content view, not a window: a tab switch, a hide or Escape ends it and reports it as dismissed. `AGENTS.md` is at its 300-word budget, so the rule lives here.
+- 2026-10-19: the survey card draws itself (icon-well tiles with key hints, the gold progress line, the animated thank-you mark) because no stock control is a one-tap answer tile or that mark; it is a one-off card over the dimmed popover, not reusable chrome. `AGENTS.md` is at its word budget, so the why lives here.
+- 2026-10-19: owner call: the survey's thank-you mark felt flat, so it now replays the Mixer's connect moment: the ring fills from a faint track into an empty dot, the dot blooms `ember → gold` with a snap and one gold ring, and keeps a small glow of its own. The large background glow behind the mark is gone.

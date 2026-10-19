@@ -178,9 +178,22 @@ let package = Package(
         // whitens the passive-drift correlation, makes a peak clear two more
         // gates before it counts (its height over the nearest rival lag, and
         // its score against the lags right around it), votes four sub-bands,
-        // and lets each speaker own its own peak inside a shared search window.
+        // and lets each speaker own its own peak inside a shared search window;
+        // 0.18.0 added the `submitSpeakerPassword` command and the failure
+        // cause and `credentialKind` on `ConnectionInfo`; 0.19.0 adds the
+        // speaker's `access` kind to `ConnectionInfo`, which
+        // `CompanionSnapshotBuilder` fills so the phone draws the same lock the
+        // Mac does; 0.20.0 adds per-speaker Mixer visibility, missing speakers,
+        // the note slot, and the `setSpeakerVisibility`/`forgetSpeakers`
+        // commands; 0.21.0 replaces the two sweeps with one glide probe both
+        // speakers play in turn (`SyncProbe.Layout`, ADR 0002 there); 0.22.0
+        // carries the room delay on `alignmentProbeStarted`; 0.23.0 each
+        // speaker's total delay; 0.24.0 and 0.25.0 the Mac app version and the
+        // speaker's product model in the snapshot; 0.26.0 is protocol version 2
+        // (TLS, the phone's signed `hello`, `CompanionPairing`); 0.27.0 adds
+        // `hello`'s optional `checksPairingCode`.
         .package(url: "https://github.com/aa-hh/audiout-shared.git",
-                 from: "0.15.1"),
+                 from: "0.27.0"),
         // Sparkle 2 (MIT) — in-app updates for the paid, notarised build only.
         // Scoped to the `AudioutApp` executable target so no library, test or
         // harness target ever links it.
@@ -197,6 +210,13 @@ let package = Package(
         // wraps it in `catchingObjCException` for normal Swift call sites.
         .target(
             name: "ObjCExceptionShim"
+        ),
+        // Test-only: silences AppKit's "no one handled this key" alert sound
+        // for every test (Sources/TestKeySilencer/include/TestKeySilencer.h).
+        // Never add it to an app or tool target.
+        .target(
+            name: "TestKeySilencer",
+            linkerSettings: [.linkedFramework("AppKit")]
         ),
         .target(
             name: "AudioutCore",
@@ -455,6 +475,7 @@ let package = Package(
                 "AudioutOnboardingUI",
                 "CastSender",
                 "CastFakeReceiver",
+                "TestKeySilencer",
                 .product(name: "ProbeKit", package: "audiout-shared"),
                 // `RemoteInviteViewTests` pins the UI's `BTOffsetSource`
                 // against `AlignmentSource`, the wire's own vocabulary, so a

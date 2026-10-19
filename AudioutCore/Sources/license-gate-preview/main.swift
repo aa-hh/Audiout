@@ -72,8 +72,15 @@ final class PreviewDelegate: NSObject, NSApplicationDelegate {
 
     private var gate: LicenseGateWindowController?
 
+    /// `LICENSE_GATE_PREVIEW_SCREENSHOT=1`, for audiout.app's screenshot of
+    /// this window: dark whatever the Mac is set to, and no field focused, so
+    /// a Caps Lock that is on draws no badge over Register.
+    private let forScreenshot =
+        ProcessInfo.processInfo.environment["LICENSE_GATE_PREVIEW_SCREENSHOT"] == "1"
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
+        if forScreenshot { NSApp.appearance = NSAppearance(named: .darkAqua) }
         showGate()
     }
 
@@ -103,6 +110,10 @@ final class PreviewDelegate: NSObject, NSApplicationDelegate {
             onAbort: { NSApp.terminate(nil) })
         self.gate = gate
         gate.present()
+        // After the view's own `viewDidAppear` focuses the key field.
+        if forScreenshot {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { gate.window?.makeFirstResponder(nil) }
+        }
     }
 }
 

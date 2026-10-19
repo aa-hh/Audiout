@@ -115,12 +115,6 @@ extension SerializedSharedState {
         resolved(Tokens.Color.panel, appearanceName: appearanceName)
     }
 
-    /// The gold wash behind the Groups overview's live card, exactly as
-    /// `GroupsOverviewViewController.swift:834-836` builds it.
-    private func liveWash(over base: NSColor, _ appearanceName: NSAppearance.Name) -> NSColor {
-        composited(resolved(Tokens.Color.gold, appearanceName: appearanceName)
-                    .withAlphaComponent(PopoverColumnGrid.rowLiveWashAlpha), over: base)
-    }
 
     /// The neutral pointer-hover wash (`DeviceRowView.swift:3098-3100`).
     /// `engagedChrome` is `label`, so this is black or white at the grid's
@@ -194,23 +188,15 @@ extension SerializedSharedState {
         let icOn: Bool
     }
 
-    /// All five sit on the row's hover wash or the Groups card's live wash.
+    /// All four sit on the row's hover wash.
     /// The row's hover wash is `engagedChrome` at
     /// `PopoverColumnGrid.rowHoverWashAlpha` (0.10), drawn at
     /// `DeviceRowView.swift:3143-3149`; dropping that alpha far enough to
     /// clear all three inks below needs 0.05, which halves the hover cue on
     /// every row, and the alternative — re-valuing `rim`/`emberText`/
     /// `labelCool2` themselves — is blocked by `DESIGN.md`'s Colors section,
-    /// which adopts these hexes case-for-case from the iPhone companion. For
-    /// the Groups card edge: `containerEdge` states measurements and no
-    /// floor of its own (`Tokens.swift:293-301`); 1.25:1 is the edge floor
-    /// that already bans `hairline` from `raised` (`Tokens.swift:265-266`,
-    /// `:290-291`), borrowed here rather than a floor `containerEdge` was
-    /// ever asked to clear — and a live card is separated from its
-    /// neighbours by the gold wash itself, the seat's gold ring, the wave
-    /// marker and the gold "Playing now" text, not the edge alone. All five
-    /// are transient or state-specific (a hover, an idle readout, a silent
-    /// name, a live card) and every one is rescued by Increase Contrast
+    /// which adopts these hexes case-for-case from the iPhone companion.
+    /// All four are hover states and pass under Increase Contrast
     /// (Test B below still holds that direction for each).
     private let exceptions: [Exception] = [
         // 2.92:1 vs the 3.0 floor. Passes elsewhere: 3.82 (aqua ic=false),
@@ -223,8 +209,6 @@ extension SerializedSharedState {
         // 3.95:1 vs the 4.5 floor. The two Increase Contrast cells pass at
         // 6.48 (aqua) and 6.03 (darkAqua).
         Exception(pair: "labelCool2 on the row's hover wash", appearance: .darkAqua, icOn: false),
-        // 1.21:1 vs the 1.25 floor. Passes elsewhere: 1.77, 4.51, 2.33.
-        Exception(pair: "Groups card edge on its live wash", appearance: .darkAqua, icOn: false),
     ]
 
     private func pairs() -> [CompositePair] {
@@ -282,25 +266,6 @@ extension SerializedSharedState {
             CompositePair(name: "labelCool2 on the row's hover wash", floor: 4.5,
                           foreground: { self.resolved(Tokens.Color.labelCool2, appearanceName: $0) },
                           ground: { self.hoverWash(over: self.rowGround($0), $0) }),
-
-            // MARK: The Groups overview's live CARD
-            //
-            // The Groups card's 12 % gold wash (`rowLiveWashAlpha`), over `raised` instead of `panel`
-            // (`GroupsOverviewViewController.swift:788-793`). Its meta line
-            // reads `label2` while live and `labelCool2` while not, so only
-            // the live inks are measured on the washed ground.
-            CompositePair(name: "label2 on the Groups card's live wash", floor: 4.5,
-                          foreground: { self.resolved(Tokens.Color.label2, appearanceName: $0) },
-                          ground: { self.liveWash(over: self.resolved(Tokens.Color.raised, appearanceName: $0), $0) }),
-            CompositePair(name: "goldText on the Groups card's live wash", floor: 4.5,
-                          foreground: { self.resolved(Tokens.Color.goldText, appearanceName: $0) },
-                          ground: { self.liveWash(over: self.resolved(Tokens.Color.raised, appearanceName: $0), $0) }),
-            // The card's own outer edge, on the same live wash
-            // (`GroupsOverviewViewController.swift:794-808`: `raised` fill,
-            // the live gold wash over it, then `containerEdge` stroked last).
-            CompositePair(name: "Groups card edge on its live wash", floor: 1.25,
-                          foreground: { self.resolved(Tokens.Color.containerEdge, appearanceName: $0) },
-                          ground: { self.liveWash(over: self.resolved(Tokens.Color.raised, appearanceName: $0), $0) }),
 
             // MARK: A banner's TINTED plate
             //

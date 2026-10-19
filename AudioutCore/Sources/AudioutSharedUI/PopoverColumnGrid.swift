@@ -536,9 +536,8 @@ public enum PopoverColumnGrid {
     /// Alpha for the selection wash, drawn in ``Tokens/Color/engagedChrome``.
     /// Used by AppRowView's single-selection highlight.
     public static let rowSelectionWashAlpha: CGFloat = 0.18
-    /// Alpha of the gold wash behind a sounding card or scene tile
-    /// (`GroupsOverviewViewController`, `SetupCardView`; the Mixer rows draw
-    /// none) — the iPhone's 12 % (`gold.opacity(0.12)`); measured 1.256:1 on
+    /// Alpha of the gold wash behind a sounding SetupCardView
+    /// (the Mixer rows draw none), the iPhone's 12 % (`gold.opacity(0.12)`); measured 1.256:1 on
     /// dark `panel`, 1.140:1 on the light ground.
     public static let rowLiveWashAlpha: CGFloat = 0.12
     /// Alpha of the tint filling an inset notice card (`TintedNoteBackgroundView`):

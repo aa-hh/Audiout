@@ -251,8 +251,8 @@ extension NativeDiscovery: DiscoverySource {}
 /// `DACPServer.parse(_:)`/`level(fromDb:)` statics. The real listener wiring is
 /// exercised by the gated live tests only (D7 discipline).
 protocol DACPEndpoint: AnyObject, Sendable {
-    var onVolume: (@Sendable (_ activeRemote: UInt32, _ level: Double) -> Void)? { get set }
-    var onVolumeStep: (@Sendable (_ activeRemote: UInt32, _ direction: Int) -> Void)? { get set }
+    var onVolume: (@Sendable (_ remoteHost: String?, _ activeRemote: UInt32, _ level: Double) -> Void)? { get set }
+    var onVolumeStep: (@Sendable (_ remoteHost: String?, _ activeRemote: UInt32, _ direction: Int) -> Void)? { get set }
     func start(dacpID: UInt64)
     func stop()
 }

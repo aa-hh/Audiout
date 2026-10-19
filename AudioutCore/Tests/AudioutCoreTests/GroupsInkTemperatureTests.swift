@@ -7,23 +7,8 @@ import AppKit
 @testable import AudioutSharedUI
 @testable import AudioutWindowUI
 
-/// C5 (2026-09-03): the Groups screen's ink carries TEMPERATURE. A group, a
-/// speaker or a member row that is silent is named in `labelCool`; the one the
-/// audio is actually reaching is named in `label`. This replaces the frozen-
-/// text lock the screen used to live under, whose deal was the opposite one
-/// ("separation comes from surfaces, never from recoloring text") — the deal
-/// changed, so the test that enforced it did too.
-///
-/// Two things it still pins from the old lock, one of them changed since:
-///   - the SIDEBAR, changed since: its secondary inks are cool (`labelCool`,
-///     `labelCool2`), and a selected row re-inks every one of them to the
-///     selection pill's text colour, which AppKit does on its own only for a
-///     system semantic colour.
-///   - the editor's checklist really does paint `raised` and `containerEdge`,
-///     sampled off a real offscreen render rather than a re-typed expectation.
-///
-/// "Same colour" throughout means: resolved under BOTH appearances, in sRGB,
-/// within 0.01 per channel.
+/// Only unavailable members use cool ink on the scene page.
+/// Sidebar selection inks and the membership card are checked in both appearances.
 @MainActor
 @Suite final class GroupsInkTemperatureTests: IsolatedSuite {
 
@@ -164,71 +149,26 @@ import AppKit
         return colors
     }
 
-    // MARK: 1-4. The group card
 
-    @Test func idleCardInkIsCool() {
-        expectSameToken(GroupsOverviewViewController.test_cardNameColor(isLive: false),
-                        Tokens.Color.labelCool, "idle card name")
-        expectSameToken(GroupsOverviewViewController.test_cardGlyphTint(isLive: false),
-                        Tokens.Color.labelCool, "idle card glyph")
-        let meta = GroupsOverviewViewController.test_cardMetaAttributedString(isLive: false)
-        expectSameToken(meta.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor,
-                        Tokens.Color.labelCool2, "idle card meta")
-    }
 
-    @Test func liveCardInkIsWarmWithGoldTextPlayingNow() throws {
-        expectSameToken(GroupsOverviewViewController.test_cardNameColor(isLive: true),
-                        Tokens.Color.label, "live card name")
-        expectSameToken(GroupsOverviewViewController.test_cardGlyphTint(isLive: true),
-                        Tokens.Color.label, "live card glyph")
 
-        let meta = GroupsOverviewViewController.test_cardMetaAttributedString(isLive: true)
-        expectSameToken(meta.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor,
-                        Tokens.Color.label2, "live card meta")
-        let playingNow = try #require(meta.string.range(of: "Playing"))
-        let start = NSRange(playingNow, in: meta.string).location
-        expectSameToken(meta.attribute(.foregroundColor, at: start, effectiveRange: nil) as? NSColor,
-                        Tokens.Color.goldText, "live card \"Playing\"")
-    }
 
-    @Test func liveCardRingsTheSeatGoldAndIdleCardEdgesItCool() {
-        let live = GroupsOverviewViewController.test_cardSeatStroke(isLive: true)
-        expectSameToken(live.color, Tokens.Color.gold, "live card seat stroke")
-        #expect(live.width == 1.5)
 
-        let idle = GroupsOverviewViewController.test_cardSeatStroke(isLive: false)
-        expectSameToken(idle.color, Tokens.Color.containerEdge, "idle card seat stroke")
-        #expect(idle.width == 1)
-    }
+    // MARK: The scene page's member rows
 
-    @Test func everyGroupCardCarriesTheIdentityGlow() {
-        // Magenta is identity, not state, so both plans carry it. The alphas
-        // are `GroupIdentityGlowViewTests`' business, not this suite's.
-        #expect(GroupsOverviewViewController.test_cardHasIdentityGlow(isLive: true))
-        #expect(GroupsOverviewViewController.test_cardHasIdentityGlow(isLive: false))
-    }
-
-    // MARK: 5-7. The editor's member rows
-
-    @Test func memberRowInkFollowsArmedMembership() {
+    // Cooling an available row because it is unchecked turns it red.
+    @Test func anAvailableMemberRowsInkStaysWarm() {
         let row = MembershipRowView(device: makeDevice(), checked: true, surface: .warmPane)
-        row.railArmed = true
-        expectSameToken(row.test_nameColor, Tokens.Color.label, "armed member name")
-        expectSameToken(row.test_glyphTint, Tokens.Color.label2, "armed member glyph")
-
-        row.railArmed = false
-        expectSameToken(row.test_nameColor, Tokens.Color.labelCool, "idle-group member name")
-        expectSameToken(row.test_glyphTint, Tokens.Color.labelCool2, "idle-group member glyph")
-
-        row.railArmed = true
+        expectSameToken(row.test_nameColor, Tokens.Color.label, "member name")
+        expectSameToken(row.test_glyphTint, Tokens.Color.label2, "member glyph")
         row.isChecked = false
-        expectSameToken(row.test_nameColor, Tokens.Color.labelCool, "non-member name in an armed group")
+        expectSameToken(row.test_nameColor, Tokens.Color.label, "non-member name")
+        expectSameToken(row.test_glyphTint, Tokens.Color.label2, "non-member glyph")
     }
 
     // Inking the unavailable name in anything but the sidebar's labelCool, or warming it when the scene plays, turns it red.
     @Test func unavailableMemberRowTakesTheSidebarsInk() {
         let row = MembershipRowView(device: makeDevice(isAvailable: false), checked: true, surface: .warmPane)
-        row.railArmed = true
         expectSameToken(row.test_nameColor, Tokens.Color.labelCool, "unavailable member name")
         expectSameToken(row.test_glyphTint, Tokens.Color.labelCool2, "unavailable member glyph")
         expectSameToken(row.test_unavailableLabelColor, Tokens.Color.labelCool2, "the \"Unavailable\" word")

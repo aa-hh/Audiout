@@ -104,6 +104,9 @@ public enum CompanionSnapshotBuilder {
     ///     right now, backing `Snapshot.missingSpeakers`; sorted by id here.
     ///   - note: the Mac's note slot, backing `Snapshot.note`; `severity` is
     ///     `"info"` or `"warning"`.
+    ///   - macAppVersion: passthrough to `Snapshot.macAppVersion`, the Mac
+    ///     app's `CFBundleShortVersionString`. `nil` from a dev run with no
+    ///     bundle to read; the phone only names it in a problem report.
     public static func build(
         devices: [Device],
         groupController: GroupController,
@@ -126,7 +129,8 @@ public enum CompanionSnapshotBuilder {
         alignmentFor: (Device) -> BTSpeakerTimingReport? = { _ in nil },
         speakerRecord: (Device) -> SpeakerPresentationRecord? = { _ in nil },
         missingSpeakers: [(id: String, name: String, kind: String?)] = [],
-        note: (text: String, severity: String)? = nil
+        note: (text: String, severity: String)? = nil,
+        macAppVersion: String? = nil
     ) -> Snapshot {
         let deviceStates = devices.map { device in
             deviceState(for: device, groupController: groupController, iconFor: iconFor,
@@ -211,6 +215,7 @@ public enum CompanionSnapshotBuilder {
                 .sorted { $0.id < $1.id }
                 .map { MissingSpeakerState(id: $0.id, name: $0.name, kind: $0.kind) },
             note: note.map { NoteState(text: $0.text, severity: $0.severity) },
+            macAppVersion: macAppVersion,
             settings: SettingsState(
                 connectVolume: connectVolume,
                 connectVolumeMin: connectVolumeMin,
@@ -314,7 +319,8 @@ public enum CompanionSnapshotBuilder {
             alignment: alignment,
             mixerVisibility: record?.visibility.rawValue,
             isVisibleInMixer: record?.isVisibleInMixer,
-            isPlaying: isPlaying
+            isPlaying: isPlaying,
+            model: device.model
         )
     }
 

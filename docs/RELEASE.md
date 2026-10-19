@@ -49,6 +49,16 @@ unapplied on the production D1 database — the deployed Worker writes columns
 those migrations add, so a purchase would take the money and fail to issue a
 key.
 
+`make-release.sh` also refuses while any dev diagnostic `make-app.sh` would
+bake into the bundle is exported (`AIRPLAY_AUDIO_DIAG` and the rest of its
+LSEnvironment list). A Claude Code shell exports `AIRPLAY_AUDIO_DIAG`; run with
+`env -u` for each one it names.
+
+The appcast's release-notes link is `https://audiout.app/releases#<version>`,
+which Sparkle shows in the update window. Deploy the website with that version's
+entry in `src/lib/releases.ts` before publishing, or the window shows the page
+without it.
+
 Two things stay manual, and neither is optional:
 
 1. `scripts/verify-standalone-app.sh build/Audiout.app` — proves the bundle

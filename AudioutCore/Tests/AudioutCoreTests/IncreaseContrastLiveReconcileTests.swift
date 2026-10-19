@@ -145,24 +145,7 @@ import ObjectiveC.runtime
 
     // MARK: The Groups window
 
-    @Test func theGroupCardAndEverythingOnItRedraws() {
-        let card = GroupsOverviewViewController.test_makeCardOffScreen()
-        let views = customDrawingViews(in: card)
-        #expect(views.count >= 3,
-                "expected the card, its icon seat and its chips — found \(views.map(\.name))")
-        #expect(viewsThatIgnoredTheFlip(views).isEmpty)
-    }
 
-    @Test func theGroupsOverviewCanvasRedraws() {
-        let overview = GroupsOverviewViewController(groupController: makeGroupController())
-        _ = overview.view
-        overview.reload(devices: [])
-        #expect(overview.test_isShowingEmptyCanvas)
-
-        let views = customDrawingViews(in: overview.view)
-        #expect(!views.isEmpty)
-        #expect(viewsThatIgnoredTheFlip(views).isEmpty)
-    }
 
     @Test func theMembershipRowRedraws() {
         let row = MembershipRowView(device: Device(id: "office", name: "Office",

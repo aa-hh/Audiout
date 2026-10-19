@@ -166,12 +166,13 @@ private final class SpyEngine: EngineControlling, @unchecked Sendable {
     private var liveStreams: [UInt64: UInt32] = [:]
     /// The stream `id`'s live session is on, or `nil` if it has none.
     func liveStream(of id: OutputID) -> UInt32? { lock.withLock { liveStreams[id.rawValue] } }
-    /// One level row per LIVE stream, which is what the `stream_health` poll
-    /// reads. The real engine reports a row per stream it has written to; the
-    /// spy reports a row per live session, so a test can assert what that row
-    /// says about the speakers on it. Levels themselves are fixtures.
+    /// The level rows the `stream_health` poll reads. The real tracker keeps a
+    /// row for every stream it was ever written and never drops one, so the spy
+    /// reports each live session's stream plus every stream a whole-system add
+    /// asked for; a retired home stream keeps reporting, as in the live log of
+    /// 2026-10-07. Levels themselves are fixtures.
     nonisolated func streamLevelSnapshot() -> [StreamLevelSnapshot] {
-        let ids = Set(lock.withLock { Array(liveStreams.values) })
+        let ids = lock.withLock { Set(liveStreams.values).union(wholeSystemAdds.map(\.1)) }
         return ids.sorted().map {
             StreamLevelSnapshot(streamId: $0, peakDBFS: -6, silentSeconds: 0, writes: 1)
         }
@@ -436,8 +437,8 @@ private final class FakeDiscovery: DiscoverySource, @unchecked Sendable {
 /// `applyDacpVolume`/`applyDacpVolumeStep` — the exact closures
 /// `NativeBackend.start()` wires to `onVolume`/`onVolumeStep` — directly.
 private final class FakeDACPEndpoint: DACPEndpoint, @unchecked Sendable {
-    var onVolume: (@Sendable (_ activeRemote: UInt32, _ level: Double) -> Void)?
-    var onVolumeStep: (@Sendable (_ activeRemote: UInt32, _ direction: Int) -> Void)?
+    var onVolume: (@Sendable (_ remoteHost: String?, _ activeRemote: UInt32, _ level: Double) -> Void)?
+    var onVolumeStep: (@Sendable (_ remoteHost: String?, _ activeRemote: UInt32, _ direction: Int) -> Void)?
     private(set) var startCount = 0
     private(set) var stopCount = 0
     func start(dacpID: UInt64) { startCount += 1 }
@@ -674,6 +675,24 @@ private func ap1Device(id: String = "AA:BB:CC:DD:EE:99", name: String = "Old Exp
     let desc = DeviceDescriptor(name: name, address: "192.168.1.20", family: .ipv4, port: 5000, kind: .raop, txtRecord: txt)
     return DiscoveredDevice(id: parsedID, descriptor: desc, outputID: outputID, isAirPlay2Supported: false,
                             access: access)
+}
+
+/// Waits until the backend has recorded the descriptor it fed the engine for
+/// `device` (`fedDescriptors`), the address a DACP report is checked against.
+private func awaitFed(_ backend: NativeBackend, _ device: DiscoveredDevice) async {
+    await pollUntil { backend.stateQueue.sync { backend.fedDescriptors[device.id] != nil } }
+}
+
+/// An AP1-only receiver as the real ones advertise: its product sits under the
+/// `_raop._tcp` TXT key `am`, with no `model` key anywhere in the record. An
+/// AirPort Express and shairport-sync both look like this.
+private func raopAMOnlyDevice(id: String = "AA:BB:CC:DD:EE:98", name: String = "Study Express",
+                              am: String = "AirPort10,115") -> DiscoveredDevice {
+    let txt = ["deviceid": id, "am": am]
+    let (parsedID, outputID) = NativeDiscovery.parseDeviceID(txt)!
+    let desc = DeviceDescriptor(name: name, address: "192.168.1.21", family: .ipv4, port: 5000, kind: .raop, txtRecord: txt)
+    return DiscoveredDevice(id: parsedID, descriptor: desc, outputID: outputID, isAirPlay2Supported: false,
+                            access: .open)
 }
 
 /// `systemVolume` defaults to a fresh ``FakeSystemVolume`` so EVERY call
@@ -1796,6 +1815,9 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         #expect(d?.isAvailable == true)
         #expect(d?.name == "Sonos Move")
         #expect(d?.kind == .sonos)
+        // The advertised TXT `model` is KEPT, not just used to guess the kind
+        // and thrown away: the phone's sync events report it.
+        #expect(d?.model == "S13")
 
         // The engine got the AP2 descriptor.
         await pollUntil { engine.fedIDs.contains(device.outputID) }
@@ -1823,6 +1845,25 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         // Fed to the engine so it becomes addOutput-able, same as an AP2 device.
         await pollUntil { engine.fedIDs.contains(ap1.outputID) }
         #expect(engine.fedIDs.contains(ap1.outputID), "AP1 device must be fed to the shared engine (T7)")
+    }
+
+    /// A `_raop._tcp` receiver that names its product only under TXT `am` still
+    /// reaches the phone with a model. Drop the `am` fallback from
+    /// `advertisedModel(for:)` and this goes red: `model` is nil for every
+    /// AirPort Express and shairport-sync on the network, because none of them
+    /// advertises the `model` key the AP2 path reads.
+    @Test func raopReceiverAdvertisingOnlyAMStillReportsItsModel() async {
+        let (backend, engine, discovery) = makeBackend()
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        let raop = raopAMOnlyDevice()
+        let events = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == raop.id } else { return false } }
+        } after: { discovery.fire(.appeared(raop)) }
+
+        let d = events.compactMap { if case .deviceAdded(let x) = $0 { return x } else { return nil } }.first { $0.id == raop.id }
+        #expect(d?.model == "AirPort10,115", "an AP1-only receiver's `am` product must land in Device.model")
     }
 
     /// Selecting an AP1 device converges it through the SAME engine surface as AP2:
@@ -2780,18 +2821,25 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         // stored setting is: stored 50 → effective (wire) 25%.
         backend.setMasterGain(mainOut: 50, group: 100, mirrorToSystemVolume: false)
         await pollUntil { engine.volumeCalls.contains { $0.0 == device.outputID && abs($0.1 - 0.25) < 0.001 } }
-        let callsBeforeEcho = engine.volumeCalls.count
 
         // THE ECHO: the receiver reflects back exactly what we just put on the
         // wire (0.25 = 25%).
         let token = UInt32(truncatingIfNeeded: device.outputID.rawValue)
-        backend.applyDacpVolume(activeRemote: token, level: 0.25)
-        // No scheduled interval here either — pure async-settle margin at the
-        // 100ms absolute floor.
-        try? await Task.sleep(nanoseconds: 100_000_000)
+        await awaitFed(backend, device)
+        // The gain push must have finished, so a wrong re-push shows up as a
+        // fresh `volumeInFlight` mark.
+        await pollUntil { backend.stateQueue.sync { !backend.volumeInFlight.contains(device.outputID) } }
+        let callsBeforeEcho = engine.volumeCalls.count
+        backend.applyDacpVolume(remoteHost: device.descriptor.address, activeRemote: token, level: 0.25)
+        // `applyDacpVolume` decides in one `stateQueue` block and a push it
+        // starts marks `volumeInFlight` there; the mark clears only after the
+        // engine call is recorded, so reading the mark before the call count
+        // catches a wrong push at either stage.
+        let rePushInFlight = backend.stateQueue.sync { backend.volumeInFlight.contains(device.outputID) }
 
         #expect(backend.devices.first { $0.id == device.id }?.volume == 50,
                        "an echo of our own attenuated write must NOT overwrite the user's stored setting")
+        #expect(!rePushInFlight, "an echo of our own attenuated write must NOT trigger a re-push")
         #expect(engine.volumeCalls.count == callsBeforeEcho,
                        "an echo of our own attenuated write must NOT trigger a re-push")
 
@@ -2800,7 +2848,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         // (0.40 wire / 50% gain = 0.80 → stored 80) and pushed back out at that
         // same wire level — AirPlay volume is sender-owned, so the receiver's
         // audible level only moves once we write it back (SET_PARAMETER).
-        backend.applyDacpVolume(activeRemote: token, level: 0.40)
+        backend.applyDacpVolume(remoteHost: device.descriptor.address, activeRemote: token, level: 0.40)
         await pollUntil { backend.devices.first { $0.id == device.id }?.volume == 80 }
         // The store and the re-push land on different queues — wait for the
         // push too, or the assert below races it under load.
@@ -9613,6 +9661,91 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
                              "a .noRedirect listed app must emit .appLevel from its metering-only tap")
     }
 
+    /// The listen-only tap that meters the Mac runs only while levels are wanted
+    /// and the sending capture is off, and stops across sleep. Turns red if the
+    /// listen tap starts while capture runs, survives capture start, sleep or
+    /// levels stopping, or never starts when the popover opens with the Mac alone.
+    @Test func localMeterTapRunsOnlyWhileLevelsFlowAndCaptureIsOff() async {
+        let (backend, engine, discovery) = makeBackend()
+        let capture = FakeCapture()
+        let listen = FakeCapture()
+        backend.captureCoordinator = capture
+        backend.localMeterCapture = listen
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:81", name: "Meter Speaker")
+        await startAndDiscover(backend, engine, discovery, device)
+        #expect(listen.ops.isEmpty, "levels are not wanted yet, so the listen tap must not start")
+
+        backend.setMeteringActive(true)
+        await pollUntil { listen.isCapturing }
+        #expect(listen.ops == ["start"])
+
+        backend.setOutputSet([device.id])
+        await pollUntil { capture.isCapturing && !listen.isCapturing }
+        #expect(listen.ops == ["start", "stop"], "the sending capture took over, so the listen tap must stop")
+
+        backend.setOutputSet([])
+        await pollUntil { listen.isCapturing }
+
+        backend.handleSystemWillSleep()
+        await pollUntil { !listen.isCapturing }
+        backend.handleSystemDidWake()
+        await pollUntil { listen.isCapturing }
+
+        backend.setMeteringActive(false)
+        await pollUntil { !listen.isCapturing }
+        #expect(listen.ops == ["start", "stop", "start", "stop", "start", "stop"])
+    }
+
+    /// With the Mac playing alone, its bar reads the listen-only tap's level and
+    /// drops to 0 when the sending capture takes over. Turns red if `isMeterable`
+    /// stops counting the listen tap, its `onLevel` is no longer wired to
+    /// `noteSystemRMS`, or the bar is not re-emitted to 0 when the tap stops.
+    @Test func localDeviceLevelComesFromTheListenOnlyTapWhileTheMacPlaysAlone() async {
+        let (backend, engine, discovery) = makeBackend()
+        let capture = FakeCapture()
+        let listen = FakeCapture()
+        backend.captureCoordinator = capture
+        backend.localMeterCapture = listen
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:82", name: "Meter Speaker")
+        await startAndDiscover(backend, engine, discovery, device)
+
+        backend.setMeteringActive(true)
+        await pollUntil { listen.isCapturing && listen.meteringActive }
+        let (levels, task) = subscribeLevels(backend); defer { task.cancel() }
+        await pollUntil {
+            listen.fireLevelIfActive(0.6)
+            return (levels.lastDeviceLevel(NativeBackend.localDeviceID) ?? 0) > 0
+        }
+        #expect(abs((levels.lastDeviceLevel(NativeBackend.localDeviceID) ?? 0) - 0.6) <= 0.001,
+                "the Mac playing alone must show the listen-only tap's level")
+
+        backend.setOutputSet([device.id])
+        await pollUntil { !listen.isCapturing }
+        await pollUntil { levels.lastDeviceLevel(NativeBackend.localDeviceID) == 0 }
+    }
+
+    /// The listen-only tap leaves out the same routed-away and user-excluded apps
+    /// the sending capture does. Turns red if `updateAppRoutes` stops handing the
+    /// listen tap the routed-away apps or the user's excluded apps.
+    @Test func localMeterTapExcludesRoutedAndExcludedAppsLikeTheMainCapture() async {
+        let (backend, engine, discovery) = makeBackend()
+        let capture = FakeCapture()
+        let listen = FakeCapture()
+        backend.captureCoordinator = capture
+        backend.localMeterCapture = listen
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:83", name: "Meter Speaker")
+        await startAndDiscover(backend, engine, discovery, device)
+
+        backend.updateAppRoutes([route("com.foo", name: "Foo", toDevice: device.id)],
+                                excludedBundleIDs: ["com.secret"])
+        await pollUntil { listen.lastExcludedBundleIDs == ["com.foo", "com.secret"] }
+        #expect(listen.lastExcludedBundleIDs == ["com.foo", "com.secret"])
+        #expect(capture.lastExcludedBundleIDs == ["com.foo", "com.secret"])
+    }
+
     /// D3, app half: `.appLevel` rides the SAME leading/trailing-edge sampler the
     /// per-device `.level` does, keyed by bundle id. A tap delivering buffers far
     /// above the ~25 Hz display cadence must not fan out one event per buffer,
@@ -9806,8 +9939,8 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
 
     /// A device that is ONLY the local Mac (no AirPlay device selected at all,
     /// so the synced-local sink never enables) must NOT be metered from the
-    /// whole-system tap — there is nothing shared to measure, and the tap
-    /// itself doesn't even run in pure passthrough. Guards against a fix that
+    /// SENDING whole-system tap — with no `localMeterCapture` injected, only
+    /// the listen-only tap may meter the Mac alone. Guards against a fix that
     /// accidentally makes the local device meterable unconditionally.
     @Test func localDeviceAloneNeverReceivesSystemLevel() async {
         let (backend, engine, discovery, capture, sink, _) = makeSyncedLocalBackend(macSelectedByDefault: true)
@@ -10171,9 +10304,10 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         // Active-Remote is the low 32 bits of the device id (airplay.c). 0.8 → 80,
         // deliberately != the discovered default of 50 so the change actually emits.
         let token = UInt32(truncatingIfNeeded: device.outputID.rawValue)
+        await awaitFed(backend, device)
         let events = await collect(from: backend) { events in
             events.contains { if case .deviceUpdated(let d) = $0 { return d.id == device.id && d.volume == 80 } else { return false } }
-        } after: { backend.applyDacpVolume(activeRemote: token, level: 0.8) }
+        } after: { backend.applyDacpVolume(remoteHost: device.descriptor.address, activeRemote: token, level: 0.8) }
 
         let updated = events.compactMap { event -> Device? in
             if case .deviceUpdated(let d) = event, d.id == device.id { return d } else { return nil }
@@ -10192,7 +10326,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         let events = await collect(from: backend) { events in
             events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
         } after: {
-            backend.applyDacpVolume(activeRemote: 0xDEADBEEF, level: 0.9) // no such token
+            backend.applyDacpVolume(remoteHost: device.descriptor.address, activeRemote: 0xDEADBEEF, level: 0.9) // no such token
             discovery.fire(.appeared(device))
         }
         #expect(!(
@@ -10217,7 +10351,8 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         } after: { discovery.fire(.appeared(device)) }
 
         let token = UInt32(truncatingIfNeeded: device.outputID.rawValue)
-        backend.applyDacpVolume(activeRemote: token, level: 0.8)
+        await awaitFed(backend, device)
+        backend.applyDacpVolume(remoteHost: device.descriptor.address, activeRemote: token, level: 0.8)
 
         let pushed = await waitForVolumePush(engine, device.outputID, 0.8)
         #expect(pushed, "a speaker-requested volume must be pushed back to the engine so the speaker actually changes level")
@@ -10237,15 +10372,21 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         } after: { discovery.fire(.appeared(device)) }
 
         let token = UInt32(truncatingIfNeeded: device.outputID.rawValue)
-        backend.applyDacpVolume(activeRemote: token, level: 0.8)
+        await awaitFed(backend, device)
+        backend.applyDacpVolume(remoteHost: device.descriptor.address, activeRemote: token, level: 0.8)
         #expect(await waitForVolumePush(engine, device.outputID, 0.8),
                 "precondition: the first push reached the engine")
+        // The first push must have finished, so a wrong second one shows up as
+        // a fresh `volumeInFlight` mark.
+        await pollUntil { backend.stateQueue.sync { !backend.volumeInFlight.contains(device.outputID) } }
         let countAfterFirst = engine.volumeCalls.count
 
-        // The "echo": same level again. Give any (wrong) push time to land.
-        // No scheduled interval here — pure async-settle margin at the 100ms floor.
-        backend.applyDacpVolume(activeRemote: token, level: 0.8)
-        try? await Task.sleep(nanoseconds: 100_000_000)
+        // The "echo": same level again. The read of the in-flight mark runs
+        // after the apply's `stateQueue` block, and a wrong push either still
+        // holds the mark or has already recorded its engine call.
+        backend.applyDacpVolume(remoteHost: device.descriptor.address, activeRemote: token, level: 0.8)
+        let rePushInFlight = backend.stateQueue.sync { backend.volumeInFlight.contains(device.outputID) }
+        #expect(!rePushInFlight, "an echo of the current value must not push again (feedback loop)")
         #expect(engine.volumeCalls.count == countAfterFirst,
                        "an echo of the current value must not push again (feedback loop)")
     }
@@ -10264,6 +10405,8 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         } after: { discovery.fire(.appeared(device)) }
 
         let token = UInt32(truncatingIfNeeded: device.outputID.rawValue)
+        await awaitFed(backend, device)
+        let host = device.descriptor.address
         let step = NativeBackend.speakerVolumeStep
         let deviceID = device.id
         let volumesOf: @Sendable ([BackendEvent]) -> [Int] = { events in
@@ -10274,14 +10417,46 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         let events = await collect(from: backend) { events in
             volumesOf(events).count >= 3
         } after: {
-            backend.applyDacpVolumeStep(activeRemote: token, direction: 1)
-            backend.applyDacpVolumeStep(activeRemote: token, direction: 1)
-            backend.applyDacpVolumeStep(activeRemote: token, direction: -1)
+            backend.applyDacpVolumeStep(remoteHost: host, activeRemote: token, direction: 1)
+            backend.applyDacpVolumeStep(remoteHost: host, activeRemote: token, direction: 1)
+            backend.applyDacpVolumeStep(remoteHost: host, activeRemote: token, direction: -1)
         }
 
         let volumes = volumesOf(events)
         #expect(volumes == [50 + step, 50 + 2 * step, 50 + step],
                        "steps must accumulate from the current level, up then back down")
+    }
+
+    /// A DACP report only counts when it comes from the speaker's own address:
+    /// the listener is open to the whole LAN and the token is 32 bits of a MAC.
+    /// Turns red if `applyDacpVolume` / `applyDacpVolumeStep` stop comparing the
+    /// sender's address with the fed descriptor's `address`.
+    @Test func dacpReportFromAnotherHostMovesNothing() async {
+        let (backend, engine, discovery) = makeBackend()
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        let device = ap2Device()
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+        await awaitFed(backend, device)
+
+        let token = UInt32(truncatingIfNeeded: device.outputID.rawValue)
+        let volumeOf: () -> Int? = { backend.devices.first { $0.id == device.id }?.volume }
+        let before = volumeOf()
+        let callsBefore = engine.volumeCalls.count
+
+        backend.applyDacpVolume(remoteHost: "192.168.1.99", activeRemote: token, level: 0.8)
+        backend.applyDacpVolume(remoteHost: nil, activeRemote: token, level: 0.8)
+        backend.applyDacpVolumeStep(remoteHost: "192.168.1.99", activeRemote: token, direction: 1)
+        backend.stateQueue.sync {}   // the three calls above have run
+        #expect(volumeOf() == before, "a report from a host that is not the speaker must not move its slider")
+        #expect(engine.volumeCalls.count == callsBefore, "and must not push anything to the engine")
+
+        backend.applyDacpVolume(remoteHost: device.descriptor.address, activeRemote: token, level: 0.8)
+        await pollUntil { volumeOf() == 80 }
+        #expect(volumeOf() == 80, "the same report from the speaker's own address moves it")
     }
 
     /// Both routing chokepoints must fire `onRoutingAction` — this is what makes
@@ -11940,6 +12115,7 @@ extension SerializedSharedState {
         let line = lines().first ?? ""
         #expect(line.contains("\"op\":\"bind\""))
         #expect(line.contains("\"cause\":\"unknown\""))
+        #expect(line.contains("\"reason\":\"sessionFailed\""), "the engine case name rides along as `reason`")
         #expect(!box.snapshot().contains { $0.contains("\"evt\":\"bind_failed\"") })
     }
 
@@ -12013,6 +12189,66 @@ extension SerializedSharedState {
         let row = try #require(homeRows().last)
         #expect(row.contains("\"devices\":\"\(device.id)\""),
                 "the row for a speaker's own whole-system stream must name that speaker")
+    }
+
+    /// `stream_health` reports the streams the app still assigns, not every
+    /// stream the engine's level tracker remembers: the tracker never forgets an
+    /// id, so a removed speaker's stream logged every 5 s with no devices and
+    /// frozen writes (live 2026-10-07).
+    /// The first expectation goes red if the loop logs every row the engine
+    /// reports. The second goes red if the skip keys on `added` instead of the
+    /// stream assignment, because a speaker whose session died while still
+    /// selected is out of `added` until it reconnects. The third goes red if
+    /// the `devices` field is filtered on `added` again.
+    @Test func streamHealthSkipsARetiredStreamButKeepsOneStillAssigned() async throws {
+        let (backend, engine, discovery) = makeBackend(watchdogScheduler: ManualWatchdogScheduler())
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        backend.start()
+        defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        let retired = ap2Device(id: "AA:BB:CC:DD:EE:A8", name: "Health Retired Speaker")
+        let kept = ap2Device(id: "AA:BB:CC:DD:EE:A9", name: "Health Kept Speaker")
+        for device in [retired, kept] {
+            _ = await collect(from: backend) { events in
+                events.contains {
+                    if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false }
+                }
+            } after: { discovery.fire(.appeared(device)) }
+        }
+
+        backend.setOutputSet([retired.id])
+        await pollUntil { (engine.liveStream(of: retired.outputID) ?? 0) >= SpyEngine.wholeSystemStreamIDBase }
+        let retiredHome = try #require(engine.liveStream(of: retired.outputID))
+        backend.setOutputSet([retired.id, kept.id])
+        await pollUntil { (engine.liveStream(of: kept.outputID) ?? 0) >= SpyEngine.wholeSystemStreamIDBase }
+        let keptHome = try #require(engine.liveStream(of: kept.outputID))
+        // Rows are logged in id order and the telemetry queue is FIFO, so once
+        // keptHome's row arrives a wrongly logged retiredHome row is already in the box.
+        try #require(retiredHome < keptHome, "precondition: the retired stream's row is logged first")
+
+        await pollUntil { capture.eqPlans.last?.streams.contains { $0.streamID == retiredHome } == true }
+        backend.setOutputSet([kept.id])
+        await pollUntil { capture.eqPlans.last?.streams.contains { $0.streamID == retiredHome } == false }
+
+        engine.pushState(kept.outputID, .failed)
+        await pollUntil { backend.devices.first { $0.id == kept.id }?.isAvailable == false }
+
+        let box = TelemetryLineBox()
+        Telemetry._installTestSink { box.append($0) }
+        defer { Telemetry._installTestSink(nil) }
+        backend.test_pollSchedulingSnapshotNow()
+
+        func rows(_ id: UInt32) -> [String] {
+            box.snapshot().filter {
+                $0.contains("\"evt\":\"stream_health\"") && $0.contains("\"stream\":\"\(id)\"")
+            }
+        }
+        await pollUntil { !rows(keptHome).isEmpty }
+        #expect(rows(retiredHome).isEmpty, "a deselected speaker's stream must not be logged again")
+        #expect(!rows(keptHome).isEmpty, "a speaker still selected keeps its stream's line while its session is down")
+        #expect(rows(keptHome).first?.contains(kept.id) == true, "the stalled stream names the speaker it belongs to")
     }
 
     /// Selecting a SECOND device while already capturing (captureRunning
@@ -13043,6 +13279,35 @@ extension SerializedSharedState {
         #expect(lines.first?["will_wait"] as? String == "true")
         #expect(lines.first?["switch_away"] as? String == "none", "no defaultOutputSwitcher was injected")
         #expect(Int(lines.first?["elapsed_ms"] as? String ?? "") != nil, "elapsed_ms must be an integer")
+
+        // The refusal's `connect_failed` names which gate outcome refused it,
+        // so busy timing ports read apart from an unapproved helper.
+        await pollUntil { !telemetryLines(box, evt: "airplay:connect_failed", device: device.id).isEmpty }
+        let failed = telemetryLines(box, evt: "airplay:connect_failed", device: device.id).first
+        #expect(failed?["cause"] as? String == "timingUnavailable")
+        #expect(failed?["reason"] as? String == "timingPortsUnavailable")
+    }
+
+    /// Turns red if the whole-system converge catch stops sending the engine
+    /// error's case name as `reason`, which leaves every non-password,
+    /// non-timeout connect failure reading only `cause: unknown` in PostHog.
+    @Test func wholeSystemConnectFailureSharesTheEngineErrorAsReason() async {
+        let (backend, engine, discovery) = makeBackend()
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:CA", name: "Rejecting Speaker")
+        engine.addFailures = [device.outputID.rawValue]
+        engine.addFailureError = .operationRejected
+        await startAndDiscover(backend, engine, discovery, device)
+
+        let box = TelemetryLineBox()
+        Telemetry._installTestSink { box.append($0) }
+        defer { Telemetry._installTestSink(nil) }
+
+        backend.setOutputSet([device.id])
+        await pollUntil { !telemetryLines(box, evt: "airplay:connect_failed", device: device.id).isEmpty }
+        let failed = telemetryLines(box, evt: "airplay:connect_failed", device: device.id).first
+        #expect(failed?["cause"] as? String == "unknown")
+        #expect(failed?["reason"] as? String == "operationRejected")
     }
 
     /// Turns red if the arm's `updateDiscovery` catch returns silently: the row
@@ -13102,7 +13367,8 @@ extension SerializedSharedState {
         #expect(binds() == 2)
         // The telemetry sink is delivered on its own queue, so wait for the line.
         await pollUntil { !telemetryLines(box, evt: "airplay:connect_failed", device: device.id).isEmpty }
-        #expect(!telemetryLines(box, evt: "airplay:connect_failed", device: device.id).isEmpty)
+        #expect(telemetryLines(box, evt: "airplay:connect_failed", device: device.id).first?["reason"] as? String
+                == "sessionFailed")
     }
 
 }

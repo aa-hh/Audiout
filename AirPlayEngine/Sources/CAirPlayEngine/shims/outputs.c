@@ -399,11 +399,10 @@ idle_fill_quality_is_default(const struct media_quality *quality)
 
 /* True when the stream still has at least one device the fill may serve right
  * now: a live session, a connected/streaming state, the default quality, and no
- * teardown in progress. Called both to enumerate streams and again immediately
- * before each write, so a device whose stop began after the enumeration — or in
- * any future path that yields mid-tick — is never written to. Reads only device
- * fields (the session pointer is tested, never dereferenced), so it is safe to
- * call on a session that is being torn down. */
+ * teardown in progress. Called immediately before each stream's write, after the
+ * enumeration, so a device whose stop began in between is never written to.
+ * Reads only device fields (the session pointer is tested, never dereferenced),
+ * so it is safe to call on a session that is being torn down. */
 static bool
 idle_fill_stream_servable(uint32_t stream_id)
 {

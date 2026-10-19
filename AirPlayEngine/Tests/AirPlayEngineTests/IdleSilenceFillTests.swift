@@ -115,7 +115,10 @@ extension SerializedEngineState {
         /// fan-out. Returns the stream's end time as the shim recorded it.
         private func hostWrite(engine: AirPlayEngine, streamId: UInt32, pts: timespec, samples: Int) async -> timespec {
             engine.write(pcm: pcm(samples: samples), streamId: streamId, pts: pts)
-            try? await Task.sleep(nanoseconds: 20_000_000)
+            let expected = nanos(pts) + nanosForSamples(Int64(samples))
+            await SuiteWait.until("stream \(streamId)'s end time reaches the written pts plus \(samples) samples") {
+                nanos(outputs_idle_fill_end_pts_for_test(streamId)) == expected
+            }
             return outputs_idle_fill_end_pts_for_test(streamId)
         }
 
@@ -179,7 +182,8 @@ extension SerializedEngineState {
         /// up or have no session at all.
         @Test func fillSkipsStreamsWithoutConnectedDevice() async {
             var q = defaultQuality()
-            #expect(airplay_test_master_session_make(33, &q, false) != nil)
+            let ams = airplay_test_master_session_make(33, &q, false)
+            #expect(ams != nil)
             makeDevice(id: 0xF003, streamId: 33, state: OUTPUT_STATE_STARTUP)
 
             let engine = AirPlayEngine()
@@ -187,7 +191,12 @@ extension SerializedEngineState {
 
             let t0 = monotonicNow()
             primeStream(at: t0)
-            _ = await hostWrite(engine: engine, streamId: 33, pts: t0, samples: 100)
+            // A stream with no connected device has no fill bookkeeping, so the
+            // write is waited for on the master session instead of the end time.
+            engine.write(pcm: pcm(samples: 100), streamId: 33, pts: t0)
+            await SuiteWait.until("the host write to land on stream 33's master session") {
+                airplay_test_master_session_input_buffer_samples(ams) >= 100
+            }
 
             let written = outputs_idle_fill_tick_for_test(ts(fromNanos: nanos(t0) + 108_000_000))
             #expect(written == 0, "a stream whose only device has not connected must get no fill")

@@ -306,7 +306,7 @@ fi
 # GUARD 5 (WARN-ONLY): don't backslide new tests onto XCTest.
 #
 # The XCTest -> swift-testing migration
-# (docs/notes/swift-testing-conversion-cookbook.md) is done for the large
+# (docs/swift-testing-conversion-cookbook.md) is done for the large
 # majority of both AudioutCore's and AirPlayEngine's test suites. New tests
 # should be written `import Testing` / `@Suite` / `@Test`, not `import XCTest`.
 #
@@ -333,7 +333,7 @@ if [ -n "$xctest_hits" ]; then
     echo "  The XCTest -> swift-testing migration is complete for the large" >&2
     echo "  majority of this repo's suites. New tests should use" >&2
     echo "  'import Testing' / '@Suite' / '@Test' instead — see" >&2
-    echo "  docs/notes/swift-testing-conversion-cookbook.md." >&2
+    echo "  docs/swift-testing-conversion-cookbook.md." >&2
     printf "%b\n" "$xctest_hits" >&2
     echo "" >&2
 fi

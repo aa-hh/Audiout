@@ -155,16 +155,34 @@ jobs:
           path: AirPlayEngine/.build
           key: ${{ runner.os }}-${{ runner.arch }}-xcode26.6-airplayengine-${{ hashFiles('AirPlayEngine/Package.swift', 'AirPlayEngine/Package.resolved') }}-${{ github.sha }}
 
+  # Handoffs, .scratch/, dev/notes/ and the other internal docs are
+  # gitignored; `git add -f` still tracks one, so fail on any tracked file
+  # .gitignore matches. Runs inside the required `tests` check, so the
+  # ruleset needs no new entry.
+  internal-docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: No tracked file matches .gitignore
+        run: |
+          tracked=$(git ls-files --cached --ignored --exclude-standard)
+          if [ -n "$tracked" ]; then
+            echo "These files match .gitignore and must not reach main (git rm --cached them):" >&2
+            printf '%s\n' "$tracked" >&2
+            exit 1
+          fi
+
   # The one required check the ruleset names.
   tests:
     runs-on: ubuntu-latest
-    needs: [suite, airplayengine]
+    needs: [suite, airplayengine, internal-docs]
     if: always()
     steps:
       - name: Every suite job passed
         run: |
-          echo "suite=${{ needs.suite.result }} airplayengine=${{ needs.airplayengine.result }}"
-          [ "${{ needs.suite.result }}" = success ] && [ "${{ needs.airplayengine.result }}" = success ]
+          echo "suite=${{ needs.suite.result }} airplayengine=${{ needs.airplayengine.result }} internal-docs=${{ needs.internal-docs.result }}"
+          [ "${{ needs.suite.result }}" = success ] && [ "${{ needs.airplayengine.result }}" = success ] && [ "${{ needs.internal-docs.result }}" = success ]
 
   # The ruleset requires a `review` commit status, which the session posts on
   # the PR head. A merge-queue run checks its own temporary merge commit,

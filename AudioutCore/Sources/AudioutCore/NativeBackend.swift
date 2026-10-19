@@ -1614,6 +1614,15 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// deadlines. Tests pass a manual one.
     let uptimeClock: UptimeClock
 
+    /// Times the meter's level drain and the coalescer's trailing flush. Kept
+    /// apart from ``delayClock`` so a test that holds retries by hand still gets
+    /// live meters. Only the tests pass anything but ``dispatchDelayClock``.
+    let levelDelayClock: DelayClock
+
+    /// The meter coalescer's reading of "now", in nanoseconds since boot. Only
+    /// the tests pass anything but `DispatchTime.now().uptimeNanoseconds`.
+    let levelUptimeNanos: @Sendable () -> UInt64
+
     // MARK: Metering (T3 — three real level sources through the event channel)
     //
     // Replaces the old single whole-system RMS fanned identically to every device.
@@ -1776,6 +1785,8 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         captureRetryMaxBackoff: TimeInterval = 10.0,
         delayClock: @escaping DelayClock = NativeBackend.dispatchDelayClock,
         uptimeClock: @escaping UptimeClock = NativeBackend.dispatchUptimeClock,
+        levelDelayClock: @escaping DelayClock = NativeBackend.dispatchDelayClock,
+        levelUptimeNanos: @escaping @Sendable () -> UInt64 = { DispatchTime.now().uptimeNanoseconds },
         takeoverStripDelay: TimeInterval = 3.0,
         watchdogScheduler: SilenceWatchdogScheduling? = nil,
         silenceFallbackDelay: TimeInterval = NativeBackend.defaultSilenceFallbackDelay,
@@ -1877,6 +1888,8 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         self.captureRetryMaxBackoff = captureRetryMaxBackoff
         self.delayClock = delayClock
         self.uptimeClock = uptimeClock
+        self.levelDelayClock = levelDelayClock
+        self.levelUptimeNanos = levelUptimeNanos
         self.takeoverStripDelay = takeoverStripDelay
 
         // Wire the per-app routing callback graph (T6/T8). All four are set once
@@ -6695,14 +6708,14 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         case app(String)
     }
 
-    /// Per-key leading-edge timestamp (`DispatchTime.now().uptimeNanoseconds`)
-    /// of the last emitted meter event.
+    /// Per-key leading-edge timestamp (``levelUptimeNanos``) of the last
+    /// emitted meter event.
     var lastLevelEmitNanos: [LevelKey: UInt64] = [:]
     /// Per-key latest value seen while inside the coalescing window, delivered
     /// by the trailing flush.
     var pendingLevel: [LevelKey: Float] = [:]
     /// Keys with a trailing flush already scheduled, so a burst schedules at most
-    /// one `asyncAfter` per key.
+    /// one trailing flush per key.
     var levelFlushScheduled: Set<LevelKey> = []
 
     /// The tap's IOProc delivery thread must not enqueue per buffer — a

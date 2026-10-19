@@ -201,8 +201,8 @@ import AppKit
 
     /// The dB ruler is TEXT on the scope's ground, so it answers to the 4.5:1
     /// text floor, not the 3:1 instrument floor — which is exactly why it is
-    /// `secondaryLabel` and not the `tertiaryLabel` the band captions use
-    /// (tertiary lands near 2.2:1 here).
+    /// `label2` and not the `label3` the band captions use
+    /// (`label3` lands near 2.2:1 here).
     @Test func theRulerTextClearsTheTextFloorOnTheScopeGround() {
         for appearance in [NSAppearance.Name.darkAqua, .accessibilityHighContrastDarkAqua] {
             let ground = resolved(Tokens.Color.scopeGround, appearanceName: appearance)

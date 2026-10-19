@@ -27,6 +27,7 @@ ok() { echo "  ok — $1"; }
 join() { printf '%s\n' $1 | paste -sd '|' -; }
 L1=$(join "$suite_shard_1")
 L2=$(join "$suite_shard_2")
+L3=$(join "$suite_shard_3")
 
 # --- a. the flag and regex for each shard ------------------------------------
 # Catches: a shard that drops or misjoins a list, a last shard that filters
@@ -36,7 +37,13 @@ suite_shards_args 1 3
     && ok "a: shard 1/3 is --filter list 1" || fail "a: shard 1/3 gave $suite_shards_flag ${suite_shards_regex:0:60}"
 suite_shards_args 3 3
 [ "$suite_shards_flag" = "--skip" ] && [ "$suite_shards_regex" = "[./]($L1|$L2)\\b" ] \
-    && ok "a: shard 3/3 is --skip lists 1 and 2" || fail "a: shard 3/3 gave $suite_shards_flag ${suite_shards_regex:0:60}"
+    && ok "a: shard 3/3 (three-process local run) skips lists 1 and 2" || fail "a: shard 3/3 gave $suite_shards_flag ${suite_shards_regex:0:60}"
+suite_shards_args 3 4
+[ "$suite_shards_flag" = "--filter" ] && [ "$suite_shards_regex" = "[./]($L3)\\b" ] \
+    && ok "a: shard 3/4 is --filter list 3" || fail "a: shard 3/4 gave $suite_shards_flag ${suite_shards_regex:0:60}"
+suite_shards_args 4 4
+[ "$suite_shards_flag" = "--skip" ] && [ "$suite_shards_regex" = "[./]($L1|$L2|$L3)\\b" ] \
+    && ok "a: shard 4/4 is --skip lists 1 to 3" || fail "a: shard 4/4 gave $suite_shards_flag ${suite_shards_regex:0:60}"
 suite_shards_args 2 2
 [ "$suite_shards_flag" = "--skip" ] && [ "$suite_shards_regex" = "[./]($L1)\\b" ] \
     && ok "a: shard 2/2 is --skip list 1" || fail "a: shard 2/2 gave $suite_shards_flag ${suite_shards_regex:0:60}"
@@ -50,22 +57,22 @@ suite_shards_args 1 1
 grep -rhoE '(struct|class|enum|actor) [A-Za-z0-9_]+' "$REPO/AudioutCore/Tests" \
     | awk '{print $2}' | sort -u > "$TMP_DIR/declared"
 missing=
-for n in $suite_shard_1 $suite_shard_2; do
+for n in $suite_shard_1 $suite_shard_2 $suite_shard_3; do
     grep -qx "$n" "$TMP_DIR/declared" || missing="$missing $n"
 done
 [ -z "$missing" ] && ok "b: every listed name is declared under AudioutCore/Tests" \
     || fail "b: not declared under AudioutCore/Tests:$missing"
 # shellcheck disable=SC2086
-dups=$(printf '%s\n' $suite_shard_1 $suite_shard_2 | sort | uniq -d | tr '\n' ' ')
+dups=$(printf '%s\n' $suite_shard_1 $suite_shard_2 $suite_shard_3 | sort | uniq -d | tr '\n' ' ')
 [ -z "$dups" ] && ok "b: no name is in both lists" || fail "b: listed twice: $dups"
 
 # --- c. the workflow runs every shard through the runner ---------------------
 # Catches: a matrix that drifts from suite_shards_max, so a shard never runs
 # on GitHub, or a workflow that stops passing --shard to the runner.
 WF="$REPO/.github/workflows/tests.yml"
-grep -qF 'shard: [1, 2, 3]' "$WF" && grep -qF -- '--shard ${{ matrix.shard }}' "$WF" \
-    && ok "c: tests.yml runs shards [1, 2, 3] through --shard" \
-    || fail "c: tests.yml lacks 'shard: [1, 2, 3]' or '--shard \${{ matrix.shard }}'"
+grep -qF 'shard: [1, 2, 3, 4]' "$WF" && grep -qF -- '--shard ${{ matrix.shard }}' "$WF" \
+    && ok "c: tests.yml runs shards [1, 2, 3, 4] through --shard" \
+    || fail "c: tests.yml lacks 'shard: [1, 2, 3, 4]' or '--shard \${{ matrix.shard }}'"
 wf_max=$(sed -n 's/.*shard: \[\(.*\)\].*/\1/p' "$WF" | tr -d ' ' | tr ',' '\n' | sort -n | tail -1)
 [ "$wf_max" = "$suite_shards_max" ] && ok "c: the matrix's last shard is suite_shards_max ($wf_max)" \
     || fail "c: matrix ends at '$wf_max', suite_shards_max is $suite_shards_max"

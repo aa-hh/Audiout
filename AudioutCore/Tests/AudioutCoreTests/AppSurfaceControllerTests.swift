@@ -946,7 +946,7 @@ import AppKit
                                               store: GroupStore(directory: scratchDir),
                                               loadPersisted: false)
         // A saved group over a fully-discovered fleet, so the screen mounts a
-        // POPULATED content pane (the card overview it auto-selects) — the
+        // POPULATED content pane — the
         // state the live regression was reported in.
         _ = try groupController.createGroup(name: "Group 1",
                                             memberIDs: ["sonos-move", "office"])
@@ -1002,12 +1002,9 @@ import AppKit
                 "the content sits to the RIGHT of the sidebar — a real split, not a stack")
     }
 
-    /// Scenes and Speakers are two screens over one `MixerWindowController`:
-    /// the Speakers tab mounts the split view (sidebar beside the speaker
-    /// pages), the Scenes tab the scenes host with no sidebar, and ⌘3 reaches
-    /// Speakers.
-    // Turns red when the key map or the mount table misses the Speakers case, or hands either tab the other's content.
-    @Test func theSpeakersTabMountsTheSplitAndTheScenesTabTheScenesHost() throws {
+    /// Scenes and Speakers mount independent sidebar splits; ⌘3 reaches Speakers.
+    // Removing the Scenes sidebar, allowing it to collapse, or mounting the Speakers split in Scenes turns it red.
+    @Test func scenesAndSpeakersMountTheirOwnSidebarSplits() throws {
         let backend = MockBackend(fleet: .demoFleet, staggerDiscovery: false,
                                   emitsLevels: false, simulatesDropouts: false)
         let groups = MixerWindowController(
@@ -1044,9 +1041,16 @@ import AppKit
         let scenesScreen = try #require(surface.test_groupsScreen)
         #expect(surface.test_hostedContentViewController === scenesScreen)
         #expect(scenesScreen.content === groups.scenesContentController,
-                "the Scenes tab mounts the scenes host")
-        #expect(!(scenesScreen.content is NSSplitViewController),
-                "and the scenes host has no sidebar")
+                "the Scenes tab mounts its own content")
+        #expect(scenesScreen.content !== speakersScreen.content)
+        let scenesSplit = try #require(scenesScreen.content as? NSSplitViewController)
+        #expect(scenesSplit.splitViewItems.count == 2)
+        let sidebar = try #require(scenesSplit.splitViewItems.first)
+        #expect(sidebar.viewController === groups.test_scenesSidebar)
+        #expect(!sidebar.canCollapse)
+        #expect(sidebar.minimumThickness == 210)
+        #expect(sidebar.maximumThickness == 210)
+        #expect(scenesSplit.splitViewItems.last?.viewController is ContentPaneHostViewController)
     }
 
     // MARK: Visible-screen publishing (the Groups content's hidden-work gate)
@@ -1386,5 +1390,133 @@ import AppKit
 
         popover.onMicPromptAnswered?()
         #expect(surface.shell.test_returnToFrontCount == 1)
+    }
+}
+
+/// The expired-trial survey card over the shell's content view. Nested under
+/// `SerializedSharedState` because these tests install the process-global
+/// `Analytics` sink (`StructuredEvents`). The card advances synchronously
+/// under `HeadlessRuntime`, so nothing here waits.
+extension SerializedSharedState {
+    @MainActor
+    @Suite final class AppSurfaceControllerTests_Survey: IsolatedSuite {
+
+        private func makeSurface() -> (AppSurfaceController, PopoverController) {
+            let popover = PopoverController(
+                appRouting: AppRoutingController(store: AppRouteStore(directory: scratchDir), loadPersisted: false),
+                runningAppsProvider: { [] })
+            let surface = AppSurfaceController(
+                popoverController: popover,
+                settings: AppSettings(defaults: isolatedDefaults),
+                groupsContent: {
+                    let vc = NSViewController()
+                    vc.view = NSView(frame: NSRect(x: 0, y: 0, width: SurfaceLayout.width, height: 464))
+                    return vc
+                },
+                speakersContent: { NSViewController() },
+                settingsContent: { SettingsRootViewController(sections: []) },
+                frameAutosaveName: NSWindow.FrameAutosaveName(uniqueName("SurveySurfaceTests")))
+            surface.show(anchorRect: nil)
+            surface.shell.test_isPanelVisibleOverride = true
+            return (surface, popover)
+        }
+
+        private func presentCard(_ surface: AppSurfaceController, _ popover: PopoverController) -> TrialSurveyCardView? {
+            popover.onSurveyAnswer?(ExpiredTrialSurveyFixture.survey)
+            return surface.test_surveyCard
+        }
+
+        /// Red if Answer stopped raising the card, or raised it anywhere but
+        /// over the shell's content view (a new window or sheet).
+        @Test func answeringPutsTheCardOverTheContentView() {
+            let (surface, popover) = makeSurface()
+            let card = presentCard(surface, popover)
+            #expect(card != nil)
+            #expect(card?.superview === surface.shell.test_panel?.contentView)
+        }
+
+        /// Red if Escape with the card up closed the whole surface, kept the
+        /// card, or stopped reporting it as dismissed.
+        @Test func escapeWithTheCardUpDismissesTheCardNotTheSurface() {
+            let (surface, popover) = makeSurface()
+            var closes = 0
+            surface.onClose = { closes += 1 }
+            _ = presentCard(surface, popover)
+            let seen = StructuredEvents.recording { surface.shell.test_panel?.cancelOperation(nil) }
+            #expect(closes == 0)
+            #expect(surface.test_surveyCard == nil)
+            #expect(seen.names() == ["survey dismissed"])
+        }
+
+        /// Red if a reason without a follow-up stopped going straight to the
+        /// text step, or the progress line stopped counting the skipped step.
+        @Test func thePriceGoesStraightToTheTextStep() throws {
+            let (surface, popover) = makeSurface()
+            let card = try #require(presentCard(surface, popover))
+            card.test_pick(try #require(card.test_tileTitles.firstIndex(of: "The price")))
+            #expect(card.test_step == .text)
+            #expect(card.test_progressFraction == 1)
+        }
+
+        /// Red if the multi-select follow-up lost a tick, its answer stopped
+        /// reaching PostHog as an array, the reason or the typed text went
+        /// missing from `survey sent`, or Done left the card up.
+        @Test func aMissingFeatureAnswerIsSentWithItsTicksAndText() throws {
+            let (surface, popover) = makeSurface()
+            let card = try #require(presentCard(surface, popover))
+            let seen = StructuredEvents.recording {
+                card.test_pick(card.test_tileTitles.firstIndex(of: "It's missing something I need")!)
+                card.test_pick(0)
+                card.test_pick(1)
+                card.test_continue()
+                card.test_textView?.string = "  More inputs  "
+                card.test_send()
+            }
+            #expect(seen.names() == ["survey sent"])
+            let props = try #require(seen.all.first?.1)
+            #expect((props["$survey_response_q2"] as? [String])?.count == 2)
+            #expect(props["$survey_response_q1"] as? String == "It's missing something I need")
+            #expect(props["$survey_response_q5"] as? String == "More inputs")
+            #expect(card.test_step == .thanks)
+            card.test_done()
+            #expect(surface.test_surveyCard == nil)
+        }
+
+        /// Red if the text step went back to a single-line field (Return
+        /// sending instead of starting a line), or Send trimmed inside the answer.
+        @Test func aTypedMultiLineAnswerIsSentWithItsNewline() throws {
+            let (surface, popover) = makeSurface()
+            let card = try #require(presentCard(surface, popover))
+            card.test_pick(try #require(card.test_tileTitles.firstIndex(of: "The price")))
+            let area = try #require(card.test_textView)
+            let seen = StructuredEvents.recording {
+                area.insertText("  Line one", replacementRange: area.selectedRange())
+                area.insertNewline(nil)
+                area.insertText("line two  \n", replacementRange: area.selectedRange())
+                #expect(card.test_step == .text)
+                card.test_send()
+            }
+            #expect(seen.names() == ["survey sent"])
+            #expect(seen.all.first?.1["$survey_response_q5"] as? String == "Line one\nline two")
+        }
+
+        /// Red if the number keys stopped choosing the tile they label.
+        @Test func aNumberKeyChoosesItsTile() throws {
+            let (surface, popover) = makeSurface()
+            let card = try #require(presentCard(surface, popover))
+            let titles = card.test_tileTitles
+            card.test_pressKey("3")
+            #expect(card.answers.reason == titles[2])
+        }
+
+        /// Red if switching screens with the card up left it on a content
+        /// view that is being replaced, or stopped reporting the dismissal.
+        @Test func switchingScreensDismissesTheCard() {
+            let (surface, popover) = makeSurface()
+            _ = presentCard(surface, popover)
+            let seen = StructuredEvents.recording { surface.select(.groups) }
+            #expect(seen.names() == ["survey dismissed"])
+            #expect(surface.test_surveyCard == nil)
+        }
     }
 }

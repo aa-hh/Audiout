@@ -85,6 +85,11 @@ public final class OnboardingViewController: NSViewController {
     /// test and the snapshot renderers replace it so nothing launches one.
     public var openURL: (URL) -> Void = { NSWorkspace.shared.open($0) }
 
+    /// Fired each time the iPhone card comes on screen. The app opens a
+    /// pairing window then, so a phone that scans the card's code may ask to
+    /// pair with this Mac.
+    public var onRemoteInviteShown: (() -> Void)?
+
     /// Called on every edge of "a system permission dialog this flow raised is
     /// still unanswered". The window controller goes quiet while it is true —
     /// see ``isPromptInFlight``.
@@ -449,10 +454,8 @@ public final class OnboardingViewController: NSViewController {
         tile.translatesAutoresizingMaskIntoConstraints = false
 
         titleLabel = NSTextField(labelWithString: "")
-        // The window's own heading, so VoiceOver's rotor can find it. The raw
-        // AX string, not `NSAccessibilityHeadingRole`: that constant is macOS 26+
-        // and this app installs on 14.2.
-        titleLabel.setAccessibilityRole(NSAccessibility.Role(rawValue: "AXHeading"))
+        // The window's own heading, so VoiceOver's rotor can find it.
+        titleLabel.setAccessibilityHeading()
         titleLabel.font = Tokens.Font.display
         titleLabel.lineBreakMode = .byWordWrapping
         titleLabel.maximumNumberOfLines = 2
@@ -652,6 +655,10 @@ public final class OnboardingViewController: NSViewController {
     /// (the daemon isn't in the bundle — it cannot heal itself, so waiting for
     /// it would be a timer running forever).
     private func startPTPHelperPoll() {
+        // A headless run drives the status itself; a wall-clock tick there
+        // races the test's own status flips, and its read can land `.enabled`
+        // ahead of the return's re-register.
+        guard !HeadlessRuntime.isActive else { return }
         guard ptpHelperPoll == nil else { return }
         guard !Self.ptpPollIsSettled(model.ptpHelperStatus) else { return }
         ptpHelperPoll = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] timer in
@@ -936,6 +943,7 @@ public final class OnboardingViewController: NSViewController {
             lastHeroDisplayedStep = displayedStep
             if displayedStep == .audioutRemote {
                 Analytics.capture("remote_invite:setup_card_shown")
+                onRemoteInviteShown?()
             }
         }
         if let browsed = browseStep {
@@ -1608,7 +1616,7 @@ public final class OnboardingViewController: NSViewController {
         // where it really lives rather than a System Settings pane.
         case .audioutRemote:
             return "Audiout Remote is connected. Manage iPhones in Audiout's "
-                + "settings, under General."
+                + "settings, under Audiout Remote."
         }
     }
 

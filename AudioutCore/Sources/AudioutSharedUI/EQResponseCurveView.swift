@@ -335,8 +335,8 @@ public final class EQResponseCurveView: NSView {
 
     /// The dB ruler in the leading gutter: the vertical scale, stated once, so
     /// the trace's height means something without a caption row under the
-    /// card. `secondaryLabel` rather than `tertiaryLabel` — over this ground
-    /// the tertiary tone falls to ~2.2:1, well under the 4.5:1 text floor.
+    /// card. `label2` rather than `label3` — over this ground
+    /// the third ink rung falls to ~2.2:1, well under the 4.5:1 text floor.
     private func drawRuler(beside plot: NSRect) {
         let attributes: [NSAttributedString.Key: Any] = [
             .font: Tokens.Font.caption,

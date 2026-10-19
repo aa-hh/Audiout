@@ -103,7 +103,8 @@ extension PopoverController {
                              canReset: canResetAlignment(for: device),
                              canAlignAgain: !device.isCast,
                              offsetSource: btOffsetSourceProvider?(device.id),
-                             movedSinceLastTimeMs: btMovedNoticeMsByID[device.id])
+                             movedSinceLastTimeMs: btMovedNoticeMsByID[device.id],
+                             pendingApply: castPendingIDs[.trim]?.contains(device.id) == true)
     }
 
     /// Record that a re-measurement moved this speaker's stored offset far
@@ -179,6 +180,10 @@ extension PopoverController {
         } else if isCast {
             // Same posture as the local closure, and for the same reason.
             onSetCastOffset?(value, id)
+            // The offset moves the receiver's own feed delay line, so it is
+            // heard only after the stream lag; this glows the drawer's field
+            // until then (the raise repaints the drawer on its first tick).
+            raiseCastPending(.trim, for: id)
         } else {
             onSetBTTrim?(value, id, persist)
         }
@@ -309,6 +314,10 @@ extension PopoverController: BTSyncDrawerViewDelegate {
         btTrimsByID.removeValue(forKey: id)
         btLatenciesByID.removeValue(forKey: id)
         btTunedDeviceIDs.remove(id)
+        // A Cast reset moves the same receiver delay line, heard after the
+        // same lag. Raised after the caches clear: its first drawer push
+        // reads them.
+        if devicesByID[id]?.isCast == true { raiseCastPending(.trim, for: id) }
         // A cleared BLUETOOTH row's chip becomes the wizard's door, so it can
         // no longer close the drawer it opened — leaving one open with no way
         // to dismiss it. Collapse it here instead.

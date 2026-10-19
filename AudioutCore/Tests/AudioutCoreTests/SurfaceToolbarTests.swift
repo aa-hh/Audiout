@@ -581,7 +581,7 @@ private func makeParkedWindow(height: CGFloat = 400, backingScale: CGFloat? = ni
         #expect(hover < engaged, "the current screen outweighs the pointer")
         #expect(engaged < pressed, "and a press outweighs both, wherever it lands")
         // The three weights are the mixer's own (`rowHoverWashAlpha`,
-        // `rowSelectionWashAlpha`, `mutePillFillAlpha`). Reading each back
+        // `rowSelectionWashAlpha`, `engagedFillAlpha`). Reading each back
         // here would only restate the `return` that produced it; what carries
         // information is the ORDER above, and that a rest seat draws nothing.
     }

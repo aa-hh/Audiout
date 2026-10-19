@@ -106,7 +106,7 @@ public final class LicenseSheetViewController: NSViewController {
         removeButton.title = "Remove license…"
         removeButton.isBordered = false
         removeButton.controlSize = .small
-        removeButton.font = .systemFont(ofSize: NSFont.systemFontSize(for: .small))
+        removeButton.font = Tokens.Font.caption
         removeButton.contentTintColor = .linkColor
         removeButton.target = self
         removeButton.action = #selector(removeTapped)
@@ -181,7 +181,7 @@ public final class LicenseSheetViewController: NSViewController {
     /// The ONE place Remove decides whether it is on screen, so every state
     /// change lands the same way: shown exactly when there is a stored key.
     private func refreshButtons() {
-        removeButton.isHidden = (settings.licenseKey ?? "").isEmpty
+        removeButton.isHidden = !settings.hasLicenseKey
     }
 
     public override func viewDidAppear() {

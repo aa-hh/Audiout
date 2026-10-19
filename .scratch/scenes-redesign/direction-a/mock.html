@@ -1,0 +1,364 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Scenes Direction A</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: #C9CBCF; color: #1d1d1f;
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+    -webkit-font-smoothing: antialiased; padding: 28px 32px 32px;
+    width: 1532px;
+  }
+  h1 { font-size: 17px; font-weight: 600; margin-bottom: 4px; }
+  .lede { font-size: 12px; color: #3a3b3e; margin-bottom: 18px; max-width: 1100px; line-height: 1.45; }
+  .grid { display: grid; grid-template-columns: 713px 713px; gap: 22px 42px; }
+  .cap { font-size: 12px; font-weight: 600; color: #2b2c2f; margin-bottom: 7px; }
+  .cap span { font-weight: 400; color: #4a4b4f; }
+
+  /* ---- theme tokens (DESIGN.md / Tokens.swift hexes) ---- */
+  .dark {
+    --canvas:#0A0A0C; --panel:#15171A; --raised:#1F232A; --well:#050507;
+    --label:rgba(255,255,255,.85); --label2:#B7AC95; --label3:#9E947F;
+    --labelCool:#A9B3BB; --labelCool2:#818C94; --hairline:#2A2E33; --edge:#3D4247; --rim:#6B767D;
+    --gold:#E8B84B; --goldText:#E8B84B; --ember:#8A6A2F; --glow:rgba(255,144,233,.22);
+    --sidebar:#1C1D21; --pill:rgba(255,255,255,.11); --chrome06:rgba(255,255,255,.06); --chrome18:rgba(255,255,255,.18);
+    --btn:#3A3D42; --btnText:rgba(255,255,255,.88);
+  }
+  .light {
+    --canvas:#FAFAFB; --panel:#FAFAFB; --raised:#FAFAFB; --well:#E9EAEC;
+    --label:rgba(0,0,0,.85); --label2:#6B5F4E; --label3:#6B6459;
+    --labelCool:#4E5A63; --labelCool2:#5F6A73; --hairline:#CBCED4; --edge:#AEB3BB; --rim:#66717A;
+    --gold:#E8B84B; --goldText:#825E0F; --ember:#7A5E2A; --glow:rgba(117,44,104,.10);
+    --sidebar:#EDEDF0; --pill:rgba(0,0,0,.085); --chrome06:rgba(0,0,0,.06); --chrome18:rgba(0,0,0,.14);
+    --btn:#FFFFFF; --btnText:rgba(0,0,0,.85);
+  }
+
+  .frame {
+    position: relative; width: 713px; border-radius: 12px; overflow: hidden;
+    background: var(--panel); color: var(--label);
+    box-shadow: 0 0 0 .5px rgba(0,0,0,.35), 0 14px 34px rgba(0,0,0,.28);
+  }
+  .abs { position: absolute; }
+  .sidebar { left: 0; top: 0; bottom: 0; width: 210px; background: var(--sidebar);
+             border-right: 1px solid var(--hairline); }
+  .content { left: 210px; top: 0; right: 0; bottom: 0; background: var(--panel); }
+  .tbrule { left: 0; right: 0; top: 44px; height: 1px; background: var(--hairline); }
+  svg.i { display: block; fill: currentColor; }
+
+  /* toolbar strip */
+  .capsule { top: 5px; height: 34px; border-radius: 17px; background: var(--chrome06); display: flex; padding: 3px; gap: 0; }
+  .seat { height: 28px; border-radius: 14px; display: flex; align-items: center; justify-content: center;
+          color: var(--label2); padding: 0 7.5px; gap: 7.5px; font-size: 11px; font-weight: 500; }
+  .seat.on { background: var(--chrome18); color: var(--label); }
+  .brand { top: 13px; font-size: 13px; font-weight: 600; color: var(--label2); letter-spacing: .1px; }
+  .pin { top: 8px; width: 28px; height: 28px; border-radius: 14px; display:flex; align-items:center; justify-content:center; color: var(--label2); }
+
+  /* sidebar */
+  .sbTitle { left: 18px; font-size: 11px; font-weight: 600; color: var(--labelCool); }
+  .sbRow { left: 0; width: 210px; height: 42px; }
+  .sbPill { position:absolute; left: 10px; right: 10px; top: 2px; bottom: 2px; border-radius: 6px; background: var(--pill); }
+  .sbIcon { position:absolute; left: 18px; top: 10px; width: 22px; height: 22px; }
+  .sbName { position:absolute; left: 48px; top: 6px; font-size: 13px; white-space: nowrap; overflow:hidden; text-overflow: ellipsis; max-width: 128px; }
+  .sbCap { position:absolute; left: 48px; top: 23px; font-size: 11px; color: var(--labelCool); white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .sbWave { position:absolute; right: 18px; top: 7px; width: 15px; height: 14px; color: var(--goldText); }
+  .addBar { left: 0; width: 210px; bottom: 0; height: 30px; display:flex; align-items:center; gap: 8px; padding-left: 21px; font-size: 13px; color: var(--label); }
+
+  /* page */
+  .glow { width: 64px; height: 64px; border-radius: 32px; background: radial-gradient(circle at 50% 50%, var(--glowCore) 0%, transparent 70%); }
+  .well { width: 48px; height: 48px; border-radius: 10px; background: var(--raised); border: 1px solid var(--edge); }
+  .well.active { border: 1.5px solid var(--gold); }
+  .wellGlyph { position:absolute; left: 9px; top: 9px; width: 30px; height: 30px; }
+  .badge { position:absolute; left: 31px; top: 31px; width: 22px; height: 22px; border-radius: 11px; background: rgba(0,0,0,.55);
+           border: 1px solid rgba(255,255,255,.25); color: #fff; display:flex; align-items:center; justify-content:center; }
+  .nameField { font-size: 16px; font-weight: 600; padding: 3px 30px 4px 8px; border-radius: 6px; background: var(--raised);
+               border: 1px solid var(--edge); position: absolute; white-space: nowrap; }
+  .nameField .pen { position:absolute; right: 8px; top: 7px; width: 12px; height: 12px; color: var(--labelCool2); }
+  .title { font-size: 16px; font-weight: 600; white-space: nowrap; }
+  .pcap { font-size: 11px; color: var(--labelCool); display:flex; align-items:center; gap: 4px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .pcap .gw { width: 13px; height: 12px; color: var(--goldText); }
+  .pcap .play { color: var(--goldText); }
+  .secTitle { font-size: 13px; color: var(--label2); }
+  .card { border-radius: 16px; background: var(--raised); border: 1px solid var(--edge); }
+  .light .card { background: #FAFAFB; }
+  .mrow { position:absolute; left: 0; right: 0; height: 42px; }
+  .mrow .ic { position:absolute; left: 41.5px; top: 11px; width: 20px; height: 20px; }
+  .mrow .nm { position:absolute; left: 72px; top: 12px; font-size: 13px; }
+  .mrow .ann { position:absolute; right: 14px; top: 14px; font-size: 11px; color: var(--labelCool2); }
+  .div { position:absolute; left: 38.5px; right: 14px; height: 1px; background: var(--edge); }
+  .note { font-size: 11px; color: var(--label2); }
+  .lrow { position:absolute; left: 0; right: 0; }
+  .lrow .g { position:absolute; left: 14px; width: 16px; height: 16px; color: var(--label2); }
+  .lrow .t { position:absolute; left: 40px; font-size: 13px; color: var(--label); }
+  .lrow .c { position:absolute; left: 40px; font-size: 11px; color: var(--labelCool); white-space: nowrap; }
+  .lrow .tr { position:absolute; right: 14px; font-size: 13px; color: var(--labelCool); }
+  .btn { font-size: 13px; padding: 2px 11px 3px; border-radius: 6px; background: var(--btn); color: var(--btnText);
+         box-shadow: 0 0 0 .5px rgba(0,0,0,.28), 0 .5px 1px rgba(0,0,0,.2); white-space: nowrap; }
+  .btn.prom { background: #E8B84B; color: #171104; border-radius: 999px; padding: 2px 13px 3px; }
+  .footer { left: 0; right: 0; text-align: center; font-size: 11px; color: var(--label2); }
+
+  /* menu */
+  .menu { width: 290px; border-radius: 9px; background: #2B2C30; color: rgba(255,255,255,.88);
+          box-shadow: 0 0 0 .5px rgba(0,0,0,.6), 0 0 0 1px rgba(255,255,255,.08) inset, 0 14px 30px rgba(0,0,0,.35);
+          padding: 5px 0; font-size: 13px; }
+  .mi { position: relative; padding: 3px 14px 3px 32px; line-height: 17px; }
+  .mi.ind { padding-left: 42px; }
+  .mi .sub { display:block; font-size: 11px; color: rgba(255,255,255,.55); line-height: 14px; }
+  .mi .chk { position:absolute; left: 26px; top: 3px; font-size: 12px; }
+  .mi.hdr { font-size: 11px; font-weight: 600; color: rgba(255,255,255,.5); padding-top: 5px; }
+  .mi.hi { background: #0A64D6; margin: 0 5px; border-radius: 5px; padding-left: 37px; color: #fff; }
+  .mi.hi .sub { color: rgba(255,255,255,.75); }
+  .sep { height: 1px; background: rgba(255,255,255,.1); margin: 5px 12px; }
+  .notes { font-size: 12px; line-height: 1.5; color: #24252a; }
+  .notes b { font-weight: 600; }
+  .notes p { margin-bottom: 7px; }
+</style>
+</head>
+<body>
+
+<svg width="0" height="0" style="position:absolute">
+  <defs>
+    <symbol id="laptop" viewBox="0 0 24 24"><path d="M5 5.5h14a1 1 0 0 1 1 1v9H4v-9a1 1 0 0 1 1-1zm1.4 1.6v7h11.2v-7z" fill-rule="evenodd"/><path d="M1.5 16.6h21v.6c0 .9-.7 1.6-1.6 1.6H3.1c-.9 0-1.6-.7-1.6-1.6z"/></symbol>
+    <symbol id="hifi" viewBox="0 0 24 24"><path fill-rule="evenodd" d="M7.5 2.5h9a2 2 0 0 1 2 2v15a2 2 0 0 1-2 2h-9a2 2 0 0 1-2-2v-15a2 2 0 0 1 2-2zM12 5.2a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3zm0 5.6a3.9 3.9 0 1 0 0 7.8 3.9 3.9 0 0 0 0-7.8zm0 2.2a1.7 1.7 0 1 1 0 3.4 1.7 1.7 0 0 1 0-3.4z"/></symbol>
+    <symbol id="homepod" viewBox="0 0 24 24"><path d="M6 6.2C6 4 8.7 3 12 3s6 1 6 3.2v11.6C18 20 15.3 21 12 21s-6-1-6-3.2z"/></symbol>
+    <symbol id="appletv" viewBox="0 0 24 24"><path fill-rule="evenodd" d="M4.5 4.5h15a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2h-15a2 2 0 0 1-2-2v-11a2 2 0 0 1 2-2zM9.2 9.6v1.3H8.3v1.1h.9v2.3c0 1 .5 1.4 1.5 1.4h.6v-1.1h-.4c-.4 0-.6-.2-.6-.6v-2h1v-1.1h-1V9.6zm2.8 1.3 1.6 4.7h1.3l1.6-4.7h-1.3l-.95 3.3-.95-3.3z"/></symbol>
+    <symbol id="router" viewBox="0 0 24 24"><path d="M3.5 14h17a1.5 1.5 0 0 1 1.5 1.5v3a1.5 1.5 0 0 1-1.5 1.5h-17A1.5 1.5 0 0 1 2 18.5v-3A1.5 1.5 0 0 1 3.5 14z"/><path d="M7 6.6a7.2 7.2 0 0 1 10 0l-1.1 1.1a5.6 5.6 0 0 0-7.8 0zm2.2 2.2a4 4 0 0 1 5.6 0l-1.1 1.1a2.4 2.4 0 0 0-3.4 0zM12 10.8a1 1 0 1 1 0 2 1 1 0 0 1 0-2z"/></symbol>
+    <symbol id="sofa" viewBox="0 0 24 24"><path d="M5.5 6.5h13a2 2 0 0 1 2 2v2.1a2.4 2.4 0 0 0-2.6 2.4v1.3H6.1V13a2.4 2.4 0 0 0-2.6-2.4V8.5a2 2 0 0 1 2-2z"/><path d="M1.8 13a1.7 1.7 0 0 1 3.4 0v2.3h13.6V13a1.7 1.7 0 0 1 3.4 0v5a1 1 0 0 1-1 1h-.8v1.3h-1.6V19H5.2v1.3H3.6V19h-.8a1 1 0 0 1-1-1z"/></symbol>
+    <symbol id="house" viewBox="0 0 24 24"><path d="M12 2.8 22 11l-1 1.2-1.5-1.2V20a1 1 0 0 1-1 1h-4v-6h-5v6h-4a1 1 0 0 1-1-1v-9L3 12.2 2 11z"/></symbol>
+    <symbol id="notehouse" viewBox="0 0 24 24"><path fill-rule="evenodd" d="M12 2.8 22 11l-1 1.2-1.5-1.2V20a1 1 0 0 1-1 1h-13a1 1 0 0 1-1-1v-9L3 12.2 2 11zm2.6 6.3-4.4 1v5.4a1.8 1.8 0 1 0 1.2 1.7v-4.6l3.2-.7v2.8a1.8 1.8 0 1 0 1.2 1.7v-7.3z"/></symbol>
+    <symbol id="group" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.6" d="M3.3 5.3h7.4v5.4H3.3zM3.3 13.3h7.4v5.4H3.3zM13.3 5.3h7.4v13.4h-7.4z" stroke-linejoin="round"/></symbol>
+    <symbol id="wave" viewBox="0 0 16 14"><path d="M1 4.6h2.6L7.4 1v12L3.6 9.4H1z"/><path d="M9.6 4.2a4 4 0 0 1 0 5.6l-.9-.9a2.7 2.7 0 0 0 0-3.8zM11.6 2.2a6.8 6.8 0 0 1 0 9.6l-.9-.9a5.5 5.5 0 0 0 0-7.8z"/></symbol>
+    <symbol id="plus" viewBox="0 0 16 16"><path d="M7.3 2.5h1.4v4.8h4.8v1.4H8.7v4.8H7.3V8.7H2.5V7.3h4.8z"/></symbol>
+    <symbol id="pencil" viewBox="0 0 16 16"><path d="M11.3 1.9l2.8 2.8-8.4 8.4-3.6.8.8-3.6zm-7.4 9.3-.3 1.2 1.2-.3z"/></symbol>
+    <symbol id="sliders" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" d="M3 6h18M3 12h18M3 18h18"/><circle cx="8" cy="6" r="2.4"/><circle cx="16" cy="12" r="2.4"/><circle cx="10" cy="18" r="2.4"/></symbol>
+    <symbol id="speakers2" viewBox="0 0 24 24"><path fill-rule="evenodd" d="M4 4h8a1.6 1.6 0 0 1 1.6 1.6v12.8A1.6 1.6 0 0 1 12 20H4a1.6 1.6 0 0 1-1.6-1.6V5.6A1.6 1.6 0 0 1 4 4zm4 2.4a1.1 1.1 0 1 0 0 2.2 1.1 1.1 0 0 0 0-2.2zm0 4.2a3 3 0 1 0 0 6 3 3 0 0 0 0-6z"/><path d="M15.6 5.5h4.4a1.6 1.6 0 0 1 1.6 1.6v11.3a1.6 1.6 0 0 1-1.6 1.6h-4.4z" opacity=".8"/></symbol>
+    <symbol id="gear" viewBox="0 0 24 24"><path fill-rule="evenodd" d="M10.6 2h2.8l.5 2.6 1.6.7 2.2-1.5 2 2-1.5 2.2.7 1.6 2.6.5v2.8l-2.6.5-.7 1.6 1.5 2.2-2 2-2.2-1.5-1.6.7-.5 2.6h-2.8l-.5-2.6-1.6-.7-2.2 1.5-2-2 1.5-2.2-.7-1.6L2 13.4v-2.8l2.6-.5.7-1.6-1.5-2.2 2-2 2.2 1.5 1.6-.7zM12 8.6a3.4 3.4 0 1 0 0 6.8 3.4 3.4 0 0 0 0-6.8z"/></symbol>
+    <symbol id="pinS" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" d="M8 3h8M9.2 3v6.2L6.5 13h11l-2.7-3.8V3M12 13v8"/></symbol>
+    <symbol id="waveOut" viewBox="0 0 16 16"><path d="M1.5 5.8h2.4L7.6 2.6v10.8L3.9 10.2H1.5z"/><path d="M10 5.2a3.6 3.6 0 0 1 0 5.6l-.9-.9a2.3 2.3 0 0 0 0-3.8z"/></symbol>
+  </defs>
+</svg>
+
+<h1>Scenes, direction A: the sibling of Speakers</h1>
+<p class="lede">The Scenes tab takes the Speakers tab's layout: a 210 pt sidebar of saved scenes, and a page made of the shared page header, one card of members and an action band. The Mixer lends one instrument, its membership rail, which now runs only inside the card. That keeps the icon well at the same x as on a speaker page. Surface 713 pt at 1×. Speakers are the demo fleet; Bedroom HomePod is shown unavailable.</p>
+
+<div class="grid" id="grid"></div>
+
+<script>
+const FLEET = [
+  { id:'mac',    name:'MacBook Pro Speakers', icon:'laptop' },
+  { id:'bed',    name:'Bedroom HomePod',      icon:'homepod', unavailable:true },
+  { id:'tv',     name:'Living Room TV',       icon:'appletv' },
+  { id:'mixer',  name:'Mixer',                icon:'router' },
+  { id:'move2',  name:'Move 2',               icon:'hifi' },
+  { id:'office', name:'Office',               icon:'hifi' },
+  { id:'move',   name:'Sonos Move',           icon:'hifi' },
+];
+const SCENES = [
+  { id:'down',  name:'Downstairs',  icon:'sofa',      members:['tv','move2','office','move'], routed:['move2','office','move'], active:true, apps:'Safari' },
+  { id:'party', name:'Party',       icon:'notehouse', members:['bed','office','move'] },
+  { id:'whole', name:'Whole House', icon:'house',     members:['mac','bed','tv','mixer','move2','office','move'] },
+];
+const ic = (id, cls='', extra='') => `<svg class="i ${cls}" ${extra}><use href="#${id}"/></svg>`;
+const fleet = id => FLEET.find(d => d.id === id);
+function sceneCaption(s) {
+  const n = s.members.length, u = s.members.filter(m => fleet(m).unavailable).length;
+  return `${n} speaker${n===1?'':'s'}` + (u ? ` · ${u} unavailable` : '');
+}
+
+function toolbar() {
+  return `
+  <div class="abs capsule" style="left:222px">
+    <div class="seat">${ic('sliders','', 'width="15" height="15"')}</div>
+    <div class="seat on">${ic('group','', 'width="15" height="15"')}<span>Scenes</span></div>
+    <div class="seat">${ic('speakers2','', 'width="15" height="15"')}</div>
+    <div class="seat">${ic('gear','', 'width="15" height="15"')}</div>
+  </div>
+  <div class="abs brand" style="left:500px">Audiout</div>
+  <div class="abs pin" style="right:14px">${ic('pinS','', 'width="15" height="15"')}</div>`;
+}
+
+function sidebar(selId, empty) {
+  let h = `<div class="abs sidebar">`;
+  h += `<div class="abs sbTitle" style="top:52px">Scenes</div>`;
+  if (empty) {
+    h += `<div class="abs sbCap" style="left:18px;top:74px;position:absolute">No scenes yet</div>`;
+  } else {
+    SCENES.forEach((s, i) => {
+      const top = 68 + i * 42, sel = s.id === selId;
+      const ink = s.active ? 'var(--label)' : 'var(--labelCool)';
+      h += `<div class="abs sbRow" style="top:${top}px">
+        ${sel ? '<div class="sbPill"></div>' : ''}
+        <div class="sbIcon" style="color:${sel ? 'var(--label)' : ink}">${ic(s.icon,'', 'width="22" height="22"')}</div>
+        <div class="sbName" style="color:${sel ? 'var(--label)' : ink}">${s.name}</div>
+        <div class="sbCap" style="${sel ? 'color:var(--label)' : ''}">${sceneCaption(s)}</div>
+        ${s.active ? `<div class="sbWave">${ic('wave','', 'width="15" height="14"')}</div>` : ''}
+      </div>`;
+    });
+  }
+  h += `<div class="abs addBar">${ic('plus','', 'width="13" height="13" style="color:var(--label)"')}<span>Add scene</span></div>`;
+  return h + `</div>`;
+}
+
+function header(s, top, opts={}) {
+  // PageHeaderView at the rail-free 14 pt inset; band = 16 + 48 + 16.
+  const x = 14 + 14, wy = top + 16;
+  const glyphInk = s.active ? 'var(--label)' : 'var(--labelCool)';
+  let h = `<div class="abs glow" style="left:${x-8}px;top:${wy-8}px;--glowCore:var(--glow)"></div>
+    <div class="abs well ${s.active?'active':''}" style="left:${x}px;top:${wy}px">
+      <div class="wellGlyph" style="color:${glyphInk}">${ic(s.icon,'', 'width="30" height="30"')}</div>
+      ${opts.plain ? '' : `<div class="badge">${ic('pencil','', 'width="10" height="10"')}</div>`}
+    </div>`;
+  const tx = x + 48 + 12;
+  if (opts.plain) {
+    h += `<div class="abs title" style="left:${tx}px;top:${wy+6}px">${s.name}</div>
+          <div class="abs pcap" style="left:${tx}px;top:${wy+29}px">${opts.caption}</div>`;
+  } else {
+    h += `<div class="abs nameField" style="left:${tx-8}px;top:${wy+1}px">${s.name}<span class="pen">${ic('pencil','', 'width="12" height="12"')}</span></div>`;
+    const cap = s.active
+      ? `<span class="gw">${ic('wave','', 'width="13" height="12"')}</span><span class="play">Playing</span><span>· ${sceneCaption(s)}</span>`
+      : `<span>${sceneCaption(s)}</span>`;
+    h += `<div class="abs pcap" style="left:${tx}px;top:${wy+32}px">${cap}</div>`;
+  }
+  return h;
+}
+
+function membersCard(s, top, theme) {
+  const rows = FLEET.filter(d => !d.unavailable || s.members.includes(d.id));
+  const ROW = 42, PAD = 6, R = 6.5, GAP = 3, DET = R + 3, NX = 20;
+  const H = PAD * 2 + rows.length * ROW;
+  const gold = '#E8B84B', ember = theme === 'light' ? '#7A5E2A' : '#8A6A2F';
+  const line = s.active ? gold : ember;
+  const cy = i => PAD + i * ROW + ROW / 2;
+  const idx = rows.map((d, i) => s.members.includes(d.id) ? i : -1).filter(i => i >= 0);
+  const first = idx[0], last = idx[idx.length - 1];
+  let svg = '';
+  if (idx.length > 1) {
+    let d = `M${NX} ${cy(first) + R + GAP}`;
+    for (let i = first + 1; i <= last; i++) {
+      const isMember = s.members.includes(rows[i].id);
+      if (isMember) { d += ` L${NX} ${cy(i) - R - GAP}`; if (i < last) d += ` M${NX} ${cy(i) + R + GAP}`; }
+      else { d += ` L${NX} ${cy(i) - DET} A${DET} ${DET} 0 0 0 ${NX} ${cy(i) + DET}`; }
+    }
+    svg += `<path d="${d}" fill="none" stroke="${line}" stroke-width="2" stroke-linecap="round"/>`;
+  }
+  rows.forEach((d, i) => {
+    const member = s.members.includes(d.id);
+    if (member) {
+      const fill = (s.active && (s.routed || []).includes(d.id)) ? gold : ember;
+      const edge = (theme === 'light' && fill === gold) ? ` stroke="${ember}" stroke-width="1"` : '';
+      svg += `<circle cx="${NX}" cy="${cy(i)}" r="${R}" fill="${fill}"${edge}/>`;
+    } else {
+      svg += `<circle cx="${NX}" cy="${cy(i)}" r="${R - .8}" fill="none" stroke="${ember}" stroke-width="1.6"/>`;
+    }
+  });
+  let h = `<div class="abs card" style="left:14px;right:14px;top:${top}px;height:${H}px">
+    <svg class="abs" style="left:0;top:0" width="40" height="${H}">${svg}</svg>`;
+  rows.forEach((d, i) => {
+    const y = PAD + i * ROW;
+    if (i > 0) h += `<div class="div" style="top:${y}px"></div>`;
+    const nameInk = d.unavailable ? 'var(--labelCool)' : 'var(--label)';
+    const iconInk = d.unavailable ? 'var(--labelCool2)' : 'var(--labelCool)';
+    h += `<div class="mrow" style="top:${y}px">
+      <div class="ic" style="color:${iconInk}">${ic(d.icon,'', 'width="20" height="20"')}</div>
+      <div class="nm" style="color:${nameInk}">${d.name}</div>
+      ${d.unavailable ? '<div class="ann">Unavailable</div>' : ''}
+    </div>`;
+  });
+  return { html: h + `</div>`, height: H };
+}
+
+function scenePage(s, theme) {
+  let h = header(s, 44 + 28);
+  let y = 44 + 28 + 80 + 20;
+  h += `<div class="abs secTitle" style="left:28px;top:${y}px">Speakers</div>`;
+  y += 16 + 6;
+  const card = membersCard(s, y, theme);
+  h += card.html; y += card.height;
+  if (s.active) {
+    h += `<div class="abs note" style="left:28px;top:${y + 6}px">Changes are saved as you go. They don’t change what’s playing now.</div>`;
+    y += 6 + 14;
+  }
+  if (s.apps) {
+    y += 20;
+    h += `<div class="abs card" style="left:14px;right:14px;top:${y}px;height:58px">
+      <div class="lrow" style="top:6px;height:46px">
+        <div class="t" style="left:14px;top:7px">Apps</div>
+        <div class="c" style="left:14px;top:25px">Sent to this scene from the Mixer</div>
+        <div class="tr" style="top:14px">${s.apps}</div>
+      </div></div>`;
+    y += 58;
+  }
+  y += 22;
+  h += `<div class="abs btn" style="left:28px;top:${y}px">Delete scene…</div>`;
+  return h;
+}
+
+function emptyPage() {
+  const s = { name:'Set up a scene', icon:'group' };
+  let h = header(s, 44 + 28, { plain:true, caption:'Save a set of speakers, then play it from the Mixer.' });
+  const y = 44 + 28 + 80 + 20;
+  h += `<div class="abs card" style="left:14px;right:14px;top:${y}px;height:${6+56+1+56+6}px">
+    <div class="lrow" style="top:6px;height:56px">
+      <div class="g" style="top:20px">${ic('waveOut','', 'width="16" height="16"')}</div>
+      <div class="t" style="top:10px">Save the speakers selected in the Mixer</div>
+      <div class="c" style="top:29px">Move 2, Office and Sonos Move</div>
+      <div class="abs btn prom" style="right:14px;top:16px">Save as scene…</div>
+    </div>
+    <div class="div" style="top:62px;left:40px"></div>
+    <div class="lrow" style="top:63px;height:56px">
+      <div class="g" style="top:20px">${ic('plus','', 'width="16" height="16"')}</div>
+      <div class="t" style="top:10px">Choose speakers</div>
+      <div class="c" style="top:29px">Pick from every speaker, even ones that are off.</div>
+      <div class="abs btn" style="right:14px;top:16px">Add scene…</div>
+    </div>
+  </div>`;
+  return h;
+}
+
+function frame({ theme, sel, empty, H, label, sub }) {
+  const s = SCENES.find(x => x.id === sel);
+  return `<div><div class="cap">${label} <span>${sub}</span></div>
+  <div class="frame ${theme}" style="height:${H}px">
+    ${sidebar(sel, empty)}
+    <div class="abs content">
+      <div class="abs tbrule"></div>
+      ${empty ? emptyPage() : scenePage(s, theme)}
+      <div class="abs footer" style="bottom:8px">Set up scenes here, then switch to the Mixer to play</div>
+    </div>
+    ${toolbar()}
+  </div></div>`;
+}
+
+const grid = document.getElementById('grid');
+grid.innerHTML =
+  frame({ theme:'dark',  sel:'down',  H:640, label:'Playing scene, dark.', sub:'Downstairs: label inks and the gold wave in the sidebar, a gold well edge, a gold rail. Living Room TV was added after the scene started, so its disc stays ember.' }) +
+  frame({ theme:'light', sel:'down',  H:640, label:'Playing scene, light.', sub:'The same page. In light, the gold glyph and the word Playing use goldText to clear contrast, and the gold discs get a 1 pt ember edge.' }) +
+  frame({ theme:'dark',  sel:'party', H:592, label:'Saved scene with an unavailable member.', sub:'Party: an ember rail from Bedroom HomePod to Sonos Move, with detour arcs around the three speakers that are not members. The unavailable member is counted in both captions and named in its row.' }) +
+  frame({ theme:'dark',  sel:null, empty:true, H:592, label:'No scenes yet.', sub:'The sidebar says so plainly. The page offers to save the speakers the Mixer has selected (gold, the one call to action) or to choose speakers. Both open the existing sheet.' }) +
+  `<div><div class="cap">Main Audio destination menu <span>(Mixer). Each scene item gains the sidebar caption as a subtitle, and Edit scenes… opens this tab.</span></div>
+   <div style="display:flex;gap:28px;align-items:flex-start">
+    <div class="menu">
+      <div class="mi">Selected Speakers</div>
+      <div class="sep"></div>
+      <div class="mi hdr" style="padding-left:32px">Scenes</div>
+      <div class="mi ind"><span class="chk">✓</span>Downstairs<span class="sub">4 speakers</span></div>
+      <div class="mi ind hi">Party<span class="sub">3 speakers · 1 unavailable</span></div>
+      <div class="mi ind">Whole House<span class="sub">7 speakers · 1 unavailable</span></div>
+      <div class="mi ind">Save selected speakers as scene</div>
+      <div class="mi ind">Edit scenes…</div>
+      <div class="sep"></div>
+      <div class="mi hdr" style="padding-left:32px">This Mac</div>
+      <div class="mi ind">MacBook Pro Speakers</div>
+    </div>
+   </div></div>` +
+  `<div class="notes"><div class="cap">What is reused, what is new</div>
+    <p><b>Reused as they are:</b> PageHeaderView, DeviceIconWellView, GroupIdentityGlowView, GroupedSectionView (.card, row radius), MembershipRowView, BusRailOverlayView, ListRowView, noteLabel, ProminentButton, IconLabelCellView, SidebarHeaderCellView, SidebarRowView, the sidebar add bar, ContentPaneHostViewController and its footer, GroupCreationSheetController, IconPickerViewController.</p>
+    <p><b>New:</b> the rail now starts at the first member's node, not the icon well. With no rail gutter in the header, the well sits at the speaker page's 14 pt inset.</p>
+    <p><b>Changed:</b> membership rows grow from 32 to 42 pt so the rail's nodes are spaced as in the Mixer. The sidebar rows get a caption line.</p>
+    <p><b>Removed:</b> the card grid, the dashed tile, the member chips, the ‹ Scenes back button, Done/Save and the in-pane push.</p>
+    <p><b>Unchanged:</b> nothing on this tab starts playback; you play a scene from the Main Audio menu.</p>
+  </div>`;
+</script>
+</body>
+</html>

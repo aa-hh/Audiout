@@ -306,12 +306,15 @@ extension PopoverController {
     /// Fire the offer's retirement timer now (headless runs don't wait 5 s).
     public func test_expireRemovalUndo() { expireRemovalUndo() }
 
-    /// The Cast fixed-volume receivers currently holding the pending fader fill.
-    public var test_castVolumePendingIDs: Set<String> { castVolumePendingIDs }
+    /// The Cast receivers currently holding the pending fader glow.
+    public var test_castVolumePendingIDs: Set<String> { castPendingIDs[.volume] ?? [] }
 
-    /// Fire a given id's pending-fill retirement timer now (headless runs
+    /// The Cast receivers whose sync offset is currently held as pending.
+    public var test_castTrimPendingIDs: Set<String> { castPendingIDs[.trim] ?? [] }
+
+    /// Fire a given id's pending-glow retirement timer now (headless runs
     /// don't wait for the measured lag).
-    public func test_expireCastVolumePending(for id: String) { expireCastVolumePending(for: id) }
+    public func test_expireCastVolumePending(for id: String) { expireCastPending(.volume, for: id) }
 
     /// Force a specific pending set + repaint — the snapshot harness stages a
     /// frozen mid-sequence frame with it (bypassing the async connection

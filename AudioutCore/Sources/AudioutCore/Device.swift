@@ -7,8 +7,12 @@ public enum AirPlayAccess: String, Sendable {
     case open
     /// A password: AirPlay 1 `pw`, or AirPlay 2 status-flags bit 7.
     case password
-    /// A code shown on the receiver's screen: status-flags bits 3 or 9. Acted on in PR 2.
+    /// A code shown on the receiver's screen the first time only: status-flags
+    /// bit 9. The receiver keeps the pairing the code earns.
     case onScreenCode
+    /// A code shown on the receiver's screen on every join: status-flags bit 3.
+    /// The receiver keeps no pairing.
+    case onScreenCodeEveryTime
     /// `act=2` or bit 10: needs a Home member's iCloud identity, which a third-party sender cannot present.
     case homeMembersOnly
 }
@@ -201,8 +205,22 @@ public struct Device: Identifiable, Equatable, Sendable {
     /// non-AirPlay kind.
     public var airPlayAccess: AirPlayAccess
 
-    /// The backend has a password on file for this speaker.
+    /// The backend has a password or a pairing key on file for this speaker.
     public var hasStoredPassword: Bool
+
+    /// What this receiver says it IS, never what its owner called it.
+    ///
+    /// AirPlay carries the advertised TXT `model` code (or `am`, which is where
+    /// an AP1-only receiver puts it instead), Cast the advertised
+    /// `md` model string, and a Bluetooth pairing either `bt:<vendor>:<product>`
+    /// (four lowercase hex digits each, from its cached Device ID record) or a
+    /// phrase from ``bluetoothProductModels`` matched against its name.
+    /// Advertised strings are trimmed and capped (``advertisedModel(_:)``);
+    /// `nil` when nothing identified the product. It goes to the phone in the
+    /// snapshot, where the sync events report which product a measurement was
+    /// taken on; nothing on the Mac draws it, and it is never the user-given
+    /// name — that name is the one thing no event may carry.
+    public var model: String?
 
     /// Product phrases that make a Bluetooth device's model unambiguous, and
     /// the SF Symbol each one earns. MOST SPECIFIC FIRST: the first phrase
@@ -242,6 +260,45 @@ public struct Device: Identifiable, Equatable, Sendable {
     static func bluetoothProductSymbol(forName name: String) -> String? {
         let folded = name.lowercased().filter { $0.isLetter || $0.isNumber }
         return bluetoothProductGlyphs.first { folded.contains($0.phrase) }?.symbol
+    }
+
+    /// Product phrases a Bluetooth name can be matched against when the
+    /// pairing reports no Device ID record, used as ``model`` itself rather
+    /// than to pick a glyph. MOST SPECIFIC FIRST, same rule as
+    /// ``bluetoothProductGlyphs``, whose phrases lead: "soundlinkflex" has to
+    /// beat "soundlink" or every Bose becomes one product. Every entry names a
+    /// product line, never a bare word a nickname could contain ("flip",
+    /// "charge", "boom"), because a wrong model is worse to count than none.
+    static let bluetoothProductModels: [String] =
+        bluetoothProductGlyphs.map(\.phrase) + [
+            "jblflip", "jblcharge", "jblgo", "jblclip", "jblxtreme", "jblboombox",
+            "jblpulse", "jblpartybox",
+            "soundlinkflex", "soundlinkmicro", "soundlinkmini", "soundlinkrevolve",
+            "soundlinkcolor", "soundlink", "boseportable", "bosehome",
+            "wonderboom", "megaboom", "hyperboom", "ueboom",
+            "sonosroam", "sonosmove",
+            "emberton", "stanmore", "kilburn", "acton", "woburn", "willen",
+            "middleton",
+            "soundcore", "srsxb", "srsxe", "srsxg", "srsxv", "tribit",
+            "beatspill", "beosound", "beoplay", "onyxstudio", "megablast",
+            "echodot", "echostudio", "amazonecho",
+        ]
+
+    /// The product phrase `name` names, or `nil` when nothing in it does.
+    /// Same fold as ``bluetoothProductSymbol(forName:)``, so punctuation,
+    /// spacing and case in "Alec's JBL Flip 6" cannot hide the product.
+    static func bluetoothProductModel(forName name: String) -> String? {
+        let folded = name.lowercased().filter { $0.isLetter || $0.isNumber }
+        return bluetoothProductModels.first { folded.contains($0) }
+    }
+
+    /// An advertised model string as ``model`` may carry it: trimmed, absent
+    /// when empty, and capped so a receiver advertising a paragraph cannot
+    /// put one in an event.
+    static func advertisedModel(_ raw: String?) -> String? {
+        guard let trimmed = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !trimmed.isEmpty else { return nil }
+        return String(trimmed.prefix(40))
     }
 
     /// The SF Symbol for this device's row icon. Everything but Bluetooth is
@@ -299,7 +356,8 @@ public struct Device: Identifiable, Equatable, Sendable {
         bluetoothDeviceClassMinor: UInt32? = nil,
         btHardwareVolumeCapable: Bool? = nil,
         airPlayAccess: AirPlayAccess = .open,
-        hasStoredPassword: Bool = false
+        hasStoredPassword: Bool = false,
+        model: String? = nil
     ) {
         self.id = id
         self.name = name
@@ -318,6 +376,7 @@ public struct Device: Identifiable, Equatable, Sendable {
         self.btHardwareVolumeCapable = btHardwareVolumeCapable
         self.airPlayAccess = airPlayAccess
         self.hasStoredPassword = hasStoredPassword
+        self.model = model
     }
 }
 
@@ -326,4 +385,16 @@ extension Int {
     /// out of range (the group-master proportional scaling in the UI can
     /// briefly compute >100 before clamping — SPEC.md §9).
     var clampedToVolume: Int { Swift.min(100, Swift.max(0, self)) }
+}
+
+extension Sequence where Element == Device {
+    /// Whether any device has been told to play and has not yet confirmed that
+    /// sound is coming out: its `connectionState` is `.connecting`. A Cast
+    /// receiver sits there from the load until it reports PLAYING, often for
+    /// seconds. Keys on the state alone, not `isSelected`: a Cast or Bluetooth
+    /// device never has `isSelected` set (see `NativeBackend.isMeterable`), and
+    /// the backend writes `.connecting` only for a device something wants playing.
+    public var hasDeviceStillConnecting: Bool {
+        contains { $0.connectionState == .connecting }
+    }
 }

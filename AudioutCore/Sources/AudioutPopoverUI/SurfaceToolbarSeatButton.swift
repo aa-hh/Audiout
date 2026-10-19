@@ -335,7 +335,7 @@ enum SurfaceToolbarSeat {
     ///   every row in the app already uses under the pointer.
     /// - **engaged** — `rowSelectionWashAlpha` (0.18): the current screen,
     ///   and Pin while pinned.
-    /// - **pressed** — `mutePillFillAlpha` (0.22), one rung above engaged, so
+    /// - **pressed** — `engagedFillAlpha` (0.22), one rung above engaged, so
     ///   a press reads under the finger wherever it lands.
     ///
     /// NEUTRAL, never gold: gold means audio in the mix, and a header
@@ -349,7 +349,7 @@ enum SurfaceToolbarSeat {
                           increaseContrast: Bool) -> CGFloat? {
         let base: CGFloat
         if isPressed {
-            base = PopoverColumnGrid.mutePillFillAlpha
+            base = PopoverColumnGrid.engagedFillAlpha
         } else if isEngaged {
             base = PopoverColumnGrid.rowSelectionWashAlpha
         } else if isHovered {

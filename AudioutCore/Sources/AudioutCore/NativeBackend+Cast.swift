@@ -27,13 +27,15 @@ extension NativeBackend {
             if var device = known[record.id] {
                 let returned = !device.isAvailable
                 device.name = record.friendlyName
+                device.model = Device.advertisedModel(record.model)
                 device.isAvailable = true
                 if device != known[record.id] { commitKnownDevice(record.id, device) }
                 if returned { logCastRowState(device) }
             } else {
                 let device = Device(
                     id: record.id, name: record.friendlyName, kind: .cast,
-                    isAvailable: true, supportsAirPlay2: false)
+                    isAvailable: true, supportsAirPlay2: false,
+                    model: Device.advertisedModel(record.model))
                 known[record.id] = device
                 order.append(record.id)
                 emit(.deviceAdded(device))
@@ -46,9 +48,10 @@ extension NativeBackend {
             castAbsenceGeneration += 1
             let generation = castAbsenceGeneration
             castAbsenceFlips[id] = generation
-            stateQueue.asyncAfter(deadline: .now() + castAbsenceGrace) { [weak self] in
+            let work = DispatchWorkItem { [weak self] in
                 self?.expireCastAbsence(id, generation)
             }
+            delayClock(castAbsenceGrace, stateQueue, work)
         }
     }
 

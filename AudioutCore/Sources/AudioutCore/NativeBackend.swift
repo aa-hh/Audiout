@@ -128,6 +128,13 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// currently-selected, unmuted device.
     public var captureCoordinator: CaptureControlling?
 
+    /// The listen-only whole-system coordinator that meters the Mac while it
+    /// plays alone, when `captureCoordinator` never runs. It never feeds audio
+    /// anywhere: its tap is `.unmuted` and its sink discards every buffer.
+    /// Assigned before `start()` like `captureCoordinator`; `nil` in tests
+    /// unless one is injected.
+    public var localMeterCapture: CaptureControlling?
+
     /// The local-playback engine (Bug T2): renders every `.currentDevice`-routed
     /// app's per-app capture on the Mac's BUILT-IN speakers as an independent
     /// stream with its own volume. Wired by ``makeBackend(_:)`` (the real
@@ -270,12 +277,12 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// 330 ms apart), so every click used to land in its own window.
     let syncedLocalSettleWindow: TimeInterval
 
-    /// Monotonic `DispatchTime.now().uptimeNanoseconds` stamps of the synced-local
+    /// Monotonic `uptimeClock` seconds stamps of the synced-local
     /// transitions this backend really applied: appended only past
     /// `fireSyncedLocalSettle`'s desired-versus-applied guard, never per toggle
     /// decision, pruned to `syncedLocalTransitionHorizon` on each append, cleared
     /// by `stop()`. On `stateQueue`.
-    var syncedLocalTransitionTimes: [UInt64] = []
+    var syncedLocalTransitionTimes: [TimeInterval] = []
 
     /// Rolling horizon over which two or more real applied transitions count as
     /// churn, arming the one-shot re-sync no matter how the clicks were spaced.
@@ -354,15 +361,16 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
 
     // MARK: Bluetooth connect lifecycle (BT-LIFECYCLE)
 
-    /// Every BT id currently held at `.connecting`, with the instant its hold
-    /// expires. An entry exists ONLY while the row is breathing; the promotion
-    /// to `.connected` (or the degrade to `.failed`) removes it. On `stateQueue`.
-    var btConnectingDeadlines: [String: Date] = [:]
+    /// Every BT id currently held at `.connecting`, with the `uptimeClock`
+    /// seconds at which its hold expires. An entry exists ONLY while the row is
+    /// breathing; the promotion to `.connected` (or the degrade to `.failed`)
+    /// removes it. On `stateQueue`.
+    var btConnectingDeadlines: [String: TimeInterval] = [:]
 
-    /// When each Bluetooth UID's sink last died and was rebuilt, so a second
-    /// death inside 10 s marks the speaker gone instead of looping on a
-    /// zombie object id. On `stateQueue`.
-    var btSinkDeathAt: [String: Date] = [:]
+    /// When each Bluetooth UID's sink last died and was rebuilt, in
+    /// `uptimeClock` seconds, so a second death inside 10 s marks the speaker
+    /// gone instead of looping on a zombie object id. On `stateQueue`.
+    var btSinkDeathAt: [String: TimeInterval] = [:]
 
     /// How long after a sink death marks a speaker gone the enumerator is
     /// restarted, which re-emits the full list: it otherwise emits only on a
@@ -498,7 +506,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// has a single producer, and a second run would replace the first's
     /// staging under it. `btTrimLock`.
     var companionAlignmentRun: CompanionAlignmentRun?
-    /// Nil outside an audition; otherwise only these two outputs keep their gain.
+    /// Nil outside an audition or a wizard run; otherwise only these two outputs keep their gain.
     /// All reads and writes are on stateQueue.
     var companionTickParticipants: Set<String>?
     /// Audio callbacks take only btTrimLock for this snapshot, never stateQueue.
@@ -508,12 +516,13 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// whether that write succeeded. A push answered `false` because a newer
     /// write superseded it never lands here: it is not this value completing.
     struct CompanionRestoreCompletion { let value: Double; let ok: Bool }
+    /// Every deadline here is in `uptimeClock` seconds.
     struct CompanionAuditionLifecycle {
         let id: UUID
         let targetID: String
         let referenceID: String
-        let preparationDeadline: Date
-        let leaseDeadline: Date
+        let preparationDeadline: TimeInterval
+        let leaseDeadline: TimeInterval
         var phase: CompanionAuditionPhase = .preparing
         var startCompletions: [@Sendable (String?) -> Void]
         var stopCompletions: [@Sendable (String?) -> Void] = []
@@ -542,7 +551,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         /// actually gone. Independent of the one-shot start/stop replies: a
         /// stop that refuses on its four-second timeout does not consume it.
         var releaseCallbacks: [@Sendable () -> Void] = []
-        var cleanupDeadline: Date?
+        var cleanupDeadline: TimeInterval?
     }
     /// The .tick run remains reserved during preparation and restoration.
     var companionAudition: CompanionAuditionLifecycle?
@@ -1583,20 +1592,34 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         queue.asyncAfter(deadline: .now() + delaySeconds, execute: work)
     }
 
-    /// Runs the backed-off retries (`.processNotYetAudible`, rebind recovery,
-    /// whole-system capture) and the companion audition's preparation, lease and
-    /// stop deadlines. Only the tests pass anything but ``dispatchDelayClock``:
+    /// Runs the backed-off retries, the companion audition's deadlines and
+    /// liveness poll, and the Bluetooth hold, sink-recovery and synced-local
+    /// settle timers, among others. Only the tests pass anything but
+    /// ``dispatchDelayClock``:
     /// on the wall clock, a loaded test run let a 0.05 s backoff burn every
     /// rebind attempt before the test's next step, and a 4 s stop deadline
     /// expire mid-restoration.
     let delayClock: DelayClock
 
+    /// Monotonic seconds since boot.
+    typealias UptimeClock = @Sendable () -> TimeInterval
+
+    /// The shipping time source: `DispatchTime.now().uptimeNanoseconds` in seconds.
+    static let dispatchUptimeClock: UptimeClock = {
+        Double(DispatchTime.now().uptimeNanoseconds) / 1_000_000_000
+    }
+
+    /// The backend's reading of "now" for the Bluetooth hold and sink-death
+    /// deadlines, the synced-local churn horizon and the companion audition
+    /// deadlines. Tests pass a manual one.
+    let uptimeClock: UptimeClock
+
     // MARK: Metering (T3 — three real level sources through the event channel)
     //
     // Replaces the old single whole-system RMS fanned identically to every device.
     // Three real sources now feed the meters, all through the same `BackendEvent`
-    // channel, all popover-scoped (gated on `meteringActive`, flipped by
-    // `setMeteringActive`):
+    // channel, all gated on `levelsFlowing` (the popover's `setMeteringActive`
+    // or the Touch Bar's `setDeviceLevelsWanted`):
     //   - Per-device `.level` = MAX(the whole-system-tap RMS iff the device is a
     //     Selected Device + unmuted, the loudest PRE-volume SOURCE level among the
     //     apps `.device`-routed to it). A device fed by both shows the larger
@@ -1608,11 +1631,19 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     //       `.currentDevice` -> `localPlaybackEngine.onAppLevel` (pre-volume, raw)
     //       `.noRedirect`    -> `meteringCapture` (a dedicated `.unmuted` tap)
 
-    /// Whether a meter is currently being shown (popover open). Gates every
-    /// `.level`/`.appLevel` emission and the metering-only tap lifecycle;
-    /// forwarded to `captureCoordinator`/`routeMixer`/`localPlaybackEngine` (each
-    /// gates its own RMS pass on it). Confined to `stateQueue`.
+    /// Whether a meter is currently being shown (popover open). Gates the
+    /// metering-only tap lifecycle, and with ``deviceLevelsWanted`` every
+    /// `.level`/`.appLevel` emission (see ``levelsFlowing``). Confined to `stateQueue`.
     var meteringActive = false
+
+    /// `setDeviceLevelsWanted`: the app's Touch Bar wants `.level` while the
+    /// popover is closed. Starts no metering-only tap. Confined to `stateQueue`.
+    var deviceLevelsWanted = false
+
+    /// Either reason to compute RMS and emit levels; forwarded to
+    /// `captureCoordinator`/`routeMixer`/`leveledInjector`/`localPlaybackEngine`
+    /// (each gates its own RMS pass on it). On `stateQueue`.
+    var levelsFlowing: Bool { meteringActive || deviceLevelsWanted }
 
     /// The most recent whole-system-tap RMS (stream_id 0) — a device's system
     /// contribution when it is a Selected Device (unmuted). On `stateQueue`.
@@ -1633,6 +1664,10 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// The bundle IDs that currently have a metering-only tap running — the live
     /// truth `meteringTapDiffLocked()` diffs against. On `stateQueue`.
     var meteringTapTargets: Set<String> = []
+
+    /// Whether `localMeterCapture` was last told to start — the gate's last
+    /// decision, like `captureRunning`. On `stateQueue`.
+    var localMeterTapRunning = false
 
     // MARK: Init
 
@@ -1740,6 +1775,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         captureRetryDelay: TimeInterval = 2.0,
         captureRetryMaxBackoff: TimeInterval = 10.0,
         delayClock: @escaping DelayClock = NativeBackend.dispatchDelayClock,
+        uptimeClock: @escaping UptimeClock = NativeBackend.dispatchUptimeClock,
         takeoverStripDelay: TimeInterval = 3.0,
         watchdogScheduler: SilenceWatchdogScheduling? = nil,
         silenceFallbackDelay: TimeInterval = NativeBackend.defaultSilenceFallbackDelay,
@@ -1840,6 +1876,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         self.captureRetryDelay = captureRetryDelay
         self.captureRetryMaxBackoff = captureRetryMaxBackoff
         self.delayClock = delayClock
+        self.uptimeClock = uptimeClock
         self.takeoverStripDelay = takeoverStripDelay
 
         // Wire the per-app routing callback graph (T6/T8). All four are set once
@@ -2399,11 +2436,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             //     reaches us here (the receiver calls back over DACP, not the event
             //     channel). Advertise under the SAME id the engine sends receivers,
             //     and route each report to that speaker's slider.
-            self.dacpServer.onVolume = { [weak self] token, level in
-                self?.applyDacpVolume(activeRemote: token, level: level)
+            self.dacpServer.onVolume = { [weak self] remoteHost, token, level in
+                self?.applyDacpVolume(remoteHost: remoteHost, activeRemote: token, level: level)
             }
-            self.dacpServer.onVolumeStep = { [weak self] token, direction in
-                self?.applyDacpVolumeStep(activeRemote: token, direction: direction)
+            self.dacpServer.onVolumeStep = { [weak self] remoteHost, token, direction in
+                self?.applyDacpVolumeStep(remoteHost: remoteHost, activeRemote: token, direction: direction)
             }
             self.dacpServer.start(dacpID: self.engine.dacpID)
 
@@ -2424,6 +2461,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             //    drain reads at the display cadence — this closure runs on the
             //    tap's IOProc delivery thread and must not enqueue per buffer.
             self.captureCoordinator?.onLevel = { [weak self] rms in self?.noteSystemRMS(rms) }
+            self.localMeterCapture?.onLevel = { [weak self] rms in self?.noteSystemRMS(rms) }
 
             // Hand the delivery path the leveled-app intercept (the coordinator is
             // assigned before `start()`); it contributes nothing until
@@ -2519,6 +2557,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         // documented final word and reaches the same state off the caller thread.
         // Then discovery, then the engine itself.
         captureCoordinator?.onLevel = nil
+        localMeterCapture?.onLevel = nil
         captureCoordinator?.onStateChange = nil
         // T2: stop observing the whole-system tap's device/rate rebuilds so the
         // ordered `captureControlQueue` stop below (which tears the tap down) can't
@@ -2530,6 +2569,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         leveledInjector.setActive(false)
         leveledInjector.updateLeveled([])
         captureCoordinator?.setMeteringActive(false)
+        localMeterCapture?.setMeteringActive(false)
         // Metering (T3): leave every metering source switched off (teardown
         // discipline — a closed backend has nobody to render a meter for) and stop
         // every metering-only tap. `meteringCapture.stopAll()` is off `stateQueue`
@@ -2608,6 +2648,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // Reset the capture gate: a later start() re-decides from scratch, and
             // capture stays off until a setOutputSet selects a real AP2 output.
             self.captureRunning = false
+            self.localMeterTapRunning = false
             // B6b / R11: drop any pending silence watchdog + reset sleep/wake flags so
             // a stop mid-wait can't leave capture wedged off (override) or suspended.
             self.silenceWatchdog?.cancel()
@@ -2652,6 +2693,12 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             self.btRoomTermMs = nil
             // CAST-OUT: same shape — reset the decisions here, enqueue the
             // teardown below so the FIFO's last Cast op is the disable.
+            // A receiver the wizard hold muted gets its level back before the
+            // Cast disable enqueued below, or it stays at 0 after quit.
+            if self.companionTickParticipants != nil {
+                self.companionTickParticipants = nil
+                for castID in self.castSelectedIDs { self.pushCastLevelLocked(castID) }
+            }
             self.castSelectedIDs = []
             self.castPlaying = []
             // CAST-SYNC: the room delay goes with them. Publishing the AirPlay
@@ -2693,6 +2740,9 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // inside this critical section, this stop is ordered after every gate
             // decision that preceded it, so the FIFO's final op is always the stop.
             // Idempotent.
+            if let localMeter = self.localMeterCapture {
+                self.captureControlQueue.async { localMeter.stop() }
+            }
             if let coordinator = self.captureCoordinator {
                 self.captureControlQueue.async { coordinator.stop() }
             }
@@ -2792,6 +2842,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // Metering (T3): a later start() re-decides from a clean slate — no
             // stale system/stream RMS, metering off, no metering-only targets.
             self.meteringActive = false
+            self.deviceLevelsWanted = false
             self.latestSystemRMS = 0
             self.latestAppLevel.removeAll()
             self.lastExcludedBundleIDs.removeAll()
@@ -3215,9 +3266,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     ///     its clock — never at `engine.start()` (Q1=B: woken only by an
     ///     actual routing action, never at launch).
     ///
-    /// Returns whether the clock is ready; the caller decides what its own
-    /// failure means (whole-system: park + `.timingUnavailable`; per-app:
-    /// walk the binding back so a later recovery re-binds).
+    /// Returns the activation outcome; anything but `.ready` means no clock,
+    /// and the caller decides what its own failure means (whole-system: park +
+    /// `.timingUnavailable`; per-app: walk the binding back so a later
+    /// recovery re-binds). The outcome is what tells an unapproved helper
+    /// from busy timing ports in `airplay:connect_failed`'s `reason`.
     ///
     /// This gate originally ran inline in `convergeDevice` ONLY, which made a
     /// per-app redirect ORDER-DEPENDENT: a redirect applied before any
@@ -3232,7 +3285,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// topology (``replayPendingPerAppBindings(trigger:)``), so a redirect
     /// that was refused clockless re-binds by itself the moment a later
     /// connect wins the ports — no user re-pick.
-    func ensurePTPTakeover(telemetryDeviceID: String) async -> Bool {
+    func ensurePTPTakeover(telemetryDeviceID: String) async -> PTPHelperActivationOutcome {
         var switchAwayOutcome: DefaultOutputSwitchOutcome?
         if let defaultOutputSwitcher {
             let takeover = defaultOutputSwitcher.switchAwayFromAirPlay()
@@ -3262,16 +3315,10 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         let activationStartUptime = ProcessInfo.processInfo.systemUptime
         let outcome = await ptpHelperActivator.activate(timeout: Self.ptpActivationTimeout)
         let elapsedMs = Int(((ProcessInfo.processInfo.systemUptime - activationStartUptime) * 1000).rounded())
-        let outcomeName: String
-        switch outcome {
-        case .ready: outcomeName = "ready"
-        case .needsApproval: outcomeName = "needsApproval"
-        case .timingPortsUnavailable: outcomeName = "timingPortsUnavailable"
-        }
         Telemetry.log(.airplay, "ptp_activate", [
             "device": telemetryDeviceID,
             "will_wait": willWaitForClock ? "true" : "false",
-            "outcome": outcomeName,
+            "outcome": outcome.telemetryName,
             "elapsed_ms": "\(elapsedMs)",
             "switch_away": switchAwayOutcome.map { "\($0)" } ?? "none",
         ])
@@ -3287,7 +3334,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             return ready && !was
         }
         if becameAvailable { replayPendingPerAppBindings(trigger: "clock_recovery") }
-        return ready
+        return outcome
     }
 
     /// Re-run the cached per-app binding pass for devices the table wants but
@@ -3509,7 +3556,8 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                     // A PTP-only receiver (Sonos/HomePod) accepts the session
                     // but plays silence with no clock, so failing the connect
                     // now beats a "connected" row that never makes a sound.
-                    guard await ensurePTPTakeover(telemetryDeviceID: id) else {
+                    let gate = await ensurePTPTakeover(telemetryDeviceID: id)
+                    guard gate == .ready else {
                         stateQueue.sync {
                             self.removeFromAddedLocked(id)
                             self.failedGate.insert(id)
@@ -3518,7 +3566,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                         }
                         Telemetry.fail(.airplay, "airplay:connect_failed",
                                        local: ["device": id],
-                                       shared: ["cause": "timingUnavailable"])
+                                       shared: ["cause": "timingUnavailable", "reason": gate.telemetryName])
                         return
                     }
 
@@ -3637,8 +3685,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                     // password as `.passwordRequired` itself (live 2026-10-04: a
                     // stuck shairport-sync read as a refused password). Because
                     // that is a guess, the stored password is
-                    // kept; only an engine `.passwordRequired` deletes it. PR 2's
-                    // authorize path is where the engine can say more.
+                    // kept; only an engine `.passwordRequired` deletes it.
                     // `nil` loops again; `failed: false` is a password wait,
                     // which is not a failure and logs none.
                     let outcome: (cause: ConnectionFailure.Cause, failed: Bool)? = stateQueue.sync {
@@ -3668,6 +3715,21 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                             }
                             return nil
                         }
+                        // A pairing key the receiver refused is spent: delete it
+                        // and loop once more with no key, so the receiver shows a
+                        // fresh code. Bounded: that attempt feeds no key.
+                        if (error as? AirPlayEngineError) == .passwordRequired,
+                           self.fedDescriptors[id]?.authKey != nil {
+                            // Synchronous on purpose: see `applyPasswordFailureLocked`.
+                            self.passwordStore.removePairingKey(for: id)
+                            self.rejectedPairingKeyIDs.insert(id)
+                            self.applyLocal(id) { $0.hasStoredPassword = false }
+                            self.failedGate.remove(id)
+                            if !self.failureEchoSeen.contains(id) {
+                                self.expectStaleFailure.insert(id)
+                            }
+                            return nil
+                        }
                         let access = self.known[id]?.airPlayAccess
                         let kind = self.lastDescriptors[id]?.kind
                         let cause: ConnectionFailure.Cause
@@ -3689,12 +3751,19 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                         if rejectedStored { self.passwordStore.removePassword(for: id) }
                         self.removeFromAddedLocked(id)
                         self.failedGate.insert(id)
-                        let keepAvailable = Self.waitsForPassword(cause, fedPassword: self.fedDescriptors[id]?.password)
+                        let fedCredential = self.fedCredential(id)
+                        // The sender drops its own copy of the key when an
+                        // encrypted SETUP times out (airplay.c `start_failure`),
+                        // reported as a plain failure. Forget the fed key so the
+                        // next feed sends the stored one again; the Keychain
+                        // keeps it, since the receiver did not refuse it.
+                        self.fedDescriptors[id]?.authKey = nil
+                        let keepAvailable = Self.waitsForPassword(cause, fedPassword: fedCredential)
                         self.applyLocal(id) {
                             $0.isSelected = false; $0.isAvailable = keepAvailable
                             if rejectedStored { $0.hasStoredPassword = false }
                         }
-                        if Self.awaitsPassword(cause, fedPassword: self.fedDescriptors[id]?.password) {
+                        if Self.awaitsPassword(cause, fedPassword: fedCredential) {
                             self.setConnectionState(.awaitingPassword, for: id)
                             return (cause, false)
                         }
@@ -3703,11 +3772,12 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                     }
                     guard let outcome else { continue }
                     guard outcome.failed else { return }
-                    // The engine error rides along locally only: its
-                    // description can name the receiver.
+                    // The engine error's description rides along locally
+                    // only, since it can name the receiver; its case name is
+                    // what `reason` shares.
                     Telemetry.fail(.airplay, "airplay:connect_failed",
                                    local: ["device": id, "detail": String(describing: error)],
-                                   shared: ["cause": "\(outcome.cause)"])
+                                   shared: ["cause": "\(outcome.cause)", "reason": Self.failureReason(error)])
                     return
                 }
             } else {
@@ -3756,6 +3826,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// passes here once, so it also spends a typed password's one extra attempt.
     func descriptorToFeed(id: String) -> DeviceDescriptor? {
         let stored = passwordStore.password(for: id)
+        let storedKey = passwordStore.pairingKey(for: id)
         return stateQueue.sync {
             // A typed password beats the store, which may not hold it yet: the
             // one the catch handed this attempt first, then the mark. A password
@@ -3765,7 +3836,8 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             if self.passwordResubmitted[id] == password { self.passwordResubmitted[id] = nil }
             self.failureEchoSeen.remove(id)
             guard let last = self.lastDescriptors[id] else { return nil }
-            let current = Self.withPassword(last, password)
+            let key = self.rejectedPairingKeyIDs.contains(id) ? nil : storedKey
+            let current = Self.withCredentials(last, password: password, authKey: key)
             if let fed = self.fedDescriptors[id], Self.descriptorsEqual(fed, current) {
                 return nil // engine already has this exact descriptor
             }
@@ -3773,13 +3845,15 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         }
     }
 
-    /// `descriptor` carrying this speaker's stored password, if any. Both engine
-    /// feed sites compare and feed this, so a discovery re-feed never wipes the
-    /// engine's per-device password. Callers read the password off `stateQueue`:
-    /// a Keychain read can wait on an access prompt.
-    private static func withPassword(_ descriptor: DeviceDescriptor, _ password: String?) -> DeviceDescriptor {
+    /// `descriptor` carrying this speaker's stored password and pairing key, if
+    /// any. Both engine feed sites compare and feed this, so a discovery re-feed
+    /// never wipes the engine's per-device credentials. Callers read the store
+    /// off `stateQueue`: a Keychain read can wait on an access prompt.
+    private static func withCredentials(_ descriptor: DeviceDescriptor, password: String?,
+                                        authKey: String?) -> DeviceDescriptor {
         var copy = descriptor
         copy.password = password
+        copy.authKey = authKey
         return copy
     }
 
@@ -3794,7 +3868,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     static func descriptorsEqual(_ a: DeviceDescriptor, _ b: DeviceDescriptor) -> Bool {
         a.name == b.name && a.hostname == b.hostname && a.address == b.address
             && sameFamily(a.family, b.family) && a.port == b.port && a.txtRecord == b.txtRecord
-            && a.password == b.password
+            && a.password == b.password && a.authKey == b.authKey
     }
 
     /// `AddressFamily` isn't `Equatable` in the engine's public surface (and we
@@ -4009,6 +4083,19 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         stateQueue.sync { _startBufferMs }
     }
 
+    /// How long, in milliseconds, sound takes to reach the room when a slow
+    /// output (a Cast receiver, a high-latency Bluetooth speaker) has pushed the
+    /// room delay past the normal start buffer; `nil` when nothing is slow.
+    /// The Touch Bar pulses its play button for this long after a start or stop.
+    /// Answers on `stateQueue`, never blocking the caller: a main-thread
+    /// `stateQueue.sync` freezes the app while coreaudiod is slow.
+    public func slowOutputDelayMs(_ reply: @escaping @Sendable (Int?) -> Void) {
+        stateQueue.async {
+            let room = self.roomDelayLocked()
+            reply(room > self._startBufferMs ? room : nil)
+        }
+    }
+
     /// `R` — the room delay (ms): the longest intrinsic delay any active
     /// output has, which every other output then delays itself to (sync
     /// architecture brief §3). One number for the whole room, so the outputs
@@ -4029,7 +4116,22 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     func roomDelayLocked() -> Int {   // on stateQueue
         let today = (btSinkEnabled && !btComposition.usesPresentationReference)
             ? btReferenceBufferMs : _startBufferMs
-        return [_castTermMs, btRoomTermMs].compactMap { $0 }.reduce(today) { Swift.max($0, $1) }
+        return roomTermsLocked().compactMap { $0 }.reduce(today) { Swift.max($0, $1) }
+    }
+
+    /// The Cast and Bluetooth terms as they apply right now. While a wizard
+    /// or audition names its participants, a term counts only when a
+    /// participant brought it in: a selected Cast receiver held silent must
+    /// not stretch the two lanes being compared.
+    private func roomTermsLocked() -> [Int?] {   // on stateQueue
+        guard let participants = companionTickParticipants else { return [_castTermMs, btRoomTermMs] }
+        let cast = castSelectedIDs.contains(where: participants.contains) ? _castTermMs : nil
+        let (latencies, trims) = btTrimLock.withLock { (btLatencyMsByUID, btTrimsByUID) }
+        let candidate = Self.btOnlyReferenceMs(latencies: latencies, trims: trims,
+                                               uids: btSelectedUIDs.filter(participants.contains))
+        let bt = (btSinkEnabled && btComposition.usesPresentationReference && candidate > _startBufferMs)
+            ? candidate : nil
+        return [cast, bt]
     }
 
     /// The reference delay (ms) the Mac-local sink renders on (Wave-4 delay
@@ -4045,7 +4147,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// the Bluetooth term when the slowest Bluetooth speaker is.
     func btReferenceDelayMs() -> Int {
         stateQueue.sync {
-            [_castTermMs, btRoomTermMs].compactMap { $0 }.reduce(_startBufferMs) { Swift.max($0, $1) }
+            roomTermsLocked().compactMap { $0 }.reduce(_startBufferMs) { Swift.max($0, $1) }
         }
     }
 
@@ -4265,6 +4367,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         // other gate decision) so the Mac isn't left muted by a tap streaming into
         // dead sockets. `expectedSelected` is untouched.
         self.captureRunning = false
+        self.reconcileLocalMeterTapLocked()
         // The leveled apps lose the program they were being summed into — hand
         // them back to the local engine, exactly as the gate's own false edge does
         // (this path bypasses `reconcileCaptureGate` entirely).
@@ -4842,14 +4945,28 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         // `silent_s` is the field to read first. Device ids stay local.
         let dropped = self.engine.writeBacklogSnapshot().droppedWrites
         for level in self.engine.streamLevelSnapshot() {
+            // Only streams the app still assigns: stream 0, a per-app stream some
+            // device is bound to, or a speaker's own home stream, which outlives a
+            // session that dies under a still-wanted speaker. A stalled stream keeps
+            // its line with `writes` frozen; a removed speaker's stream stops here,
+            // and `eq_plan` already logged the removal.
+            // razor: the engine's level tracker keeps a few bytes per retired stream
+            // id until quit, because ids are never reused. Upgrade path: an engine
+            // call that forgets a stream id when the app retires it.
+            guard level.streamId == 0
+                || self.streamBindings.values.contains(level.streamId)
+                || self.wholeSystemStreamByDevice.values.contains(level.streamId)
+            else { continue }
             // Which speakers this stream actually serves: the per-app ids bound
             // to it PLUS the ids whose whole-system home it is. Before ticket 04
             // this read `streamBindings` alone, so under one-stream-per-speaker
             // every whole-system line named nobody and the log could not say
-            // which speaker a stream belonged to.
+            // which speaker a stream belonged to. Home-stream ids are listed
+            // whether or not the session is up, so a reconnecting speaker's
+            // stalled stream says whose it is.
             var deviceSet = Set(self.streamBindings.filter { $0.value == level.streamId }.keys)
             deviceSet.formUnion(self.wholeSystemStreamByDevice
-                .filter { $0.value == level.streamId && self.added.contains($0.key) }.keys)
+                .filter { $0.value == level.streamId }.keys)
             let devices = deviceSet.sorted()
             Telemetry.log(.airplay, "stream_health", [
                 "stream": "\(level.streamId)",
@@ -4875,12 +4992,14 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         case .appeared(let discovered):
             // Read off `stateQueue`: a Keychain read can wait on an access prompt.
             let password = passwordStore.password(for: discovered.id)
-            feedEngineIfAvailable(discovered, password: password, appearing: true)
-            stateQueue.async { self.addOrUpdate(discovered, hasStoredPassword: password != nil) }
+            let key = passwordStore.pairingKey(for: discovered.id)
+            feedEngineIfAvailable(discovered, password: password, authKey: key, appearing: true)
+            stateQueue.async { self.addOrUpdate(discovered, hasStoredPassword: password != nil || key != nil) }
         case .updated(let discovered):
             let password = passwordStore.password(for: discovered.id)
+            let key = passwordStore.pairingKey(for: discovered.id)
             if discovered.isAvailable {
-                feedEngineIfAvailable(discovered, password: password, appearing: true)
+                feedEngineIfAvailable(discovered, password: password, authKey: key, appearing: true)
             } else {
                 // A reachable→unreachable transition (AP1 or AP2). In practice this
                 // is a sticky-AP2 device going OFFLINE: it lost its `_airplay._tcp`
@@ -4897,7 +5016,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 teardownEngineOutput(id: discovered.id)
                 removeEngineDiscovery(id: discovered.id)
             }
-            stateQueue.async { self.addOrUpdate(discovered, hasStoredPassword: password != nil) }
+            stateQueue.async { self.addOrUpdate(discovered, hasStoredPassword: password != nil || key != nil) }
         case .disappeared(let id, _):
             // Every receiver we surface — AP1 or AP2 — is now engine-fed and can be
             // `addOutput`-ed, so tear down unconditionally on disappear. Both calls
@@ -4937,15 +5056,19 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// converge path's `descriptorToFeed` can skip a redundant re-feed of the exact
     /// same descriptor (root cause 2). Only feeds when the descriptor is new or
     /// changed, so a repeated identical `.updated` doesn't re-add either.
-    private func feedEngineIfAvailable(_ discovered: DiscoveredDevice, password: String?, appearing: Bool) {
+    private func feedEngineIfAvailable(_ discovered: DiscoveredDevice, password: String?, authKey: String?,
+                                       appearing: Bool) {
         guard discovered.isAvailable else { return }
         let id = discovered.id
-        // A discovery re-feed never drops a password the engine holds: the store
-        // may not hold a just-typed one yet. Forget still clears it, because
-        // `descriptorToFeed` re-syncs the password before every add.
+        // A discovery re-feed never drops a password or pairing key the engine
+        // holds: the store may not hold a just-typed one yet. Forget still clears
+        // it, because `descriptorToFeed` re-syncs both before every add.
         let descriptor: DeviceDescriptor? = stateQueue.sync {
             let fed = self.fedDescriptors[id]
-            let descriptor = Self.withPassword(discovered.descriptor, password ?? fed?.password)
+            // A refused key stays off the device even while `fed` still holds it.
+            let key = self.rejectedPairingKeyIDs.contains(id) ? nil : (authKey ?? fed?.authKey)
+            let descriptor = Self.withCredentials(discovered.descriptor, password: password ?? fed?.password,
+                                                  authKey: key)
             if let fed, Self.descriptorsEqual(fed, descriptor) { return nil }
             return descriptor
         }
@@ -5301,6 +5424,16 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                     // attempt, so this report is not the receiver's answer to it.
                     // No park, no `.failed`, no password outcome, and the row
                     // stays available.
+                } else if state == .passwordRequired, self.fedDescriptors[id]?.authKey != nil,
+                          self.converging.contains(id), !self.rebindConverging.contains(id) {
+                    // A refused stored pairing key whose report beat the converge
+                    // catch: the catch loops once more with no key, so that
+                    // attempt owns the result. Spend the key here (the catch's
+                    // delete is then a no-op); no park, no `.failed`, no outcome.
+                    // Synchronous on purpose: see `applyPasswordFailureLocked`.
+                    self.passwordStore.removePairingKey(for: id)
+                    self.rejectedPairingKeyIDs.insert(id)
+                    device.hasStoredPassword = false
                 } else {
                     device.isAvailable = false
                     device.isSelected = false
@@ -5319,7 +5452,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                                 : (wasStreaming ? .droppedMidStream
                                     : Self.accessCause(device.airPlayAccess, kind: self.lastDescriptors[id]?.kind, passwordRequired: false))
                         self.applyPasswordFailureLocked(state: state, cause: cause, device: &device)
-                        if Self.awaitsPassword(cause, fedPassword: self.fedDescriptors[id]?.password) {
+                        if Self.awaitsPassword(cause, fedPassword: self.fedCredential(id)) {
                             // A password demand nobody answered yet is a wait, not a failure.
                             device.connectionState = .awaitingPassword
                         } else {
@@ -5353,7 +5486,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                                 : (wasConnected ? .droppedMidStream
                                     : Self.accessCause(device.airPlayAccess, kind: self.lastDescriptors[id]?.kind, passwordRequired: false))
                         self.applyPasswordFailureLocked(state: state, cause: cause, device: &device)
-                        if Self.awaitsPassword(cause, fedPassword: self.fedDescriptors[id]?.password) {
+                        if Self.awaitsPassword(cause, fedPassword: self.fedCredential(id)) {
                             device.connectionState = .awaitingPassword
                         } else {
                             device.connectionState = .failed(
@@ -5458,7 +5591,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// (``RemoteEvent/volume(_:level:)``). Move that device's slider. On `stateQueue`.
     ///
     /// NOTE: in practice AirPlay 2 receivers report volume over DACP, not the event
-    /// channel (see ``applyDacpVolume(activeRemote:level:)``), so this path is rarely
+    /// channel (see ``applyDacpVolume(remoteHost:activeRemote:level:)``), so this path is rarely
     /// exercised — kept so a receiver that DOES use the event channel still works.
     private func applyRemoteVolume(outputID: OutputID, level: Double) {
         stateQueue.async {
@@ -5471,14 +5604,27 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// called our ``DACPServer`` back — the real path for Sonos et al.). The
     /// `Active-Remote` token is the low 32 bits of the device id (`airplay.c`), so
     /// match it against the known outputs and move that one speaker's slider.
+    /// The DACP listener is open to the whole LAN and the token is only 32 bits
+    /// of a MAC, so a report also has to come from the matched speaker's own
+    /// address (`remoteHost`, see ``dacpReportIsFromSpeaker(id:remoteHost:verb:)``).
     /// Internal (not private) so the routing is unit-testable without a live socket.
-    func applyDacpVolume(activeRemote: UInt32, level: Double) {
+    func applyDacpVolume(remoteHost: String?, activeRemote: UInt32, level: Double) {
         stateQueue.async {
             guard let match = self.outputIDs.first(where: {
                 UInt32(truncatingIfNeeded: $0.value.rawValue) == activeRemote
-            }) else { return }
+            }), self.dacpReportIsFromSpeaker(id: match.key, remoteHost: remoteHost, verb: "volume") else { return }
             self.setSpeakerVolume(id: match.key, outputID: match.value, level: level)
         }
+    }
+
+    /// True when a DACP report came from the address the engine was fed for
+    /// device `id`; otherwise logs one count-only line and returns false. A device
+    /// that was never fed has no address to match, so its reports are refused too.
+    /// On `stateQueue`.
+    private func dacpReportIsFromSpeaker(id: String, remoteHost: String?, verb: String) -> Bool {
+        if let remoteHost, fedDescriptors[id]?.address == remoteHost { return true }
+        Telemetry.log(.airplay, "dacp_refused_host", ["verb": verb, "hostKnown": remoteHost == nil ? "false" : "true"])
+        return false
     }
 
     /// Shared core for a speaker-initiated volume change (event channel or DACP).
@@ -5541,11 +5687,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// calibration (Sonos observed sending absolute `setproperty` instead, so
     /// this is a safety net for receivers that use the relative verbs).
     /// Internal (not private) so the routing is unit-testable without a socket.
-    func applyDacpVolumeStep(activeRemote: UInt32, direction: Int) {
+    func applyDacpVolumeStep(remoteHost: String?, activeRemote: UInt32, direction: Int) {
         stateQueue.async {
             guard let match = self.outputIDs.first(where: {
                 UInt32(truncatingIfNeeded: $0.value.rawValue) == activeRemote
-            }) else { return }
+            }), self.dacpReportIsFromSpeaker(id: match.key, remoteHost: remoteHost, verb: "step") else { return }
             let id = match.key
             let current = self.muted.contains(id)
                 ? (self.stashedVolume[id] ?? self.known[id]?.volume ?? 0)
@@ -5607,17 +5753,19 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // it when the device stops streaming.
             eq: eqByDeviceID[id] ?? .flat,
             airPlayAccess: discovered.access,
-            hasStoredPassword: hasStoredPassword
+            hasStoredPassword: hasStoredPassword,
+            model: Self.advertisedModel(for: discovered)
         )
     }
 
     /// Merge a freshly-discovered device with the existing snapshot: take
-    /// discovery's truth for name/kind/AP2, but preserve the app-side control state
+    /// discovery's truth for name/kind/model/AP2, but preserve the app-side control state
     /// (volume/mute/selection) and the availability we derive from engine sessions.
     func merge(existing: Device, discovered: Device) -> Device {
         var result = existing
         result.name = discovered.name
         result.kind = discovered.kind
+        result.model = discovered.model
         result.supportsAirPlay2 = discovered.supportsAirPlay2
         // `hasStoredPassword` stays the existing value: the backend's own writes own it.
         result.airPlayAccess = discovered.airPlayAccess
@@ -5666,6 +5814,22 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         if hay.contains("airport") || hay.contains("express") { return .airportExpress }
         if hay.contains("sonos") || hay.contains("move") || hay.contains("roam") { return .sonos }
         return .generic
+    }
+
+    /// The receiver's own advertised model code, kept rather than discarded
+    /// after ``kind(for:)`` has guessed with it: the phone's sync events
+    /// report which product a measurement was taken on, and this is the only
+    /// place an AirPlay receiver says what it is.
+    ///
+    /// `am` is the last fallback because an AP1-only `_raop._tcp` receiver —
+    /// an AirPort Express, shairport-sync — puts its product there and never
+    /// advertises `model` at all, so without it every such speaker reports no
+    /// model. It is last because an AP2 receiver advertising both means the
+    /// `_airplay._tcp` `model` key, which is the one the kind heuristic above
+    /// already trusts.
+    static func advertisedModel(for discovered: DiscoveredDevice) -> String? {
+        let txt = discovered.descriptor.txtRecord
+        return Device.advertisedModel(txt["model"] ?? txt["Model"] ?? txt["am"])
     }
 
     // MARK: Volume mapping (UI 0–100 → engine 0.0–1.0)
@@ -5937,10 +6101,37 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         reconcileCaptureGate()
     }
 
+    /// The `reason` an `airplay:connect_failed` shares: the engine error's case
+    /// name, the PTP gate's outcome, or else the error's type name. Never the
+    /// error's description, which can name the receiver. The engine switch has
+    /// no default so a new engine case cannot reach PostHog unnamed.
+    static func failureReason(_ error: Error) -> String {
+        switch error {
+        case let error as AirPlayEngineError:
+            switch error {
+            case .engineNotRunning: return "engineNotRunning"
+            case .initFailed: return "initFailed"
+            case .operationRejected: return "operationRejected"
+            case .sessionFailed: return "sessionFailed"
+            case .passwordRequired: return "passwordRequired"
+            case .unknownOutput: return "unknownOutput"
+            case .invalidDescriptor: return "invalidDescriptor"
+            case .engineThreadFailed: return "engineThreadFailed"
+            case .opTimedOut: return "opTimedOut"
+            }
+        case let error as PTPClockUnavailableError:
+            return error.outcome.telemetryName
+        default:
+            return String(describing: type(of: error))
+        }
+    }
+
     // MARK: AirPlay passwords
 
     /// The cause for an engine failure, read against what the receiver
     /// advertises. A password demand on an on-screen-code receiver is a code;
+    /// on an every-time code receiver it is unsupported, since the sender asks
+    /// that receiver for a fresh code on every start and no retry gets through;
     /// a failure the engine gives no reason for is the receiver's advertised
     /// demand when it has one, else `.unknown`. A password demand on a
     /// Home-only receiver is the Home restriction, since no password satisfies it.
@@ -5951,6 +6142,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         if passwordRequired {
             switch access {
             case .onScreenCode: return .codeRequired
+            case .onScreenCodeEveryTime: return .codeEveryTimeUnsupported
             case .homeMembersOnly: return .homeMembersOnly
             default: return .authRequired
             }
@@ -5962,19 +6154,26 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         }
     }
 
-    /// Whether a failure is a password or code demand that no password was
-    /// tried against yet. Such a speaker stays available; only a refused
-    /// password makes it unavailable (owner's ruling 2026-10-04).
+    /// Whether a failure is a password or code demand that no credential (a
+    /// password or a pairing key) was tried against yet. Such a speaker stays
+    /// available; only a refused credential makes it unavailable (owner's
+    /// ruling 2026-10-04).
     static func waitsForPassword(_ cause: ConnectionFailure.Cause, fedPassword: String?) -> Bool {
         (cause == .authRequired || cause == .codeRequired) && fedPassword == nil
     }
 
-    /// Whether a failure is a password demand that no password was tried
-    /// against yet, which parks the speaker in `.awaitingPassword` instead of
-    /// `.failed`. Keyed on the cause, like ``waitsForPassword``, so an `.open`
-    /// speaker that demands a password waits too. A code demand stays a failure.
+    /// Whether a failure is a password or code demand that no credential (a
+    /// password or a pairing key) was tried against yet, which parks the speaker
+    /// in `.awaitingPassword` instead of `.failed`. Keyed on the cause, like
+    /// ``waitsForPassword``, so an `.open` speaker that demands a password waits too.
     static func awaitsPassword(_ cause: ConnectionFailure.Cause, fedPassword: String?) -> Bool {
-        cause == .authRequired && fedPassword == nil
+        (cause == .authRequired || cause == .codeRequired) && fedPassword == nil
+    }
+
+    /// The credential last fed to the engine for `id`: its password, else its
+    /// pairing key. On `stateQueue`.
+    func fedCredential(_ id: String) -> String? {
+        fedDescriptors[id]?.password ?? fedDescriptors[id]?.authKey
     }
 
     /// Who submitted the password now being tried, per device id (`"mac"` or
@@ -5986,8 +6185,14 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// it), so a submit buys at most one extra attempt.
     private var passwordResubmitted: [String: String] = [:]
 
-    /// Runs `submitAirPlayPassword`'s Keychain writes one at a time, in submit order.
+    /// Runs `submitAirPlayPassword`'s Keychain writes (passwords and pairing
+    /// keys) one at a time, in the order enqueued.
     private let passwordWriteQueue = DispatchQueue(label: "NativeBackend.passwordWrites")
+
+    /// Forgets per id. A queued submit write whose captured count no longer
+    /// matches skips the store, so it cannot undo a Forget that ran after the
+    /// submit. On `stateQueue`.
+    private var forgetGeneration: [String: Int] = [:]
 
     /// The typed password the converge catch spent its mark on, for exactly
     /// the extra attempt it grants; `descriptorToFeed` consumes it.
@@ -5998,6 +6203,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// for each. On `stateQueue`.
     /// razor: a different failure report landing before the catch counts as the echo, so the real echo then parks; tag reports with their add to close it.
     private var expectStaleFailure: Set<String> = []
+
+    /// Ids whose stored pairing key the receiver refused since launch; feeding
+    /// skips the key until a new one is stored, so a Keychain delete that
+    /// failed cannot put the refused key back on every join. On `stateQueue`.
+    private var rejectedPairingKeyIDs: Set<String> = []
 
     /// Ids the failure arm has seen a failure report for since their last
     /// `descriptorToFeed`, so the catch knows the echo already landed.
@@ -6027,6 +6237,12 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// On `stateQueue`.
     private func applyPasswordFailureLocked(state: OutputState, cause: ConnectionFailure.Cause, device: inout Device) {
         let fedPassword = fedDescriptors[device.id]?.password
+        if state == .passwordRequired, fedDescriptors[device.id]?.authKey != nil {
+            // A pairing key the receiver refused is spent: delete it, like the password below.
+            passwordStore.removePairingKey(for: device.id)
+            rejectedPairingKeyIDs.insert(device.id)
+            device.hasStoredPassword = false
+        }
         if state == .passwordRequired, fedPassword != nil {
             // Deletes are exempt from the off-`stateQueue` Keychain rule (AGENTS-HISTORY.md,
             // 2026-10-04 AirPlay passwords): they target an item this app's own signature
@@ -6036,7 +6252,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             passwordStore.removePassword(for: device.id)
             device.hasStoredPassword = false
         }
-        if Self.waitsForPassword(cause, fedPassword: fedPassword) {
+        if Self.waitsForPassword(cause, fedPassword: fedCredential(device.id)) {
             device.isAvailable = true
         }
     }
@@ -6050,19 +6266,101 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         // Keychain write runs off `stateQueue`, and `completion` (the caller's
         // retry) runs on main after it, so the retry reads the new password.
         // Writes are enqueued on one serial queue from `stateQueue`, so two
-        // submits land in submit order; deletes are unchanged (synchronous on
-        // `stateQueue` at the refusal sites, the caller's thread in Forget), and
-        // a delete that runs after the mark is skipped only while a whole-system
-        // connect holds the slot.
+        // submits land in submit order; deletes are synchronous on `stateQueue`
+        // at the refusal sites and on the caller's thread in Forget, and a write
+        // queued before a Forget skips the store. A delete that runs after the
+        // mark is skipped only while a whole-system connect holds the slot.
         stateQueue.async {
+            switch self.known[id]?.airPlayAccess {
+            case .onScreenCode?:
+                self.submitCodeLocked(password, for: id, source: source, completion: completion)
+                return
+            case .onScreenCodeEveryTime?:
+                // No code carries an every-time receiver's join (`.codeEveryTimeUnsupported`),
+                // so nothing is tried and nothing retries.
+                Telemetry.log(.airplay, "every_time_code_ignored", ["device": id])
+                return
+            default: break
+            }
             self.passwordResubmitted[id] = password
             self.pendingPasswordOutcome[id] = source
             self.applyLocal(id) { $0.hasStoredPassword = true }
             let store = self.passwordStore
-            self.passwordWriteQueue.async {
-                store.setPassword(password, for: id)
+            let generation = self.forgetGeneration[id]
+            self.passwordWriteQueue.async { [weak self] in
+                if self?.stateQueue.sync(execute: { self?.forgetGeneration[id] }) == generation {
+                    store.setPassword(password, for: id)
+                }
                 DispatchQueue.main.async(execute: completion)
             }
+        }
+    }
+
+    /// The on-screen-code side of `submitAirPlayPassword`: pair with the typed
+    /// code through `engine.authorize`, store the key the first-time-only
+    /// receiver keeps (an every-time receiver never reaches this path), then run
+    /// `completion` (the caller's retry, which feeds the key). A refused code
+    /// fails the speaker as `.codeRequired` and never retries. On `stateQueue`.
+    private func submitCodeLocked(_ code: String, for id: String, source: String,
+                                  completion: @escaping @Sendable () -> Void) {
+        pendingPasswordOutcome[id] = source
+        guard let outputID = outputIDs[id] else {
+            enterFailure(id, cause: .unknown)
+            return
+        }
+        let storesKey = known[id]?.airPlayAccess == .onScreenCode
+        let engine = self.engine
+        let store = self.passwordStore
+        let writes = self.passwordWriteQueue
+        let generation = forgetGeneration[id]
+        // The dispatcher echoes the authorize op's terminal on the state stream
+        // after its completion (`.passwordRequired` for a refused code, `.stopped`
+        // for an accepted one); drop it as the converge catch drops its own, or
+        // it reopens the code wait or stops the retry. Armed before the call,
+        // since the echo can land before this task hops back to `stateQueue`.
+        expectStaleFailure.insert(id)
+        Task { [weak self] in
+            do {
+                let key = try await engine.authorize(outputID, pin: code)
+                // The password submits' write queue, so this write lands after
+                // theirs. A Forget since the submit skips it.
+                // razor: a Forget between the check and the write still loses; holding both under one lock would close it.
+                writes.async {
+                    let forgotten = self?.stateQueue.sync { self?.forgetGeneration[id] } != generation
+                    if storesKey, !forgotten {
+                        store.setPairingKey(key, for: id)
+                        self?.stateQueue.sync {
+                            self?.rejectedPairingKeyIDs.remove(id)
+                            self?.applyLocal(id) { $0.hasStoredPassword = true }
+                        }
+                    }
+                    DispatchQueue.main.async(execute: completion)
+                }
+            } catch {
+                let refused = (error as? AirPlayEngineError) == .passwordRequired
+                let cause: ConnectionFailure.Cause = refused ? .codeRequired : .unknown
+                // Same rule as the converge catch: a timeout or a stopped engine has no echo.
+                let echoes = (error as? AirPlayEngineError).map {
+                    $0 == .sessionFailed || $0 == .passwordRequired
+                } ?? false
+                self?.stateQueue.sync {
+                    if !echoes { self?.expectStaleFailure.remove(id) }
+                    if refused { self?.applyLocal(id) { $0.isAvailable = false } }
+                    self?.enterFailure(id, cause: cause, detail: String(describing: error))
+                }
+                Telemetry.fail(.airplay, "airplay:connect_failed",
+                               local: ["device": id, "detail": String(describing: error)],
+                               shared: ["cause": "\(cause)", "reason": Self.failureReason(error)])
+            }
+        }
+    }
+
+    /// `"onScreenCode"` for a speaker that shows a code, else `"password"`: the
+    /// `kind` property of the `airplay:code_*` events. On `stateQueue`.
+    private func credentialKindLocked(_ id: String) -> String {
+        switch known[id]?.airPlayAccess {
+        case .onScreenCode?, .onScreenCodeEveryTime?: return "onScreenCode"
+        default: return "password"
         }
     }
 
@@ -6073,24 +6371,32 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         let outcome: String
         switch newState {
         case .connected: outcome = "accepted"
-        case .failed(let failure): outcome = failure.cause == .authRequired ? "rejected" : "failed"
+        case .failed(let failure):
+            outcome = failure.cause == .authRequired || failure.cause == .codeRequired ? "rejected" : "failed"
         default: return
         }
         pendingPasswordOutcome[id] = nil
         Analytics.capture("airplay:code_submitted",
-                          ["kind": "password", "outcome": outcome, "source": source])
+                          ["kind": credentialKindLocked(id), "outcome": outcome, "source": source])
     }
 
     public func forgetAirPlayPassword(for id: String) {
+        // The deletes run on the caller's thread before returning, so the next
+        // `descriptorToFeed` cannot read what was forgotten. Deletes are exempt
+        // from the off-main Keychain rule: they never raise an access prompt.
+        stateQueue.async { self.forgetGeneration[id, default: 0] += 1 }
         passwordStore.removePassword(for: id)
+        passwordStore.removePairingKey(for: id)
         stateQueue.async {
             self.passwordResubmitted[id] = nil
             self.passwordForNextFeed[id] = nil
             self.expectStaleFailure.remove(id)
             self.failureEchoSeen.remove(id)
+            self.rejectedPairingKeyIDs.remove(id)
             self.applyLocal(id) { $0.hasStoredPassword = false }
+            // An id that has left `known` reports "password".
+            Analytics.capture("airplay:code_forgotten", ["kind": self.credentialKindLocked(id)])
         }
-        Analytics.capture("airplay:code_forgotten", ["kind": "password"])
     }
 
     /// Enter the resting `.failed` state (converge add-throw or an out-of-band
@@ -6274,8 +6580,15 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         // tap, so the Mac keeps playing with no banner (owner ruling 2026-10-06).
         let want = !suspended && !silenceCaptureOverride
             && expectedSelected.contains(where: selectedSpeakerWantsStreamLocked)
-        guard want != captureRunning else { return }   // already at target
+        let changed = want != captureRunning
         captureRunning = want
+        // Before the early return, so wake re-decides the listen-only tap even
+        // when capture stays off, and before `coordinator.start()` is enqueued,
+        // so the listen-only tap's stop lands first on the same serial queue.
+        // On the stop edge it runs after `coordinator.stop()` instead (below),
+        // so un-muting the Mac never waits behind the listen tap's creation.
+        if want || !changed { reconcileLocalMeterTapLocked() }
+        guard changed else { return }   // already at target
         if want {
             // T2 (send_sched dead-code fix, whole-system-dropout investigation):
             // capture just started — (re-)arm the scheduling snapshot poll HERE,
@@ -6285,7 +6598,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // `startSchedulingSnapshotPolling()` is idempotent on its own (it
             // cancels any previously-scheduled work item before arming a fresh
             // one), and this call site is additionally guarded by the
-            // `want != captureRunning` check above, so a second selection while
+            // `guard changed` above, so a second selection while
             // already capturing never reaches here to re-arm a second time.
             startSchedulingSnapshotPolling()
         } else {
@@ -6325,6 +6638,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         captureControlQueue.async {
             if want { coordinator.start() } else { coordinator.stop() }
         }
+        if !want { reconcileLocalMeterTapLocked() }
     }
 
     /// Move every LEVELED app between its two renderers on a `captureRunning`

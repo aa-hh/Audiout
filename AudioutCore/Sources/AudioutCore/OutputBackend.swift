@@ -536,6 +536,13 @@ public protocol MeteringControlling: AnyObject {
     /// leave it `false` again — a closed popover has nobody to render a meter for,
     /// so there's no reason to keep spending a per-buffer RMS pass on it.
     func setMeteringActive(_ active: Bool)
+
+    /// Keep per-device `.level` flowing while the popover is closed, for a host
+    /// that only needs to know whether sound is coming out (the app's Touch Bar
+    /// play/pause glyph). Unlike ``setMeteringActive(_:)`` it starts no
+    /// metering-only per-app tap: those exist only for the popover's app rows.
+    /// Independent of the popover gate; levels flow while either is on.
+    func setDeviceLevelsWanted(_ wanted: Bool)
 }
 
 /// The optional per-app routing capability (T6/T7). A backend that can stream a
@@ -738,6 +745,29 @@ public func makeBackend(
         let captureCoordinator = NativeCaptureCoordinator(
             engine: engine, processResolver: resolver)
         nativeBackend.captureCoordinator = captureCoordinator
+        // Closures copied from `NativeCaptureCoordinator`'s convenience init.
+        nativeBackend.localMeterCapture = NativeCaptureCoordinator(
+            makeTap: {
+                if #available(macOS 14.2, *) {
+                    return CoreAudioSystemTap(name: "AudioutLocalMeter")
+                } else {
+                    return UnavailableSystemTap()
+                }
+            },
+            sink: DiscardingPCMSink(),
+            makeConverter: { AVFormatConverter(from: $0) },
+            resolveDefaultOutputDeviceID: {
+                if #available(macOS 14.2, *) {
+                    guard let raw = try? CoreAudioSystemTap.defaultOutputDeviceID() else { return nil }
+                    return EffectiveCaptureDevice.resolve(
+                        default: raw,
+                        uidOf: { try? CoreAudioSystemTap.readDeviceUID($0) },
+                        mainSubDeviceOf: CoreAudioSystemTap.aggregateMainSubDeviceID)
+                }
+                return nil
+            },
+            processResolver: resolver,
+            muteBehavior: .unmuted)
         // Passive drift tracking (roadmap 085 ticket 05). Wired here because
         // the reference it correlates the microphone against is this
         // coordinator's retained outgoing audio, and this is the only place
@@ -870,4 +900,9 @@ func nativeStartBufferMs(
     settings: AppSettings = AppSettings()
 ) -> Int {
     nativeStartBufferEnvOverrideMs(environment: environment) ?? settings.startBufferMs
+}
+
+/// The listen-only tap's sink: it meters the Mac and sends nothing anywhere.
+private struct DiscardingPCMSink: PCMSink {
+    func write(pcm: Data, pts: timespec) {}
 }

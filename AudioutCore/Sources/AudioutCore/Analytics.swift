@@ -41,15 +41,21 @@ public enum Analytics {
         /// pre-consent buffer flush uses it (see ``capture(_:_:)``); a sink
         /// that leaves it nil sends those events stamped at flush time.
         public let captureAt: (@Sendable (String, [String: String], Date) -> Void)?
+        /// `capture` for properties that are not all strings. Only
+        /// ``captureStructured(_:_:)`` uses it; a sink that leaves it nil
+        /// drops those events.
+        public let captureStructured: (@Sendable (String, [String: any Sendable]) -> Void)?
 
         public init(capture: @escaping @Sendable (String, [String: String]) -> Void,
                     captureError: @escaping @Sendable (String, [String: String]) -> Void,
                     consentChanged: @escaping @Sendable (Bool) -> Void,
-                    captureAt: (@Sendable (String, [String: String], Date) -> Void)? = nil) {
+                    captureAt: (@Sendable (String, [String: String], Date) -> Void)? = nil,
+                    captureStructured: (@Sendable (String, [String: any Sendable]) -> Void)? = nil) {
             self.capture = capture
             self.captureError = captureError
             self.consentChanged = consentChanged
             self.captureAt = captureAt
+            self.captureStructured = captureStructured
         }
     }
 
@@ -163,6 +169,24 @@ public enum Analytics {
             return s.sink
         }
         snapshot?.captureError(name.description, properties)
+    }
+
+    /// Sends an event whose properties are not all strings. It exists for
+    /// PostHog survey events (``ExpiredTrialSurvey``), whose properties carry
+    /// arrays of strings and of dictionaries that ``capture(_:_:)`` cannot.
+    /// No sink, no consent, or a sink without `captureStructured`: no send.
+    ///
+    /// Like ``captureError(_:_:)``, nothing is held while consent is off.
+    ///
+    /// The privacy fence (PRODUCT.md Data Collection) applies to every
+    /// property, with one owner-approved exception: the survey's free-text
+    /// answer, which is typed by the user and sent as written.
+    public static func captureStructured(_ event: StaticString, _ properties: [String: any Sendable]) {
+        let snapshot: Sink? = state.withLock { s in
+            guard s.consent else { return nil }
+            return s.sink
+        }
+        snapshot?.captureStructured?(event.description, properties)
     }
 
     // MARK: - Implementation

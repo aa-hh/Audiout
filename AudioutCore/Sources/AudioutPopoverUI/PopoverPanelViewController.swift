@@ -747,7 +747,7 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
             chevron.isBordered = false
             chevron.imagePosition = .imageOnly
             chevron.setContentHuggingPriority(.required, for: .horizontal)
-            chevron.contentTintColor = Tokens.Color.secondaryLabel
+            chevron.contentTintColor = Tokens.Color.label2
             chevron.setAccessibilityLabel(collapsed ? "Expand \(header)" : "Collapse \(header)")
             let toggle = onToggle
             let onChevron = ClosureActionTarget { toggle?() }
@@ -853,7 +853,7 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
             button.showsBorderOnlyWhileMouseInside = true
             button.imagePosition = .imageOnly
             button.imageScaling = .scaleProportionallyDown
-            button.contentTintColor = Tokens.Color.secondaryLabel
+            button.contentTintColor = Tokens.Color.label2
             button.isEnabled = accessory.isEnabled
             // System-rendered template SF Symbol (task D — `plus`), verified
             // non-nil with a graceful fallback.
@@ -916,7 +916,9 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
         // cards draw zero chrome of their own now) BEFORE this card, skipped
         // for the very first section.
         if stackView.arrangedSubviews.contains(where: { $0 is CardView }) {
-            let divider = CardDividerView()
+            // `containerEdge`: it crosses bare canvas, where the in-container
+            // `hairline` never goes.
+            let divider = RuleView(tone: .containerEdge)
             divider.translatesAutoresizingMaskIntoConstraints = false
             stackView.addArrangedSubview(divider)
             NSLayoutConstraint.activate([
@@ -1370,22 +1372,17 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
 
     /// Give a card/subsection TITLE label the AX **heading** role, so
     /// VoiceOver users can jump section-to-section (VO-⌘-H) instead of
-    /// walking every row. The raw string is the value of `kAXHeadingRole`
-    /// (HIServices) and of AppKit's macOS-26 `NSAccessibilityHeadingRole` —
-    /// spelled out because the AppKit constant does not import into Swift on
-    /// every toolchain this repo builds with, and the AX runtime has
-    /// recognized the role since long before AppKit named it. The label
-    /// still speaks its string as its value; the composed row-label design
-    /// elsewhere is untouched.
+    /// walking every row. The label still speaks its string as its value;
+    /// the composed row-label design elsewhere is untouched.
     private static func markAsAccessibilityHeading(_ label: NSTextField) {
-        label.setAccessibilityRole(NSAccessibility.Role(rawValue: "AXHeading"))
+        label.setAccessibilityHeading()
     }
 
     /// A column-header label (Output / Source / Offset / Redirect), placed over
     /// its column in the combined header row built by `beginCard`. Volume is
     /// deliberately NOT among them — see `PopoverController.rebuild()`.
     private static func makeColumnHeaderLabel(_ text: String) -> NSTextField {
-        let label = makeLegendLabel(text, weight: .medium, color: Tokens.Color.secondaryLabel)
+        let label = makeLegendLabel(text, weight: .medium, color: Tokens.Color.label2)
         label.alignment = .center
         return label
     }
@@ -1418,7 +1415,7 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
         let label = NSTextField(labelWithString: title)
         label.translatesAutoresizingMaskIntoConstraints = false
         label.font = Tokens.Font.captionMedium
-        label.textColor = Tokens.Color.inkTertiary
+        label.textColor = Tokens.Color.label3
         // Subsection titles are headings too — one rank below the card title,
         // same VoiceOver section-jumping (VO-⌘-H).
         Self.markAsAccessibilityHeading(label)
@@ -1441,7 +1438,7 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
             chevron.isBordered = false
             chevron.imagePosition = .imageOnly
             chevron.setContentHuggingPriority(.required, for: .horizontal)
-            chevron.contentTintColor = Tokens.Color.inkTertiary
+            chevron.contentTintColor = Tokens.Color.label3
             chevron.setAccessibilityLabel(collapsed ? "Expand \(title)" : "Collapse \(title)")
             let onChevron = ClosureActionTarget { onToggle?() }
             chevron.target = onChevron
@@ -1533,7 +1530,7 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
         // it the FAINTEST text there, under the 4.5:1 floor in light. The dimmed
         // `%` readouts sit at tertiary legitimately (they label DISABLED
         // sliders); a note about live routing does not.
-        label.textColor = Tokens.Color.secondaryLabel
+        label.textColor = Tokens.Color.label2
         label.lineBreakMode = .byTruncatingTail
         label.maximumNumberOfLines = 1
         let wrapper = NSView()
@@ -1565,9 +1562,9 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
 
     /// Show (or, with `nil`, clear) a full-width warning banner PINNED above every
     /// card — used by the generalized silence watchdog to say "Speakers unreachable
-    /// — playing on this Mac. Will resume automatically." A stock system-orange
-    /// rounded inset card with a warning glyph and a wrapping label; system colors
-    /// only, no custom drawing. `clearRows()` drops it along with the cards, so the
+    /// — playing on this Mac. Will resume automatically." The `.warning` note
+    /// banner: `Tokens.Color.failure` on the shared tinted inset ground, a warning
+    /// glyph and a wrapping label. `clearRows()` drops it along with the cards, so the
     /// host re-applies it at the tail of every `rebuild()`.
     ///
     /// `action`, when non-nil, renders a trailing call-to-action button — the
@@ -1887,31 +1884,6 @@ private final class ClosureActionTarget: NSObject {
     @objc func fire() { action() }
 }
 
-/// The 1 px divider between de-nested cards — the ONLY visual separation
-/// between them now that they draw no material/shadow/rim of their own
-/// (`CardView`). It crosses bare canvas rather than sitting inside a
-/// container, and it is the section's own boundary, so it stamps
-/// `containerEdge` (Rule 5: a divider on bare canvas never wears the
-/// in-container token) — measured 1.95:1 on the dark canvas, 2.02:1 on the
-/// light one. Purely
-/// decorative and non-interactive; `beginCard` inserts one into `stackView`
-/// before every card after the first.
-private final class CardDividerView: NSView {
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
-        wantsLayer = true
-        layer?.backgroundColor = Tokens.Color.containerEdge.cgColor
-    }
-
-    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-
-    override func hitTest(_ point: NSPoint) -> NSView? { nil }
-
-    override func viewDidChangeEffectiveAppearance() {
-        super.viewDidChangeEffectiveAppearance()
-        layer?.backgroundColor = Tokens.Color.containerEdge.cgColor
-    }
-}
 
 /// The header rows' host view: a plain container that, when told it is a
 /// collapse click target (`showsHoverWash` — C4 keeps the WHOLE row as the
@@ -1921,51 +1893,29 @@ private final class CardDividerView: NSView {
 /// before commitment. Non-collapsible headers never wash. Hover needs a real
 /// pointer, so snapshot/headless renders are byte-identical to before.
 ///
-/// The pointer-position reconcile in `mouseMoved` is `DeviceRowView`'s T-U8
-/// discipline: an `NSTrackingArea` never emits `mouseExited` toward an
-/// untracked dead zone, so exit alone can leave the last header stuck lit.
+/// Hover comes from a `HoverTracker`, which re-reads the real pointer: an
+/// `NSTrackingArea` never emits `mouseExited` toward an untracked dead zone,
+/// so exit alone can leave the last header stuck lit.
 private final class HeaderHoverWashView: NSView {
     var showsHoverWash = false { didSet { updateTrackingAreas() } }
-    private var hovered = false
+    private lazy var hoverTracker = HoverTracker(view: self) { [weak self] _ in
+        guard let self else { return }
+        self.setNeedsDisplay(self.bounds)
+    }
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
-        for area in trackingAreas { removeTrackingArea(area) }
-        guard showsHoverWash else { return }
-        addTrackingArea(NSTrackingArea(
-            rect: .zero,
-            options: [.mouseEnteredAndExited, .mouseMoved, .activeInActiveApp, .inVisibleRect],
-            owner: self, userInfo: nil))
-    }
-
-    override func mouseEntered(with event: NSEvent) { setHovered(true) }
-    override func mouseExited(with event: NSEvent) { setHovered(false) }
-    override func mouseMoved(with event: NSEvent) {
-        guard let window else { return setHovered(false) }
-        let local = convert(window.mouseLocationOutsideOfEventStream, from: nil)
-        setHovered(bounds.contains(local))
+        hoverTracker.update(active: showsHoverWash)
     }
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        setHovered(false)   // a rebuild/remount never keeps a stale wash
-    }
-
-    private func setHovered(_ hovered: Bool) {
-        guard self.hovered != hovered else { return }
-        self.hovered = hovered
-        setNeedsDisplay(bounds)
+        hoverTracker.setHovered(false)   // a rebuild/remount never keeps a stale wash
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        if showsHoverWash && hovered {
-            let rect = bounds.insetBy(dx: PopoverColumnGrid.selectionHighlightInsetX,
-                                      dy: PopoverColumnGrid.selectionHighlightInsetY)
-            Tokens.Color.engagedChrome
-                .withAlphaComponent(PopoverColumnGrid.rowHoverWashAlpha).setFill()
-            NSBezierPath(roundedRect: rect,
-                         xRadius: PopoverColumnGrid.selectionHighlightCornerRadius,
-                         yRadius: PopoverColumnGrid.selectionHighlightCornerRadius).fill()
+        if showsHoverWash && hoverTracker.isHovered {
+            PopoverColumnGrid.fillRowWash(in: bounds, alpha: PopoverColumnGrid.rowHoverWashAlpha)
         }
         super.draw(dirtyRect)
     }

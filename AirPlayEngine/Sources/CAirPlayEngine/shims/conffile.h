@@ -83,7 +83,9 @@ void conffile_set_libhash(uint64_t h);              /* device id / PTP clock see
  * first '@'). password == NULL clears it. Both strings are copied, and a
  * replaced copy is never freed, because device->password and session->password
  * alias it (airplay.c:4129, :1706, raop.c:4472, shims/outputs.c:143).
- * A per-device auth_key setter for on-screen code pairing belongs in the same table. */
+ * The on-screen code pairing key is not kept here: AirPlayEngine.feedDescriptor
+ * (Swift) writes device->auth_key from DeviceDescriptor.authKey on every
+ * appearing feed. */
 void conffile_set_device_password(const char *name, const char *password);
 
 /* --- Unknown-key loud-miss policy (first-light hardening #5) ---

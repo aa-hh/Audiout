@@ -458,7 +458,7 @@ import AudioutProtocol
         #expect(row.test_isEnabledOn, "switch is ON")
         // The icon is neutral in BOTH states now (2026-07-17 redesign): identity
         // only, no accent-when-selected fill. Selection reads from the switch.
-        #expect(row.test_iconTint == Tokens.Color.secondaryLabel, "icon is always neutral")
+        #expect(row.test_iconTint == Tokens.Color.label2, "icon is always neutral")
 
         // Toggle it OFF — the row must return to the unselected appearance.
         _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: false)
@@ -466,7 +466,7 @@ import AudioutProtocol
         #expect(row.test_rowWash == nil, "a deselected row paints no wash")
         #expect(!(row.test_isHovered), "no stale hover wash after deselect")
         #expect(!(row.test_isEnabledOn), "switch returned to OFF")
-        #expect(row.test_iconTint == Tokens.Color.secondaryLabel, "icon tint stays neutral (always secondary)")
+        #expect(row.test_iconTint == Tokens.Color.label2, "icon tint stays neutral (always secondary)")
     }
 
     /// T-U9a — the last-row sticky-highlight bug. A row hovered by the pointer
@@ -792,6 +792,169 @@ import AudioutProtocol
         #expect(popover.test_diagnosisPanel(for: "office") == nil)
         #expect(sheet.test_connectButton.isEnabled)
         #expect(popover.test_passwordSheet() != nil)
+    }
+
+    // Turns red if the `.failed` edge in `handleConnectionTransitions` shows the password line or the headline for a refused code.
+    @Test func codeSheetShowsTheCodeRejectionAfterSubmitFails() async throws {
+        let (popover, _, backend) = try await makePopover()
+        pushOffice(popover, backend) {
+            $0.airPlayAccess = .onScreenCode
+            $0.connectionState = .awaitingPassword
+        }
+        let row = try #require(popover.test_deviceRow(for: "office"))
+        row.test_clickEnterPassword()
+        let sheet = try #require(popover.test_passwordSheet())
+        sheet.test_typeIntoBox(0, "1234")
+        pushOffice(popover, backend) {
+            $0.airPlayAccess = .onScreenCode
+            $0.connectionState = .failed(ConnectionFailure(cause: .codeRequired))
+        }
+        #expect(sheet.test_resultText == "That code didn't work. Check the screen and try again.")
+        #expect(popover.test_passwordSheet() === sheet)
+    }
+
+    /// The heading text of `sheet`, read off its labels.
+    private func headings(of sheet: SpeakerPasswordSheetViewController) -> [String] {
+        SpeakerPasswordSheetTests.textFields(in: sheet.view).map(\.stringValue)
+    }
+
+    // Turns red if the clicked-join record is not consumed by the first `.awaitingPassword` edge, or if the toggle opens the sheet before the wait.
+    @Test func joiningACodeSpeakerOpensTheCodeSheetWhenTheJoinStartsWaiting() async throws {
+        let (popover, _, backend) = try await makePopover()
+        pushOffice(popover, backend) {
+            $0.airPlayAccess = .onScreenCode
+            $0.connectionState = .off
+        }
+        let row = try #require(popover.test_deviceRow(for: "office"))
+        popover.deviceRow(row, didToggleEnabled: true, for: "office")
+        #expect(popover.test_passwordSheet() == nil)
+
+        pushOffice(popover, backend) {
+            $0.airPlayAccess = .onScreenCode
+            $0.connectionState = .connecting
+        }
+        #expect(popover.test_passwordSheet() == nil)
+
+        pushOffice(popover, backend) {
+            $0.airPlayAccess = .onScreenCode
+            $0.connectionState = .awaitingPassword
+        }
+        let sheet = try #require(popover.test_passwordSheet())
+        #expect(headings(of: sheet).contains("Enter the code shown on “\(row.device.name)”"))
+
+        pushOffice(popover, backend) {
+            $0.airPlayAccess = .onScreenCode
+            $0.connectionState = .awaitingPassword
+        }
+        #expect(popover.test_passwordSheet() === sheet)
+    }
+
+    // Turns red if the `.awaitingPassword` arm opens the code sheet while the popover is hidden, where the retained sheet cannot present and blocks every later link click.
+    @Test func aCodeWaitWhileThePopoverIsHiddenOpensNoSheetAndTheLinkStillWorks() async throws {
+        let (popover, _, backend) = try await makePopover()
+        pushOffice(popover, backend) {
+            $0.airPlayAccess = .onScreenCode
+            $0.connectionState = .off
+        }
+        let row = try #require(popover.test_deviceRow(for: "office"))
+        popover.deviceRow(row, didToggleEnabled: true, for: "office")
+
+        popover.test_isShownOverride = false
+        pushOffice(popover, backend) {
+            $0.airPlayAccess = .onScreenCode
+            $0.connectionState = .awaitingPassword
+        }
+        #expect(popover.test_passwordSheet() == nil)
+
+        popover.test_isShownOverride = true
+        pushOffice(popover, backend) {
+            $0.airPlayAccess = .onScreenCode
+            $0.connectionState = .awaitingPassword
+        }
+        #expect(popover.test_passwordSheet() == nil, "the hidden wait spent the click")
+        try #require(popover.test_deviceRow(for: "office")).test_clickEnterPassword()
+        #expect(popover.test_passwordSheet() != nil)
+    }
+
+    // Turns red if the `.awaitingPassword` arm opens the sheet for a speaker missing from `codeJoinClickedIDs`.
+    @Test func aCodeWaitNobodyClickedHereOpensNoSheet() async throws {
+        let (popover, _, backend) = try await makePopover()
+        pushOffice(popover, backend) {
+            $0.airPlayAccess = .onScreenCode
+            $0.connectionState = .awaitingPassword
+        }
+        #expect(popover.test_passwordSheet() == nil)
+
+        let row = try #require(popover.test_deviceRow(for: "office"))
+        row.test_clickEnterPassword()
+        #expect(popover.test_passwordSheet() != nil)
+    }
+
+    // Turns red if `retryConnection(for:)` stops recording a code speaker's retry in `codeJoinClickedIDs`.
+    @Test func tryAgainOnARefusedCodeReopensTheSheetWhenTheJoinWaits() async throws {
+        let (popover, _, backend) = try await makePopover()
+        _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
+        pushOffice(popover, backend) {
+            $0.airPlayAccess = .onScreenCode
+            $0.connectionState = .failed(ConnectionFailure(cause: .codeRequired))
+        }
+        #expect(popover.test_diagnosisPanel(for: "office") != nil)
+        #expect(popover.test_passwordSheet() == nil)
+
+        popover.test_tapRetry(for: "office")
+        pushOffice(popover, backend) {
+            $0.airPlayAccess = .onScreenCode
+            $0.connectionState = .awaitingPassword
+        }
+        #expect(popover.test_passwordSheet() != nil)
+    }
+
+    // Turns red if `retryConnection(for:)` records a code speaker in `codeJoinClickedIDs` when the retry was refused.
+    @Test func aRefusedTryAgainDoesNotArmTheCodeSheet() async throws {
+        let (popover, controller, backend) = try await makePopover()
+        _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
+        pushOffice(popover, backend) {
+            $0.airPlayAccess = .onScreenCode
+            $0.connectionState = .failed(ConnectionFailure(cause: .codeRequired))
+        }
+        #expect(popover.test_diagnosisPanel(for: "office") != nil)
+        // Another speaker takes the one-speaker limit, so the retry's add is refused.
+        for id in controller.selectedDeviceIDs { _ = controller.setDeviceSelected(id, false) }
+        _ = controller.setDeviceSelected("homepod-bed", true)
+        controller.limitsToOneSpeaker = true
+
+        popover.test_tapRetry(for: "office")
+        #expect(!controller.isSpeakerSelected("office"), "the limit refused the retry")
+        pushOffice(popover, backend) {
+            $0.airPlayAccess = .onScreenCode
+            $0.connectionState = .awaitingPassword
+        }
+        #expect(popover.test_passwordSheet() == nil)
+    }
+
+    // Turns red if `dismissPasswordSheet` leaves the speaker in `codeJoinClickedIDs`, so a later wait reopens a cancelled sheet.
+    @Test func cancellingTheCodeSheetStopsItReopeningByItself() async throws {
+        let (popover, _, backend) = try await makePopover()
+        pushOffice(popover, backend) {
+            $0.airPlayAccess = .onScreenCode
+            $0.connectionState = .awaitingPassword
+        }
+        let row = try #require(popover.test_deviceRow(for: "office"))
+        // A click recorded while the speaker already waits, then the link opens the sheet: only Cancel can drop the record.
+        popover.deviceRow(row, didToggleEnabled: true, for: "office")
+        try #require(popover.test_deviceRow(for: "office")).test_clickEnterPassword()
+        try #require(popover.test_passwordSheet()).test_tapCancel()
+        #expect(popover.test_passwordSheet() == nil)
+
+        pushOffice(popover, backend) {
+            $0.airPlayAccess = .onScreenCode
+            $0.connectionState = .connecting
+        }
+        pushOffice(popover, backend) {
+            $0.airPlayAccess = .onScreenCode
+            $0.connectionState = .awaitingPassword
+        }
+        #expect(popover.test_passwordSheet() == nil)
     }
 
     // Dropping the `passwordSheetDeviceID` check around the panel open on the `.failed` edge in `handleConnectionTransitions` turns it red.
@@ -4632,6 +4795,168 @@ extension SerializedSharedState {
             #expect(popover.test_noteViewIsThankYouCard)
         }
 
+        // MARK: Expired-trial survey invite
+
+        /// Wires an owed survey invite whose done flag behaves like the host's.
+        @MainActor private final class Invite {
+            var owed = true
+            var spentCalls = 0
+            var answered: [ExpiredTrialSurvey] = []
+            /// What the host's unanswered-close count answers; `nil` leaves it unwired.
+            var unansweredIsLast: Bool?
+            var unansweredCalls = 0
+            func wire(_ popover: PopoverController) {
+                popover.surveyInviteProvider = { [unowned self] in owed ? ExpiredTrialSurveyFixture.survey : nil }
+                popover.onSurveyInviteSpent = { [unowned self] in spentCalls += 1; owed = false }
+                popover.onSurveyAnswer = { [unowned self] in answered.append($0) }
+                if let isLast = unansweredIsLast {
+                    popover.onSurveyInviteUnanswered = { [unowned self] in unansweredCalls += 1; return isLast }
+                }
+            }
+        }
+
+        private func trialEndedPopover(invite: Invite?) -> PopoverController {
+            let (popover, _) = makePopover()
+            invite?.wire(popover)
+            popover.setUnregisteredNote(.trialEnded)
+            return popover
+        }
+
+        /// Red if an owed invite stopped taking the trial-ended note's place on
+        /// open, lost its Answer button or Not now link, or reported itself
+        /// shown again on a later rebuild in the same open.
+        @Test func theOwedInviteMountsOnOpenAndReportsOnce() {
+            let invite = Invite()
+            let popover = trialEndedPopover(invite: invite)
+            let seen = StructuredEvents.recording {
+                popover.test_simulateOpen()
+                popover.rebuild()
+            }
+            #expect(popover.test_systemAirPlayNoteText == PopoverController.surveyInviteText)
+            #expect(popover.test_systemAirPlayNoteHasActionButton)
+            #expect(popover.test_systemAirPlayNoteHasTextAction)
+            #expect(seen.names() == ["survey shown"])
+            #expect(invite.spentCalls == 0, "raising the invite does not spend it")
+        }
+
+        /// Red if the invite rung showed (or reported) without a survey from
+        /// the host, replacing the trial-ended note with nothing behind it.
+        @Test func withNoSurveyTheTrialEndedNoteStays() {
+            let popover = trialEndedPopover(invite: nil)
+            let seen = StructuredEvents.recording { popover.test_simulateOpen() }
+            #expect(popover.test_systemAirPlayNoteText == PopoverController.unregisteredTrialEndedNoteText)
+            #expect(seen.names().isEmpty)
+        }
+
+        /// Red if Not now stopped sending `survey dismissed` with no answers,
+        /// stopped marking the invite done, left the invite in the slot, or
+        /// went through the unanswered-close count instead of spending at once.
+        @Test func notNowDismissesSpendsAndRestoresTheTrialNote() {
+            let invite = Invite()
+            invite.unansweredIsLast = false
+            let popover = trialEndedPopover(invite: invite)
+            popover.test_simulateOpen()
+            let seen = StructuredEvents.recording { popover.test_tapSystemAirPlayNoteTextAction() }
+            #expect(seen.names() == ["survey dismissed"])
+            #expect(seen.all.first?.1["$survey_partially_completed"] as? Bool == false)
+            #expect(invite.spentCalls == 1)
+            #expect(invite.unansweredCalls == 0)
+            #expect(popover.test_systemAirPlayNoteText == PopoverController.unregisteredTrialEndedNoteText)
+        }
+
+        /// Red if Answer stopped handing the survey to the host's card, or left
+        /// the invite owed so it would come back on the next open.
+        @Test func answerHandsTheSurveyToTheHostAndSpendsTheInvite() {
+            let invite = Invite()
+            let popover = trialEndedPopover(invite: invite)
+            popover.test_simulateOpen()
+            popover.test_tapSystemAirPlayNoteAction()
+            #expect(invite.answered == [ExpiredTrialSurveyFixture.survey])
+            #expect(invite.spentCalls == 1)
+            #expect(popover.test_systemAirPlayNoteText == PopoverController.unregisteredTrialEndedNoteText)
+        }
+
+        /// Red if the last allowed unanswered close (`onSurveyInviteUnanswered`
+        /// returning true) stopped counting as a decline: no `survey
+        /// dismissed`, or the invite left owed for the next open.
+        @Test func hidingOnTheLastUnansweredLookDismissesAndSpendsItOnce() {
+            let invite = Invite()
+            invite.unansweredIsLast = true
+            let popover = trialEndedPopover(invite: invite)
+            popover.test_simulateOpen()
+            let seen = StructuredEvents.recording {
+                popover.surfaceDidHide()
+                popover.surfaceDidHide()
+            }
+            #expect(seen.names() == ["survey dismissed"])
+            #expect(invite.spentCalls == 1)
+            #expect(invite.unansweredCalls == 1)
+        }
+
+        /// Red if a hide before the last unanswered look (`surfaceDidHide`
+        /// ignoring `onSurveyInviteUnanswered` returning false) spends the
+        /// invite or sends `survey dismissed`, or the invite stops coming back
+        /// on the next open.
+        @Test func hidingBeforeTheLastLookBringsTheInviteBackNextOpen() {
+            let invite = Invite()
+            invite.unansweredIsLast = false
+            let popover = trialEndedPopover(invite: invite)
+            popover.test_simulateOpen()
+            let hidden = StructuredEvents.recording { popover.surfaceDidHide() }
+            #expect(hidden.names().isEmpty)
+            #expect(invite.spentCalls == 0)
+            #expect(invite.unansweredCalls == 1)
+            let reopened = StructuredEvents.recording { popover.test_simulateOpen() }
+            #expect(reopened.names() == ["survey shown"])
+            #expect(popover.test_systemAirPlayNoteText == PopoverController.surveyInviteText)
+        }
+
+        /// Red if the invite pushed a capture-failure note out of the slot, or
+        /// reported itself shown while hidden behind one.
+        @Test func anInviteOutrankedByAFailureNoteIsNotRaised() {
+            let invite = Invite()
+            let popover = trialEndedPopover(invite: invite)
+            popover.setCaptureFailureMessage("Audiout can't capture system audio.")
+            let seen = StructuredEvents.recording { popover.test_simulateOpen() }
+            #expect(popover.test_systemAirPlayNoteText != PopoverController.surveyInviteText)
+            #expect(seen.names().isEmpty)
+            #expect(invite.spentCalls == 0)
+        }
+
+        /// Red if `setUnregisteredNote` stops clearing `raisedSurveyInvite`, or
+        /// clears it through `spendSurveyInvite`: a purchase with the popover
+        /// open would leave the invite up, or mark it done unanswered.
+        @Test func aPurchaseWithTheInviteUpRetiresItUnspent() {
+            let invite = Invite()
+            let popover = trialEndedPopover(invite: invite)
+            popover.test_simulateOpen()
+            #expect(popover.test_systemAirPlayNoteText == PopoverController.surveyInviteText)
+            let seen = StructuredEvents.recording { popover.setUnregisteredNote(nil) }
+            #expect(popover.test_systemAirPlayNoteText != PopoverController.surveyInviteText)
+            #expect(seen.names().isEmpty)
+            #expect(invite.spentCalls == 0)
+        }
+
+        /// Red if raising `limitNoteRaised` stops retiring the invite (its
+        /// `didSet`), or retires it through `spendSurveyInvite`: the limit text
+        /// would stay hidden behind the invite, or the invite marked done.
+        @Test func aLimitHitWithTheInviteUpShowsTheLimitTextUnspent() {
+            let invite = Invite()
+            let (popover, controller) = makePopover()
+            invite.wire(popover)
+            _ = controller.setDeviceSelected("office", true)
+            controller.limitsToOneSpeaker = true
+            popover.setUnregisteredNote(.trialEnded)
+            popover.test_simulateOpen()
+            #expect(popover.test_systemAirPlayNoteText == PopoverController.surveyInviteText)
+            let seen = StructuredEvents.recording {
+                popover.test_deviceRow(for: "kitchen")?.test_fireCheckboxAction(settingStateTo: true)
+            }
+            #expect(popover.test_systemAirPlayNoteText == PopoverController.oneSpeakerLimitNoteText)
+            #expect(seen.names().isEmpty)
+            #expect(invite.spentCalls == 0)
+        }
+
         /// Red if "Play here" left two speakers selected (the limit
         /// would then be broken by its own offer) or stopped reporting its use.
         @Test func theSwitchOfferLeavesOnlyTheClickedSpeaker() {
@@ -4647,5 +4972,43 @@ extension SerializedSharedState {
             #expect(seen.names().filter { $0.hasPrefix("license:") }
                     == ["license:limit_hit", "license:switch_offer_used"])
         }
+    }
+}
+
+/// A parsed expired-trial survey with question ids `q1`…`q5`, shared by the
+/// invite tests above and the survey card tests in `AppSurfaceControllerTests`.
+enum ExpiredTrialSurveyFixture {
+    static let id = "0190bbbb-0000-0000-0000-000000000002"
+    static let survey: ExpiredTrialSurvey = {
+        let types = ["single_choice", "multiple_choice", "single_choice", "single_choice", "open"]
+        let json: [String: Any] = ["surveys": [[
+            "id": id, "name": "Mac expired trial", "type": "api",
+            "start_date": "2026-01-01T00:00:00Z", "end_date": NSNull(),
+            "current_iteration": NSNull(), "current_iteration_start_date": NSNull(),
+            "questions": types.enumerated().map { ["id": "q\($0.offset + 1)", "type": $0.element, "question": "Question \($0.offset + 1)"] },
+        ]]]
+        let data = try! JSONSerialization.data(withJSONObject: json)
+        return ExpiredTrialSurvey.parse(data, surveyID: id, now: Date(timeIntervalSince1970: 1_800_000_000))!
+    }()
+}
+
+/// Records `Analytics.captureStructured` events. Only for suites nested under
+/// `SerializedSharedState`: it installs the process-global sink.
+final class StructuredEvents: @unchecked Sendable {
+    private let lock = NSLock()
+    private var items: [(String, [String: any Sendable])] = []
+    var all: [(String, [String: any Sendable])] { lock.withLock { items } }
+    func names() -> [String] { all.map(\.0) }
+
+    static func recording(_ body: () -> Void) -> StructuredEvents {
+        let events = StructuredEvents()
+        Analytics.install(Analytics.Sink(capture: { _, _ in }, captureError: { _, _ in },
+                                         consentChanged: { _ in },
+                                         captureStructured: { name, props in
+                                             events.lock.withLock { events.items.append((name, props)) }
+                                         }), consent: true)
+        defer { Analytics.install(nil, consent: false) }
+        body()
+        return events
     }
 }

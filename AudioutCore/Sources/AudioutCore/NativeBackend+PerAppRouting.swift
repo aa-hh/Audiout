@@ -556,6 +556,10 @@ extension NativeBackend {
                 excludedBundleIDs: excludedBundleIDs
                     .union(plan.localExcluded)
                     .union(plan.leveled))
+            // `.currentDevice` and leveled apps play on the Mac through our own (self-excluded)
+            // process, so the listen-only tap must keep their own process to meter them at all.
+            self.localMeterCapture?.updateRouting(
+                appRoutes: plan.effectiveRoutes, excludedBundleIDs: excludedBundleIDs)
         }
     }
 
@@ -757,6 +761,7 @@ extension NativeBackend {
             // excluded/routed-away, so it's cheap for a bundle that turns out not
             // to be excluded (a `.currentDevice` app, or metering-only capture).
             captureCoordinator?.refreshExcludedProcessSet(forRelaunchedBundleID: bundleID)
+            localMeterCapture?.refreshExcludedProcessSet(forRelaunchedBundleID: bundleID)
 
         case .failed(let error):
             let (justDied, shouldRetry, attempt): (Bool, Bool, Int) = stateQueue.sync {
@@ -1262,9 +1267,11 @@ extension NativeBackend {
         // clockless one re-establishes a session that plays silence, so it stays
         // gated. Practically instant mid-session (the clock is already up); on a
         // genuine refusal the `false` return feeds this chain's backoff/give-up.
-        guard await ensurePTPTakeover(telemetryDeviceID: deviceID(for: outputID) ?? "\(outputID)") else {
+        let gate = await ensurePTPTakeover(telemetryDeviceID: deviceID(for: outputID) ?? "\(outputID)")
+        guard gate == .ready else {
             Telemetry.log(.airplay, "rebind_recover_failed", [
                 "output": "\(outputID)", "scope": label, "error": "timingUnavailable",
+                "gate": gate.telemetryName,
             ])
             return false
         }
@@ -1560,6 +1567,7 @@ extension NativeBackend {
         // coordinator itself no-ops unless `bundleID` is actually in that set,
         // so this is cheap to call for every app launch, routed or not.
         captureCoordinator?.refreshExcludedProcessSet(forRelaunchedBundleID: bundleID)
+        localMeterCapture?.refreshExcludedProcessSet(forRelaunchedBundleID: bundleID)
 
         // `localBundleIDs` is ours (synced-local): an app routed to the Mac itself
         // still has a capture slot to revive on relaunch, so it takes this path too.
@@ -1932,10 +1940,11 @@ extension NativeBackend {
             // used to skip this entirely). `clearBinding` on failure is what
             // lets the clock-recovery replay / discovery re-drive re-issue
             // this op without a topology change.
-            guard await ensurePTPTakeover(telemetryDeviceID: deviceID(for: outputID) ?? "\(outputID)") else {
+            let gate = await ensurePTPTakeover(telemetryDeviceID: deviceID(for: outputID) ?? "\(outputID)")
+            guard gate == .ready else {
                 handleBindFailure(
                     outputID: outputID, stream: stream, op: "bind",
-                    error: PTPClockUnavailableError(), clearBinding: true)
+                    error: PTPClockUnavailableError(outcome: gate), clearBinding: true)
                 return
             }
             // Roadmap 008 fire-time gate — AFTER the PTP wait (the widest window
@@ -1951,10 +1960,11 @@ extension NativeBackend {
             }
         case .rebind(let outputID, let stream):
             reportPerAppConnectionState(.connecting, outputID: outputID)
-            guard await ensurePTPTakeover(telemetryDeviceID: deviceID(for: outputID) ?? "\(outputID)") else {
+            let gate = await ensurePTPTakeover(telemetryDeviceID: deviceID(for: outputID) ?? "\(outputID)")
+            guard gate == .ready else {
                 handleBindFailure(
                     outputID: outputID, stream: stream, op: "rebind",
-                    error: PTPClockUnavailableError(), clearBinding: true)
+                    error: PTPClockUnavailableError(outcome: gate), clearBinding: true)
                 return
             }
             guard perAppOpMayFire(outputID: outputID, op: "rebind", stream: stream) else { return }
@@ -2052,8 +2062,9 @@ extension NativeBackend {
 
     /// A per-app bind was refused because no PTP clock is available (the T4
     /// gate said not-ready). Distinct from an engine throw only so telemetry
-    /// reads the actual cause.
+    /// reads the actual cause, and carries the gate's outcome for its `reason`.
     struct PTPClockUnavailableError: Error, CustomStringConvertible {
+        let outcome: PTPHelperActivationOutcome
         var description: String { "timingUnavailable" }
     }
 
@@ -2157,11 +2168,18 @@ extension NativeBackend {
                 cause = .unknown
             }
             // A password demand nobody answered yet is a wait, not a failure.
-            let awaitsPassword = Self.awaitsPassword(cause, fedPassword: self.fedDescriptors[deviceID]?.password)
+            let fedCredential = self.fedCredential(deviceID)
+            let awaitsPassword = Self.awaitsPassword(cause, fedPassword: fedCredential)
             if !awaitsPassword {
+                // The sender drops its own copy of the key when an
+                // encrypted SETUP times out (airplay.c `start_failure`),
+                // reported as a plain failure. Forget the fed key so the
+                // next feed sends the stored one again; the Keychain
+                // keeps it, since the receiver did not refuse it.
+                self.fedDescriptors[deviceID]?.authKey = nil
                 Telemetry.fail(.airplay, "airplay:connect_failed",
                                local: ["device": deviceID, "op": op, "stream": "\(stream)", "error": "\(error)"],
-                               shared: ["cause": "\(cause)"])
+                               shared: ["cause": "\(cause)", "reason": Self.failureReason(error)])
             }
             if self.streamBindings[deviceID] != nil {
                 self.setPerAppConnectionStateLocked(

@@ -22,7 +22,7 @@ public protocol EQEditorViewDelegate: AnyObject {
 }
 
 /// The **EQ editor**: the tone controls for one speaker (or the whole mix),
-/// hosted by the Groups screen's detail panes. State pushed in by
+/// hosted by a speaker's page and the Main Audio page. State pushed in by
 /// ``apply(eq:bypassReason:)``, gestures reported out through a delegate — it
 /// owns no model and reaches no backend.
 ///
@@ -36,7 +36,7 @@ public protocol EQEditorViewDelegate: AnyObject {
 ///
 /// **The Advanced row is a section row, not a bare disclosure.** A 1 pt
 /// hairline sits above it; the word "Advanced" is clickable exactly like the
-/// triangle; a `tertiaryLabel` hint names the band count ("10 bands"); and a
+/// triangle; a `label3` hint names the band count ("10 bands"); and a
 /// trailing readout counts the shaped bands ("N set", blank when flat). Every
 /// channel is composed into one spoken label. The expanded/collapsed state is
 /// one global switch — ``AppSettings/eqAdvancedExpanded`` — read at init and
@@ -101,7 +101,7 @@ public final class EQEditorView: NSView {
 
     private let contentStack = NSStackView()
     private let curve = EQResponseCurveView()
-    private let bypassLabel = NSTextField(labelWithString: "")
+    private let bypassLabel = NSTextField.noteLabel()
 
     private let bassSlider = NSSlider()
     private let bassReadout = NSTextField(labelWithString: "")
@@ -117,19 +117,19 @@ public final class EQEditorView: NSView {
     private let trebleCaption = NSTextField(labelWithString: "Treble")
     private let balanceCaption = NSTextField(labelWithString: "Balance")
 
-    private let advancedDivider = ContainerEdgeView()
+    /// `containerEdge`, not `hairline`: the editor sits in a `raised` card.
+    private let advancedDivider = RuleView(tone: .containerEdge)
     private let advancedHeader = NSStackView()
     private let advancedDisclosure = NSButton()
     private let advancedTitle = NSButton()
     private let advancedHint = NSTextField(labelWithString: "\(DeviceEQ.bandCount) bands")
     private let advancedReadout = NSTextField(labelWithString: "")
-    private let advancedClip = NSView()
     // A plain view, not a stack: the fader columns are positioned by the
     // SCOPE's x-axis, not by an even distribution, so there is no stack
     // arrangement that could produce them.
     private let advancedContent = NSView()
+    private lazy var advancedClip = FoldingClipView(content: advancedContent)
     private let hzLegend = NSTextField(labelWithString: "Hz")
-    private var advancedClipCollapsed: NSLayoutConstraint!
     private var bandSliders: [NSSlider] = []
     private var bandLabels: [NSTextField] = []
     private var bandColumns: [NSView] = []
@@ -189,7 +189,6 @@ public final class EQEditorView: NSView {
             contentStack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -vInset),
         ])
 
-        configureNotes()
         configureSimpleTier()
         configureAdvancedTier()
 
@@ -208,21 +207,6 @@ public final class EQEditorView: NSView {
     private func addFullWidthRow(_ view: NSView) {
         contentStack.addArrangedSubview(view)
         view.widthAnchor.constraint(equalTo: contentStack.widthAnchor).isActive = true
-    }
-
-    private func configureNotes() {
-        bypassLabel.font = Tokens.Font.caption
-        // `secondaryLabel`, never `tertiaryLabel`: the line is live state text
-        // explaining the controls beneath it, and the module rule is that a
-        // dimmed label must be dimmed BY something.
-        bypassLabel.textColor = Tokens.Color.label2
-        // Wraps to two lines: the speaker page's unavailable sentence is
-        // longer than one line at pane width.
-        bypassLabel.usesSingleLineMode = false
-        bypassLabel.maximumNumberOfLines = 2
-        bypassLabel.lineBreakMode = .byWordWrapping
-        bypassLabel.cell?.wraps = true
-        bypassLabel.cell?.truncatesLastVisibleLine = true
     }
 
     override public func layout() {
@@ -417,22 +401,6 @@ public final class EQEditorView: NSView {
             curve.topAnchor.constraint(equalTo: advancedContent.topAnchor),
         ])
         layOutFaders(under: curve)
-
-        advancedClip.translatesAutoresizingMaskIntoConstraints = false
-        advancedClip.wantsLayer = true
-        advancedClip.layer?.masksToBounds = true
-        advancedClip.addSubview(advancedContent)
-        let bottomPin = advancedContent.bottomAnchor.constraint(equalTo: advancedClip.bottomAnchor)
-        bottomPin.priority = .defaultHigh
-        advancedClipCollapsed = advancedClip.heightAnchor.constraint(equalToConstant: 0)
-        NSLayoutConstraint.activate([
-            advancedContent.leadingAnchor.constraint(equalTo: advancedClip.leadingAnchor),
-            advancedContent.topAnchor.constraint(equalTo: advancedClip.topAnchor),
-            advancedContent.trailingAnchor.constraint(equalTo: advancedClip.trailingAnchor),
-            bottomPin,
-        ])
-        advancedClipCollapsed.isActive = true
-        advancedContent.isHidden = true
 
         addFullWidthRow(advancedDivider)
         addFullWidthRow(header)
@@ -777,9 +745,8 @@ public final class EQEditorView: NSView {
 
     // MARK: The Advanced fold (Settings-Advanced precedent, one clock)
 
-    /// Same choreography as `AudioSettingsViewController.setAdvancedExpanded`:
-    /// the clip height is the single animated value on ``FoldAnimator``'s
-    /// clock. No follower — the editor's pane SCROLLS rather than growing its
+    /// The fold runs through ``FoldingClipView``, as Settings' Advanced does.
+    /// No follower — the editor's pane SCROLLS rather than growing its
     /// window (roadmap 039), so nothing above it has to re-lay itself out per
     /// tick. Instant under Reduce Motion AND headless — the driver ticks off
     /// the main runloop, which `swift test` and the harness tools don't
@@ -787,36 +754,7 @@ public final class EQEditorView: NSView {
     private func setAdvancedExpanded(_ expanded: Bool, animated: Bool) {
         advancedExpanded = expanded
         refreshAdvancedRow()
-        if expanded {
-            advancedContent.isHidden = false
-            guard animated else {
-                advancedClipCollapsed.isActive = false
-                return
-            }
-            advancedContent.layoutSubtreeIfNeeded()
-            let target = advancedContent.fittingSize.height
-            advancedClipCollapsed.isActive = true
-            FoldAnimator.shared.animate(advancedClipCollapsed, to: target,
-                                        follower: nil) { [weak self] in
-                self?.advancedClipCollapsed.isActive = false
-            }
-        } else {
-            guard animated else {
-                advancedClipCollapsed.constant = 0
-                advancedClipCollapsed.isActive = true
-                advancedContent.isHidden = true
-                return
-            }
-            if !advancedClipCollapsed.isActive {
-                advancedClipCollapsed.constant = advancedClip.frame.height
-                advancedClipCollapsed.isActive = true
-                layoutSubtreeIfNeeded()
-            }
-            FoldAnimator.shared.animate(advancedClipCollapsed, to: 0,
-                                        follower: nil) { [weak self] in
-                self?.advancedContent.isHidden = true
-            }
-        }
+        advancedClip.setExpanded(expanded, animated: animated, follower: nil)
     }
 
     // MARK: Test hooks — real target/action dispatch, nothing presented
@@ -940,27 +878,6 @@ public final class EQEditorView: NSView {
         slider.doubleValue = value
         guard let action = slider.action, let target = slider.target as? NSObject else { return }
         _ = target.perform(action, with: slider)
-    }
-}
-
-/// A one-token divider above the Advanced row. The editor sits in a `raised`
-/// card (`GroupedSectionView`), and `hairline` is never drawn on `raised`
-/// (1.154:1 dark) — `containerEdge` measures 1.55:1 dark / 2.02:1 light there.
-/// `draw(_:)`-based rather than a frozen layer color so the token re-resolves
-/// per appearance and Increase Contrast on every paint.
-/// Non-interactive — pure chrome, never an `NSBox` (`test_hasBoxDivider`).
-private final class ContainerEdgeView: NSView {
-
-    override func hitTest(_ point: NSPoint) -> NSView? { nil }
-
-    override func draw(_ dirtyRect: NSRect) {
-        Tokens.Color.containerEdge.setFill()
-        bounds.fill()
-    }
-
-    override func viewDidChangeEffectiveAppearance() {
-        super.viewDidChangeEffectiveAppearance()
-        needsDisplay = true
     }
 }
 

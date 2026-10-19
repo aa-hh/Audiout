@@ -6,10 +6,10 @@ import Testing
 @testable import AudioutSharedUI
 @testable import AudioutPopoverUI
 
-/// Coverage for the **Cast feed-gain pending fader fill** — the fixed-volume
-/// Cast receiver's fader holds the engaged fill's ember-blend "not yet gold"
-/// tone from a volume/mute gesture until the measured stream lag has elapsed,
-/// since there is no protocol ack for feed-gain volume.
+/// Coverage for the **Cast pending glows** — a fixed-volume Cast receiver's
+/// fader thumb glows white from a volume/mute gesture, and its sync drawer's
+/// value field glows from an offset edit, until the measured stream lag has
+/// elapsed, since there is no protocol ack for either.
 ///
 /// Two seams, mirroring `RemovalUndoTests`:
 ///
@@ -44,116 +44,215 @@ import Testing
 
         row.apply(device, selected: true, controllable: true, inActiveTarget: true,
                   volumePendingApply: true)
-        #expect(row.test_isFaderPending, "the host raised the pending flag, so the fader holds the flat tone")
+        #expect(row.test_isFaderPending, "the host raised the pending flag, so the thumb glows")
         #expect(row.test_accessibilityValue?.contains("applying volume") == true,
-                "the pending fill's spoken equivalent")
+                "the pending glow's spoken equivalent")
 
         row.apply(device, selected: true, controllable: true, inActiveTarget: true)
         #expect(!row.test_isFaderPending, "and it goes the moment the host stops offering it")
         #expect(row.test_accessibilityValue?.contains("applying volume") != true)
     }
 
-    /// PIXEL truth for the pending fill — the flag flipping must actually
-    /// change what the slider draws. Renders the row's slider to a bitmap in
-    /// both states and requires the images to differ; a live run (2026-08-23)
-    /// showed the flag raised while the pixels never moved.
-    @Test func pendingFillActuallyChangesTheSliderPixels() {
-        let device = makeCastDevice()
-        let row = makeBusRow(device)
-        row.frame = NSRect(x: 0, y: 0, width: 640, height: 64)
-        row.layoutSubtreeIfNeeded()
-
-        func sliderBitmap() -> Data? {
-            let slider = row.test_slider
-            let bounds = slider.bounds
-            guard bounds.width > 10,
-                  let rep = slider.bitmapImageRepForCachingDisplay(in: bounds) else { return nil }
-            slider.cacheDisplay(in: bounds, to: rep)
-            return rep.tiffRepresentation
-        }
-
-        row.apply(device, selected: true, controllable: true, inActiveTarget: true)
-        row.layoutSubtreeIfNeeded()
-        let gold = sliderBitmap()
-        #expect(gold != nil, "the slider must render at all")
-
-        row.apply(device, selected: true, controllable: true, inActiveTarget: true,
-                  volumePendingApply: true)
-        let pending = sliderBitmap()
-        #expect(pending != nil)
-        #expect(row.test_isFaderPending)
-        #expect(gold != pending,
-                "the pending fill must be VISIBLE — same bytes means the flag never reaches the pixels")
+    /// The slider rendered with Reduce Motion forced on, so the pending glow
+    /// sits at full strength instead of mid-breath.
+    private func sliderRep(_ row: DeviceRowView) -> NSBitmapImageRep? {
+        let slider = row.test_slider
+        (slider.cell as? WarmFaderCell)?.test_reduceMotionOverride = true
+        guard slider.bounds.width > 10,
+              let rep = slider.bitmapImageRepForCachingDisplay(in: slider.bounds)
+        else { return nil }
+        slider.cacheDisplay(in: slider.bounds, to: rep)
+        return rep
     }
 
-    /// PERCEPTUAL truth for the pending fill — the level the 2026-08-23 live
-    /// bug actually lived at. The raise → stamp → draw → composite chain was
-    /// proven working on hardware (telemetry) and offline (a mock-window
-    /// layer-capture probe) while the user still reported ZERO visible change,
-    /// because the pending tone was the EXACT fill every unarmed fader
-    /// already draws — a same-luminance warm tint swap on a 5 pt track. So
-    /// byte inequality against the gold render (the test above) is not
-    /// enough: the pending fill must be STRUCTURALLY distinct from the
-    /// unarmed fill it was previously indistinguishable from. Sweeps the
-    /// track midline and requires a material color break (>30/255 in some
-    /// channel) on a meaningful share of pixels — a tint swap of warm
-    /// same-luminance fills stays under it; the dashed gold/trough
-    /// alternation clears it.
-    @Test func pendingFillIsNotTheUnarmedFillInDisguise() {
+    /// The stock knob rect in the slider's points; the drawn thumb and its
+    /// halo both sit inside it at the row's mid-range volume.
+    private func knobRect(_ row: DeviceRowView) -> NSRect {
+        let slider = row.test_slider
+        return (slider.cell as? NSSliderCell)?.knobRect(flipped: slider.isFlipped) ?? .zero
+    }
+
+    /// Whole pixel columns from `fromX` to `toX` (points), so the check holds
+    /// whichever way the slider is flipped.
+    private func columns(_ rep: NSBitmapImageRep, from fromX: CGFloat, to toX: CGFloat,
+                         in bounds: NSRect) -> [(Int, Int)] {
+        let scale = CGFloat(rep.pixelsWide) / bounds.width
+        let lo = max(0, Int((fromX * scale).rounded(.down)))
+        let hi = min(rep.pixelsWide, Int((toX * scale).rounded(.up)))
+        guard lo < hi else { return [] }
+        return (lo..<hi).flatMap { x in (0..<rep.pixelsHigh).map { (x, $0) } }
+    }
+
+    private func channelDelta(_ a: NSColor?, _ b: NSColor?) -> CGFloat {
+        guard let a, let b else { return 0 }
+        return max(abs(a.redComponent - b.redComponent),
+                   abs(a.greenComponent - b.greenComponent),
+                   abs(a.blueComponent - b.blueComponent))
+    }
+
+    /// The pending glow lives on the thumb only: the thumb's pixels move and
+    /// the gold fill left of it stays byte-for-byte the solid gradient. Turns
+    /// red if `drawKnob` stops drawing the glow, or if `drawBar` brings back
+    /// any pending treatment of the fill (the retired dashes included).
+    @Test func pendingGlowChangesTheThumbAndLeavesTheFillSolid() throws {
         let device = makeCastDevice()
         let row = makeBusRow(device)
         row.appearance = NSAppearance(named: .darkAqua)
         row.frame = NSRect(x: 0, y: 0, width: 640, height: 64)
+        row.apply(device, selected: true, controllable: true, inActiveTarget: true)
         row.layoutSubtreeIfNeeded()
+        let gold = try #require(sliderRep(row), "the slider must render at all")
 
-        func sliderRep() -> NSBitmapImageRep? {
-            let slider = row.test_slider
-            guard slider.bounds.width > 10,
-                  let rep = slider.bitmapImageRepForCachingDisplay(in: slider.bounds)
-            else { return nil }
-            slider.cacheDisplay(in: slider.bounds, to: rep)
-            return rep
+        row.apply(device, selected: true, controllable: true, inActiveTarget: true,
+                  volumePendingApply: true)
+        let pending = try #require(sliderRep(row))
+        #expect(row.test_isFaderPending)
+        #expect(gold.pixelsWide == pending.pixelsWide)
+
+        let bounds = row.test_slider.bounds
+        let knob = knobRect(row)
+        #expect(knob.minX > 20, "the fixture needs a fill to the left of the thumb")
+
+        let thumbPixels = columns(gold, from: knob.minX, to: knob.maxX, in: bounds)
+        let thumbChanged = thumbPixels.filter {
+            channelDelta(gold.colorAt(x: $0.0, y: $0.1), pending.colorAt(x: $0.0, y: $0.1)) > 30.0 / 255.0
+        }.count
+        #expect(thumbChanged > 0, "the pending glow never reached the thumb's pixels")
+
+        let fillPixels = columns(gold, from: 0, to: knob.minX - 1, in: bounds)
+        let fillChanged = fillPixels.filter {
+            channelDelta(gold.colorAt(x: $0.0, y: $0.1), pending.colorAt(x: $0.0, y: $0.1)) > 0
+        }.count
+        #expect(fillChanged == 0, "\(fillChanged) fill pixels changed: the fill must stay solid gold while pending")
+    }
+
+    /// The thumb lights from inside and its 3 pt outer ring fits inside the
+    /// slider. Turns red if the body stops blending toward the light, or if
+    /// `DeviceRowView` drops the slider's 24 pt height so the ring clips.
+    @Test func pendingGlowLightsTheThumbAndItsOuterRingIsNotClipped() throws {
+        let device = makeCastDevice()
+        let row = makeBusRow(device)
+        row.appearance = NSAppearance(named: .darkAqua)
+        row.frame = NSRect(x: 0, y: 0, width: 640, height: 64)
+        row.apply(device, selected: true, controllable: true, inActiveTarget: true)
+        row.layoutSubtreeIfNeeded()
+        let settled = try #require(sliderRep(row))
+        row.apply(device, selected: true, controllable: true, inActiveTarget: true,
+                  volumePendingApply: true)
+        let pending = try #require(sliderRep(row))
+
+        let bounds = row.test_slider.bounds
+        let knob = knobRect(row)
+        let thumbTop = (knob.midY - PopoverColumnGrid.faderThumbHeight / 2).rounded()
+        let scale = CGFloat(settled.pixelsWide) / bounds.width
+        func pixel(_ rep: NSBitmapImageRep, y: CGFloat) -> NSColor? {
+            rep.colorAt(x: Int(knob.midX * scale), y: Int(y * scale))
         }
 
-        // The UNARMED-but-enabled render: the fill whose tone the original
-        // pending implementation literally reused. Same device, same volume,
-        // same enabled state — only armed-ness and the pending flag move.
-        row.apply(device, selected: true, controllable: true, inActiveTarget: false)
-        row.layoutSubtreeIfNeeded()
-        guard let unarmed = sliderRep() else {
-            Issue.record("the unarmed slider must render at all")
-            return
+        let settledBody = try #require(pixel(settled, y: knob.midY - 4))
+        let pendingBody = try #require(pixel(pending, y: knob.midY - 4))
+        #expect(pendingBody.redComponent > settledBody.redComponent + 0.3,
+                "the pending thumb body must light toward the warm white")
+
+        let ringY = thumbTop - 2.5
+        #expect(ringY >= 0, "the slider is too short: the outer ring starts above its top edge")
+        let settledRing = try #require(pixel(settled, y: ringY))
+        let pendingRing = try #require(pixel(pending, y: ringY))
+        #expect(settledRing.alphaComponent == 0, "nothing is drawn 2.5 pt above a settled thumb")
+        #expect(pendingRing.alphaComponent > 0, "the outer ring was clipped or never drawn")
+    }
+
+    /// Under Reduce Motion a pending armed row's `%` readout holds the dim
+    /// ink, and once the hold ends it is the ordinary armed `goldText`.
+    /// Turns red if the row stops tinting the readout from the cell's pulse,
+    /// or if the tint outlives the hold.
+    @Test func pendingReadoutHoldsTheDimInkAndReturnsToGold() throws {
+        let device = makeCastDevice()
+        let row = makeBusRow(device)
+        let dark = try #require(NSAppearance(named: .darkAqua))
+        row.appearance = dark
+        (row.test_slider.cell as? WarmFaderCell)?.test_reduceMotionOverride = true
+        func srgb(_ color: NSColor?) -> NSColor? {
+            var out: NSColor?
+            dark.performAsCurrentDrawingAppearance { out = color?.usingColorSpace(.sRGB) }
+            return out
+        }
+        func same(_ a: NSColor?, _ b: NSColor?) -> Bool {
+            guard let a = srgb(a), let b = srgb(b) else { return false }
+            return abs(a.redComponent - b.redComponent) < 0.01
+                && abs(a.greenComponent - b.greenComponent) < 0.01
+                && abs(a.blueComponent - b.blueComponent) < 0.01
         }
 
         row.apply(device, selected: true, controllable: true, inActiveTarget: true,
                   volumePendingApply: true)
-        guard let pending = sliderRep() else {
-            Issue.record("the pending slider must render at all")
-            return
-        }
-        #expect(row.test_isFaderPending)
-        #expect(unarmed.pixelsWide == pending.pixelsWide)
+        #expect(same(row.test_readoutColor, Tokens.Color.emberText),
+                "a pending readout under Reduce Motion holds the dim ink")
 
-        let y = unarmed.pixelsHigh / 2
-        var material = 0
-        var sampled = 0
-        for x in 0..<min(unarmed.pixelsWide, pending.pixelsWide) {
-            guard let a = unarmed.colorAt(x: x, y: y),
-                  let b = pending.colorAt(x: x, y: y) else { continue }
-            sampled += 1
-            let delta = max(abs(a.redComponent - b.redComponent),
-                            abs(a.greenComponent - b.greenComponent),
-                            abs(a.blueComponent - b.blueComponent))
-            if delta > 30.0 / 255.0 { material += 1 }
+        row.apply(device, selected: true, controllable: true, inActiveTarget: true)
+        #expect(same(row.test_readoutColor, Tokens.Color.goldText),
+                "the ordinary armed readout returns once the hold ends")
+    }
+
+    /// The slider's frame grew by 3 pt at each end for the halo, but the
+    /// trough the user sees did not move, and at 0 % and 100 % the outer halo
+    /// ring past the thumb's outer edge is painted, not cut off. Turns red if
+    /// `haloRoom` and the row's widened frame stop cancelling out, or if the
+    /// thumb goes back to sitting flush with the slider's own edge.
+    @Test func haloRoomKeepsTheTroughInPlaceAndTheEndRingsPainted() throws {
+        let device = makeCastDevice()
+        let row = makeBusRow(device)
+        row.appearance = NSAppearance(named: .darkAqua)
+        row.frame = NSRect(x: 0, y: 0, width: 640, height: 64)
+        row.apply(device, selected: true, controllable: true, inActiveTarget: true)
+        row.layoutSubtreeIfNeeded()
+        let slider = row.test_slider
+        let cell = try #require(slider.cell as? WarmFaderCell)
+
+        let track = slider.convert(cell.test_trackRect, to: row)
+        let oldEnd = row.bounds.width - PopoverColumnGrid.sliderTrailing
+        #expect(abs(track.maxX - oldEnd) < 0.01, "the trough's end moved")
+        #expect(abs(track.minX - (oldEnd - PopoverColumnGrid.sliderWidth)) < 0.01,
+                "the trough's start moved")
+
+        for value in [0.0, 100.0] {
+            row.apply(device, selected: true, controllable: true, inActiveTarget: true)
+            slider.doubleValue = value
+            let settled = try #require(sliderRep(row))
+            row.apply(device, selected: true, controllable: true, inActiveTarget: true,
+                      volumePendingApply: true)
+            slider.doubleValue = value
+            let pending = try #require(sliderRep(row))
+
+            let local = cell.test_trackRect
+            let x = value == 0 ? local.minX - 2.5 : local.maxX + 2.5
+            let scale = CGFloat(pending.pixelsWide) / slider.bounds.width
+            let y = Int(knobRect(row).midY * scale)
+            let before = try #require(settled.colorAt(x: Int(x * scale), y: y))
+            let after = try #require(pending.colorAt(x: Int(x * scale), y: y))
+            #expect(before.alphaComponent == 0, "nothing sits past the trough at \(value) %")
+            #expect(after.alphaComponent > 0, "the halo was cut off at \(value) %")
         }
-        #expect(sampled > 0)
-        #expect(Double(material) >= 0.05 * Double(sampled),
-                """
-                the pending fill must be UNMISSABLE — only \(material) of \
-                \(sampled) midline pixels differ materially from the ordinary \
-                unarmed fill, which is exactly the live-invisible tint swap \
-                the 2026-08-23 runs shipped
-                """)
+    }
+
+    /// Hiding the surface mid-hold drops the fader's hold at once: no glow
+    /// and no timer while nobody can see it. Turns red if `surfaceDidHide`
+    /// stops calling `cancelPendingHold()` on its rows.
+    @Test func hidingTheSurfaceStopsAPendingFader() throws {
+        let (popover, fleet) = makeLaggedCastPopover()
+        let id = fleet[0].id
+        let row = try #require(popover.test_deviceRow(for: id))
+        let cell = try #require(row.test_slider.cell as? WarmFaderCell)
+        cell.test_reduceMotionOverride = false
+
+        row.test_fireSliderAction(settingValueTo: 30)
+        #expect(cell.isPendingApply)
+        #expect(cell.test_isPulseTimerRunning)
+
+        popover.surfaceDidHide()
+
+        #expect(!cell.isPendingApply)
+        #expect(!cell.test_isPulseTimerRunning, "the arrival must not play on a hidden surface")
     }
 
     // MARK: Controller level
@@ -237,5 +336,40 @@ import Testing
         popover.test_deviceRow(for: id)?.test_toggleMute(true)
 
         #expect(popover.test_castVolumePendingIDs.contains(id))
+    }
+
+    /// A Cast offset edit from the drawer holds the TRIM glow, not the
+    /// volume one, and lights the drawer's field. Turns red if `applyBTTrim`
+    /// stops raising `.trim` for a Cast device, raises it under `.volume`, or
+    /// if the raise stops pushing the mounted drawer.
+    @Test func aCastOffsetEditHoldsTheTrimGlowOnly() throws {
+        let (popover, fleet) = makeLaggedCastPopover()
+        let id = fleet[0].id
+        popover.test_toggleSyncDrawer(deviceID: id)
+        let drawer = try #require(popover.test_syncDrawer, "the Cast row's drawer never mounted")
+        #expect(!drawer.test_isPendingGlowShown)
+
+        drawer.test_firePlusClick()
+
+        #expect(popover.test_castTrimPendingIDs == [id])
+        #expect(popover.test_castVolumePendingIDs.isEmpty)
+        #expect(drawer.test_isPendingGlowShown, "the drawer must glow on the first tick")
+    }
+
+    /// A Bluetooth trim is heard at once, so it holds nothing. Turns red if
+    /// the trim raise moves outside `applyBTTrim`'s Cast branch.
+    @Test func aBluetoothTrimEditHoldsNothing() throws {
+        let bt = Device(id: "bt-a:output", name: "Speaker A", kind: .bluetooth,
+                        isAvailable: true, supportsAirPlay2: false, connectionState: .connected)
+        let popover = makePopover(fleet: [bt])
+        _ = popover.test_toggleDeviceEnabled(deviceID: bt.id, on: true)
+        popover.update(devices: [bt])
+        popover.test_toggleSyncDrawer(deviceID: bt.id)
+        let drawer = try #require(popover.test_syncDrawer)
+
+        drawer.test_firePlusClick()
+
+        #expect(popover.test_castTrimPendingIDs.isEmpty)
+        #expect(!drawer.test_isPendingGlowShown)
     }
 }

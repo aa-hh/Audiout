@@ -19,7 +19,7 @@ calls into `CAirPlayEngine`, never the reverse, and binds no PTP sockets.
 
 ## Map
 
-- `AirPlayEngine` → the actor: lifecycle, discovery feed, outputs, PCM write.
+- `AirPlayEngine` → the actor: lifecycle, discovery feed, outputs, code pairing, PCM write.
 - `EngineConfig` → configuration applied to the vendored C settings at start.
 - `OutputBindResult` → makes an already-bound idempotent no-op visible to callers.
 - `EngineThread` → owns the one event base and OS thread onto the C cluster.

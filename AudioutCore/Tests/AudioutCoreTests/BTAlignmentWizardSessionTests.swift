@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import ProbeKit
 @testable import AudioutCore
 
 private final class Recorder {
@@ -468,8 +469,9 @@ private func proposalValue(_ session: BTAlignmentWizardSession) -> Double? {
     }
 
     /// The two tick timbres are split by TRANSPORT (the Bluetooth fan-out gets
-    /// the bright click, the engine feed the low knock), so whether the pair
-    /// sounds different is a fact about the two speakers' transports — and it
+    /// the higher (660 Hz) mallet note, the engine feed the lower (440 Hz)
+    /// one), so whether the pair sounds different is a fact about the two
+    /// speakers' transports — and it
     /// follows the reference the user can still swap mid-run.
     @Test func thePairSoundsDifferOnlyAcrossTransports() {
         let recorder = Recorder()
@@ -539,6 +541,55 @@ private func proposalValue(_ session: BTAlignmentWizardSession) -> Double? {
         #expect(session.screen == .proposal(valueMs: 300), "got \(session.screen)")
         #expect(session.proposalIsRecalled == false, "measured, not recalled")
         session.cancel()
+    }
+
+    /// Turns red if the bar is sized from the lane layout alone.
+    @Test func theProbeStartSizesTheListenFromThePipelineDelay() {
+        let recorder = Recorder()
+        let session = recorder.makeSession(targetIsBluetooth: true)
+        session.requestListening = { $0(true) }
+        session.start()
+        session.probeDidStart(pipelineDelaySeconds: 5)
+        #expect(session.probeListeningSeconds == MicProbeSession.probeLeadSeconds
+                + SyncProbe.Layout.totalSeconds
+                + MicProbeSession.listeningTailSeconds(pipelineDelaySeconds: 5))
+
+        session.offerMeasuredProposal(valueMs: 300)
+        session.rejectProposal()
+        #expect(session.screen == .listening(isRealignment: false), "got \(session.screen)")
+        #expect(session.probeListeningSeconds == nil, "the next listen starts unsized")
+        session.cancel()
+    }
+
+    /// Turns red if the turn windows stop following the lane layout, the room delay, the transport mapping, or the per-listen reset.
+    @Test func theTurnScheduleFollowsTheLaneLayoutAndTheRoomDelay() {
+        let recorder = Recorder()
+        let session = recorder.makeSession(targetIsBluetooth: true)
+        session.requestListening = { $0(true) }
+        session.start()
+        #expect(session.probeSpeakerPlaying(at: 3.0) == nil, "no schedule before the probe starts")
+        session.probeDidStart(pipelineDelaySeconds: 2)
+        #expect(session.probeSpeakerPlaying(at: 2.4) == nil)
+        #expect(session.probeSpeakerPlaying(at: 2.5) == .target)
+        #expect(session.probeSpeakerPlaying(at: 6.49) == .target)
+        #expect(session.probeSpeakerPlaying(at: 6.5) == nil)
+        #expect(session.probeSpeakerPlaying(at: 7.0) == .reference)
+        #expect(session.probeSpeakerPlaying(at: 10.99) == .reference)
+        #expect(session.probeSpeakerPlaying(at: 11.0) == nil)
+
+        session.offerMeasuredProposal(valueMs: 300)
+        session.rejectProposal()
+        #expect(session.probePipelineDelaySeconds == nil, "the next listen starts unscheduled")
+        #expect(session.probeSpeakerPlaying(at: 3.0) == nil)
+        session.cancel()
+
+        let macTarget = recorder.makeSession(targetIsBluetooth: false)
+        macTarget.requestListening = { $0(true) }
+        macTarget.start()
+        macTarget.probeDidStart(pipelineDelaySeconds: 2)
+        #expect(macTarget.probeSpeakerPlaying(at: 2.5) == .reference, "the Bluetooth lane is the reference's")
+        #expect(macTarget.probeSpeakerPlaying(at: 7.0) == .target)
+        macTarget.cancel()
     }
 
     /// A host that cannot listen still gets the zero-click path — and the
@@ -635,6 +686,39 @@ private func proposalValue(_ session: BTAlignmentWizardSession) -> Double? {
             Issue.record("expected the questions, got \(session.screen)")
             return
         }
+        session.cancel()
+    }
+
+    /// Turns red if the lane-to-speaker mapping or the per-listen reset breaks.
+    @Test func aBluetoothTargetsLaneVerdictsLandOnItsSpeakers() {
+        let recorder = Recorder()
+        let session = recorder.makeSession(targetIsBluetooth: true)
+        var checked: [(BTAlignmentWizardSession.ProbeSpeaker, Bool)] = []
+        session.onProbeSpeakerChecked = { checked.append(($0, $1)) }
+        session.requestListening = { $0(true) }
+        session.start()
+        session.probeLaneChecked(.bluetooth, heard: true)
+        session.probeLaneChecked(.engine, heard: false)
+        #expect(checked.map(\.0) == [.target, .reference])
+        #expect(checked.map(\.1) == [true, false])
+        #expect(session.probeSpeakerVerdicts == [.target: true, .reference: false])
+
+        session.endListening()
+        #expect(session.screen == .listening(isRealignment: false), "the retry listen, got \(session.screen)")
+        #expect(session.probeSpeakerVerdicts.isEmpty, "the retry starts with no verdicts")
+        session.cancel()
+    }
+
+    /// Turns red if the mapping stops following the transport.
+    @Test func aMacTargetHearsItsBluetoothReferenceOnTheFirstLane() {
+        let recorder = Recorder()
+        let session = recorder.makeSession(reference: .init(id: "move", name: "Move 2", isBluetooth: true),
+                                           targetIsBluetooth: false)
+        session.requestListening = { $0(true) }
+        session.start()
+        session.probeLaneChecked(.bluetooth, heard: false)
+        session.probeLaneChecked(.engine, heard: true)
+        #expect(session.probeSpeakerVerdicts == [.reference: false, .target: true])
         session.cancel()
     }
 
@@ -1058,11 +1142,11 @@ extension SerializedSharedState {
             #expect(events[0].0 == "bt_sync:mic_permission_answered")
             #expect(events[0].1 == ["granted": "true"])
             #expect(events[1].0 == "bt_sync:listening_ended")
-            #expect(events[1].1 == ["outcome": "measured", "attempt": "1", "value_ms_bucket": "200+"])
+            #expect(events[1].1 == ["outcome": "measured", "attempt": "1", "value_ms_bucket": "200+", "probe_sound": "glide_chord"])
             #expect(events[2].0 == "bt_sync:mic_retried")
             #expect(events[2].1 == [:])
             #expect(events[3].0 == "bt_sync:listening_ended")
-            #expect(events[3].1 == ["outcome": "failed", "attempt": "2"])
+            #expect(events[3].1 == ["outcome": "failed", "attempt": "2", "probe_sound": "glide_chord"])
         }
 
         /// An implausible reading's Try again reports as a retry, and both
@@ -1093,11 +1177,11 @@ extension SerializedSharedState {
                 return
             }
             #expect(events[1].0 == "bt_sync:listening_ended")
-            #expect(events[1].1 == ["outcome": "implausible", "attempt": "1", "value_ms_bucket": "below_-4"])
+            #expect(events[1].1 == ["outcome": "implausible", "attempt": "1", "value_ms_bucket": "below_-4", "probe_sound": "glide_chord"])
             #expect(events[2].0 == "bt_sync:mic_retried")
             #expect(events[2].1 == [:])
             #expect(events[3].0 == "bt_sync:listening_ended")
-            #expect(events[3].1 == ["outcome": "measured", "attempt": "2", "value_ms_bucket": "-4_to_0"])
+            #expect(events[3].1 == ["outcome": "measured", "attempt": "2", "value_ms_bucket": "-4_to_0", "probe_sound": "glide_chord"])
         }
     }
 }

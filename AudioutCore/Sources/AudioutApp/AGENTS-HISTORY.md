@@ -178,3 +178,8 @@ places: `OnboardingWindowController` re-fronts itself on
 permission change), and `AppDelegate`'s menu-bar click re-fronts it (rather than
 opening the surface) whenever `onboardingWindowController` is non-nil. First-run
 completion persists in `AppSettings.hasCompletedSetup`.
+
+2026-10-19: the app became a regular app (`.regular`, no `LSUIElement`), so it
+has a Dock icon and a menu bar and shows in ⌘-Tab and Force Quit (owner's
+call). The "No main menu" rule above is stale: `installMainMenu()` builds the
+Audiout, File, Edit and Window menus.

@@ -7,7 +7,7 @@
 #
 # RESOLVED Q1: the app ships as a SwiftPM executable + this bundle script (no
 # Xcode project). This produces "Audiout.app" with an Info.plist
-# (LSUIElement=true → menu-bar-only, no Dock icon), a stable bundle id, and a
+# (no LSUIElement: a regular app with a Dock icon), a stable bundle id, and a
 # code signature (Developer ID when the keychain has one, else ad-hoc) so
 # Gatekeeper lets it launch.
 #
@@ -651,9 +651,8 @@ fi
 # classic .icns baked from Icon Composer's flattened 1024 "Default" render,
 # which keeps the script working unmodified on an Xcode-15 machine (falls back
 # every time) while an Xcode-26 machine gets the real Liquid Glass icon.
-# NOTE: this is a menu-bar app (LSUIElement) so it has no Dock icon; this icon
-# is what Finder, Get Info, the About box, notifications, and any
-# Store/distribution listing use.
+# This icon is what the Dock, ⌘-Tab, Finder, Get Info, the About box,
+# notifications, and any Store/distribution listing use.
 mkdir -p "$RESOURCES_DIR"
 
 # --- Custom SF Symbols: one catalogue, compiled WITH the icon -----------------
@@ -824,8 +823,6 @@ if [ "$ICON_MODE" = "icns" ]; then
 fi
 
 # --- Info.plist -----------------------------------------------------------
-# LSUIElement=true makes it a menu-bar-only accessory (no Dock icon, no menu
-# bar) even before the code sets .accessory — belt-and-suspenders.
 echo "==> Writing Info.plist"
 PLIST="$CONTENTS/Info.plist"
 /usr/libexec/PlistBuddy -c "Clear dict" "$PLIST" >/dev/null 2>&1 || printf '%s' '<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd"><plist version="1.0"><dict></dict></plist>' > "$PLIST"
@@ -838,7 +835,6 @@ PLIST="$CONTENTS/Info.plist"
 /usr/libexec/PlistBuddy -c "Add :CFBundleShortVersionString string $APP_VERSION" "$PLIST"
 /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string $BUILD_NUMBER" "$PLIST"
 /usr/libexec/PlistBuddy -c "Add :LSMinimumSystemVersion string $MIN_MACOS" "$PLIST"
-/usr/libexec/PlistBuddy -c "Add :LSUIElement bool true" "$PLIST"
 /usr/libexec/PlistBuddy -c "Add :NSHighResolutionCapable bool true" "$PLIST"
 # Point the bundle at whichever icon the app-icon step above produced:
 # CFBundleIconName for either compiled-Assets.car mode (actool convention —

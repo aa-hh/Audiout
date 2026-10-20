@@ -178,11 +178,9 @@ import Testing
     /// Turns red if the coordinator stops feeding the approval controller
     /// its pairing window, or stops closing the window once a phone is
     /// approved — an unknown phone could then ask with no window open, or
-    /// the window would stay open after it did its job. The positive half of
-    /// the server gate is not observable here: this build does not offer the
-    /// phone app, so `resolvedAllowRemoteControl` is off inside the suite and
-    /// the server never starts — which the identity store's untouched count
-    /// pins.
+    /// the window would stay open after it did its job. The server's start is
+    /// read off the identity store: each attempt asks it once, and it refuses,
+    /// so no real listener ever opens.
     @Test func theServerRunsOnlyWithAnApprovedPhoneOrAnOpenPairingWindow() {
         let host = StubHost()
         let identities = RefusingIdentityStore()
@@ -195,10 +193,12 @@ import Testing
         coordinator.approvals.handleRequest(clientID: "STRANGER", clientName: "iPhone",
                                             pairingCode: "000000") { stranger.append($0) }
         #expect(stranger == [.pairingClosed], "no window open: the stranger is refused unasked")
+        #expect(identities.loads == 0, "nothing wants the server yet, so it never tries to start")
 
         coordinator.openPairingWindow()
         #expect(coordinator.pairingWindowOpen)
         #expect(windowChanges == 1)
+        #expect(identities.loads == 1, "the open window is what tries to start the server")
 
         var invited: [CompanionServer.ApprovalDecision] = []
         coordinator.approvals.handleRequest(clientID: "INVITED", clientName: "iPhone",
@@ -206,16 +206,14 @@ import Testing
         #expect(invited == [.pending, .approved])
         #expect(!coordinator.pairingWindowOpen, "the first approval closes the window that let it in")
         #expect(windowChanges == 2)
-        #expect(identities.loads == 0,
-                "a build that does not offer the phone app never reaches for the TLS identity")
     }
 
     /// Turns red if `wantsServer` stops counting a phone still waiting on its
     /// prompt, so the pairing window's expiry stops the server under it, or
     /// keeps counting it once its prompt is answered, so a Mac with nothing
     /// approved stays on the network. The expiry is the window's work item
-    /// calling `closePairingWindow()`, called directly here; the server's
-    /// own start and stop are out of reach, as the test above explains.
+    /// calling `closePairingWindow()`, called directly here; the server never
+    /// really starts, as the test above explains.
     @Test func aPromptOpenWhenThePairingWindowEndsKeepsTheServerWantedUntilAnswered() {
         let host = StubHost()
         host.answersPromptsAtOnce = false

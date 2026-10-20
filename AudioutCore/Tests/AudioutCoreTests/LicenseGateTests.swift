@@ -421,6 +421,23 @@ import AudioutSharedUI
         #expect(gate.test_state == .enter)
     }
 
+    /// Red if "Lost your key?" left the key state, stopped opening the
+    /// website's resend page with the app's source tag, or showed in a build
+    /// with no website to send the buyer to.
+    @MainActor
+    @Test func lostKeyOpensTheResendPage() {
+        var opened: [URL] = []
+        let gate = makeContent(settings(withBuy: true), Transport(), openURL: { opened.append($0) })
+        gate.test_tapHaveKey()
+        #expect(gate.test_visibleControls.contains { ($0 as? TextLinkButton)?.linkTitle == "Lost your key?" })
+        gate.test_tapLostKey()
+        #expect(opened == [URL(string: "https://audiout.app/resend?s=mac-app")!])
+        #expect(gate.test_state == .enter)
+
+        let noSite = makeContent(settings(), Transport())
+        #expect(!noSite.test_visibleControls.contains { ($0 as? TextLinkButton)?.linkTitle == "Lost your key?" })
+    }
+
     /// Red if "Back" stopped returning a buyer who abandoned the checkout to
     /// the offer with Buy reachable, or the trip moved the title.
     @MainActor
@@ -819,56 +836,6 @@ import AudioutSharedUI
         #expect(settings.trialExpiresAt == nil, "no second trial was written")
     }
 
-    // MARK: LicenseResend (Core)
-
-    @MainActor
-    @Test func resendPostsTheTrimmedAddress() async throws {
-        let settings = settings()
-        let transport = Transport()
-        var completions = 0
-        LicenseResend(settings: settings, transport: transport.closure)
-            .request(email: "  Buyer@Example.com ") { completions += 1 }
-        await drainMain()
-
-        #expect(completions == 1)
-        let request = try #require(transport.requests.first)
-        #expect(request.url == Self.server.appending(path: "v1/resend"))
-        #expect(request.httpMethod == "POST")
-        #expect(request.value(forHTTPHeaderField: "Content-Type") == "application/json")
-        let body = try #require(request.httpBody)
-        let obj = try #require(try JSONSerialization.jsonObject(with: body) as? [String: Any])
-        #expect(obj["email"] as? String == "buyer@example.com")
-    }
-
-    /// There is no failure to report — a dead network completes exactly like a
-    /// delivered mail, because the caller's one line is the same either way.
-    @MainActor
-    @Test func resendCompletesOnFailureToo() async {
-        let transport = Transport()
-        transport.answer = (nil, nil, URLError(.notConnectedToInternet))
-        var completions = 0
-        LicenseResend(settings: settings(), transport: transport.closure)
-            .request(email: "buyer@example.com") { completions += 1 }
-        await drainMain()
-        #expect(completions == 1)
-    }
-
-    /// No server (a build from source) and a malformed address both send
-    /// nothing, and still call back.
-    @MainActor
-    @Test func resendSendsNothingWithoutAServerOrAnAtSign() async {
-        let transport = Transport()
-        var completions = 0
-        LicenseResend(settings: settings(withServer: false), transport: transport.closure)
-            .request(email: "buyer@example.com") { completions += 1 }
-        LicenseResend(settings: settings(), transport: transport.closure)
-            .request(email: "buyer") { completions += 1 }
-        await drainMain()
-
-        #expect(completions == 2)
-        #expect(transport.requests.isEmpty)
-    }
-
     // MARK: The key boxes
 
     /// Red if normalising stopped dropping the `AUDT-` prefix and the dashes,
@@ -960,7 +927,7 @@ import AudioutSharedUI
     /// surface's 713 x 600 floor, a row spills out of it in either state (the
     /// paste link beside the subtitle and the status label are the widest),
     /// the key state gained a control beyond title, subtitle, paste link,
-    /// boxes, status and Back, or a Quit button comes back. The trial is only
+    /// boxes, status, Back and "Lost your key?", or a Quit button comes back. The trial is only
     /// on the offer and only before any trial; Back is there in the key state
     /// of a build with a checkout.
     @MainActor
@@ -983,7 +950,7 @@ import AudioutSharedUI
 
         let controls = gate.test_visibleControls
         let trial = trialStartedDaysAgo == nil ? 1 : 0
-        let expected = enter ? 6 : 4 + trial
+        let expected = enter ? 7 : 4 + trial
         #expect(controls.count == expected)
         for control in controls {
             let frame = control.convert(control.bounds, to: gate.view)

@@ -80,6 +80,8 @@ public final class LicenseGateViewController: NSViewController {
     private var statusText = ""
     private var statusColor = Tokens.Color.label2
     private let backButton = TextLinkButton(title: "Back")
+    /// Opens the website's "Resend my key" page.
+    private let lostKeyButton = TextLinkButton(title: "Lost your key?")
 
     private var state: GateState
     private var didPass = false
@@ -215,13 +217,16 @@ public final class LicenseGateViewController: NSViewController {
         keyBand.translatesAutoresizingMaskIntoConstraints = false
         keyBand.addSubview(keyEntry)
 
-        // Back alone, on the leading edge.
+        // Back on the leading edge, "Lost your key?" on the trailing edge.
         backButton.target = self
         backButton.action = #selector(backTapped)
         backButton.isHidden = settings.buyURL == nil
+        lostKeyButton.target = self
+        lostKeyButton.action = #selector(lostKeyTapped)
+        lostKeyButton.isHidden = settings.resendURL == nil
         let bottomSpacer = NSView()
         bottomSpacer.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .horizontal)
-        let bottomRow = NSStackView(views: [backButton, bottomSpacer])
+        let bottomRow = NSStackView(views: [backButton, bottomSpacer, lostKeyButton])
         bottomRow.orientation = .horizontal
         bottomRow.alignment = .centerY
         bottomRow.spacing = Self.rowSpacing
@@ -347,8 +352,10 @@ public final class LicenseGateViewController: NSViewController {
             haveKeyButton.nextKeyView = buyButton
         } else {
             pasteButton.nextKeyView = keyEntry.firstBox
-            keyEntry.chainKeyViews(to: backButton.isHidden ? pasteButton : backButton)
-            backButton.nextKeyView = pasteButton
+            let afterBack: NSView = lostKeyButton.isHidden ? pasteButton : lostKeyButton
+            keyEntry.chainKeyViews(to: backButton.isHidden ? afterBack : backButton)
+            backButton.nextKeyView = afterBack
+            lostKeyButton.nextKeyView = pasteButton
         }
     }
 
@@ -414,6 +421,13 @@ public final class LicenseGateViewController: NSViewController {
     /// For a buyer who bought on the website before installing: the key
     /// state, without opening the checkout again.
     @objc private func haveKeyTapped() { enterKeyState() }
+
+    /// The website's "Resend my key" page, for a buyer whose receipt email
+    /// is gone. The gate stays in the key state for the key that comes back.
+    @objc private func lostKeyTapped() {
+        guard let url = settings.resendURL else { return }
+        openURL(url)
+    }
 
     /// Back to the offer, so a buyer who abandoned the checkout can reach Buy
     /// (or the trial) again. What is in the boxes stays for the way back.
@@ -670,6 +684,12 @@ public final class LicenseGateViewController: NSViewController {
         backTapped()
     }
 
+    /// Invoke "Lost your key?" as a click would.
+    public func test_tapLostKey() {
+        _ = view
+        lostKeyTapped()
+    }
+
     /// Invoke the trial offer as a click would.
     public func test_tapTrial() {
         _ = view
@@ -776,13 +796,13 @@ public final class LicenseGateViewController: NSViewController {
     /// Everything the current state shows, title first, for the layout
     /// tests. The offer: the title, the subtitle, Buy, the trial when
     /// offered, and "I already have a key". The key entry: the title, the
-    /// subtitle, the paste link, the boxes, the status label, and Back when
-    /// shown.
+    /// subtitle, the paste link, the boxes, the status label, Back when
+    /// shown, and "Lost your key?" when there is a resend page.
     var test_visibleControls: [NSView] {
         _ = view
         let controls: [NSView] = state == .offer
             ? [headlineLabel, offerSubtitle, buyButton, trialButton, haveKeyButton]
-            : [headlineLabel, enterSubtitle, pasteButton, keyEntry, statusLine, backButton]
+            : [headlineLabel, enterSubtitle, pasteButton, keyEntry, statusLine, backButton, lostKeyButton]
         return controls.filter { !$0.isHidden }
     }
 }

@@ -937,6 +937,19 @@ public struct AppSettings {
         return components.url ?? page
     }
 
+    /// The website's "Resend my key" page: the Buy page's site with the path
+    /// `/resend`, tagged `?s=mac-app` like the Buy link. Nil when there is no
+    /// Buy page (a build from source).
+    public var resendURL: URL? {
+        guard let page = buyPageURL,
+              var components = URLComponents(url: page, resolvingAgainstBaseURL: false)
+        else { return nil }
+        components.path = "/resend"
+        components.queryItems = [URLQueryItem(name: "s", value: Self.buySourceTag)]
+        components.fragment = nil
+        return components.url
+    }
+
     /// The `s` value on every Buy link. Must match the site's tag shape,
     /// `^[a-z0-9-]{1,32}$`, or the site ignores it.
     public static let buySourceTag = "mac-app"

@@ -295,10 +295,8 @@ import Testing
         #expect(CompanionApprovalPrompt.messageText == "Allow an iPhone to control Audiout on this Mac?")
     }
 
-    /// Turns red if the code stops being split 3 + 3 on screen, or VoiceOver
-    /// is handed the digits as one number.
-    @Test func theCodeIsSplitOnScreenAndReadDigitByDigit() {
-        #expect(CompanionApprovalPrompt.formattedCode("482913") == "482 913")
+    /// Turns red if VoiceOver is handed the code's digits as one number.
+    @Test func theCodeIsReadDigitByDigit() {
         #expect(CompanionApprovalPrompt.accessibilityLabel(code: "482913") == "Pairing code 4 8 2 9 1 3")
     }
 

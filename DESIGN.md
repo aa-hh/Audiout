@@ -70,7 +70,7 @@ typography:
   pairingCode:
     fontFamily: "SF Pro (system), monospacedDigit"
     fontSize: "28pt (off-scale)"
-    fontWeight: 500
+    fontWeight: 600
   titleLarge:
     fontFamily: "SF Pro (system)"
     fontSize: "15pt (systemFontSize + 2)"
@@ -1580,12 +1580,13 @@ cannot or will not scan can type it.
 Scanning the code only gets the app. While the Allow switch is on, the Mac is
 on the network whether or not any phone is paired, and a new phone pairs by
 opening Audiout Remote: the Mac brings itself forward, beeps and shows a stock
-`NSAlert`, "Allow an iPhone to control Audiout on this Mac?", with the
-six-digit code as its accessory view, centred, in `pairingCode` (28 pt,
-monospaced digits, split "482 913", read by VoiceOver digit by digit). The
-body asks the user to allow only if the iPhone shows the same code, and quotes
-the phone's own name only when it says more than "iPhone". "Don't Allow" is the
-default button and answers Return and Escape. In Settings › Audiout Remote a
+`NSAlert`, "Allow an iPhone to control Audiout on this Mac?", with the app
+icon wearing a `lock.fill` badge in a white circle, and the six-digit code as
+its accessory view: one digit per rounded 36 × 46 pt box in `pairingCode`,
+read by VoiceOver as one "Pairing code 4 8 2 9 1 3". The body asks the user to
+allow only if the iPhone shows the same code, and quotes the phone's own name
+only when it says more than "iPhone". Allow is drawn as the primary button but
+has no key equivalent, so Return does nothing; Escape is Don't Allow. In Settings › Audiout Remote a
 plain caption under the Allow switch (and its override note), mounted only
 while the switch is on, says how: "To add an iPhone, open Audiout Remote on it
 while it's on the same Wi-Fi as this Mac." Each Remembered iPhones row shows

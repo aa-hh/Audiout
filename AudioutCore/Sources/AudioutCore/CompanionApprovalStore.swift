@@ -378,11 +378,6 @@ public enum CompanionApprovalPrompt {
             + "You can remove it later in Settings › Audiout Remote."
     }
 
-    /// "482913" → "482 913".
-    public static func formattedCode(_ pairingCode: String) -> String {
-        "\(pairingCode.prefix(3)) \(pairingCode.dropFirst(3))"
-    }
-
     /// "482913" → "Pairing code 4 8 2 9 1 3", so VoiceOver reads digits,
     /// not two numbers.
     public static func accessibilityLabel(code pairingCode: String) -> String {

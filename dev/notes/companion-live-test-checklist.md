@@ -60,8 +60,8 @@ No TestFlight build exists yet — Xcode direct-install is the only path today.
   nothing to tap on the phone.
 - [ ] **On the Mac**, Audiout comes to the front with a beep and shows "Allow an iPhone
   to control Audiout on this Mac?" with the same code, large, under the text. If the
-  phone reports a name other than "iPhone", the text quotes it. Return and Escape both
-  answer Don't Allow.
+  phone reports a name other than "iPhone", the text quotes it. Escape answers Don't
+  Allow; Return does nothing.
 - [ ] **Lock the Mac before clicking.** Expected: the phone switches to "Unlock <Mac>"
   with the code still showing; unlocking switches it back to "Click Allow on <Mac>".
 - [ ] **Click Allow.** Expected: the phone goes live (Speakers tab populates) within

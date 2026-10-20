@@ -48,8 +48,8 @@ public final class ProminentButton: NSButton {
     /// under light Increase Contrast, which reads 1.84:1 on `#E8B84B`).
     private var ink: NSColor { Self.pinnedDark(Tokens.Color.inkOnFill) }
 
-    /// `color` resolved once under `.darkAqua`.
-    private static func pinnedDark(_ color: NSColor) -> NSColor {
+    /// `color` resolved once under `.darkAqua`. `CTAButton` pins its gold the same way.
+    static func pinnedDark(_ color: NSColor) -> NSColor {
         var resolved = color
         NSAppearance(named: .darkAqua)?.performAsCurrentDrawingAppearance {
             resolved = color.usingColorSpace(.sRGB) ?? color

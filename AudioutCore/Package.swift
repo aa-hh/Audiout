@@ -118,11 +118,10 @@ let package = Package(
         // Offscreen PNG renderer for the alignment-wizard window (v2 visual
         // verification). Run: `swift run wizard-snapshot [output-dir]`.
         .executable(name: "wizard-snapshot", targets: ["wizard-snapshot"]),
-        // Opens the real first-open licence gate and nothing else — no
-        // backend, no permissions, no network. The one surface a snapshot
-        // tool CANNOT stand in for: its ground is a live Metal shader, and
-        // Metal is off under `HeadlessRuntime`, so an offscreen render of this
-        // window is a flat colour. Run: `swift run license-gate-preview`.
+        // Opens the real one surface with the first-open licence gate over a
+        // mock fleet — no real backend, no permissions, no network — so the
+        // gate can be clicked through on screen. Run:
+        // `swift run license-gate-preview`.
         .executable(name: "license-gate-preview", targets: ["license-gate-preview"]),
         // Silent read-only Core Audio diagnostic for enumerating process objects and
         // their PIDs/bundle IDs, useful for diagnosing per-app routing (T7).
@@ -164,7 +163,7 @@ let package = Package(
         // protocol — CompanionServer / CompanionSnapshotBuilder /
         // CompanionCommandDispatcher are the consumers) and AudioutField (the
         // emitter field's numbers, which the marketing site's shader reads
-        // from the same file — `EmitterFieldView` is its consumer here). MIT,
+        // from the same file — `SettledLightLayer` is its consumer here). MIT,
         // so the closed-source iPhone companion can link the same code, and a
         // repository of its own because SwiftPM cannot depend on a package
         // that lives inside a subdirectory of another repo — and the phone
@@ -316,13 +315,7 @@ let package = Package(
             name: "AudioutOnboardingUI",
             // AudioutSharedUI: the Tokens design-token layer (Wave 2 of the
             // Warm Signal redesign) — onboarding styles through Tokens.* now.
-            // AudioutField: the emitter field's shared numbers, which
-            // `EmitterFieldView` generates its Metal shader from rather than
-            // retyping them (the licence gate's ground).
-            dependencies: [
-                "AudioutCore", "AudioutSharedUI",
-                .product(name: "AudioutField", package: "audiout-shared"),
-            ],
+            dependencies: ["AudioutCore", "AudioutSharedUI"],
             swiftSettings: [.unsafeFlags(swiftClangImporterFlags)]
         ),
         // Pure AppKit (SPEC §9). The app shell (status item, backend wiring,
@@ -361,7 +354,10 @@ let package = Package(
         // verification) — see the product comment above.
         .executableTarget(
             name: "popover-snapshot",
-            dependencies: ["AudioutCore", "AudioutPopoverUI", "AudioutSharedUI"],
+            // AudioutOnboardingUI + AudioutSettingsUI: the `license-gate`
+            // scene renders the real surface with the gate over it.
+            dependencies: ["AudioutCore", "AudioutPopoverUI", "AudioutSharedUI",
+                           "AudioutOnboardingUI", "AudioutSettingsUI"],
             swiftSettings: [.unsafeFlags(swiftClangImporterFlags)]
         ),
         // Offscreen PNG renderer for the Settings window — see the product
@@ -389,7 +385,8 @@ let package = Package(
         // above.
         .executableTarget(
             name: "license-gate-preview",
-            dependencies: ["AudioutCore", "AudioutOnboardingUI"],
+            dependencies: ["AudioutCore", "AudioutOnboardingUI", "AudioutPopoverUI",
+                           "AudioutSettingsUI", "AudioutSharedUI"],
             swiftSettings: [.unsafeFlags(swiftClangImporterFlags)]
         ),
         // Offscreen PNG renderer for the mixer window (group-creation design

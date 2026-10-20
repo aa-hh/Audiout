@@ -299,7 +299,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
     /// The first-run onboarding/permission-priming window, retained while open
     /// (first launch, or "Open Setup…" from Settings ▸ General).
     private var onboardingWindowController: OnboardingWindowController?
-    private var licenseGateWindowController: LicenseGateWindowController?
+    /// The first-open licence gate while it is drawn over the surface.
+    private var licenseGateController: LicenseGateViewController?
+    /// Set when the gate is owed but Setup opened first: Setup's finish
+    /// mounts it, once.
+    private var licenseGateAwaitsSetup = false
 
     /// The `SetupModel` behind the last-presented onboarding window, kept alive
     /// after the window closes and REUSED by every subsequent automatic
@@ -686,9 +690,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
     @MainActor
     private func openLicenseSheet(registering key: String) {
         // While the first-open gate is up it IS the licence surface: the
-        // purchase link lands straight in its field.
-        if let gate = licenseGateWindowController {
+        // purchase link lands straight in its field, over the Mixer.
+        if let gate = licenseGateController {
             gate.submit(key: key)
+            showSurface(.mixer)
             return
         }
         guard surface != nil else {
@@ -728,10 +733,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
     /// Returns `false` either way: we have opened what there is to open, and
     /// AppKit must not go looking for an untitled window to make.
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        if let gate = licenseGateWindowController {
-            gate.present()
-            return false
-        }
         if onboardingWindowController != nil {
             onboardingWindowController?.present()
             return false
@@ -884,12 +885,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
         statusItemController = StatusItemController()
         statusItemController.onButtonClicked = { [weak self] _ in
             guard let self else { return }
-            // The licence gate, while open, owns the click outright — it is
-            // the only thing the app is until it is answered.
-            if let gate = self.licenseGateWindowController {
-                gate.present()
-                return
-            }
             // The surface is built LATER in this same launch pass. No event
             // normally interleaves, but anything that ever spins the runloop
             // mid-`applicationDidFinishLaunching` (a modal, an SDK) would let
@@ -1638,22 +1633,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
 
     }
 
-    /// The first-open licence gate, the mid-session grant detector and the
-    /// revocation watch — whichever of them this launch needs.
+    /// The first-run block, the first-open licence gate, the mid-session
+    /// grant detector and the revocation watch — whichever of them this
+    /// launch needs.
     @MainActor
     private func runGateOrStart() {
-        // First-open licence gate: the welcome for a purchased build
-        // (`AudioutLicenseServerURL` in Info.plist) with no key and no trial.
-        // Its pass runs the exact first-run block this used to be, so Setup's
-        // permission priming and the backend deferral are preserved behind it;
-        // its abort quits. An ended trial or a refused key never meets it — it
-        // runs limited to one speaker (`LicenseGate.limitsToOneSpeaker`). A
-        // build from source carries no server URL and never gates.
+        runFirstRunGateAndStartBackend()
+        // First-open licence gate: for a purchased build
+        // (`AudioutLicenseServerURL` in Info.plist) with no key and no trial,
+        // drawn over the live Mixer once Setup (if it opened) is done. An ended
+        // trial or a refused key never meets it — it runs limited to one
+        // speaker (`LicenseGate.limitsToOneSpeaker`). A build from source
+        // carries no server URL and never gates.
         if LicenseGate.shouldPresent(settings: settings) {
             log("Audiout launched — first-open license gate")
-            presentLicenseGate()
-        } else {
-            runFirstRunGateAndStartBackend()
+            if onboardingWindowController != nil {
+                licenseGateAwaitsSetup = true
+            } else {
+                presentLicenseGate()
+            }
         }
 
         // T6-rev: arm the mid-session grant detector. Both launch branches above
@@ -1735,11 +1733,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
 
     }
 
-    /// The launch step the licence gate defers: the first-run Setup gate
-    /// (permission priming defers the backend) or the immediate backend start
-    /// with its live TCC re-checks. Extracted verbatim from
-    /// `applicationDidFinishLaunching`; both the gate's pass and the ungated
-    /// launch run it exactly once.
+    /// The first-run Setup gate (permission priming defers the backend) or the
+    /// immediate backend start with its live TCC re-checks. Extracted verbatim
+    /// from `applicationDidFinishLaunching`; every launch runs it exactly once.
     @MainActor
     private func runFirstRunGateAndStartBackend() {
         // First-run priming: on the native path, explain BOTH permissions before
@@ -1819,45 +1815,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
         }
     }
 
-    /// Present (or re-front) the first-open licence gate. The gate owns the
-    /// launch until it is answered: pass re-applies licence state and runs
-    /// the deferred first-run block; abort (✕ or Quit) terminates — a hard
-    /// gate's close IS declining to run the paid build.
+    /// Draw the first-open licence gate over the surface and open the surface
+    /// on the Mixer. There is no way past it but a key or a trial; the panel's
+    /// Quit is the way out. Its pass re-applies licence state and takes it
+    /// away.
     @MainActor
     private func presentLicenseGate() {
-        if let gate = licenseGateWindowController {
-            gate.present()
-            return
+        if licenseGateController == nil {
+            let gate = LicenseGateViewController(
+                settings: settings,
+                openURL: { NSWorkspace.shared.open($0) },
+                onPassed: { [weak self] in
+                    guard let self else { return }
+                    self.licenseGateController = nil
+                    self.surface.dismissLicenseGate(animated: true)
+                    self.applyLicenseState()
+                    // Same as `license.onLicenseChanged` below: a key entered at
+                    // the gate registers the device now, not at the next launch.
+                    LicenseCheckIn(settings: self.settings).checkInIfNeeded()
+                    // A trial handed out by the gate has no key yet, and the
+                    // launch path is long past — the reachability monitor
+                    // watches for network CHANGES, and an already-online Mac
+                    // gets none. Without this ask, such a trial stays unknown
+                    // to the server until the next launch: no key on the Buy
+                    // link, no device row, no event.
+                    TrialRegistrar.registerIfNeeded(
+                        settings: self.settings,
+                        completion: { [weak self] registered in
+                            guard registered else { return }
+                            self?.useNewTrialKey()
+                        })
+                })
+            licenseGateController = gate
+            surface.presentLicenseGate(gate)
         }
-        let gate = LicenseGateWindowController(
-            settings: settings,
-            openURL: { NSWorkspace.shared.open($0) },
-            onPassed: { [weak self] in
-                guard let self else { return }
-                self.licenseGateWindowController = nil
-                self.applyLicenseState()
-                // Same as `license.onLicenseChanged` below: a key entered at
-                // the gate registers the device now, not at the next launch.
-                LicenseCheckIn(settings: self.settings).checkInIfNeeded()
-                // A trial handed out by the gate has no key yet, and the launch
-                // path is long past — the reachability monitor watches for
-                // network CHANGES, and an already-online Mac gets none. Without
-                // this ask, such a trial stays unknown to the server until the
-                // next launch: no key on the Buy link, no device row, no event.
-                TrialRegistrar.registerIfNeeded(
-                    settings: self.settings,
-                    completion: { [weak self] registered in
-                        guard registered else { return }
-                        self?.useNewTrialKey()
-                    })
-                self.runFirstRunGateAndStartBackend()
-            },
-            onAbort: { [weak self] in
-                self?.licenseGateWindowController = nil
-                NSApp?.terminate(nil)
-            })
-        licenseGateWindowController = gate
-        gate.present()
+        showSurface(.mixer)
     }
 
     /// What a freshly issued trial key changes, the moment it is stored.
@@ -2343,7 +2335,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
             // the user with NO window at all — the whole point of finishing
             // setup is to start using the app, so open the surface the moment
             // onboarding dismisses rather than making them go find the
-            // menu-bar icon themselves.
+            // menu-bar icon themselves. A licence gate owed at launch waited
+            // for Setup and opens over that surface now, unless a key or a
+            // trial arrived meanwhile (a phone purchase during Setup).
+            if self.licenseGateAwaitsSetup {
+                self.licenseGateAwaitsSetup = false
+                if LicenseGate.shouldPresent(settings: self.settings) {
+                    self.presentLicenseGate()
+                    return
+                }
+            }
             self.showSurface(.mixer)
         }
         // The Setup window's iPhone card on screen is a pairing window.
@@ -3587,7 +3588,7 @@ extension AppDelegate: CompanionCoordinatorHost {
     }
 
     /// A licence key bought on the phone. Kept in this target
-    /// because it needs `LicenseValidator`, the gate window and
+    /// because it needs `LicenseValidator`, the gate and
     /// `applyLicenseState`, none of which an AppKit-free type owns. The phone
     /// is answered only after the licence server's verdict; with the gate up,
     /// an accepted key then opens it, and the gate's own pass runs
@@ -3598,14 +3599,14 @@ extension AppDelegate: CompanionCoordinatorHost {
         // The gate's check and the phone's must not race on the same stored
         // key, so the phone is told to retry rather than silently dropped or
         // falsely accepted.
-        if licenseGateWindowController?.isChecking == true {
+        if licenseGateController?.isChecking == true {
             reply(CompanionServer.CommandResult(applied: false, refusalReason: "Your Mac is checking another licence key. Try again in a moment."))
             return
         }
         CompanionLicenseActivation(settings: settings).activate(key: key) { [weak self] result in
             reply(result)
             guard let self, !self.isTerminating else { return }
-            if result.applied, let gate = self.licenseGateWindowController {
+            if result.applied, let gate = self.licenseGateController {
                 gate.passWithStoredKey()
                 return
             }

@@ -120,6 +120,14 @@ public final class AppSurfaceController {
     private let settings: AppSettings
     /// The expired-trial survey, over the shell's content view while up.
     private var surveyCard: TrialSurveyCardView?
+    /// The first-open licence gate, from `presentLicenseGate` until
+    /// `dismissLicenseGate`. Kept across closes and screen switches; its view
+    /// is seated over whichever screen is mounted, Settings excepted.
+    private var licenseGate: NSViewController?
+    /// The content view the gate's view currently sits in (`nil` while
+    /// Settings is up), and the constraint seating it below the toolbar strip.
+    private weak var licenseGateHost: NSView?
+    private var licenseGateTop: NSLayoutConstraint?
     /// The shell window's one header strip (D1): four icon-only tabs + Pin,
     /// as a real unified `NSToolbar`.
     private let toolbarController = SurfaceToolbarController()
@@ -601,6 +609,92 @@ public final class AppSurfaceController {
         surveyCard = nil
     }
 
+    // MARK: First-open licence gate
+
+    /// Draw `controller`'s view over the Mixer, Scenes and Speakers screens
+    /// until ``dismissLicenseGate(animated:)``. It sits below the toolbar
+    /// strip, so the four tabs stay live, and it is lifted off while Settings
+    /// is selected (Settings › License keeps its own key sheet). It survives
+    /// a close: a reopen shows it again. The frame is not resized for it.
+    ///
+    /// An `NSViewController` rather than the gate's own type, so this target
+    /// does not depend on `AudioutOnboardingUI`.
+    public func presentLicenseGate(_ controller: NSViewController) {
+        guard licenseGate == nil else { return }
+        licenseGate = controller
+        Analytics.capture("license:gate_shown")
+        seatLicenseGate()
+    }
+
+    /// Take the gate away: a 0.55 s ease-out fade, then removal; at once
+    /// headless or under Reduce Motion, or when `animated` is false.
+    public func dismissLicenseGate(animated: Bool) {
+        guard let gate = licenseGate else { return }
+        licenseGate = nil
+        restoreAccessibility(of: licenseGateHost, without: gate.view)
+        licenseGateHost = nil
+        licenseGateTop = nil
+        let overlay = gate.view
+        guard animated, overlay.superview != nil, !HeadlessRuntime.isActive,
+              !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else {
+            overlay.removeFromSuperview()
+            return
+        }
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.55
+            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            overlay.animator().alphaValue = 0
+        } completionHandler: {
+            overlay.removeFromSuperview()
+        }
+    }
+
+    /// Put the gate's view over the mounted screen, or lift it off while
+    /// Settings is up. Every `setContent` swaps the window's content view, so
+    /// this runs after each mount. While seated, the screen underneath is
+    /// hidden from accessibility: its content view reports only the gate.
+    private func seatLicenseGate() {
+        guard let gate = licenseGate else { return }
+        let host = selectedScreen == .settings ? nil : shell.window?.contentView
+        let overlay = gate.view
+        guard host !== licenseGateHost || overlay.superview !== host else { return }
+        restoreAccessibility(of: licenseGateHost, without: overlay)
+        overlay.removeFromSuperview()
+        licenseGateHost = host
+        licenseGateTop = nil
+        guard let host else { return }
+        overlay.translatesAutoresizingMaskIntoConstraints = false
+        host.addSubview(overlay)
+        let top = overlay.topAnchor.constraint(equalTo: host.topAnchor, constant: chromeTopInset)
+        licenseGateTop = top
+        NSLayoutConstraint.activate([
+            top,
+            overlay.leadingAnchor.constraint(equalTo: host.leadingAnchor),
+            overlay.trailingAnchor.constraint(equalTo: host.trailingAnchor),
+            overlay.bottomAnchor.constraint(equalTo: host.bottomAnchor),
+        ])
+        host.setAccessibilityChildren([overlay])
+    }
+
+    /// Give a screen back its own accessibility children after the gate
+    /// leaves it. AppKit has no way to clear an explicit children list
+    /// (`setAccessibilityChildren(nil)` leaves it empty), so the screen's
+    /// direct subviews are listed instead; AppKit's accessibility bridge
+    /// expands the ignored ones into their live descendants, so everything
+    /// below that first level stays current.
+    ///
+    /// razor: a direct subview added to that screen's root after this point is
+    /// missed by VoiceOver. The hosted roots build theirs once, in `loadView`;
+    /// the two views this surface adds itself cannot arrive later — the launch
+    /// splash shows once per process, before the gate can pass, and the survey
+    /// card needs an expired trial, which a session that passed the gate does
+    /// not have. A root that starts adding direct subviews later needs a root
+    /// view subclass that answers `accessibilityChildren()` itself.
+    private func restoreAccessibility(of host: NSView?, without overlay: NSView) {
+        guard let host else { return }
+        host.setAccessibilityChildren(host.subviews.filter { $0 !== overlay })
+    }
+
     /// Drop a pending first-open reveal (a close during the settle wait). The
     /// window was never fronted, so there is nothing to hide — just stop the
     /// wait from later fronting a surface the user has moved on from.
@@ -864,6 +958,9 @@ public final class AppSurfaceController {
            let first = window.initialFirstResponder, first.canBecomeKeyView {
             window.makeFirstResponder(first)
         }
+        // Last, so the gate sits above the screen just mounted and its key
+        // field takes the first responder the line above may have handed out.
+        seatLicenseGate()
     }
 
     // MARK: Lazy screens
@@ -1007,6 +1104,7 @@ public final class AppSurfaceController {
 
     private func applyChromeTopInset() {
         let inset = chromeTopInset
+        licenseGateTop?.constant = inset
         mixerPanel?.setContentTopInset(inset)
         groupsScreen?.setContentTopInset(inset)
         speakersScreen?.setContentTopInset(inset)
@@ -1053,6 +1151,8 @@ public final class AppSurfaceController {
     /// The lazily-built pieces, `nil` until their tab is first selected.
     var test_mixerPanel: PopoverPanelViewController? { mixerPanel }
     var test_surveyCard: TrialSurveyCardView? { surveyCard }
+    /// The licence gate's overlay while one is presented (seated or not).
+    public var test_licenseGateView: NSView? { licenseGate?.view }
     var test_groupsScreen: SurfaceScreenViewController? { groupsScreen }
     var test_speakersScreen: SurfaceScreenViewController? { speakersScreen }
     var test_settingsScreen: SurfaceScreenViewController? { settingsScreen }

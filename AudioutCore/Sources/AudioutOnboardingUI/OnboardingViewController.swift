@@ -85,6 +85,12 @@ public final class OnboardingViewController: NSViewController {
     /// test and the snapshot renderers replace it so nothing launches one.
     public var openURL: (URL) -> Void = { NSWorkspace.shared.open($0) }
 
+    /// Fired each time the iPhone card comes on screen. The app starts the
+    /// companion server then if it is not running yet (first-run Setup holds
+    /// it back until Local Network has been explained), so a phone that
+    /// scans the card's code can find this Mac.
+    public var onRemoteInviteShown: (() -> Void)?
+
     /// Called on every edge of "a system permission dialog this flow raised is
     /// still unanswered". The window controller goes quiet while it is true —
     /// see ``isPromptInFlight``.
@@ -938,6 +944,7 @@ public final class OnboardingViewController: NSViewController {
             lastHeroDisplayedStep = displayedStep
             if displayedStep == .audioutRemote {
                 Analytics.capture("remote_invite:setup_card_shown")
+                onRemoteInviteShown?()
             }
         }
         if let browsed = browseStep {

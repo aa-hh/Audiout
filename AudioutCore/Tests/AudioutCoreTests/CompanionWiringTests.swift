@@ -196,13 +196,16 @@ import Testing
         #expect(on.loads == 1, "switch on and no phone approved: the server tries to start")
     }
 
-    /// Turns red if `wire(startingServer: false)` starts the server anyway:
-    /// on a first launch its Bonjour advertisement would raise the Local
-    /// Network prompt before Setup explains it.
+    /// Turns red if `wire(startingServer: false)` starts the server anyway
+    /// (on a first launch its Bonjour advertisement would raise the Local
+    /// Network prompt before Setup explains it), or if `updateServerState()`
+    /// starts it before `wire` attached the approval gate.
     @Test func wiringCanLeaveTheServerForLater() {
         let identities = RefusingIdentityStore()
         let coordinator = makeCoordinator(host: StubHost(), storeName: "deferred", identityStore: identities,
                                           allowRemoteControl: true)
+        coordinator.updateServerState()
+        #expect(identities.loads == 0, "not wired yet: nothing starts")
         coordinator.wire(startingServer: false)
         #expect(identities.loads == 0)
         coordinator.updateServerState()

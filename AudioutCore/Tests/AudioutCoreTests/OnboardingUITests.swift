@@ -1494,17 +1494,25 @@ import Testing
     /// Defect this names: the card asking for something macOS raises (a
     /// caption promising a system dialog, a Settings deep link), or drawing
     /// anything other than the invitation the other two hosts mount.
+    /// Also turns red if the card stops firing `onRemoteInviteShown` once as
+    /// it comes on screen: the app starts the companion server on it, and
+    /// without that a phone that scans the card during first-run Setup finds
+    /// no Mac.
     @Test func theIPhoneCardStagesTheInvitationAndOpensThePage() async {
         var opened: [URL] = []
+        var invitesShown = 0
         let vc = makeVC(model: makeModel(audio: .granted, foundSpeakers: 3,
                                          remoteAppAvailable: true,
                                          ptpHelper: FakePTPHelper(status: .enabled)))
         vc.openURL = { opened.append($0) }
+        vc.onRemoteInviteShown = { invitesShown += 1 }
         await vc.test_allow([.audio, .localNetwork])
         vc.test_tapSkip(.bluetooth)
+        #expect(invitesShown == 0, "nothing fires before the card is up")
         vc.test_tapSkip(.remoteControl)
 
         #expect(vc.test_activeStep == .audioutRemote)
+        #expect(invitesShown == 1, "the card coming on screen fires once")
         #expect(vc.test_heroHeadline == "Measure with your iPhone")
         #expect(vc.test_previewFrameLabel == nil,
                 "macOS raises nothing here, so nothing may claim it does")

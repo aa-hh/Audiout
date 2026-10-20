@@ -138,6 +138,10 @@ public final class CompanionCoordinator {
     /// ``updateServerState()`` only acts on a real edge.
     private var isActive = false
 
+    /// Set by ``wire(startingServer:)``; ``updateServerState()`` does nothing
+    /// before it.
+    private var isWired = false
+
     /// Phones whose icon pages are still being sent; a second request from
     /// one of them is refused until the first is done.
     private var iconRequestsInFlight: Set<UUID> = []
@@ -222,7 +226,8 @@ public final class CompanionCoordinator {
     // MARK: Wiring
 
     /// Attach every companion trigger + the command/disconnect callbacks, then
-    /// start the server if setting/env allow. Called once, at the END of
+    /// (unless `startingServer` is false) start the server if setting/env
+    /// allow. Called once, at the END of
     /// `applicationDidFinishLaunching` (see the call site's ordering comment).
     /// `appRouting.onRoutesDidChange`, `groupController.onStateDidChange`,
     /// `excludedApps.onChange`, the icon-controller chain-wrap and the two
@@ -234,6 +239,7 @@ public final class CompanionCoordinator {
     /// ``updateServerState()``: its Bonjour advertisement raises the Local
     /// Network prompt, which first-run Setup must explain first.
     public func wire(startingServer: Bool = true) {
+        isWired = true
         dispatcher = CompanionCommandDispatcher(
             groupController: groupController,
             appRouting: appRouting,
@@ -494,13 +500,18 @@ public final class CompanionCoordinator {
 
     /// Start or stop the companion server: it runs while
     /// `AppSettings.resolvedAllowRemoteControl` allows it (env override →
-    /// persisted switch). Called at launch and from the Settings › Audiout
-    /// Remote switch; a no-op when nothing changed. A start that cannot load the TLS identity
+    /// persisted switch). Called once the app is wired and the backend has
+    /// started (or Setup's iPhone card shows), and from the Settings ›
+    /// Audiout Remote switch; a no-op when nothing changed or before
+    /// ``wire(startingServer:)``. A start that cannot load the TLS identity
     /// reports it, leaves the server stopped, and is tried again on the next
     /// call. On start, broadcasts an initial snapshot IMMEDIATELY — the server
     /// defers a helloed client's `welcome` until the first broadcast, so an
     /// early client would otherwise hang.
     public func updateServerState() {
+        // Before `wire()` the server would come up with no approval gate or
+        // command handler attached.
+        guard isWired else { return }
         let shouldRun = AppSettings.resolvedAllowRemoteControl(settings: settings)
         guard shouldRun != isActive else { return }
         if shouldRun {

@@ -298,11 +298,11 @@ public final class CompanionApprovalController {
         for decide in waiters ?? [] {
             decide(allowed ? .approved : .denied)
         }
-        // A late answer to a prompt that was already withdrawn must not end
-        // the cooldown of whichever prompt followed it.
         // A pause this denial starts empties the queue before the cooldown
         // wake is scheduled, so no queued phone slips a prompt in.
         if !allowed { noteDenial() }
+        // A late answer to a prompt that was already withdrawn must not end
+        // the cooldown of whichever prompt followed it.
         if activePromptClientID == clientID { finishActivePrompt() }
     }
 

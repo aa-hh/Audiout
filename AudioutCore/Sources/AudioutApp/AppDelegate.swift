@@ -855,9 +855,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
             self?.companionCoordinator.scheduleBroadcast()
         }
 
-        // The server starts with the backend (`startBackendIfNeeded`): both
-        // raise the Local Network prompt, which first-run Setup explains first.
-        companionCoordinator.wire(startingServer: false)
+        // The server's Bonjour advertisement raises the Local Network prompt,
+        // which first-run Setup explains first: start it here only if the
+        // backend already started, otherwise `startBackendIfNeeded` or the
+        // Setup iPhone card starts it.
+        companionCoordinator.wire(startingServer: backendStarted)
 
         // A link that LAUNCHED the app was handled before any of this existed.
         if let key = pendingLicenseKeyFromURL {
@@ -2338,6 +2340,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
             // onboarding dismisses rather than making them go find the
             // menu-bar icon themselves.
             self.showSurface(.mixer)
+        }
+        // The iPhone card comes after the Local Network step, so the server
+        // may start there even while Setup holds the backend back.
+        controller.onRemoteInviteShown = { [weak self] in
+            self?.companionCoordinator.updateServerState()
         }
         onboardingWindowController = controller
         controller.present()

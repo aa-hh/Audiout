@@ -855,7 +855,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
             self?.companionCoordinator.scheduleBroadcast()
         }
 
-        companionCoordinator.wire()
+        // The server starts with the backend (`startBackendIfNeeded`): both
+        // raise the Local Network prompt, which first-run Setup explains first.
+        companionCoordinator.wire(startingServer: false)
 
         // A link that LAUNCHED the app was handled before any of this existed.
         if let key = pendingLicenseKeyFromURL {
@@ -2207,6 +2209,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
         backendStarted = true
         subscribeToBackendEvents()
         backend.start()
+        companionCoordinator.updateServerState()
     }
 
     /// Build (or reuse) a ``SetupModel`` (production probes) + onboarding window

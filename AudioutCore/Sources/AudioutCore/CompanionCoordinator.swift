@@ -230,7 +230,10 @@ public final class CompanionCoordinator {
     /// single-assignment closures the launch path already owns, so the
     /// companion tail rides inside them at their original sites rather than
     /// being reassigned here.
-    public func wire() {
+    /// `startingServer` false leaves the server for a later
+    /// ``updateServerState()``: its Bonjour advertisement raises the Local
+    /// Network prompt, which first-run Setup must explain first.
+    public func wire(startingServer: Bool = true) {
         dispatcher = CompanionCommandDispatcher(
             groupController: groupController,
             appRouting: appRouting,
@@ -479,7 +482,7 @@ public final class CompanionCoordinator {
         }
         server.setScreenLocked(Self.screenIsLocked())
 
-        updateServerState()
+        if startingServer { updateServerState() }
     }
 
     /// Whether the screen is locked right now, from the login session's

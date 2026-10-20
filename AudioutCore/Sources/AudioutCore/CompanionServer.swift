@@ -96,7 +96,8 @@ public final class CompanionServer: @unchecked Sendable {
     /// The app layer's verdict on one helloed connection (T24). `.pending`
     /// may be sent first — the server then sends the client
     /// `awaitingApproval` and keeps holding it — and must be followed
-    /// (possibly minutes later) by exactly one `.approved`/`.denied`; a
+    /// (possibly minutes later) by exactly one `.approved`, `.denied` or
+    /// `.paused`; a
     /// verdict for a connection that already died or timed out is a no-op.
     /// `.paused` refuses an unknown phone without asking anyone, while the
     /// Mac turns new phones away for `seconds` more.
@@ -264,9 +265,7 @@ public final class CompanionServer: @unchecked Sendable {
     /// approval question is considered abandoned and the connection is
     /// closed with `goodbye("approvalTimedOut")`. Deliberately generous —
     /// the Mac's user may be in another room when the prompt appears — and
-    /// retryable: the phone reconnects and asks again. The pairing-code
-    /// alert for an approved phone (`CompanionApprovalController`) closes
-    /// after the same time.
+    /// retryable: the phone reconnects and asks again.
     static let approvalTimeout: TimeInterval = 180
     /// Test-only: overrides ``approvalTimeout``.
     public var test_approvalTimeoutOverride: TimeInterval?

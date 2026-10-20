@@ -481,20 +481,13 @@ public struct AppSettings {
     /// mirroring `BackendKind.environmentVariableName`'s dev-convenience idiom.
     public static let allowRemoteControlEnvironmentVariableName = "AUDIOUT_COMPANION"
 
-    /// Whether this build offers the iPhone companion at all: `false` for the
-    /// shipping app until Audiout Remote is approved and on the App Store,
-    /// `true` for every dev build (``isDevBuild``).
-    ///
-    /// Every surface that mentions the phone app is an invitation to download
-    /// it, and until it exists each one is a dead end: the Setup window's
-    /// iPhone card, the Settings › General switch with its QR row and phone
-    /// list, and the alignment wizard's "Measure with your iPhone" panel all
-    /// read this and stay off the screen. The companion server does not start
-    /// either — there is nothing on any phone to connect with.
-    ///
-    /// Return `true` here on the release that follows the phone app's
-    /// approval; nothing else moves. `AUDIOUT_COMPANION` still wins over it.
-    public static var remoteAppIsOffered: Bool { isDevBuild }
+    /// Whether this build offers the iPhone companion at all: `true` for
+    /// every build now that Audiout Remote ships. Every surface that mentions
+    /// the phone app (the Setup window's iPhone card, Settings › Audiout
+    /// Remote, the alignment wizard's "Measure with your iPhone" panel) and
+    /// the companion server read this; `false` would hide them all and keep
+    /// the server off. `AUDIOUT_COMPANION` still wins over it.
+    public static var remoteAppIsOffered: Bool { true }
 
     /// Dev builds only: the Settings › General › Developer "Licence gate"
     /// popup. ``LicenseGatePresentation/resolved(environment:settings:isDevBuild:)``

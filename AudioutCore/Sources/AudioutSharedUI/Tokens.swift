@@ -1339,6 +1339,13 @@ public enum Tokens {
         public static var headingDigits: NSFont {
             .monospacedDigitSystemFont(ofSize: NSFont.systemFontSize + 3, weight: .semibold)
         }
+        /// The six-digit code on the Mac's Allow prompt for a new iPhone,
+        /// which the user compares with the phone's screen from arm's length:
+        /// 28 pt, monospaced digits so the two halves line up, medium like
+        /// the speaker code sheet's digit boxes.
+        public static var pairingCode: NSFont {
+            .monospacedDigitSystemFont(ofSize: 28, weight: .medium)
+        }
         /// A large message title (mixer-window empty state, +2pt regular).
         /// Alias of `NSFont.systemFont(ofSize: NSFont.systemFontSize + 2)`.
         public static var titleLarge: NSFont {

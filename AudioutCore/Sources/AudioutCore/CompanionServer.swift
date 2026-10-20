@@ -49,9 +49,11 @@ import AudioutProtocol
 ///    the latest cached snapshot — or, if no snapshot has been broadcast
 ///    yet, the `welcome` is deferred until the first ``broadcast(_:)`` (the
 ///    wiring broadcasts immediately after start, so this window is
-///    milliseconds); `.denied` → `goodbye("notApproved")`; `.pairingClosed`
-///    → `goodbye("pairingClosed")`; `.pending` → an `awaitingApproval` frame
-///    (the phone shows the code and "check your Mac") and the connection is
+///    milliseconds); `.denied` → `goodbye("notApproved")`; `.paused` →
+///    `goodbye("pairingPaused")` with the seconds left; `.pending` → an
+///    `awaitingApproval` frame carrying whether the screen is locked (the
+///    phone shows the code and "click Allow"; ``setScreenLocked(_:)`` re-sends
+///    it when the lock changes) and the connection is
 ///    held — released from the pre-hello deadline, bounded instead by the
 ///    much more generous ``approvalTimeout`` (the user may be walking to the
 ///    Mac), after which it gets `goodbye("approvalTimedOut")` and may simply
@@ -96,10 +98,11 @@ public final class CompanionServer: @unchecked Sendable {
     /// `awaitingApproval` and keeps holding it — and must be followed
     /// (possibly minutes later) by exactly one `.approved`/`.denied`; a
     /// verdict for a connection that already died or timed out is a no-op.
-    /// `.pairingClosed` refuses an unknown phone that arrived while no
-    /// pairing window was open, without asking anyone.
-    public enum ApprovalDecision: Sendable {
-        case approved, denied, pending, pairingClosed
+    /// `.paused` refuses an unknown phone without asking anyone, while the
+    /// Mac turns new phones away for `seconds` more.
+    public enum ApprovalDecision: Equatable, Sendable {
+        case approved, denied, pending
+        case paused(seconds: Int)
     }
 
     // MARK: - Wiring surface
@@ -122,17 +125,12 @@ public final class CompanionServer: @unchecked Sendable {
     /// whose signature proved it holds the key `clientID` names
     /// (`CompanionPairing.clientID(forPublicKey:)`, uppercase hex;
     /// `clientName` already truncated). `pairingCode` is the six digits the
-    /// phone is showing for this Mac and key, for the prompt to repeat.
-    /// `checksPairingCode` is the hello's flag: the phone is asking its user
-    /// to compare that code, so the Mac shows it even for a phone it already
-    /// approved. `connectionID` is the connection's id, the one
-    /// ``onCommand`` and ``onClientDisconnected`` later report. The
+    /// phone is showing for this Mac and key, for the prompt to repeat. The
     /// wiring answers via `decide` — from any thread, any time later (see
     /// ``ApprovalDecision``); the server holds the connection meanwhile and
     /// NEVER blocks waiting. Left nil, no client is ever promoted (the
     /// awaiting deadline reaps them) — the trust boundary fails closed.
     public var onApprovalRequest: (@Sendable (_ clientID: String, _ clientName: String, _ pairingCode: String,
-                                              _ checksPairingCode: Bool, _ connectionID: UUID,
                                               _ decide: @escaping @Sendable (ApprovalDecision) -> Void) -> Void)?
 
     /// Fires when the last awaiting connection carrying this phone
@@ -140,13 +138,6 @@ public final class CompanionServer: @unchecked Sendable {
     /// reaped it. Never fires for an answered request (approved or denied).
     /// The wiring uses this to withdraw the prompt still on screen.
     public var onApprovalAbandoned: (@Sendable (_ clientID: String) -> Void)?
-
-    /// Fires once for each connection reported through
-    /// ``onApprovalRequest`` that closed without being admitted: refused
-    /// (any decision but `.approved`, or approved into a full server),
-    /// dropped, timed out, or cut by ``stop(reason:)``. An admitted
-    /// connection reports its end through ``onClientDisconnected`` instead.
-    public var onAwaitingConnectionClosed: (@Sendable (_ connectionID: UUID) -> Void)?
 
     /// A client went away for any reason — clean close, error, liveness
     /// reaping, or `stop()` — after being accepted (helloed + promoted;
@@ -211,6 +202,8 @@ public final class CompanionServer: @unchecked Sendable {
         /// A goodbye already went out (``refuse``); ``stopLocked`` must not
         /// send a second one on the same socket.
         var isClosing = false
+        /// Told `awaitingApproval`: ``setScreenLocked(_:)`` re-sends it.
+        var isAwaitingPrompt = false
         /// The active deadline work item: the pre-hello deadline while in
         /// `pending`, re-armed as the (much longer) approval deadline while
         /// in `awaiting`; cancelled on promotion. For a connection refused
@@ -233,6 +226,9 @@ public final class CompanionServer: @unchecked Sendable {
     /// broadcast to, or command-eligible. Bounded by ``awaitingCap``; reaped
     /// by the ``approvalTimeout`` deadline, NOT the pre-hello one.
     private var awaiting: [UUID: Client] = [:]
+    /// Whether the Mac's screen is locked (``setScreenLocked(_:)``), sent
+    /// with every `awaitingApproval`.
+    private var screenLocked = false
     /// Helloed + promoted clients — the only connections that count, get
     /// broadcasts, and may send commands.
     private var clients: [UUID: Client] = [:]
@@ -467,7 +463,6 @@ public final class CompanionServer: @unchecked Sendable {
         let droppedAwaiting = awaiting
         awaiting.removeAll()
         for (_, client) in droppedAwaiting {
-            noteAwaitingClosed(client.id)
             client.handshakeTimeout?.cancel()
             let connection = client.connection
             if let goodbye, !client.isClosing {
@@ -711,15 +706,15 @@ public final class CompanionServer: @unchecked Sendable {
         switch decision {
         case .pending:
             // The Mac is prompting its user; tell the phone so it can show
-            // "check your Mac" instead of a spinner.
-            send(.awaitingApproval, to: client)
+            // "click Allow" (or "unlock your Mac") instead of a spinner.
+            client.isAwaitingPrompt = true
+            send(.awaitingApproval(screenLocked: screenLocked), to: client)
         case .approved:
             // Re-check the cap AT promotion: other phones may have filled it
             // while this one waited for its human.
             guard clients.count < (test_maxClientsOverride ?? Self.maxClients) else {
                 log.notice("companion client approved but refused: at capacity")
                 awaiting[id] = nil
-                noteAwaitingClosed(id)
                 refuse(client, reason: CompanionGoodbyeReason.serverFull)
                 return
             }
@@ -727,25 +722,37 @@ public final class CompanionServer: @unchecked Sendable {
         case .denied:
             log.notice("companion client refused: not approved")
             awaiting[id] = nil
-            noteAwaitingClosed(id)
             refuse(client, reason: CompanionGoodbyeReason.notApproved)
-        case .pairingClosed:
-            log.notice("companion client refused: unknown phone and no pairing window open")
+        case .paused(let seconds):
+            log.notice("companion client refused: new phones paused for \(seconds) s")
             awaiting[id] = nil
-            noteAwaitingClosed(id)
-            refuse(client, reason: CompanionGoodbyeReason.pairingClosed)
+            refuse(client, reason: CompanionGoodbyeReason.pairingPaused, retryAfterSeconds: seconds)
+        }
+    }
+
+    /// Whether the Mac's screen is locked, so its Allow prompt is out of
+    /// sight. Every phone already told `awaitingApproval` hears the new
+    /// value; a repeat of the current value sends nothing. Callable from
+    /// any thread.
+    public func setScreenLocked(_ locked: Bool) {
+        queue.async { [self] in
+            guard locked != screenLocked else { return }
+            screenLocked = locked
+            for client in awaiting.values where client.isAwaitingPrompt {
+                send(.awaitingApproval(screenLocked: locked), to: client)
+            }
         }
     }
 
     /// Best-effort goodbye, then close — with the same 250 ms backstop
     /// cancel `stopLocked` uses, for a client no pre-hello deadline guards
     /// anymore. MUST only run on ``queue``.
-    private func refuse(_ client: Client, reason: String) {
+    private func refuse(_ client: Client, reason: String, retryAfterSeconds: Int? = nil) {
         client.handshakeTimeout?.cancel()
         client.handshakeTimeout = nil
         client.isClosing = true
         let connection = client.connection
-        if let goodbye = encoded(.goodbye(reason: reason)) {
+        if let goodbye = encoded(.goodbye(reason: reason, retryAfterSeconds: retryAfterSeconds)) {
             sendRaw(goodbye, over: connection) {
                 connection.cancel()
             }
@@ -785,7 +792,6 @@ public final class CompanionServer: @unchecked Sendable {
         if let waiting = awaiting.removeValue(forKey: id) {
             waiting.handshakeTimeout?.cancel()
             waiting.connection.cancel()
-            noteAwaitingClosed(id)
             noteApprovalAbandoned(waiting)
             return // never promoted: no disconnect signal, never counted
         }
@@ -798,13 +804,6 @@ public final class CompanionServer: @unchecked Sendable {
             disconnected?(id)
             countChanged?(count)
         }
-    }
-
-    /// MUST only run on ``queue``, once per connection leaving ``awaiting``
-    /// unadmitted.
-    private func noteAwaitingClosed(_ id: UUID) {
-        let closed = onAwaitingConnectionClosed
-        queue.async { closed?(id) }
     }
 
     /// MUST only run on ``queue``, and only for a connection just removed
@@ -935,12 +934,12 @@ public final class CompanionServer: @unchecked Sendable {
         }
 
         switch envelope.message {
-        case .hello(let rawClientKey, let rawName, let protoVersion, let rawSignature, let checksPairingCode):
+        case .hello(let rawClientKey, let rawName, let protoVersion, let rawSignature):
             guard clients[client.id] == nil else { return } // duplicate hello: ignore
             guard pending[client.id] != nil else { return } // awaiting-duplicate, or lost a race with its own death
             guard !CompanionProto.isIncompatible(peerVersion: protoVersion) else {
                 // A newer peer might mean things we can't interpret, and an
-                // older one speaks the handshake version 2 replaced; tell it
+                // older one expects the pairing flow version 3 replaced; tell it
                 // why, then close. The pre-hello deadline stays armed as the
                 // close backstop if this send never flushes.
                 log.notice("companion client refused: proto \(protoVersion) outside \(CompanionProto.minimumPeerVersion)...\(CompanionProto.version)")
@@ -1015,7 +1014,6 @@ public final class CompanionServer: @unchecked Sendable {
                 guard let self, let held = self.awaiting.removeValue(forKey: connectionID) else { return }
                 self.log.notice("companion client refused: approval prompt unanswered")
                 self.refuse(held, reason: CompanionGoodbyeReason.approvalTimedOut)
-                self.noteAwaitingClosed(connectionID)
                 self.noteApprovalAbandoned(held)
             }
             client.handshakeTimeout = approvalWork
@@ -1030,7 +1028,7 @@ public final class CompanionServer: @unchecked Sendable {
             if let onApprovalRequest {
                 let clientName = client.clientName ?? ""
                 queue.async {
-                    onApprovalRequest(phoneClientID, clientName, pairingCode, checksPairingCode, connectionID, decide)
+                    onApprovalRequest(phoneClientID, clientName, pairingCode, decide)
                 }
             }
             // else: nothing to ask — the approval deadline reaps it (closed

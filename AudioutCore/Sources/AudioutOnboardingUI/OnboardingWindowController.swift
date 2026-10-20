@@ -28,13 +28,6 @@ public final class OnboardingWindowController: NSWindowController, NSWindowDeleg
     private let contentVC: OnboardingViewController
     private var didFinish = false
 
-    /// Fired each time the iPhone card comes on screen — see
-    /// ``OnboardingViewController/onRemoteInviteShown``.
-    public var onRemoteInviteShown: (() -> Void)? {
-        get { contentVC.onRemoteInviteShown }
-        set { contentVC.onRemoteInviteShown = newValue }
-    }
-
     /// - Parameters:
     ///   - model: the Core flow model, pre-wired with the production probes.
     ///   - reason: why this presentation is happening — `.firstRun` (default,

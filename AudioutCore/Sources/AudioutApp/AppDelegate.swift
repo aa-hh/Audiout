@@ -451,12 +451,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
     /// connection just died.
     private var companionApprovalAlerts: [String: NSAlert] = [:]
 
-    /// Open pairing-code alerts for approved phones, keyed by clientID.
-    private var companionCodeCheckAlerts: [String: NSAlert] = [:]
-    /// Closes a pairing-code alert on Escape, which a non-modal one-button
-    /// `NSAlert` ignores. Installed with the first alert.
-    private var companionCodeCheckEscapeMonitor: Any?
-
     /// AIRPLAY_DEBUG_LEVELS=1 → log capture RMS ~1/sec (see the `.level` case).
     private let debugLevels = ProcessInfo.processInfo.environment["AIRPLAY_DEBUG_LEVELS"] == "1"
     private var lastLevelLog = Date.distantPast
@@ -1384,10 +1378,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
         // overwriting it.
         popoverController.remoteInviteStateProvider = { [weak self] in
             self?.remoteInviteState() ?? .notConnected
-        }
-        // The wizard's iPhone panel showing its code is a pairing window.
-        popoverController.onRemoteInviteShown = { [weak self] in
-            self?.companionCoordinator.openPairingWindow()
         }
         popoverController.btLatencyProvider = { [weak self] deviceID in
             (self?.backend as? BTOutputControlling)?.btMeasuredLatencyMs(forDevice: deviceID)
@@ -2346,10 +2336,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
             // menu-bar icon themselves.
             self.showSurface(.mixer)
         }
-        // The Setup window's iPhone card on screen is a pairing window.
-        controller.onRemoteInviteShown = { [weak self] in
-            self?.companionCoordinator.openPairingWindow()
-        }
         onboardingWindowController = controller
         controller.present()
     }
@@ -2604,11 +2590,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
         remote.onAllowRemoteControlChanged = { [weak self] in
             self?.companionCoordinator.updateServerState()
         }
-        // "Pair an iPhone" opens the pairing window; the button reads the
-        // window's state and repaints when it opens or lapses.
-        remote.onPairRequested = { [weak self] in self?.companionCoordinator.openPairingWindow() }
-        remote.isPairingOpen = { [weak self] in self?.companionCoordinator.pairingWindowOpen ?? false }
-        companionCoordinator.onPairingWindowChanged = { [weak remote] in remote?.refreshPairingState() }
 
         let license = LicenseSettingsViewController(settings: settings)
         // The way back in for `audiout://register`.
@@ -3432,36 +3413,57 @@ extension AppDelegate: CompanionCoordinatorHost {
 
     /// The T24 approval alert: shows the pairing code the phone is showing,
     /// explains the stakes, and reports the answer back to
-    /// `CompanionApprovalController` (which persists it and settles every
-    /// connection waiting on it). Main-actor and modal — the SERVER never
-    /// blocks (its queue keeps running; only this app's own UI waits), and
-    /// the controller shows one prompt at a time. The phone's self-reported
-    /// name is not in the question: the code is what identifies it.
-    /// "Don't Allow" is the default button, and the alert floats at
-    /// `.floating` level and requests attention without activating the app,
-    /// so a Return or click aimed at something else never approves a phone.
-    /// An abort from `withdrawApprovalPrompt` is not the user's answer and
-    /// records nothing.
+    /// `CompanionApprovalController` (which settles every connection waiting
+    /// on it). Main-actor and modal — the SERVER never blocks (its queue
+    /// keeps running; only this app's own UI waits), and the controller shows
+    /// one prompt at a time. Nobody clicked anything to cause it, so it
+    /// brings the app forward and beeps; "Don't Allow" answers Return and
+    /// Escape, so a key press aimed at something else never approves a
+    /// phone. An abort from `withdrawApprovalPrompt` is not the user's answer
+    /// and records nothing.
     @MainActor
     func presentApprovalPrompt(clientID: String, clientName: String, pairingCode: String,
                                respond: @escaping (Bool) -> Void) {
         // Headless harnesses must never flash real UI; not answering leaves
-        // the decision unmade (no persisted denial) and the server's own
-        // approval deadline closes the connection.
+        // the decision unmade and the server's own approval deadline closes
+        // the connection.
         guard !HeadlessRuntime.isActive, !isTerminating else { return }
-        let code = Self.formattedPairingCode(pairingCode)
         let alert = NSAlert()
-        alert.messageText = "Allow an iPhone to control audio on this Mac?"
-        alert.informativeText = "The iPhone is showing a code. Allow only if it shows \(code) too.\n\nIt will be able to see and control what's playing on this Mac's speakers, including which apps are playing audio. You can change this later in Settings › Audiout Remote."
+        alert.messageText = CompanionApprovalPrompt.messageText
+        alert.informativeText = CompanionApprovalPrompt.informativeText(clientName: clientName)
+        alert.accessoryView = Self.pairingCodeView(pairingCode)
         alert.addButton(withTitle: "Don't Allow")
         alert.addButton(withTitle: "Allow")
         alert.window.level = .floating
-        NSApp.requestUserAttention(.criticalRequest)
+        // Escape: NSAlert maps it only to a button titled Cancel.
+        let escape = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            guard event.keyCode == 53, event.window === alert.window else { return event }
+            NSApp.stopModal(withCode: .alertFirstButtonReturn)
+            return nil
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        NSSound.beep()
         companionApprovalAlerts[clientID] = alert
         let outcome = alert.runModal()
         companionApprovalAlerts.removeValue(forKey: clientID)
+        if let escape { NSEvent.removeMonitor(escape) }
         guard outcome != .abort else { return }
         respond(outcome == .alertSecondButtonReturn)
+    }
+
+    /// The code the phone shows too, large and centred under the alert's
+    /// text, read by VoiceOver digit by digit.
+    private static func pairingCodeView(_ pairingCode: String) -> NSView {
+        let label = NSTextField(labelWithString: CompanionApprovalPrompt.formattedCode(pairingCode))
+        label.font = Tokens.Font.pairingCode
+        label.textColor = Tokens.Color.label
+        label.alignment = .center
+        label.setAccessibilityLabel(CompanionApprovalPrompt.accessibilityLabel(code: pairingCode))
+        label.sizeToFit()
+        // NSAlert lays the accessory out at the width of its text column;
+        // a label any narrower would sit at that column's leading edge.
+        label.frame.size.width = 220
+        return label
     }
 
     /// Close the prompt shown for `clientID`, if it's still the one on
@@ -3475,70 +3477,6 @@ extension AppDelegate: CompanionCoordinatorHost {
     func withdrawApprovalPrompt(clientID: String) {
         guard let alert = companionApprovalAlerts[clientID], NSApp.modalWindow === alert.window else { return }
         NSApp.abortModal()
-    }
-
-    /// "482913" → "482 913", as both pairing-code alerts show it.
-    private static func formattedPairingCode(_ pairingCode: String) -> String {
-        "\(pairingCode.prefix(3)) \(pairingCode.dropFirst(3))"
-    }
-
-    /// An approved phone forgot this Mac and is asking its user to compare
-    /// the pairing code: show it, with only an OK button. Not modal, so it
-    /// never holds up the app or the phone, which is already welcomed;
-    /// `withdrawPairingCodeCheck` closes it. The empty-name fallback is the
-    /// "an iPhone" the approval prompt uses. Ordered front without
-    /// activating the app, at the approval prompt's `.floating` level, on
-    /// every Space and over a full-screen app, since the user may be anywhere
-    /// when the phone asks.
-    @MainActor
-    func presentPairingCodeCheck(clientID: String, clientName: String, pairingCode: String) {
-        guard !HeadlessRuntime.isActive, !isTerminating else { return }
-        withdrawPairingCodeCheck(clientID: clientID)
-        let name = clientName.isEmpty ? "An iPhone" : clientName
-        let alert = NSAlert()
-        alert.messageText = "\(name) is checking it reached this Mac"
-        alert.informativeText = "Its screen should show:\n\n\(Self.formattedPairingCode(pairingCode))\n\nIf it shows a different code, tap Cancel on the iPhone."
-        let ok = alert.addButton(withTitle: "OK")
-        ok.target = self
-        ok.action = #selector(closePairingCodeCheck(_:))
-        alert.layout()
-        let window = alert.window
-        window.level = .floating
-        // A panel hides when its app loses focus; this one stays up until
-        // OK or its phone closes it.
-        window.hidesOnDeactivate = false
-        window.collectionBehavior.formUnion([.canJoinAllSpaces, .fullScreenAuxiliary])
-        window.center()
-        // A second phone checking at the same time: step down and right
-        // from the first rather than cover it.
-        if let shown = companionCodeCheckAlerts.values.first(where: { $0.window.isVisible })?.window {
-            window.cascadeTopLeft(from: shown.cascadeTopLeft(from: .zero))
-        }
-        window.orderFrontRegardless()
-        NSApp.requestUserAttention(.informationalRequest)
-        companionCodeCheckAlerts[clientID] = alert
-        if companionCodeCheckEscapeMonitor == nil {
-            companionCodeCheckEscapeMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-                MainActor.assumeIsolated {
-                    guard event.keyCode == 53, let self,
-                          let clientID = self.companionCodeCheckAlerts.first(where: { $0.value.window === event.window })?.key
-                    else { return event }
-                    self.withdrawPairingCodeCheck(clientID: clientID)
-                    return nil
-                }
-            }
-        }
-    }
-
-    @MainActor
-    @objc private func closePairingCodeCheck(_ sender: NSButton) {
-        guard let clientID = companionCodeCheckAlerts.first(where: { $0.value.buttons.first === sender })?.key else { return }
-        withdrawPairingCodeCheck(clientID: clientID)
-    }
-
-    @MainActor
-    func withdrawPairingCodeCheck(clientID: String) {
-        companionCodeCheckAlerts.removeValue(forKey: clientID)?.window.orderOut(nil)
     }
 
     /// The `.regular` running apps. Mirrors

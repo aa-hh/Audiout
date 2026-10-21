@@ -461,9 +461,9 @@ import Testing
 
     // MARK: Companion - a build that does not carry the phone app
     //
-    // Every build offers the phone app now, but the resolution keeps its
-    // `offered: false` path and every companion surface reads it, so these
-    // three pin what such a build resolves to.
+    // Every build offers the companion now (`remoteAppIsOffered` is true), but
+    // every companion surface still reads the resolution, so these three pin
+    // what an injected `offered: false` resolves to.
 
     /// Turns red if `remoteAppIsOffered` is gated on anything again (it was
     /// `isDevBuild` until Audiout Remote shipped): a release would then hide

@@ -674,7 +674,7 @@ collapsing Advanced dismisses its popover.
 |---|---|---|
 | General | "Needs Login Items approval" | `ring` |
 | | "Opens at login", "Doesn't open at login" | `labelCool` |
-| Audiout Remote (companion builds only) | "Off", "On · no iPhones yet", "On · 1 iPhone allowed", "On · N iPhones allowed" | `labelCool` |
+| Audiout Remote | "Off", "On · no iPhones yet", "On · 1 iPhone allowed", "On · N iPhones allowed" | `labelCool` |
 | Appearance | "{theme} · {accent}", e.g. "Match system · Full gold" | `labelCool` |
 | Audio | "No apps stay on this Mac", "1 app stays on this Mac", "N apps stay on this Mac"; second line "Buffer N ms" while the buffer is not 1000 ms | `labelCool` |
 | License (builds with a licence server only) | "Trial · N days left", "Registered", "Key saved, not verified" | `labelCool` |
@@ -1661,7 +1661,10 @@ is a change in two apps.
   voice, beside every QR tile and in every invitation line.
 - No invitation names the App Store, a price, "free", or "download". The
   website says what the store's state is; the Mac does not know and does not
-  guess.
+  guess. One line breaks this and the full-name rule, on the owner's call:
+  Settings › Audiout Remote ends with "The iPhone app is coming soon to the
+  App Store." in caption voice, one section gap under the last card, whatever
+  the switch says.
 - Source words are the glossary's, verbatim: **"Measured"**, **"First pass"**,
   **"Timing from last time"** (`BTOffsetSource` in `AudioutSharedUI` owns the
   sentences; `AudioutProtocol.AlignmentSource` owns the wire strings).

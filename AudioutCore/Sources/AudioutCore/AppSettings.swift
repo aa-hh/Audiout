@@ -481,12 +481,8 @@ public struct AppSettings {
     /// mirroring `BackendKind.environmentVariableName`'s dev-convenience idiom.
     public static let allowRemoteControlEnvironmentVariableName = "AUDIOUT_COMPANION"
 
-    /// Whether this build offers the iPhone companion at all: `true` for
-    /// every build now that Audiout Remote ships. Every surface that mentions
-    /// the phone app (the Setup window's iPhone card, Settings › Audiout
-    /// Remote, the alignment wizard's "Measure with your iPhone" panel) and
-    /// the companion server read this; `false` would hide them all and keep
-    /// the server off. `AUDIOUT_COMPANION` still wins over it.
+    /// Whether this build offers the iPhone companion at all: `true` for every
+    /// build, shipping and dev alike. `AUDIOUT_COMPANION` still wins over it.
     public static var remoteAppIsOffered: Bool { true }
 
     /// Dev builds only: the Settings › General › Developer "Licence gate"

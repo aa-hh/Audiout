@@ -35,6 +35,7 @@ public final class RemoteSettingsViewController: NSViewController, SettingsReado
     private var remoteInviteRow: NSView?
     private var remoteInviteTile: RemoteInviteView?
     private let remoteInviteButton = NSButton()
+    private let comingSoonNote = SettingsPane.makeNote("The iPhone app is coming soon to the App Store.")
 
     /// Resolved once at init (the env var, if any, can't change for the life of
     /// this process) — what the switch must honestly reflect: the EFFECTIVE
@@ -43,9 +44,9 @@ public final class RemoteSettingsViewController: NSViewController, SettingsReado
     /// renders disabled and ``remoteControlOverrideNote`` explains why.
     private let remoteControlResolution: AppSettings.RemoteControlResolution
 
-    /// Whether this build carries the iPhone companion. The app builds the
-    /// section only when it does: an off switch reads as "you could turn this
-    /// on", which a build without the phone app cannot keep.
+    /// Whether this build carries the iPhone companion; every build does now.
+    /// The app builds the section only when it does: an off switch reads as
+    /// "you could turn this on".
     public var isOffered: Bool { !remoteControlResolution.isUnoffered }
 
     /// Fired after "Allow control from iPhone on this network" changes and
@@ -169,10 +170,16 @@ public final class RemoteSettingsViewController: NSViewController, SettingsReado
             phoneCard = phones
             content += [phoneListHeading, phones.container]
         }
+        content.append(comingSoonNote)
         let page = SettingsForm.pageView(content: content)
-        if let stack = page.subviews.first as? NSStackView, phoneCard != nil {
+        if let stack = page.subviews.first as? NSStackView {
+            // The same gap after both cards, so the note sits one section
+            // below whichever is last on screen while the phone list hides.
             stack.setCustomSpacing(GroupsPaneLayout.sectionGap, after: card.container)
-            stack.setCustomSpacing(GroupsPaneLayout.labelToSectionGap, after: phoneListHeading)
+            if let phoneCard {
+                stack.setCustomSpacing(GroupsPaneLayout.labelToSectionGap, after: phoneListHeading)
+                stack.setCustomSpacing(GroupsPaneLayout.sectionGap, after: phoneCard.container)
+            }
         }
         view = page
         rebuildPhoneList()

@@ -67,6 +67,10 @@ typography:
     fontFamily: "SF Pro (system), monospacedDigit"
     fontSize: "16pt"
     fontWeight: 600
+  pairingCode:
+    fontFamily: "SF Pro (system), monospacedDigit"
+    fontSize: "28pt (off-scale)"
+    fontWeight: 600
   titleLarge:
     fontFamily: "SF Pro (system)"
     fontSize: "15pt (systemFontSize + 2)"
@@ -659,7 +663,7 @@ this Mac have plain titles without explanatory subtitles.
 The empty Apps that stay on this Mac card fits one 44 pt Add app row plus
 6 pt card padding above and below. Removing the last app returns it to that
 height.
-Status readouts, Allowed/Denied phone captions, launch-option and Login Items
+Status readouts, phone "Last connected" captions, launch-option and Login Items
 warnings, and buffer reconnect results remain visible. Advanced mounts its
 feedback row only while reconnecting or showing a result; clearing feedback
 removes that row and its divider. Its forced-launch-option warning remains
@@ -670,7 +674,7 @@ collapsing Advanced dismisses its popover.
 |---|---|---|
 | General | "Needs Login Items approval" | `ring` |
 | | "Opens at login", "Doesn't open at login" | `labelCool` |
-| Audiout Remote | "Off", "On · no iPhones yet", "On · no iPhones allowed", "On · 1 iPhone allowed", "On · N iPhones allowed" | `labelCool` |
+| Audiout Remote | "Off", "On · no iPhones yet", "On · 1 iPhone allowed", "On · N iPhones allowed" | `labelCool` |
 | Appearance | "{theme} · {accent}", e.g. "Match system · Full gold" | `labelCool` |
 | Audio | "No apps stay on this Mac", "1 app stays on this Mac", "N apps stay on this Mac"; second line "Buffer N ms" while the buffer is not 1000 ms | `labelCool` |
 | License (builds with a licence server only) | "Trial · N days left", "Registered", "Key saved, not verified" | `labelCool` |
@@ -1573,27 +1577,21 @@ accessibility and the address printed under it — `audiout.app/remote`, no
 scheme, in the surface's own caption voice — is the element, so a person who
 cannot or will not scan can type it.
 
-Scanning the code only gets the app; pairing needs the Mac to be listening.
-In Settings › Audiout Remote, a "Pair an iPhone" row sits directly under the
-Allow switch (and its override note), above the invitation, mounted only
-while the switch is on. Its stock rounded push button reads "Pair an iPhone"
-and opens a 3-minute pairing window; while the window is open it reads
-"Pairing…" and is disabled. The help text under the title says "Lets a new
-iPhone find this Mac for the next 3 minutes. Approve it with the code both
-screens show." The Setup window's iPhone card and the wizard sheet's iPhone
-panel, when it shows its code, open the same window as they come on screen.
-The Mac is discoverable on the network only while a pairing window is open
-or once a phone is paired; outside both, a new phone finds nothing to join.
-A paired phone that has forgotten this Mac asks its user to compare the code
-again; the Mac lets it in without asking and shows the code in a stock alert,
-not modal, with only an OK button: "<phone name> is checking it reached this
-Mac", then "Its screen should show:" over the code and "If it shows a
-different code, tap Cancel on the iPhone." OK, Return or Escape closes it,
-and it closes itself when that phone sends its first command, disconnects or
-is refused, or after 3 minutes. A paired phone that has not connected for 30
-days counts as new again and needs a pairing window; it leaves the
-Remembered iPhones list at that moment, and connecting again never closes a
-pairing window that is already open.
+Scanning the code only gets the app. While the Allow switch is on, the Mac is
+on the network whether or not any phone is paired, and a new phone pairs by
+opening Audiout Remote: the Mac brings itself forward, beeps and shows a stock
+`NSAlert`, "Allow an iPhone to control Audiout on this Mac?", with the app
+icon wearing a `lock.fill` badge in a white circle, and the six-digit code as
+its accessory view: one digit per rounded 36 × 46 pt box in `pairingCode`,
+read by VoiceOver as one "Pairing code 4 8 2 9 1 3". The body asks the user to
+allow only if the iPhone shows the same code, and quotes the phone's own name
+only when it says more than "iPhone". Allow is drawn as the primary button but
+has no key equivalent, so Return does nothing; Escape is Don't Allow. In Settings › Audiout Remote a
+plain caption under the Allow switch (and its override note), mounted only
+while the switch is on, says how: "To add an iPhone, open Audiout Remote on it
+while it's on the same Wi-Fi as this Mac." Each Remembered iPhones row shows
+the phone's name over "Last connected" and a relative time ("3 hours ago");
+an allowed phone stays listed until removed, and a "Don't Allow" leaves no row.
 
 ### Permission Row (Onboarding, signature component, Mac-only)
 `IconTileView`'s neutral `raised` fill and hairline rim stay untouched; only

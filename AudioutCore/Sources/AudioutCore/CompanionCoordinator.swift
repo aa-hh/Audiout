@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+import CoreGraphics
 import Foundation
 import AudioutProtocol
 
@@ -20,12 +21,6 @@ public protocol CompanionCoordinatorHost: AnyObject {
                                respond: @escaping (Bool) -> Void)
     /// Close the prompt for `clientID` — its connection died unanswered.
     func withdrawApprovalPrompt(clientID: String)
-    /// Show an information-only alert with the `pairingCode` an approved
-    /// phone is asking its user to compare, replacing any still open for
-    /// `clientID`. Must not block: the phone is already welcomed.
-    func presentPairingCodeCheck(clientID: String, clientName: String, pairingCode: String)
-    /// Close that alert, if it is still open.
-    func withdrawPairingCodeCheck(clientID: String)
     /// The `.regular` running apps, newest read (the coordinator caches it).
     func runningApplications() -> [(bundleID: String, displayName: String)]
     /// Answer a phone's `requestAppIcons` — reading an icon is AppKit work.
@@ -91,14 +86,13 @@ public final class CompanionCoordinator {
     /// ``updateServerState()``. It runs while
     /// `AppSettings.resolvedAllowRemoteControl` allows it (the Settings ›
     /// Audiout Remote switch, with the `AUDIOUT_COMPANION` env override
-    /// winning) AND a phone is approved, a pairing window is open, or a phone
-    /// is still waiting on its prompt — a Mac nobody has paired with is not on
-    /// the network at all.
+    /// winning), whether or not any phone is allowed yet: a new phone pairs
+    /// by connecting, which raises the Allow prompt.
     public let server: CompanionServer
 
-    /// The per-phone approval model (T24): remembers each phone's allow/deny
-    /// answer, funnels unknown phones into one prompt at a time, and backs
-    /// the Settings › Audiout Remote "Remembered iPhones" list.
+    /// The per-phone approval model (T24): remembers each allowed phone,
+    /// funnels unknown phones into one prompt at a time, and backs the
+    /// Settings › Audiout Remote "Remembered iPhones" list.
     public let approvals: CompanionApprovalController
 
     /// Where the server's TLS identity lives; read each time the server
@@ -144,19 +138,9 @@ public final class CompanionCoordinator {
     /// ``updateServerState()`` only acts on a real edge.
     private var isActive = false
 
-    /// How long ``openPairingWindow()`` lets an unknown phone ask to pair.
-    public static let pairingWindowDuration: TimeInterval = 180
-
-    /// Whether unknown phones may ask to pair right now. Opened by Settings ›
-    /// Audiout Remote's Pair an iPhone button, and when the Setup window's
-    /// iPhone card or the alignment wizard's iPhone panel comes on screen;
-    /// closes after ``pairingWindowDuration`` or once a phone is approved.
-    public private(set) var pairingWindowOpen = false
-
-    /// Fired whenever ``pairingWindowOpen`` changes.
-    public var onPairingWindowChanged: (() -> Void)?
-
-    private var pairingWindowExpiry: DispatchWorkItem?
+    /// Set by ``wire(startingServer:)``; ``updateServerState()`` does nothing
+    /// before it.
+    private var isWired = false
 
     /// Phones whose icon pages are still being sent; a second request from
     /// one of them is refused until the first is done.
@@ -232,7 +216,7 @@ public final class CompanionCoordinator {
     /// exactly one phone connected and exactly one on file, so the Mac never
     /// guesses which one is in the room.
     public var invitePhoneName: String? {
-        let approved = approvals.approvals.filter { $0.decision == .approved }
+        let approved = approvals.approvals
         guard clientCount == 1, approved.count == 1 else { return nil }
         return approved[0].lastKnownName
     }
@@ -242,7 +226,8 @@ public final class CompanionCoordinator {
     // MARK: Wiring
 
     /// Attach every companion trigger + the command/disconnect callbacks, then
-    /// start the server if setting/env allow. Called once, at the END of
+    /// (unless `startingServer` is false) start the server if setting/env
+    /// allow. Called once, at the END of
     /// `applicationDidFinishLaunching` (see the call site's ordering comment).
     /// `appRouting.onRoutesDidChange`, `groupController.onStateDidChange`,
     /// `excludedApps.onChange`, the icon-controller chain-wrap and the two
@@ -250,7 +235,11 @@ public final class CompanionCoordinator {
     /// single-assignment closures the launch path already owns, so the
     /// companion tail rides inside them at their original sites rather than
     /// being reassigned here.
-    public func wire() {
+    /// `startingServer` false leaves the server for a later
+    /// ``updateServerState()``: its Bonjour advertisement raises the Local
+    /// Network prompt, which first-run Setup must explain first.
+    public func wire(startingServer: Bool = true) {
+        isWired = true
         dispatcher = CompanionCommandDispatcher(
             groupController: groupController,
             appRouting: appRouting,
@@ -309,9 +298,6 @@ public final class CompanionCoordinator {
                     reply(CompanionServer.CommandResult(applied: false, refusalReason: "Audiout is shutting down."))
                     return
                 }
-                // The phone only sends commands once it is live, so its
-                // pairing code no longer needs comparing.
-                self.approvals.endCodeCheck(connectionID: clientID)
                 // FIX-B2 finding 2a: per-client token bucket, refused before
                 // any main-thread work is spent. A refusal costs the client
                 // nothing once it slows down; the phone's own send policy
@@ -421,7 +407,6 @@ public final class CompanionCoordinator {
         server.onClientDisconnected = { [weak self] clientID in
             DispatchQueue.main.async {
                 guard let self, !self.isTerminating else { return }
-                self.approvals.endCodeCheck(connectionID: clientID)
                 self.rateLimiter.forgetClient(clientID)
                 self.iconRequestsInFlight.remove(clientID)
                 // A run, a fine-tune session and an A/B receipt are all
@@ -467,21 +452,11 @@ public final class CompanionCoordinator {
         // after the server started still reaches the next phone to connect.
         server.companionToken = { [settings] in settings.companionToken }
         server.serverID = { [settings] in settings.companionServerID }
-        server.onApprovalRequest = { [weak self] clientID, clientName, pairingCode, checksPairingCode, connectionID, decide in
+        server.onApprovalRequest = { [weak self] clientID, clientName, pairingCode, decide in
             DispatchQueue.main.async {
                 guard let self, !self.isTerminating else { return }
                 self.approvals.handleRequest(
-                    clientID: clientID, clientName: clientName, pairingCode: pairingCode,
-                    checksPairingCode: checksPairingCode, connectionID: connectionID,
-                    decide: decide)
-            }
-        }
-        // A connection the gate let in can still be refused (server full) or
-        // die before it is admitted: its pairing-code alert goes with it.
-        server.onAwaitingConnectionClosed = { [weak self] connectionID in
-            DispatchQueue.main.async {
-                guard let self, !self.isTerminating else { return }
-                self.approvals.endCodeCheck(connectionID: connectionID)
+                    clientID: clientID, clientName: clientName, pairingCode: pairingCode, decide: decide)
             }
         }
         // The last connection carrying this phone identity died before the
@@ -499,85 +474,45 @@ public final class CompanionCoordinator {
         approvals.withdrawPrompt = { [weak self] clientID in
             self?.host?.withdrawApprovalPrompt(clientID: clientID)
         }
-        approvals.presentCodeCheck = { [weak self] clientID, clientName, pairingCode in
-            self?.host?.presentPairingCodeCheck(clientID: clientID, clientName: clientName,
-                                                pairingCode: pairingCode)
-        }
-        approvals.withdrawCodeCheck = { [weak self] clientID in
-            self?.host?.withdrawPairingCodeCheck(clientID: clientID)
-        }
         // Revoking a phone in Settings must also disconnect it if it's live.
         approvals.dropClient = { [weak self] clientID in
             self?.server.dropClient(clientID: clientID)
         }
-        // An unknown phone is only ever prompted for inside a pairing window.
-        approvals.isPairingOpen = { [weak self] in self?.pairingWindowOpen ?? false }
-        // The first approval ends the window that let it in; a removal (a
-        // revocation, or a lapse) never touches the window, and the last one
-        // stops the server unless a window is open.
-        approvals.onApprovedSetChanged = { [weak self] approvalRecorded in
-            guard let self else { return }
-            if approvalRecorded && self.pairingWindowOpen {
-                self.closePairingWindow()
-            } else {
-                self.updateServerState()
+        // A prompt behind the lock screen is out of sight: the waiting phone
+        // asks its user to unlock the Mac.
+        let center = DistributedNotificationCenter.default()
+        for (name, locked) in [("com.apple.screenIsLocked", true), ("com.apple.screenIsUnlocked", false)] {
+            center.addObserver(forName: .init(name), object: nil, queue: nil) { [weak server] _ in
+                server?.setScreenLocked(locked)
             }
         }
-        // A server kept up only for a waiting prompt stops once the last one
-        // is answered or abandoned.
-        approvals.onPendingRequestsSettled = { [weak self] in self?.updateServerState() }
+        server.setScreenLocked(Self.screenIsLocked())
 
-        updateServerState()
+        if startingServer { updateServerState() }
     }
 
-    private var hasApprovedPhone: Bool {
-        approvals.approvals.contains { $0.decision == .approved }
-    }
-
-    /// Whether anything needs the server up, before the Settings switch has
-    /// its say: an approved phone, an open pairing window, or a phone still
-    /// waiting on its prompt after the window that let it in has closed.
-    var wantsServer: Bool {
-        hasApprovedPhone || pairingWindowOpen || approvals.hasPendingRequest
-    }
-
-    /// Let unknown phones ask to pair for ``pairingWindowDuration``, starting
-    /// the server if nothing else keeps it running. Opening an open window
-    /// restarts its clock.
-    public func openPairingWindow() {
-        pairingWindowExpiry?.cancel()
-        let expiry = DispatchWorkItem { [weak self] in self?.closePairingWindow() }
-        pairingWindowExpiry = expiry
-        DispatchQueue.main.asyncAfter(deadline: .now() + Self.pairingWindowDuration, execute: expiry)
-        pairingWindowOpen = true
-        updateServerState()
-        onPairingWindowChanged?()
-    }
-
-    /// End the pairing window; the server stops too unless a phone is
-    /// approved or still waiting on its prompt, in which case it stops once
-    /// the last waiting prompt is answered or abandoned.
-    public func closePairingWindow() {
-        pairingWindowExpiry?.cancel()
-        pairingWindowExpiry = nil
-        pairingWindowOpen = false
-        updateServerState()
-        onPairingWindowChanged?()
+    /// Whether the screen is locked right now, from the login session's
+    /// own record; the lock notifications keep it current after that.
+    private static func screenIsLocked() -> Bool {
+        guard let session = CGSessionCopyCurrentDictionary() as? [String: Any] else { return false }
+        return session["CGSSessionScreenIsLocked"] as? Bool ?? false
     }
 
     /// Start or stop the companion server: it runs while
     /// `AppSettings.resolvedAllowRemoteControl` allows it (env override →
-    /// persisted switch) and a phone is approved, a pairing window is open,
-    /// or a phone is still waiting on its prompt. Called at launch, from the
-    /// Settings › Audiout Remote switch, on every pairing-window or
-    /// approved-set change, and when the last waiting prompt settles; a no-op
-    /// when nothing changed. A start that cannot load the TLS identity
+    /// persisted switch). Called once the app is wired and the backend has
+    /// started (or Setup's iPhone card shows), and from the Settings ›
+    /// Audiout Remote switch; a no-op when nothing changed or before
+    /// ``wire(startingServer:)``. A start that cannot load the TLS identity
     /// reports it, leaves the server stopped, and is tried again on the next
     /// call. On start, broadcasts an initial snapshot IMMEDIATELY — the server
     /// defers a helloed client's `welcome` until the first broadcast, so an
     /// early client would otherwise hang.
     public func updateServerState() {
-        let shouldRun = AppSettings.resolvedAllowRemoteControl(settings: settings) && wantsServer
+        // Before `wire()` the server would come up with no approval gate or
+        // command handler attached.
+        guard isWired else { return }
+        let shouldRun = AppSettings.resolvedAllowRemoteControl(settings: settings)
         guard shouldRun != isActive else { return }
         if shouldRun {
             let identity: CompanionIdentity

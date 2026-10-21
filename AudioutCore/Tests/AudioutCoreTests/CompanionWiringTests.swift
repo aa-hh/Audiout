@@ -28,12 +28,6 @@ import Testing
             if answersPromptsAtOnce { respond(true) } else { openPrompts.append(respond) }
         }
         func withdrawApprovalPrompt(clientID: String) {}
-        var codeChecks: [(clientID: String, name: String, code: String)] = []
-        var withdrawnCodeChecks: [String] = []
-        func presentPairingCodeCheck(clientID: String, clientName: String, pairingCode: String) {
-            codeChecks.append((clientID, clientName, pairingCode))
-        }
-        func withdrawPairingCodeCheck(clientID: String) { withdrawnCodeChecks.append(clientID) }
         var activatedKeys: [String] = []
         func activateLicenseKey(_ key: String,
                                 reply: @escaping (CompanionServer.CommandResult) -> Void) {
@@ -70,12 +64,19 @@ import Testing
         var results: [CompanionServer.CommandResult] = []
     }
 
-    /// Prompts open in a pairing window and follow one another at once, so a
-    /// test can approve several phones in a row without wiring the
-    /// coordinator; ``CompanionCoordinator/wire()`` replaces the window
-    /// check with the real one.
+    /// Decisions the approval gate hands back on main.
+    private final class DecisionLog: @unchecked Sendable {
+        var value: [CompanionServer.ApprovalDecision] = []
+    }
+
+    /// Prompts are answered Allow and follow one another at once, so a test
+    /// can approve several phones in a row without wiring the coordinator;
+    /// ``CompanionCoordinator/wire()`` hands prompts to the host instead.
+    /// The Allow switch is off unless `allowRemoteControl` says otherwise, so
+    /// the server never tries to start by accident.
     private func makeCoordinator(host: StubHost, storeName: String,
                                  identityStore: RefusingIdentityStore = RefusingIdentityStore(),
+                                 allowRemoteControl: Bool = false,
                                  schedule: ((TimeInterval, @escaping @MainActor () -> Void) -> Void)? = nil)
         -> CompanionCoordinator {
         let directory = scratchDir.appendingPathComponent(storeName)
@@ -85,7 +86,6 @@ import Testing
         let approvals = CompanionApprovalController(
             store: CompanionApprovalStore(directory: directory),
             schedule: schedule ?? { _, job in job() })
-        approvals.isPairingOpen = { true }
         approvals.presentPrompt = { _, _, _, respond in respond(true) }
         return CompanionCoordinator(
             backend: backend,
@@ -96,7 +96,11 @@ import Testing
                 loadPersisted: false),
             appRouting: AppRoutingController(store: AppRouteStore(directory: directory),
                                              loadPersisted: false),
-            settings: AppSettings(defaults: makeDefaults()),
+            settings: {
+                let settings = AppSettings(defaults: makeDefaults())
+                settings.allowRemoteControl = allowRemoteControl
+                return settings
+            }(),
             excludedBundleIDs: { [] },
             speakerLibrary: SpeakerLibraryController(store: SpeakerLibraryStore(directory: directory),
                                                      loadPersisted: false),
@@ -173,144 +177,58 @@ import Testing
                 "every client-count change reaches the host")
     }
 
-    // MARK: Pairing window
+    // MARK: Pairing without a window
 
-    /// Turns red if the coordinator stops feeding the approval controller
-    /// its pairing window, or stops closing the window once a phone is
-    /// approved — an unknown phone could then ask with no window open, or
-    /// the window would stay open after it did its job. The server's start is
-    /// read off the identity store: each attempt asks it once, and it refuses,
-    /// so no real listener ever opens.
-    @Test func theServerRunsOnlyWithAnApprovedPhoneOrAnOpenPairingWindow() {
-        let host = StubHost()
-        let identities = RefusingIdentityStore()
-        let coordinator = makeCoordinator(host: host, storeName: "pairing-window", identityStore: identities)
-        var windowChanges = 0
-        coordinator.onPairingWindowChanged = { windowChanges += 1 }
+    /// Turns red if the server needs an approved phone (or anything but the
+    /// Allow switch) before it starts: a Mac nobody has paired with must be
+    /// findable, or no new phone can ask. The identity store refuses, so the
+    /// count of identity loads is how far the start got.
+    @Test func theServerStartsWithTheSwitchOnAndNoPhoneApproved() {
+        let off = RefusingIdentityStore()
+        makeCoordinator(host: StubHost(), storeName: "switch-off", identityStore: off).wire()
+        #expect(off.loads == 0, "switch off: the server never tries to start")
+
+        let on = RefusingIdentityStore()
+        let coordinator = makeCoordinator(host: StubHost(), storeName: "switch-on", identityStore: on,
+                                          allowRemoteControl: true)
         coordinator.wire()
-
-        var stranger: [CompanionServer.ApprovalDecision] = []
-        coordinator.approvals.handleRequest(clientID: "STRANGER", clientName: "iPhone",
-                                            pairingCode: "000000") { stranger.append($0) }
-        #expect(stranger == [.pairingClosed], "no window open: the stranger is refused unasked")
-        #expect(identities.loads == 0, "nothing wants the server yet, so it never tries to start")
-
-        coordinator.openPairingWindow()
-        #expect(coordinator.pairingWindowOpen)
-        #expect(windowChanges == 1)
-        #expect(identities.loads == 1, "the open window is what tries to start the server")
-
-        var invited: [CompanionServer.ApprovalDecision] = []
-        coordinator.approvals.handleRequest(clientID: "INVITED", clientName: "iPhone",
-                                            pairingCode: "000000") { invited.append($0) }
-        #expect(invited == [.pending, .approved])
-        #expect(!coordinator.pairingWindowOpen, "the first approval closes the window that let it in")
-        #expect(windowChanges == 2)
+        #expect(coordinator.approvals.approvals.isEmpty)
+        #expect(on.loads == 1, "switch on and no phone approved: the server tries to start")
     }
 
-    /// Turns red if `wantsServer` stops counting a phone still waiting on its
-    /// prompt, so the pairing window's expiry stops the server under it, or
-    /// keeps counting it once its prompt is answered, so a Mac with nothing
-    /// approved stays on the network. The expiry is the window's work item
-    /// calling `closePairingWindow()`, called directly here; the server never
-    /// really starts, as the test above explains.
-    @Test func aPromptOpenWhenThePairingWindowEndsKeepsTheServerWantedUntilAnswered() {
+    /// Turns red if `wire(startingServer: false)` starts the server anyway
+    /// (on a first launch its Bonjour advertisement would raise the Local
+    /// Network prompt before Setup explains it), or if `updateServerState()`
+    /// starts it before `wire` attached the approval gate.
+    @Test func wiringCanLeaveTheServerForLater() {
+        let identities = RefusingIdentityStore()
+        let coordinator = makeCoordinator(host: StubHost(), storeName: "deferred", identityStore: identities,
+                                          allowRemoteControl: true)
+        coordinator.updateServerState()
+        #expect(identities.loads == 0, "not wired yet: nothing starts")
+        coordinator.wire(startingServer: false)
+        #expect(identities.loads == 0)
+        coordinator.updateServerState()
+        #expect(identities.loads == 1, "the launch path's later call starts it")
+    }
+
+    /// Turns red if a hello from an unknown phone stops reaching the host's
+    /// Allow prompt through the wired coordinator, with nothing opened on the
+    /// Mac first.
+    @Test func anUnknownPhonesHelloRaisesThePromptWithNothingOpened() async {
         let host = StubHost()
         host.answersPromptsAtOnce = false
-        let coordinator = makeCoordinator(host: host, storeName: "window-expiry")
+        let coordinator = makeCoordinator(host: host, storeName: "no-window")
         coordinator.wire()
-        coordinator.openPairingWindow()
-
-        var decisions: [CompanionServer.ApprovalDecision] = []
-        coordinator.approvals.handleRequest(clientID: "WAITING", clientName: "iPhone",
-                                            pairingCode: "000000") { decisions.append($0) }
-        #expect(decisions == [.pending])
-
-        coordinator.closePairingWindow()
-        #expect(!coordinator.pairingWindowOpen)
-        #expect(coordinator.wantsServer, "the phone on the prompt keeps the server wanted")
-
-        host.openPrompts.first?(false)
-        #expect(decisions == [.pending, .denied])
-        #expect(!coordinator.wantsServer, "answered, and nothing approved: nothing wants the server")
-    }
-
-    /// Turns red if a phone whose approval lapsed closes or changes the
-    /// pairing window the user opened, with or without another phone still
-    /// approved, or is let in without the Allow/Don't Allow prompt showing
-    /// its code.
-    @Test func aLapsedPhoneIsAskedAgainAndLeavesThePairingWindowOpen() throws {
-        let lapsed = String(repeating: "D", count: 64)
-        for anotherPhoneApproved in [true, false] {
-            let storeName = "lapse-\(anotherPhoneApproved)"
-            let directory = scratchDir.appendingPathComponent(storeName)
-            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-            var records = [CompanionApproval(
-                clientID: lapsed, lastKnownName: "Old iPhone", decision: .approved, firstSeen: .distantPast,
-                lastSeen: Date().addingTimeInterval(-CompanionApprovalStore.trustLapse - 60))]
-            if anotherPhoneApproved {
-                records.append(CompanionApproval(clientID: String(repeating: "E", count: 64),
-                                                 lastKnownName: "Owner's iPhone", decision: .approved,
-                                                 firstSeen: .distantPast, lastSeen: Date()))
-            }
-            try CompanionApprovalStore(directory: directory).save(records)
-            let host = StubHost()
-            host.answersPromptsAtOnce = false
-            let coordinator = makeCoordinator(host: host, storeName: storeName)
-            coordinator.wire()
-            coordinator.openPairingWindow()
-            var windowChanges = 0
-            coordinator.onPairingWindowChanged = { windowChanges += 1 }
-
-            var decisions: [CompanionServer.ApprovalDecision] = []
-            coordinator.approvals.handleRequest(clientID: lapsed, clientName: "Old iPhone",
-                                                pairingCode: "482913") { decisions.append($0) }
-
-            #expect(decisions == [.pending], "another phone approved: \(anotherPhoneApproved)")
-            #expect(host.promptCodes == ["482913"], "another phone approved: \(anotherPhoneApproved)")
-            #expect(coordinator.pairingWindowOpen, "another phone approved: \(anotherPhoneApproved)")
-            #expect(windowChanges == 0, "another phone approved: \(anotherPhoneApproved)")
-        }
-    }
-
-    // MARK: Pairing-code alert
-
-    /// Turns red if the coordinator stops handing the hello's code-check flag
-    /// to the approval controller, stops sending the alert to the host, or
-    /// stops closing it on that connection's first command, its close, or
-    /// its refusal or death before it was admitted.
-    @Test func thePairingCodeAlertReachesTheHostAndClosesOnCommandOrDisconnect() async {
-        let host = StubHost()
-        let coordinator = makeCoordinator(host: host, storeName: "code-check", schedule: { _, _ in })
-        let phone = String(repeating: "C", count: 64)
-        approve(clientID: phone, name: "Owner's iPhone", in: coordinator)
-        coordinator.wire()
-        let server = coordinator.server
-        func hello(on connection: UUID) {
-            server.onApprovalRequest?(phone, "Owner's iPhone", "482913", true, connection) { _ in }
+        let decisions = DecisionLog()
+        coordinator.server.onApprovalRequest?(String(repeating: "D", count: 64), "iPhone", "482913") {
+            decisions.value.append($0)
         }
 
-        let first = UUID()
-        hello(on: first)
-        await SuiteWait.until("the alert reaches the host") { host.codeChecks.count == 1 }
-        #expect(host.codeChecks.first?.name == "Owner's iPhone")
-        #expect(host.codeChecks.first?.code == "482913")
-        server.onCommand?("r1", .requestAppIcons(bundleIDs: []), first) { _ in }
-        await SuiteWait.until("the first command closes it") { host.withdrawnCodeChecks == [phone] }
-
-        let second = UUID()
-        hello(on: second)
-        await SuiteWait.until("the reconnect's alert reaches the host") { host.codeChecks.count == 2 }
-        server.onClientDisconnected?(second)
-        await SuiteWait.until("the close closes it") { host.withdrawnCodeChecks == [phone, phone] }
-
-        let third = UUID()
-        hello(on: third)
-        await SuiteWait.until("the third alert reaches the host") { host.codeChecks.count == 3 }
-        server.onAwaitingConnectionClosed?(third)
-        await SuiteWait.until("a refusal before admission closes it") {
-            host.withdrawnCodeChecks == [phone, phone, phone]
-        }
+        await SuiteWait.until("the prompt reaches the host") { host.promptCodes == ["482913"] }
+        #expect(decisions.value == [.pending])
+        host.openPrompts.first?(true)
+        #expect(decisions.value == [.pending, .approved])
     }
 
     // MARK: Icon requests

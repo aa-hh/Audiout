@@ -234,7 +234,6 @@ extension SerializedSharedState {
             StoreRecovery.onWriteFailure = { _ in failures.count += 1 }
             defer { StoreRecovery.onWriteFailure = nil }
 
-            controller.isPairingOpen = { true }
             controller.presentPrompt = { _, _, _, respond in respond(true) }
             controller.handleRequest(clientID: "test-client", clientName: "Test Phone", pairingCode: "000000") { _ in }
 

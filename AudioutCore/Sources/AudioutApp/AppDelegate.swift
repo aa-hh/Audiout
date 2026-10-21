@@ -301,6 +301,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
     private var onboardingWindowController: OnboardingWindowController?
     /// The first-open licence gate while it is drawn over the surface.
     private var licenseGateController: LicenseGateViewController?
+    /// `whenStatusItemPlaced`'s waiting body and its window-move observer.
+    private var pendingStatusItemPlacement: (@MainActor (NSRect, Bool) -> Void)?
+    private var statusItemMoveObserver: NSObjectProtocol?
     /// Set when the gate is owed but Setup opened first: Setup's finish
     /// mounts it, once.
     private var licenseGateAwaitsSetup = false
@@ -1849,7 +1852,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
             licenseGateController = gate
             surface.presentLicenseGate(gate)
         }
-        showSurface(.mixer)
+        // At launch the menu bar icon has no place yet; wait for it so the
+        // surface opens under it.
+        whenStatusItemPlaced { [weak self] anchor, placed in
+            self?.showSurface(.mixer, anchorRect: anchor, pointsAtAnchor: placed)
+        }
     }
 
     /// What a freshly issued trial key changes, the moment it is stored.
@@ -2485,10 +2492,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
     /// `MixerWindowController` has not seen yet pends there rather than being
     /// dropped.
     @MainActor
-    private func showSurface(_ screen: SurfaceScreen, selecting: SidebarSelection? = nil) {
+    private func showSurface(_ screen: SurfaceScreen, selecting: SidebarSelection? = nil,
+                             anchorRect: NSRect? = nil, pointsAtAnchor: Bool = true) {
         refreshSpeakerBluetoothAccess()
         surface.select(screen)
-        surface.show(anchorRect: statusAnchorRect())
+        surface.show(anchorRect: anchorRect ?? statusAnchorRect(), pointsAtAnchor: pointsAtAnchor)
         if let selecting { mixerWindowController?.select(selecting) }
     }
 
@@ -2669,6 +2677,75 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
     private func statusAnchorRect() -> NSRect? {
         guard let button = statusItemController.button, let win = button.window else { return nil }
         return win.convertToScreen(button.convert(button.bounds, to: nil))
+    }
+
+    /// The menu-bar item's frame once macOS has placed it in a menu bar.
+    /// Right after launch the item's window exists but sits at the screen's
+    /// bottom-left corner. A place at or above a screen's top edge counts,
+    /// so an auto-hidden menu bar still does.
+    @MainActor
+    private func placedStatusAnchorRect() -> NSRect? {
+        guard let rect = statusAnchorRect() else { return nil }
+        let placed = NSScreen.screens.contains {
+            rect.midX >= $0.frame.minX && rect.midX <= $0.frame.maxX && rect.maxY >= $0.frame.maxY - 2
+        }
+        return placed ? rect : nil
+    }
+
+    /// Runs `body` with the menu-bar item's frame once macOS has placed it
+    /// (at once if it already has), so a surface opened during launch lands
+    /// under the icon rather than at the screen's corner. After a second it
+    /// gives up and passes a point at the main screen's top-right with
+    /// `placed` false, so no arrow points at it: an icon hidden by a full
+    /// menu bar, the notch or a menu bar manager never gets a place.
+    @MainActor
+    private func whenStatusItemPlaced(_ body: @escaping @MainActor (NSRect, Bool) -> Void) {
+        if let rect = placedStatusAnchorRect() {
+            body(rect, true)
+            return
+        }
+        pendingStatusItemPlacement = body
+        statusItemMoveObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.didMoveNotification,
+            object: statusItemController.button?.window, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, let rect = self.placedStatusAnchorRect() else { return }
+                self.finishStatusItemPlacement(rect, placed: true)
+            }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                if let rect = self.placedStatusAnchorRect() {
+                    self.finishStatusItemPlacement(rect, placed: true)
+                } else {
+                    self.finishStatusItemPlacement(Self.topRightAnchor(), placed: false)
+                }
+            }
+        }
+    }
+
+    @MainActor
+    private func finishStatusItemPlacement(_ rect: NSRect, placed: Bool) {
+        guard let body = pendingStatusItemPlacement else { return }
+        pendingStatusItemPlacement = nil
+        if let observer = statusItemMoveObserver {
+            NotificationCenter.default.removeObserver(observer)
+            statusItemMoveObserver = nil
+        }
+        log(placed ? "surface anchored under the menu bar icon at \(rect)"
+                   : "menu bar icon has no place after 1 s (it reads \(statusAnchorRect().map { "\($0)" } ?? "no window")) — surface anchored top-right")
+        body(rect, placed)
+    }
+
+    /// A one-point stand-in for the icon at the main screen's top-right, just
+    /// under the menu bar, for `whenStatusItemPlaced`'s fallback.
+    @MainActor
+    private static func topRightAnchor() -> NSRect {
+        guard let screen = NSScreen.main ?? NSScreen.screens.first else { return .zero }
+        let vf = screen.visibleFrame
+        return NSRect(x: vf.maxX - 1, y: vf.maxY, width: 1, height: screen.frame.maxY - vf.maxY)
     }
 
     /// The Advanced › Audio buffer model (PLAN-LATENCY-SETTING.md), or nil when

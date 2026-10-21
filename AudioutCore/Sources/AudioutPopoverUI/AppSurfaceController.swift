@@ -188,6 +188,7 @@ public final class AppSurfaceController {
     /// only fix is to not grow it on screen at all — front it already settled).
     private var isRevealPending = false
     private var pendingRevealAnchor: NSRect?
+    private var pendingRevealPointsAtAnchor = true
     private var revealCeilingTimer: Timer?
 
     /// Work handed to ``whenRevealed(_:)`` while that wait was still on — run at
@@ -416,7 +417,9 @@ public final class AppSurfaceController {
     /// fronts it — re-running the Mixer's open ritual there would discard the
     /// user's mid-open collapse toggles for no reason (it is the same open
     /// session).
-    public func show(anchorRect: NSRect?) {
+    /// `pointsAtAnchor: false`: `anchorRect` is a stand-in for an icon that
+    /// has no place in the menu bar, so the bubble draws no arrow.
+    public func show(anchorRect: NSRect?, pointsAtAnchor: Bool = true) {
         // A repeat click DURING a first-open reveal wait is the user asking for
         // the surface NOW — the wait has visibly done nothing, so clicking again
         // must not be swallowed (it used to `return`, and every further click
@@ -444,6 +447,7 @@ public final class AppSurfaceController {
             if SurfaceSplashView.wouldPresent {
                 isRevealPending = true
                 pendingRevealAnchor = anchorRect
+                pendingRevealPointsAtAnchor = pointsAtAnchor
                 // A quiet window wider than the discovery trickle's gap between
                 // devices, so a stream that arrives one device at a time does
                 // NOT settle in a gap mid-stream (0.3 s settled between the
@@ -474,7 +478,7 @@ public final class AppSurfaceController {
             }
             settleTracker = nil
         }
-        shell.show(anchorRect: anchorRect)
+        shell.show(anchorRect: anchorRect, pointsAtAnchor: pointsAtAnchor)
         isShown = true
         if !wasShown, selectedScreen == .mixer {
             popoverController.surfaceDidShow()
@@ -515,7 +519,8 @@ public final class AppSurfaceController {
 
         let anchor = pendingRevealAnchor
         pendingRevealAnchor = nil
-        shell.show(anchorRect: anchor)
+        shell.show(anchorRect: anchor, pointsAtAnchor: pendingRevealPointsAtAnchor)
+        pendingRevealPointsAtAnchor = true
         isShown = true
         if selectedScreen == .mixer {
             popoverController.surfaceDidShow()

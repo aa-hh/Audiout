@@ -2625,11 +2625,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
         // A committed key changes both the note and the update feed's header.
         license.onLicenseChanged = { [weak self, settings] in
             // Settings is the one screen the gate leaves uncovered. A key
-            // registered there lifts the gate the way a key typed into its
-            // boxes would; the gate's own pass re-applies state and checks in.
-            // A stored key with no verdict yet counts, like everywhere else
-            // (`licenseUnregistered`'s soft-check posture).
-            if let gate = self?.licenseGateController, !settings.licenseUnregistered {
+            // registered there lifts the gate once the server has accepted it
+            // (the sheet stores the key and fires this before the verdict, so
+            // a stored key alone is not enough), and not while the gate is
+            // checking a key of its own. The gate's pass re-applies state and
+            // checks in.
+            if let gate = self?.licenseGateController, !gate.isChecking,
+               settings.licenseStatus == .active {
                 gate.passWithStoredKey()
                 return
             }

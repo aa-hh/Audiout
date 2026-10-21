@@ -1277,8 +1277,8 @@ other tab.
 
   The two states crossfade over 0.25 s either way (at once under Reduce
   Motion); the title stays put. A purchase deep link moves straight to the
-  key state and verifies. A key registered in Settings › License (the one
-  screen the gate leaves uncovered) lifts the gate too. There is no
+  key state and verifies. A key the server accepts in Settings › License
+  (the one screen the gate leaves uncovered) lifts the gate too. There is no
   Register button: a full key verifies itself. No Quit either: the
   status-item menu has it.
 

@@ -194,12 +194,11 @@ let package = Package(
         // `hello`'s optional `checksPairingCode`; 0.28.0 adds the `removed`
         // goodbye reason; 0.29.0 adds the run's `referenceID` on
         // `startAlignmentProbe`/`setAlignmentTick` and the snapshot's
-        // `referenceCandidateIDs`; protocol version 3 (no pairing window,
-        // `awaitingApproval`'s `screenLocked`, the `pairingPaused` goodbye)
-        // is pinned by revision until audiout-shared tags it 0.30.0, then
-        // this goes back to `from: "0.30.0"`.
+        // `referenceCandidateIDs`; 0.30.0 is protocol version 3 (no pairing
+        // window, `awaitingApproval`'s `screenLocked`, the `pairingPaused`
+        // goodbye).
         .package(url: "https://github.com/aa-hh/audiout-shared.git",
-                 revision: "a91764fa16c4b48d0c015dbf08fd55501ef32084"),
+                 from: "0.30.0"),
         // Sparkle 2 (MIT) — in-app updates for the paid, notarised build only.
         // Scoped to the `AudioutApp` executable target so no library, test or
         // harness target ever links it.

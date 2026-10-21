@@ -357,11 +357,23 @@ import AudioutSharedUI
         }
     }
 
-    private static let offerCopy =
-        "Purchasing Audiout provides a licence that unlocks both this Mac as well as its companion iOS remote app."
+    private static let offerCopy = AppSettings.remoteAppIsOffered
+        ? LicenseGateViewController.offerSubtitleWithPhone : LicenseGateViewController.offerSubtitleMacOnly
     private static let enterCopy = "Copy your licence key from your receipt email, enter it below, or"
 
     // MARK: The two states
+
+    /// Red if the offer subtitle stopped asking `AppSettings.remoteAppIsOffered`
+    /// and invited buyers to the phone app in a build that does not offer it.
+    @Test func theOfferSubtitleMentionsThePhoneOnlyWhenTheRemoteAppIsOffered() {
+        #expect(LicenseGateViewController.offerSubtitleWithPhone ==
+            "Purchasing Audiout provides a licence that unlocks both this Mac as well as its companion iOS remote app.")
+        #expect(LicenseGateViewController.offerSubtitleMacOnly ==
+            "Purchasing Audiout provides a licence that unlocks this Mac.")
+        #expect(Self.offerCopy == (AppSettings.remoteAppIsOffered
+            ? LicenseGateViewController.offerSubtitleWithPhone : LicenseGateViewController.offerSubtitleMacOnly))
+    }
+
 
     /// Red if a build with a checkout stopped opening on the offer, the title
     /// or subtitle copy changed, Buy or the trial went missing before any
@@ -901,6 +913,29 @@ import AudioutSharedUI
         #expect(entry.test_boxTexts == ["AAAAA", "BBBBB", "CCCCC", "DDDDD"])
         #expect(entry.test_focusedIndex == 3)
         #expect(entry.isComplete)
+    }
+
+    /// Red if `controlTextDidChange` went back to re-splitting a full box's
+    /// own five plus an appended whole key from that box, instead of sending
+    /// the appended key through `fill`.
+    @MainActor
+    @Test func aWholeKeyPastedAfterAFullBoxReplacesEveryBox() {
+        let entry = makeContent(settings(), Transport()).test_keyEntry
+        entry.fill("AAAAA")
+        entry.focusBox(0)
+        entry.test_type("AUDT-BBBBB-CCCCC-DDDDD-EEEEE")
+        #expect(entry.test_boxTexts == ["BBBBB", "CCCCC", "DDDDD", "EEEEE"])
+    }
+
+    /// Red if `controlTextDidChange` stopped laying the characters appended
+    /// to a full box from the next box onward.
+    @MainActor
+    @Test func charactersAppendedToAFullBoxGoToTheNextBox() {
+        let entry = makeContent(settings(), Transport()).test_keyEntry
+        entry.fill("AAAAA")
+        entry.focusBox(0)
+        entry.test_type("BBBBB")
+        #expect(entry.test_boxTexts == ["AAAAA", "BBBBB", "", ""])
     }
 
     /// Red if the box geometry drifted from the four 92 pt boxes, their

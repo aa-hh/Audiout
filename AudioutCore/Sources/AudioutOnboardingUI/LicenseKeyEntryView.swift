@@ -225,10 +225,28 @@ final class LicenseKeyEntryView: NSView, NSTextFieldDelegate {
                 editor.selectedRange = NSRange(location: at, length: 0)
             }
         } else {
-            let spread = Array(chars.prefix((Self.boxCount - i) * Self.groupSize))
+            // A full box with the caret parked at its end (where "Key not
+            // accepted" leaves it) reads the paste appended to its own five:
+            // only the appended part is new input, so a whole key replaces
+            // every box and anything else spreads from the next box.
+            var from = i
+            var input = chars
+            let previous = lastTexts[i]
+            if previous.count == Self.groupSize, raw.hasPrefix(previous) {
+                let appended = String(raw.dropFirst(previous.count))
+                input = Self.normalised(appended)
+                if appended.uppercased().trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("AUDT"),
+                   input.count == Self.boxCount * Self.groupSize {
+                    fill(appended)
+                    return
+                }
+                setText(i, previous)
+                from = i + 1
+            }
+            let spread = Array(input.prefix(max(0, Self.boxCount - from) * Self.groupSize))
             var last = i
             for (offset, start) in stride(from: 0, to: spread.count, by: Self.groupSize).enumerated() {
-                last = i + offset
+                last = from + offset
                 setText(last, String(spread[start..<min(start + Self.groupSize, spread.count)]))
             }
             let lastIsFull = boxes[last].stringValue.count == Self.groupSize

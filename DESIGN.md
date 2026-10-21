@@ -1229,7 +1229,9 @@ other tab.
   apart unless stated:
   1. "Purchasing Audiout provides a licence that unlocks both this Mac as
      well as its companion iOS remote app." in `titleLarge` / `label2`,
-     wrapping at 520 pt.
+     wrapping at 520 pt. A build that does not offer the phone app
+     (`AppSettings.remoteAppIsOffered` false) reads "Purchasing Audiout
+     provides a licence that unlocks this Mac." instead.
   2. One row, 16 pt apart: "Buy Audiout", the primary `CTAButton` (gold,
      `heading`, 200 x 44 pt), the Return key, which opens the checkout and
      moves to the key state; beside it "Start 14 day free trial", the

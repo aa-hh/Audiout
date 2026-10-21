@@ -58,8 +58,11 @@ public final class LicenseGateViewController: NSViewController {
     /// Buy, the trial and "I already have a key", centred in the space under
     /// the offer's subtitle.
     private let offerActions = NSStackView()
-    private let offerSubtitle = NSTextField(wrappingLabelWithString:
-        "Purchasing Audiout provides a licence that unlocks both this Mac as well as its companion iOS remote app.")
+    static let offerSubtitleWithPhone =
+        "Purchasing Audiout provides a licence that unlocks both this Mac as well as its companion iOS remote app."
+    static let offerSubtitleMacOnly = "Purchasing Audiout provides a licence that unlocks this Mac."
+    private let offerSubtitle = NSTextField(wrappingLabelWithString: AppSettings.remoteAppIsOffered
+        ? LicenseGateViewController.offerSubtitleWithPhone : LicenseGateViewController.offerSubtitleMacOnly)
     /// The panel's one gold button, the 200 x 44 gold `CTAButton`.
     private var buyButton: CTAButton!
     private let trialButton = CTAButton(title: LicenseGateViewController.trialTitle,

@@ -645,8 +645,8 @@ public final class LicenseGateViewController: NSViewController {
         return checking
     }
 
-    /// The key was validated and stored by the companion path, so the gate
-    /// opens as its own check would.
+    /// The key was validated and stored elsewhere (the companion path, or
+    /// Settings › License), so the gate opens as its own check would.
     public func passWithStoredKey() { pass(afterBeat: false) }
 
     // MARK: Test-support hooks

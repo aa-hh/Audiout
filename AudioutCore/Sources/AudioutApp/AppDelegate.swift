@@ -2624,6 +2624,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
         licenseSettingsController = license
         // A committed key changes both the note and the update feed's header.
         license.onLicenseChanged = { [weak self, settings] in
+            // Settings is the one screen the gate leaves uncovered. A key
+            // registered there lifts the gate the way a key typed into its
+            // boxes would; the gate's own pass re-applies state and checks in.
+            // A stored key with no verdict yet counts, like everywhere else
+            // (`licenseUnregistered`'s soft-check posture).
+            if let gate = self?.licenseGateController, !settings.licenseUnregistered {
+                gate.passWithStoredKey()
+                return
+            }
             self?.applyLicenseState()
             // A key entered mid-session registers the device now rather than at
             // the next launch. This closure fires a few times around one

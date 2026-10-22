@@ -1,31 +1,34 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 //
-// license-gate-preview — opens the real first-open licence gate window, and
-// nothing else. No backend, no permissions, no network, no menu-bar item.
-//
-// It exists because the gate's ground is a live Metal shader
-// (`EmitterFieldView`) and Metal is deliberately switched OFF under
-// `HeadlessRuntime`, so the snapshot tools every other surface is reviewed
-// with render this window as a flat colour. The only way to see the field is
-// to run it. This is that.
+// license-gate-preview — opens the real one surface (Mixer, Scenes, Speakers,
+// Settings) over a mock speaker fleet, with the first-open licence gate drawn
+// over it, so the gate can be clicked through on screen. No real backend, no
+// permissions, no network, no menu-bar item.
 //
 //   swift run --package-path AudioutCore license-gate-preview
 //
-// The window is the shipping `LicenseGateWindowController` with the shipping
-// view controller inside it — the only fakes are at the seams the gate
-// already injects: a transport that answers from the key you type instead of
-// a server, an `openURL` that goes nowhere, and a scratch defaults suite so a
-// preview run cannot touch the real app's stored key.
+// The surface is the shipping `AppSurfaceController` hosting the shipping
+// `PopoverController` panel, and the gate is the shipping
+// `LicenseGateViewController`. The only fakes are at the seams they already
+// inject: `MockBackend`'s demo fleet, a transport that answers from the key
+// you type instead of a server, an `openURL` that goes nowhere, and a scratch
+// defaults suite so a preview run cannot touch the real app's stored key.
 
 import AppKit
 import AudioutCore
 import AudioutOnboardingUI
+import AudioutPopoverUI
+import AudioutSettingsUI
+import AudioutSharedUI
 
-/// The key decides the verdict, so every scene the field can play is one
-/// typed word away. Anything else is a good key.
+/// The key decides the verdict, so every outcome is one typed word away.
+/// Anything else is a good key.
 enum FakeVerdict {
     static func forKey(_ key: String) -> String? {
-        let key = key.uppercased()
+        // The gate normalises what is typed (uppercase, dashes gone, O and I
+        // read as 0 and 1), so the word is looked for in that shape.
+        let key = key.uppercased().replacingOccurrences(of: "-", with: "")
+            .replacingOccurrences(of: "0", with: "O").replacingOccurrences(of: "1", with: "I")
         if key.contains("OFFLINE") { return nil }   // unreachable: saved, gate opens
         if key.contains("BAD") { return "invalid" }
         if key.contains("REVOKED") { return "revoked" }
@@ -35,9 +38,8 @@ enum FakeVerdict {
 }
 
 /// Answers the validator's POST from the key in its own body. Nothing leaves
-/// the machine. The delay is the real thing's shape, not padding: the
-/// `checking` scene is a rotating lead among the three emitters, and at zero
-/// latency you would never see it.
+/// the machine. The delay is the real thing's shape, so "Verifying…" is
+/// readable before the verdict replaces it.
 func previewTransport(_ request: URLRequest,
                       _ completion: @escaping (Data?, URLResponse?, Error?) -> Void) {
     let body = request.httpBody.flatMap {
@@ -67,42 +69,87 @@ let defaults: UserDefaults = {
     return UserDefaults(suiteName: suite) ?? .standard
 }()
 
+func tempDir() -> URL {
+    let dir = FileManager.default.temporaryDirectory
+        .appendingPathComponent("license-gate-preview-\(UUID().uuidString)", isDirectory: true)
+    try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    return dir
+}
+
+/// A screen with nothing on it, for the Scenes and Speakers tabs.
+@MainActor
+func emptyScreen() -> NSViewController {
+    let vc = NSViewController()
+    vc.view = NSView(frame: NSRect(x: 0, y: 0, width: SurfaceLayout.width, height: 464))
+    return vc
+}
+
 @MainActor
 final class PreviewDelegate: NSObject, NSApplicationDelegate {
 
-    private var gate: LicenseGateWindowController?
+    private let settings = AppSettings(
+        defaults: defaults,
+        licenseServerURL: URL(string: "https://license.preview.invalid")!,
+        buyURL: URL(string: "https://audiout.app/buy")!)
+    private let backend = MockBackend(fleet: .demoFleet, staggerDiscovery: false,
+                                      emitsLevels: true, simulatesDropouts: false)
+    private var groups: GroupController?
+    private var popover: PopoverController?
+    private var surface: AppSurfaceController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
-        showGate()
+        let groups = GroupController(backend: backend, store: GroupStore(directory: tempDir()),
+                                     routingStore: RoutingStore(directory: tempDir()),
+                                     loadPersisted: false)
+        let popover = PopoverController(
+            appRouting: AppRoutingController(store: AppRouteStore(directory: tempDir()),
+                                             loadPersisted: false),
+            runningAppsProvider: { [] })
+        backend.start()
+        let deadline = Date().addingTimeInterval(3)
+        while backend.devices.count < 7 && Date() < deadline {
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.02))
+        }
+        popover.configure(groupController: groups)
+        groups.ensureDefaultSelection()
+        popover.update(devices: backend.devices)
+
+        let surface = AppSurfaceController(
+            popoverController: popover, settings: settings,
+            groupsContent: { emptyScreen() },
+            speakersContent: { emptyScreen() },
+            settingsContent: { SettingsRootViewController(sections: []) },
+            frameAutosaveName: "LicenseGatePreviewSurface")
+        // Pinned, so clicking the terminal does not tuck the surface away.
+        surface.setPinned(true)
+        surface.onClose = { NSApp.terminate(nil) }
+        self.groups = groups
+        self.popover = popover
+        self.surface = surface
+        presentGate()
+        surface.show(anchorRect: nil)
     }
 
-    /// A pass reopens the gate rather than quitting, so the farewell can be
-    /// watched more than once without relaunching. ✕ and Quit still end it —
-    /// those are the shipping window's own way out.
-    private func showGate() {
-        let settings = AppSettings(
-            defaults: defaults,
-            licenseServerURL: URL(string: "https://license.preview.invalid")!,
-            buyURL: URL(string: "https://audiout.app/buy")!)
+    /// A pass fades the gate out, then puts a fresh one back, so the fade can
+    /// be watched more than once without relaunching. Quit (or closing the
+    /// surface) ends the preview.
+    private func presentGate() {
         settings.licenseKey = nil
         settings.licenseStatus = nil
-
-        let gate = LicenseGateWindowController(
+        let gate = LicenseGateViewController(
             settings: settings,
             transport: previewTransport,
             openURL: { url in
-                // Never actually opens a browser: the point of pressing Buy
-                // here is the `waiting` scene it puts the field into.
-                print("  (Buy would open \(url.absoluteString) — the field is now `waiting`)")
+                // Never opens a browser; the gate still moves to the key state.
+                print("  (Buy would open \(url.absoluteString))")
             },
             onPassed: { [weak self] in
-                print("  passed — reopening the gate")
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { self?.showGate() }
-            },
-            onAbort: { NSApp.terminate(nil) })
-        self.gate = gate
-        gate.present()
+                print("  passed — the gate fades, and a fresh one returns in 2 s")
+                self?.surface?.dismissLicenseGate(animated: true)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2) { self?.presentGate() }
+            })
+        surface?.presentLicenseGate(gate)
     }
 }
 
@@ -110,20 +157,25 @@ print("""
 
   Audiout — licence gate preview
 
-  The window is the real one. Type into the key field and press Register;
-  the verdict comes from the key itself, not from a server:
+  The surface is the real one over a mock fleet, with the gate drawn over the
+  Mixer. It opens on the offer: "Buy Audiout" prints the checkout link instead
+  of opening a browser and moves to the key state; "I already have a key"
+  goes there without the checkout; the trial button starts the 14 days and
+  opens the gate.
 
-    AUDT-AAAAA-BBBBB-CCCCC-DDDDD   accepted — the field surges, then leaves
-    AUDT-BAD                       rejected — the field dims and freezes
-    AUDT-REVOKED                   rejected, and Buy comes up to full strength
-    AUDT-OFFLINE                   server unreachable — key saved, gate opens
+  In the key state, type or paste a key into the boxes (or use "click here to
+  paste it"); the status line counts down, the twentieth character verifies
+  it, and the verdict comes from the key itself, not from a server. "Back"
+  at the bottom returns to the offer, where the trial button is:
 
-  What the ground is doing, scene by scene: empty field is `idle` (breathing);
-  a part-typed key steadies it; a full-length key lifts all three sources;
-  Register hands the lead around them; Buy dims and slows it. Leave it
-  untouched for 20 s to watch the Quit/Buy row lift once.
+    AUDT-AAAAA-BBBBB-CCCCC-DDDDD   accepted — "Registered", then the gate fades
+    AUDT-BADBA-DBADB-ADBAD-BADBA   "Key not accepted", the reason on the line below
+    AUDT-REVOK-EDREV-OKEDR-EVOKE   rejected as refunded
+    AUDT-UNKNO-WNUNK-NOWNU-NKNOW   not recognised
+    AUDT-OFFLI-NEOFF-LINEO-FFLIN   server unreachable — "Key saved", gate opens
 
-  ✕ or Quit ends the preview.
+  Switch tabs: Scenes and Speakers stay covered, Settings is left uncovered.
+  Quit, or closing the surface, ends the preview.
 
 """)
 // The app never exits, so a buffered stdout (anything but a terminal) would

@@ -5,11 +5,11 @@ import Foundation
 import Testing
 @testable import AudioutCore
 @testable import AudioutOnboardingUI
+import AudioutSharedUI
 
-/// `LicenseGate` (Core) and the first-open gate window (OnboardingUI). The
+/// `LicenseGate` (Core) and the first-open gate overlay (OnboardingUI). The
 /// rule under defense: only a PURCHASED build (a licence server URL) with an
-/// unregistered install gates, the gate never locks out an offline buyer, and
-/// closing it unanswered aborts rather than leaking a running unlicensed app.
+/// unregistered install gates, and the gate never locks out an offline buyer.
 @Suite struct LicenseGateTests {
 
     private let isolation = TestIsolation(owner: "LicenseGateTests")
@@ -64,8 +64,7 @@ import Testing
     }
 
     /// A refunded or revoked key keeps the app running on one speaker. Red if
-    /// a declined verdict brought the blocking window back, whose only exit is
-    /// Quit.
+    /// a declined verdict brought the blocking gate back.
     @Test(arguments: [LicenseStatus.revoked, .unknown, .invalid])
     func declinedKeyLimitsInsteadOfGating(status: LicenseStatus) {
         let settings = settings()
@@ -319,11 +318,10 @@ import Testing
         #expect(!LicenseGate.owesConversionConsentAsk(settings: s))
     }
 
-    // MARK: The window
+    // MARK: The gate
 
     /// Canned-transport helper mirroring `LicenseValidatorTests.Transport`,
-    /// plus the requests it was handed — the resend path has no verdict to
-    /// assert on, only the fact that it asked.
+    /// plus the requests it was handed.
     private final class Transport: @unchecked Sendable {
         var answer: (Data?, URLResponse?, Error?) = (nil, nil, nil)
         var requests: [URLRequest] = []
@@ -341,35 +339,181 @@ import Testing
         }
     }
 
-    @MainActor
-    private func makeGate(_ settings: AppSettings, _ transport: Transport,
-                          onPassed: @escaping () -> Void = {},
-                          onAbort: @escaping () -> Void = {}) -> LicenseGateWindowController {
-        LicenseGateWindowController(settings: settings, transport: transport.closure,
-                                    openURL: { _ in },
-                                    onPassed: onPassed, onAbort: onAbort)
-    }
-
-    /// The gate's content on its own, for the states that never involve the
-    /// window (the clipboard offer's seam is set after `init`).
+    /// The gate on its own (the clipboard offer's seam is set after `init`).
     @MainActor
     private func makeContent(_ settings: AppSettings, _ transport: Transport,
+                             openURL: @escaping (URL) -> Void = { _ in },
                              onPassed: @escaping () -> Void = {}) -> LicenseGateViewController {
         LicenseGateViewController(settings: settings, transport: transport.closure,
-                                  openURL: { _ in }, onPassed: onPassed)
+                                  openURL: openURL, onPassed: onPassed)
     }
 
     /// `LicenseValidator` lands every completion via `DispatchQueue.main.async`
     /// even with a synchronous transport — one queued turn stands between
-    /// Register and its outcome.
+    /// the submission and its outcome.
     private func drainMain() async {
         await withCheckedContinuation { cont in
             DispatchQueue.main.async { cont.resume() }
         }
     }
 
+    private static let offerCopy = AppSettings.remoteAppIsOffered
+        ? LicenseGateViewController.offerSubtitleWithPhone : LicenseGateViewController.offerSubtitleMacOnly
+    private static let enterCopy = "Copy your licence key from your receipt email, enter it below, or"
+
+    // MARK: The two states
+
+    /// Red if the offer subtitle stopped asking `AppSettings.remoteAppIsOffered`
+    /// and invited buyers to the phone app in a build that does not offer it.
+    @Test func theOfferSubtitleMentionsThePhoneOnlyWhenTheRemoteAppIsOffered() {
+        #expect(LicenseGateViewController.offerSubtitleWithPhone ==
+            "Purchasing Audiout provides a licence that unlocks both this Mac as well as its companion iOS remote app.")
+        #expect(LicenseGateViewController.offerSubtitleMacOnly ==
+            "Purchasing Audiout provides a licence that unlocks this Mac.")
+        #expect(Self.offerCopy == (AppSettings.remoteAppIsOffered
+            ? LicenseGateViewController.offerSubtitleWithPhone : LicenseGateViewController.offerSubtitleMacOnly))
+    }
+
+
+    /// Red if a build with a checkout stopped opening on the offer, the title
+    /// or subtitle copy changed, Buy or the trial went missing before any
+    /// trial, or the status line showed through the offer.
+    @MainActor
+    @Test func theGateOpensOnTheOffer() {
+        let gate = makeContent(settings(withBuy: true), Transport())
+        #expect(gate.test_state == .offer)
+        #expect(gate.test_headlineText == "Activate Audiout")
+        #expect(gate.test_bodyText == Self.offerCopy)
+        #expect(gate.test_buyIsVisible)
+        #expect(gate.test_trialIsVisible)
+        #expect(gate.test_trialTitle == "Start 14 day free trial")
+        let haveKey = gate.test_visibleControls.compactMap { $0 as? TextLinkButton }
+        #expect(haveKey.map(\.linkTitle) == ["I already have a key"])
+        #expect(gate.test_resultText == nil)
+    }
+
+    /// Red if Buy stopped opening the checkout exactly once, or stopped moving
+    /// the panel to the key state with its own subtitle and no Buy.
+    @MainActor
+    @Test func buyOpensTheCheckoutAndEntersTheKeyState() {
+        var opened: [URL] = []
+        let settings = settings(withBuy: true)
+        let gate = makeContent(settings, Transport(), openURL: { opened.append($0) })
+        gate.test_tapBuy()
+        #expect(opened == [settings.buyURL].compactMap { $0 })
+        #expect(opened.count == 1)
+        #expect(gate.test_state == .enter)
+        #expect(gate.test_headlineText == "Activate Audiout")
+        #expect(gate.test_bodyText == Self.enterCopy)
+        #expect(!gate.test_buyIsVisible)
+        #expect(gate.test_resultText == "20 characters to go")
+    }
+
+    /// Red if "I already have a key" opened the checkout on its way to the
+    /// key state, or stopped going there.
+    @MainActor
+    @Test func haveAKeyEntersWithoutTheCheckout() {
+        var opened = 0
+        let gate = makeContent(settings(withBuy: true), Transport(), openURL: { _ in opened += 1 })
+        gate.test_tapHaveKey()
+        #expect(gate.test_state == .enter)
+        #expect(opened == 0)
+    }
+
+    /// Red if a build with no checkout URL showed an offer whose Buy goes
+    /// nowhere instead of opening on the key state, or showed a Back to it.
+    @MainActor
+    @Test func aBuildWithoutABuyURLOpensInTheKeyState() {
+        let gate = makeContent(settings(), Transport())
+        #expect(gate.test_state == .enter)
+        #expect(gate.test_bodyText == Self.enterCopy)
+        #expect(!gate.test_buyIsVisible)
+        #expect(!gate.test_visibleControls.contains { ($0 as? TextLinkButton)?.linkTitle == "Back" })
+        gate.test_tapBack()
+        #expect(gate.test_state == .enter)
+    }
+
+    /// Red if "Lost your key?" left the key state, stopped opening the
+    /// website's resend page with the app's source tag, or showed in a build
+    /// with no website to send the buyer to.
+    @MainActor
+    @Test func lostKeyOpensTheResendPage() {
+        var opened: [URL] = []
+        let gate = makeContent(settings(withBuy: true), Transport(), openURL: { opened.append($0) })
+        gate.test_tapHaveKey()
+        #expect(gate.test_visibleControls.contains { ($0 as? TextLinkButton)?.linkTitle == "Lost your key?" })
+        gate.test_tapLostKey()
+        #expect(opened == [URL(string: "https://audiout.app/resend?s=mac-app")!])
+        #expect(gate.test_state == .enter)
+
+        let noSite = makeContent(settings(), Transport())
+        #expect(!noSite.test_visibleControls.contains { ($0 as? TextLinkButton)?.linkTitle == "Lost your key?" })
+    }
+
+    /// Red if "Back" stopped returning a buyer who abandoned the checkout to
+    /// the offer with Buy reachable, or the trip moved the title.
+    @MainActor
+    @Test func backReturnsToTheOffer() throws {
+        let gate = makeContent(settings(withBuy: true), Transport())
+        gate.view.frame = NSRect(x: 0, y: 0, width: 713, height: 600)
+        gate.view.layoutSubtreeIfNeeded()
+        let title = try #require(gate.test_visibleControls.first)
+        let before = title.convert(title.bounds, to: gate.view)
+
+        gate.test_tapBuy()
+        gate.test_setKeyText("AUDT-AAAAA")
+        gate.test_tapBack()
+        gate.view.layoutSubtreeIfNeeded()
+        #expect(gate.test_state == .offer)
+        #expect(gate.test_buyIsVisible)
+        #expect(title.convert(title.bounds, to: gate.view) == before)
+        #expect(gate.test_keyText == "AUDT-AAAAA", "the boxes keep the key for the way back")
+    }
+
+    /// Red if the status line stopped counting down the characters still to
+    /// enter on every fill, or lost the singular at one.
+    @MainActor
+    @Test func theCountFallsAsCharactersLand() {
+        let transport = Transport()
+        let gate = makeContent(settings(), transport)
+        #expect(gate.test_resultText == "20 characters to go")
+        for typed in 1...19 {
+            gate.test_setKeyText(String(repeating: "A", count: typed))
+            let left = 20 - typed
+            #expect(gate.test_resultText == "\(left) character\(left == 1 ? "" : "s") to go")
+        }
+        #expect(gate.test_resultText == "1 character to go")
+        #expect(transport.requests.isEmpty)
+        #expect(!gate.isChecking)
+    }
+
+    /// Red if a key verified before its twentieth character, or the
+    /// twentieth stopped submitting it, locking the boxes and showing
+    /// "Verifying…" until the verdict replaces it. Headless, so no pulse.
+    @MainActor
+    @Test func theTwentiethCharacterStartsVerifying() async {
+        let transport = Transport()
+        transport.stub(status: 200, json: #"{"status":"unknown","key":"\#(Self.key)"}"#)
+        let gate = makeContent(settings(), transport)
+        gate.test_setKeyText(String(repeating: "A", count: 19))
+        #expect(transport.requests.isEmpty)
+
+        gate.test_setKeyText(String(repeating: "A", count: 20))
+        #expect(gate.test_resultText == "Verifying…")
+        #expect(gate.isChecking)
+        #expect(!gate.test_keyEntry.isEnabled, "the boxes lock while the server is asked")
+        #expect(!gate.test_statusIsPulsing, "no pulse headless")
+        await drainMain()
+        #expect(transport.requests.count == 1)
+        #expect(gate.test_resultText == "Key not accepted")
+    }
+
+    // MARK: Verdicts
+
     /// The transport answers synchronously and headless runs skip the settle
-    /// beat, so the pass lands one main-queue turn after Register.
+    /// beat, so the pass lands one main-queue turn after the full key does.
+    /// Red if an accepted key stopped saying "Registered" with its thanks, or
+    /// stopped opening the gate exactly once.
     @MainActor
     @Test func verifiedActiveKeyOpensTheGate() async {
         let settings = settings()
@@ -377,16 +521,44 @@ import Testing
         transport.stub(status: 200, json: #"{"status":"active","key":"\#(Self.key)"}"#)
 
         var passed = 0
-        let gate = makeGate(settings, transport, onPassed: { passed += 1 })
-        gate.test_contentViewController.test_setKeyText(Self.key)
-        gate.test_contentViewController.test_tapRegister()
+        let gate = makeContent(settings, transport, onPassed: { passed += 1 })
+        gate.test_setKeyText(Self.key)
+        #expect(gate.test_resultText == "Verifying…")
+        await drainMain()
+
+        #expect(transport.requests.count == 1)
+        #expect(passed == 1)
+        #expect(gate.test_didPass)
+        #expect(settings.licenseStatus == .active)
+        #expect(gate.test_resultText == "Registered")
+        #expect(gate.test_detailText == "Thank you for supporting Audiout.")
+    }
+
+    /// An unreachable server saves the key AND opens the gate — "couldn't
+    /// verify" must never lock a buyer out. Red if it stopped doing either, or
+    /// stopped saying so.
+    @MainActor
+    @Test func unreachableServerSavesKeyAndOpens() async {
+        let settings = settings()
+        let transport = Transport()   // (nil, nil, nil) → .unreachable
+
+        var passed = 0
+        let gate = makeContent(settings, transport, onPassed: { passed += 1 })
+        gate.test_setKeyText(Self.key)
         await drainMain()
 
         #expect(passed == 1)
-        #expect(gate.test_didFinish)
-        #expect(settings.licenseStatus == .active)
+        #expect(settings.licenseKey == Self.key)
+        #expect(settings.licenseStatus == nil)
+        #expect(gate.test_resultText == "Key saved")
+        #expect(gate.test_detailText == "We'll check it next time you're online.")
+        // Next launch does not re-gate on the saved-unverified key.
+        #expect(!LicenseGate.shouldPresent(settings: settings, presentation: .auto))
     }
 
+    /// Red if a refused key opened the gate, stopped naming the refusal with
+    /// the shared `LicenseCopy` reason, or left the boxes locked or the caret
+    /// anywhere but the first box.
     @MainActor
     @Test func rejectedKeyHoldsTheGateAndSaysWhy() async {
         let settings = settings()
@@ -394,124 +566,138 @@ import Testing
         transport.stub(status: 200, json: #"{"status":"unknown","key":"\#(Self.key)"}"#)
 
         var passed = 0
-        let gate = makeGate(settings, transport, onPassed: { passed += 1 })
-        gate.test_contentViewController.test_setKeyText(Self.key)
-        gate.test_contentViewController.test_tapRegister()
+        let gate = makeContent(settings, transport, onPassed: { passed += 1 })
+        gate.test_setKeyText(Self.key)
         await drainMain()
 
         #expect(passed == 0)
-        #expect(!gate.test_didFinish)
-        #expect(gate.test_contentViewController.test_resultText
-            == LicenseCopy.statusLine(for: .unknown, reason: nil))
+        #expect(!gate.test_didPass)
+        #expect(gate.test_resultText == "Key not accepted")
+        #expect(gate.test_detailText == LicenseCopy.statusLine(for: .unknown, reason: nil))
+        // The boxes keep the key and take edits again, from the first box.
+        #expect(gate.test_keyText == Self.key)
+        #expect(gate.test_keyEntry.isEnabled)
+        #expect(gate.test_keyEntry.test_focusedIndex == 0)
+        #expect(!gate.isChecking)
     }
 
-    /// An unreachable server saves the key AND opens the gate — "couldn't
-    /// verify" must never lock a buyer out.
+    /// Red if editing a rejected key short of twenty characters left the
+    /// verdict in place instead of the count with an empty detail line, or
+    /// completing it again stopped asking the server again.
     @MainActor
-    @Test func unreachableServerSavesKeyAndOpens() async {
-        let settings = settings()
-        let transport = Transport()   // (nil, nil, nil) → .unreachable
-
-        var passed = 0
-        let gate = makeGate(settings, transport, onPassed: { passed += 1 })
-        gate.test_contentViewController.test_setKeyText(Self.key)
-        gate.test_contentViewController.test_tapRegister()
+    @Test func editingAfterARejectionRestoresTheCount() async throws {
+        let transport = Transport()
+        transport.stub(status: 200, json: #"{"status":"unknown","key":"\#(Self.key)"}"#)
+        let gate = makeContent(settings(), transport)
+        gate.test_setKeyText(Self.key)
         await drainMain()
+        #expect(gate.test_resultText == "Key not accepted")
 
-        #expect(passed == 1)
-        #expect(settings.licenseKey == Self.key)
-        #expect(settings.licenseStatus == nil)
-        #expect(gate.test_contentViewController.test_resultText
-            == "Your key is saved. We'll check it next time you're online.")
-        // Next launch does not re-gate on the saved-unverified key.
-        #expect(!LicenseGate.shouldPresent(settings: settings, presentation: .auto))
+        let entry = gate.test_keyEntry
+        let last = try #require(entry.test_boxes.last)
+        last.stringValue = "DDDD"
+        entry.controlTextDidChange(Notification(name: NSControl.textDidChangeNotification, object: last))
+        #expect(gate.test_resultText == "1 character to go")
+        #expect(gate.test_detailText == nil)
+        #expect(transport.requests.count == 1)
+
+        last.stringValue = "DDDDD"
+        entry.controlTextDidChange(Notification(name: NSControl.textDidChangeNotification, object: last))
+        #expect(gate.test_resultText == "Verifying…")
+        await drainMain()
+        #expect(transport.requests.count == 2)
     }
 
+    /// Red if the purchase deep link stopped moving the offer to the key
+    /// state without the checkout, or asked the server twice for one key.
     @MainActor
-    @Test func emptySubmitPromptsWithoutPassing() async {
-        let settings = settings()
-        var passed = 0
-        let gate = makeGate(settings, Transport(), onPassed: { passed += 1 })
-        gate.test_contentViewController.test_tapRegister()
-        #expect(passed == 0)
-        #expect(gate.test_contentViewController.test_resultText != nil)
-    }
-
-    @MainActor
-    @Test func closingUnansweredAborts() async {
-        let settings = settings()
-        var aborted = 0
-        var passed = 0
-        let gate = makeGate(settings, Transport(),
-                            onPassed: { passed += 1 }, onAbort: { aborted += 1 })
-        gate.test_closeWindow()
-        #expect(aborted == 1)
-        #expect(passed == 0)
-        // The single-fire guard: a second close changes nothing.
-        gate.test_closeWindow()
-        #expect(aborted == 1)
-    }
-
-    /// The purchase deep link lands in the gate's own field.
-    @MainActor
-    @Test func deepLinkSubmitsIntoTheGate() async {
-        let settings = settings()
+    @Test func deepLinkEntersAndVerifies() async {
+        let settings = settings(withBuy: true)
         let transport = Transport()
         transport.stub(status: 200, json: #"{"status":"active","key":"\#(Self.key)"}"#)
 
         var passed = 0
-        let gate = makeGate(settings, transport, onPassed: { passed += 1 })
+        var opened = 0
+        let gate = makeContent(settings, transport, openURL: { _ in opened += 1 },
+                               onPassed: { passed += 1 })
         gate.submit(key: Self.key)
+        #expect(gate.test_state == .enter)
         await drainMain()
         #expect(passed == 1)
+        #expect(opened == 0)
         #expect(settings.licenseKey == Self.key)
+        // The full key started its own check as it landed; the link's submit
+        // must not ask the server a second time.
+        #expect(transport.requests.count == 1)
     }
 
     /// Red if the phone-verified pass stopped opening the gate exactly once.
     @MainActor
     @Test func aPhoneVerifiedKeyOpensTheGateExactlyOnce() async {
         var passed = 0
-        var aborted = 0
-        let gate = makeGate(settings(), Transport(),
-                            onPassed: { passed += 1 }, onAbort: { aborted += 1 })
+        let gate = makeContent(settings(), Transport(), onPassed: { passed += 1 })
         gate.passWithStoredKey()
         gate.passWithStoredKey()
         #expect(passed == 1)
-        #expect(aborted == 0)
     }
 
-    /// Red if `isChecking` stopped reporting a Register check in flight, which
+    /// Red if `isChecking` stopped reporting a key check in flight, which
     /// let the phone's key race the gate's own check on the stored key.
     @MainActor
     @Test func isCheckingCoversOnlyARegisterInFlight() async {
-        let gate = makeGate(settings(), Transport())
+        let gate = makeContent(settings(), Transport())
         #expect(!gate.isChecking)
         gate.submit(key: Self.key)
         #expect(gate.isChecking, "the validator has not answered until the next main-queue turn")
         await drainMain()
     }
 
-    // MARK: The one surface's states
+    // MARK: The clipboard
 
-    /// A key on the clipboard is OFFERED, never spent: filled in and named, so
-    /// the buyer still presses Register themselves.
+    /// A key on the clipboard is filled in on the first arrival in the key
+    /// state, and only then. A full one verifies at once; a partial one shows
+    /// its count. Red if the offer read the clipboard, a partial key was sent
+    /// to the server, a full one stopped submitting itself, or a second
+    /// arrival looked again.
     @MainActor
-    @Test func clipboardKeyIsOfferedNeverSubmitted() async {
+    @Test func clipboardKeyIsOfferedAndAFullOneVerifies() async {
+        let partialSettings = settings(withBuy: true, store: isolation.makeDefaults())
+        let partialTransport = Transport()
+        let partial = makeContent(partialSettings, partialTransport)
+        var reads = 0
+        partial.pasteboardAccessIsAlwaysAllowed = { true }
+        partial.pasteboardString = { reads += 1; return "AUDT-AAAAA-BBBBB" }
+        partial.test_arrive()
+        #expect(reads == 0, "the offer never reads the clipboard")
+
+        partial.test_tapHaveKey()
+        #expect(partial.test_keyText == "AUDT-AAAAA-BBBBB")
+        #expect(partial.test_resultText == "10 characters to go")
+        #expect(partialTransport.requests.isEmpty)
+        #expect(partialSettings.licenseKey == nil)
+
+        partial.test_setKeyText("")
+        partial.test_arrive()
+        #expect(reads == 1, "one look only")
+        #expect(partial.test_keyText.isEmpty)
+
         let settings = settings()
+        let transport = Transport()
         var passed = 0
-        let content = makeContent(settings, Transport(), onPassed: { passed += 1 })
+        let content = makeContent(settings, transport, onPassed: { passed += 1 })
         content.pasteboardAccessIsAlwaysAllowed = { true }
         content.pasteboardString = { "  \(Self.key)\n" }
         content.test_arrive()
 
         #expect(content.test_keyText == Self.key)
-        #expect(content.test_resultText == "From your clipboard")
-        #expect(passed == 0)
-        #expect(settings.licenseKey == nil)
+        #expect(content.test_resultText == "Verifying…")
+        await drainMain()
+        #expect(transport.requests.count == 1)
+        #expect(settings.licenseKey == Self.key)
+        #expect(passed == 1, "an unreachable server still opens the gate")
     }
 
-    /// Anything that is not a key is left alone — the field stays empty and
-    /// the gutter says nothing.
+    /// Red if a clipboard that holds no key changed the boxes or the count.
     @MainActor
     @Test func unrelatedClipboardIsIgnored() async {
         let content = makeContent(settings(), Transport())
@@ -520,12 +706,12 @@ import Testing
         content.test_arrive()
 
         #expect(content.test_keyText.isEmpty)
-        #expect(content.test_resultText == nil)
+        #expect(content.test_resultText == "20 characters to go")
     }
 
     /// The READ is the thing that costs the user a system paste alert, so this
-    /// counts reads rather than results: unless the app is already allowed to
-    /// read the clipboard, arrival must not touch it at all.
+    /// counts reads rather than results. Red if arrival touched the clipboard
+    /// without the app already being allowed to read it.
     @MainActor
     @Test func arrivalNeverReadsTheClipboardWithoutAlwaysAllow() async {
         let content = makeContent(settings(), Transport())
@@ -536,168 +722,86 @@ import Testing
 
         #expect(reads == 0)
         #expect(content.test_keyText.isEmpty)
-        #expect(content.test_resultText == nil)
+        #expect(content.test_resultText == "20 characters to go")
     }
 
-    /// The click is the gesture that earns the read: it fills the field even
-    /// where arrival may not look, replaces what was typed, and still leaves
-    /// the submitting to the buyer.
+    /// The click is the gesture that earns the read. Red if "click here to
+    /// paste it" stopped filling the boxes where arrival may not look,
+    /// stopped replacing what was typed, or a full key stopped verifying.
     @MainActor
-    @Test func pasteKeyFillsFromTheClipboardOnClick() async {
+    @Test func pasteLinkFillsFromTheClipboard() async {
         let settings = settings()
+        let transport = Transport()
         var passed = 0
-        let content = makeContent(settings, Transport(), onPassed: { passed += 1 })
+        let content = makeContent(settings, transport, onPassed: { passed += 1 })
         content.pasteboardAccessIsAlwaysAllowed = { false }
         content.pasteboardString = { "  \(Self.key)\n" }
         content.test_setKeyText("AUDT-OLD")
         content.test_tapPasteKey()
 
         #expect(content.test_keyText == Self.key)
-        #expect(content.test_resultText == "From your clipboard")
+        #expect(content.test_resultText == "Verifying…")
         #expect(passed == 0)
-        #expect(settings.licenseKey == nil)
+        await drainMain()
+        #expect(transport.requests.count == 1)
+        #expect(settings.licenseKey == Self.key)
     }
 
-    /// A clipboard with no key says so in the one gutter and changes nothing
-    /// else.
+    /// Red if a paste with no key on the clipboard stopped saying so in the
+    /// detail line, or touched the boxes or the count.
     @MainActor
-    @Test func pasteKeyWithoutAKeySaysSo() async {
+    @Test func pasteLinkWithoutAKeySaysSo() async {
         let content = makeContent(settings(), Transport())
         content.pasteboardAccessIsAlwaysAllowed = { false }
         content.pasteboardString = { "https://example.com" }
         content.test_tapPasteKey()
 
         #expect(content.test_keyText.isEmpty)
-        #expect(content.test_resultText == "No key on the clipboard. It starts with AUDT-.")
-    }
-
-    /// While the resend question borrows the field there is nothing to paste
-    /// into, so the link rests, greyed rather than hidden, because hiding it
-    /// would collapse the row and move the link beside it.
-    @MainActor
-    @Test func pasteKeyRestsDuringTheLostKeyDetour() async {
-        let content = makeContent(settings(), Transport())
-        #expect(content.test_pasteKeyIsEnabled)
-
-        content.test_tapLostKey()
-        #expect(!content.test_pasteKeyIsEnabled)
-
-        content.test_tapLostKey()
-        #expect(content.test_pasteKeyIsEnabled)
-    }
-
-    /// "I lost my key" morphs the SAME field and button — no sheet, no second
-    /// window — and lands one neutral line whatever the server did.
-    @MainActor
-    @Test func lostKeyMorphsInPlaceAndResends() async {
-        let settings = settings()
-        let transport = Transport()
-        let content = makeContent(settings, transport)
-
-        content.test_tapLostKey()
-        #expect(content.test_placeholder == "you@example.com")
-        #expect(content.test_commitTitle == "Email my key")
-        #expect(content.test_lostKeyTitle == "Back to your key")
-        #expect(content.test_resultText == "Enter the email you bought with.")
-
-        content.test_setKeyText("Buyer@Example.com")
-        content.test_tapRegister()
-        await drainMain()
-
-        #expect(transport.requests.count == 1)
-        let request = transport.requests.first
-        #expect(request?.url == Self.server.appending(path: "v1/resend"))
-        let body = (try? JSONSerialization.jsonObject(with: request?.httpBody ?? Data()))
-            as? [String: Any]
-        #expect(body?["email"] as? String == "buyer@example.com")
-
-        #expect(content.test_resultText == "If that address bought Audiout, the key is on its way.")
-        #expect(content.test_commitTitle == "Register")
-        #expect(content.test_placeholder == LicenseCopy.keyFormatHint)
-        #expect(content.test_lostKeyTitle == "I lost my key")
-    }
-
-    /// Back restores the key that was mid-typing, and clears the detour's line.
-    @MainActor
-    @Test func backFromLostKeyRestoresTheTypedKey() async {
-        let content = makeContent(settings(), Transport())
-        content.test_setKeyText(Self.key)
-        content.test_tapLostKey()
-        #expect(content.test_keyText.isEmpty)
-
-        content.test_tapLostKey()
-        #expect(content.test_keyText == Self.key)
-        #expect(content.test_resultText == nil)
-    }
-
-    @MainActor
-    @Test func resendWithoutAnAddressAsksAgain() async {
-        let transport = Transport()
-        let content = makeContent(settings(), transport)
-        content.test_tapLostKey()
-        content.test_tapRegister()
-        await drainMain()
-
-        #expect(content.test_resultText == "Enter the email address you bought with.")
-        #expect(transport.requests.isEmpty)
-    }
-
-    /// A refunded key has one useful answer left, so Buy stops being quiet.
-    @MainActor
-    @Test func revokedVerdictPromotesTheBuyLink() async {
-        let settings = settings(withBuy: true)
-        let transport = Transport()
-        transport.stub(status: 200, json: #"{"status":"revoked","key":"\#(Self.key)"}"#)
-
-        let content = makeContent(settings, transport)
-        content.test_setKeyText(Self.key)
-        content.test_tapRegister()
-        await drainMain()
-
-        #expect(content.test_resultText == LicenseCopy.statusLine(for: .revoked, reason: nil))
-        #expect(content.test_buyIsVisible)
-        #expect(content.test_buyAlpha == 1)
-    }
-
-    /// The field behind the type is part of the answer: a farewell on the way
-    /// out, quiet on a refusal.
-    @MainActor
-    @Test func fieldSceneFollowsTheVerdict() async {
-        let accepted = Transport()
-        accepted.stub(status: 200, json: #"{"status":"active","key":"\#(Self.key)"}"#)
-        let passing = makeContent(settings(), accepted)
-        passing.test_setKeyText(Self.key)
-        passing.test_tapRegister()
-        await drainMain()
-        #expect(passing.test_fieldScene == .farewell)
-
-        let refused = Transport()
-        refused.stub(status: 200, json: #"{"status":"unknown","key":"\#(Self.key)"}"#)
-        let held = makeContent(settings(), refused)
-        held.test_setKeyText(Self.key)
-        held.test_tapRegister()
-        await drainMain()
-        #expect(held.test_fieldScene == .quiet)
+        #expect(content.test_resultText == "20 characters to go")
+        #expect(content.test_detailText == "No key on the clipboard. It starts with AUDT-.")
     }
 
     // MARK: The trial offer
+
+    /// Red if the key state's trial button came back (the key state ends in
+    /// Back alone; the trial is on the offer, one Back away), or the offer's
+    /// button stopped starting the trial.
+    @MainActor
+    @Test func theTrialIsOfferedOnTheOfferOnly() throws {
+        let settings = settings(withBuy: true)
+        var passed = 0
+        let gate = makeContent(settings, Transport(), onPassed: { passed += 1 })
+        let isTrial = { (view: NSView) in (view as? NSButton)?.title == "Start 14 day free trial" }
+        gate.test_tapHaveKey()
+        #expect(!gate.test_trialIsVisible)
+        #expect(!gate.test_visibleControls.contains(where: isTrial))
+        gate.test_tapBack()
+        #expect(gate.test_trialIsVisible)
+        #expect(gate.test_trialTitle == "Start 14 day free trial")
+        let trials = gate.test_visibleControls.filter(isTrial).compactMap { $0 as? NSButton }
+        #expect(trials.count == 1)
+        let button = try #require(trials.first)
+        _ = (button.target as? NSObject)?.perform(button.action, with: button)
+        #expect(passed == 1)
+        #expect(settings.trialStartedAt != nil)
+    }
 
     /// The offer is for someone who has never had a trial, and for nobody
     /// else. Red if it came back for a trial already running or already spent
     /// — a second trial is not a thing this app has.
     @MainActor
     @Test func theTrialOfferIsOnlyThereBeforeAnyTrial() {
-        let fresh = makeContent(settings(), Transport())
+        let fresh = makeContent(settings(withBuy: true), Transport())
         #expect(fresh.test_trialIsVisible)
-        #expect(fresh.test_trialTitle == "Try Audiout free for 14 days")
 
-        let running = settings(store: isolation.makeDefaults())
-        startTrial(running, daysAgo: 1)
-        #expect(!makeContent(running, Transport()).test_trialIsVisible)
-
-        let spent = settings(store: isolation.makeDefaults())
-        startTrial(spent, daysAgo: 20)
-        #expect(!makeContent(spent, Transport()).test_trialIsVisible)
+        for daysAgo in [1.0, 20.0] {
+            let started = settings(withBuy: true, store: isolation.makeDefaults())
+            startTrial(started, daysAgo: daysAgo)
+            let gate = makeContent(started, Transport())
+            #expect(!gate.test_trialIsVisible)
+            gate.test_tapHaveKey()
+            #expect(!gate.test_trialIsVisible)
+        }
     }
 
     /// The tap starts the 14 days and opens the gate in the same turn. Red if
@@ -729,7 +833,7 @@ import Testing
     /// no valid key, every launch.
     @MainActor
     @Test func aTrialThatConvertedIsNeverOfferedASecondOne() {
-        let settings = settings()
+        let settings = settings(withBuy: true)
         startTrial(settings, daysAgo: 3)
         settings.trialExpiresAt = nil
         #expect(TrialClock.state(settings: settings) == .none, "reads as no trial")
@@ -744,156 +848,188 @@ import Testing
         #expect(settings.trialExpiresAt == nil, "no second trial was written")
     }
 
-    /// Every gate welcomes. Red if the words changed per trial state — the
-    /// gate is first-open only, so no other copy belongs on it.
-    @MainActor
-    @Test func theGateAlwaysWelcomes() {
-        let welcome = "Welcome to Audiout"
-        let why = "It takes one key to open. Yours is in your receipt email, starting with AUDT."
-        let fresh = makeContent(settings(store: isolation.makeDefaults()), Transport())
-        #expect(fresh.test_headlineText == welcome)
-        #expect(fresh.test_bodyText == why)
+    // MARK: The key boxes
 
-        // A running trial never reaches the gate (the rule above), but if one
-        // ever did it gets the same words.
-        let running = settings(store: isolation.makeDefaults())
-        startTrial(running, daysAgo: 1)
-        let midTrial = makeContent(running, Transport())
-        #expect(midTrial.test_headlineText == welcome)
-        #expect(midTrial.test_bodyText == why)
+    /// Red if normalising stopped dropping the `AUDT-` prefix and the dashes,
+    /// stopped uppercasing, stopped mapping `O` to `0`, or `fill` stopped
+    /// laying five characters into each box.
+    @MainActor
+    @Test(arguments: ["audt-ab0de-fghjk-mnpqr-stvwx", "AB0DEFGHJKMNPQRSTVWX"])
+    func aKeyFillsTheSameWithOrWithoutItsPrefix(text: String) {
+        let entry = makeContent(settings(), Transport()).test_keyEntry
+        entry.fill(text)
+        #expect(entry.test_boxTexts == ["AB0DE", "FGHJK", "MNPQR", "STVWX"])
+        #expect(entry.keyText == "AUDT-AB0DE-FGHJK-MNPQR-STVWX")
+        #expect(entry.isComplete)
     }
 
-    // MARK: LicenseResend (Core)
-
+    /// Red if `O`, `I` or `L` stopped reading as the digit the licence server
+    /// forgives them as.
     @MainActor
-    @Test func resendPostsTheTrimmedAddress() async throws {
-        let settings = settings()
-        let transport = Transport()
-        var completions = 0
-        LicenseResend(settings: settings, transport: transport.closure)
-            .request(email: "  Buyer@Example.com ") { completions += 1 }
-        await drainMain()
-
-        #expect(completions == 1)
-        let request = try #require(transport.requests.first)
-        #expect(request.url == Self.server.appending(path: "v1/resend"))
-        #expect(request.httpMethod == "POST")
-        #expect(request.value(forHTTPHeaderField: "Content-Type") == "application/json")
-        let body = try #require(request.httpBody)
-        let obj = try #require(try JSONSerialization.jsonObject(with: body) as? [String: Any])
-        #expect(obj["email"] as? String == "buyer@example.com")
+    @Test func lookalikeLettersBecomeDigits() {
+        let entry = makeContent(settings(), Transport()).test_keyEntry
+        entry.fill("o1il2l")
+        #expect(entry.test_boxTexts == ["01112", "1", "", ""])
     }
 
-    /// There is no failure to report — a dead network completes exactly like a
-    /// delivered mail, because the caller's one line is the same either way.
+    /// Red if a character outside Crockford base32 (here `U`, a dash and a
+    /// space) reached a box, typed or filled.
     @MainActor
-    @Test func resendCompletesOnFailureToo() async {
-        let transport = Transport()
-        transport.answer = (nil, nil, URLError(.notConnectedToInternet))
-        var completions = 0
-        LicenseResend(settings: settings(), transport: transport.closure)
-            .request(email: "buyer@example.com") { completions += 1 }
-        await drainMain()
-        #expect(completions == 1)
+    @Test func charactersOutsideTheAlphabetAreDropped() {
+        let entry = makeContent(settings(), Transport()).test_keyEntry
+        entry.fill("A U-B")
+        #expect(entry.keyText == "AUDT-AB")
+        for junk in ["U", "-", " "] {
+            entry.test_type(junk)
+            #expect(entry.test_boxTexts[0] == "AB", "\(junk) landed in a box")
+        }
     }
 
-    /// No server (a build from source) and a malformed address both send
-    /// nothing, and still call back.
+    /// Red if focus moved before the fifth character or stopped moving on
+    /// it, or Delete on an empty box stopped stepping back to the box before
+    /// without deleting there.
     @MainActor
-    @Test func resendSendsNothingWithoutAServerOrAnAtSign() async {
-        let transport = Transport()
-        var completions = 0
-        LicenseResend(settings: settings(withServer: false), transport: transport.closure)
-            .request(email: "buyer@example.com") { completions += 1 }
-        LicenseResend(settings: settings(), transport: transport.closure)
-            .request(email: "buyer") { completions += 1 }
-        await drainMain()
+    @Test func typingMovesOnAndDeleteStepsBack() {
+        let entry = makeContent(settings(), Transport()).test_keyEntry
+        entry.test_type("abcd")
+        #expect(entry.test_boxTexts[0] == "ABCD")
+        #expect(entry.test_focusedIndex == 0)
+        entry.test_type("e")
+        #expect(entry.test_boxTexts[0] == "ABCDE")
+        #expect(entry.test_focusedIndex == 1)
+        entry.test_backspace()
+        #expect(entry.test_focusedIndex == 0)
+        #expect(entry.test_boxTexts == ["ABCDE", "", "", ""])
+    }
 
-        #expect(completions == 2)
-        #expect(transport.requests.isEmpty)
+    /// Red if a paste stopped spreading five per box from the edited box
+    /// onward, touched a box before it, or ran past the fourth box.
+    @MainActor
+    @Test func aPasteSpreadsAcrossTheBoxesFromTheEditedOne() {
+        let entry = makeContent(settings(), Transport()).test_keyEntry
+        entry.fill("AAAAA")
+        #expect(entry.test_focusedIndex == 1)
+        entry.test_type("bbbbb-ccccc-ddddd-eeeee")
+        #expect(entry.test_boxTexts == ["AAAAA", "BBBBB", "CCCCC", "DDDDD"])
+        #expect(entry.test_focusedIndex == 3)
+        #expect(entry.isComplete)
+    }
+
+    /// Red if `controlTextDidChange` went back to re-splitting a full box's
+    /// own five plus an appended whole key from that box, instead of sending
+    /// the appended key through `fill`.
+    @MainActor
+    @Test func aWholeKeyPastedAfterAFullBoxReplacesEveryBox() {
+        let entry = makeContent(settings(), Transport()).test_keyEntry
+        entry.fill("AAAAA")
+        entry.focusBox(0)
+        entry.test_type("AUDT-BBBBB-CCCCC-DDDDD-EEEEE")
+        #expect(entry.test_boxTexts == ["BBBBB", "CCCCC", "DDDDD", "EEEEE"])
+    }
+
+    /// Red if `controlTextDidChange` stopped laying the characters appended
+    /// to a full box from the next box onward.
+    @MainActor
+    @Test func charactersAppendedToAFullBoxGoToTheNextBox() {
+        let entry = makeContent(settings(), Transport()).test_keyEntry
+        entry.fill("AAAAA")
+        entry.focusBox(0)
+        entry.test_type("BBBBB")
+        #expect(entry.test_boxTexts == ["AAAAA", "BBBBB", "", ""])
+    }
+
+    /// Red if the box geometry drifted from the four 92 pt boxes, their
+    /// 16 pt dash slots and the plate, or the row went back to stretching
+    /// across the panel instead of keeping its natural width.
+    @MainActor
+    @Test func theKeyRowFitsThePanel() {
+        let gate = makeContent(settings(), Transport())
+        gate.view.frame = NSRect(x: 0, y: 0, width: 713, height: 600)
+        gate.view.layoutSubtreeIfNeeded()
+        let width = gate.test_keyEntry.frame.width
+        #expect(width >= 516 && width <= 532, "the key row measures \(width) pt")
     }
 
     // MARK: Layout
 
-    /// The window is a FIXED 560 x 440 and the content column is centred in
-    /// it, so every type size on this screen is spending a budget that cannot
-    /// grow. The column has to clear the Quit/Buy row pinned to the bottom
-    /// edge — an overlap here is two controls drawn on top of each other, not
-    /// a scroll.
-    ///
-    /// The trial state is the axis that varies: each of the three draws a
-    /// different column — the trial offer and its line are only in the first,
-    /// and the ending's body copy is longer than the welcome's.
+    private func buttons(in view: NSView) -> [NSButton] {
+        view.subviews.flatMap { sub in ((sub as? NSButton).map { [$0] } ?? []) + buttons(in: sub) }
+    }
+
+    /// The panel sits 14 pt in from both sides and 8 pt above the bottom of
+    /// the overlay, and everything the current state shows lies inside it.
+    /// Red if the panel's insets change, it outgrows the overlay at the
+    /// surface's 713 x 600 floor, a row spills out of it in either state (the
+    /// paste link beside the subtitle and the status label are the widest),
+    /// the key state gained a control beyond title, subtitle, paste link,
+    /// boxes, status, Back and "Lost your key?", or a Quit button comes back. The trial is only
+    /// on the offer and only before any trial; Back is there in the key state
+    /// of a build with a checkout.
     @MainActor
-    @Test(arguments: [nil, 1.0, 20.0] as [Double?])
-    func theContentColumnClearsTheBottomButtonRow(trialStartedDaysAgo: Double?) {
+    @Test(arguments: [nil, 1.0, 20.0] as [Double?], [false, true])
+    func thePanelHoldsEveryControlAtTheSurfaceFloor(trialStartedDaysAgo: Double?, enter: Bool) {
         let settings = settings(withBuy: true, store: isolation.makeDefaults())
         if let trialStartedDaysAgo { startTrial(settings, daysAgo: trialStartedDaysAgo) }
         let gate = makeContent(settings, Transport())
-        gate.view.frame = NSRect(origin: .zero, size: LicenseGateViewController.contentSize)
+        if enter { gate.test_tapHaveKey() }
+        let size = NSSize(width: 713, height: 600)
+        gate.view.frame = NSRect(origin: .zero, size: size)
         gate.view.layoutSubtreeIfNeeded()
 
-        let column = gate.view.subviews.compactMap { $0 as? NSStackView }.first
-        #expect(column != nil)
-        let buttons = gate.view.subviews.compactMap { $0 as? NSButton }
-        #expect(buttons.count == 2, "expected the Quit and Buy pair on the root view")
-        guard let column, let rowTop = buttons.map(\.frame.maxY).max() else { return }
+        let panel = gate.test_panel.frame
+        // Unflipped overlay: y counts up from the bottom edge.
+        #expect(panel.minX == 14)
+        #expect(size.width - panel.maxX == 14)
+        #expect(panel.minY == 8)
+        #expect(panel.maxY <= size.height, "the panel overflows the top of the overlay")
 
-        // The root view is unflipped, so y counts up from the bottom edge.
-        #expect(column.frame.minY > rowTop,
-                "the column reaches down to \(column.frame.minY), into a button row topping out at \(rowTop)")
-        #expect(column.frame.maxY < LicenseGateViewController.contentSize.height,
-                "the column overflows the top of a window that cannot grow")
+        let controls = gate.test_visibleControls
+        let trial = trialStartedDaysAgo == nil ? 1 : 0
+        let expected = enter ? 7 : 4 + trial
+        #expect(controls.count == expected)
+        for control in controls {
+            let frame = control.convert(control.bounds, to: gate.view)
+            #expect(panel.contains(frame), "\(control) at \(frame) spills out of the panel \(panel)")
+        }
+        #expect(!buttons(in: gate.view).contains { $0.title == "Quit" || $0.keyEquivalent == "q" })
     }
 
-    /// The glass panel backs the brand mark down through the quiet links. It has
-    /// to clear the Quit/Buy row at the bottom (the trial offer that sits below
-    /// it is what leaves that room) and not overflow the fixed window at the
-    /// top. The trial axis varies the content it wraps, same as the column test.
+    /// Red if the panel stopped holding one height across the two states, so
+    /// the title (pinned to a bottom-anchored panel) jumps when Buy or "I
+    /// already have a key" moves to the key state.
     @MainActor
-    @Test(arguments: [nil, 1.0, 20.0] as [Double?])
-    func theGlassPanelClearsTheButtonRowAndTop(trialStartedDaysAgo: Double?) {
-        let settings = settings(withBuy: true, store: isolation.makeDefaults())
-        if let trialStartedDaysAgo { startTrial(settings, daysAgo: trialStartedDaysAgo) }
-        let gate = makeContent(settings, Transport())
-        gate.view.frame = NSRect(origin: .zero, size: LicenseGateViewController.contentSize)
+    @Test func theTitleDoesNotMoveBetweenStates() throws {
+        let gate = makeContent(settings(withBuy: true), Transport())
+        gate.view.frame = NSRect(x: 0, y: 0, width: 713, height: 600)
         gate.view.layoutSubtreeIfNeeded()
+        let title = try #require(gate.test_visibleControls.first)
+        let before = title.convert(title.bounds, to: gate.view)
 
-        let glass = gate.test_glassPanel
-        let buttons = gate.view.subviews.compactMap { $0 as? NSButton }
-        guard let rowTop = buttons.map(\.frame.maxY).max() else { return }
-
-        // Unflipped root: y counts up from the bottom edge.
-        #expect(glass.frame.minY > rowTop,
-                "the glass panel reaches down to \(glass.frame.minY), into a button row topping out at \(rowTop)")
-        #expect(glass.frame.maxY < LicenseGateViewController.contentSize.height,
-                "the glass panel overflows the top of a window that cannot grow")
+        gate.test_tapHaveKey()
+        gate.view.layoutSubtreeIfNeeded()
+        #expect(gate.test_visibleControls.first === title)
+        #expect(title.convert(title.bounds, to: gate.view) == before)
     }
 
-    /// The glass panel's bottom edge keeps a clear gap above the trial button,
-    /// rather than crowding it — the trial button only exists on a fresh
-    /// install (no trial ever started), so this case is not parametrized.
+    /// Buy and the trial button are 200 x 44 pt `CTAButton`s, Buy in
+    /// `heading` and the trial in `body`. Red if either went back to a stock
+    /// push button's height or the 150 pt width, Buy regained a minimum
+    /// width, or the faces swapped fonts.
     @MainActor
-    @Test
-    func theGlassPanelKeepsClearOfTheTrialButton() {
-        let settings = settings(withBuy: true, store: isolation.makeDefaults())
-        let gate = makeContent(settings, Transport())
-        gate.view.frame = NSRect(origin: .zero, size: LicenseGateViewController.contentSize)
+    @Test func theCTAsAreTheiPhoneSize() throws {
+        let gate = makeContent(settings(withBuy: true), Transport())
+        gate.view.frame = NSRect(x: 0, y: 0, width: 713, height: 600)
         gate.view.layoutSubtreeIfNeeded()
-
-        let glass = gate.test_glassPanel
-        let column = gate.view.subviews.compactMap { $0 as? NSStackView }.first
-        #expect(column != nil, "expected the content column on the root view")
-        guard let column else { return }
-        let trial = column.arrangedSubviews.compactMap { $0 as? NSButton }.first
-        #expect(trial != nil, "expected the trial button arranged directly in the column")
-        guard let trial else { return }
-
-        let trialInRoot = trial.convert(trial.bounds, to: gate.view)
-
-        // Unflipped root: y counts up from the bottom edge.
-        #expect(glass.frame.minY - trialInRoot.maxY >= 10,
-                "the glass panel's bottom edge crowds the trial button: gap is \(glass.frame.minY - trialInRoot.maxY)")
+        let cta = CGSize(width: 200, height: 44)
+        #expect(gate.test_buyFrame.size == cta)
+        #expect(gate.test_trialFrame.size == cta)
+        let buttons = gate.test_visibleControls.compactMap { $0 as? CTAButton }
+        let buy = try #require(buttons.first { $0.title == "Buy Audiout" })
+        #expect(buy.style == .primary)
+        #expect(buy.font == Tokens.Font.heading)
+        let trial = try #require(buttons.first { $0.title == "Start 14 day free trial" })
+        #expect(trial.style == .secondary)
+        #expect(trial.font == Tokens.Font.body)
     }
 }
 

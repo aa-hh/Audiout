@@ -3378,11 +3378,6 @@ public final class PopoverController: NSObject {
     public var remoteInviteStateProvider:
         (() -> BTAlignmentWizardView.RemoteInviteState)?
 
-    /// Fired when the wizard sheet comes on screen with its iPhone panel
-    /// inviting a phone (the code is showing). The app opens a pairing window
-    /// then, so a phone that scans the code may ask to pair with this Mac.
-    public var onRemoteInviteShown: (() -> Void)?
-
     /// Where a speaker's applied offset came from, asked of the app layer on
     /// every push. Unset until T14 publishes a source, and the drawer's
     /// caption line is then empty and still reserved.

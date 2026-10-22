@@ -481,20 +481,9 @@ public struct AppSettings {
     /// mirroring `BackendKind.environmentVariableName`'s dev-convenience idiom.
     public static let allowRemoteControlEnvironmentVariableName = "AUDIOUT_COMPANION"
 
-    /// Whether this build offers the iPhone companion at all: `false` for the
-    /// shipping app until Audiout Remote is approved and on the App Store,
-    /// `true` for every dev build (``isDevBuild``).
-    ///
-    /// Every surface that mentions the phone app is an invitation to download
-    /// it, and until it exists each one is a dead end: the Setup window's
-    /// iPhone card, the Settings › General switch with its QR row and phone
-    /// list, and the alignment wizard's "Measure with your iPhone" panel all
-    /// read this and stay off the screen. The companion server does not start
-    /// either — there is nothing on any phone to connect with.
-    ///
-    /// Return `true` here on the release that follows the phone app's
-    /// approval; nothing else moves. `AUDIOUT_COMPANION` still wins over it.
-    public static var remoteAppIsOffered: Bool { isDevBuild }
+    /// Whether this build offers the iPhone companion at all: `true` for every
+    /// build, shipping and dev alike. `AUDIOUT_COMPANION` still wins over it.
+    public static var remoteAppIsOffered: Bool { true }
 
     /// Dev builds only: the Settings › General › Developer "Licence gate"
     /// popup. ``LicenseGatePresentation/resolved(environment:settings:isDevBuild:)``
@@ -935,6 +924,19 @@ public struct AppSettings {
         }
         components.queryItems = items
         return components.url ?? page
+    }
+
+    /// The website's "Resend my key" page: the Buy page's site with the path
+    /// `/resend`, tagged `?s=mac-app` like the Buy link. Nil when there is no
+    /// Buy page (a build from source).
+    public var resendURL: URL? {
+        guard let page = buyPageURL,
+              var components = URLComponents(url: page, resolvingAgainstBaseURL: false)
+        else { return nil }
+        components.path = "/resend"
+        components.queryItems = [URLQueryItem(name: "s", value: Self.buySourceTag)]
+        components.fragment = nil
+        return components.url
     }
 
     /// The `s` value on every Buy link. Must match the site's tag shape,

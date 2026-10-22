@@ -130,7 +130,7 @@ import AudioutProtocol
             // main-actor hop → the approval controller (which answers from
             // the pre-approved fixture with no prompt).
             server.localCertificateSHA256 = Self.fingerprint
-            server.onApprovalRequest = { [self] clientID, clientName, pairingCode, _, _, decide in
+            server.onApprovalRequest = { [self] clientID, clientName, pairingCode, decide in
                 Task { @MainActor in
                     self.approvals.handleRequest(clientID: clientID, clientName: clientName,
                                                  pairingCode: pairingCode, decide: decide)

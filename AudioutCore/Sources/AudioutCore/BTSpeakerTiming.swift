@@ -740,16 +740,16 @@ public struct BTSpeakerTimingReport: Equatable, Sendable {
 /// phone-driven run may be staged, and the sentence the phone shows when it
 /// isn't.
 ///
-/// Preconditions, deliberately — not engagement. Nothing here asks whether the
-/// user is interested; it asks whether a measurement could physically happen:
-/// the speaker under test has to be making sound, and something else has to be
-/// making sound for it to be compared against. Everything else the run needs
-/// (a live delay line, nothing already in flight) is the backend's to answer,
-/// because only the backend knows it.
+/// Preconditions, deliberately — not engagement. Neither speaker has to be
+/// playing: `CompanionCoordinator` selects the target and the reference for
+/// the run, so this asks only that the target is a Bluetooth speaker and that
+/// there is something it may be compared against. Everything else the run
+/// needs (a live delay line, nothing already in flight) is the backend's to
+/// answer, because only the backend knows it.
 ///
 /// Lives in the library rather than in `AppDelegate` for the reason that
 /// target's own AGENTS.md gives: behavior decided in the app target is
-/// invisible to the test suite. The four sentences travel with the rule that
+/// invisible to the test suite. The sentences travel with the rule that
 /// produces them — the phone shows them verbatim.
 public enum CompanionAlignmentPreconditions {
 
@@ -760,29 +760,37 @@ public enum CompanionAlignmentPreconditions {
         case refused(String)
     }
 
-    /// `isAudible` must be the GROUP-AWARE read (`GroupController
-    /// .isMainOutMember(_:)`), never `isSpeakerSelected(_:)` — the latter sees
-    /// Selected Devices only and is wrong in both directions under a group
-    /// target, which would refuse a speaker the room can plainly hear and hide
-    /// every reference in the group from the run.
+    /// `referenceID` is the speaker the phone named, or `nil` for the default
+    /// (`CompanionSnapshotBuilder.alignmentReferenceID`). A named one must be
+    /// one of the Mac's own outputs or that default. `isAudible` only breaks
+    /// the default's tie and must be the GROUP-AWARE read (`GroupController
+    /// .isMainOutMember(_:)`), never `isSpeakerSelected(_:)`, which is blind
+    /// to group membership.
     public static func evaluate(
         targetID: String,
+        referenceID: String?,
         among devices: [Device],
         isAudible: (String) -> Bool
     ) -> Outcome {
         guard let target = devices.first(where: { $0.id == targetID }), target.isBluetooth else {
             return .refused("Unknown speaker.")
         }
-        guard isAudible(targetID) else {
-            return .refused(
-                "\u{201C}\(target.name)\u{201D} isn't playing right now, so there's nothing to measure.")
-        }
-        guard let referenceID = CompanionSnapshotBuilder.alignmentReferenceID(
+        let defaultID = CompanionSnapshotBuilder.alignmentReferenceID(
             forTarget: targetID, among: devices, isAudible: isAudible)
-        else {
-            return .refused(
-                "Nothing else is playing to compare \u{201C}\(target.name)\u{201D} against.")
+        if let referenceID {
+            guard let reference = devices.first(where: { $0.id == referenceID }) else {
+                return .refused("Unknown speaker.")
+            }
+            let candidates = CompanionSnapshotBuilder.alignmentReferenceCandidateIDs(
+                forTarget: targetID, among: devices)
+            guard candidates.contains(referenceID) || referenceID == defaultID else {
+                return .refused("\u{201C}\(reference.name)\u{201D} can't be compared against right now.")
+            }
+            return .ready(referenceID: referenceID)
         }
-        return .ready(referenceID: referenceID)
+        guard let defaultID else {
+            return .refused("Nothing else to compare \u{201C}\(target.name)\u{201D} against.")
+        }
+        return .ready(referenceID: defaultID)
     }
 }

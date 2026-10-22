@@ -461,9 +461,16 @@ import Testing
 
     // MARK: Companion - a build that does not carry the phone app
     //
-    // `remoteAppIsOffered` is false until Audiout Remote is on the App Store.
-    // Every companion surface reads the resolution, so these three pin what
-    // that build resolves to.
+    // Every build offers the companion now (`remoteAppIsOffered` is true), but
+    // every companion surface still reads the resolution, so these three pin
+    // what an injected `offered: false` resolves to.
+
+    /// Turns red if `remoteAppIsOffered` is gated on anything again (it was
+    /// `isDevBuild` until Audiout Remote shipped): a release would then hide
+    /// every phone surface and keep the server off.
+    @Test func everyBuildOffersThePhoneApp() {
+        #expect(AppSettings.remoteAppIsOffered)
+    }
 
     @Test func anUnofferedBuildResolvesOffEvenWhenTheSettingSaysOn() {
         // The setting defaults to TRUE, so a build that forgot to consult

@@ -4,6 +4,7 @@ import Foundation
 import Testing
 import AppKit
 @testable import AudioutCore
+@testable import AudioutOnboardingUI
 @testable import AudioutPopoverUI
 @testable import AudioutSettingsUI
 @testable import AudioutSharedUI
@@ -1536,6 +1537,109 @@ extension SerializedSharedState {
             #expect(unanswered == 0)
             surface.performClose()
             #expect(unanswered == 1)
+        }
+    }
+
+    /// The first-open licence gate over the shell's content view. Serialized
+    /// with the survey suite because presenting it reports
+    /// `license:gate_shown` through the process-global `Analytics`.
+    @MainActor
+    @Suite final class AppSurfaceControllerTests_LicenseGate: IsolatedSuite {
+
+        private func makeSurface() -> (AppSurfaceController, LicenseGateViewController) {
+            let popover = PopoverController(
+                appRouting: AppRoutingController(store: AppRouteStore(directory: scratchDir), loadPersisted: false),
+                runningAppsProvider: { [] })
+            let settings = AppSettings(defaults: isolatedDefaults,
+                                       licenseServerURL: URL(string: "https://license.example.com"))
+            let surface = AppSurfaceController(
+                popoverController: popover,
+                settings: settings,
+                groupsContent: {
+                    let vc = NSViewController()
+                    vc.view = NSView(frame: NSRect(x: 0, y: 0, width: SurfaceLayout.width, height: 464))
+                    return vc
+                },
+                speakersContent: { NSViewController() },
+                settingsContent: { SettingsRootViewController(sections: []) },
+                frameAutosaveName: NSWindow.FrameAutosaveName(uniqueName("GateSurfaceTests")))
+            surface.show(anchorRect: nil)
+            let gate = LicenseGateViewController(settings: settings, openURL: { _ in }, onPassed: {})
+            return (surface, gate)
+        }
+
+        /// Every view reachable through the accessibility tree from `root`.
+        private func accessibleViews(under root: NSView) -> [NSView] {
+            var found: [NSView] = []
+            var queue: [Any] = root.accessibilityChildren() ?? []
+            while !queue.isEmpty {
+                let element = queue.removeFirst()
+                if let view = element as? NSView { found.append(view) }
+                if let node = element as? NSAccessibilityProtocol {
+                    queue.append(contentsOf: node.accessibilityChildren() ?? [])
+                }
+            }
+            return found
+        }
+
+        /// Red if the gate stopped landing on top of the mounted screen, rode
+        /// up under the toolbar strip, or let a click through to the Mixer.
+        @Test func presentingPutsTheGateOverTheContentBelowTheToolbar() throws {
+            let (surface, gate) = makeSurface()
+            surface.presentLicenseGate(gate)
+            let content = try #require(surface.shell.window?.contentView)
+            let overlay = try #require(surface.test_licenseGateView)
+            content.layoutSubtreeIfNeeded()
+
+            #expect(overlay.superview === content)
+            #expect(content.subviews.last === overlay, "the gate is the topmost view")
+            #expect(abs(overlay.frame.maxY - (content.bounds.height - surface.test_chromeTopInset)) < 0.5)
+            let mid = NSPoint(x: content.bounds.midX, y: content.bounds.midY)
+            let hit = try #require(content.hitTest(mid))
+            #expect(hit === overlay || hit.isDescendant(of: overlay))
+        }
+
+        /// Red if the Mixer under the gate stayed reachable by VoiceOver, or the
+        /// gate's panel stopped being reachable at all.
+        @Test func theGatedMixerExposesOnlyTheGateToAccessibility() throws {
+            let (surface, gate) = makeSurface()
+            let content = try #require(surface.shell.window?.contentView)
+            #expect(!accessibleViews(under: content).isEmpty, "the bare Mixer has accessible views")
+
+            surface.presentLicenseGate(gate)
+            let overlay = try #require(surface.test_licenseGateView)
+            let reachable = accessibleViews(under: content)
+            #expect(reachable.contains { $0.accessibilityLabel() == "Activate Audiout" && $0.accessibilityRole() == .group })
+            #expect(reachable.allSatisfy { $0.isDescendant(of: overlay) },
+                    "Mixer views stay reachable: \(reachable.filter { !$0.isDescendant(of: overlay) })")
+        }
+
+        /// Red if Settings stayed covered, or returning to the Mixer left it
+        /// uncovered.
+        @Test func settingsLiftsTheGateAndTheMixerBringsItBack() throws {
+            let (surface, gate) = makeSurface()
+            surface.presentLicenseGate(gate)
+            let overlay = try #require(surface.test_licenseGateView)
+
+            surface.select(.settings)
+            #expect(overlay.superview == nil)
+
+            surface.select(.mixer)
+            #expect(overlay.superview === surface.shell.window?.contentView)
+        }
+
+        /// Red if dismissing left the overlay in the window, or left the
+        /// Mixer hidden from accessibility.
+        @Test func dismissingRemovesTheGate() throws {
+            let (surface, gate) = makeSurface()
+            surface.presentLicenseGate(gate)
+            let overlay = try #require(surface.test_licenseGateView)
+            let content = try #require(surface.shell.window?.contentView)
+
+            surface.dismissLicenseGate(animated: false)
+            #expect(overlay.superview == nil)
+            #expect(surface.test_licenseGateView == nil)
+            #expect(accessibleViews(under: content).contains { !$0.isDescendant(of: overlay) })
         }
     }
 }

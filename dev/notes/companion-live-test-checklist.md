@@ -49,36 +49,38 @@ No TestFlight build exists yet — Xcode direct-install is the only path today.
 
 ---
 
-## 3. Approval flow (D2 REVISED — the newest feature, most likely to surprise)
+## 3. Approval flow (protocol version 3: no pairing window)
 
-- [ ] **On the Mac**, open Settings › General, enable "Allow control from iPhone on
-  this network" (mock or native backend, either is fine for this step).
-- [ ] **On the phone**, tap the Mac in the discovered list. Expected: phone shows
-  **"Waiting for Approval…"** (yellow, spinner icon) — a real "check your Mac" holding
-  state, not an error.
-- [ ] **A native alert appears on the Mac** naming the phone (its device name, e.g.
-  "the owner's iPhone"). Expected: this fires only once per unknown identity.
-- [ ] **Tap Allow on the Mac.** Expected: phone transitions straight to live (Speakers
-  tab populates) within about a second — no re-tap needed on the phone.
-- [ ] **Check Settings › General on the Mac**: the phone now appears under
-  **"Remembered iPhones"** with a name and "Allowed" label, and an ✕ to revoke.
-- [ ] **Quit and relaunch the phone app**, reconnect to the same Mac. Expected: **no
-  re-prompt** on the Mac — this identity is remembered, straight to live. (This is the
-  persistence guarantee the whole feature exists for; if it re-prompts, the identity
-  isn't being persisted and that's a regression.)
-- [ ] **Revoke from the Mac** (✕ on the "Remembered iPhones" row) while the phone is
-  connected. Expected: the phone drops immediately — Connection tab settles back to
-  "Looking for a Mac…" / empty state, no crash, no infinite spinner.
-- [ ] **Reconnect from the phone.** Expected: back to "Waiting for Approval…", a fresh
-  alert appears on the Mac (revoking really did forget the identity, not just hide the
-  row).
-- [ ] **This time tap Don't Allow on the Mac.** Expected: phone settles on a
-  non-error, non-retrying state with guidance (its own copy, distinct from the
-  transient "waiting" state) and **does NOT keep redialing** — a denied phone must not
-  nag the Mac's user repeatedly. Confirm no further alert pops on the Mac from that
-  same phone without the user reconnecting by hand.
-- [ ] **On the Mac**, the row now shows "Denied". **Revoke it** to reset for the rest
-  of this checklist.
+- [ ] **On the Mac**, open Settings › Audiout Remote and make sure "Allow control from
+  iPhone on this network" is on. Expected: a caption under it reads "To add an iPhone,
+  open Audiout Remote on it while it's on the same Wi-Fi as this Mac." There is no
+  Pair an iPhone button.
+- [ ] **On the phone**, open Audiout Remote and tap the Mac. Expected: the phone shows
+  "Click Allow on <Mac>" with a six-digit code — a waiting state, not an error, and
+  nothing to tap on the phone.
+- [ ] **On the Mac**, Audiout comes to the front with a beep and shows "Allow an iPhone
+  to control Audiout on this Mac?" with the same code, large, under the text. If the
+  phone reports a name other than "iPhone", the text quotes it. Escape answers Don't
+  Allow; Return does nothing.
+- [ ] **Lock the Mac before clicking.** Expected: the phone switches to "Unlock <Mac>"
+  with the code still showing; unlocking switches it back to "Click Allow on <Mac>".
+- [ ] **Click Allow.** Expected: the phone goes live (Speakers tab populates) within
+  about a second — no tap on the phone.
+- [ ] **Check Settings › Audiout Remote**: the phone appears under **"Remembered
+  iPhones"** with its name, "Last connected …" and a remove button.
+- [ ] **Quit and relaunch the phone app**, reconnect. Expected: **no prompt** on the Mac,
+  straight to live. Forgetting the Mac on the phone and connecting again also goes
+  straight to live, with no alert on the Mac.
+- [ ] **Remove it on the Mac** while the phone is connected. Expected: the phone drops
+  at once, no crash, no endless spinner. Reconnecting raises a fresh prompt.
+- [ ] **Click Don't Allow.** Expected: the phone shows "<Mac> didn't allow this iPhone"
+  with Ask again, and does not redial on its own. No row appears on the Mac. Tapping
+  Ask again raises a new prompt (after the 10-second gap between prompts).
+- [ ] **Click Don't Allow three times within ten minutes.** Expected: the next ask gets
+  "<Mac> is turning away new iPhones" with a time to try after, and no prompt on the
+  Mac; an already-allowed phone still connects. Relaunching the Mac app clears it.
+- [ ] **Leave a prompt unanswered for 3 minutes.** Expected: the prompt closes and the
+  phone shows "<Mac> didn't answer". This does not count towards the three.
 
 ---
 

@@ -846,6 +846,44 @@ import AudioutProtocol
                 "only Bluetooth rows ever carry an alignment")
     }
 
+    /// Turns red if the published reference or its candidate list is filtered
+    /// by Main Out membership again, if a non-local device enters the
+    /// candidate list, or if the fallback default is dropped when the Mac
+    /// exposes no hardware output.
+    @Test func theReferenceIsTheMacsOwnOutputWhateverIsSelected() async throws {
+        func alignment(of fleet: [Device], selecting ids: Set<String>) async throws
+            -> DeviceState.AlignmentState {
+            let backend = try await makeBackend(fleet)
+            let controller = makeGroupController(backend: backend)
+            for id in ids { controller.setDeviceSelected(id, true) }
+            for device in fleet where !ids.contains(device.id) {
+                controller.setDeviceSelected(device.id, false)
+            }
+            try #require(controller.selectedDeviceIDs == ids)
+            let snapshot = CompanionSnapshotBuilder.build(
+                devices: backend.devices, groupController: controller, appRouting: makeAppRouting(),
+                excludedBundleIDs: noExcludedBundleIDs, iconFor: iconFor, addableApps: noAddableApps,
+                runningRouted: noRunningRouted, liveRoutedAppNames: noLiveRoutedAppNames,
+                localFallbackActive: false, takeoverStatus: nil, serverName: defaultServerName,
+                connectVolume: defaultConnectVolume, connectVolumeMin: defaultConnectVolumeMin,
+                connectVolumeMax: defaultConnectVolumeMax, startBufferMs: defaultStartBufferMs,
+                startBufferOptionsMs: defaultStartBufferOptionsMs,
+                alignmentFor: { $0.kind == .bluetooth ? BTSpeakerTimingReport(status: .tuned) : nil })
+            return try #require(snapshot.devices.first { $0.id == "bt-a" }?.alignment)
+        }
+        let local = Device(id: "local", name: "Mac", kind: .localMac, isLocalDevice: true)
+        let bt = Device(id: "bt-a", name: "Kitchen", kind: .bluetooth)
+        let airPlay = Device(id: "airplay", name: "Lounge", kind: .homePod)
+
+        let withMac = try await alignment(of: [local, bt, airPlay], selecting: ["bt-a"])
+        #expect(withMac.referenceID == "local")
+        #expect(withMac.referenceCandidateIDs == ["local"])
+
+        let withoutMac = try await alignment(of: [bt, airPlay], selecting: ["bt-a", "airplay"])
+        #expect(withoutMac.referenceID == "airplay")
+        #expect(withoutMac.referenceCandidateIDs == [])
+    }
+
     // MARK: The Mac's app version
 
     /// Turns red if the builder stops passing `macAppVersion` through to the

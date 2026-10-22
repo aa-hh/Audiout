@@ -47,6 +47,19 @@ import AudioutCore
         #expect(dev.test_developerSectionIsMounted)
     }
 
+    // Turns red if the Developer "Licence server" popup stops storing the
+    // choice or stops telling the app layer exactly once, so no re-check runs.
+    @Test func theLicenseServerPopupStoresTheChoiceAndNotifiesOnce() {
+        let settings = AppSettings(defaults: TestIsolation(owner: "AboutSectionTests").makeDefaults())
+        let dev = GeneralSettingsViewController(loginItem: FakeLoginItem(), settings: settings,
+                                                isDevBuild: true)
+        var fired = 0
+        dev.onLicenseServerChanged = { fired += 1 }
+        dev.test_selectLicenseServer(.production)
+        #expect(settings.licenseServerChoice == .production)
+        #expect(fired == 1)
+    }
+
     // MARK: AboutInfo reads the bundle, never hardcodes
 
     @Test func aboutInfoReadsVersionAndBuildFromTheBundleNotHardcoded() {

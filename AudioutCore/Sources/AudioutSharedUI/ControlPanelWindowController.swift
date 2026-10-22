@@ -98,6 +98,9 @@ public final class ControlPanelWindowController: NSWindowController {
     /// horizontal position against the SAME status-item anchor rather than a
     /// fraction frozen at open time. `nil` when the panel was last centered.
     private var lastAnchorRect: NSRect?
+    /// Whether the last show pointed the beak at its anchor (see
+    /// `show(anchorRect:pointsAtAnchor:)`).
+    private var lastPointsAtAnchor = true
 
     /// Purely decorative window (T11) sitting BEHIND the real panel, drawing
     /// the rounded bubble + arrow "beak" that visually ties the panel to the
@@ -231,7 +234,7 @@ public final class ControlPanelWindowController: NSWindowController {
         isPinned = pinned
         applyPinProfile()
         if !pinned, isPanelVisible {
-            show(anchorRect: lastAnchorRect)
+            show(anchorRect: lastAnchorRect, pointsAtAnchor: lastPointsAtAnchor)
         }
     }
 
@@ -655,9 +658,14 @@ public final class ControlPanelWindowController: NSWindowController {
     /// restored it to), it has no beak to keep in lockstep, and a re-front is
     /// not an appearance so it does not re-fade. The anchor is still recorded
     /// so a later un-pin has something to re-anchor to.
-    public func show(anchorRect: NSRect?) {
+    ///
+    /// `pointsAtAnchor: false` places the panel under `anchorRect` the same
+    /// way but draws no beak: the anchor is a stand-in, not the icon.
+    public func show(anchorRect: NSRect?, pointsAtAnchor: Bool = true) {
         guard let panel = window else { return }
         lastAnchorRect = anchorRect
+        lastPointsAtAnchor = pointsAtAnchor
+        backingView.showsBeak = pointsAtAnchor
         panel.contentView?.layoutSubtreeIfNeeded()
 
         if isPinned {

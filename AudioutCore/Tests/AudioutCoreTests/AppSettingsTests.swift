@@ -461,9 +461,16 @@ import Testing
 
     // MARK: Companion - a build that does not carry the phone app
     //
-    // `remoteAppIsOffered` is false until Audiout Remote is on the App Store.
-    // Every companion surface reads the resolution, so these three pin what
-    // that build resolves to.
+    // Every build offers the companion now (`remoteAppIsOffered` is true), but
+    // every companion surface still reads the resolution, so these three pin
+    // what an injected `offered: false` resolves to.
+
+    /// Turns red if `remoteAppIsOffered` is gated on anything again (it was
+    /// `isDevBuild` until Audiout Remote shipped): a release would then hide
+    /// every phone surface and keep the server off.
+    @Test func everyBuildOffersThePhoneApp() {
+        #expect(AppSettings.remoteAppIsOffered)
+    }
 
     @Test func anUnofferedBuildResolvesOffEvenWhenTheSettingSaysOn() {
         // The setting defaults to TRUE, so a build that forgot to consult
@@ -667,6 +674,83 @@ import Testing
                 "no bundle key ⇒ the free build: nothing to validate against")
         let server = URL(string: "https://license.example.com")!
         #expect(AppSettings(defaults: defaults, licenseServerURL: server).licenseServerURL == server)
+    }
+
+    /// Turns red if a dev build's `licenseServerURL` stops following the
+    /// Developer "Licence server" choice, or the choice is not persisted.
+    @Test func devBuildLicenseServerFollowsTheStoredChoice() {
+        let server = URL(string: "https://license.example.com")!
+        let settings = AppSettings(defaults: defaults, licenseServerURL: server, isDevBuild: true)
+        settings.licenseServerChoice = .staging
+        #expect(settings.licenseServerURL == LicenseServerChoice.staging.url)
+        settings.licenseServerChoice = .production
+        #expect(settings.licenseServerURL == URL(string: "https://license.audiout.app"))
+        settings.licenseServerChoice = .buildDefault
+        #expect(settings.licenseServerURL == server)
+        settings.licenseServerChoice = .staging
+        let reread = AppSettings(defaults: defaults, licenseServerURL: server, isDevBuild: true)
+        #expect(reread.licenseServerChoice == .staging)
+    }
+
+    /// Turns red if a shipping build reads the stored licence-server choice,
+    /// which would let a leftover dev preference repoint a release.
+    @Test func shippingBuildIgnoresTheStoredLicenseServerChoice() {
+        let server = URL(string: "https://license.example.com")!
+        let shipping = AppSettings(defaults: defaults, licenseServerURL: server, isDevBuild: false)
+        shipping.licenseServerChoice = .production
+        #expect(shipping.licenseServerURL == server)
+        #expect(AppSettings(defaults: defaults, licenseServerURL: server).licenseServerURL == server)
+    }
+
+    /// Turns red if changing the licence server keeps the old server's verdict,
+    /// clears the key or trial start, or clears any verdict field on a same-value set.
+    @Test func changingTheLicenseServerClearsOnlyTheVerdict() {
+        let settings = AppSettings(defaults: defaults, isDevBuild: true)
+        let started = Date(timeIntervalSince1970: 1_700_000_000)
+        settings.licenseKey = "audt-test-key"
+        settings.trialStartedAt = started
+        settings.trialRegistered = true
+        settings.licenseStatus = .active
+        settings.licenseReason = "x"
+        settings.licenseMaxMajor = 1
+        settings.companionToken = "t"
+        settings.trialExpiresAt = started.addingTimeInterval(86_400)
+
+        settings.licenseServerChoice = .staging
+        #expect(settings.licenseStatus == nil)
+        #expect(settings.licenseReason == nil)
+        #expect(settings.licenseMaxMajor == nil)
+        #expect(settings.companionToken == nil)
+        #expect(settings.trialExpiresAt == nil)
+        #expect(settings.licenseKey == "audt-test-key")
+        #expect(settings.trialStartedAt == started)
+        #expect(settings.trialRegistered)
+
+        settings.licenseStatus = .active
+        settings.licenseReason = "x"
+        settings.licenseMaxMajor = 1
+        settings.companionToken = "t"
+        settings.trialExpiresAt = started.addingTimeInterval(86_400)
+        settings.licenseServerChoice = .staging
+        #expect(settings.licenseStatus == .active)
+        #expect(settings.licenseReason == "x")
+        #expect(settings.licenseMaxMajor == 1)
+        #expect(settings.companionToken == "t")
+        #expect(settings.trialExpiresAt == started.addingTimeInterval(86_400))
+    }
+
+    /// Turns red if the Sparkle feed override is offered for "Build default"
+    /// or on a shipping build, or points anywhere but the chosen server.
+    @Test func licenseServerChoiceAppcastURLOnlyForADevBuildWithAChosenServer() {
+        let dev = AppSettings(defaults: defaults, isDevBuild: true)
+        dev.licenseServerChoice = .buildDefault
+        #expect(dev.licenseServerChoiceAppcastURL == nil)
+        let shipping = AppSettings(defaults: defaults, isDevBuild: false)
+        shipping.licenseServerChoice = .production
+        #expect(shipping.licenseServerChoiceAppcastURL == nil)
+        dev.licenseServerChoice = .staging
+        #expect(dev.licenseServerChoiceAppcastURL
+                == URL(string: "https://license-staging.audiout.app/appcast.xml"))
     }
 
     @Test func checkInURLDerivesFromTheLicenseServerAndYieldsToAStoredValue() {

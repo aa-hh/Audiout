@@ -37,6 +37,12 @@ public final class ControlPanelBackingView: NSView {
         didSet { needsDisplay = true }
     }
 
+    /// Whether the beak is drawn. Off when the panel opened with no menu bar
+    /// icon to point at; the strip stays reserved so the frames don't change.
+    var showsBeak = true {
+        didSet { needsDisplay = true }
+    }
+
     public override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
@@ -58,6 +64,7 @@ public final class ControlPanelBackingView: NSView {
     private func bubblePath() -> NSBezierPath {
         let rect = bubbleRect
         let path = NSBezierPath(roundedRect: rect, xRadius: Self.cornerRadius, yRadius: Self.cornerRadius)
+        guard showsBeak else { return path }
 
         let minFraction = Self.cornerRadius / max(bounds.width, 1)
         let clamped = min(max(beakFraction, minFraction), 1 - minFraction)

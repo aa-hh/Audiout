@@ -17,8 +17,9 @@ responsibility ends at the C ABI the umbrella header exposes.
 - Two backends, two separate definitions, not a shared struct; the Swift layer dispatches between them.
 - TXT key-value records passed across the discovery seam stay owned by the caller.
 - Test-only C symbols are not the shipping API; production Swift never calls them.
-- The idle silence fill lives in `shims/outputs.c` and bypasses the Swift write guards and telemetry, so `writes` and `silent_s` stay host-side truth.
-- Long-form traps, dated decisions and the changelog: [AGENTS-HISTORY.md](AGENTS-HISTORY.md). Grep it before debugging anything here.
+- The idle silence fill (`shims/outputs.c`) bypasses Swift write guards and telemetry; `writes` and `silent_s` stay host-side truth.
+- A stopping device keeps `session`/`state` live ~1 s; target writes by `idle_fill_suppressed`.
+- History, long-form traps: [AGENTS-HISTORY.md](AGENTS-HISTORY.md); grep it first.
 
 ## Map
 

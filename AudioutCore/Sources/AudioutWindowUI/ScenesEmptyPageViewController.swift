@@ -9,7 +9,7 @@ public final class ScenesEmptyPageViewController: NSViewController {
     private let iconWell = DeviceIconWellView()
     private let titleLabel = NSTextField(labelWithString: "Scenes")
     private let captionLabel = NSTextField(labelWithString: "No scenes yet")
-    private lazy var header = PageHeaderView(iconWell: iconWell, title: titleLabel, caption: captionLabel)
+    private lazy var header = PageHeaderView(icon: iconWell, title: titleLabel, caption: captionLabel)
     private lazy var addButton = ProminentButton(title: "Add scene…", target: self, action: #selector(addTapped(_:)))
     private lazy var row = ListRowView(title: "Add scene…",
         caption: "Pick the speakers that play together. You switch to a scene from Main Audio in the Mixer.",

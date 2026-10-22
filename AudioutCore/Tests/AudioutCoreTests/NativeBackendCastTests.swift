@@ -175,8 +175,8 @@ import CoreAudio
     /// No sockets: the real `DACPServer.start(dacpID:)` binds a live
     /// `NWListener` (Local Network prompt).
     private final class FakeDACPEndpoint: DACPEndpoint, @unchecked Sendable {
-        var onVolume: (@Sendable (_ activeRemote: UInt32, _ level: Double) -> Void)?
-        var onVolumeStep: (@Sendable (_ activeRemote: UInt32, _ direction: Int) -> Void)?
+        var onVolume: (@Sendable (_ remoteHost: String?, _ activeRemote: UInt32, _ level: Double) -> Void)?
+        var onVolumeStep: (@Sendable (_ remoteHost: String?, _ activeRemote: UInt32, _ direction: Int) -> Void)?
         func start(dacpID: UInt64) {}
         func stop() {}
     }
@@ -317,6 +317,9 @@ import CoreAudio
         #expect(row?.kind == .cast)
         #expect(row?.isCast == true)
         #expect(row?.name == "Living Room TV")
+        // Turns red if the advertised `md` model stops reaching the `Device`,
+        // which is the only place a Cast receiver says what product it is.
+        #expect(row?.model == "Google TV Streamer")
         #expect(row?.isAvailable == true)
         #expect(row?.supportsAirPlay2 == false)
         #expect(row?.isLocalDevice == false)

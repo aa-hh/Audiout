@@ -187,7 +187,7 @@ public final class BTAlignmentWizardView: NSView {
     /// showing a code that would lead nowhere.
     static let remoteAllowOffLine =
         "To measure with your iPhone, turn on Allow control from iPhone in "
-        + "Audiout's settings, under General."
+        + "Audiout's settings, under Audiout Remote."
     /// A phone is already here: no code, just what to do on it. The phone's
     /// name is the approval's own, the only phone identity this Mac shows.
     static func remoteConnectedLine(phoneName: String?, target: String) -> String {
@@ -382,6 +382,7 @@ public final class BTAlignmentWizardView: NSView {
 
     let stage = AlignmentStageView()
     private let titleLabel = NSTextField(labelWithString: "")
+    private let betaChip = BetaChipView()
     private let clickCountLabel = NSTextField(labelWithString: "")
     /// The stage's accessible caption — a REAL text field, never layer text.
     private let readout = NSTextField(labelWithString: "")
@@ -410,8 +411,17 @@ public final class BTAlignmentWizardView: NSView {
         self.session = session
         super.init(frame: NSRect(x: 0, y: 0, width: Self.viewWidth, height: 0))
         buildChrome()
-        session.onScreenChange = { [weak self] screen in self?.render(screen) }
+        session.onScreenChange = { [weak self] screen in
+            self?.render(screen)
+            // Only arriving on listening (the first listen or a retry, which
+            // goes listening → listening) sends the lights home; a repaint of
+            // the same screen, such as a picker refresh, keeps their verdicts.
+            if case .listening = screen { self?.stage.resetListening(animated: true) }
+        }
         session.onProbeStarted = { [weak self] in self?.startProbeProgress() }
+        session.onProbeSpeakerChecked = { [weak self] speaker, heard in
+            self?.stage.setListeningPhase(heard ? .heard : .missed, for: speaker, animated: true)
+        }
         render(session.screen)
     }
 
@@ -428,6 +438,7 @@ public final class BTAlignmentWizardView: NSView {
 
         let titleRow = NSView()
         titleRow.translatesAutoresizingMaskIntoConstraints = false
+        titleRow.addSubview(betaChip)
         for label in [titleLabel, clickCountLabel] {
             label.translatesAutoresizingMaskIntoConstraints = false
             // MANDATORY on the RIGHT slot and harmless on the left: a label
@@ -443,11 +454,12 @@ public final class BTAlignmentWizardView: NSView {
         clickCountLabel.font = Tokens.Font.caption
         clickCountLabel.textColor = Tokens.Color.label2
         clickCountLabel.alignment = .right
-        // The two slots are pinned to OPPOSITE edges of a plain container, so
-        // nothing but this stops a long device name running straight under
-        // `Click n of about 15` — two labels overprinting each other. The name
-        // is the half that gives way: the click count is fixed-width chrome
-        // and always says the same thing.
+        // The two slots are pinned to OPPOSITE edges of a plain container,
+        // with the Beta chip between them, so nothing but this stops a long
+        // device name running straight under the chip and `Click n of about
+        // 15` — labels overprinting each other. The name is the half that
+        // gives way: the chip and the click count are fixed-width chrome and
+        // always say the same thing.
         titleLabel.lineBreakMode = .byTruncatingTail
         titleLabel.setContentCompressionResistancePriority(
             .defaultLow, for: .horizontal)
@@ -512,7 +524,11 @@ public final class BTAlignmentWizardView: NSView {
             // below the larger's, which reads as a subscript.
             clickCountLabel.firstBaselineAnchor.constraint(
                 equalTo: titleLabel.firstBaselineAnchor),
-            titleLabel.trailingAnchor.constraint(
+            betaChip.leadingAnchor.constraint(
+                equalTo: titleLabel.trailingAnchor, constant: Self.spacingTight * 2),
+            betaChip.centerYAnchor.constraint(equalTo: titleRow.centerYAnchor),
+            betaChip.heightAnchor.constraint(equalToConstant: Self.titleRowHeight),
+            betaChip.trailingAnchor.constraint(
                 lessThanOrEqualTo: clickCountLabel.leadingAnchor,
                 constant: -Self.spacingRow),
 
@@ -1190,6 +1206,7 @@ public final class BTAlignmentWizardView: NSView {
         if session.probeStartedAt != nil { startProbeProgress() }
     }
 
+    /// The bar and the stage's speaker turns share this one clock.
     private func startProbeProgress() {
         guard !HeadlessRuntime.isActive,
               probeProgress != nil, probeProgressTimer == nil,
@@ -1197,7 +1214,11 @@ public final class BTAlignmentWizardView: NSView {
         probeProgressTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30, repeats: true) { [weak self] _ in
             guard let self, let bar = self.probeProgress,
                   let started = self.session.probeStartedAt else { return }
-            bar.doubleValue = min(1, Date().timeIntervalSince(started) / total)
+            let elapsed = Date().timeIntervalSince(started)
+            bar.doubleValue = min(1, elapsed / total)
+            self.stage.setListeningTurn(self.session.probeSpeakerPlaying(at: elapsed),
+                                        levelAboveRoomDB: self.session.probeLevelAboveRoomDB?(),
+                                        now: CACurrentMediaTime())
         }
     }
 
@@ -1788,13 +1809,24 @@ public final class BTAlignmentWizardView: NSView {
             .compactMap { $0 as? NSStackView }
             .allSatisfy { $0.fittingSize.width <= available }
     }
-    /// Do the title row's two slots stay clear of each other? They are pinned
-    /// to OPPOSITE edges of a plain container, so a long device name has
-    /// nothing but its truncation guard between it and overprinting
-    /// `Click n of about 15`.
+    /// Do the title row's three slots stay clear of each other? The name and
+    /// the click count are pinned to OPPOSITE edges of a plain container with
+    /// the Beta chip between them, so a long device name has nothing but its
+    /// truncation guard between it and overprinting either of them.
     var test_titleSlotsAreClear: Bool {
         layoutSubtreeIfNeeded()
-        return titleLabel.frame.maxX <= clickCountLabel.frame.minX
+        return titleLabel.frame.maxX <= betaChip.frame.minX
+            && betaChip.frame.maxX <= clickCountLabel.frame.minX
+    }
+    /// The title row's middle slot: the word the chip is DRAWING, or `nil`
+    /// when it is not in the row, hidden, or laid out to nothing. Reads the
+    /// label's own `stringValue` and the chip's real placement rather than the
+    /// static constant, so it can actually fail.
+    var test_betaChipText: String? {
+        layoutSubtreeIfNeeded()
+        guard betaChip.superview != nil, !betaChip.isHiddenOrHasHiddenAncestor,
+              !betaChip.frame.isEmpty else { return nil }
+        return betaChip.drawnText
     }
     private func clickButton(titled title: String) {
         actionButtons.first { $0.title == title }?.performClick(nil)
@@ -1813,5 +1845,69 @@ public final class BTAlignmentWizardView: NSView {
         guard let item = referencePopUp.menu?.items.first(where: { $0.title == title }),
               let action = item.action, let target = item.target as? NSObject else { return }
         _ = target.perform(action, with: item)
+    }
+}
+
+/// The "Beta" capsule in the wizard's title row. Deliberately NEUTRAL — a
+/// recessed well, a control rim and secondary ink — because beta is a fact
+/// about alignment itself, not a state this run is reporting, so it gets no
+/// hue. Local to this file: the wizard is the only Mac surface that wears it.
+private final class BetaChipView: NSView {
+
+    static let text = "Beta"
+
+    private let label = NSTextField(labelWithString: BetaChipView.text)
+
+    /// What the chip's label actually holds, for the test hook to read.
+    var drawnText: String? { label.stringValue.isEmpty ? nil : label.stringValue }
+
+    init() {
+        super.init(frame: .zero)
+        translatesAutoresizingMaskIntoConstraints = false
+        wantsLayer = true
+        label.translatesAutoresizingMaskIntoConstraints = false
+        // Same reason as the title row's own labels: a label left in the
+        // default multi-line mode publishes no horizontal content size, and a
+        // chip sized to its text would then collapse to the empty-field
+        // bearing.
+        label.usesSingleLineMode = true
+        label.alignment = .center
+        label.font = Tokens.Font.microLabel
+        label.textColor = Tokens.Color.label2
+        // The capsule is the accessibility element, so the label inside it
+        // must not be one too — VoiceOver would say "Beta" twice.
+        label.setAccessibilityElement(false)
+        addSubview(label)
+        NSLayoutConstraint.activate([
+            label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
+            label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
+            label.centerYAnchor.constraint(equalTo: centerYAnchor),
+        ])
+        // The chip is fixed-width chrome beside a name that truncates: it
+        // never gives up a point of its width.
+        setContentHuggingPriority(.required, for: .horizontal)
+        setContentCompressionResistancePriority(.required, for: .horizontal)
+        setAccessibilityElement(true)
+        setAccessibilityRole(.staticText)
+        setAccessibilityLabel(Self.text)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override var wantsUpdateLayer: Bool { true }
+
+    /// The corner radius is half the live height, so the capsule re-stamps
+    /// itself whenever the row's geometry changes.
+    override func layout() {
+        super.layout()
+        needsDisplay = true
+    }
+
+    override func updateLayer() {
+        layer?.backgroundColor = Tokens.Color.well.cgColor
+        layer?.borderColor = Tokens.Color.rim.cgColor
+        layer?.borderWidth = 1
+        layer?.cornerRadius = bounds.height / 2
+        layer?.cornerCurve = .continuous
     }
 }

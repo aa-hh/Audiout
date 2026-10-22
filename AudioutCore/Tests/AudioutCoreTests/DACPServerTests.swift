@@ -213,7 +213,10 @@ import Network
         // rightly refuses to let this closure mutate a captured local `var`
         // — assert inline instead of capturing the reported values out.
         let volumeReported = Signal()
-        server.onVolume = { token, level in
+        // The loopback peer is 127.0.0.1: the host is what NativeBackend checks
+        // against the speaker's own address before it moves a slider.
+        server.onVolume = { remoteHost, token, level in
+            #expect(remoteHost == "127.0.0.1")
             #expect(token == 460916894)
             #expect(abs(level - DACPServer.level(fromDb: -16.5)) < 0.0001)
             volumeReported.fire()

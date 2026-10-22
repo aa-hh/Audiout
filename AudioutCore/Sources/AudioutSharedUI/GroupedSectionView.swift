@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 import AppKit
-import AudioutSharedUI
 
 /// The Groups screen's container shape (the macOS System Settings grouped
 /// idiom), in three modes.
@@ -57,9 +56,9 @@ import AudioutSharedUI
 /// content it backs in z-order, so no row/checkbox/rail click target is ever
 /// affected; the dead area beside a narrower row simply swallows a click with
 /// no target, same as clicking blank pane background anywhere else.
-final class GroupedSectionView: NSView {
+public final class GroupedSectionView: NSView {
 
-    override init(frame frameRect: NSRect) {
+    public override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         redrawOnAccessibilityDisplayChange()
     }
@@ -67,7 +66,7 @@ final class GroupedSectionView: NSView {
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     /// How this container draws itself — see the type's doc comment.
-    enum Style {
+    public enum Style {
         /// The page's one instrument: `raised` fill + a `containerEdge` edge.
         case card
         /// The page's one instrument, recessed: `well` fill + the same
@@ -81,10 +80,10 @@ final class GroupedSectionView: NSView {
     /// Defaults to ``Style/card`` so a section is a card unless a page says
     /// otherwise. A page may hold more than one box: the speaker page holds the
     /// Equalizer well and the list card.
-    var style: Style = .card { didSet { needsDisplay = true } }
+    public var style: Style = .card { didSet { needsDisplay = true } }
 
     /// A page's own corner radius for this box. Nil keeps the style's default.
-    var radiusOverride: CGFloat? { didSet { needsDisplay = true } }
+    public var radiusOverride: CGFloat? { didSet { needsDisplay = true } }
 
     /// The card and the well are both a grouped stack, so they take the panel
     /// rung. `.bare` draws no shape, so its value is never read.
@@ -98,27 +97,27 @@ final class GroupedSectionView: NSView {
     }
     /// Breathing room above the first row and below the last, so rows never
     /// touch the container's edges.
-    static let verticalPadding: CGFloat = 6
+    public static let verticalPadding: CGFloat = 6
     private static let hairlineThickness: CGFloat = 1
     private static let borderWidth: CGFloat = 1
 
     /// Where the row's ICON starts, measured from this view's own leading edge
     /// — the inset dividers align to it. Set by the controller so it stays
     /// derived from the shared grid rather than re-typed here.
-    var contentLeadingInset: CGFloat = 0 { didSet { needsDisplay = true } }
+    public var contentLeadingInset: CGFloat = 0 { didSet { needsDisplay = true } }
 
     /// How far the dividers stop short of this view's trailing edge.
-    var contentTrailingInset: CGFloat = 0 { didSet { needsDisplay = true } }
+    public var contentTrailingInset: CGFloat = 0 { didSet { needsDisplay = true } }
 
     /// The rows currently laid out over this view, in top-to-bottom order —
     /// read for LIVE frames on every draw, exactly like
     /// `BusRailOverlayView.deviceRows` (no cached geometry: a rebuild can
     /// add/drop rows when an unchecked unavailable device disappears).
-    var rows: [NSView] = [] { didSet { needsDisplay = true } }
+    public var rows: [NSView] = [] { didSet { needsDisplay = true } }
 
-    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    public override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
-    override func draw(_ dirtyRect: NSRect) {
+    public override func draw(_ dirtyRect: NSRect) {
         switch style {
         case .card, .well:
             // Stroke sits ON the boundary, so inset by half its width to keep
@@ -182,7 +181,7 @@ final class GroupedSectionView: NSView {
         }
     }
 
-    override func viewDidChangeEffectiveAppearance() {
+    public override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
         needsDisplay = true
     }

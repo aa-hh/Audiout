@@ -87,6 +87,7 @@ extension PopoverController {
                 if let state = Self.remoteInviteAnalyticsState(view.remoteInvite) {
                     Analytics.capture("remote_invite:sheet_shown", ["state": state])
                 }
+                if case .notConnected = view.remoteInvite { onRemoteInviteShown?() }
             }
         }
     }
@@ -376,6 +377,12 @@ extension PopoverController {
         var appliedMsAtSweep = 0.0
         let probe = makeMicProbe()
         btWizardMicProbe = probe
+        session.probeLevelAboveRoomDB = { [weak probe] in probe?.levelAboveRoomDB() }
+        probe.onLaneVerdict = { [weak self, weak probe] lane, heard in
+            guard let self, let probe, self.btWizardDeviceID == deviceID,
+                  self.btWizardMicProbe === probe else { return }
+            self.btWizardSession?.probeLaneChecked(lane, heard: heard)
+        }
         probe.start(stage: { levelStepDB, onStarted, onFinished in
             stageProbe(levelStepDB, { pipelineDelaySeconds in
                 DispatchQueue.main.async { [weak self] in

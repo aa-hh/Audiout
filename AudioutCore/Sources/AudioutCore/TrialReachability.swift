@@ -68,7 +68,7 @@ public final class TrialReachability {
         monitor.pathUpdateHandler = { [weak self] path in
             guard let self else { return }
             switch Self.step(for: TrialClock.state(settings: self.settings),
-                             hasKey: !(self.settings.licenseKey ?? "").isEmpty,
+                             hasKey: self.settings.hasLicenseKey,
                              hasVerdict: self.settings.licenseStatus != nil,
                              satisfied: path.status == .satisfied) {
             case .register:

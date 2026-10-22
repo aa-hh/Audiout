@@ -165,37 +165,6 @@ import CAirPlayEngine
         #expect(lineCount <= 6, "3.5s at a 1s interval should log only a few times, never per-call")
     }
 
-    // MARK: - `AirPlayEngine.write` end-to-end
-
-    /// The real hot path (`write(pcm:pts:)` -> `write(streams:pts:)`) feeds
-    /// all three metric families, and `writeSchedulingSnapshot()` reflects
-    /// them without requiring an actor hop (`nonisolated`, callable
-    /// synchronously right after headless writes).
-    @Test func engineWritePathFeedsAllThreeMetricFamilies() async throws {
-        let engine = AirPlayEngine()
-        await engine.enterHeadlessTestMode()
-
-        let samplesPerWrite = 352
-        let pcm = Data(repeating: 0, count: samplesPerWrite * 4) // S16LE stereo
-        let pts = timespec(tv_sec: 0, tv_nsec: 0)
-
-        engine.write(pcm: pcm, pts: pts) // seeds inter-arrival baseline
-        for _ in 0..<8 {
-            engine.write(pcm: pcm, pts: pts)
-        }
-
-        let snapshot = engine.writeSchedulingSnapshot()
-        // Headless mode runs `body()` inline (no engine thread hop), so wake
-        // latency and in-cycle work are both measurable but expected to be
-        // tiny, not zero-or-absent.
-        #expect(snapshot.wakeLatency.count == 9)
-        #expect(snapshot.inCycleWork.count == 9)
-        #expect(snapshot.interArrivalGap.count == 8) // 8 gaps from 9 arrivals
-        #expect(snapshot.wakeLatency.maxMs >= 0)
-        #expect(snapshot.inCycleWork.maxMs >= 0)
-        #expect(snapshot.interArrivalGap.p50Ms > 0, "the time each headless write takes must show up as positive gaps")
-    }
-
     // MARK: - Allocation-free hot path (proxy — see file header)
 
     /// PROXY test (see file header for the limitation): drives far more
@@ -273,4 +242,46 @@ private final class StderrCapture {
         dup2(savedFd, 2)
         close(savedFd)
     }
+}
+
+// `enterHeadlessTestMode` installs the engine's completion registry as the
+// process-wide C hook target (`CompletionRegistry.shared`), so this test nests
+// under the serialized parent with every other engine test in the target.
+// Run beside them, it took the hook from an `addOutput` waiting on its
+// completion, which was then dropped and timed out. The probe suite above
+// stays out: it touches nothing global but stderr.
+extension SerializedEngineState {
+
+@Suite struct SchedulingProbeEngineWritePathTests {
+
+    /// The real hot path (`write(pcm:pts:)` -> `write(streams:pts:)`) feeds
+    /// all three metric families, and `writeSchedulingSnapshot()` reflects
+    /// them without requiring an actor hop (`nonisolated`, callable
+    /// synchronously right after headless writes).
+    @Test func engineWritePathFeedsAllThreeMetricFamilies() async throws {
+        let engine = AirPlayEngine()
+        await engine.enterHeadlessTestMode()
+
+        let samplesPerWrite = 352
+        let pcm = Data(repeating: 0, count: samplesPerWrite * 4) // S16LE stereo
+        let pts = timespec(tv_sec: 0, tv_nsec: 0)
+
+        engine.write(pcm: pcm, pts: pts) // seeds inter-arrival baseline
+        for _ in 0..<8 {
+            engine.write(pcm: pcm, pts: pts)
+        }
+
+        let snapshot = engine.writeSchedulingSnapshot()
+        // Headless mode runs `body()` inline (no engine thread hop), so wake
+        // latency and in-cycle work are both measurable but expected to be
+        // tiny, not zero-or-absent.
+        #expect(snapshot.wakeLatency.count == 9)
+        #expect(snapshot.inCycleWork.count == 9)
+        #expect(snapshot.interArrivalGap.count == 8) // 8 gaps from 9 arrivals
+        #expect(snapshot.wakeLatency.maxMs >= 0)
+        #expect(snapshot.inCycleWork.maxMs >= 0)
+        #expect(snapshot.interArrivalGap.p50Ms > 0, "the time each headless write takes must show up as positive gaps")
+    }
+}
+
 }

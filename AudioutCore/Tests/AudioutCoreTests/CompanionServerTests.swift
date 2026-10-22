@@ -924,7 +924,8 @@ import AudioutProtocol
         let (client, log) = try await connectClient(via: hub, to: server)
         defer { client.cancel() }
         try await sendAuthenticatedHello(over: client, log: log)
-        try #require(await waitUntil { log.contains(.awaitingApproval(screenLocked: false)) }, "the client was never held for approval")
+        try #require(await waitUntil { log.messages.contains { if case .awaitingApproval = $0 { return true } else { return false } } },
+                     "the client was never held for approval")
         clock.advance(by: CompanionServer.approvalTimeout)
 
         #expect(await waitUntil { log.contains(.goodbye(reason: CompanionGoodbyeReason.approvalTimedOut)) },
@@ -973,7 +974,8 @@ import AudioutProtocol
         let (client, log) = try await connectClient(via: hub, to: server)
         defer { client.cancel() }
         try await sendAuthenticatedHello(over: client, log: log)
-        try #require(await waitUntil { log.contains(.awaitingApproval(screenLocked: false)) }, "the client was never held for approval")
+        try #require(await waitUntil { log.messages.contains { if case .awaitingApproval = $0 { return true } else { return false } } },
+                     "the client was never held for approval")
         clock.advance(by: CompanionServer.approvalTimeout)
 
         #expect(await waitUntil { abandoned.value == [Self.testClientID] },

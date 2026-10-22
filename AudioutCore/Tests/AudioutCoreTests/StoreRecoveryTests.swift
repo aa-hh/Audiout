@@ -234,7 +234,6 @@ extension SerializedSharedState {
             StoreRecovery.onWriteFailure = { _ in failures.count += 1 }
             defer { StoreRecovery.onWriteFailure = nil }
 
-            controller.isPairingOpen = { true }
             controller.presentPrompt = { _, _, _, respond in respond(true) }
             controller.handleRequest(clientID: "test-client", clientName: "Test Phone", pairingCode: "000000") { _ in }
 
@@ -255,31 +254,9 @@ extension SerializedSharedState {
         private func makeBackend(_ fleet: [Device] = .demoFleet) async throws -> MockBackend {
             let backend = MockBackend(fleet: fleet, staggerDiscovery: false, emitsLevels: false,
                                       simulatesDropouts: false)
-            let stream = backend.makeEventStream()
-            let box = DiscoveryCountBox()
-            try await confirmation("fleet discovered") { discovered in
-                let task = Task {
-                    for await event in stream {
-                        if case .deviceAdded = event, await box.increment() >= fleet.count {
-                            discovered(); break
-                        }
-                    }
-                }
-                defer { task.cancel() }
-                backend.start()
-                try await withThrowingTaskGroup(of: Void.self) { group in
-                    group.addTask { _ = await task.value }
-                    group.addTask { try await Task.sleep(for: .seconds(2)) }
-                    try await group.next()
-                    group.cancelAll()
-                }
-            }
+            backend.start()
+            await SuiteWait.until("the fleet to be discovered") { backend.devices.count >= fleet.count }
             return backend
         }
     }
-}
-
-private actor DiscoveryCountBox {
-    private var count = 0
-    func increment() -> Int { count += 1; return count }
 }

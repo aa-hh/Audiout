@@ -49,25 +49,8 @@ import AppKit
     }
 
     private func waitForFleet(_ backend: MockBackend, count: Int) async throws {
-        let stream = backend.makeEventStream()
-        let box = PopoverIconTestCountBox()
-        try await confirmation("fleet discovered") { received in
-            let task = Task {
-                for await event in stream {
-                    if case .deviceAdded = event, await box.increment() >= count {
-                        received(); break
-                    }
-                }
-            }
-            defer { task.cancel() }
-            backend.start()
-            try await withThrowingTaskGroup(of: Void.self) { group in
-                group.addTask { _ = await task.value }
-                group.addTask { try await Task.sleep(for: .seconds(2)) }
-                try await group.next()
-                group.cancelAll()
-            }
-        }
+        backend.start()
+        await SuiteWait.until("the fleet to be discovered") { backend.devices.count >= count }
     }
 
     private func tempDirectory() -> URL {
@@ -251,9 +234,4 @@ import AppKit
             #expect(clearance >= 1.0, "\(name) is \(clearance) pt from its ring's inner edge")
         }
     }
-}
-
-private actor PopoverIconTestCountBox {
-    private var count = 0
-    func increment() -> Int { count += 1; return count }
 }

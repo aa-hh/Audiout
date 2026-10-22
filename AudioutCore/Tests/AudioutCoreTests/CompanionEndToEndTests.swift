@@ -67,7 +67,13 @@ import AudioutProtocol
         let settings: AppSettings
         let dispatcher: CompanionCommandDispatcher
         let approvals: CompanionApprovalController
-        let server = CompanionServer()
+        /// Its deadlines run on a clock nobody advances, so none fires. On the
+        /// wall clock a loaded run sent the hello after the 5 s pre-hello
+        /// deadline had already closed the socket, and no welcome came.
+        let server: CompanionServer = {
+            let clock = ManualDelayClock()
+            return CompanionServer(delayClock: clock.queueHoppingClock, uptimeClock: clock.uptime)
+        }()
 
         init(scratchDir: URL, defaults: UserDefaults, fleet: [Device] = .demoFleet) {
             backend = MockBackend(fleet: fleet, staggerDiscovery: false,
@@ -124,7 +130,7 @@ import AudioutProtocol
             // main-actor hop → the approval controller (which answers from
             // the pre-approved fixture with no prompt).
             server.localCertificateSHA256 = Self.fingerprint
-            server.onApprovalRequest = { [self] clientID, clientName, pairingCode, _, _, decide in
+            server.onApprovalRequest = { [self] clientID, clientName, pairingCode, decide in
                 Task { @MainActor in
                     self.approvals.handleRequest(clientID: clientID, clientName: clientName,
                                                  pairingCode: pairingCode, decide: decide)
@@ -186,25 +192,8 @@ import AudioutProtocol
     }
 
     private func waitForFleet(_ backend: MockBackend, count: Int) async throws {
-        let stream = backend.makeEventStream()
-        let box = E2ECountBox()
-        try await confirmation("fleet discovered") { discovered in
-            let task = Task {
-                for await event in stream {
-                    if case .deviceAdded = event, await box.increment() >= count {
-                        discovered(); break
-                    }
-                }
-            }
-            defer { task.cancel() }
-            backend.start()
-            try await withThrowingTaskGroup(of: Void.self) { group in
-                group.addTask { _ = await task.value }
-                group.addTask { try await Task.sleep(for: .seconds(2)) }
-                try await group.next()
-                group.cancelAll()
-            }
-        }
+        backend.start()
+        await SuiteWait.until("the fleet to be discovered") { backend.devices.count >= count }
     }
 
     // MARK: - Concurrency-safe test plumbing (copied from CompanionServerTests)
@@ -563,13 +552,5 @@ import AudioutProtocol
             #expect(await waitUntil { log.containsState { $0.mainOut.kind == "selected" } },
                     "client \(name) never saw Main Out fall back after its target group was deleted")
         }
-    }
-}
-
-private actor E2ECountBox {
-    private var count = 0
-    func increment() -> Int {
-        count += 1
-        return count
     }
 }

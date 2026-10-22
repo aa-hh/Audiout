@@ -458,19 +458,24 @@ public final class GroupController {
     /// launch.
     public var limitsToOneSpeaker = false {
         didSet {
-            let pending = pendingLaunchClamp
-            pendingLaunchClamp = nil
-            if let pending, oldValue, !limitsToOneSpeaker {
+            if let pending = pendingLaunchClamp, oldValue, !limitsToOneSpeaker {
+                pendingLaunchClamp = nil
                 Analytics.capture("license:launch_clamp_lifted",
                                   ["clamped": pending.clamped, "speaker_count": String(pending.speakerCount)])
             }
         }
     }
 
-    /// Set by the launch clamp in `ensureDefaultSelection`, consumed by the
-    /// first assignment to `limitsToOneSpeaker` afterwards, so only the licence
-    /// answer of the same launch can report a lift. Never persisted.
+    /// Set by the launch clamp in `ensureDefaultSelection`, cleared by a lift or
+    /// by `licenseAnswered()`, so only a lift before the server's first answer
+    /// counts. Other passes that re-assign `limitsToOneSpeaker` (a remote-config
+    /// refresh, a Mixer open) leave it alone. Never persisted.
     private var pendingLaunchClamp: (clamped: String, speakerCount: Int)?
+
+    /// The host calls this from every `LicenseValidator.validate` completion,
+    /// after applying the answer: a lift reported later is no longer the
+    /// launch clamp's.
+    public func licenseAnswered() { pendingLaunchClamp = nil }
 
     /// The refusal reason `setDeviceSelected` returns under the limit.
     public static let oneSpeakerLimitReason = "one_speaker_limit"

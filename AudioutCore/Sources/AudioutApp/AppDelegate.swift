@@ -66,7 +66,7 @@ private let audioProcessResolver = AudioProcessResolver(
 /// drives `AppSurfaceController`'s click policy, and the surface hosts the
 /// Mixer panel built by `PopoverController`.
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
 
     /// The one place that talks to a concrete backend type. Resolved via
     /// `makeBackend()`: explicit arg (none) → `AIRPLAY_BACKEND` env → `.native`.
@@ -200,25 +200,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var postHogProjectToken = ""
     private var postHogHost = ""
 
-    /// The expired-trial survey's definition, once fetched; the popover's
-    /// invite reads it.
-    private var activeTrialSurvey: ExpiredTrialSurvey?
-    /// Set while a fetch runs or after one succeeded; a failed fetch clears
-    /// it so the next daily-active or licence pass tries again.
-    private var trialSurveyFetchStarted = false
-
-    /// Fetch the survey once this install is owed it.
-    private func refreshExpiredTrialSurvey() {
-        guard analyticsAvailable, !trialSurveyFetchStarted,
-              ExpiredTrialSurvey.isOwed(settings: settings, consent: settings.telemetryEnabled) else { return }
-        trialSurveyFetchStarted = true
-        ExpiredTrialSurvey.fetch(host: postHogHost, token: postHogProjectToken,
+    private lazy var trialSurveyFetcher = ExpiredTrialSurvey.Fetcher(settings: settings) { [weak self] completion in
+        guard let self else { completion(nil); return }
+        ExpiredTrialSurvey.fetch(host: self.postHogHost, token: self.postHogProjectToken,
                                  surveyID: ExpiredTrialSurvey.surveyID) { survey in
-            DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
-                self.activeTrialSurvey = survey
-                if survey == nil { self.trialSurveyFetchStarted = false }
-            }
+            DispatchQueue.main.async { completion(survey) }
         }
     }
 
@@ -300,7 +286,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// The first-run onboarding/permission-priming window, retained while open
     /// (first launch, or "Open Setup…" from Settings ▸ General).
     private var onboardingWindowController: OnboardingWindowController?
-    private var licenseGateWindowController: LicenseGateWindowController?
+    /// The first-open licence gate while it is drawn over the surface.
+    private var licenseGateController: LicenseGateViewController?
+    /// `whenStatusItemPlaced`'s waiting body and its window-move observer.
+    private var pendingStatusItemPlacement: (@MainActor (NSRect, Bool) -> Void)?
+    private var statusItemMoveObserver: NSObjectProtocol?
+    /// Set when the gate is owed but Setup opened first: Setup's finish
+    /// mounts it, once.
+    private var licenseGateAwaitsSetup = false
 
     /// The `SetupModel` behind the last-presented onboarding window, kept alive
     /// after the window closes and REUSED by every subsequent automatic
@@ -451,12 +444,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// `withdrawApprovalPrompt(clientID:)` find and close the one whose
     /// connection just died.
     private var companionApprovalAlerts: [String: NSAlert] = [:]
-
-    /// Open pairing-code alerts for approved phones, keyed by clientID.
-    private var companionCodeCheckAlerts: [String: NSAlert] = [:]
-    /// Closes a pairing-code alert on Escape, which a non-modal one-button
-    /// `NSAlert` ignores. Installed with the first alert.
-    private var companionCodeCheckEscapeMonitor: Any?
 
     /// AIRPLAY_DEBUG_LEVELS=1 → log capture RMS ~1/sec (see the `.level` case).
     private let debugLevels = ProcessInfo.processInfo.environment["AIRPLAY_DEBUG_LEVELS"] == "1"
@@ -652,9 +639,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: Lifecycle
 
     func applicationWillFinishLaunching(_ notification: Notification) {
-        // Menu-bar-only: no Dock icon, no app menu (RESOLVED Q1). Set before
-        // finishing launch so a Dock icon never even flickers.
-        NSApp.setActivationPolicy(.accessory)
+        // A regular app: Dock icon, ⌘-Tab, Force Quit and the menu bar, beside
+        // the status item (owner's call, 2026-10-19; was menu-bar-only).
+        NSApp.setActivationPolicy(.regular)
         // `audiout://` (CFBundleURLTypes, written by scripts/make-app.sh).
         // Registered HERE, not in didFinishLaunching: a link that LAUNCHES the
         // app delivers its Apple Event as part of finishing launch, and a
@@ -687,9 +674,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @MainActor
     private func openLicenseSheet(registering key: String) {
         // While the first-open gate is up it IS the licence surface: the
-        // purchase link lands straight in its field.
-        if let gate = licenseGateWindowController {
+        // purchase link lands straight in its field, over the Mixer.
+        if let gate = licenseGateController {
             gate.submit(key: key)
+            showSurface(.mixer)
             return
         }
         guard surface != nil else {
@@ -729,10 +717,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Returns `false` either way: we have opened what there is to open, and
     /// AppKit must not go looking for an untitled window to make.
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        if let gate = licenseGateWindowController {
-            gate.present()
-            return false
-        }
         if onboardingWindowController != nil {
             onboardingWindowController?.present()
             return false
@@ -862,7 +846,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.companionCoordinator.scheduleBroadcast()
         }
 
-        companionCoordinator.wire()
+        // The server's Bonjour advertisement raises the Local Network prompt,
+        // which first-run Setup explains first: start it here only if the
+        // backend already started, otherwise `startBackendIfNeeded` or the
+        // Setup iPhone card starts it.
+        companionCoordinator.wire(startingServer: backendStarted)
 
         // A link that LAUNCHED the app was handled before any of this existed.
         if let key = pendingLicenseKeyFromURL {
@@ -885,12 +873,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItemController = StatusItemController()
         statusItemController.onButtonClicked = { [weak self] _ in
             guard let self else { return }
-            // The licence gate, while open, owns the click outright — it is
-            // the only thing the app is until it is answered.
-            if let gate = self.licenseGateWindowController {
-                gate.present()
-                return
-            }
             // The surface is built LATER in this same launch pass. No event
             // normally interleaves, but anything that ever spins the runloop
             // mid-`applicationDidFinishLaunching` (a modal, an SDK) would let
@@ -986,6 +968,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     }
 
+    // Dev builds only: the Developer "Licence server" choice overrides the
+    // baked feed. `nil` keeps the bundle's `SUFeedURL`.
+    func feedURLString(for updater: SPUUpdater) -> String? {
+        settings.licenseServerChoiceAppcastURL?.absoluteString
+    }
+
     /// Sparkle, the licence state and the analytics identity — after the
     /// status item, because none of it puts a pixel on screen by itself.
     @MainActor
@@ -1003,7 +991,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // the updater is never even started.
         if Bundle.main.object(forInfoDictionaryKey: "SUFeedURL") != nil {
             updaterController = SPUStandardUpdaterController(startingUpdater: true,
-                                                             updaterDelegate: nil,
+                                                             updaterDelegate: self,
                                                              userDriverDelegate: nil)
         }
 
@@ -1027,6 +1015,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.useNewTrialKey()
         }, onValidated: { [weak self] in
             self?.applyLicenseState()
+            self?.groupController?.licenseAnswered()
         })
         trialReachability?.start()
 
@@ -1042,6 +1031,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // now and again on the answer costs nothing.
         LicenseValidator(settings: settings).validate { [weak self] _ in
             self?.applyLicenseState()
+            self?.groupController?.licenseAnswered()
         }
         applyLicenseState()
         RemoteAppConfigFetcher(settings: settings).refresh { [weak self] in self?.applyLicenseState() }
@@ -1249,10 +1239,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         popoverController.onThankYouShown = { [settings] in
             settings.licenseThankYouShown = true
         }
-        popoverController.surveyInviteProvider = { [weak self] in
-            guard let self, ExpiredTrialSurvey.isOwed(settings: settings, consent: settings.telemetryEnabled) else { return nil }
-            return activeTrialSurvey
-        }
+        popoverController.surveyInviteProvider = { [weak self] in self?.trialSurveyFetcher.invite }
         popoverController.onSurveyInviteSpent = { [settings] in
             settings.expiredTrialSurveyDone = true
         }
@@ -1379,10 +1366,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // overwriting it.
         popoverController.remoteInviteStateProvider = { [weak self] in
             self?.remoteInviteState() ?? .notConnected
-        }
-        // The wizard's iPhone panel showing its code is a pairing window.
-        popoverController.onRemoteInviteShown = { [weak self] in
-            self?.companionCoordinator.openPairingWindow()
         }
         popoverController.btLatencyProvider = { [weak self] deviceID in
             (self?.backend as? BTOutputControlling)?.btMeasuredLatencyMs(forDevice: deviceID)
@@ -1512,6 +1495,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 if LicenseGate.limitsToOneSpeaker(settings: settings) {
                     LicenseValidator(settings: settings).validate { [weak self] _ in
                         self?.applyLicenseState()
+                        self?.groupController?.licenseAnswered()
                     }
                 }
                 // The consent ask comes on the open after the thank-you card.
@@ -1633,22 +1617,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     }
 
-    /// The first-open licence gate, the mid-session grant detector and the
-    /// revocation watch — whichever of them this launch needs.
+    /// The first-run block, the first-open licence gate, the mid-session
+    /// grant detector and the revocation watch — whichever of them this
+    /// launch needs.
     @MainActor
     private func runGateOrStart() {
-        // First-open licence gate: the welcome for a purchased build
-        // (`AudioutLicenseServerURL` in Info.plist) with no key and no trial.
-        // Its pass runs the exact first-run block this used to be, so Setup's
-        // permission priming and the backend deferral are preserved behind it;
-        // its abort quits. An ended trial or a refused key never meets it — it
-        // runs limited to one speaker (`LicenseGate.limitsToOneSpeaker`). A
-        // build from source carries no server URL and never gates.
+        runFirstRunGateAndStartBackend()
+        // First-open licence gate: for a purchased build
+        // (`AudioutLicenseServerURL` in Info.plist) with no key and no trial,
+        // drawn over the live Mixer once Setup (if it opened) is done. An ended
+        // trial or a refused key never meets it — it runs limited to one
+        // speaker (`LicenseGate.limitsToOneSpeaker`). A build from source
+        // carries no server URL and never gates.
         if LicenseGate.shouldPresent(settings: settings) {
             log("Audiout launched — first-open license gate")
-            presentLicenseGate()
-        } else {
-            runFirstRunGateAndStartBackend()
+            if onboardingWindowController != nil {
+                licenseGateAwaitsSetup = true
+            } else {
+                presentLicenseGate()
+            }
         }
 
         // T6-rev: arm the mid-session grant detector. Both launch branches above
@@ -1730,11 +1717,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     }
 
-    /// The launch step the licence gate defers: the first-run Setup gate
-    /// (permission priming defers the backend) or the immediate backend start
-    /// with its live TCC re-checks. Extracted verbatim from
-    /// `applicationDidFinishLaunching`; both the gate's pass and the ungated
-    /// launch run it exactly once.
+    /// The first-run Setup gate (permission priming defers the backend) or the
+    /// immediate backend start with its live TCC re-checks. Extracted verbatim
+    /// from `applicationDidFinishLaunching`; every launch runs it exactly once.
     @MainActor
     private func runFirstRunGateAndStartBackend() {
         // First-run priming: on the native path, explain BOTH permissions before
@@ -1814,45 +1799,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// Present (or re-front) the first-open licence gate. The gate owns the
-    /// launch until it is answered: pass re-applies licence state and runs
-    /// the deferred first-run block; abort (✕ or Quit) terminates — a hard
-    /// gate's close IS declining to run the paid build.
+    /// Draw the first-open licence gate over the surface and open the surface
+    /// on the Mixer. There is no way past it but a key or a trial; the panel's
+    /// Quit is the way out. Its pass re-applies licence state and takes it
+    /// away.
     @MainActor
     private func presentLicenseGate() {
-        if let gate = licenseGateWindowController {
-            gate.present()
-            return
+        if licenseGateController == nil {
+            let gate = LicenseGateViewController(
+                settings: settings,
+                openURL: { NSWorkspace.shared.open($0) },
+                onPassed: { [weak self] in
+                    guard let self else { return }
+                    self.licenseGateController = nil
+                    self.surface.dismissLicenseGate(animated: true)
+                    self.applyLicenseState()
+                    // Same as `license.onLicenseChanged` below: a key entered at
+                    // the gate registers the device now, not at the next launch.
+                    LicenseCheckIn(settings: self.settings).checkInIfNeeded()
+                    // A trial handed out by the gate has no key yet, and the
+                    // launch path is long past — the reachability monitor
+                    // watches for network CHANGES, and an already-online Mac
+                    // gets none. Without this ask, such a trial stays unknown
+                    // to the server until the next launch: no key on the Buy
+                    // link, no device row, no event.
+                    TrialRegistrar.registerIfNeeded(
+                        settings: self.settings,
+                        completion: { [weak self] registered in
+                            guard registered else { return }
+                            self?.useNewTrialKey()
+                        })
+                })
+            licenseGateController = gate
+            surface.presentLicenseGate(gate)
         }
-        let gate = LicenseGateWindowController(
-            settings: settings,
-            openURL: { NSWorkspace.shared.open($0) },
-            onPassed: { [weak self] in
-                guard let self else { return }
-                self.licenseGateWindowController = nil
-                self.applyLicenseState()
-                // Same as `license.onLicenseChanged` below: a key entered at
-                // the gate registers the device now, not at the next launch.
-                LicenseCheckIn(settings: self.settings).checkInIfNeeded()
-                // A trial handed out by the gate has no key yet, and the launch
-                // path is long past — the reachability monitor watches for
-                // network CHANGES, and an already-online Mac gets none. Without
-                // this ask, such a trial stays unknown to the server until the
-                // next launch: no key on the Buy link, no device row, no event.
-                TrialRegistrar.registerIfNeeded(
-                    settings: self.settings,
-                    completion: { [weak self] registered in
-                        guard registered else { return }
-                        self?.useNewTrialKey()
-                    })
-                self.runFirstRunGateAndStartBackend()
-            },
-            onAbort: { [weak self] in
-                self?.licenseGateWindowController = nil
-                NSApp?.terminate(nil)
-            })
-        licenseGateWindowController = gate
-        gate.present()
+        // At launch the menu bar icon has no place yet; wait for it so the
+        // surface opens under it.
+        whenStatusItemPlaced { [weak self] anchor, placed in
+            self?.showSurface(.mixer, anchorRect: anchor, pointsAtAnchor: placed)
+        }
     }
 
     /// What a freshly issued trial key changes, the moment it is stored.
@@ -1869,6 +1854,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         LicenseCheckIn(settings: settings).checkInIfNeeded()
         LicenseValidator(settings: settings).validate { [weak self] _ in
             self?.applyLicenseState()
+            self?.groupController?.licenseAnswered()
         }
         applyLicenseState()
     }
@@ -2212,6 +2198,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         backendStarted = true
         subscribeToBackendEvents()
         backend.start()
+        companionCoordinator.updateServerState()
     }
 
     /// Build (or reuse) a ``SetupModel`` (production probes) + onboarding window
@@ -2338,12 +2325,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // the user with NO window at all — the whole point of finishing
             // setup is to start using the app, so open the surface the moment
             // onboarding dismisses rather than making them go find the
-            // menu-bar icon themselves.
+            // menu-bar icon themselves. A licence gate owed at launch waited
+            // for Setup and opens over that surface now, unless a key or a
+            // trial arrived meanwhile (a phone purchase during Setup).
+            if self.licenseGateAwaitsSetup {
+                self.licenseGateAwaitsSetup = false
+                if LicenseGate.shouldPresent(settings: self.settings) {
+                    self.presentLicenseGate()
+                    return
+                }
+            }
             self.showSurface(.mixer)
         }
-        // The Setup window's iPhone card on screen is a pairing window.
+        // The iPhone card comes after the Local Network step, so the server
+        // may start there even while Setup holds the backend back.
         controller.onRemoteInviteShown = { [weak self] in
-            self?.companionCoordinator.openPairingWindow()
+            self?.companionCoordinator.updateServerState()
         }
         onboardingWindowController = controller
         controller.present()
@@ -2386,10 +2383,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return menu
     }
 
-    /// A minimal application main menu. A menu-bar-only (`.accessory`) app shows
-    /// no menu bar, but a main menu still supplies working key equivalents while
-    /// the app is active — this is what makes ⌘Q (and ⌘,) work, which the app
-    /// otherwise lacked entirely.
+    /// The application main menu: Audiout (About, Settings, Hide, Quit), File,
+    /// Edit and Window, shown at the top of the screen while the app is active.
     ///
     /// Also installs a File menu with a single Close item (⌘W): AppKit only
     /// synthesizes ⌘W automatically for a `.closable` window when a main menu
@@ -2409,8 +2404,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let appItem = NSMenuItem()
         mainMenu.addItem(appItem)
         let appMenu = NSMenu()
+        appMenu.addItem(withTitle: "About Audiout", action: #selector(menuOpenAbout), keyEquivalent: "").target = self
+        appMenu.addItem(.separator())
         let settings = appMenu.addItem(withTitle: "Settings…", action: #selector(menuOpenSettings), keyEquivalent: ",")
         settings.target = self
+        appMenu.addItem(.separator())
+        appMenu.addItem(withTitle: "Hide Audiout", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h").target = NSApp
+        appMenu.addItem(withTitle: "Hide Others", action: #selector(NSApplication.hideOtherApplications(_:)), keyEquivalent: "h")
+            .keyEquivalentModifierMask = [.command, .option]
+        appMenu.addItem(withTitle: "Show All", action: #selector(NSApplication.unhideAllApplications(_:)), keyEquivalent: "")
         appMenu.addItem(.separator())
         let quit = appMenu.addItem(withTitle: "Quit Audiout", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         quit.target = NSApp
@@ -2446,6 +2448,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         editItem.submenu = editMenu
 
+        let windowItem = NSMenuItem()
+        mainMenu.addItem(windowItem)
+        let windowMenu = NSMenu(title: "Window")
+        windowMenu.addItem(withTitle: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m").target = nil
+        windowMenu.addItem(withTitle: "Zoom", action: #selector(NSWindow.performZoom(_:)), keyEquivalent: "").target = nil
+        windowItem.submenu = windowMenu
+        // AppKit appends the open windows to this menu itself.
+        NSApp.windowsMenu = windowMenu
+
         NSApp.mainMenu = mainMenu
     }
 
@@ -2465,10 +2476,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// `MixerWindowController` has not seen yet pends there rather than being
     /// dropped.
     @MainActor
-    private func showSurface(_ screen: SurfaceScreen, selecting: SidebarSelection? = nil) {
+    private func showSurface(_ screen: SurfaceScreen, selecting: SidebarSelection? = nil,
+                             anchorRect: NSRect? = nil, pointsAtAnchor: Bool = true) {
         refreshSpeakerBluetoothAccess()
         surface.select(screen)
-        surface.show(anchorRect: statusAnchorRect())
+        surface.show(anchorRect: anchorRect ?? statusAnchorRect(), pointsAtAnchor: pointsAtAnchor)
         if let selecting { mixerWindowController?.select(selecting) }
     }
 
@@ -2562,6 +2574,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // window; the backend is already running, so its onFinished is a
         // guarded no-op.
         general.onRunSetupAgain = { [weak self] in self?.presentSetup() }
+        // Dev builds only. The verdict was just cleared, so the first apply
+        // drops the speaker limit, the Mixer note and the phones' token at
+        // once; the validator's answer from the newly chosen server restores
+        // whatever it says (`.noKey`/`.noServer` make no request).
+        general.onLicenseServerChanged = { [weak self, settings] in
+            self?.applyLicenseState()
+            LicenseValidator(settings: settings).validate { [weak self] _ in
+                self?.applyLicenseState()
+            }
+            LicenseCheckIn(settings: settings).checkInIfNeeded()
+        }
         // Left nil in a build with no updater, which hides the button.
         if let updaterController {
             general.onCheckForUpdates = { updaterController.checkForUpdates(nil) }
@@ -2574,17 +2597,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         remote.onAllowRemoteControlChanged = { [weak self] in
             self?.companionCoordinator.updateServerState()
         }
-        // "Pair an iPhone" opens the pairing window; the button reads the
-        // window's state and repaints when it opens or lapses.
-        remote.onPairRequested = { [weak self] in self?.companionCoordinator.openPairingWindow() }
-        remote.isPairingOpen = { [weak self] in self?.companionCoordinator.pairingWindowOpen ?? false }
-        companionCoordinator.onPairingWindowChanged = { [weak remote] in remote?.refreshPairingState() }
 
         let license = LicenseSettingsViewController(settings: settings)
         // The way back in for `audiout://register`.
         licenseSettingsController = license
         // A committed key changes both the note and the update feed's header.
         license.onLicenseChanged = { [weak self, settings] in
+            // Settings is the one screen the gate leaves uncovered. A key
+            // registered there lifts the gate once the server has accepted it
+            // (the sheet stores the key and fires this before the verdict, so
+            // a stored key alone is not enough), and not while the gate is
+            // checking a key of its own. The gate's pass re-applies state and
+            // checks in.
+            if let gate = self?.licenseGateController, !gate.isChecking,
+               settings.licenseStatus == .active {
+                gate.passWithStoredKey()
+                return
+            }
             self?.applyLicenseState()
             // A key entered mid-session registers the device now rather than at
             // the next launch. This closure fires a few times around one
@@ -2638,6 +2667,75 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func statusAnchorRect() -> NSRect? {
         guard let button = statusItemController.button, let win = button.window else { return nil }
         return win.convertToScreen(button.convert(button.bounds, to: nil))
+    }
+
+    /// The menu-bar item's frame once macOS has placed it in a menu bar.
+    /// Right after launch the item's window exists but sits at the screen's
+    /// bottom-left corner. A place at or above a screen's top edge counts,
+    /// so an auto-hidden menu bar still does.
+    @MainActor
+    private func placedStatusAnchorRect() -> NSRect? {
+        guard let rect = statusAnchorRect() else { return nil }
+        let placed = NSScreen.screens.contains {
+            rect.midX >= $0.frame.minX && rect.midX <= $0.frame.maxX && rect.maxY >= $0.frame.maxY - 2
+        }
+        return placed ? rect : nil
+    }
+
+    /// Runs `body` with the menu-bar item's frame once macOS has placed it
+    /// (at once if it already has), so a surface opened during launch lands
+    /// under the icon rather than at the screen's corner. After a second it
+    /// gives up and passes a point at the main screen's top-right with
+    /// `placed` false, so no arrow points at it: an icon hidden by a full
+    /// menu bar, the notch or a menu bar manager never gets a place.
+    @MainActor
+    private func whenStatusItemPlaced(_ body: @escaping @MainActor (NSRect, Bool) -> Void) {
+        if let rect = placedStatusAnchorRect() {
+            body(rect, true)
+            return
+        }
+        pendingStatusItemPlacement = body
+        statusItemMoveObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.didMoveNotification,
+            object: statusItemController.button?.window, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, let rect = self.placedStatusAnchorRect() else { return }
+                self.finishStatusItemPlacement(rect, placed: true)
+            }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                if let rect = self.placedStatusAnchorRect() {
+                    self.finishStatusItemPlacement(rect, placed: true)
+                } else {
+                    self.finishStatusItemPlacement(Self.topRightAnchor(), placed: false)
+                }
+            }
+        }
+    }
+
+    @MainActor
+    private func finishStatusItemPlacement(_ rect: NSRect, placed: Bool) {
+        guard let body = pendingStatusItemPlacement else { return }
+        pendingStatusItemPlacement = nil
+        if let observer = statusItemMoveObserver {
+            NotificationCenter.default.removeObserver(observer)
+            statusItemMoveObserver = nil
+        }
+        log(placed ? "surface anchored under the menu bar icon at \(rect)"
+                   : "menu bar icon has no place after 1 s (it reads \(statusAnchorRect().map { "\($0)" } ?? "no window")) — surface anchored top-right")
+        body(rect, placed)
+    }
+
+    /// A one-point stand-in for the icon at the main screen's top-right, just
+    /// under the menu bar, for `whenStatusItemPlaced`'s fallback.
+    @MainActor
+    private static func topRightAnchor() -> NSRect {
+        guard let screen = NSScreen.main ?? NSScreen.screens.first else { return .zero }
+        let vf = screen.visibleFrame
+        return NSRect(x: vf.maxX - 1, y: vf.maxY, width: 1, height: screen.frame.maxY - vf.maxY)
     }
 
     /// The Advanced › Audio buffer model (PLAN-LATENCY-SETTING.md), or nil when
@@ -2819,7 +2917,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // time — `setConsent` ignores an unchanged value.
             Analytics.setConsent(settings.telemetryEnabled)
         }
-        refreshExpiredTrialSurvey()
+        trialSurveyFetcher.refresh(analyticsAvailable: analyticsAvailable)
     }
 
     /// The one-time ask a trial user gets right after their paid key is
@@ -3265,7 +3363,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             settings.telemetryDailyActiveDay = due.day
             Analytics.capture("streaming:daily_active", ["speaker_count": String(due.speakerCount)])
             if ExpiredTrialSurvey.countStreamingDay(settings: settings) {
-                refreshExpiredTrialSurvey()
+                trialSurveyFetcher.refresh(analyticsAvailable: analyticsAvailable)
             }
         }
         // Keep the Scenes and Speakers screens in lockstep with the same
@@ -3400,38 +3498,107 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 /// enumeration, app icons, popover repaints, and the app's own lifecycle flag.
 extension AppDelegate: CompanionCoordinatorHost {
 
-    /// The T24 approval alert: shows the pairing code the phone is showing,
-    /// explains the stakes, and reports the answer back to
-    /// `CompanionApprovalController` (which persists it and settles every
-    /// connection waiting on it). Main-actor and modal — the SERVER never
-    /// blocks (its queue keeps running; only this app's own UI waits), and
-    /// the controller shows one prompt at a time. The phone's self-reported
-    /// name is not in the question: the code is what identifies it.
-    /// "Don't Allow" is the default button, and the alert floats at
-    /// `.floating` level and requests attention without activating the app,
-    /// so a Return or click aimed at something else never approves a phone.
-    /// An abort from `withdrawApprovalPrompt` is not the user's answer and
-    /// records nothing.
+    /// The T24 approval alert: the question, why it matters, the pairing
+    /// code the phone is showing in six boxes, and Allow / Don't Allow.
+    /// Reports the answer back to `CompanionApprovalController` (which
+    /// settles every connection waiting on it). Main-actor and modal — the
+    /// SERVER never blocks (its queue keeps running; only this app's own UI
+    /// waits), and the controller shows one prompt at a time. Nobody clicked
+    /// anything to cause it, so it brings the app forward and beeps. Allow is
+    /// drawn as the primary button but has no key equivalent: Return does
+    /// nothing and Escape is Don't Allow, so a key press aimed at something
+    /// else never approves a
+    /// phone. An abort from `withdrawApprovalPrompt` is not the user's answer
+    /// and records nothing.
     @MainActor
     func presentApprovalPrompt(clientID: String, clientName: String, pairingCode: String,
                                respond: @escaping (Bool) -> Void) {
         // Headless harnesses must never flash real UI; not answering leaves
-        // the decision unmade (no persisted denial) and the server's own
-        // approval deadline closes the connection.
+        // the decision unmade and the server's own approval deadline closes
+        // the connection.
         guard !HeadlessRuntime.isActive, !isTerminating else { return }
-        let code = Self.formattedPairingCode(pairingCode)
         let alert = NSAlert()
-        alert.messageText = "Allow an iPhone to control audio on this Mac?"
-        alert.informativeText = "The iPhone is showing a code. Allow only if it shows \(code) too.\n\nIt will be able to see and control what's playing on this Mac's speakers, including which apps are playing audio. You can change this later in Settings › Audiout Remote."
-        alert.addButton(withTitle: "Don't Allow")
-        alert.addButton(withTitle: "Allow")
+        alert.messageText = CompanionApprovalPrompt.messageText
+        alert.informativeText = CompanionApprovalPrompt.informativeText(clientName: clientName)
+        alert.icon = Self.lockBadgedAppIcon()
+        alert.accessoryView = Self.pairingCodeBoxes(pairingCode)
+        let allow = alert.addButton(withTitle: "Allow")
+        allow.keyEquivalent = ""
+        allow.bezelColor = .controlAccentColor
+        if #available(macOS 26.0, *) { allow.tintProminence = .primary }
+        alert.addButton(withTitle: "Don't Allow").keyEquivalent = "\u{1b}"
         alert.window.level = .floating
-        NSApp.requestUserAttention(.criticalRequest)
+        NSApp.activate(ignoringOtherApps: true)
+        NSSound.beep()
         companionApprovalAlerts[clientID] = alert
         let outcome = alert.runModal()
         companionApprovalAlerts.removeValue(forKey: clientID)
         guard outcome != .abort else { return }
-        respond(outcome == .alertSecondButtonReturn)
+        respond(outcome == .alertFirstButtonReturn)
+    }
+
+    /// The app icon with a `lock.fill` symbol in a white circle at its
+    /// bottom-right corner, for the approval alert.
+    private static func lockBadgedAppIcon() -> NSImage {
+        let icon = NSApp.applicationIconImage ?? NSImage()
+        return NSImage(size: NSSize(width: 64, height: 64), flipped: false) { rect in
+            icon.draw(in: rect)
+            let badge = NSRect(x: rect.maxX - 28, y: 0, width: 28, height: 28)
+            // A faint shadow keeps the white circle visible against the
+            // icon's pale background.
+            NSGraphicsContext.saveGraphicsState()
+            let shadow = NSShadow()
+            shadow.shadowBlurRadius = 2
+            shadow.shadowOffset = NSSize(width: 0, height: -1)
+            shadow.shadowColor = NSColor.black.withAlphaComponent(0.3)
+            shadow.set()
+            NSColor.white.setFill()
+            NSBezierPath(ovalIn: badge.insetBy(dx: 1, dy: 1)).fill()
+            NSGraphicsContext.restoreGraphicsState()
+            let config = NSImage.SymbolConfiguration(pointSize: 14, weight: .semibold)
+                .applying(.init(paletteColors: [.black]))
+            if let lock = NSImage(systemSymbolName: "lock.fill", accessibilityDescription: nil)?
+                .withSymbolConfiguration(config) {
+                let size = lock.size
+                lock.draw(in: NSRect(x: badge.midX - size.width / 2, y: badge.midY - size.height / 2,
+                                     width: size.width, height: size.height))
+            }
+            return true
+        }
+    }
+
+    /// The approval alert's code: one large digit per rounded box, read
+    /// aloud by VoiceOver as a single "Pairing code 0 9 2 2 1 9".
+    private static func pairingCodeBoxes(_ pairingCode: String) -> NSView {
+        let boxes = pairingCode.map { digit -> NSView in
+            let label = NSTextField(labelWithString: String(digit))
+            label.font = Tokens.Font.pairingCode
+            label.alignment = .center
+            label.translatesAutoresizingMaskIntoConstraints = false
+            let box = NSBox()
+            box.boxType = .custom
+            box.cornerRadius = 8
+            box.borderWidth = 1
+            box.borderColor = .separatorColor
+            box.fillColor = .quaternaryLabelColor.withAlphaComponent(0.06)
+            box.contentViewMargins = .zero
+            box.translatesAutoresizingMaskIntoConstraints = false
+            box.contentView?.addSubview(label)
+            NSLayoutConstraint.activate([
+                box.widthAnchor.constraint(equalToConstant: 36),
+                box.heightAnchor.constraint(equalToConstant: 46),
+                label.centerXAnchor.constraint(equalTo: box.centerXAnchor),
+                label.centerYAnchor.constraint(equalTo: box.centerYAnchor),
+            ])
+            return box
+        }
+        let row = NSStackView(views: boxes)
+        row.spacing = 6
+        row.setAccessibilityElement(true)
+        row.setAccessibilityRole(.staticText)
+        row.setAccessibilityLabel(CompanionApprovalPrompt.accessibilityLabel(code: pairingCode))
+        row.frame.size = row.fittingSize
+        return row
     }
 
     /// Close the prompt shown for `clientID`, if it's still the one on
@@ -3445,70 +3612,6 @@ extension AppDelegate: CompanionCoordinatorHost {
     func withdrawApprovalPrompt(clientID: String) {
         guard let alert = companionApprovalAlerts[clientID], NSApp.modalWindow === alert.window else { return }
         NSApp.abortModal()
-    }
-
-    /// "482913" → "482 913", as both pairing-code alerts show it.
-    private static func formattedPairingCode(_ pairingCode: String) -> String {
-        "\(pairingCode.prefix(3)) \(pairingCode.dropFirst(3))"
-    }
-
-    /// An approved phone forgot this Mac and is asking its user to compare
-    /// the pairing code: show it, with only an OK button. Not modal, so it
-    /// never holds up the app or the phone, which is already welcomed;
-    /// `withdrawPairingCodeCheck` closes it. The empty-name fallback is the
-    /// "an iPhone" the approval prompt uses. Ordered front without
-    /// activating the app, at the approval prompt's `.floating` level, on
-    /// every Space and over a full-screen app, since the user may be anywhere
-    /// when the phone asks.
-    @MainActor
-    func presentPairingCodeCheck(clientID: String, clientName: String, pairingCode: String) {
-        guard !HeadlessRuntime.isActive, !isTerminating else { return }
-        withdrawPairingCodeCheck(clientID: clientID)
-        let name = clientName.isEmpty ? "An iPhone" : clientName
-        let alert = NSAlert()
-        alert.messageText = "\(name) is checking it reached this Mac"
-        alert.informativeText = "Its screen should show:\n\n\(Self.formattedPairingCode(pairingCode))\n\nIf it shows a different code, tap Cancel on the iPhone."
-        let ok = alert.addButton(withTitle: "OK")
-        ok.target = self
-        ok.action = #selector(closePairingCodeCheck(_:))
-        alert.layout()
-        let window = alert.window
-        window.level = .floating
-        // A panel hides when its app loses focus; this one stays up until
-        // OK or its phone closes it.
-        window.hidesOnDeactivate = false
-        window.collectionBehavior.formUnion([.canJoinAllSpaces, .fullScreenAuxiliary])
-        window.center()
-        // A second phone checking at the same time: step down and right
-        // from the first rather than cover it.
-        if let shown = companionCodeCheckAlerts.values.first(where: { $0.window.isVisible })?.window {
-            window.cascadeTopLeft(from: shown.cascadeTopLeft(from: .zero))
-        }
-        window.orderFrontRegardless()
-        NSApp.requestUserAttention(.informationalRequest)
-        companionCodeCheckAlerts[clientID] = alert
-        if companionCodeCheckEscapeMonitor == nil {
-            companionCodeCheckEscapeMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-                MainActor.assumeIsolated {
-                    guard event.keyCode == 53, let self,
-                          let clientID = self.companionCodeCheckAlerts.first(where: { $0.value.window === event.window })?.key
-                    else { return event }
-                    self.withdrawPairingCodeCheck(clientID: clientID)
-                    return nil
-                }
-            }
-        }
-    }
-
-    @MainActor
-    @objc private func closePairingCodeCheck(_ sender: NSButton) {
-        guard let clientID = companionCodeCheckAlerts.first(where: { $0.value.buttons.first === sender })?.key else { return }
-        withdrawPairingCodeCheck(clientID: clientID)
-    }
-
-    @MainActor
-    func withdrawPairingCodeCheck(clientID: String) {
-        companionCodeCheckAlerts.removeValue(forKey: clientID)?.window.orderOut(nil)
     }
 
     /// The `.regular` running apps. Mirrors
@@ -3557,7 +3660,7 @@ extension AppDelegate: CompanionCoordinatorHost {
     }
 
     /// A licence key bought on the phone. Kept in this target
-    /// because it needs `LicenseValidator`, the gate window and
+    /// because it needs `LicenseValidator`, the gate and
     /// `applyLicenseState`, none of which an AppKit-free type owns. The phone
     /// is answered only after the licence server's verdict; with the gate up,
     /// an accepted key then opens it, and the gate's own pass runs
@@ -3568,14 +3671,14 @@ extension AppDelegate: CompanionCoordinatorHost {
         // The gate's check and the phone's must not race on the same stored
         // key, so the phone is told to retry rather than silently dropped or
         // falsely accepted.
-        if licenseGateWindowController?.isChecking == true {
+        if licenseGateController?.isChecking == true {
             reply(CompanionServer.CommandResult(applied: false, refusalReason: "Your Mac is checking another licence key. Try again in a moment."))
             return
         }
         CompanionLicenseActivation(settings: settings).activate(key: key) { [weak self] result in
             reply(result)
             guard let self, !self.isTerminating else { return }
-            if result.applied, let gate = self.licenseGateWindowController {
+            if result.applied, let gate = self.licenseGateController {
                 gate.passWithStoredKey()
                 return
             }

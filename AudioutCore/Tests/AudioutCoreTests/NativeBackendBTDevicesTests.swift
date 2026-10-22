@@ -314,8 +314,9 @@ import CoreAudio
         bt.fire([sonos, flip])
         waitFor { self.device(backend, self.flip.id) != nil }
 
+        // The pairedness check runs inside `retryOutput`'s own `stateQueue.sync`,
+        // and with no connection manager nothing is left in flight after it.
         backend.retryOutput(flip.id)   // flip IS in the merged list (paired)
-        SuiteWait.settle(0.3)
         if case .failed(let failure)? = device(backend, flip.id)?.connectionState {
             #expect(failure.cause != .notPaired, "pairedness comes from the merged list, not availability")
         }

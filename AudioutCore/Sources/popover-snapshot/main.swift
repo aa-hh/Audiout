@@ -37,6 +37,11 @@
 // group-name wording, the AP1 micro-tag, the failure-red override, and the
 // STATIC "+N" overflow).
 //
+// `AIRPLAY_SNAPSHOT_MODE=license-gate` renders the real one surface on the
+// Mixer with the first-open licence gate over the demo fleet, in both of its
+// states: `license-gate-offer-{light,dark}.png` and
+// `license-gate-enter-{light,dark}.png`. See `snapshotLicenseGate`.
+//
 // `AIRPLAY_SNAPSHOT_MODE=resting-ring` renders the ring-resting-state task's
 // scenario: the DEFAULT {local device} passthrough selection (no toggles) —
 // the Main Audio ring shows its thin, hue-neutral RESTING form instead of
@@ -45,7 +50,9 @@
 
 import AppKit
 import AudioutCore
+import AudioutOnboardingUI
 import AudioutPopoverUI
+import AudioutSettingsUI
 import AudioutSharedUI
 
 /// Resolve `name` AND pin it as the app-level appearance. On Darwin 27,
@@ -97,7 +104,7 @@ var renderFailed = false
 /// the host screen's backing scale factor.
 @MainActor
 @discardableResult
-func renderPNG(view: NSView, to url: URL) -> Bool {
+func renderPNG(view: NSView, to url: URL, background: NSColor? = nil) -> Bool {
     view.layoutSubtreeIfNeeded()
     let bounds = view.bounds
     let pixelsWide = Int((bounds.width * snapshotBackingScale).rounded())
@@ -117,6 +124,17 @@ func renderPNG(view: NSView, to url: URL) -> Bool {
     // content instead of stale heap bytes.
     if let bitmapData = rep.bitmapData {
         memset(bitmapData, 0, rep.bytesPerRow * pixelsHigh)
+    }
+    // A view whose ground is painted by another window (the surface's
+    // backing bubble) gets that ground filled in first.
+    if let background, let context = NSGraphicsContext(bitmapImageRep: rep) {
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = context
+        view.effectiveAppearance.performAsCurrentDrawingAppearance {
+            background.setFill()
+            NSRect(origin: .zero, size: bounds.size).fill()
+        }
+        NSGraphicsContext.restoreGraphicsState()
     }
     view.cacheDisplay(in: bounds, to: rep)
     
@@ -209,6 +227,75 @@ func snapshot(appearanceName: NSAppearance.Name, label: String, outDir: URL) {
     let url = outDir.appendingPathComponent("popover-\(label).png")
     renderPNG(view: panelView, to: url)
     window.contentView = NSView()   // detach so the next run gets a fresh panel
+}
+
+/// The real one surface on the Mixer, the demo fleet loaded, and the
+/// first-open licence gate mounted over it — what a buyer sees after Setup:
+/// first the offer, then the key state "I already have a key" moves to.
+/// Renders the shell window's content view (the toolbar strip lives in the
+/// title bar, so its band is empty here) over the `panel` ground the backing
+/// bubble would paint.
+@MainActor
+func snapshotLicenseGate(appearanceName: NSAppearance.Name, label: String, outDir: URL) {
+    let appearance = snapshotAppearance(appearanceName)
+    let backend = MockBackend(fleet: .demoFleet, staggerDiscovery: false,
+                              emitsLevels: false, simulatesDropouts: false)
+    let groups = GroupController(backend: backend, store: GroupStore(directory: tempDir()),
+                                 routingStore: RoutingStore(directory: tempDir()),
+                                 loadPersisted: false)
+    let popover = PopoverController(
+        appRouting: AppRoutingController(store: AppRouteStore(directory: tempDir()),
+                                         loadPersisted: false),
+        runningAppsProvider: { [] })
+    backend.start()
+    guard waitForFleet(backend, count: 7) else {
+        print("  SETUP FAIL: fleet did not fully discover"); return
+    }
+    popover.configure(groupController: groups)
+    groups.ensureDefaultSelection()
+    _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
+    popover.update(devices: backend.devices)
+
+    let suite = "com.audiout.popover-snapshot.license-gate"
+    UserDefaults.standard.removePersistentDomain(forName: suite)
+    let settings = AppSettings(defaults: UserDefaults(suiteName: suite) ?? .standard,
+                               licenseServerURL: URL(string: "https://license.example.com"),
+                               buyURL: URL(string: "https://audiout.app/buy"))
+    let emptyScreen: () -> NSViewController = {
+        let vc = NSViewController()
+        vc.view = NSView(frame: NSRect(x: 0, y: 0, width: SurfaceLayout.width, height: 464))
+        return vc
+    }
+    let surface = AppSurfaceController(
+        popoverController: popover, settings: settings,
+        groupsContent: emptyScreen, speakersContent: emptyScreen,
+        settingsContent: { SettingsRootViewController(sections: []) },
+        frameAutosaveName: NSWindow.FrameAutosaveName("LicenseGateSnapshotSurface-\(label)"))
+    let gate = LicenseGateViewController(settings: settings, openURL: { _ in }, onPassed: {})
+    surface.presentLicenseGate(gate)
+    surface.shell.test_panel?.appearance = appearance
+    surface.shell.test_panel?.ignoresMouseEvents = true
+    surface.show(anchorRect: nil)
+    FoldAnimator.shared.test_settleNow()
+    drain(0.1)
+
+    guard let content = surface.shell.window?.contentView,
+          surface.test_licenseGateView?.superview === content else {
+        print("  FAIL  license gate is not seated over the surface's content")
+        renderFailed = true
+        return
+    }
+    content.appearance = appearance
+    content.layoutSubtreeIfNeeded()
+    renderPNG(view: content, to: outDir.appendingPathComponent("license-gate-offer-\(label).png"),
+              background: Tokens.Color.panel)
+    gate.test_tapHaveKey()
+    drain(0.4)
+    content.layoutSubtreeIfNeeded()
+    renderPNG(view: content, to: outDir.appendingPathComponent("license-gate-enter-\(label).png"),
+              background: Tokens.Color.panel)
+    surface.dismissLicenseGate(animated: false)
+    surface.performClose()
 }
 
 /// Recursively collects every subview of type `T` under `root` (depth-first,
@@ -1248,6 +1335,26 @@ func run() -> Int32 {
     if mode == "local-mix-blocked" {
         snapshotLocalMixBlocked(appearanceName: .aqua, label: "light", outDir: outDir)
         snapshotLocalMixBlocked(appearanceName: .darkAqua, label: "dark", outDir: outDir)
+        print("Done.")
+        return renderFailed ? 1 : 0
+    }
+    if mode == "license-gate" {
+        // One surface per process: a second `AppSurfaceController` built in
+        // the same process measured its Mixer at the screen's full height
+        // (1100 pt against the first one's 648), whichever appearance went
+        // second. So light renders here and dark in a child run of this tool.
+        if ProcessInfo.processInfo.environment["AIRPLAY_SNAPSHOT_APPEARANCE"] == "dark" {
+            snapshotLicenseGate(appearanceName: .darkAqua, label: "dark", outDir: outDir)
+            return renderFailed ? 1 : 0
+        }
+        snapshotLicenseGate(appearanceName: .aqua, label: "light", outDir: outDir)
+        let child = Process()
+        child.executableURL = URL(fileURLWithPath: CommandLine.arguments[0])
+        child.arguments = [outDir.path]
+        child.environment = ProcessInfo.processInfo.environment
+            .merging(["AIRPLAY_SNAPSHOT_APPEARANCE": "dark"]) { $1 }
+        do { try child.run(); child.waitUntilExit() } catch { renderFailed = true }
+        if child.terminationStatus != 0 { renderFailed = true }
         print("Done.")
         return renderFailed ? 1 : 0
     }

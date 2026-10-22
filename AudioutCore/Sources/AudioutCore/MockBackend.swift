@@ -355,6 +355,13 @@ public final class MockBackend: OutputBackend, @unchecked Sendable {
         queue.sync {}
     }
 
+    /// Whether the level timer is running. Outside the `test_emit…` fixtures it
+    /// is the only thing that emits `.level` and `.appLevel`. Read on `queue`,
+    /// so it also orders after every mutation already enqueued.
+    public var test_isLevelTimerRunning: Bool {
+        queue.sync { levelTimer != nil }
+    }
+
     // MARK: T9 offline fixture — live per-app routing indicator
 
     /// Fire a `.routedApps` event as if a per-app redirect just went live (or

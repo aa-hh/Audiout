@@ -37,10 +37,8 @@ import Testing
             box.value = qos_class_self()
         }, tracked: false)
 
-        var deadline = 500   // 500 x 10ms = 5s
-        while box.value == QOS_CLASS_UNSPECIFIED && deadline > 0 {
-            try await Task.sleep(for: .milliseconds(10))
-            deadline -= 1
+        await SuiteWait.until("the enqueued closure records the engine thread's QoS") {
+            box.value != QOS_CLASS_UNSPECIFIED
         }
 
         #expect(

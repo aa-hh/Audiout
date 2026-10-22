@@ -67,7 +67,13 @@ import AudioutProtocol
         let settings: AppSettings
         let dispatcher: CompanionCommandDispatcher
         let approvals: CompanionApprovalController
-        let server = CompanionServer()
+        /// Its deadlines run on a clock nobody advances, so none fires. On the
+        /// wall clock a loaded run sent the hello after the 5 s pre-hello
+        /// deadline had already closed the socket, and no welcome came.
+        let server: CompanionServer = {
+            let clock = ManualDelayClock()
+            return CompanionServer(delayClock: clock.queueHoppingClock, uptimeClock: clock.uptime)
+        }()
 
         init(scratchDir: URL, defaults: UserDefaults, fleet: [Device] = .demoFleet) {
             backend = MockBackend(fleet: fleet, staggerDiscovery: false,

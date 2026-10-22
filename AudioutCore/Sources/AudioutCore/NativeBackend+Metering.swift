@@ -226,9 +226,8 @@ extension NativeBackend {
     private func scheduleSystemRMSDrainLocked() {   // on stateQueue
         guard levelsFlowing, !levelDrainScheduled else { return }
         levelDrainScheduled = true
-        stateQueue.asyncAfter(deadline: .now() + .nanoseconds(Int(levelEmitIntervalNanos))) { [weak self] in
-            self?.drainSystemRMS()
-        }
+        let work = DispatchWorkItem { [weak self] in self?.drainSystemRMS() }
+        levelDelayClock(Double(levelEmitIntervalNanos) / 1_000_000_000, stateQueue, work)
     }
 
     /// Record one app's PRE-volume SOURCE level and fan it out: to the app's own
@@ -243,7 +242,7 @@ extension NativeBackend {
         stateQueue.async {
             guard self.levelsFlowing else { return }
             self.scheduleLevelEmit(key: .app(bundleID), rms: rms,
-                                   now: DispatchTime.now().uptimeNanoseconds)
+                                   now: self.levelUptimeNanos())
             self.latestAppLevel[bundleID] = rms
             // The device this app feeds tracks the loudest source routed to it, so
             // re-emit its combined `.level` now that this source level changed.
@@ -299,7 +298,7 @@ extension NativeBackend {
             }
         }
         scheduleLevelEmit(key: .device(id), rms: max(systemContribution, sourceContribution),
-                          now: DispatchTime.now().uptimeNanoseconds)
+                          now: levelUptimeNanos())
     }
 
     /// The event one coalescer key delivers.
@@ -320,9 +319,8 @@ extension NativeBackend {
             pendingLevel[key] = rms
             guard levelFlushScheduled.insert(key).inserted else { return }
             let remaining = levelEmitIntervalNanos - (now - last)
-            stateQueue.asyncAfter(deadline: .now() + .nanoseconds(Int(remaining))) { [weak self] in
-                self?.flushPendingLevel(key: key)
-            }
+            let work = DispatchWorkItem { [weak self] in self?.flushPendingLevel(key: key) }
+            levelDelayClock(Double(remaining) / 1_000_000_000, stateQueue, work)
             return
         }
         lastLevelEmitNanos[key] = now
@@ -336,7 +334,7 @@ extension NativeBackend {
     private func flushPendingLevel(key: LevelKey) {   // on stateQueue
         levelFlushScheduled.remove(key)
         guard let rms = pendingLevel.removeValue(forKey: key) else { return }
-        lastLevelEmitNanos[key] = DispatchTime.now().uptimeNanoseconds
+        lastLevelEmitNanos[key] = levelUptimeNanos()
         emit(levelEvent(for: key, rms: rms))
     }
 

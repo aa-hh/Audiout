@@ -10,7 +10,7 @@ import Testing
     /// 1 kHz mono, 2 bytes/frame, 0.5 s capacity = 500 frames — small enough
     /// that wraparound is a few appends away.
     static func makeRing() -> ReferenceAudioRing {
-        ReferenceAudioRing(capacitySeconds: 0.5, sampleRate: 1_000, channels: 1)
+        ReferenceAudioRing(capacitySeconds: 500.0 / 1_000, sampleRate: 1_000, channels: 1)
     }
 
     /// `count` S16LE mono frames whose sample VALUE is its absolute frame

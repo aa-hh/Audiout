@@ -432,11 +432,9 @@ import Testing
         let (box, collector) = record(backend.makeEventStream())
         defer { collector.cancel() }
 
-        // Default: metering inactive, so no `.appLevel` should show up yet. The
-        // level timer ticks every 0.1 s on the real clock, so give it three ticks.
-        await SuiteWait.until("an .appLevel the gate should have blocked", timeout: 0.3) {
-            box.events.contains { if case .appLevel = $0 { return true } else { return false } }
-        }
+        // Default: metering inactive, so the level timer that fabricates every
+        // `.appLevel` must not be running, and none may have reached the stream.
+        #expect(!backend.test_isLevelTimerRunning, "the level timer must stay off while metering is inactive")
         var seen = box.events
         #expect(
             !seen.contains { if case .appLevel = $0 { return true } else { return false } },

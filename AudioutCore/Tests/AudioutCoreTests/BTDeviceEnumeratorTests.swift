@@ -307,7 +307,8 @@ import Testing
         enumerator.refresh()
         script.undetermined = false   // the user denied; authorized stays false
         script.decide()
-        SuiteWait.settle(0.3)
+        // `refresh()` runs synchronously on the enumerator's queue, behind the
+        // re-enumeration the decision callback enqueued, so both have run here.
         enumerator.refresh()
         #expect(!pairedTouched.isSet, "denied ⇒ IOBluetooth is never touched")
         #expect(received.all.last?.map(\.id) == [sonosUID], "still Core-Audio-only")
@@ -365,7 +366,9 @@ import Testing
         #expect(script.requestCount == 1)
 
         enumerator.requestAuthorizationForUserAction()
-        SuiteWait.settle(0.2)
+        // Barrier: `refresh()` is synchronous on the queue the second tap was
+        // enqueued on, and this policy never asks from enumeration.
+        enumerator.refresh()
         #expect(script.requestCount == 1, "one prompt per process, however often the user taps")
 
         script.authorized = true
@@ -385,7 +388,8 @@ import Testing
         enumerator.onSnapshot = { _ in }
 
         enumerator.requestAuthorizationForUserAction()
-        SuiteWait.settle(0.2)
+        // Barrier: `refresh()` is synchronous on the queue the tap was enqueued on.
+        enumerator.refresh()
         #expect(script.requestCount == 0)
     }
 

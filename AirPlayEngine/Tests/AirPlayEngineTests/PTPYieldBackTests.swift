@@ -88,7 +88,7 @@ final class PTPYieldBackTests {
     /// `ptpd_slave_remove` (a wedged engine thread on quit, a crashed
     /// engine process, a bug in some future teardown path). Proves the
     /// daemon forgets it anyway, and the running helper still idle-exits.
-    @Test func forgottenPeerAgesOutAndHelperStillIdleExitsWithoutExplicitRemoval() throws {
+    @Test func forgottenPeerAgesOutAndHelperStillIdleExitsWithoutExplicitRemoval() async throws {
         guard let binary = ptpHelperBinaryURL else {
             Issue.record("ptp-helper binary not found next to the test bundle; set AUDIOUT_PTP_HELPER_BINARY to point at it")
             return
@@ -102,7 +102,7 @@ final class PTPYieldBackTests {
 
         ptpLifecycleShmName.withCString { ptp_test_shm_name_override($0) }
 
-        guard let clientHdl = findHelperDaemon(within: 6) else {
+        guard let clientHdl = await findHelperDaemon() else {
             Issue.record("the helper never published a findable clock record:\n\(run.log)")
             return
         }
@@ -130,7 +130,7 @@ final class PTPYieldBackTests {
         // Comfortably before AIRPTP_STALE_SECS (15 s): the helper must still
         // be alive here, or it exited for the wrong reason (a bug that would
         // make legitimate playback stutter roughly every 15 s).
-        Thread.sleep(forTimeInterval: 5)
+        try await Task.sleep(for: .seconds(5)) // real-time-ok: the helper is a separate process that ages the peer out on its own C clock against AIRPTP_STALE_SECS, which has no override (see the file header)
         #expect(run.process.isRunning, "helper exited well before the forgotten peer could have gone stale:\n\(run.log)")
 
         // 15 s staleness + up to 5 s heartbeat lag + the 2 s idle window is
@@ -145,14 +145,15 @@ final class PTPYieldBackTests {
     }
 
     /// Polls `airptp_daemon_find()` until the subprocess has published its
-    /// clock record, same as `PTPHelperLifecycleTests`'s helper.
-    private func findHelperDaemon(within seconds: TimeInterval) -> OpaquePointer? {
-        let deadline = Date().addingTimeInterval(seconds)
-        while Date() < deadline {
-            if let hdl = ptp_test_daemon_find() { return hdl }
-            Thread.sleep(forTimeInterval: 0.1)
+    /// clock record. Returns `nil` only after `SuiteWait`'s hang ceiling, which
+    /// it records as a failure.
+    private func findHelperDaemon() async -> OpaquePointer? {
+        var hdl: OpaquePointer?
+        await SuiteWait.until("the helper to publish a findable clock record") {
+            hdl = ptp_test_daemon_find()
+            return hdl != nil
         }
-        return ptp_test_daemon_find()
+        return hdl
     }
 }
 

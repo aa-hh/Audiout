@@ -137,18 +137,18 @@ import CoreAudio
     /// the production HAL read — on a machine where Audiout really IS the default
     /// output, that read would silently flip these tests.
     private func makeBackend(macSelectedByDefault: Bool = false, weOwnVolume: Bool = false,
-                             // The burst tests below shrink this; every other test keeps the
-                             // production value. The production default itself is pinned in
-                             // `NativeBackendTests`, not here.
-                             syncedLocalSettleWindow: TimeInterval = 0.5,
-                             delayClock: @escaping NativeBackend.DelayClock = NativeBackend.dispatchDelayClock)
+                             // Only sets how far `elapseSettleWindow()` advances the clock;
+                             // the production default is pinned in `NativeBackendTests`.
+                             syncedLocalSettleWindow: TimeInterval = NativeBackendSyncedLocalSelectionTests.settleWindow,
+                             // nil runs the settle on this test's own `clock`.
+                             delayClock: NativeBackend.DelayClock? = nil)
         -> (NativeBackend, SpySyncedLocalSink, LockedBool) {
         let backend = NativeBackend(
             engineControl: NoOpEngine(),
             discoverySource: NoOpDiscovery(),
             systemVolume: NoOpSystemVolume(),
             syncedLocalSettleWindow: syncedLocalSettleWindow,
-            delayClock: delayClock,
+            delayClock: delayClock ?? clock.queueHoppingClock,
             aggregateControl: NoOpAggregateControl(),
             currentDefaultOutputUID: {
                 weOwnVolume ? AggregateOutputDevice.productUID : "BuiltInSpeakerDevice"
@@ -195,6 +195,25 @@ import CoreAudio
         SuiteWait.untilOnRunLoop(timeout: timeout, sourceLocation: sourceLocation, cond)
     }
 
+    /// The settle window `makeBackend` gives the backend unless a test passes its own.
+    static let settleWindow: TimeInterval = 1
+
+    /// The synced-local settle timer runs on this, so a test decides when the
+    /// window closes instead of waiting it out. A fresh suite instance per test
+    /// means a fresh clock per test.
+    private let clock = ManualDelayClock()
+
+    /// Close the settle window `makeBackend` armed: the pending settle fires.
+    private func elapseSettleWindow() { clock.advance(by: Self.settleWindow) }
+
+    /// Run every job already queued on `stateQueue`, then every sink call those
+    /// queued on `captureControlQueue`: after this, a transition the backend
+    /// decided has reached the sink spy.
+    private func drainQueues(_ backend: NativeBackend) {
+        backend.stateQueue.sync {}
+        backend.captureControlQueue.sync {}
+    }
+
     // MARK: Tests
 
     /// Mac-only → Mac + AirPlay: the sink turns ON — constructed, attached,
@@ -208,6 +227,7 @@ import CoreAudio
         #expect(sink.calls.isEmpty, "Mac alone must never enable the synced-local sink")
 
         backend.setOutputSet(["airplay-1"])   // now Mac + 1 AirPlay device
+        elapseSettleWindow()
         waitFor { !sink.calls.isEmpty }
 
         #expect(sink.calls == ["start", "startObserving"],
@@ -230,6 +250,7 @@ import CoreAudio
         // evaluated and found false.
         backend.start()
         backend.setOutputSet(["airplay-1"])   // Mac + AirPlay ⇒ sink armed
+        elapseSettleWindow()
         waitFor { !sink.gains.isEmpty }
 
         // A GROUP change moves the sink gain: group 50 × Mac 100% = 0.50.
@@ -270,6 +291,7 @@ import CoreAudio
 
         backend.start()
         backend.setOutputSet(["airplay-1"])
+        elapseSettleWindow()
         waitFor { !sink.gains.isEmpty }
 
         // Main 20 × group 80 × Mac 100% = 0.16 — the very value the settable case
@@ -294,11 +316,13 @@ import CoreAudio
         defer { backend.stop() }
 
         backend.setOutputSet(["airplay-1"])   // Mac + AirPlay: enabled
+        elapseSettleWindow()
         waitFor { !sink.calls.isEmpty }
         #expect(sink.calls == ["start", "startObserving"])
 
         macSelected.set(false)                // user deselects the Mac row
         backend.setOutputSet(["airplay-1"])   // same AirPlay membership, Mac dropped
+        elapseSettleWindow()
         waitFor { sink.calls.count >= 4 }
 
         #expect(sink.calls == ["start", "startObserving", "stop", "stopObserving"],
@@ -313,12 +337,14 @@ import CoreAudio
         defer { backend.stop() }
 
         backend.setOutputSet(["airplay-1"])
+        elapseSettleWindow()
         waitFor { !sink.calls.isEmpty }
         #expect(sink.calls == ["start", "startObserving"])
 
         backend.setOutputSet(["airplay-1", "airplay-2"])   // a second AirPlay device joins
-        // Give any (incorrect) redundant work a moment to show up.
-        SuiteWait.settle(0.3)
+        // Fire any (incorrect) redundant settle, then let its sink calls land.
+        elapseSettleWindow()
+        drainQueues(backend)
 
         #expect(sink.calls == ["start", "startObserving"],
                 "adding a second AirPlay device to an already-enabled selection must not re-attach/re-start the sink")
@@ -332,7 +358,8 @@ import CoreAudio
 
         backend.setOutputSet(["airplay-1"])
         backend.setOutputSet(["airplay-1", "airplay-2"])
-        SuiteWait.settle(0.3)
+        elapseSettleWindow()
+        drainQueues(backend)
 
         #expect(sink.calls.isEmpty, "AirPlay selected with the Mac NOT selected must never enable the sink")
     }
@@ -344,10 +371,12 @@ import CoreAudio
         defer { backend.stop() }
 
         backend.setOutputSet(["airplay-1"])
+        elapseSettleWindow()
         waitFor { !sink.calls.isEmpty }
 
         macSelected.set(false)
         backend.setOutputSet([])
+        elapseSettleWindow()
         waitFor { sink.calls.count >= 4 }
 
         #expect(sink.calls == ["start", "startObserving", "stop", "stopObserving"])
@@ -365,14 +394,12 @@ import CoreAudio
     /// window, must collapse into AT MOST ONE real sink transition, not one per
     /// click. `on -> off -> on -> off -> on` (5 decisions, net ON).
     ///
-    /// H-3: the window is 0.15 s. The burst must fit INSIDE one window for the
-    /// assertion to mean anything, and 50 ms is under plausible `stateQueue`
-    /// scheduling jitter on a loaded machine; a split burst produced a FALSE
-    /// failure.
+    /// H-3: the burst must fit INSIDE one window for the assertion to mean
+    /// anything. On the wall clock, scheduling jitter on a loaded machine split
+    /// a burst and produced a FALSE failure; the manual clock closes the window
+    /// only when the test advances it.
     @Test func rapidToggleBurstProducesAtMostOneTransition() {
-        let clock = ManualDelayClock()
-        let (backend, sink, macSelected) = makeBackend(macSelectedByDefault: false, syncedLocalSettleWindow: 0.15,
-                                                       delayClock: clock.queueHoppingClock)
+        let (backend, sink, macSelected) = makeBackend(macSelectedByDefault: false)
         defer { backend.stop() }
 
         macSelected.set(true);  backend.setOutputSet(["airplay-1"])
@@ -381,7 +408,7 @@ import CoreAudio
         macSelected.set(false); backend.setOutputSet(["airplay-1"])
         macSelected.set(true);  backend.setOutputSet(["airplay-1"])   // net: ON
 
-        clock.advance(by: 0.15)
+        elapseSettleWindow()
         waitFor { !sink.calls.isEmpty }
         // Nothing else is armed, so no wrongly-uncoalesced extra transition can come.
         #expect(clock.pendingCount == 0)
@@ -393,18 +420,16 @@ import CoreAudio
     /// A net-no-op burst, one that lands back on the currently-APPLIED state,
     /// must do NOTHING at all: no sink call, because there is nothing to apply
     /// (this is also what keeps the reset off this path in the
-    /// `NativeBackendTests` companion cases). 0.15 s window for the same jitter
-    /// headroom as the case above: the four flips must land in ONE window or the
-    /// "net" in "net no-op" is lost.
+    /// `NativeBackendTests` companion cases). The four flips must land in ONE
+    /// window or the "net" in "net no-op" is lost, which the manual clock
+    /// guarantees as in the case above.
     @Test func netNoOpBurstDoesNothing() {
-        let clock = ManualDelayClock()
-        let (backend, sink, macSelected) = makeBackend(macSelectedByDefault: true, syncedLocalSettleWindow: 0.15,
-                                                       delayClock: clock.queueHoppingClock)
+        let (backend, sink, macSelected) = makeBackend(macSelectedByDefault: true)
         defer { backend.stop() }
 
         // Settle into ON first (applied == true), same as every other test here.
         backend.setOutputSet(["airplay-1"])
-        clock.advance(by: 0.15)
+        elapseSettleWindow()
         waitFor { !sink.calls.isEmpty }
         #expect(sink.calls == ["start", "startObserving"])
 
@@ -414,7 +439,7 @@ import CoreAudio
         macSelected.set(false); backend.setOutputSet(["airplay-1"])
         macSelected.set(true);  backend.setOutputSet(["airplay-1"])   // net: back to ON (already applied)
 
-        clock.advance(by: 0.15)   // the settle window elapses
+        elapseSettleWindow()
         // The fire ran on `stateQueue` and bailed on desired == applied.
         waitFor { !backend.test_hasPendingSyncedLocalSettle }
         #expect(sink.calls == ["start", "startObserving"],
@@ -468,9 +493,10 @@ import CoreAudio
     /// `stopObserving`, the same mirrored-order teardown a normal Mac-deselect
     /// produces.
     @Test func stopTearsDownAnAlreadyRunningSyncedLocalSink() {
-        let (backend, sink, _) = makeBackend(macSelectedByDefault: true, syncedLocalSettleWindow: 0.15)
+        let (backend, sink, _) = makeBackend(macSelectedByDefault: true)
 
         backend.setOutputSet(["airplay-1"])   // Mac + AirPlay: enables the sink
+        elapseSettleWindow()
         waitFor { !sink.calls.isEmpty }
         #expect(sink.calls == ["start", "startObserving"],
                 "precondition: the sink must be running before stop() is exercised")
@@ -544,6 +570,7 @@ import CoreAudio
         let backend = NativeBackend(engineControl: NoOpEngine(),
                                     discoverySource: NoOpDiscovery(),
                                     systemVolume: NoOpSystemVolume(),
+                                    delayClock: clock.queueHoppingClock,
                                     aggregateControl: NoOpAggregateControl())
         defer { backend.stop() }
         let sink = SpySyncedLocalSink()
@@ -556,6 +583,7 @@ import CoreAudio
                                        memberIDs: [NativeBackend.localDeviceID, "airplay-1"],
                                        memberVolumes: [:]))
         controller.setMainOut(.group(id: "g1"))
+        clock.fireAll()   // the production settle window, whatever its length
         waitFor { !sink.calls.isEmpty }
 
         #expect(router.lastOutputSet == ["airplay-1"],
@@ -572,6 +600,7 @@ import CoreAudio
         let backend = NativeBackend(engineControl: NoOpEngine(),
                                     discoverySource: NoOpDiscovery(),
                                     systemVolume: NoOpSystemVolume(),
+                                    delayClock: clock.queueHoppingClock,
                                     aggregateControl: NoOpAggregateControl())
         defer { backend.stop() }
         let sink = SpySyncedLocalSink()
@@ -585,7 +614,8 @@ import CoreAudio
         try controller.saveGroup(Group(id: "g1", name: "Patio",
                                        memberIDs: ["airplay-1"], memberVolumes: [:]))
         controller.setMainOut(.group(id: "g1"))
-        SuiteWait.settle(0.3)
+        clock.fireAll()
+        drainQueues(backend)
 
         #expect(router.lastOutputSet == ["airplay-1"])
         #expect(sink.calls.isEmpty,
@@ -600,12 +630,14 @@ import CoreAudio
             engineControl: NoOpEngine(),
             discoverySource: NoOpDiscovery(),
             systemVolume: NoOpSystemVolume(),
+            delayClock: clock.queueHoppingClock,
             aggregateControl: NoOpAggregateControl())
         backend.selectedDevicesQuery = { $0 == NativeBackend.localDeviceID }
         defer { backend.stop() }
 
         backend.setOutputSet(["airplay-1"])   // Mac + AirPlay, but no syncedLocalSinkFactory
-        SuiteWait.settle(0.2)
+        clock.fireAll()
+        drainQueues(backend)
         // No crash, nothing to observe — this test passes by not throwing.
     }
 
@@ -618,6 +650,7 @@ import CoreAudio
         let (backend, sink, _) = makeBackend(macSelectedByDefault: true)
         defer { backend.stop() }
         backend.setOutputSet(["airplay-1"])
+        elapseSettleWindow()
         waitFor { !sink.calls.isEmpty }
 
         // Relative to whatever is stored, so the assertion owns no assumption
@@ -647,6 +680,7 @@ import CoreAudio
         let (backend, sink, _) = makeBackend(macSelectedByDefault: true)
         defer { backend.stop() }
         backend.setOutputSet(["airplay-1"])
+        elapseSettleWindow()
         waitFor { !sink.calls.isEmpty }
 
         let base = Double(backend.currentLocalSyncOffsetMs())
@@ -666,10 +700,11 @@ import CoreAudio
         let (backend, sink, _) = makeBackend(macSelectedByDefault: true)
         defer { backend.stop() }
         backend.setOutputSet(["airplay-1"])
+        elapseSettleWindow()
         waitFor { !sink.calls.isEmpty }
 
         backend.noteLocalSyncOffsetChanged()
-        SuiteWait.settle(0.3)
+        drainQueues(backend)   // the seek, if any, is a `captureControlQueue` job
         #expect(sink.offsetDeltas.isEmpty, "got: \(sink.offsetDeltas)")
         #expect(sink.reanchorCauses.isEmpty)
     }
@@ -680,6 +715,7 @@ import CoreAudio
         let (backend, sink, _) = makeBackend(macSelectedByDefault: true)
         defer { backend.stop() }
         backend.setOutputSet(["airplay-1"])
+        elapseSettleWindow()
         waitFor { !sink.calls.isEmpty }
         let stored = backend.currentLocalSyncOffsetMs()
 

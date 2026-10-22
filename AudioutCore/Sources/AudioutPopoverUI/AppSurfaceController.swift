@@ -571,7 +571,7 @@ public final class AppSurfaceController {
         // A Mixer already asleep behind the latch has had its `surfaceDidHide()`;
         // a second one would run the teardown twice.
         if isShown, selectedScreen == .mixer, !surfaceCoveredHidden {
-            popoverController.surfaceDidHide()
+            popoverController.surfaceDidHide(closed: true)
         }
         surfaceCoveredHidden = false
         isShown = false

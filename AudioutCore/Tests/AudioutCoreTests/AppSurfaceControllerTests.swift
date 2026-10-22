@@ -1519,6 +1519,25 @@ extension SerializedSharedState {
             #expect(seen.names() == ["survey dismissed"])
             #expect(surface.test_surveyCard == nil)
         }
+
+        /// Red if a window covering the Mixer counts as an unanswered close of
+        /// the survey invite, or a real close stops counting as one.
+        @Test func onlyARealCloseCountsAgainstTheInvite() {
+            let (surface, popover) = makeSurface()
+            var unanswered = 0
+            popover.surveyInviteProvider = { ExpiredTrialSurveyFixture.survey }
+            popover.onSurveyInviteUnanswered = { unanswered += 1; return false }
+            popover.setUnregisteredNote(.trialEnded)
+            popover.test_simulateOpen()
+            #expect(popover.test_systemAirPlayNoteText == PopoverController.surveyInviteText)
+            for _ in 0..<3 {
+                surface.test_notePixelVisibility(false)
+                surface.test_notePixelVisibility(true)
+            }
+            #expect(unanswered == 0)
+            surface.performClose()
+            #expect(unanswered == 1)
+        }
     }
 
     /// The first-open licence gate over the shell's content view. Serialized

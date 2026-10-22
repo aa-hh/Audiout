@@ -28,6 +28,7 @@
 
 import Testing
 import Foundation
+import os
 import PTPHelperTestSupport
 
 // Nests under `SerializedLibairptpState` (SerializedLibairptpStateSuite.swift),
@@ -195,6 +196,13 @@ let ptpHelperBinaryURL: URL? = {
 final class HelperRun {
     let process = Process()
     private let logURL: URL
+    /// Set, then signalled, by `terminationHandler`, which Foundation calls on
+    /// its own queue, so no wait here depends on which thread called `run()`
+    /// (PTPYieldBackTests is async and resumes on any thread). Replaces an
+    /// unbounded `waitUntilExit()` in `cleanUp`, the one wait in this chain
+    /// with no ceiling.
+    private let status = OSAllocatedUnfairLock<Int32?>(initialState: nil)
+    private let exited = DispatchSemaphore(value: 0)
 
     /// stderr goes to a file rather than a `Pipe`: the helper's libairptp
     /// callbacks log freely, and an undrained pipe buffer would deadlock the
@@ -227,6 +235,11 @@ final class HelperRun {
         process.environment = environment
         process.standardOutput = FileHandle.nullDevice
         process.standardError = try FileHandle(forWritingTo: logURL)
+        let status = status, exited = exited
+        process.terminationHandler = { p in
+            status.withLock { $0 = p.terminationStatus }
+            exited.signal()
+        }
 
         try process.run()
     }
@@ -237,20 +250,30 @@ final class HelperRun {
     /// its status, or `nil` if it was still running when the timeout expired —
     /// "did not exit" is a distinct failure from "exited non-zero".
     func waitForExit(timeout: TimeInterval) -> Int32? {
-        let deadline = Date().addingTimeInterval(timeout)
-        while process.isRunning && Date() < deadline {
-            Thread.sleep(forTimeInterval: 0.1)
-        }
-        guard !process.isRunning else { return nil }
-        process.waitUntilExit()
-        return process.terminationStatus
+        waitForTermination(timeout: timeout)
+        return status.withLock { $0 }
     }
 
+    /// Every wait here has a ceiling: SIGTERM, then SIGKILL, then give up and
+    /// record it, so a helper whose exit never reports fails one test instead
+    /// of hanging the run.
     func cleanUp() {
-        if process.isRunning {
+        if status.withLock({ $0 }) == nil {
             process.terminate()
-            process.waitUntilExit()
+            waitForTermination(timeout: 10)
+        }
+        if status.withLock({ $0 }) == nil {
+            kill(process.processIdentifier, SIGKILL)
+            waitForTermination(timeout: 10)
+            if status.withLock({ $0 }) == nil {
+                Issue.record("ptp-helper pid \(process.processIdentifier) never reported its exit after SIGTERM and SIGKILL:\n\(log)")
+            }
         }
         try? FileManager.default.removeItem(at: logURL)
+    }
+
+    private func waitForTermination(timeout: TimeInterval) {
+        guard status.withLock({ $0 }) == nil else { return }
+        _ = exited.wait(timeout: .now() + timeout) // real-time-ok: hang ceiling on a separate process's exit
     }
 }

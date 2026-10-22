@@ -212,9 +212,9 @@ public final class CompanionServer: @unchecked Sendable {
         /// deliberately left armed as the close backstop in case the goodbye
         /// send never flushes.
         var handshakeTimeout: DispatchWorkItem?
-        /// Last inbound sign of life — any frame, ping, or pong. Basis of
-        /// the liveness reaper.
-        var lastActivity = Date()
+        /// Last inbound sign of life — any frame, ping, or pong — on
+        /// ``uptimeClock``. Basis of the liveness reaper.
+        var lastActivity: TimeInterval = 0
 
         init(connection: NWConnection) { self.connection = connection }
     }
@@ -236,9 +236,17 @@ public final class CompanionServer: @unchecked Sendable {
     /// The latest snapshot ``broadcast(_:)`` saw — replayed to each new
     /// client in its `welcome`.
     private var latestSnapshot: Snapshot?
-    /// Fires ``livenessTick()`` every ``pingInterval`` while the server has
-    /// (or has had) clients; torn down by `stop()`.
-    private var livenessTimer: DispatchSourceTimer?
+    /// The next scheduled ``livenessTick()``, one every ``pingInterval``
+    /// while the server has (or has had) clients; cancelled by `stop()`.
+    private var livenessWork: DispatchWorkItem?
+
+    /// Schedules the pre-hello and approval deadlines and the liveness
+    /// ticks. Only the tests pass anything but
+    /// `NativeBackend.dispatchDelayClock`, so they can fire a deadline
+    /// without waiting for it.
+    private let delayClock: NativeBackend.DelayClock
+    /// The liveness reaper's "now".
+    private let uptimeClock: NativeBackend.UptimeClock
 
     // MARK: - Limits
 
@@ -248,11 +256,7 @@ public final class CompanionServer: @unchecked Sendable {
     /// hello within milliseconds of connecting; the iOS app's own
     /// address-resolve probe never upgrades at all and is exactly what this
     /// deadline reaps.
-    private static let preHelloTimeout: TimeInterval = 5
-    /// Test-only: overrides ``preHelloTimeout`` so a cancellation test
-    /// doesn't wait real seconds. Nil (default) uses the real value.
-    /// Same seam as `DACPServer.test_idleReceiveTimeoutOverride`.
-    public var test_handshakeTimeoutOverride: TimeInterval?
+    static let preHelloTimeout: TimeInterval = 5
 
     /// More phones than any household plausibly has; a bound so a
     /// misbehaving LAN peer can't grow `clients` without limit.
@@ -267,8 +271,6 @@ public final class CompanionServer: @unchecked Sendable {
     /// the Mac's user may be in another room when the prompt appears — and
     /// retryable: the phone reconnects and asks again.
     static let approvalTimeout: TimeInterval = 180
-    /// Test-only: overrides ``approvalTimeout``.
-    public var test_approvalTimeoutOverride: TimeInterval?
 
     /// Hard bound on simultaneous awaiting-approval connections — a LAN
     /// peer cycling fresh keys must not grow `awaiting` (each entry
@@ -336,19 +338,21 @@ public final class CompanionServer: @unchecked Sendable {
     /// Server-initiated WebSocket ping cadence per promoted client. A live
     /// phone's stack auto-pongs; the pong (or any frame) refreshes
     /// `lastActivity`.
-    private static let pingInterval: TimeInterval = 20
-    /// Test-only: overrides ``pingInterval`` (read when the liveness timer
-    /// is created, i.e. at the first client promotion after start/stop).
-    public var test_pingIntervalOverride: TimeInterval?
+    static let pingInterval: TimeInterval = 20
 
     /// A promoted client with no inbound activity for this long is dead —
     /// with ``pingInterval`` 20 s that is ~3 unanswered pings — and is
     /// cancelled, which fires ``onClientDisconnected`` like any other death.
-    private static let livenessTimeout: TimeInterval = 60
-    /// Test-only: overrides ``livenessTimeout``.
-    public var test_livenessTimeoutOverride: TimeInterval?
+    static let livenessTimeout: TimeInterval = 60
 
-    public init() {}
+    public convenience init() {
+        self.init(delayClock: NativeBackend.dispatchDelayClock, uptimeClock: NativeBackend.dispatchUptimeClock)
+    }
+
+    init(delayClock: @escaping NativeBackend.DelayClock, uptimeClock: @escaping NativeBackend.UptimeClock) {
+        self.delayClock = delayClock
+        self.uptimeClock = uptimeClock
+    }
 
     // MARK: - Lifecycle
 
@@ -446,8 +450,8 @@ public final class CompanionServer: @unchecked Sendable {
     private func stopLocked(reason: String) {
         listener?.cancel()
         listener = nil
-        livenessTimer?.cancel()
-        livenessTimer = nil
+        livenessWork?.cancel()
+        livenessWork = nil
         let droppedPending = pending
         pending.removeAll()
         for (_, client) in droppedPending {
@@ -644,12 +648,11 @@ public final class CompanionServer: @unchecked Sendable {
         // fires, the state handler above cleans up like any other death.
         // A cancellable work item (not a bare closure) so no timer can
         // outlive the connection it guards.
-        let timeout = test_handshakeTimeoutOverride ?? Self.preHelloTimeout
         let work = DispatchWorkItem { [weak self] in
             self?.pending[id]?.connection.cancel()
         }
         client.handshakeTimeout = work
-        queue.asyncAfter(deadline: .now() + timeout, execute: work)
+        delayClock(Self.preHelloTimeout, queue, work)
     }
 
     /// MUST only run on ``queue``. The connection is up: hand it the 32
@@ -682,7 +685,7 @@ public final class CompanionServer: @unchecked Sendable {
         client.handshakeTimeout = nil
         awaiting[client.id] = nil
         clients[client.id] = client
-        client.lastActivity = Date()
+        client.lastActivity = uptimeClock()
         ensureLivenessTimer()
         // The name is attacker-controlled: already truncated, and logged at
         // default (.private) privacy, never .public.
@@ -818,26 +821,31 @@ public final class CompanionServer: @unchecked Sendable {
 
     // MARK: - Liveness
 
-    /// Lazily created at the first promotion (the test seam never calls
-    /// `start`, so the timer can't live there); torn down in `stopLocked`.
+    /// Lazily started at the first promotion (the test seam never calls
+    /// `start`, so the ticks can't start there); cancelled in `stopLocked`.
     /// An idle tick over zero clients is harmless.
     private func ensureLivenessTimer() {
-        guard livenessTimer == nil else { return }
-        let interval = test_pingIntervalOverride ?? Self.pingInterval
-        let timer = DispatchSource.makeTimerSource(queue: queue)
-        timer.schedule(deadline: .now() + interval, repeating: interval, leeway: .milliseconds(Int(interval * 100)))
-        timer.setEventHandler { [weak self] in self?.livenessTick() }
-        timer.resume()
-        livenessTimer = timer
+        guard livenessWork == nil else { return }
+        scheduleLivenessTick()
+    }
+
+    /// MUST only run on ``queue``. Each tick schedules the next one.
+    private func scheduleLivenessTick() {
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.livenessTick()
+            self.scheduleLivenessTick()
+        }
+        livenessWork = work
+        delayClock(Self.pingInterval, queue, work)
     }
 
     /// MUST only run on ``queue``. Reap the silent, ping the rest.
     private func livenessTick() {
-        let timeout = test_livenessTimeoutOverride ?? Self.livenessTimeout
-        let now = Date()
+        let now = uptimeClock()
         for client in clients.values {
-            if now.timeIntervalSince(client.lastActivity) > timeout {
-                log.notice("companion client reaped: no activity for \(Int(now.timeIntervalSince(client.lastActivity))) s")
+            if now - client.lastActivity > Self.livenessTimeout {
+                log.notice("companion client reaped: no activity for \(Int(now - client.lastActivity)) s")
                 client.connection.cancel() // state handler → removeClient
             } else {
                 sendPing(to: client)
@@ -854,8 +862,8 @@ public final class CompanionServer: @unchecked Sendable {
         let id = client.id
         let metadata = NWProtocolWebSocket.Metadata(opcode: .ping)
         metadata.setPongHandler(queue) { [weak self] error in
-            guard error == nil else { return }
-            self?.clients[id]?.lastActivity = Date()
+            guard error == nil, let self else { return }
+            self.clients[id]?.lastActivity = self.uptimeClock()
         }
         let context = NWConnection.ContentContext(identifier: "companionPing", metadata: [metadata])
         client.connection.send(content: Data("hb".utf8), contentContext: context, isComplete: true, completion: .contentProcessed { _ in })
@@ -883,7 +891,7 @@ public final class CompanionServer: @unchecked Sendable {
                 case .ping, .pong:
                     // Control frames are liveness, not payload — and may
                     // carry empty data, which must not read as EOF below.
-                    client.lastActivity = Date()
+                    client.lastActivity = self.uptimeClock()
                     self.receiveLoop(client)
                     return
                 default:
@@ -899,7 +907,7 @@ public final class CompanionServer: @unchecked Sendable {
                 client.connection.cancel()
                 return
             }
-            client.lastActivity = Date()
+            client.lastActivity = self.uptimeClock()
             self.handle(data, from: client)
             // `handle` may have cancelled the connection (malformed frame /
             // proto mismatch); its removal is async via the state handler,
@@ -1007,7 +1015,7 @@ public final class CompanionServer: @unchecked Sendable {
                 serverCertificateSHA256: localCertificateSHA256, clientPublicKey: keyBytes)
             client.phoneClientID = phoneClientID
             client.clientName = Self.displayName(rawName)
-            client.lastActivity = Date()
+            client.lastActivity = uptimeClock()
             let connectionID = client.id
             let approvalWork = DispatchWorkItem { [weak self] in
                 guard let self, let held = self.awaiting.removeValue(forKey: connectionID) else { return }
@@ -1016,9 +1024,7 @@ public final class CompanionServer: @unchecked Sendable {
                 self.noteApprovalAbandoned(held)
             }
             client.handshakeTimeout = approvalWork
-            queue.asyncAfter(
-                deadline: .now() + (test_approvalTimeoutOverride ?? Self.approvalTimeout),
-                execute: approvalWork)
+            delayClock(Self.approvalTimeout, queue, approvalWork)
 
             let decide: @Sendable (ApprovalDecision) -> Void = { [weak self] decision in
                 guard let self else { return }
@@ -1140,5 +1146,10 @@ public final class CompanionServer: @unchecked Sendable {
     /// Test-only: how many connections are currently held for approval.
     func test_awaitingCount() -> Int {
         queue.sync { awaiting.count }
+    }
+
+    /// Test-only: each promoted client's last sign of life, on ``uptimeClock``.
+    func test_lastActivities() -> [TimeInterval] {
+        queue.sync { clients.values.map(\.lastActivity) }
     }
 }

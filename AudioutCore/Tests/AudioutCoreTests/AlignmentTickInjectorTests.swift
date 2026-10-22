@@ -681,7 +681,8 @@ import AudioToolbox
 
         coordinator.setAlignTickMode(.wizard)
         tap.deliverSilence(frames: 512, pts: timespec(tv_sec: 3, tv_nsec: 0))
-        waitFor(timeout: 0.3) { engineSink.writes.contains { $0.pts.tv_sec == 3 } }
+        // No wait: `handleBuffer` runs on the delivering thread and writes the
+        // sink before `deliverSilence` returns, so a leak would already show.
         #expect(!engineSink.writes.contains { $0.pts.tv_sec == 3 },
                 "during a wizard run captured buffers reach no consumer at all")
 

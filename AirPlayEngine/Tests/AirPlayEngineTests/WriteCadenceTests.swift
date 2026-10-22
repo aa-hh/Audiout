@@ -5,10 +5,9 @@
 //
 // Two levels are exercised:
 //   1. `WriteCadenceTracker` directly — deterministic control over the
-//      "wall-clock elapsed" input via a fixed, injected sample count/rate and
-//      real (but tiny, sleep-based) delays or an injected clock, so the
-//      deficit/overrun math is verified without any dependency on the full
-//      engine/dispatcher.
+//      "wall-clock elapsed" input via a fixed sample count/rate and an
+//      injected clock, so the deficit/overrun math is verified without any
+//      dependency on the full engine/dispatcher.
 //   2. `AirPlayEngine.write(pcm:pts:)` end-to-end in headless test mode —
 //      proves the hot path actually feeds the tracker, and that
 //      `writeCadenceSnapshot()` reflects it.
@@ -52,30 +51,29 @@ import CAirPlayEngine
     /// larger than the audio time it represents (e.g. the producer stalls) —
     /// must show up as a growing deficit, not get silently absorbed.
     @Test func underfedFeedReflectsDeficit() {
-        let tracker = WriteCadenceTracker()
+        var simulatedSeconds: Double = 0
+        let tracker = WriteCadenceTracker(now: { simulatedSeconds })
         let sampleRate = 44100
         let samplesPerWrite = 352
         let audioSeconds = Double(samplesPerWrite) / Double(sampleRate) // ~8ms
 
         tracker.record(samples: samplesPerWrite, sampleRate: sampleRate) // seed baseline
 
-        // Simulate 5 writes, each arriving ~50ms late relative to the ~8ms of
-        // audio it represents -> ~42ms deficit per write, ~210ms cumulative.
-        let stallSeconds = 0.05
+        // 5 writes, each arriving 50ms after the last while carrying only ~8ms
+        // of audio -> ~42ms deficit per write, ~210ms cumulative.
+        let stall = 0.05
         for _ in 0..<5 {
-            Thread.sleep(forTimeInterval: stallSeconds)
+            simulatedSeconds += stall
             tracker.record(samples: samplesPerWrite, sampleRate: sampleRate)
         }
 
         let snapshot = tracker.snapshot()
         #expect(snapshot.writeCount == 6)
-        let expectedDeficitPerWrite = stallSeconds - audioSeconds
-        let expectedTotal = expectedDeficitPerWrite * 5
-        // Allow generous scheduling slop (Thread.sleep is not exact) but the
-        // deficit must clearly reflect the stall, not be near zero.
-        #expect(snapshot.deficitSeconds > expectedTotal * 0.5)
+        let expectedTotal = (stall - audioSeconds) * 5
+        #expect(abs(snapshot.deficitSeconds - expectedTotal) <= 1e-9,
+                "the deficit must be exactly the stall time not covered by audio")
         #expect(snapshot.lastGapSeconds > 0, "last gap should be positive (behind) after a stall")
-        #expect(abs(snapshot.overrunSeconds - 0) <= 0.01, "an underfed feed should not also register overrun")
+        #expect(abs(snapshot.overrunSeconds) <= 1e-9, "an underfed feed should not also register overrun")
     }
 
     /// The inverse: a burst of writes delivered faster than the audio time
@@ -106,9 +104,10 @@ import CAirPlayEngine
     /// write immediately after a reset seeds fresh rather than comparing
     /// against a stale (now-ancient) timestamp and reporting a bogus deficit.
     @Test func resetClearsCountersAndBaseline() {
-        let tracker = WriteCadenceTracker()
+        var simulatedSeconds: Double = 0
+        let tracker = WriteCadenceTracker(now: { simulatedSeconds })
         tracker.record(samples: 352, sampleRate: 44100)
-        Thread.sleep(forTimeInterval: 0.05)
+        simulatedSeconds += 0.05
         tracker.record(samples: 352, sampleRate: 44100)
         #expect(tracker.snapshot().deficitSeconds > 0)
 
@@ -120,7 +119,10 @@ import CAirPlayEngine
         #expect(afterReset.lastGapSeconds == 0)
 
         // The very next record() call must seed the baseline again (no huge
-        // deficit from comparing against the pre-reset timestamp).
+        // deficit from comparing against the pre-reset timestamp). The clock
+        // moves on first, under the stall threshold, so a stale baseline
+        // would show up here as a deficit.
+        simulatedSeconds += 1
         tracker.record(samples: 352, sampleRate: 44100)
         #expect(tracker.snapshot().writeCount == 1)
         #expect(tracker.snapshot().deficitSeconds == 0, "first record after reset only seeds the baseline")
@@ -200,17 +202,17 @@ import CAirPlayEngine
         var simulatedSeconds: Double = 0
         let tracker = WriteCadenceTracker(now: { simulatedSeconds })
         let sampleRate = 44100
-        let pauseSeconds = 0.05
+        let pause = 0.05
         // Alternate a write claiming ~2x the elapsed audio (runs ahead ->
         // overrun) with one claiming almost none (runs behind -> deficit).
-        let aheadSamples = Int(pauseSeconds * 2 * Double(sampleRate))
+        let aheadSamples = Int(pause * 2 * Double(sampleRate))
         let behindSamples = 64
 
         tracker.record(samples: aheadSamples, sampleRate: sampleRate) // seed
         for _ in 0..<8 {
-            simulatedSeconds += pauseSeconds
+            simulatedSeconds += pause
             tracker.record(samples: aheadSamples, sampleRate: sampleRate)
-            simulatedSeconds += pauseSeconds
+            simulatedSeconds += pause
             tracker.record(samples: behindSamples, sampleRate: sampleRate)
         }
 
@@ -232,19 +234,19 @@ import CAirPlayEngine
     /// land in `stalledSeconds`, leaving the drift totals alone: charged to the
     /// deficit, a single sleep contributes more than every real gap combined.
     @Test func longGapIsChargedToStallNotDrift() {
-        // Threshold injected so the discontinuity is reachable without a real
-        // five-second sleep; production keeps the default.
+        // Threshold injected below the production five seconds to exercise the
+        // parameter; production keeps the default.
         var simulatedSeconds: Double = 0
-        let tracker = WriteCadenceTracker(stallGapSeconds: 0.05, now: { simulatedSeconds })
+        let tracker = WriteCadenceTracker(stallGapSeconds: 1, now: { simulatedSeconds })
         let sampleRate = 44100
 
         tracker.record(samples: 64, sampleRate: sampleRate) // seed
-        simulatedSeconds += 0.15                            // the "pause"
+        simulatedSeconds += 3                               // the "pause"
         tracker.record(samples: 64, sampleRate: sampleRate)
 
         let snap = tracker.snapshot()
         #expect(snap.stallCount == 1)
-        #expect(snap.stalledSeconds > 0.05, "the whole gap belongs to the stall bucket")
+        #expect(snap.stalledSeconds > 1, "the whole gap belongs to the stall bucket")
         #expect(snap.deficitSeconds == 0, "a discontinuity must not read as drift")
         #expect(snap.netDriftSeconds == 0)
 
@@ -346,8 +348,6 @@ import CAirPlayEngine
 // `StartBufferAndLatencyProbeTests` is driving — those tests then simply never
 // see their events and time out. Every `enterHeadlessTestMode()` caller
 // in this target nests here.
-// (These two also stall on `Task.sleep` and assert tight cadence bounds, so
-// serialising them removes a second, independent source of flake.)
 //
 // The pure tracker suite above deliberately stays OUT of the serialized parent
 // — it touches nothing global, and over-adding costs real wall-clock since
@@ -357,28 +357,31 @@ extension SerializedEngineState {
 
 @Suite struct WriteCadenceEngineWritePathTests {
 
-    /// The hot `write` path actually feeds the tracker: a paced/underfed
-    /// synthetic feed through the real public API reflects a deficit via
-    /// `writeCadenceSnapshot()`.
-    @Test func engineWritePathFeedsCadenceTracker() async throws {
+    /// The hot `write` path actually feeds the tracker: a burst of writes
+    /// through the real public API, each carrying far more audio than the
+    /// time between calls, reflects an overrun via `writeCadenceSnapshot()`.
+    /// The engine's tracker reads the real clock, so the burst direction is
+    /// the one that needs no waiting.
+    @Test func engineWritePathFeedsCadenceTracker() async {
         let engine = AirPlayEngine()
         await engine.enterHeadlessTestMode()
 
-        let samplesPerWrite = 352
+        let samplesPerWrite = 44100 // 1 s of audio per write
         let bytesPerSample = 2 * 2 // S16LE, stereo
         let pcm = Data(repeating: 0, count: samplesPerWrite * bytesPerSample)
         let pts = timespec(tv_sec: 0, tv_nsec: 0)
+        // No master session carries this stream, so the fan-out never encodes
+        // the oversized buffers.
+        let streamId: UInt32 = 77
 
-        engine.write(pcm: pcm, pts: pts) // seeds baseline
-
+        engine.write(pcm: pcm, streamId: streamId, pts: pts) // seeds baseline
         for _ in 0..<5 {
-            try await Task.sleep(nanoseconds: 50_000_000) // stall well beyond the ~8ms frame
-            engine.write(pcm: pcm, pts: pts)
+            engine.write(pcm: pcm, streamId: streamId, pts: pts)
         }
 
         let snapshot = engine.writeCadenceSnapshot()
         #expect(snapshot.writeCount == 6)
-        #expect(snapshot.deficitSeconds > 0.1, "underfed real writes through the public API must show a deficit")
+        #expect(snapshot.overrunSeconds > 4, "back-to-back 1 s writes through the public API must show an overrun")
     }
 
     /// Wiring proof for the refusal accounting through the REAL public write

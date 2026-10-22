@@ -199,25 +199,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
     private var postHogProjectToken = ""
     private var postHogHost = ""
 
-    /// The expired-trial survey's definition, once fetched; the popover's
-    /// invite reads it.
-    private var activeTrialSurvey: ExpiredTrialSurvey?
-    /// Set while a fetch runs or after one succeeded; a failed fetch clears
-    /// it so the next daily-active or licence pass tries again.
-    private var trialSurveyFetchStarted = false
-
-    /// Fetch the survey once this install is owed it.
-    private func refreshExpiredTrialSurvey() {
-        guard analyticsAvailable, !trialSurveyFetchStarted,
-              ExpiredTrialSurvey.isOwed(settings: settings, consent: settings.telemetryEnabled) else { return }
-        trialSurveyFetchStarted = true
-        ExpiredTrialSurvey.fetch(host: postHogHost, token: postHogProjectToken,
+    private lazy var trialSurveyFetcher = ExpiredTrialSurvey.Fetcher(settings: settings) { [weak self] completion in
+        guard let self else { completion(nil); return }
+        ExpiredTrialSurvey.fetch(host: self.postHogHost, token: self.postHogProjectToken,
                                  surveyID: ExpiredTrialSurvey.surveyID) { survey in
-            DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
-                self.activeTrialSurvey = survey
-                if survey == nil { self.trialSurveyFetchStarted = false }
-            }
+            DispatchQueue.main.async { completion(survey) }
         }
     }
 
@@ -1028,6 +1014,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
             self?.useNewTrialKey()
         }, onValidated: { [weak self] in
             self?.applyLicenseState()
+            self?.groupController?.licenseAnswered()
         })
         trialReachability?.start()
 
@@ -1043,6 +1030,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
         // now and again on the answer costs nothing.
         LicenseValidator(settings: settings).validate { [weak self] _ in
             self?.applyLicenseState()
+            self?.groupController?.licenseAnswered()
         }
         applyLicenseState()
         RemoteAppConfigFetcher(settings: settings).refresh { [weak self] in self?.applyLicenseState() }
@@ -1250,10 +1238,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
         popoverController.onThankYouShown = { [settings] in
             settings.licenseThankYouShown = true
         }
-        popoverController.surveyInviteProvider = { [weak self] in
-            guard let self, ExpiredTrialSurvey.isOwed(settings: settings, consent: settings.telemetryEnabled) else { return nil }
-            return activeTrialSurvey
-        }
+        popoverController.surveyInviteProvider = { [weak self] in self?.trialSurveyFetcher.invite }
         popoverController.onSurveyInviteSpent = { [settings] in
             settings.expiredTrialSurveyDone = true
         }
@@ -1509,6 +1494,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
                 if LicenseGate.limitsToOneSpeaker(settings: settings) {
                     LicenseValidator(settings: settings).validate { [weak self] _ in
                         self?.applyLicenseState()
+                        self?.groupController?.licenseAnswered()
                     }
                 }
                 // The consent ask comes on the open after the thank-you card.
@@ -1867,6 +1853,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
         LicenseCheckIn(settings: settings).checkInIfNeeded()
         LicenseValidator(settings: settings).validate { [weak self] _ in
             self?.applyLicenseState()
+            self?.groupController?.licenseAnswered()
         }
         applyLicenseState()
     }
@@ -2929,7 +2916,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
             // time — `setConsent` ignores an unchanged value.
             Analytics.setConsent(settings.telemetryEnabled)
         }
-        refreshExpiredTrialSurvey()
+        trialSurveyFetcher.refresh(analyticsAvailable: analyticsAvailable)
     }
 
     /// The one-time ask a trial user gets right after their paid key is
@@ -3375,7 +3362,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
             settings.telemetryDailyActiveDay = due.day
             Analytics.capture("streaming:daily_active", ["speaker_count": String(due.speakerCount)])
             if ExpiredTrialSurvey.countStreamingDay(settings: settings) {
-                refreshExpiredTrialSurvey()
+                trialSurveyFetcher.refresh(analyticsAvailable: analyticsAvailable)
             }
         }
         // Keep the Scenes and Speakers screens in lockstep with the same

@@ -82,10 +82,11 @@ public final class DACPServer: @unchecked Sendable {
     /// kernel socket — would stay in `connections` for as long as this
     /// server runs (this server runs for the entire native-streaming session).
     private static let idleReceiveTimeout: TimeInterval = 30
-    /// Test-only: overrides ``idleReceiveTimeout`` so an idle-cancellation
-    /// test doesn't have to wait 30 real seconds. Nil (default) uses the
-    /// real value.
-    public var test_idleReceiveTimeoutOverride: TimeInterval?
+    /// Schedules each connection's ``idleReceiveTimeout`` deadline. Only the
+    /// tests pass anything but ``NativeBackend/dispatchDelayClock``, so an
+    /// idle-cancellation test decides when the deadline passes instead of
+    /// waiting 30 real seconds.
+    private let delayClock: NativeBackend.DelayClock
     /// Pending idle-timeout work item per connection, mirroring
     /// `connections` — cancelled the moment `receive(_:)` actually completes
     /// (success or error), cleaned up in the same places `connections`
@@ -106,7 +107,13 @@ public final class DACPServer: @unchecked Sendable {
     /// Test-only: how many connections are currently held.
     var test_connectionCount: Int { connections.count }
 
-    public init() {}
+    public convenience init() {
+        self.init(delayClock: NativeBackend.dispatchDelayClock)
+    }
+
+    init(delayClock: @escaping NativeBackend.DelayClock) {
+        self.delayClock = delayClock
+    }
 
     // MARK: - Lifecycle
 
@@ -242,12 +249,11 @@ public final class DACPServer: @unchecked Sendable {
         // ourselves — the `stateUpdateHandler` above then removes it from
         // `connections` exactly like any other cancellation, so there's no
         // duplicated removal logic here.
-        let timeout = test_idleReceiveTimeoutOverride ?? Self.idleReceiveTimeout
         let idleWork = DispatchWorkItem { [weak self] in
             self?.connections[key]?.cancel()
         }
         idleTimeouts[key] = idleWork
-        queue.asyncAfter(deadline: .now() + timeout, execute: idleWork)
+        delayClock(Self.idleReceiveTimeout, queue, idleWork)
     }
 
     private func receive(_ connection: NWConnection) {

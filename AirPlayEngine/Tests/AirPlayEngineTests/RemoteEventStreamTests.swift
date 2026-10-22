@@ -21,7 +21,7 @@ import CAirPlayEngine
 // global hook concurrently, so one test's `airplayengine_remote_fire` call
 // can be observed by another test's stream reader (or the hook gets
 // clobbered mid-test), which reproduced as an intermittent
-// `RemoteEventTestTimeout` under full-suite runs (never in isolation).
+// timeout waiting for an event under full-suite runs (never in isolation).
 // Nesting into the same `.serialized` parent as the outputs.c-registry
 // suites removes the collision — reusing the existing parent rather than a
 // second one because a separate `.serialized` suite would still race
@@ -41,7 +41,7 @@ extension SerializedEngineState {
 
         airplayengine_remote_fire(0xABCD, AIRPLAYENGINE_REMOTE_VOLUME, 0.75)
 
-        let event = try await reader.next(timeout: 2)
+        let event = try await reader.next()
         #expect(event == .volume(OutputID(rawValue: 0xABCD), level: 0.75))
 
         await engine.stop()
@@ -57,8 +57,8 @@ extension SerializedEngineState {
         airplayengine_remote_fire(0x1, AIRPLAYENGINE_REMOTE_VOLUME, 1.5)   // over
         airplayengine_remote_fire(0x2, AIRPLAYENGINE_REMOTE_VOLUME, -0.5)  // under
 
-        let over = try await reader.next(timeout: 2)
-        let under = try await reader.next(timeout: 2)
+        let over = try await reader.next()
+        let under = try await reader.next()
         #expect(over == .volume(OutputID(rawValue: 0x1), level: 1.0))
         #expect(under == .volume(OutputID(rawValue: 0x2), level: 0.0))
 
@@ -76,9 +76,9 @@ extension SerializedEngineState {
         airplayengine_remote_fire(0, AIRPLAYENGINE_REMOTE_NEXT, -1)
         airplayengine_remote_fire(0, AIRPLAYENGINE_REMOTE_PREVIOUS, -1)
 
-        let playPause = try await reader.next(timeout: 2)
-        let next = try await reader.next(timeout: 2)
-        let previous = try await reader.next(timeout: 2)
+        let playPause = try await reader.next()
+        let next = try await reader.next()
+        let previous = try await reader.next()
         #expect(playPause == .transport(.playPause))
         #expect(next == .transport(.next))
         #expect(previous == .transport(.previous))
@@ -98,7 +98,7 @@ extension SerializedEngineState {
         airplayengine_remote_fire(0, AIRPLAYENGINE_REMOTE_UNKNOWN, -1) // dropped
         airplayengine_remote_fire(0, AIRPLAYENGINE_REMOTE_NEXT, -1)    // delivered
 
-        let first = try await reader.next(timeout: 2)
+        let first = try await reader.next()
         #expect(first == .transport(.next), "UNKNOWN must be swallowed so .next is first")
 
         await engine.stop()
@@ -116,7 +116,7 @@ extension SerializedEngineState {
         // A fire after teardown reaches no hub (shared cleared) — nothing delivered.
         airplayengine_remote_fire(0, AIRPLAYENGINE_REMOTE_PLAYPAUSE, -1)
         await #expect(throws: (any Error).self) {
-            try await reader.next(timeout: 1)
+            try await reader.next()
         }
     }
 }
@@ -124,8 +124,9 @@ extension SerializedEngineState {
 } // extension SerializedEngineState
 
 /// Drains an `AsyncStream<RemoteEvent>` into a locked FIFO on a background task
-/// and exposes a timeout-guarded `next()` — the remote-event twin of
-/// `StateStreamTests`' `StreamReader`.
+/// and exposes `next()`, which returns the next event or throws once the stream
+/// has finished with none left. A stream that neither delivers nor finishes
+/// fails at `SuiteWait`'s ceiling.
 private final class RemoteEventReader: @unchecked Sendable {
     private let task: Task<Void, Never>
     private let sink: Sink
@@ -133,29 +134,40 @@ private final class RemoteEventReader: @unchecked Sendable {
     init(_ stream: AsyncStream<RemoteEvent>) {
         let sink = Sink()
         self.sink = sink
-        self.task = Task { for await event in stream { sink.append(event) } }
+        self.task = Task {
+            for await event in stream { sink.append(event) }
+            sink.finish()
+        }
     }
 
     private final class Sink: @unchecked Sendable {
         private let lock = NSLock()
         private var items: [RemoteEvent] = []
+        private var finished = false
         func append(_ e: RemoteEvent) { lock.lock(); items.append(e); lock.unlock() }
+        func finish() { lock.lock(); finished = true; lock.unlock() }
+        var isFinished: Bool { lock.lock(); defer { lock.unlock() }; return finished }
         func popFirst() -> RemoteEvent? {
             lock.lock(); defer { lock.unlock() }
             return items.isEmpty ? nil : items.removeFirst()
         }
     }
 
-    func next(timeout seconds: Double) async throws -> RemoteEvent {
-        let deadline = Date().addingTimeInterval(seconds)
-        while Date() < deadline {
-            if let element = sink.popFirst() { return element }
-            try await Task.sleep(nanoseconds: 2_000_000) // 2ms
+    func next() async throws -> RemoteEvent {
+        var element: RemoteEvent?
+        await SuiteWait.until("a remote event arrives or the stream finishes") {
+            // Read `finished` before popping: every append lands before
+            // `finish()`, so a finished stream with an empty queue has nothing
+            // left to deliver.
+            let done = sink.isFinished
+            element = element ?? sink.popFirst()
+            return element != nil || done
         }
-        throw RemoteEventTestTimeout()
+        guard let element else { throw RemoteEventStreamFinished() }
+        return element
     }
 
     deinit { task.cancel() }
 }
 
-private struct RemoteEventTestTimeout: Error {}
+private struct RemoteEventStreamFinished: Error {}

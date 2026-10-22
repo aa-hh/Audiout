@@ -1191,7 +1191,8 @@ public final class BTAlignmentWizardView: NSView {
 
     /// The listening screen's determinate bar: empty until the probe starts,
     /// then filled over the probe's lead plus its two lanes. Driven by a
-    /// plain timer outside headless runs; Reduce Motion keeps this progress cue.
+    /// plain timer, no animation API, so headless and Reduce Motion need no
+    /// branch.
     private func addProbeProgress() {
         let bar = NSProgressIndicator()
         bar.translatesAutoresizingMaskIntoConstraints = false
@@ -1208,8 +1209,7 @@ public final class BTAlignmentWizardView: NSView {
 
     /// The bar and the stage's speaker turns share this one clock.
     private func startProbeProgress() {
-        guard !HeadlessRuntime.isActive,
-              probeProgress != nil, probeProgressTimer == nil,
+        guard probeProgress != nil, probeProgressTimer == nil,
               let total = session.probeListeningSeconds else { return }
         probeProgressTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30, repeats: true) { [weak self] _ in
             guard let self, let bar = self.probeProgress,
@@ -1653,7 +1653,6 @@ public final class BTAlignmentWizardView: NSView {
         guard let probeProgress else { return false }
         return probeProgress.isDescendant(of: contentStack)
     }
-    var test_hasActiveProbeProgressTimer: Bool { probeProgressTimer?.isValid == true }
     var test_stage: AlignmentStageView { stage }
     /// Every direct text label in the mounted band, in reading order — the
     /// listening screen splits its message across a display headline and a body

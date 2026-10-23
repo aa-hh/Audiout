@@ -809,6 +809,16 @@ extension NativeBackend {
                 if let minor = snapshot.deviceClassMinor {
                     updated.bluetoothDeviceClassMinor = minor
                 }
+                // The model keeps the last known value for the same reason: a
+                // snapshot taken without the grant, or one whose SDP cache has
+                // gone, carries none. It also never DOWNGRADES: once the ids
+                // have been read, a later snapshot whose SDP cache has gone
+                // falls back to a name phrase, and letting that replace the
+                // ids would count one speaker under two strings in a session.
+                if let model = snapshot.model,
+                   updated.model == nil || model.hasPrefix("bt:") {
+                    updated.model = model
+                }
                 if updated != existing {
                     let availabilityMoved = updated.isAvailable != existing.isAvailable
                     if availabilityMoved, expectedSelected.contains(id) {
@@ -867,7 +877,8 @@ extension NativeBackend {
                     // gets the value re-pushed on every arm, so the snapshot and
                     // what is audible agree.
                     eq: eqByDeviceID[id] ?? .flat,
-                    bluetoothDeviceClassMinor: snapshot.deviceClassMinor)
+                    bluetoothDeviceClassMinor: snapshot.deviceClassMinor,
+                    model: snapshot.model)
                 // The first time this process lists a connected Bluetooth
                 // device is the only link-up it will ever see for it: a first
                 // pairing, or a speaker already up when the app launched. Both
@@ -2879,7 +2890,7 @@ extension NativeBackend: BTOutputControlling {
     /// `captureControlQueue`.
     private func beginWizardArmGate(expecting uids: Set<String>) {   // captureControlQueue
         cancelWizardArmGate()
-        scheduleWizardArmPoll(started: Date(), releasedAt: nil, expecting: uids)
+        scheduleWizardArmPoll(started: uptimeClock(), releasedAt: nil, expecting: uids)
     }
 
     /// `captureControlQueue`. Idempotent.
@@ -2888,24 +2899,23 @@ extension NativeBackend: BTOutputControlling {
         wizardArmPollWork = nil
     }
 
-    private func scheduleWizardArmPoll(started: Date, releasedAt: Date?,
+    private func scheduleWizardArmPoll(started: TimeInterval, releasedAt: TimeInterval?,
                                        expecting uids: Set<String>) {
         let work = DispatchWorkItem { [weak self] in
             self?.pollWizardArmGate(started: started, releasedAt: releasedAt, expecting: uids)
         }
         wizardArmPollWork = work
-        captureControlQueue.asyncAfter(
-            deadline: .now() + wizardArmPollInterval, execute: work)
+        delayClock(wizardArmPollInterval, captureControlQueue, work)
     }
 
     /// One arm-gate poll. `captureControlQueue`, which owns both sinks — and is
     /// not a render or tap thread, so the one telemetry line at the end is
     /// emitted where it belongs.
-    private func pollWizardArmGate(started: Date, releasedAt: Date?,
+    private func pollWizardArmGate(started: TimeInterval, releasedAt: TimeInterval?,
                                    expecting uids: Set<String>) {
         wizardArmPollWork = nil
-        let now = Date()
-        let waited = now.timeIntervalSince(started)
+        let now = uptimeClock()
+        let waited = now - started
         let rendering = btSink?.renderingDeviceUIDs() ?? []
         // `true` when there is no local sink at all: nothing to wait for.
         let localReleased = syncedLocalSink?.hasStartedRendering ?? true
@@ -2925,7 +2935,7 @@ extension NativeBackend: BTOutputControlling {
         // still awake. A release seen between two polls is dated to the poll
         // that saw it, which errs long by at most one interval.
         let releasedAt = releasedAt ?? (everyoneReleased ? now : nil)
-        let bedSeconds = releasedAt.map { now.timeIntervalSince($0) } ?? 0
+        let bedSeconds = releasedAt.map { now - $0 } ?? 0
         let ready = everyoneReleased && bedSeconds >= wizardArmMinimumBedSeconds
         // The ceiling is for a speaker that never releases. One that has
         // released is owed its bed however late it got there.

@@ -118,9 +118,10 @@ public final class LicenseSheetViewController: NSViewController {
         cancelButton.target = self
         cancelButton.action = #selector(cancelTapped)
 
-        // One action, one treatment: Register here is the same act as Register
-        // on the first-open licence gate (`LicenseGateViewController.swift:148`),
-        // so it wears the same gold. The folder's "no gold in these panes" rule
+        // One action, one treatment: Register here is the same act as the
+        // first-open licence gate's key check (its full key verifies itself;
+        // its one gold button is "Email my key" in the lost-key detour), so it
+        // wears the same gold. The folder's "no gold in these panes" rule
         // holds — a sheet is not a pane.
         //
         // It is also the folder's exception to "every view sets
@@ -181,7 +182,7 @@ public final class LicenseSheetViewController: NSViewController {
     /// The ONE place Remove decides whether it is on screen, so every state
     /// change lands the same way: shown exactly when there is a stored key.
     private func refreshButtons() {
-        removeButton.isHidden = (settings.licenseKey ?? "").isEmpty
+        removeButton.isHidden = !settings.hasLicenseKey
     }
 
     public override func viewDidAppear() {

@@ -104,6 +104,9 @@ public enum CompanionSnapshotBuilder {
     ///     right now, backing `Snapshot.missingSpeakers`; sorted by id here.
     ///   - note: the Mac's note slot, backing `Snapshot.note`; `severity` is
     ///     `"info"` or `"warning"`.
+    ///   - macAppVersion: passthrough to `Snapshot.macAppVersion`, the Mac
+    ///     app's `CFBundleShortVersionString`. `nil` from a dev run with no
+    ///     bundle to read; the phone only names it in a problem report.
     public static func build(
         devices: [Device],
         groupController: GroupController,
@@ -126,7 +129,8 @@ public enum CompanionSnapshotBuilder {
         alignmentFor: (Device) -> BTSpeakerTimingReport? = { _ in nil },
         speakerRecord: (Device) -> SpeakerPresentationRecord? = { _ in nil },
         missingSpeakers: [(id: String, name: String, kind: String?)] = [],
-        note: (text: String, severity: String)? = nil
+        note: (text: String, severity: String)? = nil,
+        macAppVersion: String? = nil
     ) -> Snapshot {
         let deviceStates = devices.map { device in
             deviceState(for: device, groupController: groupController, iconFor: iconFor,
@@ -211,6 +215,7 @@ public enum CompanionSnapshotBuilder {
                 .sorted { $0.id < $1.id }
                 .map { MissingSpeakerState(id: $0.id, name: $0.name, kind: $0.kind) },
             note: note.map { NoteState(text: $0.text, severity: $0.severity) },
+            macAppVersion: macAppVersion,
             settings: SettingsState(
                 connectVolume: connectVolume,
                 connectVolumeMin: connectVolumeMin,
@@ -221,34 +226,43 @@ public enum CompanionSnapshotBuilder {
         )
     }
 
-    /// The speaker a sync-calibration run for `targetID` would be measured
-    /// against, or `nil` when there is nothing usable — which is what turns
+    /// The Mac's own hardware outputs a sync-calibration run for `targetID`
+    /// may be measured against, in list order. The phone shows a picker only
+    /// when this holds more than one entry.
+    public static func alignmentReferenceCandidateIDs(
+        forTarget targetID: String,
+        among devices: [Device]
+    ) -> [String] {
+        devices.filter { $0.id != targetID && $0.isAvailable && $0.isLocalDevice }.map(\.id)
+    }
+
+    /// The speaker a sync-calibration run for `targetID` is measured against
+    /// by default, or `nil` when there is nothing usable — which is what turns
     /// the phone's "Fix timing" CTA off.
     ///
-    /// Mirrors the Mac wizard's own ordering
-    /// (`PopoverController.btWizardDefaultReference`): the Mac's own output
-    /// first (always present, always in step, nothing to set up), then any
-    /// other non-Bluetooth speaker, then a Bluetooth one. Cast is never
-    /// offered — a Cast receiver plays seconds behind live, which no
-    /// ±500 ms correction can resolve against.
+    /// Mirrors the Mac wizard's own rule
+    /// (`PopoverController.btWizardDefaultReference`): the Mac's own hardware
+    /// output first; else, when exactly one other speaker is audible, that
+    /// one; else the first. Cast is never offered — a Cast receiver plays
+    /// seconds behind live, which no ±500 ms correction can resolve against.
     ///
-    /// Restricted to devices the user currently has audio on: a reference that
-    /// is not playing makes no sound for the phone's microphone to hear, so
-    /// offering it would stage a run that cannot produce a measurement.
-    /// `isAudible` must be `GroupController.isMainOutMember(_:)` — the
-    /// group-aware read; `isSpeakerSelected(_:)` is blind to group membership
-    /// and would drop every member of an active group from the candidates.
+    /// Nothing here asks what is playing: `CompanionCoordinator` selects the
+    /// comparison output and the target for the run itself, so the choice
+    /// never depends on what is selected. `isAudible` only breaks the tie in
+    /// the fallback and must be `GroupController.isMainOutMember(_:)`, the
+    /// group-aware read.
     public static func alignmentReferenceID(
         forTarget targetID: String,
         among devices: [Device],
         isAudible: (String) -> Bool
     ) -> String? {
-        let candidates = devices.filter {
-            $0.id != targetID && $0.isAvailable && !$0.isCast && isAudible($0.id)
+        if let local = alignmentReferenceCandidateIDs(forTarget: targetID, among: devices).first {
+            return local
         }
-        if let local = candidates.first(where: \.isLocalDevice) { return local.id }
-        if let wired = candidates.first(where: { !$0.isBluetooth }) { return wired.id }
-        return candidates.first?.id
+        let fallback = devices.filter { $0.id != targetID && $0.isAvailable && !$0.isCast }
+        let audible = fallback.filter { isAudible($0.id) }
+        if audible.count == 1 { return audible[0].id }
+        return fallback.first?.id
     }
 
     /// The wire alignment struct for one device: the caller's timing report
@@ -267,6 +281,8 @@ public enum CompanionSnapshotBuilder {
             referenceID: alignmentReferenceID(
                 forTarget: device.id, among: devices,
                 isAudible: groupController.isMainOutMember),
+            referenceCandidateIDs: alignmentReferenceCandidateIDs(
+                forTarget: device.id, among: devices),
             settleRemainingSeconds: report.settleRemainingSeconds,
             clockState: report.clockState.rawValue,
             source: report.source?.rawValue,
@@ -315,7 +331,8 @@ public enum CompanionSnapshotBuilder {
             alignment: alignment,
             mixerVisibility: record?.visibility.rawValue,
             isVisibleInMixer: record?.isVisibleInMixer,
-            isPlaying: isPlaying
+            isPlaying: isPlaying,
+            model: device.model
         )
     }
 

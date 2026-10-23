@@ -132,23 +132,20 @@ import Network
         // nil until bound — confirmed with a standalone repro against this
         // SDK. Wait for the `.ready` state itself, not a non-nil `.port`,
         // and only then read the real assigned port.
-        var isReady = false
+        let listenerReady = Signal()
         listener.stateUpdateHandler = { state in
-            if case .ready = state { isReady = true }
+            if case .ready = state { listenerReady.fire() }
         }
         let netQueue = DispatchQueue(label: "DACPServerTests.loopback")
         listener.start(queue: netQueue)
 
-        let readyDeadline = Date().addingTimeInterval(2)
-        while !isReady && Date() < readyDeadline {
-            Thread.sleep(forTimeInterval: 0.005)
-        }
+        _ = waitFor([listenerReady], timeout: 2)
         // swift-testing has no runtime skip, so an environment that cannot
         // bind loopback FAILS loudly instead of passing silently. The bind
         // is deliberately narrowed to 127.0.0.1 (see the comment above)
         // precisely so this is reliable; if it ever does flake, that should
         // be visible.
-        try #require(isReady, "test loopback listener never reached .ready")
+        try #require(listenerReady.fired, "test loopback listener never reached .ready")
         let port = try #require(listener.port, "listener bound no port")
         try #require(port.rawValue != 0, "listener port never left the placeholder 0")
 
@@ -178,20 +175,21 @@ import Network
         let (listener, client, serverSide) = try makeLoopbackPair()
         defer { listener.cancel(); client.cancel() }
 
-        let server = DACPServer()
-        server.test_idleReceiveTimeoutOverride = 0.3 // real default is 30s
+        let clock = ManualDelayClock()
+        let server = DACPServer(delayClock: clock.queueHoppingClock)
         defer { server.stop() }
         server.accept(serverSide)
 
         // Deliberately send nothing — the exact "idle peer" shape the
         // timeout exists for. The client's own pending receive should
-        // complete (EOF or error) once the server closes its end after the
-        // shortened idle deadline, rather than hang forever waiting on data
+        // complete (EOF or error) once the server closes its end when the
+        // idle deadline passes, rather than hang forever waiting on data
         // that will never arrive.
         let idleClosed = Signal()
         client.receive(minimumIncompleteLength: 1, maximumLength: 1) { _, _, isComplete, error in
             if isComplete || error != nil { idleClosed.fire() }
         }
+        clock.fireAll()
         #expect(waitFor([idleClosed], timeout: 2),
                 "the server never cancelled the idle connection")
     }
@@ -204,16 +202,19 @@ import Network
         let (listener, client, serverSide) = try makeLoopbackPair()
         defer { listener.cancel(); client.cancel() }
 
-        let server = DACPServer()
-        // Short on purpose: proves the round trip completes well inside the
-        // idle window on its own merits, not because the timeout happens to
-        // be generous.
-        server.test_idleReceiveTimeoutOverride = 0.3
+        // `clock`, not `queueHoppingClock`: the idle deadline is never fired
+        // here, and `pendingCount` must see the server's own work item to
+        // tell whether the receive cancelled it.
+        let clock = ManualDelayClock()
+        let server = DACPServer(delayClock: clock.clock)
         // `onVolume` is `@Sendable` (DACPServer.swift), so the compiler
         // rightly refuses to let this closure mutate a captured local `var`
         // — assert inline instead of capturing the reported values out.
         let volumeReported = Signal()
-        server.onVolume = { token, level in
+        // The loopback peer is 127.0.0.1: the host is what NativeBackend checks
+        // against the speaker's own address before it moves a slider.
+        server.onVolume = { remoteHost, token, level in
+            #expect(remoteHost == "127.0.0.1")
             #expect(token == 460916894)
             #expect(abs(level - DACPServer.level(fromDb: -16.5)) < 0.0001)
             volumeReported.fire()
@@ -234,6 +235,7 @@ import Network
         #expect(waitFor([volumeReported, responseReceived], timeout: 2),
                 "the request round trip did not complete within 2s")
         #expect(responseText?.hasPrefix("HTTP/1.1 204 No Content") == true)
+        #expect(clock.pendingCount == 0, "the completed receive cancels the idle deadline")
     }
 
     /// The bug this guards: `accept(_:)` stored every arriving connection

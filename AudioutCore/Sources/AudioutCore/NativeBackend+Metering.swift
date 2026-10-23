@@ -56,13 +56,33 @@ extension NativeBackend {
             }
             // When off, the drain chain stops itself on its next fire.
             self.scheduleSystemRMSDrainLocked()
+            self.reconcileLocalMeterTapLocked()
             return (self.levelsFlowing, self.meteringTapDiffLocked())
         }
         captureCoordinator?.setMeteringActive(flowing)
+        localMeterCapture?.setMeteringActive(flowing)
         routeMixer.setMeteringActive(flowing)
         leveledInjector.setMeteringActive(flowing)
         localPlaybackEngine?.setMeteringActive(flowing)
         applyMeteringTapDiff(diff)
+    }
+
+    /// Start or stop the listen-only tap (`localMeterCapture`) that gives the
+    /// Mac's bar a level while the sending capture is off: it runs only while
+    /// levels are wanted, the backend is started and not asleep. Decided under
+    /// `stateQueue`, executed on `captureControlQueue` in decision order, the
+    /// same split `reconcileCaptureGate` keeps. On `stateQueue`.
+    func reconcileLocalMeterTapLocked() {   // on stateQueue
+        let want = localMeterCapture != nil && started && levelsFlowing
+            && !captureRunning && !suspended
+        guard want != localMeterTapRunning else { return }
+        localMeterTapRunning = want
+        // The Mac stops being meterable from this tap; drop its bar to 0.
+        if !want, levelsFlowing { emitCombinedLevel(forDevice: Self.localDeviceID) }
+        guard let coordinator = localMeterCapture else { return }
+        captureControlQueue.async {
+            if want { coordinator.start() } else { coordinator.stop() }
+        }
     }
 
     // MARK: Synced local sink (T-FANOUT / "play everywhere")
@@ -167,11 +187,14 @@ extension NativeBackend {
     /// device's own delay line, which sits DOWNSTREAM of this measurement, so
     /// changing a trim changes when the speaker sounds and never when the bar moves;
     /// one system RMS feeds every device's bar and no per-device delay can reach it.
+    /// The local device's second "rendering now" fact is `localMeterTapRunning`:
+    /// with the sending capture off, macOS plays the system mix on the Mac
+    /// itself, and the listen-only tap measures exactly that mix.
     /// Must run on `stateQueue`, like every caller.
     func isMeterable(_ device: Device) -> Bool {
         if device.isBluetooth { return device.connectionState == .connected }
         if device.isCast { return castPlaying.contains(device.id) }
-        return device.isLocalDevice ? syncedLocalSinkApplied : device.isSelected
+        return device.isLocalDevice ? (syncedLocalSinkApplied || localMeterTapRunning) : device.isSelected
     }
 
     /// Read whatever `noteSystemRMS` last stored (stream_id 0) and, if it is
@@ -203,9 +226,8 @@ extension NativeBackend {
     private func scheduleSystemRMSDrainLocked() {   // on stateQueue
         guard levelsFlowing, !levelDrainScheduled else { return }
         levelDrainScheduled = true
-        stateQueue.asyncAfter(deadline: .now() + .nanoseconds(Int(levelEmitIntervalNanos))) { [weak self] in
-            self?.drainSystemRMS()
-        }
+        let work = DispatchWorkItem { [weak self] in self?.drainSystemRMS() }
+        levelDelayClock(Double(levelEmitIntervalNanos) / 1_000_000_000, stateQueue, work)
     }
 
     /// Record one app's PRE-volume SOURCE level and fan it out: to the app's own
@@ -220,7 +242,7 @@ extension NativeBackend {
         stateQueue.async {
             guard self.levelsFlowing else { return }
             self.scheduleLevelEmit(key: .app(bundleID), rms: rms,
-                                   now: DispatchTime.now().uptimeNanoseconds)
+                                   now: self.levelUptimeNanos())
             self.latestAppLevel[bundleID] = rms
             // The device this app feeds tracks the loudest source routed to it, so
             // re-emit its combined `.level` now that this source level changed.
@@ -276,7 +298,7 @@ extension NativeBackend {
             }
         }
         scheduleLevelEmit(key: .device(id), rms: max(systemContribution, sourceContribution),
-                          now: DispatchTime.now().uptimeNanoseconds)
+                          now: levelUptimeNanos())
     }
 
     /// The event one coalescer key delivers.
@@ -297,9 +319,8 @@ extension NativeBackend {
             pendingLevel[key] = rms
             guard levelFlushScheduled.insert(key).inserted else { return }
             let remaining = levelEmitIntervalNanos - (now - last)
-            stateQueue.asyncAfter(deadline: .now() + .nanoseconds(Int(remaining))) { [weak self] in
-                self?.flushPendingLevel(key: key)
-            }
+            let work = DispatchWorkItem { [weak self] in self?.flushPendingLevel(key: key) }
+            levelDelayClock(Double(remaining) / 1_000_000_000, stateQueue, work)
             return
         }
         lastLevelEmitNanos[key] = now
@@ -313,7 +334,7 @@ extension NativeBackend {
     private func flushPendingLevel(key: LevelKey) {   // on stateQueue
         levelFlushScheduled.remove(key)
         guard let rms = pendingLevel.removeValue(forKey: key) else { return }
-        lastLevelEmitNanos[key] = DispatchTime.now().uptimeNanoseconds
+        lastLevelEmitNanos[key] = levelUptimeNanos()
         emit(levelEvent(for: key, rms: rms))
     }
 

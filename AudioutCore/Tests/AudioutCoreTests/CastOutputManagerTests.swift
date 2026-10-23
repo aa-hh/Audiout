@@ -89,7 +89,7 @@ import Testing
             serverBindsLoopbackOnly: true,
             streamHostOverride: "127.0.0.1",
             requestTimeout: 3,
-            reconnectDelay: 0.1,
+            reconnectDelay: 1,
             playDeadline: playDeadline
         )
     }

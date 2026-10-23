@@ -5,8 +5,8 @@ import AudioutCore
 import AudioutSharedUI
 
 /// Settings › **Audiout Remote**: the "Allow control from iPhone on this
-/// network" switch, the invitation to the iPhone app while it is on, and the
-/// remembered iPhones. A build that does not carry the companion
+/// network" switch, how to add an iPhone and the invitation to the iPhone
+/// app while it is on, and the remembered iPhones. A build that does not carry the companion
 /// (``isOffered`` false) never builds this section at all.
 @MainActor
 public final class RemoteSettingsViewController: NSViewController, SettingsReadoutProviding {
@@ -23,14 +23,19 @@ public final class RemoteSettingsViewController: NSViewController, SettingsReado
     private let phoneListHeading = SettingsPane.makeSectionTitle("Remembered iPhones")
     private var phoneCard: (container: NSView, box: GroupedSectionView, stack: NSStackView)?
 
-    // The switch's card, and the invitation mounted in it directly under the
-    // switch (or the override note) only while that switch is on.
+    // The switch's card, and the add-an-iPhone line and the invitation
+    // mounted in it directly under the switch (or the override note) only
+    // while that switch is on.
     private var remoteCard: (container: NSView, box: GroupedSectionView, stack: NSStackView)?
     private var remoteControlRow: NSView?
     private var overrideNoteRow: NSView?
+    private var addPhoneRow: NSView?
+    private let addPhoneNote = SettingsForm.label(
+        "To add an iPhone, open Audiout Remote on it while it's on the same Wi-Fi as this Mac.")
     private var remoteInviteRow: NSView?
     private var remoteInviteTile: RemoteInviteView?
     private let remoteInviteButton = NSButton()
+    private let comingSoonNote = SettingsPane.makeNote("The iPhone app is coming soon to the App Store.")
 
     /// Resolved once at init (the env var, if any, can't change for the life of
     /// this process) — what the switch must honestly reflect: the EFFECTIVE
@@ -39,10 +44,9 @@ public final class RemoteSettingsViewController: NSViewController, SettingsReado
     /// renders disabled and ``remoteControlOverrideNote`` explains why.
     private let remoteControlResolution: AppSettings.RemoteControlResolution
 
-    /// Whether this build carries the iPhone companion. The app builds the
-    /// section only when it does: an off switch reads as "you could turn this
-    /// on", and until Audiout Remote is on the App Store there is nothing to
-    /// turn on.
+    /// Whether this build carries the iPhone companion; every build does now.
+    /// The app builds the section only when it does: an off switch reads as
+    /// "you could turn this on".
     public var isOffered: Bool { !remoteControlResolution.isUnoffered }
 
     /// Fired after "Allow control from iPhone on this network" changes and
@@ -98,13 +102,10 @@ public final class RemoteSettingsViewController: NSViewController, SettingsReado
 
     var readoutLines: [String] {
         guard allowsRemoteControl else { return ["Off"] }
-        let phones = approvals?.approvals ?? []
-        guard !phones.isEmpty else { return ["On · no iPhones yet"] }
-        let allowed = phones.filter { $0.decision == .approved }.count
-        switch allowed {
-        case 0: return ["On · no iPhones allowed"]
+        switch approvals?.approvals.count ?? 0 {
+        case 0: return ["On · no iPhones yet"]
         case 1: return ["On · 1 iPhone allowed"]
-        default: return ["On · \(allowed) iPhones allowed"]
+        case let allowed: return ["On · \(allowed) iPhones allowed"]
         }
     }
 
@@ -144,6 +145,14 @@ public final class RemoteSettingsViewController: NSViewController, SettingsReado
         remoteControlOverrideNote.maximumNumberOfLines = 0
         remoteControlOverrideNote.preferredMaxLayoutWidth = SettingsPane.cardLaneWidth
 
+        // The same plain caption: there is nothing to click, a new phone
+        // pairs by connecting and the Mac asks.
+        addPhoneNote.font = Tokens.Font.caption
+        addPhoneNote.textColor = Tokens.Color.label2
+        addPhoneNote.lineBreakMode = .byWordWrapping
+        addPhoneNote.maximumNumberOfLines = 0
+        addPhoneNote.preferredMaxLayoutWidth = SettingsPane.cardLaneWidth
+        addPhoneRow = SettingsPane.makeLaneRow(addPhoneNote)
         buildRemoteInviteRow()
 
         var cardRows: [NSView] = [remoteControlRow]
@@ -161,10 +170,16 @@ public final class RemoteSettingsViewController: NSViewController, SettingsReado
             phoneCard = phones
             content += [phoneListHeading, phones.container]
         }
+        content.append(comingSoonNote)
         let page = SettingsForm.pageView(content: content)
-        if let stack = page.subviews.first as? NSStackView, phoneCard != nil {
+        if let stack = page.subviews.first as? NSStackView {
+            // The same gap after both cards, so the note sits one section
+            // below whichever is last on screen while the phone list hides.
             stack.setCustomSpacing(GroupsPaneLayout.sectionGap, after: card.container)
-            stack.setCustomSpacing(GroupsPaneLayout.labelToSectionGap, after: phoneListHeading)
+            if let phoneCard {
+                stack.setCustomSpacing(GroupsPaneLayout.labelToSectionGap, after: phoneListHeading)
+                stack.setCustomSpacing(GroupsPaneLayout.sectionGap, after: phoneCard.container)
+            }
         }
         view = page
         rebuildPhoneList()
@@ -209,22 +224,26 @@ public final class RemoteSettingsViewController: NSViewController, SettingsReado
         remoteInviteRow = SettingsPane.makeLaneRow(invitation)
     }
 
-    /// Mount or unmount the invitation, and drop its QR once a phone is
-    /// remembered. Hidden-in-place for the TILE (a stack collapses an arranged
-    /// subview it is told to hide) and mounted/unmounted for the ROW.
+    /// Mount or unmount the add-an-iPhone line and the invitation under it,
+    /// and drop the invitation's QR once a phone is remembered. Hidden-in-place
+    /// for the TILE (a stack collapses an arranged subview it is told to hide)
+    /// and mounted/unmounted for the ROWS.
     private func applyRemoteInviteVisibility() {
-        guard isViewLoaded, let row = remoteInviteRow, let card = remoteCard else { return }
+        guard isViewLoaded, let addPhoneRow, let inviteRow = remoteInviteRow, let card = remoteCard else { return }
         remoteInviteTile?.isHidden = !(approvals?.approvals.isEmpty ?? true)
         let wanted = remoteControlSwitch.state == .on
-        if wanted, row.superview == nil {
-            let anchor = overrideNoteRow ?? remoteControlRow
-            let after = card.stack.arrangedSubviews.firstIndex(where: { $0 === anchor })
-            card.stack.insertArrangedSubview(row, at: (after ?? 0) + 1)
-            // `removeFromSuperview` dropped the width pin.
-            row.widthAnchor.constraint(equalTo: card.stack.widthAnchor).isActive = true
-        } else if !wanted, row.superview != nil {
-            card.stack.removeArrangedSubview(row)
-            row.removeFromSuperview()
+        var anchor = overrideNoteRow ?? remoteControlRow
+        for row in [addPhoneRow, inviteRow] {
+            if wanted, row.superview == nil {
+                let after = card.stack.arrangedSubviews.firstIndex(where: { $0 === anchor })
+                card.stack.insertArrangedSubview(row, at: (after ?? 0) + 1)
+                // `removeFromSuperview` dropped the width pin.
+                row.widthAnchor.constraint(equalTo: card.stack.widthAnchor).isActive = true
+            } else if !wanted, row.superview != nil {
+                card.stack.removeArrangedSubview(row)
+                row.removeFromSuperview()
+            }
+            anchor = row
         }
         card.box.rows = card.stack.arrangedSubviews.filter { !$0.isHidden }
     }
@@ -257,9 +276,22 @@ public final class RemoteSettingsViewController: NSViewController, SettingsReado
         card.box.rows = card.stack.arrangedSubviews.filter { !$0.isHidden }
     }
 
-    /// One remembered phone: name, Allowed/Denied, remove. The identity shown
-    /// is only the phone's (already truncated) display name — the raw
-    /// clientID never reaches UI; it rides the remove button's identifier.
+    /// "Last connected 3 hours ago". The reference is at least a second past
+    /// `lastSeen`, so a phone that just connected (or a clock set back)
+    /// never reads "in 0 seconds". The words follow the app's own language,
+    /// not the Mac's, so the sentence never mixes two.
+    static func lastConnectedText(_ lastSeen: Date, now: Date = Date()) -> String {
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .full
+        formatter.locale = Locale(identifier: Bundle.main.preferredLocalizations.first ?? "en")
+        let reference = max(now, lastSeen.addingTimeInterval(1))
+        return "Last connected " + formatter.localizedString(for: lastSeen, relativeTo: reference)
+    }
+
+    /// One remembered phone: name, when it last connected, remove. The
+    /// identity shown is only the phone's (already truncated) display name —
+    /// the raw clientID never reaches UI; it rides the remove button's
+    /// identifier.
     private func makePhoneRow(_ approval: CompanionApproval) -> ListRowView {
         let remove = NSButton()
         remove.isBordered = false
@@ -274,7 +306,7 @@ public final class RemoteSettingsViewController: NSViewController, SettingsReado
         remove.identifier = NSUserInterfaceItemIdentifier(approval.clientID)
         remove.setAccessibilityLabel("Remove \(approval.lastKnownName)")
         return ListRowView(title: approval.lastKnownName,
-                           caption: approval.decision == .approved ? "Allowed" : "Denied",
+                           caption: Self.lastConnectedText(approval.lastSeen),
                            accessory: remove)
     }
 
@@ -378,15 +410,22 @@ public final class RemoteSettingsViewController: NSViewController, SettingsReado
         remoteControlToggled()
     }
 
+    // MARK: Test-support hooks (adding an iPhone)
+
+    /// The add-an-iPhone line's text while it is in the pane (only while the
+    /// switch is on), nil otherwise.
+    public var test_addPhoneNote: String? {
+        _ = view
+        return addPhoneRow?.superview != nil ? addPhoneNote.stringValue : nil
+    }
+
     // MARK: Test-support hooks (Remembered iPhones — T24)
 
-    /// The rendered phone rows as `(name, decision)` pairs, in list order —
-    /// read from the controller the way the rebuild does, after forcing the
-    /// same load/rebuild a real show performs.
-    public var test_rememberedPhones: [(name: String, decision: String)] {
+    /// The rendered phone rows as `(name, caption)` pairs, in list order.
+    public var test_rememberedPhones: [(name: String, caption: String)] {
         _ = view
-        return approvals?.approvals.map {
-            ($0.lastKnownName, $0.decision == .approved ? "Allowed" : "Denied")
+        return phoneCard?.stack.arrangedSubviews.compactMap {
+            ($0 as? ListRowView).map { ($0.titleLabel.stringValue, $0.caption ?? "") }
         } ?? []
     }
 
@@ -405,10 +444,9 @@ public final class RemoteSettingsViewController: NSViewController, SettingsReado
         return phoneCard?.stack.arrangedSubviews.count ?? 0
     }
 
-    /// The rendered Allowed/Denied caption's actual text colour at a row
-    /// index — pins that a recorded decision is a plain word, not the
-    /// failure/warning red, regardless of which way the decision went.
-    public func test_phoneRowDecisionTextColor(at index: Int) -> NSColor? {
+    /// The rendered last-connected caption's actual text colour at a row
+    /// index — pins that it is plain text, not the failure/warning red.
+    public func test_phoneRowCaptionTextColor(at index: Int) -> NSColor? {
         _ = view
         guard let rows = phoneCard?.stack.arrangedSubviews, rows.indices.contains(index),
               let row = rows[index] as? ListRowView, let caption = row.caption else { return nil }

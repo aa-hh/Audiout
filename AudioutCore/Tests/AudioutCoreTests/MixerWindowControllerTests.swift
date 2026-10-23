@@ -129,25 +129,8 @@ import AppKit
     }
 
     private func waitForFleet(_ backend: MockBackend, count: Int) async throws {
-        let stream = backend.makeEventStream()
-        let box = WindowTestCountBox()
-        try await confirmation("fleet discovered") { discovered in
-            let task = Task {
-                for await event in stream {
-                    if case .deviceAdded = event, await box.increment() >= count {
-                        discovered(); break
-                    }
-                }
-            }
-            defer { task.cancel() }
-            backend.start()
-            try await withThrowingTaskGroup(of: Void.self) { group in
-                group.addTask { _ = await task.value }
-                group.addTask { try await Task.sleep(for: .seconds(2)) }
-                try await group.next()
-                group.cancelAll()
-            }
-        }
+        backend.start()
+        await SuiteWait.until("the fleet to be discovered") { backend.devices.count >= count }
     }
 
     /// Like `makeWindow()`, but also constructs and injects a
@@ -253,7 +236,7 @@ import AppKit
         #expect(page.test_rowTitles == before, "a hidden page only stores what it is told")
 
         window.setVisibleTab(.speakers)
-        #expect(page.test_rowTitles == ["1 speaker can\u{2019}t be found", "Bluetooth access is off",
+        #expect(page.test_rowTitles == ["1 of the 2 can\u{2019}t be found", "Bluetooth access is off",
                                         "Pair Bluetooth speaker\u{2026}"])
         #expect(window.test_sidebar.test_contextMenuItems(for: .device(id: "den"))
                     .contains("Forget \u{201C}Missing speaker\u{201D}\u{2026}"))
@@ -1812,9 +1795,4 @@ import AppKit
         #expect(window.test_scenesSidebar.test_rowIDs == [group.id])
         #expect(window.test_scenesSidebar.selectedSceneID == group.id)
     }
-}
-
-private actor WindowTestCountBox {
-    private var count = 0
-    func increment() -> Int { count += 1; return count }
 }

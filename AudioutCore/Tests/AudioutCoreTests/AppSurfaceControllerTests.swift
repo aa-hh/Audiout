@@ -4,6 +4,7 @@ import Foundation
 import Testing
 import AppKit
 @testable import AudioutCore
+@testable import AudioutOnboardingUI
 @testable import AudioutPopoverUI
 @testable import AudioutSettingsUI
 @testable import AudioutSharedUI
@@ -1390,5 +1391,255 @@ import AppKit
 
         popover.onMicPromptAnswered?()
         #expect(surface.shell.test_returnToFrontCount == 1)
+    }
+}
+
+/// The expired-trial survey card over the shell's content view. Nested under
+/// `SerializedSharedState` because these tests install the process-global
+/// `Analytics` sink (`StructuredEvents`). The card advances synchronously
+/// under `HeadlessRuntime`, so nothing here waits.
+extension SerializedSharedState {
+    @MainActor
+    @Suite final class AppSurfaceControllerTests_Survey: IsolatedSuite {
+
+        private func makeSurface() -> (AppSurfaceController, PopoverController) {
+            let popover = PopoverController(
+                appRouting: AppRoutingController(store: AppRouteStore(directory: scratchDir), loadPersisted: false),
+                runningAppsProvider: { [] })
+            let surface = AppSurfaceController(
+                popoverController: popover,
+                settings: AppSettings(defaults: isolatedDefaults),
+                groupsContent: {
+                    let vc = NSViewController()
+                    vc.view = NSView(frame: NSRect(x: 0, y: 0, width: SurfaceLayout.width, height: 464))
+                    return vc
+                },
+                speakersContent: { NSViewController() },
+                settingsContent: { SettingsRootViewController(sections: []) },
+                frameAutosaveName: NSWindow.FrameAutosaveName(uniqueName("SurveySurfaceTests")))
+            surface.show(anchorRect: nil)
+            surface.shell.test_isPanelVisibleOverride = true
+            return (surface, popover)
+        }
+
+        private func presentCard(_ surface: AppSurfaceController, _ popover: PopoverController) -> TrialSurveyCardView? {
+            popover.onSurveyAnswer?(ExpiredTrialSurveyFixture.survey)
+            return surface.test_surveyCard
+        }
+
+        /// Red if Answer stopped raising the card, or raised it anywhere but
+        /// over the shell's content view (a new window or sheet).
+        @Test func answeringPutsTheCardOverTheContentView() {
+            let (surface, popover) = makeSurface()
+            let card = presentCard(surface, popover)
+            #expect(card != nil)
+            #expect(card?.superview === surface.shell.test_panel?.contentView)
+        }
+
+        /// Red if Escape with the card up closed the whole surface, kept the
+        /// card, or stopped reporting it as dismissed.
+        @Test func escapeWithTheCardUpDismissesTheCardNotTheSurface() {
+            let (surface, popover) = makeSurface()
+            var closes = 0
+            surface.onClose = { closes += 1 }
+            _ = presentCard(surface, popover)
+            let seen = StructuredEvents.recording { surface.shell.test_panel?.cancelOperation(nil) }
+            #expect(closes == 0)
+            #expect(surface.test_surveyCard == nil)
+            #expect(seen.names() == ["survey dismissed"])
+        }
+
+        /// Red if a reason without a follow-up stopped going straight to the
+        /// text step, or the progress line stopped counting the skipped step.
+        @Test func thePriceGoesStraightToTheTextStep() throws {
+            let (surface, popover) = makeSurface()
+            let card = try #require(presentCard(surface, popover))
+            card.test_pick(try #require(card.test_tileTitles.firstIndex(of: "The price")))
+            #expect(card.test_step == .text)
+            #expect(card.test_progressFraction == 1)
+        }
+
+        /// Red if the multi-select follow-up lost a tick, its answer stopped
+        /// reaching PostHog as an array, the reason or the typed text went
+        /// missing from `survey sent`, or Done left the card up.
+        @Test func aMissingFeatureAnswerIsSentWithItsTicksAndText() throws {
+            let (surface, popover) = makeSurface()
+            let card = try #require(presentCard(surface, popover))
+            let seen = StructuredEvents.recording {
+                card.test_pick(card.test_tileTitles.firstIndex(of: "It's missing something I need")!)
+                card.test_pick(0)
+                card.test_pick(1)
+                card.test_continue()
+                card.test_textView?.string = "  More inputs  "
+                card.test_send()
+            }
+            #expect(seen.names() == ["survey sent"])
+            let props = try #require(seen.all.first?.1)
+            #expect((props["$survey_response_q2"] as? [String])?.count == 2)
+            #expect(props["$survey_response_q1"] as? String == "It's missing something I need")
+            #expect(props["$survey_response_q5"] as? String == "More inputs")
+            #expect(card.test_step == .thanks)
+            card.test_done()
+            #expect(surface.test_surveyCard == nil)
+        }
+
+        /// Red if the text step went back to a single-line field (Return
+        /// sending instead of starting a line), or Send trimmed inside the answer.
+        @Test func aTypedMultiLineAnswerIsSentWithItsNewline() throws {
+            let (surface, popover) = makeSurface()
+            let card = try #require(presentCard(surface, popover))
+            card.test_pick(try #require(card.test_tileTitles.firstIndex(of: "The price")))
+            let area = try #require(card.test_textView)
+            let seen = StructuredEvents.recording {
+                area.insertText("  Line one", replacementRange: area.selectedRange())
+                area.insertNewline(nil)
+                area.insertText("line two  \n", replacementRange: area.selectedRange())
+                #expect(card.test_step == .text)
+                card.test_send()
+            }
+            #expect(seen.names() == ["survey sent"])
+            #expect(seen.all.first?.1["$survey_response_q5"] as? String == "Line one\nline two")
+        }
+
+        /// Red if the number keys stopped choosing the tile they label.
+        @Test func aNumberKeyChoosesItsTile() throws {
+            let (surface, popover) = makeSurface()
+            let card = try #require(presentCard(surface, popover))
+            let titles = card.test_tileTitles
+            card.test_pressKey("3")
+            #expect(card.answers.reason == titles[2])
+        }
+
+        /// Red if switching screens with the card up left it on a content
+        /// view that is being replaced, or stopped reporting the dismissal.
+        @Test func switchingScreensDismissesTheCard() {
+            let (surface, popover) = makeSurface()
+            _ = presentCard(surface, popover)
+            let seen = StructuredEvents.recording { surface.select(.groups) }
+            #expect(seen.names() == ["survey dismissed"])
+            #expect(surface.test_surveyCard == nil)
+        }
+
+        /// Red if a window covering the Mixer counts as an unanswered close of
+        /// the survey invite, or a real close stops counting as one.
+        @Test func onlyARealCloseCountsAgainstTheInvite() {
+            let (surface, popover) = makeSurface()
+            var unanswered = 0
+            popover.surveyInviteProvider = { ExpiredTrialSurveyFixture.survey }
+            popover.onSurveyInviteUnanswered = { unanswered += 1; return false }
+            popover.setUnregisteredNote(.trialEnded)
+            popover.test_simulateOpen()
+            #expect(popover.test_systemAirPlayNoteText == PopoverController.surveyInviteText)
+            for _ in 0..<3 {
+                surface.test_notePixelVisibility(false)
+                surface.test_notePixelVisibility(true)
+            }
+            #expect(unanswered == 0)
+            surface.performClose()
+            #expect(unanswered == 1)
+        }
+    }
+
+    /// The first-open licence gate over the shell's content view. Serialized
+    /// with the survey suite because presenting it reports
+    /// `license:gate_shown` through the process-global `Analytics`.
+    @MainActor
+    @Suite final class AppSurfaceControllerTests_LicenseGate: IsolatedSuite {
+
+        private func makeSurface() -> (AppSurfaceController, LicenseGateViewController) {
+            let popover = PopoverController(
+                appRouting: AppRoutingController(store: AppRouteStore(directory: scratchDir), loadPersisted: false),
+                runningAppsProvider: { [] })
+            let settings = AppSettings(defaults: isolatedDefaults,
+                                       licenseServerURL: URL(string: "https://license.example.com"))
+            let surface = AppSurfaceController(
+                popoverController: popover,
+                settings: settings,
+                groupsContent: {
+                    let vc = NSViewController()
+                    vc.view = NSView(frame: NSRect(x: 0, y: 0, width: SurfaceLayout.width, height: 464))
+                    return vc
+                },
+                speakersContent: { NSViewController() },
+                settingsContent: { SettingsRootViewController(sections: []) },
+                frameAutosaveName: NSWindow.FrameAutosaveName(uniqueName("GateSurfaceTests")))
+            surface.show(anchorRect: nil)
+            let gate = LicenseGateViewController(settings: settings, openURL: { _ in }, onPassed: {})
+            return (surface, gate)
+        }
+
+        /// Every view reachable through the accessibility tree from `root`.
+        private func accessibleViews(under root: NSView) -> [NSView] {
+            var found: [NSView] = []
+            var queue: [Any] = root.accessibilityChildren() ?? []
+            while !queue.isEmpty {
+                let element = queue.removeFirst()
+                if let view = element as? NSView { found.append(view) }
+                if let node = element as? NSAccessibilityProtocol {
+                    queue.append(contentsOf: node.accessibilityChildren() ?? [])
+                }
+            }
+            return found
+        }
+
+        /// Red if the gate stopped landing on top of the mounted screen, rode
+        /// up under the toolbar strip, or let a click through to the Mixer.
+        @Test func presentingPutsTheGateOverTheContentBelowTheToolbar() throws {
+            let (surface, gate) = makeSurface()
+            surface.presentLicenseGate(gate)
+            let content = try #require(surface.shell.window?.contentView)
+            let overlay = try #require(surface.test_licenseGateView)
+            content.layoutSubtreeIfNeeded()
+
+            #expect(overlay.superview === content)
+            #expect(content.subviews.last === overlay, "the gate is the topmost view")
+            #expect(abs(overlay.frame.maxY - (content.bounds.height - surface.test_chromeTopInset)) < 0.5)
+            let mid = NSPoint(x: content.bounds.midX, y: content.bounds.midY)
+            let hit = try #require(content.hitTest(mid))
+            #expect(hit === overlay || hit.isDescendant(of: overlay))
+        }
+
+        /// Red if the Mixer under the gate stayed reachable by VoiceOver, or the
+        /// gate's panel stopped being reachable at all.
+        @Test func theGatedMixerExposesOnlyTheGateToAccessibility() throws {
+            let (surface, gate) = makeSurface()
+            let content = try #require(surface.shell.window?.contentView)
+            #expect(!accessibleViews(under: content).isEmpty, "the bare Mixer has accessible views")
+
+            surface.presentLicenseGate(gate)
+            let overlay = try #require(surface.test_licenseGateView)
+            let reachable = accessibleViews(under: content)
+            #expect(reachable.contains { $0.accessibilityLabel() == "Activate Audiout" && $0.accessibilityRole() == .group })
+            #expect(reachable.allSatisfy { $0.isDescendant(of: overlay) },
+                    "Mixer views stay reachable: \(reachable.filter { !$0.isDescendant(of: overlay) })")
+        }
+
+        /// Red if Settings stayed covered, or returning to the Mixer left it
+        /// uncovered.
+        @Test func settingsLiftsTheGateAndTheMixerBringsItBack() throws {
+            let (surface, gate) = makeSurface()
+            surface.presentLicenseGate(gate)
+            let overlay = try #require(surface.test_licenseGateView)
+
+            surface.select(.settings)
+            #expect(overlay.superview == nil)
+
+            surface.select(.mixer)
+            #expect(overlay.superview === surface.shell.window?.contentView)
+        }
+
+        /// Red if dismissing left the overlay in the window, or left the
+        /// Mixer hidden from accessibility.
+        @Test func dismissingRemovesTheGate() throws {
+            let (surface, gate) = makeSurface()
+            surface.presentLicenseGate(gate)
+            let overlay = try #require(surface.test_licenseGateView)
+            let content = try #require(surface.shell.window?.contentView)
+
+            surface.dismissLicenseGate(animated: false)
+            #expect(overlay.superview == nil)
+            #expect(surface.test_licenseGateView == nil)
+            #expect(accessibleViews(under: content).contains { !$0.isDescendant(of: overlay) })
+        }
     }
 }

@@ -81,8 +81,8 @@ import CoreAudio
     }
 
     private final class FakeDACPEndpoint: DACPEndpoint, @unchecked Sendable {
-        var onVolume: (@Sendable (_ activeRemote: UInt32, _ level: Double) -> Void)?
-        var onVolumeStep: (@Sendable (_ activeRemote: UInt32, _ direction: Int) -> Void)?
+        var onVolume: (@Sendable (_ remoteHost: String?, _ activeRemote: UInt32, _ level: Double) -> Void)?
+        var onVolumeStep: (@Sendable (_ remoteHost: String?, _ activeRemote: UInt32, _ direction: Int) -> Void)?
         func start(dacpID: UInt64) {}
         func stop() {}
     }
@@ -398,7 +398,8 @@ import CoreAudio
         btRenderStartTimeout: TimeInterval = 6,
         injectedPerAppCapture: PerAppCaptureCoordinator? = nil,
         delayClock: @escaping NativeBackend.DelayClock = NativeBackend.dispatchDelayClock,
-        uptimeClock: @escaping NativeBackend.UptimeClock = NativeBackend.dispatchUptimeClock
+        uptimeClock: @escaping NativeBackend.UptimeClock = NativeBackend.dispatchUptimeClock,
+        watchdogScheduler: SilenceWatchdogScheduling? = nil
     ) -> (NativeBackend, RecordingEngine, FakeDiscovery, FakeBTEnumerator, SpyBTSink, FakeCapture) {
         let engine = RecordingEngine()
         let discovery = FakeDiscovery()
@@ -414,6 +415,7 @@ import CoreAudio
             injectedPerAppCapture: injectedPerAppCapture,
             delayClock: delayClock,
             uptimeClock: uptimeClock,
+            watchdogScheduler: watchdogScheduler,
             silenceFallbackDelay: silenceFallbackDelay,
             systemDefaultOutputIsAirPlayClass: { false },
             aggregateControl: NoOpAggregateControl(),
@@ -438,6 +440,59 @@ import CoreAudio
 
     fileprivate func device(_ backend: NativeBackend, _ id: String) -> Device? {
         backend.devices.first { $0.id == id }
+    }
+
+    /// The barrier for "nothing more happens" checks: every job already queued
+    /// on `stateQueue` has run, and so has every `captureControlQueue` job those
+    /// queued. Two rounds, because a hop can go back again: the render poll
+    /// reads the sink on `captureControlQueue` and applies on `stateQueue`, and
+    /// `updateBTReferenceBufferLocked(pushToSink: false)` queues one more
+    /// `stateQueue` hop before its room-delay fan-out.
+    fileprivate func drainQueues(_ backend: NativeBackend) {
+        for _ in 0..<2 {
+            backend.stateQueue.sync {}
+            backend.captureControlQueue.sync {}
+        }
+    }
+
+    /// A silence-watchdog scheduler that runs nothing until `fireAll()`, so the
+    /// fallback countdown elapses when the test says. Per-suite copy of the one
+    /// in `NativeBackendTests`, which is private to that file.
+    private final class ManualWatchdogScheduler: SilenceWatchdogScheduling, @unchecked Sendable {
+        private let lock = NSLock()
+        private var pending: [(id: Int, body: @Sendable () -> Void)] = []
+        private var nextID = 0
+
+        func schedule(after delay: TimeInterval, _ body: @escaping @Sendable () -> Void) -> SilenceWatchdogToken {
+            lock.withLock { () -> SilenceWatchdogToken in
+                let id = nextID
+                nextID += 1
+                pending.append((id, body))
+                return Token(id: id, scheduler: self)
+            }
+        }
+
+        fileprivate func cancel(id: Int) {
+            lock.withLock { pending.removeAll { $0.id == id } }
+        }
+
+        /// Whether a countdown is armed (scheduled, not fired or cancelled).
+        var hasPending: Bool { lock.withLock { !pending.isEmpty } }
+
+        /// Run (and consume) every armed countdown, as if its delay had passed.
+        func fireAll() {
+            let bodies = lock.withLock { () -> [@Sendable () -> Void] in
+                let b = pending.map(\.body); pending.removeAll(); return b
+            }
+            for body in bodies { body() }
+        }
+
+        private final class Token: SilenceWatchdogToken {
+            let id: Int
+            weak var scheduler: ManualWatchdogScheduler?
+            init(id: Int, scheduler: ManualWatchdogScheduler) { self.id = id; self.scheduler = scheduler }
+            func cancel() { scheduler?.cancel(id: id) }
+        }
     }
 
     // MARK: - Partition: BT-only selection
@@ -534,7 +589,7 @@ import CoreAudio
         // Headroom is 100 ms, so this lands exactly on the buffer, not over it.
         backend.endBTWizardLatencyPreview(forDevice: btMove.id, keepMs: Double(startBuffer - 100))
         waitFor { backend.btMeasuredLatencyMs(forDevice: self.btMove.id) == Double(startBuffer - 100) }
-        SuiteWait.settle(0.3)   // let the async recompute settle
+        drainQueues(backend)   // the reference recompute and its fan-out have run
 
         #expect(capture.preDelayMs.isEmpty, "got \(capture.preDelayMs)")
         #expect(backend.btReferenceDelayMs() == startBuffer)
@@ -618,7 +673,7 @@ import CoreAudio
 
         backend.endBTWizardLatencyPreview(forDevice: btMove.id, keepMs: Double(startBuffer + 100))
         waitFor { backend.btMeasuredLatencyMs(forDevice: self.btMove.id) == Double(startBuffer + 100) }
-        SuiteWait.settle(0.3)
+        drainQueues(backend)
         #expect(backend.btReferenceDelayMs() == raised, "a lower re-measurement never lowers the room")
         #expect(capture.preDelayMs.last == raised - startBuffer, "got \(capture.preDelayMs)")
 
@@ -646,7 +701,7 @@ import CoreAudio
         waitFor { engine.addedIDs.contains(ap.outputID) && sink.calls.contains("start") }
         backend.endBTWizardLatencyPreview(forDevice: btMove.id, keepMs: Double(backend.startBufferMs + 300))
         waitFor { (capture.preDelayMs.last ?? 0) > 0 }
-        SuiteWait.settle(0.3)
+        drainQueues(backend)   // the raise's own re-anchor lands before the mark
         let mark = sink.calls.count
 
         backend.setOutputSet([ap.id, btFlip.id])
@@ -710,7 +765,7 @@ import CoreAudio
 
         macSelected.set(true)
         backend.setOutputSet([btMove.id, ap.id])   // same ids — the Mac-toggle shape
-        SuiteWait.settle(0.3)
+        drainQueues(backend)
 
         #expect(sink.calls.filter { $0 == "setComposition" }.count == compositionPushes,
                 "a Mac toggle alone must not push a composition")
@@ -750,7 +805,7 @@ import CoreAudio
         let callsAfterEnable = sink.calls.count
 
         backend.setOutputSet([btMove.id])   // membership-neutral
-        SuiteWait.settle(0.3)
+        drainQueues(backend)
         #expect(sink.calls.count == callsAfterEnable,
                 "an unchanged BT decision must not re-drive the sink manager")
     }
@@ -765,7 +820,10 @@ import CoreAudio
 
         backend.setOutputSet([btMove.id])
         backend.retryOutput(btMove.id)
-        SuiteWait.settle(0.3)
+        // An engine op is kicked by claiming `converging` under `stateQueue`
+        // before either call returns, and released only after the op ran.
+        waitFor { !backend.test_isConverging }
+        drainQueues(backend)
         #expect(engine.addedIDs.isEmpty, "a BT retry must not invent an engine op")
     }
 
@@ -779,7 +837,7 @@ import CoreAudio
         bt.fire([btMove])
         waitFor { self.device(backend, self.btMove.id) != nil }
         backend.setOutputSet([btMove.id])
-        SuiteWait.settle(0.2)
+        drainQueues(backend)   // the BT transition has run against the missing factory
         // Passes by not crashing; nothing to observe without a sink.
     }
 
@@ -789,7 +847,8 @@ import CoreAudio
     /// `isAvailable` (a BT id never reaches `.connected`), so the silence
     /// fallback must not un-mute the Mac mid-playback.
     @Test func availableBTOnlySelectionDoesNotTripSilenceFallback() {
-        let (backend, _, _, bt, sink, capture) = makeBackend(silenceFallbackDelay: 0.1)
+        let watchdog = ManualWatchdogScheduler()
+        let (backend, _, _, bt, sink, capture) = makeBackend(watchdogScheduler: watchdog)
         defer { backend.stop() }
         backend.start()
         bt.fire([btMove])   // connected → isAvailable
@@ -797,7 +856,8 @@ import CoreAudio
 
         backend.setOutputSet([btMove.id])
         waitFor { sink.calls.contains("start") }
-        SuiteWait.settle(0.5)   // give a (wrong) fallback time to fire
+        watchdog.fireAll()      // the fallback delay elapses: a (wrong) fallback fires now
+        drainQueues(backend)    // ...and its capture stop has landed
 
         #expect(!capture.ops.contains("stop"),
                 "an audible BT-only selection must never un-gate capture (the Mac stays muted)")
@@ -807,7 +867,8 @@ import CoreAudio
     /// so the fallback fires — and the speaker reconnecting clears it again
     /// (the availability edge re-runs the watchdog reconcile).
     @Test func unavailableBTSelectionTripsFallbackAndReconnectClearsIt() {
-        let (backend, _, _, bt, sink, capture) = makeBackend(silenceFallbackDelay: 0.1)
+        let watchdog = ManualWatchdogScheduler()
+        let (backend, _, _, bt, sink, capture) = makeBackend(watchdogScheduler: watchdog)
         defer { backend.stop() }
         backend.start()
         bt.fire([BTDeviceSnapshot(id: btMove.id, name: btMove.name, isConnected: false)])
@@ -816,6 +877,8 @@ import CoreAudio
         backend.setOutputSet([btMove.id])
         waitFor { sink.calls.contains("start") }
         // Stranded: nothing audible → the watchdog fires and un-gates capture.
+        waitFor { watchdog.hasPending }
+        watchdog.fireAll()
         waitFor { capture.ops.contains("stop") }
         #expect(capture.ops.contains("stop"),
                 "a dead BT-only selection falls back to the Mac's own speakers")
@@ -996,16 +1059,25 @@ import CoreAudio
 
     /// A selected Bluetooth speaker whose sink is rendering, so the row has left
     /// its connect hold and no timeout can turn it `.failed` mid-test.
+    /// With a `clock`, the backend's delayed jobs run on it, and this drives the
+    /// render poll that ends the hold.
     private func selectedMove(
-        btConnection: BTConnectionManaging? = nil
+        btConnection: BTConnectionManaging? = nil,
+        clock: ManualDelayClock? = nil
     ) -> (NativeBackend, FakeBTEnumerator, SpyBTSink) {
-        let (backend, _, _, bt, sink, _) = makeBackend(btConnection: btConnection)
+        let (backend, _, _, bt, sink, _) = makeBackend(
+            btConnection: btConnection,
+            delayClock: clock?.queueHoppingClock ?? NativeBackend.dispatchDelayClock)
         backend.start()
         bt.fire([btSinkDeathSpeaker])
         waitFor { self.device(backend, self.btSinkDeathSpeaker.id) != nil }
         backend.setOutputSet([btSinkDeathSpeaker.id])
         waitFor { sink.calls.contains("start") }
         sink.renderingUIDs = [btSinkDeathSpeaker.id]
+        if let clock {
+            waitFor { clock.pendingCount >= 1 }
+            clock.advance(by: NativeBackend.btRenderPollInterval)
+        }
         waitFor { self.device(backend, self.btSinkDeathSpeaker.id)?.connectionState == .connected }
         return (backend, bt, sink)
     }
@@ -1076,15 +1148,20 @@ import CoreAudio
     /// enumerator emits only on a list change, so a speaker macOS still lists
     /// would stay unavailable until relaunch.
     @Test func sinkDeathMarkedGone_restartsTheEnumeratorAfterTheRecoveryDelay() {
-        let (backend, bt, _) = selectedMove()
+        let clock = ManualDelayClock()
+        let (backend, bt, _) = selectedMove(clock: clock)
         defer { backend.stop() }
-        backend.btSinkDeathRecoverySeconds = 0.1
         let id = btSinkDeathSpeaker.id
         let startsBefore = bt.starts
 
         backend.handleBTSinkDead(uid: id)
         backend.handleBTSinkDead(uid: id)
 
+        // The second death marks the row gone and arms the restart in the same
+        // `stateQueue` block, and `devices` reads under that queue.
+        waitFor { self.device(backend, id)?.isAvailable == false }
+        #expect(bt.starts == startsBefore, "the restart waits for the recovery delay")
+        clock.advance(by: backend.btSinkDeathRecoverySeconds)
         waitFor { bt.starts > startsBefore }
         #expect(bt.starts == startsBefore + 1)
     }
@@ -1176,7 +1253,7 @@ import CoreAudio
         backend.retryOutput(btMove.id)          // never selected
         waitFor { self.device(backend, self.btMove.id)?.connectionState == .off }
         #expect(device(backend, btMove.id)?.connectionState == ConnectionState.off)
-        SuiteWait.settle(0.3)
+        drainQueues(backend)
         #expect(device(backend, btMove.id)?.connectionState == ConnectionState.off,
                 "an unselected connect must never leave a row spinning")
     }
@@ -1185,7 +1262,7 @@ import CoreAudio
     /// `.failed` rather than spinning forever.
     @Test func sinkThatNeverRendersDegradesToFailedWithinTheCap() {
         let clock = ManualDelayClock()
-        let (backend, _, _, bt, _, _) = makeBackend(btRenderStartTimeout: 0.2,
+        let (backend, _, _, bt, _, _) = makeBackend(btRenderStartTimeout: 5,
                                                     delayClock: clock.queueHoppingClock,
                                                     uptimeClock: clock.uptime)
         defer { backend.stop() }
@@ -1196,7 +1273,7 @@ import CoreAudio
         backend.setOutputSet([btMove.id])
         waitFor { self.device(backend, self.btMove.id)?.connectionState == .connecting }
         waitFor { clock.pendingCount >= 1 }
-        clock.advance(by: 0.3)
+        clock.advance(by: 6)   // past the 5 s cap
         waitFor {
             if case .failed = self.device(backend, self.btMove.id)?.connectionState { return true }
             return false
@@ -1215,7 +1292,7 @@ import CoreAudio
     /// seconds later, every time.
     @Test func speakerSelectedWithNothingPlayingLandsConnectedNotFailed() {
         let clock = ManualDelayClock()
-        let (backend, _, _, bt, sink, _) = makeBackend(btRenderStartTimeout: 0.2,
+        let (backend, _, _, bt, sink, _) = makeBackend(btRenderStartTimeout: 5,
                                                        delayClock: clock.queueHoppingClock,
                                                        uptimeClock: clock.uptime)
         defer { backend.stop() }
@@ -1227,7 +1304,7 @@ import CoreAudio
         backend.setOutputSet([btMove.id])
         waitFor { self.device(backend, self.btMove.id)?.connectionState == .connecting }
         waitFor { clock.pendingCount >= 1 }
-        clock.advance(by: 0.3)
+        clock.advance(by: 6)   // past the 5 s cap
         waitFor { self.device(backend, self.btMove.id)?.connectionState == .connected }
         #expect(device(backend, btMove.id)?.connectionState == ConnectionState.connected,
                 "a silent Mac must not turn a healthy speaker into a failed row")
@@ -1236,7 +1313,10 @@ import CoreAudio
     /// Deselecting mid-hold ends the spinner at once — the poll must not
     /// resurrect it as either `.connected` or `.failed`.
     @Test func deselectingMidHoldEndsTheSpinner() {
-        let (backend, _, _, bt, sink, _) = makeBackend(btRenderStartTimeout: 0.2)
+        let clock = ManualDelayClock()
+        let (backend, _, _, bt, sink, _) = makeBackend(btRenderStartTimeout: 5,
+                                                       delayClock: clock.queueHoppingClock,
+                                                       uptimeClock: clock.uptime)
         defer { backend.stop() }
         backend.start()
         bt.fire([btMove])
@@ -1244,9 +1324,13 @@ import CoreAudio
 
         backend.setOutputSet([btMove.id])
         waitFor { self.device(backend, self.btMove.id)?.connectionState == .connecting }
+        waitFor { clock.pendingCount >= 1 }     // the render poll is armed
         backend.setOutputSet([])
         sink.renderingUIDs = [btMove.id]        // the sink kept rendering briefly
-        SuiteWait.settle(0.5)
+        // Past the 5 s cap: the poll sees both a render and an expired ceiling,
+        // so either wrong answer gets its chance to land.
+        clock.advance(by: 6)
+        drainQueues(backend)
         #expect(device(backend, btMove.id)?.connectionState == ConnectionState.off,
                 "a deselected row is off — never connected, never failed")
     }
@@ -1520,7 +1604,14 @@ import CoreAudio
 
         let (levels, task) = subscribeLevels(backend); defer { task.cancel() }
         backend.setMeteringActive(true)
-        waitFor(timeout: 0.3) { capture.onLevel?(0.6); return false }
+        // Re-fire while polling, as the metered case above does. `latestSystemRMS`
+        // is written only by the drain that emits every metered device's level,
+        // so reading 0.6 under `stateQueue` means that drain has finished.
+        waitFor { capture.onLevel?(0.6); return backend.stateQueue.sync { backend.latestSystemRMS } == 0.6 }
+        // The event stream is first in, first out: once a level queued behind
+        // that drain arrives, anything the drain emitted has arrived too.
+        backend.emitAppLevel(bundleID: "com.example.marker", rms: 0.1)
+        waitFor { levels.hasAppLevel("com.example.marker") }
 
         #expect(levels.lastDeviceLevel(btMove.id) == nil,
                 "a selected-but-silent BT speaker must not light its bar")
@@ -1623,7 +1714,9 @@ import CoreAudio
     /// Turns red if removing a per-app Bluetooth route stops ending its hold and returning the row to `.off`.
     @Test func removingThePerAppBTRouteEndsTheHoldAndReadsOff() {
         let perAppCapture = workingPerAppCapture(bundleIDs: ["com.foo"])
-        let (backend, _, _, bt, sink, _) = makeBackend(injectedPerAppCapture: perAppCapture)
+        let clock = ManualDelayClock()
+        let (backend, _, _, bt, sink, _) = makeBackend(injectedPerAppCapture: perAppCapture,
+                                                       delayClock: clock.queueHoppingClock)
         defer { backend.stop() }
         backend.start()
         bt.fire([btMove])
@@ -1631,13 +1724,15 @@ import CoreAudio
 
         backend.updateAppRoutes([route("com.foo", name: "Foo", toDevice: btMove.id)])
         waitFor { self.device(backend, self.btMove.id)?.connectionState == .connecting }
+        waitFor { clock.pendingCount >= 1 }     // the render poll is armed
         backend.updateAppRoutes([])
         waitFor { self.device(backend, self.btMove.id)?.connectionState == .off }
         #expect(device(backend, btMove.id)?.connectionState == ConnectionState.off)
 
         // The hold is gone: a later render cannot resurrect the row.
         sink.renderingUIDs = [btMove.id]
-        SuiteWait.settle(0.3)
+        clock.advance(by: NativeBackend.btRenderPollInterval)
+        drainQueues(backend)
         #expect(device(backend, btMove.id)?.connectionState == ConnectionState.off,
                 "a removed route's deadline must not promote the row afterwards")
     }
@@ -1645,8 +1740,10 @@ import CoreAudio
     /// Turns red if the per-app claim's release writes `.off` over the `.failed` of a Bluetooth speaker whose own loss dropped the route.
     @Test func perAppOnlyBTSpeakerLostAfterTheCeilingKeepsItsFailure() {
         let perAppCapture = workingPerAppCapture(bundleIDs: ["com.foo"])
+        let clock = ManualDelayClock()
         let (backend, _, _, bt, sink, _) = makeBackend(
-            btRenderStartTimeout: 0.2, injectedPerAppCapture: perAppCapture)
+            btRenderStartTimeout: 5, injectedPerAppCapture: perAppCapture,
+            delayClock: clock.queueHoppingClock, uptimeClock: clock.uptime)
         defer { backend.stop() }
         backend.start()
         bt.fire([btMove])
@@ -1654,6 +1751,8 @@ import CoreAudio
 
         backend.updateAppRoutes([route("com.foo", name: "Foo", toDevice: btMove.id)])
         waitFor { sink.perAppClaimedUIDCalls.last == [self.btMove.id] }
+        waitFor { clock.pendingCount >= 1 }
+        clock.advance(by: 6)   // past the 5 s cap
         waitFor {
             if case .failed = self.device(backend, self.btMove.id)?.connectionState { return true }
             return false
@@ -1753,7 +1852,7 @@ import CoreAudio
         waitFor { self.device(backend, self.btMove.id) != nil }
 
         backend.updateAppRoutes([route("com.foo", name: "Foo", toDevice: btMove.id)])
-        SuiteWait.settle(0.3)
+        drainQueues(backend)
         #expect(device(backend, btMove.id)?.connectionState == ConnectionState.off,
                 "nothing is connecting to a speaker that is not there")
     }
@@ -1768,7 +1867,7 @@ import CoreAudio
         waitFor { self.device(backend, self.btMove.id) != nil }
 
         backend.updateAppRoutes([route("com.foo", name: "Foo", toDevice: btMove.id)])
-        SuiteWait.settle(0.3)
+        drainQueues(backend)
         #expect(device(backend, btMove.id)?.connectionState == ConnectionState.off)
         #expect(sink.perAppClaimedUIDCalls.last != [btMove.id])
 
@@ -1832,7 +1931,7 @@ import CoreAudio
         // count — seeded the way the existing suite does.
         backend.endBTWizardLatencyPreview(forDevice: btMove.id, keepMs: 900)
         waitFor { backend.btMeasuredLatencyMs(forDevice: self.btMove.id) == 900 }
-        waitFor(timeout: 0.3) { false }   // let the async reference recompute settle
+        drainQueues(backend)   // the reference recompute and its fan-out have run
 
         #expect(backend.localSinkReferenceDelayMs() == BTSyncedSink.defaultBTOnlyBufferMs,
                 "a per-app-only device's latency must never raise the shared BT reference")

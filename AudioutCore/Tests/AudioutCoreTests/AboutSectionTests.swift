@@ -4,6 +4,7 @@ import Foundation
 import Testing
 import AppKit
 import AudioutSharedUI
+import AudioutCore
 @testable import AudioutSettingsUI
 
 /// Covers the About/Credits surface reachable from Settings › General ›
@@ -32,6 +33,31 @@ import AudioutSharedUI
         let data = try! PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0)
         try! data.write(to: dir.appendingPathComponent("Info.plist"))
         return Bundle(path: dir.path)!
+    }
+
+    // Turns red if the Developer card is mounted regardless of `isDevBuild`,
+    // which would ship the licence-gate override in a release.
+    @Test func theDeveloperCardIsMountedOnlyInADevBuild() {
+        let settings = AppSettings(defaults: TestIsolation(owner: "AboutSectionTests").makeDefaults())
+        let shipping = GeneralSettingsViewController(loginItem: FakeLoginItem(), settings: settings,
+                                                     isDevBuild: false)
+        #expect(!shipping.test_developerSectionIsMounted)
+        let dev = GeneralSettingsViewController(loginItem: FakeLoginItem(), settings: settings,
+                                                isDevBuild: true)
+        #expect(dev.test_developerSectionIsMounted)
+    }
+
+    // Turns red if the Developer "Licence server" popup stops storing the
+    // choice or stops telling the app layer exactly once, so no re-check runs.
+    @Test func theLicenseServerPopupStoresTheChoiceAndNotifiesOnce() {
+        let settings = AppSettings(defaults: TestIsolation(owner: "AboutSectionTests").makeDefaults())
+        let dev = GeneralSettingsViewController(loginItem: FakeLoginItem(), settings: settings,
+                                                isDevBuild: true)
+        var fired = 0
+        dev.onLicenseServerChanged = { fired += 1 }
+        dev.test_selectLicenseServer(.production)
+        #expect(settings.licenseServerChoice == .production)
+        #expect(fired == 1)
     }
 
     // MARK: AboutInfo reads the bundle, never hardcodes

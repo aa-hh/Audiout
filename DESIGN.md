@@ -67,6 +67,10 @@ typography:
     fontFamily: "SF Pro (system), monospacedDigit"
     fontSize: "16pt"
     fontWeight: 600
+  pairingCode:
+    fontFamily: "SF Pro (system), monospacedDigit"
+    fontSize: "28pt (off-scale)"
+    fontWeight: 600
   titleLarge:
     fontFamily: "SF Pro (system)"
     fontSize: "15pt (systemFontSize + 2)"
@@ -126,7 +130,7 @@ typography:
     fontWeight: 700
   wordmark:
     fontFamily: "ClashDisplay-Semibold (bundled at assembly, falls back to bold system)"
-    fontSize: "sized per call site (gate primer, About)"
+    fontSize: "sized per call site (About)"
     fontWeight: 600
 rounded:
   control: "10pt"
@@ -517,14 +521,14 @@ file describes, restated in AppKit's own size vocabulary (`systemFontSize`
 relative to a text style.
 
 ### Hierarchy
-- **Display** (700, 20pt; `displayLarge` 700/24pt for the licence gate's
-  welcome headline): a window's own headline, where the headline is the
-  reason the window opened.
+- **Display** (700, 20pt): a window's own headline, where the headline is the
+  reason the window opened, and the licence gate's "Activate Audiout".
+  `displayLarge` (700, 24pt) has no consumer.
 - **Heading** (600, 16pt; `headingDigits` 600/16pt with tabular digits for
   the Overview's counts): a window page's name and the "Equalizer" heading
   on the speaker page and the Main Audio page — one step above body.
 - **Title Large / Subtitle Large** (`titleLarge` 400/15pt, `subtitleLarge`
-  400/12pt): the licence gate's explanation and key field.
+  400/12pt): the licence gate's subtitles and status line.
 - **Body** (400, 13pt; `bodyEmphasized` 600/13pt for the sidebar plates and
   the password sheet's heading):
   list-row titles, form labels, and a section title above a box (the scene
@@ -659,7 +663,7 @@ this Mac have plain titles without explanatory subtitles.
 The empty Apps that stay on this Mac card fits one 44 pt Add app row plus
 6 pt card padding above and below. Removing the last app returns it to that
 height.
-Status readouts, Allowed/Denied phone captions, launch-option and Login Items
+Status readouts, phone "Last connected" captions, launch-option and Login Items
 warnings, and buffer reconnect results remain visible. Advanced mounts its
 feedback row only while reconnecting or showing a result; clearing feedback
 removes that row and its divider. Its forced-launch-option warning remains
@@ -670,7 +674,7 @@ collapsing Advanced dismisses its popover.
 |---|---|---|
 | General | "Needs Login Items approval" | `ring` |
 | | "Opens at login", "Doesn't open at login" | `labelCool` |
-| Audiout Remote (companion builds only) | "Off", "On · no iPhones yet", "On · no iPhones allowed", "On · 1 iPhone allowed", "On · N iPhones allowed" | `labelCool` |
+| Audiout Remote | "Off", "On · no iPhones yet", "On · 1 iPhone allowed", "On · N iPhones allowed" | `labelCool` |
 | Appearance | "{theme} · {accent}", e.g. "Match system · Full gold" | `labelCool` |
 | Audio | "No apps stay on this Mac", "1 app stays on this Mac", "N apps stay on this Mac"; second line "Buffer N ms" while the buffer is not 1000 ms | `labelCool` |
 | License (builds with a licence server only) | "Trial · N days left", "Registered", "Key saved, not verified" | `labelCool` |
@@ -702,15 +706,17 @@ strip: "Available" in `captionEmphasized` / `speakersAccent` over four kind
 tiles (AirPlay, Bluetooth, Cast, This Mac), then Unavailable behind a 1 pt
 `containerEdge` rule. A tile is a 16 pt `labelCool2` glyph, its number in
 `Tokens.Font.headingDigits` and its label in `caption` / `labelCool`; a kind's
-number is `speakersAccent` above 0, Unavailable's is `label`, and both are
+number is `speakersAccent` above 0, Unavailable's is `labelCool`, and both are
 `labelCool2` at 0. This Mac counts as This Mac; any other speaker counts under
 its kind only while the Mac can reach it and as Unavailable otherwise, so
 Unavailable equals the rows under the sidebar's dividers. After the strip come
 one-line `ListRowView` rows, built once and only shown while true: "N speakers
-can't be found" with "Forget N speakers…", "Local Network access is off" with
+can't be found" (or "K of the N can't be found" when only some unavailable
+speakers are missing) with "Forget K speakers…", "Local Network access is off" with
 "Open Privacy Settings…", "Bluetooth access is off" with its action button, and
 "Pair Bluetooth speaker…" with a `speakersAccent` `plus.circle` and a
-`labelCool2` chevron, always last. Each row's longer sentence is its tooltip
+`labelCool2` `arrow.up.forward.app`, since it opens System Settings, always
+last. Each row's longer sentence is its tooltip
 and VoiceOver hint. Nothing on the tab uses `systemGreen`.
 
 `SpeakerSearch` decides when each number is known: This Mac once it is
@@ -733,15 +739,18 @@ one hero panel, gating Done until every check passes.
 
 Mostly flat, matching iOS: the dark ground ladder (canvas → panel → raised)
 and, in light, edge weight alone carry depth. `Tokens.Color.shadow` (an
-alias of `NSColor.black`) has four real consumers, every one of them a flat
-clipped band rather than a blurred `NSShadow`: `AlignmentPlateCell` (the
+alias of `NSColor.black`) has five real consumers. Four are a flat clipped
+band rather than a blurred shadow: `AlignmentPlateCell` (the
 wizard's answer-plate lip shading, rim shadow blend, and chip shadow fill),
 `WarmFaderCell` (the fader trough's inset shade at
 `Tokens.Color.insetShadeAlpha`, 0.18),
 `GroupedSectionView`'s `.well` style (a 1pt band at that same alpha, clipped
 inside the shape's top edge), and `SetupPreviewFrameView` (the onboarding demo
 frame, which blends the same 0.18 lip and a 0.06 darkening of its own `well`
-fill, because it is layer-backed rather than hand-drawn). `.well` is the page card recessed: the
+fill, because it is layer-backed rather than hand-drawn). The one blurred
+shadow is `TrialSurveyCardView`'s: the expired-trial survey card floats over
+the screen it covers, so its layer casts a 44 pt blur at 0.4 opacity, 18 pt
+down. `.well` is the page card recessed: the
 `Tokens.Color.well` fill in place of `.card`'s `raised`, the same
 `containerEdge` stroke and, by default, the `panel` radius; both Equalizer
 wells take the `row` radius (16 pt), the radius of the list below them, so
@@ -766,6 +775,17 @@ The popover's own
 `ControlPanelBackingView` (a custom-drawn bubble-plus-beak shape, because
 `NSPanel` has no arrow) is a separate, named custom-drawn exception that
 does not itself draw a shadow.
+
+`BetaChipView`, in the alignment wizard's title row, is the other named
+exception: a layer-backed `well` capsule with a 1pt `rim` border carrying
+`Beta` in `microLabel` `label2`. Alignment ships as a beta and the window
+that offers it says so, between the speaker's name and the click count. No
+stock control is a label on a tinted capsule — `NSButton`'s recessed bezel
+is the nearest look and it is a control, which this is not. It is
+fixed-width chrome, so the truncating name is the half that gives way, and
+it is one accessibility element, not two. The iPhone draws the same capsule
+as `BetaBadge` on its three alignment doors; neither app puts the word in a
+menu item, where a capsule cannot go.
 
 ### Named Rules
 
@@ -817,9 +837,12 @@ round at **control** (10pt).
 ## Components
 
 ### ProminentButton (signature component)
-The one call-to-action button in the app: `Tokens.Color.gold` fill via
+The call-to-action button everywhere but the licence gate (which draws
+`CTAButton`, below): `Tokens.Color.gold` fill via
 `bezelColor`, `Tokens.Color.inkOnFill` ink, `Tokens.Font.body` (or the
-emphasized weight for a finale CTA). Fill and ink are pinned to their DARK
+emphasized weight for a finale CTA). On macOS 26 and later it sets
+`tintProminence` to primary: at the automatic default AppKit draws the
+`bezelColor` muted, and the gold came out a dark olive in the popover. Fill and ink are pinned to their DARK
 values (`#E8B84B` with `#171104`) in both appearances: one light gold with dark
 text everywhere, the same pin as the alignment wizard's primary plates. Light
 mode's paper gold `#A67C1E` is shaded by the rounded bezel into a muddy olive
@@ -957,7 +980,8 @@ here offers), which, like a click on the selected row, raises the sheet; red is
 reserved for a refused password or code. A code receiver gets the sheet's code
 variant: the heading "Enter the code shown on “<name>”", then four
 one-digit boxes (52×48 pt, 8 pt apart, the row centred in the 320 pt sheet,
-24 pt medium monospaced digits, no placeholder; each box is `CodeBoxCell`: a
+24 pt medium monospaced digits, no placeholder; each box is `CodeBoxCell`
+(`AudioutSharedUI`, shared with the licence gate's key boxes): a
 `well` fill inside a 1 pt `rim` edge on the 10 pt control radius, so the
 boundary holds 3:1 on any sheet background, with the digit, caret and field
 editor centred vertically and the stock focus ring following the rounded
@@ -1093,17 +1117,22 @@ why a card is empty must not be the faintest text on the panel.
 ### Note Banner, Inset Cards and the Thank-You Card (Mixer)
 **Note banner** (`SystemAirPlayNoteBannerView`, a `TintedNoteBackgroundView`
 subclass): a glyph and a wrapping label in `label`. It mounts in two
-places, the warning banner at the top of the panel and the note slot. Two
+places, the warning banner at the top of the panel and the note slot. Three
 severities:
 
-| Severity | Tint | Glyph |
-|---|---|---|
-| Info | `ring` | `info.circle.fill` |
-| Warning | `failure` | `exclamationmark.triangle.fill` |
+| Severity | Tint | Glyph | Button |
+|---|---|---|---|
+| Info | `ring` | `info.circle.fill` | gold `ProminentButton` |
+| Question | `ring` | `bubble.left.fill` | gold `ProminentButton` |
+| Warning | `failure` | `exclamationmark.triangle.fill` | small plain rounded |
 
 It may carry a trailing button, pinned to the trailing edge, and an
 underlined `TextLinkButton` left of it; never more than one link beside a
-button. A banner is not dismissible.
+button. An info or question banner's button is the gold call to action at
+the large control size (a 24 pt bezel), and the banner grows to hold it with
+8 pt above and below, so a one-line note with a button is 44 pt tall; a
+warning banner's stays plain and small, so gold never sits on the failure
+tint. A banner is not dismissible.
 
 `TintedNoteBackgroundView` (`AudioutSharedUI`) is the ground every tinted
 notice shares: the tint at 12 % (`PopoverColumnGrid.insetCardTintAlpha`), a
@@ -1117,6 +1146,55 @@ purchase. The same background in `gold`, 112 pt tall, the emitter's settled
 rings in a 96 pt well at the leading edge, a headline in `heading`, body
 text in `body` / `label2`, and a small rounded **Close** text button. The
 rings play one surge on appearing, then rest.
+
+**Expired-trial survey**: offered to a trial-ended install that still
+streams. The invite takes the note slot in place of the trial-ended note and
+comes back on up to 3 opens until **Answer** or **Not now** is clicked; the
+third close with neither clicked counts as declined. It is a question banner
+reading "What’s missing from Audiout? Two quick questions.", a gold
+**Answer** button and a **Not now** link.
+Answer raises `TrialSurveyCardView` over the shell's content view: the whole
+view under `cardScrim` (dark `#0A0A0C` at 0.6, light black at 0.22) and a
+centred 420 pt card in `panel` with a 1 pt `containerEdge` edge, a 16 pt
+(`row`) corner and a drop shadow 18 pt down, 44 pt blur, 0.4 opacity. A 3 pt
+progress line runs along the top, `gold` over a `hairline` track, filling by
+thirds (a reason with no follow-up jumps from one third to full). The body
+sits 22 pt below it with 20 pt sides and 18 pt below, steps 16 pt apart; the
+question is `display` / `label`, with an optional `body` / `label2` line 4 pt
+under it. Answers are 44 pt tiles 8 pt apart: `raised` fill, 1 pt
+`containerEdge` edge, 10 pt corner, a 32 pt `well` holding a 20 pt SF Symbol
+in `label2`, the label in `body` / `label`, and the number key at the trailing
+edge in `keycap` / `label3`. Hover washes `engagedChrome` at 0.10; chosen
+washes it at 0.18, turns the edge (1.5 pt), the glyph and the key `gold`.
+Multi-select tiles have no checkbox: the gold edge is the tick. A
+single-choice tile, or its number key, answers and moves on after 120 ms;
+each next step slides in 32 pt from the right while fading up over 200 ms
+(a fade only under Reduce Motion). The footer puts **Back** on the left and
+**Not now** (or **Skip**) and the gold primary button on the right. The text
+step is a stock bezeled text area about four lines tall (84 pt, scrolling
+past that) where Return starts a new line and ⌘Return sends, with the hint
+"Leave out names, emails or anything personal." in `caption` / `label2`. The card rises from 96 % scale while
+fading in over 200 ms.
+
+The thank-you step is a 160×100 pt mark, 36 pt below the progress line, over
+"Thanks." and one line, 14 pt apart, then **Done**. The mark replays the
+Mixer's connect moment. A 30 pt `hifispeaker` glyph sits inside a 72 pt ring
+(3.8 pt stroke) open across the halo ring's 70° gap. When the step appears
+the ring is a faint track (`rim` at 0.28) and the 19 pt dot in the gap is
+empty, a 1.5 pt `rim` outline. After an 80 ms hold, the ring fills in `rim`
+over 500 ms in one clockwise sweep from the gap's lower edge to the dot,
+starting gently and speeding up all the way into the dot (0.6, 0, 0.92,
+0.55), its leading 45° lit from grey toward `glow` like a highlighter and
+fully lit until the tip arrives. At contact (580 ms) the lit stretch fades
+over 100 ms; the dot fills with the Mixer's `ember → gold` bloom compressed
+to 180 ms (ease-out) as its outline fades over 60 ms; it snaps to 1.36× in
+50 ms, dips to 0.97× over 70 ms and settles over 80 ms; and one 1.5 pt
+`gold` ring leaves it, widening to 2.6× the dot and fading from 0.55 over
+340 ms (0.16, 1, 0.3, 1). A 56 pt radial `glow` centred on the dot rises to
+0.9 by 640 ms and eases down to 0.55 by 900 ms, where it stays: the finished
+mark is a gold dot with a soft halo. Nothing else moves. Under Reduce Motion
+the ring and dot are drawn finished at once; only colour moves, the dot's
+`ember → gold` bloom and its glow fading up to 0.55 over 300 ms.
 
 **Inset cards under a device row**: the first-join alignment note (a `well`
 card with a `containerEdge` edge; one wrapping sentence in `detail` /
@@ -1132,13 +1210,117 @@ pt. Only the diagnosis card's ✕ answers Escape; the alignment note's does not,
 so Escape keeps the surface's order (thank-you card, then the bubble closes). The thank-you card is the exception and keeps its
 **Close** text button.
 
+### Licence Gate (first open, Mac-only)
+`LicenseGateViewController` (`AudioutOnboardingUI`), mounted by
+`AppSurfaceController.presentLicenseGate` after Setup for a build with a
+licence server and an install with no key and no trial. It is the iPhone
+`LockedView`'s chrome restated: an overlay on the one surface, below the
+toolbar strip, over the live Mixer, Scenes or Speakers screen. Settings is
+never covered; the overlay lifts off while it is selected and returns with any
+other tab.
+
+- **Veil:** flat `canvas` at 0.66 over the whole overlay, so the screen under
+  it reads at about 34 %. No blur.
+- **Scrim:** the bottom 420 pt (or the whole overlay, if shorter), `canvas`
+  from clear at its top to 0.55 at 42 % and solid from 82 %.
+- **Panel:** 14 pt in from both sides, 8 pt above the bottom; `raised` fill,
+  1 pt `rim` edge, `row` radius (16 pt), a black shadow at 0.18 dark / 0.10
+  light, 12 pt blur, 4 pt down. Padding 16 top, 15 sides. Everything is
+  centred. The title "Activate Audiout" (`display` / `label`, a heading) sits
+  at the top in both states; under it one slot holds the two states' bodies,
+  as tall as the taller needs, so the panel keeps one height and the title
+  never moves. In each state the subtitle sits 2 pt under the title and the
+  rest is centred in the space below it, at least 24 pt under the subtitle
+  and 28 pt above the panel's bottom edge.
+- **Offer** (the panel opens here when the build has a checkout URL), 12 pt
+  apart unless stated:
+  1. "Purchasing Audiout provides a licence that unlocks both this Mac as
+     well as its companion iOS remote app." in `titleLarge` / `label2`,
+     wrapping at 520 pt. A build that does not offer the phone app
+     (`AppSettings.remoteAppIsOffered` false) reads "Purchasing Audiout
+     provides a licence that unlocks this Mac." instead.
+  2. One row, 16 pt apart: "Buy Audiout", the primary `CTAButton` (gold,
+     `heading`, 200 x 44 pt), the Return key, which opens the checkout and
+     moves to the key state; beside it "Start 14 day free trial", the
+     secondary `CTAButton` (`raised`, `pendingGlow` edge, `body`, 200 x 44
+     pt), only before any trial (Buy alone stays centred once it is gone). It
+     starts the trial and opens the gate at once. This is the only trial
+     button on the gate.
+  3. 18 pt below the row, "I already have a key" (text link, `caption`): the
+     key state without the checkout.
+- **Key state** (a build with no checkout URL opens here):
+  1. "Copy your licence key from your receipt email, enter it below, or" in
+     `titleLarge` / `label2`, then 4 pt after it on the same line "click here
+     to paste it" (gold `TextActionButton`), which fills the boxes from a
+     clipboard key starting `AUDT-`.
+  2. The key entry (`LicenseKeyEntryView`), in its own band with 14 pt
+     clear above and below it: an `AUDT` plate
+     drawn by `CodeBoxCell` like the boxes but never editable, 104 x 40 pt in
+     `label2`, then four `CodeBoxCell` boxes of five characters, 89 x 40 pt,
+     each after an en dash in `label2` centred in a 16 pt slot; 17 pt medium
+     monospaced, box text in `label` with 1 pt kerning, no placeholder. The
+     row is 524 pt. The boxes take Crockford base32 only, uppercase, with `O`
+     as `0` and `I`, `L` as `1`; the fifth character moves focus on, Delete
+     on an empty box steps back, a pasted key spreads five per box from the
+     edited one.
+  3. Directly under the band (0 pt), the status label, `titleLarge`,
+     centred, two lines reserved. Line one is the status in `label2`: "20
+     characters to go" down to "1 character to go"; the twentieth character
+     submits the key and shows "Verifying…", the whole label pulsing 1 →
+     0.55 → 1 opacity on a 1.4 s ease-in-out cycle (none under Reduce
+     Motion). Then "Registered" in `label`, "Key saved" (server unreachable)
+     or "Key not accepted" in `failure` (line one only). Line two, in
+     `label2`, is the detail where there is one: "Thank you for supporting
+     Audiout.", "We'll check it next time you're online.", the refusal's
+     `LicenseCopy` reason, or "No key on the clipboard. It starts with
+     AUDT-." A refused key leaves the boxes editable with the caret in the
+     first; editing it short of twenty characters brings the count back and
+     clears the detail.
+  4. 4 pt below, "Back" (text link) at the leading edge, back to the
+     offer (absent without a checkout URL), and "Lost your key?" (text link)
+     at the trailing edge, opening the website's resend page
+     (`AppSettings.resendURL`; absent without a checkout URL). The key state
+     has no trial button; the trial is on the offer.
+
+  The two states crossfade over 0.25 s either way (at once under Reduce
+  Motion); the title stays put. A purchase deep link moves straight to the
+  key state and verifies. A key the server accepts in Settings › License
+  (the one screen the gate leaves uncovered) lifts the gate too. There is no
+  Register button: a full key verifies itself. No Quit either: the
+  status-item menu has it.
+
+Nothing under the overlay takes a click, a scroll, a key or a VoiceOver
+action. Escape does not dismiss it. A pass fades it out over 0.55 s ease-out
+(an accepted key holds 1.2 s first so "Registered" is read); under Reduce
+Motion it goes at once.
+
+### CTA Button
+`CTAButton` (`AudioutSharedUI`) is the iPhone's `GoldCTALabel` face restated:
+200 x 44 pt, control radius (10 pt), title centred, a flat drawn fill that
+stays the same when the window is not key. The primary is `gold` with
+`inkOnFill` ink, both pinned to their dark values in both appearances as
+`ProminentButton` pins them, in `heading`; pressed blends the fill 12 %
+toward black; disabled is a `well` fill with `labelCool2` ink. The secondary
+is `raised` with a 1 pt inside `pendingGlow` edge and `label` ink in `body`;
+pressed blends the fill 8 % toward `label`; disabled ink is `label3`. Users:
+the licence gate's "Buy Audiout" (primary) and its trial offer (secondary).
+Nowhere else yet.
+
 ### Text Link
 `TextLinkButton` (`AudioutSharedUI`) is the app's one underlined text link:
 the underline is its only signal, in `label2` (`label3` while disabled), with
 the pointing-hand cursor, at `.body` or `.caption` size. Users: a note
-banner's text action, a row's "Enter Password…", the licence gate's two
-links.
+banner's text action, a row's "Enter Password…", the licence gate's "I
+already have a key".
 Never gold.
+
+### Text Action (gold)
+`TextActionButton` (`AudioutSharedUI`), the Mac's version of the iPhone's
+`TextAction`: `bodyEmphasized` in `goldText`, no underline, no bezel,
+`label3` while disabled, the pointing-hand cursor while enabled, re-styled on
+an accent-dial change. It is for a tertiary call to action that must read as
+a route forward; today only the licence gate's "click here to paste it".
+Every other text action stays the quiet `TextLinkButton`.
 
 ### Failure Pill (Mixer FEED column)
 A failing device's FEED pill carries the `exclamationmark.triangle` glyph at
@@ -1504,6 +1686,22 @@ accessibility and the address printed under it — `audiout.app/remote`, no
 scheme, in the surface's own caption voice — is the element, so a person who
 cannot or will not scan can type it.
 
+Scanning the code only gets the app. While the Allow switch is on, the Mac is
+on the network whether or not any phone is paired, and a new phone pairs by
+opening Audiout Remote: the Mac brings itself forward, beeps and shows a stock
+`NSAlert`, "Allow an iPhone to control Audiout on this Mac?", with the app
+icon wearing a `lock.fill` badge in a white circle, and the six-digit code as
+its accessory view: one digit per rounded 36 × 46 pt box in `pairingCode`,
+read by VoiceOver as one "Pairing code 4 8 2 9 1 3". The body asks the user to
+allow only if the iPhone shows the same code, and quotes the phone's own name
+only when it says more than "iPhone". Allow is drawn as the primary button but
+has no key equivalent, so Return does nothing; Escape is Don't Allow. In Settings › Audiout Remote a
+plain caption under the Allow switch (and its override note), mounted only
+while the switch is on, says how: "To add an iPhone, open Audiout Remote on it
+while it's on the same Wi-Fi as this Mac." Each Remembered iPhones row shows
+the phone's name over "Last connected" and a relative time ("3 hours ago");
+an allowed phone stays listed until removed, and a "Don't Allow" leaves no row.
+
 ### Permission Row (Onboarding, signature component, Mac-only)
 `IconTileView`'s neutral `raised` fill and hairline rim stay untouched; only
 the SF Symbol glyph carries one of the seven spine hues (six dial-aware
@@ -1572,7 +1770,10 @@ is a change in two apps.
   voice, beside every QR tile and in every invitation line.
 - No invitation names the App Store, a price, "free", or "download". The
   website says what the store's state is; the Mac does not know and does not
-  guess.
+  guess. One line breaks this and the full-name rule, on the owner's call:
+  Settings › Audiout Remote ends with "The iPhone app is coming soon to the
+  App Store." in caption voice, one section gap under the last card, whatever
+  the switch says.
 - Source words are the glossary's, verbatim: **"Measured"**, **"First pass"**,
   **"Timing from last time"** (`BTOffsetSource` in `AudioutSharedUI` owns the
   sentences; `AudioutProtocol.AlignmentSource` owns the wire strings).

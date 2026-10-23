@@ -100,8 +100,8 @@ import CoreAudio
     }
 
     private final class FakeDACPEndpoint: DACPEndpoint, @unchecked Sendable {
-        var onVolume: (@Sendable (_ activeRemote: UInt32, _ level: Double) -> Void)?
-        var onVolumeStep: (@Sendable (_ activeRemote: UInt32, _ direction: Int) -> Void)?
+        var onVolume: (@Sendable (_ remoteHost: String?, _ activeRemote: UInt32, _ level: Double) -> Void)?
+        var onVolumeStep: (@Sendable (_ remoteHost: String?, _ activeRemote: UInt32, _ direction: Int) -> Void)?
         func start(dacpID: UInt64) {}
         func stop() {}
     }
@@ -414,7 +414,7 @@ import CoreAudio
         connect(backend, bt, hardware)
         waitFor { hardware.hasWatch(self.speaker.id) }
         waitFor { callCount.value == 1 }
-        SuiteWait.settle(0.3)  // let the verdict land in the cache
+        waitFor { backend.stateQueue.sync { backend.btSDPClaimByUID[self.speaker.id] } == true }
 
         // Disconnect clears the probed marker, so only the cache can stop a
         // second probe on the reconnect.
@@ -422,7 +422,9 @@ import CoreAudio
         waitFor { hardware.unwatched.contains(self.speaker.id) }
         bt.fire([speaker])
         waitFor { hardware.hasWatch(self.speaker.id) }
-        SuiteWait.settle(0.3)  // give a second probe time to run if one was queued
+        // A second probe would be queued on the SDP queue before the watch is
+        // armed in the same pass; draining that queue runs it if it exists.
+        backend.btSDPQueue.sync {}
 
         #expect(callCount.value == 1)
     }

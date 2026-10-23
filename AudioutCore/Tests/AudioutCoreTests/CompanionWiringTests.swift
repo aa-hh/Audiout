@@ -15,10 +15,17 @@ import Testing
     /// "Allow" and records what the coordinator asked of AppKit.
     private final class StubHost: CompanionCoordinatorHost {
         var clientCounts: [Int] = []
+        /// One entry per icon request handed over, holding its completion.
+        var iconCompletions: [@MainActor () -> Void] = []
+        /// When false, prompts stay open and their answers wait in `openPrompts`.
+        var answersPromptsAtOnce = true
+        var openPrompts: [(Bool) -> Void] = []
+        var promptCodes: [String] = []
 
-        func presentApprovalPrompt(clientID: String, clientName: String,
+        func presentApprovalPrompt(clientID: String, clientName: String, pairingCode: String,
                                    respond: @escaping (Bool) -> Void) {
-            respond(true)
+            promptCodes.append(pairingCode)
+            if answersPromptsAtOnce { respond(true) } else { openPrompts.append(respond) }
         }
         func withdrawApprovalPrompt(clientID: String) {}
         var activatedKeys: [String] = []
@@ -28,7 +35,10 @@ import Testing
             reply(CompanionServer.CommandResult(applied: true))
         }
         func runningApplications() -> [(bundleID: String, displayName: String)] { [] }
-        func serveAppIconPages(_ requested: [String], to clientID: UUID) {}
+        func serveAppIconPages(_ requested: [String], to clientID: UUID,
+                               completion: @escaping @MainActor () -> Void) {
+            iconCompletions.append(completion)
+        }
         func devices() -> [Device] { [] }
         func symbolName(for device: Device) -> String { "hifispeaker" }
         func routedAppNames() -> [String: [String]] { [:] }
@@ -39,14 +49,44 @@ import Testing
         func log(_ message: String) {}
     }
 
-    private func makeCoordinator(host: StubHost, storeName: String) -> CompanionCoordinator {
+    /// Never hands out an identity, and counts how often it was asked: the
+    /// suite must never touch the login keychain or start a real listener.
+    private final class RefusingIdentityStore: CompanionIdentityStoring {
+        var loads = 0
+        func loadOrCreate() throws -> CompanionIdentity {
+            loads += 1
+            throw CompanionIdentityError.identityNotFound
+        }
+    }
+
+    /// Replies from the coordinator's command path, which arrive on main.
+    private final class ReplyLog: @unchecked Sendable {
+        var results: [CompanionServer.CommandResult] = []
+    }
+
+    /// Decisions the approval gate hands back on main.
+    private final class DecisionLog: @unchecked Sendable {
+        var value: [CompanionServer.ApprovalDecision] = []
+    }
+
+    /// Prompts are answered Allow and follow one another at once, so a test
+    /// can approve several phones in a row without wiring the coordinator;
+    /// ``CompanionCoordinator/wire()`` hands prompts to the host instead.
+    /// The Allow switch is off unless `allowRemoteControl` says otherwise, so
+    /// the server never tries to start by accident.
+    private func makeCoordinator(host: StubHost, storeName: String,
+                                 identityStore: RefusingIdentityStore = RefusingIdentityStore(),
+                                 allowRemoteControl: Bool = false,
+                                 schedule: ((TimeInterval, @escaping @MainActor () -> Void) -> Void)? = nil)
+        -> CompanionCoordinator {
         let directory = scratchDir.appendingPathComponent(storeName)
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let backend = MockBackend(fleet: .demoFleet, staggerDiscovery: false,
                                   emitsLevels: false, simulatesDropouts: false)
         let approvals = CompanionApprovalController(
-            store: CompanionApprovalStore(directory: directory))
-        approvals.presentPrompt = { _, _, respond in respond(true) }
+            store: CompanionApprovalStore(directory: directory),
+            schedule: schedule ?? { _, job in job() })
+        approvals.presentPrompt = { _, _, _, respond in respond(true) }
         return CompanionCoordinator(
             backend: backend,
             groupController: GroupController(
@@ -56,18 +96,24 @@ import Testing
                 loadPersisted: false),
             appRouting: AppRoutingController(store: AppRouteStore(directory: directory),
                                              loadPersisted: false),
-            settings: AppSettings(defaults: makeDefaults()),
+            settings: {
+                let settings = AppSettings(defaults: makeDefaults())
+                settings.allowRemoteControl = allowRemoteControl
+                return settings
+            }(),
             excludedBundleIDs: { [] },
             speakerLibrary: SpeakerLibraryController(store: SpeakerLibraryStore(directory: directory),
                                                      loadPersisted: false),
             serverName: "TestMac",
             server: CompanionServer(),
             approvals: approvals,
+            identityStore: identityStore,
             host: host)
     }
 
     private func approve(clientID: String, name: String, in coordinator: CompanionCoordinator) {
-        coordinator.approvals.handleRequest(clientID: clientID, clientName: name, decide: { _ in })
+        coordinator.approvals.handleRequest(clientID: clientID, clientName: name, pairingCode: "000000",
+                                            decide: { _ in })
     }
 
     /// Turns red if `CompanionCoordinator.noteSlot` reorders the popover's
@@ -129,5 +175,91 @@ import Testing
 
         #expect(host.clientCounts == [1, 1],
                 "every client-count change reaches the host")
+    }
+
+    // MARK: Pairing without a window
+
+    /// Turns red if the server needs an approved phone (or anything but the
+    /// Allow switch) before it starts: a Mac nobody has paired with must be
+    /// findable, or no new phone can ask. The identity store refuses, so the
+    /// count of identity loads is how far the start got.
+    @Test func theServerStartsWithTheSwitchOnAndNoPhoneApproved() {
+        let off = RefusingIdentityStore()
+        makeCoordinator(host: StubHost(), storeName: "switch-off", identityStore: off).wire()
+        #expect(off.loads == 0, "switch off: the server never tries to start")
+
+        let on = RefusingIdentityStore()
+        let coordinator = makeCoordinator(host: StubHost(), storeName: "switch-on", identityStore: on,
+                                          allowRemoteControl: true)
+        coordinator.wire()
+        #expect(coordinator.approvals.approvals.isEmpty)
+        #expect(on.loads == 1, "switch on and no phone approved: the server tries to start")
+    }
+
+    /// Turns red if `wire(startingServer: false)` starts the server anyway
+    /// (on a first launch its Bonjour advertisement would raise the Local
+    /// Network prompt before Setup explains it), or if `updateServerState()`
+    /// starts it before `wire` attached the approval gate.
+    @Test func wiringCanLeaveTheServerForLater() {
+        let identities = RefusingIdentityStore()
+        let coordinator = makeCoordinator(host: StubHost(), storeName: "deferred", identityStore: identities,
+                                          allowRemoteControl: true)
+        coordinator.updateServerState()
+        #expect(identities.loads == 0, "not wired yet: nothing starts")
+        coordinator.wire(startingServer: false)
+        #expect(identities.loads == 0)
+        coordinator.updateServerState()
+        #expect(identities.loads == 1, "the launch path's later call starts it")
+    }
+
+    /// Turns red if a hello from an unknown phone stops reaching the host's
+    /// Allow prompt through the wired coordinator, with nothing opened on the
+    /// Mac first.
+    @Test func anUnknownPhonesHelloRaisesThePromptWithNothingOpened() async {
+        let host = StubHost()
+        host.answersPromptsAtOnce = false
+        let coordinator = makeCoordinator(host: host, storeName: "no-window")
+        coordinator.wire()
+        let decisions = DecisionLog()
+        coordinator.server.onApprovalRequest?(String(repeating: "D", count: 64), "iPhone", "482913") {
+            decisions.value.append($0)
+        }
+
+        await SuiteWait.until("the prompt reaches the host") { host.promptCodes == ["482913"] }
+        #expect(decisions.value == [.pending])
+        host.openPrompts.first?(true)
+        #expect(decisions.value == [.pending, .approved])
+    }
+
+    // MARK: Icon requests
+
+    /// Turns red if the coordinator answers a phone's second icon request
+    /// while the first one's pages are still going out, or keeps refusing
+    /// after they are done.
+    @Test func aSecondIconRequestWhileOneIsInFlightIsRefused() async {
+        let host = StubHost()
+        let coordinator = makeCoordinator(host: host, storeName: "icons")
+        coordinator.wire()
+        let onCommand = coordinator.server.onCommand
+        let replies = ReplyLog()
+        let phone = UUID()
+        func request(_ id: String) {
+            onCommand?(id, .requestAppIcons(bundleIDs: ["com.example.app"]), phone) { result in
+                DispatchQueue.main.async { replies.results.append(result) }
+            }
+        }
+
+        request("first")
+        await SuiteWait.until("the first icon request is answered") { replies.results.count == 1 }
+        request("second")
+        await SuiteWait.until("the second icon request is answered") { replies.results.count == 2 }
+        #expect(replies.results.map(\.applied) == [true, false])
+        #expect(replies.results.last?.refusalReason == "Icons are still being sent. Wait a moment.")
+        #expect(host.iconCompletions.count == 1, "the refused request never reached the host")
+
+        host.iconCompletions[0]()
+        request("third")
+        await SuiteWait.until("the third icon request is answered") { replies.results.count == 3 }
+        #expect(replies.results.last?.applied == true, "a finished request frees the phone to ask again")
     }
 }

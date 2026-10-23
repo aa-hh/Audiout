@@ -118,6 +118,16 @@ public final class AppSurfaceController {
 
     private let popoverController: PopoverController
     private let settings: AppSettings
+    /// The expired-trial survey, over the shell's content view while up.
+    private var surveyCard: TrialSurveyCardView?
+    /// The first-open licence gate, from `presentLicenseGate` until
+    /// `dismissLicenseGate`. Kept across closes and screen switches; its view
+    /// is seated over whichever screen is mounted, Settings excepted.
+    private var licenseGate: NSViewController?
+    /// The content view the gate's view currently sits in (`nil` while
+    /// Settings is up), and the constraint seating it below the toolbar strip.
+    private weak var licenseGateHost: NSView?
+    private var licenseGateTop: NSLayoutConstraint?
     /// The shell window's one header strip (D1): four icon-only tabs + Pin,
     /// as a real unified `NSToolbar`.
     private let toolbarController = SurfaceToolbarController()
@@ -178,6 +188,7 @@ public final class AppSurfaceController {
     /// only fix is to not grow it on screen at all — front it already settled).
     private var isRevealPending = false
     private var pendingRevealAnchor: NSRect?
+    private var pendingRevealPointsAtAnchor = true
     private var revealCeilingTimer: Timer?
 
     /// Work handed to ``whenRevealed(_:)`` while that wait was still on — run at
@@ -276,6 +287,7 @@ public final class AppSurfaceController {
         // system dialog's focus.
         popoverController.onMicPromptInFlightChanged = { [weak self] in self?.shell.setPermissionPromptInFlight($0) }
         popoverController.onMicPromptAnswered = { [weak self] in self?.shell.returnToFront() }
+        popoverController.onSurveyAnswer = { [weak self] in self?.presentSurveyCard(for: $0) }
 
         // The one header (D1): a real unified NSToolbar on the shell window,
         // both profiles. Attaching here — before anything shows — means the
@@ -344,6 +356,7 @@ public final class AppSurfaceController {
         // On the Mixer, a showing thank-you card takes the first Escape.
         shell.cancelHandler = { [weak self] in
             guard let self else { return false }
+            if let surveyCard { return surveyCard.handleEscape() }
             if selectedScreen == .mixer, popoverController.dismissThankYouCardForEscape() {
                 return true
             }
@@ -381,6 +394,7 @@ public final class AppSurfaceController {
     private func applyPixelVisibility(_ visible: Bool) {
         guard isShown, selectedScreen == .mixer, !isRevealPending else { return }
         if !visible, !surfaceCoveredHidden {
+            dismissSurveyCard()
             surfaceCoveredHidden = true
             popoverController.surfaceDidHide()
         } else if visible, surfaceCoveredHidden {
@@ -403,7 +417,9 @@ public final class AppSurfaceController {
     /// fronts it — re-running the Mixer's open ritual there would discard the
     /// user's mid-open collapse toggles for no reason (it is the same open
     /// session).
-    public func show(anchorRect: NSRect?) {
+    /// `pointsAtAnchor: false`: `anchorRect` is a stand-in for an icon that
+    /// has no place in the menu bar, so the bubble draws no arrow.
+    public func show(anchorRect: NSRect?, pointsAtAnchor: Bool = true) {
         // A repeat click DURING a first-open reveal wait is the user asking for
         // the surface NOW — the wait has visibly done nothing, so clicking again
         // must not be swallowed (it used to `return`, and every further click
@@ -431,6 +447,7 @@ public final class AppSurfaceController {
             if SurfaceSplashView.wouldPresent {
                 isRevealPending = true
                 pendingRevealAnchor = anchorRect
+                pendingRevealPointsAtAnchor = pointsAtAnchor
                 // A quiet window wider than the discovery trickle's gap between
                 // devices, so a stream that arrives one device at a time does
                 // NOT settle in a gap mid-stream (0.3 s settled between the
@@ -461,7 +478,7 @@ public final class AppSurfaceController {
             }
             settleTracker = nil
         }
-        shell.show(anchorRect: anchorRect)
+        shell.show(anchorRect: anchorRect, pointsAtAnchor: pointsAtAnchor)
         isShown = true
         if !wasShown, selectedScreen == .mixer {
             popoverController.surfaceDidShow()
@@ -502,7 +519,8 @@ public final class AppSurfaceController {
 
         let anchor = pendingRevealAnchor
         pendingRevealAnchor = nil
-        shell.show(anchorRect: anchor)
+        shell.show(anchorRect: anchor, pointsAtAnchor: pendingRevealPointsAtAnchor)
+        pendingRevealPointsAtAnchor = true
         isShown = true
         if selectedScreen == .mixer {
             popoverController.surfaceDidShow()
@@ -549,10 +567,11 @@ public final class AppSurfaceController {
     }
 
     private func handleShellClosed() {
+        dismissSurveyCard()
         // A Mixer already asleep behind the latch has had its `surfaceDidHide()`;
         // a second one would run the teardown twice.
         if isShown, selectedScreen == .mixer, !surfaceCoveredHidden {
-            popoverController.surfaceDidHide()
+            popoverController.surfaceDidHide(closed: true)
         }
         surfaceCoveredHidden = false
         isShown = false
@@ -560,6 +579,125 @@ public final class AppSurfaceController {
         cancelPendingReveal()
         publishVisibleScreen()
         onClose?()
+    }
+
+    // MARK: Expired-trial survey
+
+    /// Raise the survey card over the current screen and send its answers.
+    private func presentSurveyCard(for survey: ExpiredTrialSurvey) {
+        guard surveyCard == nil, let host = shell.window?.contentView else { return }
+        let card = TrialSurveyCardView(survey: survey)
+        card.onSent = { Analytics.captureStructured("survey sent", survey.sentProperties($0)) }
+        card.onDismissed = { [weak self] in
+            Analytics.captureStructured("survey dismissed", survey.dismissedProperties($0))
+            self?.removeSurveyCard()
+        }
+        card.onDone = { [weak self] in self?.removeSurveyCard() }
+        host.addSubview(card)
+        NSLayoutConstraint.activate([
+            card.leadingAnchor.constraint(equalTo: host.leadingAnchor),
+            card.trailingAnchor.constraint(equalTo: host.trailingAnchor),
+            card.topAnchor.constraint(equalTo: host.topAnchor),
+            card.bottomAnchor.constraint(equalTo: host.bottomAnchor),
+        ])
+        surveyCard = card
+        card.appear()
+    }
+
+    /// End a card that is up, reporting it the way its own Not now would.
+    private func dismissSurveyCard() {
+        surveyCard?.dismiss()
+    }
+
+    private func removeSurveyCard() {
+        surveyCard?.removeFromSuperview()
+        surveyCard = nil
+    }
+
+    // MARK: First-open licence gate
+
+    /// Draw `controller`'s view over the Mixer, Scenes and Speakers screens
+    /// until ``dismissLicenseGate(animated:)``. It sits below the toolbar
+    /// strip, so the four tabs stay live, and it is lifted off while Settings
+    /// is selected (Settings › License keeps its own key sheet). It survives
+    /// a close: a reopen shows it again. The frame is not resized for it.
+    ///
+    /// An `NSViewController` rather than the gate's own type, so this target
+    /// does not depend on `AudioutOnboardingUI`.
+    public func presentLicenseGate(_ controller: NSViewController) {
+        guard licenseGate == nil else { return }
+        licenseGate = controller
+        Analytics.capture("license:gate_shown")
+        seatLicenseGate()
+    }
+
+    /// Take the gate away: a 0.55 s ease-out fade, then removal; at once
+    /// headless or under Reduce Motion, or when `animated` is false.
+    public func dismissLicenseGate(animated: Bool) {
+        guard let gate = licenseGate else { return }
+        licenseGate = nil
+        restoreAccessibility(of: licenseGateHost, without: gate.view)
+        licenseGateHost = nil
+        licenseGateTop = nil
+        let overlay = gate.view
+        guard animated, overlay.superview != nil, !HeadlessRuntime.isActive,
+              !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else {
+            overlay.removeFromSuperview()
+            return
+        }
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.55
+            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            overlay.animator().alphaValue = 0
+        } completionHandler: {
+            overlay.removeFromSuperview()
+        }
+    }
+
+    /// Put the gate's view over the mounted screen, or lift it off while
+    /// Settings is up. Every `setContent` swaps the window's content view, so
+    /// this runs after each mount. While seated, the screen underneath is
+    /// hidden from accessibility: its content view reports only the gate.
+    private func seatLicenseGate() {
+        guard let gate = licenseGate else { return }
+        let host = selectedScreen == .settings ? nil : shell.window?.contentView
+        let overlay = gate.view
+        guard host !== licenseGateHost || overlay.superview !== host else { return }
+        restoreAccessibility(of: licenseGateHost, without: overlay)
+        overlay.removeFromSuperview()
+        licenseGateHost = host
+        licenseGateTop = nil
+        guard let host else { return }
+        overlay.translatesAutoresizingMaskIntoConstraints = false
+        host.addSubview(overlay)
+        let top = overlay.topAnchor.constraint(equalTo: host.topAnchor, constant: chromeTopInset)
+        licenseGateTop = top
+        NSLayoutConstraint.activate([
+            top,
+            overlay.leadingAnchor.constraint(equalTo: host.leadingAnchor),
+            overlay.trailingAnchor.constraint(equalTo: host.trailingAnchor),
+            overlay.bottomAnchor.constraint(equalTo: host.bottomAnchor),
+        ])
+        host.setAccessibilityChildren([overlay])
+    }
+
+    /// Give a screen back its own accessibility children after the gate
+    /// leaves it. AppKit has no way to clear an explicit children list
+    /// (`setAccessibilityChildren(nil)` leaves it empty), so the screen's
+    /// direct subviews are listed instead; AppKit's accessibility bridge
+    /// expands the ignored ones into their live descendants, so everything
+    /// below that first level stays current.
+    ///
+    /// razor: a direct subview added to that screen's root after this point is
+    /// missed by VoiceOver. The hosted roots build theirs once, in `loadView`;
+    /// the two views this surface adds itself cannot arrive later — the launch
+    /// splash shows once per process, before the gate can pass, and the survey
+    /// card needs an expired trial, which a session that passed the gate does
+    /// not have. A root that starts adding direct subviews later needs a root
+    /// view subclass that answers `accessibilityChildren()` itself.
+    private func restoreAccessibility(of host: NSView?, without overlay: NSView) {
+        guard let host else { return }
+        host.setAccessibilityChildren(host.subviews.filter { $0 !== overlay })
     }
 
     /// Drop a pending first-open reveal (a close during the settle wait). The
@@ -631,6 +769,8 @@ public final class AppSurfaceController {
     /// size. Selecting the current screen is a no-op.
     public func select(_ screen: SurfaceScreen) {
         guard screen != selectedScreen else { return }
+        // `setContent` replaces the content view the card sits on.
+        dismissSurveyCard()
         Analytics.capture("surface:screen_selected", ["screen": String(describing: screen)])
         if selectedScreen == .mixer, isShown, !surfaceCoveredHidden {
             // The panel is leaving the window: drop what must not outlive a
@@ -823,6 +963,9 @@ public final class AppSurfaceController {
            let first = window.initialFirstResponder, first.canBecomeKeyView {
             window.makeFirstResponder(first)
         }
+        // Last, so the gate sits above the screen just mounted and its key
+        // field takes the first responder the line above may have handed out.
+        seatLicenseGate()
     }
 
     // MARK: Lazy screens
@@ -966,6 +1109,7 @@ public final class AppSurfaceController {
 
     private func applyChromeTopInset() {
         let inset = chromeTopInset
+        licenseGateTop?.constant = inset
         mixerPanel?.setContentTopInset(inset)
         groupsScreen?.setContentTopInset(inset)
         speakersScreen?.setContentTopInset(inset)
@@ -1011,6 +1155,9 @@ public final class AppSurfaceController {
     var test_toolbarController: SurfaceToolbarController { toolbarController }
     /// The lazily-built pieces, `nil` until their tab is first selected.
     var test_mixerPanel: PopoverPanelViewController? { mixerPanel }
+    var test_surveyCard: TrialSurveyCardView? { surveyCard }
+    /// The licence gate's overlay while one is presented (seated or not).
+    public var test_licenseGateView: NSView? { licenseGate?.view }
     var test_groupsScreen: SurfaceScreenViewController? { groupsScreen }
     var test_speakersScreen: SurfaceScreenViewController? { speakersScreen }
     var test_settingsScreen: SurfaceScreenViewController? { settingsScreen }

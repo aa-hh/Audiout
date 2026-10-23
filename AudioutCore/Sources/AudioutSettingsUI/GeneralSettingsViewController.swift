@@ -39,6 +39,18 @@ public final class GeneralSettingsViewController: NSViewController, SettingsRead
     private let aboutButton = NSButton()
     private let updatesButton = NSButton()
     private let aboutWindowController: AboutWindowController
+    /// Dev builds only: the licence-gate override (Developer card).
+    private let licenseGatePopup = NSPopUpButton()
+    private static let licenseGateOptions: [(String, LicenseGatePresentation)] = [
+        ("Automatic", .auto), ("Always show", .forceShow), ("Never show", .forceHide),
+    ]
+    /// Dev builds only: which licence server the app talks to (Developer card).
+    private let licenseServerPopup = NSPopUpButton()
+    private static let licenseServerOptions: [(String, LicenseServerChoice)] = [
+        ("Build default", .buildDefault), ("Staging", .staging), ("Production", .production),
+    ]
+    private let isDevBuild: Bool
+    private var developerCard: NSView?
 
     /// Fired when "Run setup again…" is clicked, so the app can re-present the
     /// first-run onboarding/permission-priming flow. Nil (unset) leaves the
@@ -52,6 +64,12 @@ public final class GeneralSettingsViewController: NSViewController, SettingsRead
     /// loads, exactly as it does `onRunSetupAgain`.
     public var onCheckForUpdates: (() -> Void)?
 
+    /// Fired after the Developer "Licence server" popup stores a new choice,
+    /// so the app can re-apply the licence state and ask the new server. Nil
+    /// (unset) leaves the popup storing the choice only — the app layer wires
+    /// it in `makeSettingsRoot`.
+    public var onLicenseServerChanged: (() -> Void)?
+
     var onReadoutChanged: (() -> Void)?
 
     /// - Parameters:
@@ -62,16 +80,20 @@ public final class GeneralSettingsViewController: NSViewController, SettingsRead
     ///     the live app bundle (`AboutInfo.current()`), injected as a fixed
     ///     value in tests so the rendered version string never depends on how
     ///     the test binary was built.
+    ///   - isDevBuild: mounts the Developer card; defaults to
+    ///     ``AppSettings/isDevBuild``, so a shipping build never shows it.
     ///   - openURL: opens the About window's "View Source Code…" link;
     ///     defaults to `NSWorkspace`, injected as a recording closure in tests
     ///     so a test run never actually launches a browser.
     public init(loginItem: LoginItemManaging,
                 settings: AppSettings = AppSettings(),
+                isDevBuild: Bool = AppSettings.isDevBuild,
                 aboutInfo: AboutInfo = .current(),
                 openURL: @escaping (URL) -> Void = { NSWorkspace.shared.open($0) },
                 saveDiagnostics: (() -> Void)? = nil) {
         self.loginItem = loginItem
         self.settings = settings
+        self.isDevBuild = isDevBuild
         self.aboutWindowController = AboutWindowController(info: aboutInfo, openURL: openURL,
                                                            saveDiagnostics: saveDiagnostics)
         super.init(nibName: nil, bundle: nil)
@@ -187,9 +209,59 @@ public final class GeneralSettingsViewController: NSViewController, SettingsRead
         buttons.spacing = 8
         buttons.translatesAutoresizingMaskIntoConstraints = false
 
-        let page = SettingsForm.pageView(content: [header, card.container, buttons])
-        (page.subviews.first as? NSStackView)?.setCustomSpacing(14, after: card.container)
+        var content: [NSView] = [header, card.container, buttons]
+        let developerTitle = SettingsPane.makeSectionTitle("Developer")
+        if isDevBuild {
+            let developer = makeDeveloperCard()
+            developerCard = developer
+            content.append(contentsOf: [developerTitle, developer])
+        }
+        let page = SettingsForm.pageView(content: content)
+        let pageStack = page.subviews.first as? NSStackView
+        pageStack?.setCustomSpacing(14, after: card.container)
+        if isDevBuild {
+            pageStack?.setCustomSpacing(GroupsPaneLayout.sectionGap, after: buttons)
+            pageStack?.setCustomSpacing(GroupsPaneLayout.labelToSectionGap, after: developerTitle)
+        }
         view = page
+    }
+
+    /// Dev builds only: the first-open licence gate override, standing in for
+    /// `AUDIOUT_LICENSE_GATE` (which still wins when set). Read once at launch.
+    private func makeDeveloperCard() -> NSView {
+        for (title, _) in Self.licenseGateOptions { licenseGatePopup.addItem(withTitle: title) }
+        if let index = Self.licenseGateOptions.firstIndex(where: { $0.1 == settings.licenseGatePresentation }) {
+            licenseGatePopup.selectItem(at: index)
+        }
+        licenseGatePopup.target = self
+        licenseGatePopup.action = #selector(licenseGateChanged)
+        licenseGatePopup.setAccessibilityLabel("Licence gate")
+        let gateRow = ListRowView(title: "Licence gate", accessory: licenseGatePopup,
+                                  helpText: "Takes effect next launch.")
+
+        for (title, _) in Self.licenseServerOptions { licenseServerPopup.addItem(withTitle: title) }
+        if let index = Self.licenseServerOptions.firstIndex(where: { $0.1 == settings.licenseServerChoice }) {
+            licenseServerPopup.selectItem(at: index)
+        }
+        licenseServerPopup.target = self
+        licenseServerPopup.action = #selector(licenseServerChanged)
+        licenseServerPopup.setAccessibilityLabel("Licence server")
+        let serverRow = ListRowView(title: "Licence server", accessory: licenseServerPopup,
+                                    helpText: "Clears the saved licence verdict; the next check asks this server.")
+        return SettingsPane.makeCard(rows: [gateRow, serverRow]).container
+    }
+
+    @objc private func licenseGateChanged() {
+        let index = licenseGatePopup.indexOfSelectedItem
+        guard Self.licenseGateOptions.indices.contains(index) else { return }
+        settings.licenseGatePresentation = Self.licenseGateOptions[index].1
+    }
+
+    @objc private func licenseServerChanged() {
+        let index = licenseServerPopup.indexOfSelectedItem
+        guard Self.licenseServerOptions.indices.contains(index) else { return }
+        settings.licenseServerChoice = Self.licenseServerOptions[index].1
+        onLicenseServerChanged?()
     }
 
     @objc private func reconnectToggled() {
@@ -342,6 +414,20 @@ public final class GeneralSettingsViewController: NSViewController, SettingsRead
     /// `AboutViewController`'s own `test_*` hooks without this pane
     /// re-exposing every one of them a second time.
     public var test_about: AboutWindowController { aboutWindowController }
+
+    /// Whether the dev-only Developer card is in the pane.
+    public var test_developerSectionIsMounted: Bool {
+        _ = view
+        return developerCard?.superview != nil
+    }
+
+    /// Pick a Developer "Licence server" entry as a click would.
+    public func test_selectLicenseServer(_ choice: LicenseServerChoice) {
+        _ = view
+        guard let index = Self.licenseServerOptions.firstIndex(where: { $0.1 == choice }) else { return }
+        licenseServerPopup.selectItem(at: index)
+        licenseServerChanged()
+    }
 
     /// Invoke "About Audiout…" as a click would.
     public func test_tapAbout() {

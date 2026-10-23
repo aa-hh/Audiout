@@ -289,6 +289,11 @@ public final class GroupController {
             var isGroup = false
             if case .group = mainOut { isGroup = true }
             if selectedDeviceIDs.count > 1 || isGroup {
+                if case .group(let id) = mainOut {
+                    pendingLaunchClamp = ("scene", groups.first { $0.id == id }?.memberIDs.count ?? 0)
+                } else {
+                    pendingLaunchClamp = ("speakers", selectedDeviceIDs.count)
+                }
                 selectedDeviceIDs = [local.id]
                 pendingBluetoothRestoreIDs.formIntersection(selectedDeviceIDs)
                 mainOut = .selectedDevices
@@ -451,7 +456,26 @@ public final class GroupController {
     /// (`LicenseGate.limitsToOneSpeaker`). Refuses a second speaker and a group
     /// target; never trims a live set — the limit lands on the next edit or
     /// launch.
-    public var limitsToOneSpeaker = false
+    public var limitsToOneSpeaker = false {
+        didSet {
+            if let pending = pendingLaunchClamp, oldValue, !limitsToOneSpeaker {
+                pendingLaunchClamp = nil
+                Analytics.capture("license:launch_clamp_lifted",
+                                  ["clamped": pending.clamped, "speaker_count": String(pending.speakerCount)])
+            }
+        }
+    }
+
+    /// Set by the launch clamp in `ensureDefaultSelection`, cleared by a lift or
+    /// by `licenseAnswered()`, so only a lift before the server's first answer
+    /// counts. Other passes that re-assign `limitsToOneSpeaker` (a remote-config
+    /// refresh, a Mixer open) leave it alone. Never persisted.
+    private var pendingLaunchClamp: (clamped: String, speakerCount: Int)?
+
+    /// The host calls this from every `LicenseValidator.validate` completion,
+    /// after applying the answer: a lift reported later is no longer the
+    /// launch clamp's.
+    public func licenseAnswered() { pendingLaunchClamp = nil }
 
     /// The refusal reason `setDeviceSelected` returns under the limit.
     public static let oneSpeakerLimitReason = "one_speaker_limit"

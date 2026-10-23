@@ -819,25 +819,17 @@ extension SerializedEngineState {
 
             // Wait until the waiter is armed (the op has suspended), WITHOUT firing a
             // completion.
-            for _ in 0..<200 {
-                if let dev = outputs_device_get(id.rawValue), outputs_callback_get(dev) != nil { break }
-                try await Task.sleep(nanoseconds: 1_000_000)
+            await SuiteWait.until("the op's C callback slot is armed") {
+                guard let dev = outputs_device_get(id.rawValue) else { return false }
+                return outputs_callback_get(dev) != nil
             }
 
             // Tear down with the op in flight. This must resume the awaiting
             // continuation (throwing) — not leak it — and complete promptly.
-            let stopDone = Task { await engine.stop() }
-            let stopResult = await withTaskGroup(of: Bool.self) { group -> Bool in
-                group.addTask { await stopDone.value; return true }
-                group.addTask {
-                    try? await Task.sleep(nanoseconds: 3_000_000_000) // 3s watchdog
-                    return false
-                }
-                let first = await group.next()!
-                group.cancelAll()
-                return first
-            }
-            #expect(stopResult, "stop() must not hang when an op is in flight")
+            let stopped = DoneFlag()
+            let stopDone = Task { await engine.stop(); stopped.set() }
+            await SuiteWait.until("stop() returns with an op in flight") { stopped.isSet }
+            await stopDone.value
 
             // The in-flight op resumed by THROWING (cancellation), not by leaking.
             let opError = await opTask.value
@@ -866,23 +858,28 @@ extension SerializedEngineState {
             makeRegistryDevice(id: id.rawValue)
 
             let engine = AirPlayEngine()
-            // N=1 arms a real waiter; a short injected timeout keeps the test fast.
-            // We deliberately NEVER fire a completion — only the timeout can resolve it.
-            await engine.enterHeadlessTestMode(issue: { _, _ in 1 }, opTimeout: 0.2)
+            // N=1 arms a real waiter. We deliberately NEVER fire a completion —
+            // only the timeout can resolve it. The timeout is long enough never to
+            // fire on its own; the test moves the op's real timer to fire now.
+            await engine.enterHeadlessTestMode(issue: { _, _ in 1 }, opTimeout: 60)
             await engine.registerKnownOutputForTest(id)
 
-            let start = Date()
-            do {
-                try await engine.addOutput(id)
-                Issue.record("a stalled op must throw opTimedOut, not resolve or leak")
-            } catch AirPlayEngineError.opTimedOut {
-                // expected: the continuation was resumed (throwing), not leaked.
-            } catch {
-                Issue.record("wrong error: \(error)")
+            let opTask = Task { () -> Error? in
+                do { try await engine.addOutput(id); return nil }
+                catch { return error }
             }
-            // Sanity: it resolved via the timeout window, not instantly.
-            #expect(Date().timeIntervalSince(start) >= 0.15,
-                    "should resolve at the timeout, not immediately")
+            // Armed means suspended and unresolved: nothing but the timer is left
+            // to resolve it.
+            await SuiteWait.until("the op's registry waiter is armed") {
+                engine.waiterIsArmedForTest(callbackId: 0)
+            }
+            // An actor call runs only after startOp's headless body (arm, issue) has finished.
+            #expect(await engine.hasArmedWaiterForTest(callbackId: 0))
+            #expect(engine.expireOpTimeoutForTest(callbackId: 0), "the armed op must carry a timeout timer")
+
+            let opError = await opTask.value
+            #expect(opError as? AirPlayEngineError == .opTimedOut,
+                    "a stalled op must throw opTimedOut, not resolve or leak (got \(String(describing: opError)))")
 
             // No residual waiter: the timeout removed it from the registry under the
             // same lock deliver/cancel use, so exactly one of {deliver, cancel,
@@ -902,17 +899,17 @@ extension SerializedEngineState {
         //
         // The complement to the leak test: a real completion arriving inside the
         // timeout window wins the race, cancels the timer, and resolves normally. We
-        // then wait PAST the original deadline to prove the cancelled timer never
+        // then run the timeout handler after delivery to prove a late timer never
         // fires a second (double) resume.
         @Test func completionBeforeTimeoutSucceedsAndDoesNotDoubleResume() async throws {
             let id = OutputID(rawValue: 0xDEAD_0003)
             makeRegistryDevice(id: id.rawValue)
 
             let engine = AirPlayEngine()
-            await engine.enterHeadlessTestMode(issue: { _, _ in 1 }, opTimeout: 0.3)
+            await engine.enterHeadlessTestMode(issue: { _, _ in 1 }, opTimeout: 60)
             await engine.registerKnownOutputForTest(id)
 
-            // Fire the real completion well within the 0.3s window: it must win.
+            // Fire the real completion inside the timeout window: it must win.
             async let op: Void = engine.addOutput(id)
             try await fireWhenArmed(id: id.rawValue, state: OUTPUT_STATE_STREAMING, engine: engine)
             try await op // resolves normally (no throw)
@@ -920,10 +917,14 @@ extension SerializedEngineState {
             let state = await engine.stateOf(id)
             #expect(state == .streaming)
 
-            // Wait past the ORIGINAL timeout deadline. If the timer weren't cancelled
-            // on delivery it would fire now against an already-resumed continuation
-            // and trap the process. Reaching the assertion means it stayed cancelled.
-            try await Task.sleep(nanoseconds: 400_000_000) // 0.4s > 0.3s deadline
+            // Delivery removed the waiter together with its timer, so the timer has
+            // nothing left to reschedule.
+            #expect(!engine.expireOpTimeoutForTest(callbackId: 0),
+                    "delivery must remove the op's waiter and its timeout timer")
+            // Run the timeout handler anyway, as a timer already in flight when the
+            // completion landed would. Resolving the spent waiter a second time
+            // would trap the process; reaching the assertion means it found nothing.
+            engine.fireOpTimeoutForTest(callbackId: 0)
             let stillStreaming = await engine.stateOf(id)
             #expect(stillStreaming == .streaming,
                     "a delivered op must not be disturbed by the (cancelled) timeout")
@@ -949,14 +950,21 @@ extension SerializedEngineState {
             // until its timeout (a flaky 12s `opTimedOut` before this fix). The
             // wrapper always uses the lowest free slot (0 for a single op after
             // reset), so we wait for waiter 0 then fire slot 0.
-            for _ in 0..<200 {
-                if await engine.hasArmedWaiterForTest(callbackId: 0) {
-                    fireCompletion(id: id, cbIdSlot: 0, state: state)
-                    return
-                }
-                try await Task.sleep(nanoseconds: 1_000_000) // 1ms
+            await SuiteWait.until("the waiter for device \(String(format: "0x%llX", id)) is armed") {
+                engine.waiterIsArmedForTest(callbackId: 0)
             }
-            Issue.record("waiter was never armed for device \(String(format: "0x%llX", id))")
+            // An actor call runs only after startOp's headless body (arm, issue) has finished.
+            if await engine.hasArmedWaiterForTest(callbackId: 0) {
+                fireCompletion(id: id, cbIdSlot: 0, state: state)
+            }
         }
     }
+}
+
+/// Set once from a task, read by a `SuiteWait.until` condition.
+private final class DoneFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var done = false
+    var isSet: Bool { lock.lock(); defer { lock.unlock() }; return done }
+    func set() { lock.lock(); done = true; lock.unlock() }
 }

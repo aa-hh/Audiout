@@ -320,12 +320,19 @@ public final class CompanionServer: @unchecked Sendable {
     private static let maxClientNameLength = 64
 
     /// The hello's attacker-controlled name as every surface shows it: line
-    /// breaks and control characters become spaces, so a name cannot add
-    /// lines to an alert title or a Settings row, then it is trimmed and cut
-    /// to ``maxClientNameLength``.
+    /// breaks, control characters and format characters become spaces, so a
+    /// name cannot add lines to an alert title or a Settings row, then it is
+    /// trimmed and cut to ``maxClientNameLength``. The format category is
+    /// dropped because the bidirectional overrides live in it (U+202E,
+    /// U+200F, U+061C): the approval prompt and the Settings row are where
+    /// the user decides whether to trust a phone, and a name that reorders
+    /// the text around it can make that decision read backwards.
     static func displayName(_ rawName: String) -> String {
         let flattened = String(String.UnicodeScalarView(rawName.unicodeScalars.map {
-            $0.properties.generalCategory == .control || CharacterSet.newlines.contains($0) ? " " : $0
+            (scalar: Unicode.Scalar) -> Unicode.Scalar in
+            let category = scalar.properties.generalCategory
+            return category == .control || category == .format
+                || CharacterSet.newlines.contains(scalar) ? " " : scalar
         }))
         return String(flattened.trimmingCharacters(in: .whitespaces).prefix(maxClientNameLength))
     }

@@ -168,7 +168,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
                 Self.captureCoarseLocationOnce()
             },
             captureAt: { PostHogSDK.shared.capture($0, properties: $1, timestamp: $2) },
-            captureStructured: { PostHogSDK.shared.capture($0, properties: $1.mapValues { $0 as Any }) }
+            captureStructured: { PostHogSDK.shared.capture($0, properties: $1.mapValues { $0 as Any }) },
+            anonymousID: { PostHogSDK.shared.getDistinctId() }
         ), consent: settings.telemetryEnabled)
         if settings.telemetryEnabled { Self.captureCoarseLocationOnce() }
     }

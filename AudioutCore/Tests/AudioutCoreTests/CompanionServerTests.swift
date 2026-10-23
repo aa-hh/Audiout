@@ -759,11 +759,14 @@ import AudioutProtocol
                 "the attacker-controlled clientName was not truncated at parse")
     }
 
-    /// Turns red if a line break or control character in the hello's name
-    /// reaches a surface that shows it (an alert title, a Settings row), or
-    /// if the cut to 64 characters stops applying.
+    /// Turns red if a line break, control character or bidirectional
+    /// override in the hello's name reaches a surface that shows it (an
+    /// alert title, a Settings row), or if the cut to 64 characters stops
+    /// applying.
     @Test func aClientNameIsFlattenedToOneLine() {
         #expect(CompanionServer.displayName("  Ada's\niPhone\r\u{2028}\u{0007}  ") == "Ada's iPhone")
+        // U+202E and U+061C reorder the text around the name in the approval alert.
+        #expect(CompanionServer.displayName("Ada\u{202E}\u{061C}enohPi") == "Ada  enohPi")
         #expect(CompanionServer.displayName("\n\n") == "")
         #expect(CompanionServer.displayName(String(repeating: "b", count: 200)).count == 64)
     }

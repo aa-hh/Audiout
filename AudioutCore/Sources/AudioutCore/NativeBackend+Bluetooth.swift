@@ -2,6 +2,7 @@ import Foundation
 import AudioToolbox
 import AirPlayEngine
 import CastSender
+import ProbeKit // DEBUG-wz7
 
 extension NativeBackend {
     // MARK: Bluetooth hardware volume decisions (BT-HW-VOL)
@@ -1601,6 +1602,8 @@ extension NativeBackend: BTOutputControlling {
         if active, btTargetDeviceID != nil {
             stateQueue.async {
                 guard !self.btWizardReferenceRaised else { return }
+                Telemetry.log(.wz7, "DEBUG-wz7_wait_wizard_reference_buffer", // DEBUG-wz7
+                              ["ms": String(Self.btWizardReferenceBufferMs)])
                 self.btWizardReferenceRaised = true
                 self.updateBTReferenceBufferLocked()
             }
@@ -1681,6 +1684,10 @@ extension NativeBackend: BTOutputControlling {
             }
             self.localPlaybackEngine?.setOutputSuppressed(wanted != nil) {}
             if before != after { self.roomDelayChangedLocked(cause: "wizard_hold") }
+            if active { // DEBUG-wz7
+                Telemetry.log(.wz7, "DEBUG-wz7_participants_ready", [
+                    "roomDelayBeforeMs": String(before), "roomDelayAfterMs": String(after)])
+            }
         }
     }
 
@@ -1854,8 +1861,14 @@ extension NativeBackend: BTOutputControlling {
             referenceOnEngine: !referenceIsBluetooth,
             targetWindowUID: targetID,
             referenceWindowUID: referenceIsBluetooth ? referenceID : nil,
-            onStarted: { onStarted(roomDelaySeconds) },
+            onStarted: {
+                Self.wz7LogToneSchedule(roomDelaySeconds: roomDelaySeconds, // DEBUG-wz7
+                                        uids: [targetID, referenceID])
+                onStarted(roomDelaySeconds)
+            },
             onFinished: { [weak self] in
+                Telemetry.log(.wz7, "DEBUG-wz7_wait_pipeline_tail", // DEBUG-wz7
+                              ["ms": String(Int(MicProbeSession.pipelineTailSeconds * 1000))])
                 onFinished()
                 // The air lags the feed by the sinks' pipeline delay, so the
                 // AUDIO stands down a tail's worth after the last probe FRAME —
@@ -1903,6 +1916,7 @@ extension NativeBackend: BTOutputControlling {
             return true
         }
         guard moved else { return }
+        Telemetry.log(.wz7, "DEBUG-wz7_probe_audio_stood_down", [:]) // DEBUG-wz7
         setBTWizardTickActive(false, btTargetDeviceID: targetID, btReferenceDeviceID: nil)
         endBTWizardRun()
         captureControlQueue.asyncAfter(
@@ -2269,6 +2283,7 @@ extension NativeBackend: BTOutputControlling {
             failCompanionAuditionPreparation(id: id,
                 reason: "Starting the speaker clicks took too long. Try again.")
         case .claimed(let callbacks):
+            Telemetry.log(.wz7, "DEBUG-wz7_audition_active", [:]) // DEBUG-wz7
             setBTWizardTickActive(true, btTargetDeviceID: nil, btReferenceDeviceID: nil)
             callbacks.forEach { $0(nil) }
             monitorCompanionAuditionPair(id: id)
@@ -2889,6 +2904,11 @@ extension NativeBackend: BTOutputControlling {
     /// engine needs longer than the old fixed 3 s preamble allowed for).
     /// `captureControlQueue`.
     private func beginWizardArmGate(expecting uids: Set<String>) {   // captureControlQueue
+        Telemetry.log(.wz7, "DEBUG-wz7_wait_arm_gate", [ // DEBUG-wz7
+            "minBedMs": String(Int(wizardArmMinimumBedSeconds * 1000)),
+            "ceilingMs": String(Int(wizardArmCeilingSeconds * 1000)),
+            "pollMs": String(Int(wizardArmPollInterval * 1000)),
+            "expecting": String(uids.count)])
         cancelWizardArmGate()
         scheduleWizardArmPoll(started: uptimeClock(), releasedAt: nil, expecting: uids)
     }
@@ -2947,6 +2967,9 @@ extension NativeBackend: BTOutputControlling {
             return
         }
         captureCoordinator?.armWizardTicks()
+        Telemetry.log(.wz7, "DEBUG-wz7_ticks_armed", [ // DEBUG-wz7
+            "waitedMs": String(Int((waited * 1_000).rounded())),
+            "bedMs": String(Int((bedSeconds * 1_000).rounded()))])
         Telemetry.log(.localPlayback, "wizard_ticks_armed", [
             "waitedMs": String(Int((waited * 1_000).rounded())),
             "bedMs": String(Int((bedSeconds * 1_000).rounded())),
@@ -2955,5 +2978,28 @@ extension NativeBackend: BTOutputControlling {
             "timedOut": ready ? "0" : "1",
         ])
         btSink?.logHealthNow(at: "wizard_armed", uids: uids)
+    }
+}
+
+// DEBUG-wz7: temporary alignment-wizard timing marks, never merged.
+extension NativeBackend {
+    /// One line per probe lane at the moment the probe starts rendering into
+    /// the feed: when that lane enters the feed and when its sound should
+    /// reach the room (feed time plus the room delay), as wall-clock times.
+    /// Lane 0 is the Bluetooth target's, lane 1 the reference's.
+    static func wz7LogToneSchedule(roomDelaySeconds: TimeInterval, uids: [String]) {
+        let now = Date()
+        let iso = Date.ISO8601FormatStyle(includingFractionalSeconds: true)
+        for lane in 0..<2 {
+            let feed = SyncProbe.Layout.bedLeadSeconds + SyncProbe.Layout.laneSpacingSeconds * Double(lane)
+            Telemetry.log(.wz7, "DEBUG-wz7_tone_scheduled", [
+                "lane": String(lane),
+                "uid": uids.indices.contains(lane) ? uids[lane] : "nil",
+                "feedAt": now.addingTimeInterval(feed).formatted(iso),
+                "plannedAirAt": now.addingTimeInterval(feed + roomDelaySeconds).formatted(iso),
+                "toneMs": String(Int(SyncProbe.Layout.laneSeconds * 1000)),
+                "roomDelayMs": String(Int((roomDelaySeconds * 1000).rounded())),
+            ])
+        }
     }
 }

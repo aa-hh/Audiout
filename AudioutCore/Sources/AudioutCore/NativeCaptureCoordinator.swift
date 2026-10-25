@@ -395,6 +395,8 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     /// each lane on its own fan-out and needs no per-device routing.
     /// Pacer-queue confined.
     private var companionProbeWindowUIDs: [String?] = []
+    /// DEBUG-wz7: the probe lane the last pacer block carried, `pacerQueue` only.
+    private var wz7LastProbeWindow: Int?
     /// A companion run owns this probe, so its completion must NOT hand over
     /// to the by-ear tick grid — the phone decides what happens next.
     /// Pacer-queue confined.
@@ -1526,6 +1528,7 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         }
         guard !suppressWizardPacerTimer else { return }
         let timer = DispatchSource.makeTimerSource(queue: pacerQueue)
+        Telemetry.log(.wz7, "DEBUG-wz7_wait_pacer_engage", ["ms": "200"]) // DEBUG-wz7
         timer.schedule(
             deadline: .now() + Self.wizardPacerEngageDelay,
             repeating: Self.wizardPacerInterval,
@@ -1586,6 +1589,15 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             let finished = micProbeFinished
             micProbeFinished = nil
             if let finished { DispatchQueue.global(qos: .userInitiated).async(execute: finished) }
+        }
+        if companionProbeActive, window != wz7LastProbeWindow { // DEBUG-wz7
+            if let lane = wz7LastProbeWindow {
+                Telemetry.log(.wz7, "DEBUG-wz7_tone_feed_end", ["lane": String(lane)])
+            }
+            if let lane = window {
+                Telemetry.log(.wz7, "DEBUG-wz7_tone_played", ["lane": String(lane), "at": "entered_feed"])
+            }
+            wz7LastProbeWindow = window
         }
         // Which Bluetooth sink, if any, is to hear the probe in THIS block.
         let sweepOwnerUID = window.flatMap { index -> String? in

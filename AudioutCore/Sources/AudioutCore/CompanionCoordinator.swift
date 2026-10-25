@@ -798,6 +798,11 @@ public final class CompanionCoordinator {
         targetID: String, active: Bool, referenceID requestedReferenceID: String?, clientID: UUID,
         reply: @escaping @Sendable (CompanionServer.CommandResult) -> Void
     ) {
+        if active { // DEBUG-wz7
+            Telemetry.log(.wz7, "DEBUG-wz7_ticks_request_received", [:])
+        } else {
+            Telemetry.log(.wz7, "DEBUG-wz7_keep_received", ["via": "setAlignmentTick_active_false"])
+        }
         if let reason = CompanionCommandDispatcher.alignmentTargetIDRefusal(targetID) {
             reply(.init(applied: false, refusalReason: reason))
             return
@@ -913,6 +918,7 @@ public final class CompanionCoordinator {
                     return
                 }
                 reply(.init(applied: true))
+                Telemetry.log(.wz7, "DEBUG-wz7_ticks_reply_sent", ["applied": "1"]) // DEBUG-wz7
                 self.scheduleBroadcast()
                 // One monitor per audition, not per start: it rearms itself
                 // every 0.25 s for the audition's life, so arming it again on
@@ -986,6 +992,7 @@ public final class CompanionCoordinator {
     private func makeAlignmentActions() -> CompanionAlignmentActions {
         CompanionAlignmentActions(
             startProbe: { [weak self] targetID, requestedReferenceID, clientID in
+                Telemetry.log(.wz7, "DEBUG-wz7_cmd_probe_received", [:]) // DEBUG-wz7
                 guard let self, let bt = self.backend as? BTOutputControlling else {
                     return "This Mac can't measure speaker timing."
                 }
@@ -1077,6 +1084,9 @@ public final class CompanionCoordinator {
                 // all. A measurement that arrives has already passed that, and
                 // the Mac has nothing better to judge it with, so it does not
                 // gate on it — it only records it, for the measurement log.
+                Telemetry.log(.wz7, "DEBUG-wz7_measurement_received", [ // DEBUG-wz7
+                    "offsetMs": String(format: "%.1f", offsetMs),
+                    "confidence": String(format: "%.1f", confidence)])
                 guard let self, let bt = self.backend as? BTOutputControlling else {
                     return "This Mac can't measure speaker timing."
                 }

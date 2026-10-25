@@ -53,6 +53,7 @@ public enum Telemetry {
     /// `settings` (the on-disk stores' save/parse failures, `StoreRecovery`).
     public enum Category: String, Sendable {
         case permission, captureWS, capturePA, airplay, localPlayback, lifecycle, surface, cast, settings
+        case wz7 // DEBUG-wz7: temporary alignment-wizard timing marks, never merged.
     }
 
     /// Non-blocking. Formats `{"ts":...,"sid":...,"cat":...,"evt":...,

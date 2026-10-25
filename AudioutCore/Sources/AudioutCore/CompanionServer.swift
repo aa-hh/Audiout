@@ -575,6 +575,8 @@ public final class CompanionServer: @unchecked Sendable {
         let delay = roomDelaySeconds.flatMap { $0.isFinite ? $0 : nil }
         queue.async { [weak self] in
             guard let self, let client = self.clients[clientID], client.isWelcomed else { return }
+            Telemetry.log(.wz7, "DEBUG-wz7_probe_started_sent", // DEBUG-wz7
+                          ["roomDelaySeconds": delay.map { String(format: "%.3f", $0) } ?? "nil"])
             self.send(.alignmentProbeStarted(deviceID: deviceID, roomDelaySeconds: delay), to: client)
         }
     }
@@ -585,6 +587,7 @@ public final class CompanionServer: @unchecked Sendable {
     public func sendAlignmentProbeFinished(deviceID: String, to clientID: UUID) {
         queue.async { [weak self] in
             guard let self, let client = self.clients[clientID], client.isWelcomed else { return }
+            Telemetry.log(.wz7, "DEBUG-wz7_probe_stopped", [:]) // DEBUG-wz7
             self.send(.alignmentProbeFinished(deviceID: deviceID), to: client)
         }
     }
@@ -599,6 +602,9 @@ public final class CompanionServer: @unchecked Sendable {
                                      to clientID: UUID) {
         queue.async { [weak self] in
             guard let self, let client = self.clients[clientID], client.isWelcomed else { return }
+            Telemetry.log(.wz7, "DEBUG-wz7_measurement_applied_sent", [ // DEBUG-wz7
+                "measuredMs": String(format: "%.1f", measuredMs),
+                "correctedMs": String(format: "%.1f", correctedMs)])
             self.send(.alignmentApplied(deviceID: deviceID, measuredMs: measuredMs,
                                         correctedMs: correctedMs, source: source), to: client)
         }

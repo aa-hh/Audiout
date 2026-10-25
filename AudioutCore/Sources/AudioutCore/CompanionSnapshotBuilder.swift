@@ -285,7 +285,8 @@ public enum CompanionSnapshotBuilder {
                 forTarget: device.id, among: devices),
             settleRemainingSeconds: report.settleRemainingSeconds,
             clockState: report.clockState.rawValue,
-            source: report.source?.rawValue)
+            source: report.source?.rawValue,
+            delayMs: report.delayMs)
     }
 
     private static func deviceState(

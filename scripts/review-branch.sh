@@ -19,8 +19,8 @@
 # (`none` when there are none). A push that leaves it unchanged, such as
 # merging main in or a docs-only commit, uses no round: the run re-posts that
 # round's status on the new HEAD and exits with its result. Round 2
-# reviews only what was committed since round 1's head (the fix for its HIGH
-# findings) and never skips; a third run refuses. No PR yet means round 1
+# reviews only what the branch changed since round 1's head (the fix for its
+# HIGH findings), not what merging main in brought, and never skips; a third run refuses. No PR yet means round 1
 # against main. Only a HIGH finding fails the status; MEDIUM and LOW are
 # posted and do not block.
 #
@@ -171,10 +171,20 @@ if [ "$round" -gt 2 ] && [ "$mode" != --continue ]; then
   echo "two rounds done; remaining findings are on the PR"
   exit 1
 fi
+base_label=$main_base
 if [ "$round" = 2 ]; then
-  base=$prev_head
-  git rev-parse --verify -q "$base^{commit}" > /dev/null \
-    || { echo "Round 1's head $base (from PR #$pr) is not in this clone; git fetch, then run again." >&2; exit 2; }
+  git rev-parse --verify -q "$prev_head^{commit}" > /dev/null \
+    || { echo "Round 1's head $prev_head (from PR #$pr) is not in this clone; git fetch, then run again." >&2; exit 2; }
+  # Diff against round 1's head with today's main merged in (a tree, not a
+  # commit), so main merged into the branch since round 1 is not reviewed
+  # again. Without main merged in, that tree is round 1's head's own tree.
+  # Needs git 2.38+ for --write-tree.
+  if base=$(git merge-tree --write-tree "$prev_head" "$main_base" 2> /dev/null); then
+    base_label="round 1 head $prev_head with origin/main $main_base merged in (tree $base)"
+  else
+    echo "Round 1's head does not merge cleanly with origin/main (or git is older than 2.38), so round 2 reviews the branch's whole change against origin/main." >&2
+    base=$main_base
+  fi
 else
   base=$main_base
 fi
@@ -341,7 +351,7 @@ if [ "$mode" != --continue ]; then
       printf '\n### %s\n\n' "$a"
       git show "$tip:$a" 2>/dev/null
     done
-    printf '\n## Diff\n\nbase: %s tip: %s\n\n' "$base" "$tip"
+    printf '\n## Diff\n\nbase: %s\ntip: %s\n\n' "$base_label" "$tip"
     git diff "$base" "$tip"
   } > "$state/tail" || exit 2
 

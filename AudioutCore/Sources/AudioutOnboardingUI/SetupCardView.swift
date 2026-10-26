@@ -502,7 +502,7 @@ final class SetupSpineRowView: NSView {
     /// spent entirely on the ONE button the step wants pressed, and a gold bar
     /// on the spine competed with it across the window) is superseded by
     /// decisions F4 and R4 of the design migration,
-    /// `dev/notes/design-migration-scoping/01-decisions.md`: live is one gold
+    /// `docs/design-migration-decisions.md`: live is one gold
     /// wash everywhere in the app, so this row says what a sounding device row
     /// says. The ember EDGE BAR the old reading also carried does not come
     /// back with it. A BROKEN row overrides the wash with the failure hue,

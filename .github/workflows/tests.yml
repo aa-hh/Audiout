@@ -155,6 +155,24 @@ jobs:
           path: AirPlayEngine/.build
           key: ${{ runner.os }}-${{ runner.arch }}-xcode26.6-airplayengine-${{ hashFiles('AirPlayEngine/Package.swift', 'AirPlayEngine/Package.resolved') }}-${{ github.sha }}
 
+  # Handoffs, .scratch/, dev/notes/ and the other internal docs are
+  # gitignored; `git add -f` still tracks one, so fail on any tracked file
+  # .gitignore matches. Runs inside the required `tests` check, so the
+  # ruleset needs no new entry.
+  internal-docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: No tracked file matches .gitignore
+        run: |
+          tracked=$(git ls-files --cached --ignored --exclude-standard)
+          if [ -n "$tracked" ]; then
+            echo "These files match .gitignore and must not reach main (git rm --cached them):" >&2
+            printf '%s\n' "$tracked" >&2
+            exit 1
+          fi
+
   # The pre-commit shared-leak guard again, over the whole PR: the hook is
   # skipped without core.hooksPath or with --no-verify. Required through
   # `tests` (owner's call, 2026-10-26); push and manual runs have no base, so
@@ -173,13 +191,13 @@ jobs:
   # The one required check the ruleset names.
   tests:
     runs-on: ubuntu-latest
-    needs: [suite, airplayengine, shared-leak]
+    needs: [suite, airplayengine, internal-docs, shared-leak]
     if: always()
     steps:
       - name: Every suite job passed
         run: |
-          echo "suite=${{ needs.suite.result }} airplayengine=${{ needs.airplayengine.result }} shared-leak=${{ needs.shared-leak.result }}"
-          [ "${{ needs.suite.result }}" = success ] && [ "${{ needs.airplayengine.result }}" = success ] || exit 1
+          echo "suite=${{ needs.suite.result }} airplayengine=${{ needs.airplayengine.result }} internal-docs=${{ needs.internal-docs.result }} shared-leak=${{ needs.shared-leak.result }}"
+          [ "${{ needs.suite.result }}" = success ] && [ "${{ needs.airplayengine.result }}" = success ] && [ "${{ needs.internal-docs.result }}" = success ] || exit 1
           case "${{ github.event_name }}/${{ needs.shared-leak.result }}" in
             */success|push/skipped|workflow_dispatch/skipped) ;;
             *) exit 1 ;;

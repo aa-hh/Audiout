@@ -160,7 +160,10 @@ import Foundation
         /// The phone's own start was refused; `clientID` is the phone that asked.
         case startRefused(clientID: UUID?)
         /// The backend's lease ran out and stood the run down.
-        case leaseEnded
+        /// `backendStillPrepared` is the backend's answer, read when the
+        /// report reached main: true means the target was prepared again
+        /// after the lease fired, and that newer run keeps its claim.
+        case leaseEnded(backendStillPrepared: Bool)
     }
 
     /// Give back the claim of a run that was prepared and ends without
@@ -176,8 +179,8 @@ import Foundation
         switch end {
         case .startRefused(let clientID):
             ownsRun = owner == nil || (owner?.kind == .probe && owner?.clientID == clientID)
-        case .leaseEnded:
-            ownsRun = owner == nil || owner?.kind == .probe
+        case .leaseEnded(let backendStillPrepared):
+            ownsRun = !backendStillPrepared && (owner == nil || owner?.kind == .probe)
         }
         guard ownsRun, prepared.remove(targetID) != nil else { return false }
         if let owner { releaseOwned(targetID: targetID, clientID: owner.clientID) }

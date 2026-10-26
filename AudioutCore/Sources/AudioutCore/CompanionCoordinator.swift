@@ -294,8 +294,11 @@ public final class CompanionCoordinator {
         (backend as? BTOutputControlling)?.onCompanionPreparedProbeLeaseEnded = { [weak self] targetID in
             DispatchQueue.main.async {
                 guard let self, !self.isTerminating else { return }
+                let stillPrepared = (self.backend as? BTOutputControlling)?
+                    .hasPreparedCompanionAlignmentProbe(targetID: targetID) ?? false
                 if self.alignmentOwners.endPreparedProbe(
-                    targetID: targetID, .leaseEnded, prepared: &self.preparedProbeTargets) {
+                    targetID: targetID, .leaseEnded(backendStillPrepared: stillPrepared),
+                    prepared: &self.preparedProbeTargets) {
                     self.releaseEngaged(forTarget: targetID)
                 }
             }

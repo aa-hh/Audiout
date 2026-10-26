@@ -1109,6 +1109,11 @@ public protocol BTOutputControlling: AnyObject {
     /// any other exit. Default get-nil / set-noop.
     var onCompanionPreparedProbeLeaseEnded: (@Sendable (_ targetID: String) -> Void)? { get set }
 
+    /// Whether a run prepared for `targetID` and not yet started is up now.
+    /// The wiring asks before acting on a lease report, which reaches it after
+    /// a hop to main and may trail a newer preparation. Default `false`.
+    func hasPreparedCompanionAlignmentProbe(targetID: String) -> Bool
+
     /// What the Mac publishes about this device's timing, for the snapshot's
     /// `DeviceState.alignment`. `nil` (the default) means this backend reports
     /// no alignment at all and the phone shows none.
@@ -1224,6 +1229,7 @@ extension BTOutputControlling {
         get { nil }
         set { }
     }
+    public func hasPreparedCompanionAlignmentProbe(targetID: String) -> Bool { false }
     public func btAlignmentReport(forDevice id: String) -> BTSpeakerTimingReport? { nil }
     public func startCompanionAlignmentProbe(targetID: String, referenceID: String,
                                              onStarted: @escaping (_ roomDelaySeconds: TimeInterval) -> Void,
@@ -1779,6 +1785,12 @@ extension NativeBackend: BTOutputControlling {
         set { btTrimLock.withLock { companionPreparedLeaseEnded = newValue } }
     }
 
+    public func hasPreparedCompanionAlignmentProbe(targetID: String) -> Bool {
+        btTrimLock.withLock {
+            companionAlignmentRun.map { $0.phase == .prepared && $0.targetUID == targetID } ?? false
+        }
+    }
+
     public func btAlignmentReport(forDevice id: String) -> BTSpeakerTimingReport? {
         var report = btSpeakerTiming.report(uid: id)
         report.delayMs = btDelayMs(forDevice: id)
@@ -1938,6 +1950,9 @@ extension NativeBackend: BTOutputControlling {
         // A phone left on its Start page would otherwise keep the user's audio
         // off for as long as it stays connected. Keyed by run id, so the lease
         // of a run already stood down never ends the one prepared after it.
+        // The report to the wiring names only the target; the wiring checks
+        // `hasPreparedCompanionAlignmentProbe` on main before acting, so a
+        // report that trails a newer preparation leaves that one alone.
         delayClock(companionPreparedLeaseSeconds, captureControlQueue, DispatchWorkItem { [weak self] in
             guard let self,
                   let stale = self.takeCompanionProbeRun({ $0.id == runID && $0.phase == .prepared })

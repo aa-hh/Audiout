@@ -338,7 +338,8 @@ import Testing
                         referenceID: reference, leaseDeadline: nil)
         var prepared: Set<String> = [target]
 
-        #expect(owner.endPreparedProbe(targetID: target, .leaseEnded, prepared: &prepared),
+        #expect(owner.endPreparedProbe(targetID: target, .leaseEnded(backendStillPrepared: false),
+                                       prepared: &prepared),
                 "the caller gives the run's speakers back too")
         #expect(owner.current(targetID: target) == nil)
         #expect(prepared.isEmpty)
@@ -346,6 +347,22 @@ import Testing
                                         referenceID: reference, leaseDeadline: nil) else {
             Issue.record("phone B must be able to prepare once A's lease ran out"); return
         }
+    }
+
+    /// Turns red if `endPreparedProbe` ignores `backendStillPrepared`, so a
+    /// lease report that reaches main after the same speaker was prepared
+    /// again gives back the newer run's claim and speakers.
+    @Test func aLateLeaseReportLeavesANewerPreparationAlone() {
+        let owner = CompanionAlignmentOwnership()
+        _ = owner.claim(targetID: target, clientID: phoneA, kind: .probe,
+                        referenceID: reference, leaseDeadline: nil)
+        var prepared: Set<String> = [target]
+
+        #expect(!owner.endPreparedProbe(targetID: target, .leaseEnded(backendStillPrepared: true),
+                                        prepared: &prepared),
+                "the newer run keeps its speakers")
+        #expect(owner.current(targetID: target)?.clientID == phoneA)
+        #expect(prepared == [target])
     }
 
     /// Turns red if a refused start stops checking that its target is still

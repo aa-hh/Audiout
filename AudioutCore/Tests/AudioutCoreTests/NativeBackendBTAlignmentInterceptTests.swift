@@ -2417,7 +2417,9 @@ extension SerializedSharedState {
     /// down a run a start has already adopted. Also turns red if the lease
     /// stops calling `onCompanionPreparedProbeLeaseEnded` with the target, or
     /// calls it for a run a start adopted, so the wiring keeps or drops the
-    /// phone's claim wrongly.
+    /// phone's claim wrongly. Also turns red if
+    /// `hasPreparedCompanionAlignmentProbe` stops reading the run's phase and
+    /// target, so a late lease report releases a newer preparation's claim.
     @Test @MainActor func aPreparedRunGivesTheRoomBackWhenItsLeaseRunsOut() async throws {
         let dir = scratchDir
         try BTTrimStore(directory: dir).save([btMove.id: 40])
@@ -2428,6 +2430,8 @@ extension SerializedSharedState {
         backend.onCompanionPreparedProbeLeaseEnded = { leaseEnded.value = leaseEnded.value + [$0] }
         #expect(backend.prepareCompanionAlignmentProbe(targetID: btMove.id, referenceID: btFlip.id) == nil)
         await SuiteWait.until { sink.buffers.last == NativeBackend.btWizardReferenceBufferMs }
+        #expect(backend.hasPreparedCompanionAlignmentProbe(targetID: btMove.id))
+        #expect(!backend.hasPreparedCompanionAlignmentProbe(targetID: btFlip.id), "only the target counts")
 
         clock.advance(by: backend.companionPreparedLeaseSeconds)
         await SuiteWait.until {
@@ -2439,10 +2443,13 @@ extension SerializedSharedState {
         #expect(sink.trims.last?.ms == 40, "the suspended trim is back: \(sink.trims)")
         #expect(companionPhase(backend) == nil)
         #expect(leaseEnded.value == [btMove.id], "the wiring is told once, with the target")
+        #expect(!backend.hasPreparedCompanionAlignmentProbe(targetID: btMove.id), "the lease stood it down")
 
         #expect(backend.prepareCompanionAlignmentProbe(targetID: btMove.id, referenceID: btFlip.id) == nil)
+        #expect(backend.hasPreparedCompanionAlignmentProbe(targetID: btMove.id))
         #expect(backend.startCompanionAlignmentProbe(
             targetID: btMove.id, referenceID: btFlip.id, onStarted: { _ in }, onFinished: {}) == nil)
+        #expect(!backend.hasPreparedCompanionAlignmentProbe(targetID: btMove.id), "the start moved it on")
         drainStateThenCapture(backend)
         #expect(capture.stages == 1)
         #expect(capture.modes == [.wizard, .off, .wizard], "a start inside the lease adopts the feed")

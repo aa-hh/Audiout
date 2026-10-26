@@ -155,6 +155,20 @@ jobs:
           path: AirPlayEngine/.build
           key: ${{ runner.os }}-${{ runner.arch }}-xcode26.6-airplayengine-${{ hashFiles('AirPlayEngine/Package.swift', 'AirPlayEngine/Package.resolved') }}-${{ github.sha }}
 
+  # The pre-commit shared-leak guard again, over the whole PR: the hook is
+  # skipped without core.hooksPath or with --no-verify. Not in `tests`' needs,
+  # so not required until the owner says so.
+  shared-leak:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: No local copy of an audiout-shared type
+        run: sh .githooks/guard-shared-leak.sh "origin/${{ github.base_ref }}"
+
   # The one required check the ruleset names.
   tests:
     runs-on: ubuntu-latest

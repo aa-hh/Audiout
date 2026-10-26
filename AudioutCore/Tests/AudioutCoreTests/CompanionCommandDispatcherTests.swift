@@ -28,6 +28,7 @@ import AudioutProtocol
     @Test func cancelProbeReceivesTheAskingClient() async throws {
         let seen = DispatcherCancelSpy()
         let actions = CompanionAlignmentActions(
+            prepareProbe: { _, _, _ in nil },
             startProbe: { _, _, _ in nil },
             cancelProbe: { targetID, clientID in
                 seen.calls.append((targetID, clientID))
@@ -55,6 +56,7 @@ import AudioutProtocol
     @Test func startProbeReceivesTheNamedReference() async throws {
         let seen = DispatcherStartSpy()
         let actions = CompanionAlignmentActions(
+            prepareProbe: { _, _, _ in nil },
             startProbe: { targetID, referenceID, _ in
                 seen.calls.append((targetID, referenceID))
                 return nil
@@ -69,6 +71,33 @@ import AudioutProtocol
         let context = try await makeContext(alignmentActions: actions)
         let result = context.dispatcher.execute(
             .startAlignmentProbe(targetID: "speaker-1", referenceID: "mac"), clientID: UUID())
+        #expect(result.applied)
+        #expect(seen.calls.count == 1)
+        #expect(seen.calls.first?.0 == "speaker-1")
+        #expect(seen.calls.first?.1 == "mac")
+    }
+
+    /// Turns red if the dispatcher drops the reference the phone named
+    /// before it reaches the wiring layer's `prepareProbe`, or routes
+    /// `prepareAlignmentProbe` anywhere else.
+    @Test func prepareProbeReceivesTheNamedReference() async throws {
+        let seen = DispatcherStartSpy()
+        let actions = CompanionAlignmentActions(
+            prepareProbe: { targetID, referenceID, _ in
+                seen.calls.append((targetID, referenceID))
+                return nil
+            },
+            startProbe: { _, _, _ in nil },
+            cancelProbe: { _, _ in nil },
+            reportMeasurement: { _, _, _ in nil },
+            setTick: { _, _, _ in nil },
+            nudgeTrim: { _, _ in nil },
+            revertNudge: { _ in nil },
+            clearTuning: { _ in nil },
+            playDemo: { _, _ in nil })
+        let context = try await makeContext(alignmentActions: actions)
+        let result = context.dispatcher.execute(
+            .prepareAlignmentProbe(targetID: "speaker-1", referenceID: "mac"), clientID: UUID())
         #expect(result.applied)
         #expect(seen.calls.count == 1)
         #expect(seen.calls.first?.0 == "speaker-1")

@@ -661,15 +661,21 @@ public final class BTSpeakerTiming: @unchecked Sendable {
 /// under it.
 struct CompanionAlignmentRun {
     enum Phase {
+        /// The wizard feed is up and the speakers are releasing; no probe is
+        /// staged.
+        case prepared
         /// The probe is in the feed.
         case probe
-        /// The probe is silent and the room is back, but the run's record is
-        /// still standing because the phone is still recording its own tail,
-        /// transforming it, and has not reported yet. The AUDIO stands down
-        /// long before the RUN does, and a
-        /// measurement that arrives here still needs this record's
-        /// suspended trim.
+        /// The probe has left the feed, but the run's record is still
+        /// standing because the phone is still recording its own tail,
+        /// transforming it, and has not reported yet. The wizard feed stays
+        /// up meanwhile, and a measurement that arrives here still needs this
+        /// record's suspended trim.
         case awaitingReport
+        /// The measurement is applied and the wizard feed is kept up so the
+        /// clicks the phone asks for next need no second rebuild and arm
+        /// gate; a start, a cancel, or the grace timer stands it down.
+        case handoff
         /// A by-ear fine-tune session, whose metronome is running.
         case tick
     }
@@ -679,6 +685,9 @@ struct CompanionAlignmentRun {
     let id = UUID()
     /// The Bluetooth device being measured or tuned (its Core Audio UID).
     let targetUID: String
+    /// The probe's reference, so a click request naming the same pair can
+    /// take over a `.handoff` run's feed. `nil` for a `.tick` run.
+    let referenceUID: String?
     var phase: Phase
     /// The user's trim, put aside for the run's duration and restored when it
     /// ends without a measurement. A probe SUSPENDS the trim (pushes 0 to the

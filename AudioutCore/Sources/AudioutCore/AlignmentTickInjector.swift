@@ -207,7 +207,7 @@ final class AlignmentTickInjector: @unchecked Sendable {
                                    armedAtStart: false, replacesProgram: true)
     }
 
-    private let sampleRate: Double
+    let sampleRate: Double
     /// Pacer-queue-confined once a run is under way (``setTempo(bpm:)``), like
     /// `cursor` and `tickEpochFrame`: the wizard pacer is the single consumer.
     private var beatFrames: Int
@@ -309,17 +309,18 @@ final class AlignmentTickInjector: @unchecked Sendable {
 
     // MARK: Wizard run control (pacer-queue only)
 
-    /// Start the beat grid here, with the FIRST tick one whole interval away —
-    /// not at the top of the next rendered block. The arm point is wherever the
-    /// gate happened to open, so a tick placed on it can land a few ms after the
+    /// Start the beat grid here, with the FIRST tick `firstTickAfterFrames`
+    /// away, one whole interval when nil. The full interval is for an arm whose
+    /// previous sound may be a tick: the arm point is wherever the gate
+    /// happened to open, so a tick placed on it can land a few ms after the
     /// previous run's last one, overlapping two 90 ms tick bodies into one
-    /// ambiguous smear. A full interval of silence first makes the opening tick
-    /// a clean pair on every speaker. Called once per wizard run, after every
-    /// participating sink has released. Idempotent: a second call would restart
-    /// the phase, which the arm gate never wants.
-    func armTicks() {
+    /// ambiguous smear. A caller that knows the feed has carried no tick since
+    /// its last sound may pass a short lead instead. Called once per wizard
+    /// run, after every participating sink has released. Idempotent: a second
+    /// call would restart the phase, which the arm gate never wants.
+    func armTicks(firstTickAfterFrames: Int? = nil) {
         guard tickEpochFrame < 0 else { return }
-        tickEpochFrame = cursor + beatFrames
+        tickEpochFrame = cursor + (firstTickAfterFrames ?? beatFrames)
     }
 
     /// Undo an arm that landed before a late-staged mic probe could ride it.

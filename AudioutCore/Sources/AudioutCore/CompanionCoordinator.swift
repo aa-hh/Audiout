@@ -377,7 +377,7 @@ public final class CompanionCoordinator {
                 switch command {
                 case .setDeviceVolume, .setDeviceMuted,
                      .setMainOutMuted, .setGroupMuted, .setStartBufferMs,
-                     .startAlignmentProbe, .cancelAlignmentProbe,
+                     .prepareAlignmentProbe, .startAlignmentProbe, .cancelAlignmentProbe,
                      .reportAlignmentMeasurement, .setAlignmentTick,
                      .nudgeAlignmentTrim, .revertAlignmentNudge,
                      .clearAlignmentTuning, .playAlignmentDemo:
@@ -974,9 +974,68 @@ public final class CompanionCoordinator {
         }
     }
 
-    // MARK: The eight sync-calibration actuators
+    // MARK: The nine sync-calibration actuators
 
-    /// The eight sync-calibration actuators the companion dispatcher calls.
+    /// The preamble a phone's prepare and start share: the Decision 5
+    /// preconditions, the target and reference engaged, the probe owner
+    /// claimed — then `act`, with everything given back if it refuses.
+    private func claimAndRunProbe(
+        targetID: String, requestedReferenceID: String?, clientID: UUID?,
+        _ act: (BTOutputControlling, String) -> String?
+    ) -> String? {
+        guard let bt = self.backend as? BTOutputControlling else {
+            return "This Mac can't measure speaker timing."
+        }
+        if let busy = self.legacyAlignmentRefusal(targetID: targetID) { return busy }
+        let referenceID: String
+        switch CompanionAlignmentPreconditions.evaluate(
+            targetID: targetID,
+            referenceID: requestedReferenceID,
+            among: self.alignmentDevices,
+            isAudible: self.groupController.isMainOutMember
+        ) {
+        case .refused(let reason):
+            return reason
+        case .ready(let id):
+            referenceID = id
+        }
+        var engagedNow: [String] = []
+        let engageRefusal = self.engage(targetID, forTarget: targetID, newlyEngaged: &engagedNow)
+            ?? self.engage(referenceID, forTarget: targetID, newlyEngaged: &engagedNow)
+        let generation = self.engagedByTarget[targetID]?.generation ?? 0
+        if let reason = engageRefusal {
+            self.releaseEngaged(forTarget: targetID, only: engagedNow, generation: generation)
+            return reason
+        }
+        // Claimed BEFORE the backend call, so a second phone is refused
+        // rather than racing it, and given back if the run never staged
+        // — but ONLY if this call is what created it. A repeat request
+        // joins the run already going, and giving THAT back would erase
+        // the owner the first run's events are addressed to.
+        var claim: CompanionAlignmentOwnership.Claim?
+        if let clientID {
+            let attempt = self.alignmentOwners.claim(
+                targetID: targetID, clientID: clientID, kind: .probe,
+                referenceID: referenceID, leaseDeadline: nil)
+            if case .refused(let reason) = attempt {
+                self.releaseEngaged(forTarget: targetID, only: engagedNow,
+                                    generation: generation)
+                return reason
+            }
+            claim = attempt
+        }
+        let refusal = act(bt, referenceID)
+        if refusal != nil {
+            self.releaseEngaged(forTarget: targetID, only: engagedNow,
+                                generation: generation)
+            if let claim {
+                self.alignmentOwners.releaseFresh(claim, targetID: targetID)
+            }
+        }
+        return refusal
+    }
+
+    /// The nine sync-calibration actuators the companion dispatcher calls.
     ///
     /// Decision 5's preconditions and the sentences they refuse with live in
     /// `CompanionAlignmentPreconditions`, not here. What remains here is
@@ -985,63 +1044,37 @@ public final class CompanionCoordinator {
     /// live delay line, and whether anything else is already running.
     private func makeAlignmentActions() -> CompanionAlignmentActions {
         CompanionAlignmentActions(
+            prepareProbe: { [weak self] targetID, requestedReferenceID, clientID in
+                guard let self else { return "This Mac can't measure speaker timing." }
+                return self.claimAndRunProbe(
+                    targetID: targetID, requestedReferenceID: requestedReferenceID,
+                    clientID: clientID) { bt, referenceID in
+                        bt.prepareCompanionAlignmentProbe(targetID: targetID, referenceID: referenceID)
+                    }
+            },
             startProbe: { [weak self] targetID, requestedReferenceID, clientID in
-                guard let self, let bt = self.backend as? BTOutputControlling else {
-                    return "This Mac can't measure speaker timing."
-                }
-                if let busy = self.legacyAlignmentRefusal(targetID: targetID) { return busy }
-                let referenceID: String
-                switch CompanionAlignmentPreconditions.evaluate(
-                    targetID: targetID,
-                    referenceID: requestedReferenceID,
-                    among: self.alignmentDevices,
-                    isAudible: self.groupController.isMainOutMember
-                ) {
-                case .refused(let reason):
-                    return reason
-                case .ready(let id):
-                    referenceID = id
-                }
-                var engagedNow: [String] = []
-                let engageRefusal = self.engage(targetID, forTarget: targetID, newlyEngaged: &engagedNow)
-                    ?? self.engage(referenceID, forTarget: targetID, newlyEngaged: &engagedNow)
-                let generation = self.engagedByTarget[targetID]?.generation ?? 0
-                if let reason = engageRefusal {
-                    self.releaseEngaged(forTarget: targetID, only: engagedNow, generation: generation)
-                    return reason
-                }
-                // Claimed BEFORE the backend call, so a second phone is refused
-                // rather than racing it, and given back if the run never staged
-                // — but ONLY if this call is what created it. A repeat request
-                // joins the run already going, and giving THAT back would erase
-                // the owner the first run's events are addressed to.
-                var claim: CompanionAlignmentOwnership.Claim?
-                if let clientID {
-                    let attempt = self.alignmentOwners.claim(
-                        targetID: targetID, clientID: clientID, kind: .probe,
-                        referenceID: referenceID, leaseDeadline: nil)
-                    if case .refused(let reason) = attempt {
-                        self.releaseEngaged(forTarget: targetID, only: engagedNow,
-                                            generation: generation)
-                        return reason
+                guard let self else { return "This Mac can't measure speaker timing." }
+                let refusal = self.claimAndRunProbe(
+                    targetID: targetID, requestedReferenceID: requestedReferenceID,
+                    clientID: clientID) { bt, referenceID in
+                        bt.startCompanionAlignmentProbe(
+                            targetID: targetID, referenceID: referenceID,
+                            onStarted: { [weak self] roomDelaySeconds in
+                                self?.sendProbeEvent(targetID: targetID, started: true,
+                                                     roomDelaySeconds: roomDelaySeconds)
+                            },
+                            onFinished: { [weak self] in
+                                self?.sendProbeEvent(targetID: targetID, started: false)
+                            })
                     }
-                    claim = attempt
-                }
-                let refusal = bt.startCompanionAlignmentProbe(
-                    targetID: targetID, referenceID: referenceID,
-                    onStarted: { [weak self] roomDelaySeconds in
-                        self?.sendProbeEvent(targetID: targetID, started: true,
-                                             roomDelaySeconds: roomDelaySeconds)
-                    },
-                    onFinished: { [weak self] in
-                        self?.sendProbeEvent(targetID: targetID, started: false)
-                    })
-                if refusal != nil {
-                    self.releaseEngaged(forTarget: targetID, only: engagedNow,
-                                        generation: generation)
-                    if let claim {
-                        self.alignmentOwners.releaseFresh(claim, targetID: targetID)
-                    }
+                // The phone sends no cancel after a refused start, so a run it
+                // prepared would hold the room silent until the sheet closes.
+                // Only this phone's preparation (or an unowned one): another
+                // phone's is not this refusal's to end.
+                let owner = self.alignmentOwners.current(targetID: targetID)
+                if refusal != nil, owner == nil || (owner?.kind == .probe && owner?.clientID == clientID) {
+                    (self.backend as? BTOutputControlling)?
+                        .standDownPreparedCompanionAlignmentProbe(targetID: targetID)
                 }
                 return refusal
             },

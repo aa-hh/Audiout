@@ -142,7 +142,8 @@ post_status() {
 
 # The last round posted on this branch's PR: prev_round, prev_head,
 # prev_level, prev_high, prev_changes (prev_round 0 when none or no PR).
-pr=$($GH pr view --json number -q .number 2>/dev/null)
+# REST, not `gh pr view`: cloud sessions refuse its GraphQL lookup.
+pr=$($GH api "repos/aa-hh/Audiout/pulls?head=aa-hh:$branch&state=open" --jq '.[0].number // empty' 2>/dev/null)
 prev_round=0; prev_head=""; prev_level=""; prev_high=0; prev_changes=""
 if [ -n "$pr" ]; then
   bodies=$($GH api --paginate "repos/aa-hh/Audiout/issues/$pr/comments" --jq '.[].body') \

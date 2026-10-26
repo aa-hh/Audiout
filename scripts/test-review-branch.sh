@@ -31,8 +31,8 @@ analytics="AudioutCore/Sources/AudioutCore/Analytics.swift"
 license="AudioutCore/Sources/AudioutCore/LicenseGate.swift"
 mkdir -p "$ANSWERS" "$PROMPTS"
 
-# The gh stub. GH_CALLS gets one line per call; `pr view` prints the number in
-# GH_PR (fails when the file is missing, as gh does with no PR); a comment
+# The gh stub. GH_CALLS gets one line per call; the open-PR lookup prints the
+# number in GH_PR (nothing when the file is missing, as the API does with no PR); a comment
 # post copies the body to GH_COMMENT and appends it to GH_THREAD, the PR's comment
 # history; reading the comments prints GH_THREAD; a status post exits with
 # the number in GH_API_EXIT.
@@ -42,7 +42,7 @@ cat > "$TMP_DIR/gh" <<EOF
 #!/bin/bash
 echo "\$*" >> "$GH_CALLS"
 case "\$*" in
-  "pr view"*) [ -f "$GH_PR" ] && cat "$GH_PR" || exit 1 ;;
+  "api repos/aa-hh/Audiout/pulls?head="*) [ -f "$GH_PR" ] && cat "$GH_PR"; true ;;
   "api repos/aa-hh/Audiout/issues/"*"/comments -F body=@"*) f="\${4#body=@}"; cp "\$f" "$GH_COMMENT"; cat "\$f" >> "$GH_THREAD" ;;
   *"/comments"*) cat "$GH_THREAD" 2> /dev/null; true ;;
   "api "*) exit "\$(cat "$GH_API_EXIT")" ;;
@@ -191,7 +191,7 @@ grep -q '^api repos/aa-hh/Audiout/issues/42/comments -F body=@' "$GH_CALLS" && [
   && ok "c: one comment on PR 42: marker, heading, then 'Review: no findings'" || { fail "c: comment wrong"; cat "$GH_CALLS" "$GH_COMMENT" >&2; }
 status_call | grep -q -- '-f state=success -f description=cheap, round 1, 0 HIGH$' \
   && ok "c: success status 'cheap, round 1, 0 HIGH'" || fail "c: status: $(status_call)"
-[ "$(head -n 1 "$GH_CALLS" | cut -d' ' -f1-2)" = "pr view" ] && tail -n 1 "$GH_CALLS" | grep -q '^api repos/aa-hh/Audiout/statuses/' \
+head -n 1 "$GH_CALLS" | grep -q '^api repos/aa-hh/Audiout/pulls?head=aa-hh:' && tail -n 1 "$GH_CALLS" | grep -q '^api repos/aa-hh/Audiout/statuses/' \
   && ok "c: comment posted before the status" || fail "c: gh call order: $(cat "$GH_CALLS")"
 last_log | grep -q "$(printf '\tcheap\t0\t0\t0\t0\t')" && ok "c: log counts 0 0 0 0" || fail "c: log line '$(last_log)'"
 

@@ -327,4 +327,50 @@ import Testing
         #expect(calls.targets == [target])
         #expect(owner.current(targetID: target)?.requestID == audition.requestID)
     }
+
+    /// Turns red if `endPreparedProbe(_:.leaseEnded)` leaves the probe claim
+    /// or the prepared entry in place, so after the backend's lease gives the
+    /// room back a second phone is still refused and the first phone's
+    /// speakers stay selected until it disconnects.
+    @Test func aPreparedRunsLeaseGivesBackItsClaimSoAnotherPhoneCanPrepare() {
+        let owner = CompanionAlignmentOwnership()
+        _ = owner.claim(targetID: target, clientID: phoneA, kind: .probe,
+                        referenceID: reference, leaseDeadline: nil)
+        var prepared: Set<String> = [target]
+
+        #expect(owner.endPreparedProbe(targetID: target, .leaseEnded, prepared: &prepared),
+                "the caller gives the run's speakers back too")
+        #expect(owner.current(targetID: target) == nil)
+        #expect(prepared.isEmpty)
+        guard case .fresh = owner.claim(targetID: target, clientID: phoneB, kind: .probe,
+                                        referenceID: reference, leaseDeadline: nil) else {
+            Issue.record("phone B must be able to prepare once A's lease ran out"); return
+        }
+    }
+
+    /// Turns red if a refused start stops checking that its target is still
+    /// prepared, so a refusal while the phone's started probe is playing
+    /// erases the owner its events are addressed to and drops its speakers
+    /// mid-sweep; or if a refused start of a prepared run keeps the claim.
+    @Test func aRefusedStartEndsOnlyAPreparedRun() {
+        let owner = CompanionAlignmentOwnership()
+        _ = owner.claim(targetID: target, clientID: phoneA, kind: .probe,
+                        referenceID: reference, leaseDeadline: nil)
+        var prepared: Set<String> = []
+
+        #expect(!owner.endPreparedProbe(targetID: target, .startRefused(clientID: phoneA),
+                                        prepared: &prepared),
+                "a started probe keeps its speakers")
+        #expect(owner.current(targetID: target)?.clientID == phoneA)
+
+        prepared = [target]
+        #expect(!owner.endPreparedProbe(targetID: target, .startRefused(clientID: phoneB),
+                                        prepared: &prepared),
+                "phone B's refusal does not end phone A's preparation")
+        #expect(prepared == [target])
+        #expect(owner.endPreparedProbe(targetID: target, .startRefused(clientID: phoneA),
+                                       prepared: &prepared))
+        #expect(owner.current(targetID: target) == nil)
+        #expect(prepared.isEmpty)
+    }
 }

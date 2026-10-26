@@ -1102,6 +1102,13 @@ public protocol BTOutputControlling: AnyObject {
     /// unchanged.
     var onBTAlignmentChanged: (@Sendable () -> Void)? { get set }
 
+    /// Fired with the target when the lease of a prepared run (one readied by
+    /// ``prepareCompanionAlignmentProbe(targetID:referenceID:)`` and never
+    /// started) runs out and stands it down, so the wiring can give back the
+    /// phone's claim and the speakers it selected for that run. Not fired for
+    /// any other exit. Default get-nil / set-noop.
+    var onCompanionPreparedProbeLeaseEnded: (@Sendable (_ targetID: String) -> Void)? { get set }
+
     /// What the Mac publishes about this device's timing, for the snapshot's
     /// `DeviceState.alignment`. `nil` (the default) means this backend reports
     /// no alignment at all and the phone shows none.
@@ -1210,6 +1217,10 @@ extension BTOutputControlling {
     /// sink of its own reports no alignment and refuses every action, which is
     /// what a mock/dev build should do.
     public var onBTAlignmentChanged: (@Sendable () -> Void)? {
+        get { nil }
+        set { }
+    }
+    public var onCompanionPreparedProbeLeaseEnded: (@Sendable (_ targetID: String) -> Void)? {
         get { nil }
         set { }
     }
@@ -1763,6 +1774,11 @@ extension NativeBackend: BTOutputControlling {
         set { btSpeakerTiming.onChange = newValue }
     }
 
+    public var onCompanionPreparedProbeLeaseEnded: (@Sendable (_ targetID: String) -> Void)? {
+        get { btTrimLock.withLock { companionPreparedLeaseEnded } }
+        set { btTrimLock.withLock { companionPreparedLeaseEnded = newValue } }
+    }
+
     public func btAlignmentReport(forDevice id: String) -> BTSpeakerTimingReport? {
         var report = btSpeakerTiming.report(uid: id)
         report.delayMs = btDelayMs(forDevice: id)
@@ -1927,6 +1943,7 @@ extension NativeBackend: BTOutputControlling {
                   let stale = self.takeCompanionProbeRun({ $0.id == runID && $0.phase == .prepared })
             else { return }
             self.abandonCompanionProbe(stale)
+            self.btTrimLock.withLock { self.companionPreparedLeaseEnded }?(stale.targetUID)
         })
         return nil
     }
@@ -2089,8 +2106,8 @@ extension NativeBackend: BTOutputControlling {
     }
 
     /// Put the room back after a run that produced no measurement — the
-    /// phone's Cancel, a client that vanished, a report that never came, or a
-    /// handoff nobody took up. The wizard feed is stood down, and the trim the
+    /// phone's Cancel, a client that vanished, a report that never came, a
+    /// preparation whose lease ran out, or a handoff nobody took up. The wizard feed is stood down, and the trim the
     /// staging suspended goes back on the sink — except after a measurement
     /// (`.handoff`), whose kept value is already there.
     private func abandonCompanionProbe(_ run: CompanionAlignmentRun) {

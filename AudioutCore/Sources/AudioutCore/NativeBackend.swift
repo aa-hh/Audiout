@@ -571,6 +571,8 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// How long a prepared run may hold the room before the Mac gives it
     /// back; the phone re-prepares on its next Hold still entry.
     var companionPreparedLeaseSeconds: TimeInterval = 120
+    /// ``onCompanionPreparedProbeLeaseEnded``'s storage. `btTrimLock`.
+    var companionPreparedLeaseEnded: (@Sendable (_ targetID: String) -> Void)?
 
     /// The device an A/B receipt is playing for, if one is. Its own field
     /// rather than another ``CompanionAlignmentRun/Phase``: a receipt takes no

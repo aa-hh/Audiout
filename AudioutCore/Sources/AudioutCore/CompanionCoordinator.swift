@@ -198,10 +198,11 @@ public final class CompanionCoordinator {
     /// the selections of the run that replaced it.
     private var engagedByTarget: [String: (generation: Int, ids: [String])] = [:]
     private var engagementGeneration = 0
-    /// Targets with a probe run prepared and not yet started. A refused start
-    /// gives back its owner and engagement only for one of these: the same
-    /// refusal for a probe already playing must leave both, or its events
-    /// lose their addressee and its speakers drop out mid-sweep.
+    /// Targets with a probe run prepared and not yet started. A refused start,
+    /// or the backend's lease standing the preparation down, gives back its
+    /// owner and engagement only for one of these: the same refusal for a
+    /// probe already playing must leave both, or its events lose their
+    /// addressee and its speakers drop out mid-sweep.
     private var preparedProbeTargets: Set<String> = []
 
     /// Cached `.regular` running-app list backing `addableApps`/`isRunning` in
@@ -284,6 +285,19 @@ public final class CompanionCoordinator {
             DispatchQueue.main.async {
                 guard let self, !self.isTerminating else { return }
                 self.scheduleBroadcast()
+            }
+        }
+        // The backend lets go of a prepared run its lease ended; the phone may
+        // never cancel it, so its claim and the speakers selected for it go
+        // back here, or a second phone stays refused and a reference outside
+        // Main Out keeps playing the user's audio.
+        (backend as? BTOutputControlling)?.onCompanionPreparedProbeLeaseEnded = { [weak self] targetID in
+            DispatchQueue.main.async {
+                guard let self, !self.isTerminating else { return }
+                if self.alignmentOwners.endPreparedProbe(
+                    targetID: targetID, .leaseEnded, prepared: &self.preparedProbeTargets) {
+                    self.releaseEngaged(forTarget: targetID)
+                }
             }
         }
 
@@ -442,6 +456,10 @@ public final class CompanionCoordinator {
                     if owner == nil || owner?.clientID == clientID {
                         self.releaseEngaged(forTarget: targetID)
                     }
+                }
+                self.preparedProbeTargets = self.preparedProbeTargets.filter { targetID in
+                    let owner = self.alignmentOwners.current(targetID: targetID)
+                    return owner != nil && owner?.clientID != clientID
                 }
             }
         }
@@ -1089,10 +1107,9 @@ public final class CompanionCoordinator {
                 if owner == nil || (owner?.kind == .probe && owner?.clientID == clientID) {
                     (self.backend as? BTOutputControlling)?
                         .standDownPreparedCompanionAlignmentProbe(targetID: targetID)
-                    if self.preparedProbeTargets.remove(targetID) != nil {
-                        if let clientID {
-                            self.alignmentOwners.releaseOwned(targetID: targetID, clientID: clientID)
-                        }
+                    if self.alignmentOwners.endPreparedProbe(
+                        targetID: targetID, .startRefused(clientID: clientID),
+                        prepared: &self.preparedProbeTargets) {
                         self.releaseEngaged(forTarget: targetID)
                     }
                 }

@@ -533,7 +533,8 @@ import CoreAudio
         waitFor { sink.calls.contains("start") }
 
         backend.setOutputSet([])
-        waitFor { sink.calls.contains("stop") }
+        // Disabling makes two calls back to back on the queue ("stop", then "setDevices"), so wait for both.
+        waitFor { sink.lifecycleCalls.count >= 5 }
 
         #expect(sink.lifecycleCalls == ["setComposition", "setDevices", "start", "stop", "setDevices"],
                 "disable mirrors enable: stop, then drop the per-device sinks")

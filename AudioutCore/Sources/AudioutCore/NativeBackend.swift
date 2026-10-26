@@ -568,6 +568,9 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// How long a `.handoff` run keeps the wizard feed up waiting for the
     /// phone's click request before it stands down on its own.
     var companionHandoffGraceSeconds: TimeInterval = 4
+    /// How long a prepared run may hold the room before the Mac gives it
+    /// back; the phone re-prepares on its next Hold still entry.
+    var companionPreparedLeaseSeconds: TimeInterval = 120
 
     /// The device an A/B receipt is playing for, if one is. Its own field
     /// rather than another ``CompanionAlignmentRun/Phase``: a receipt takes no
@@ -699,7 +702,8 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// Derived by ``updateBTRoomTermLocked()``; on `stateQueue`.
     var btRoomTermMs: Int?
     /// A Bluetooth-target wizard run is under way, so the reference is pinned
-    /// wide open (``btWizardReferenceBufferMs``) for the duration, except in a
+    /// wide open (``btWizardReferenceBufferMs``, or ``btWizardReferencePinnedMs``
+    /// for a phone run) for the duration, except in a
     /// presentation-timeline room, where the room delay is the reference and
     /// the wizard's ceiling follows it. On `stateQueue`.
     var btWizardReferenceRaised = false

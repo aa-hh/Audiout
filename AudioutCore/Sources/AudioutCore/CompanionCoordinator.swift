@@ -198,6 +198,11 @@ public final class CompanionCoordinator {
     /// the selections of the run that replaced it.
     private var engagedByTarget: [String: (generation: Int, ids: [String])] = [:]
     private var engagementGeneration = 0
+    /// Targets with a probe run prepared and not yet started. A refused start
+    /// gives back its owner and engagement only for one of these: the same
+    /// refusal for a probe already playing must leave both, or its events
+    /// lose their addressee and its speakers drop out mid-sweep.
+    private var preparedProbeTargets: Set<String> = []
 
     /// Cached `.regular` running-app list backing `addableApps`/`isRunning` in
     /// the snapshot (FIX-B2 finding 2b). The host's app-lifecycle observers
@@ -1046,11 +1051,13 @@ public final class CompanionCoordinator {
         CompanionAlignmentActions(
             prepareProbe: { [weak self] targetID, requestedReferenceID, clientID in
                 guard let self else { return "This Mac can't measure speaker timing." }
-                return self.claimAndRunProbe(
+                let refusal = self.claimAndRunProbe(
                     targetID: targetID, requestedReferenceID: requestedReferenceID,
                     clientID: clientID) { bt, referenceID in
                         bt.prepareCompanionAlignmentProbe(targetID: targetID, referenceID: referenceID)
                     }
+                if refusal == nil { self.preparedProbeTargets.insert(targetID) }
+                return refusal
             },
             startProbe: { [weak self] targetID, requestedReferenceID, clientID in
                 guard let self else { return "This Mac can't measure speaker timing." }
@@ -1067,14 +1074,27 @@ public final class CompanionCoordinator {
                                 self?.sendProbeEvent(targetID: targetID, started: false)
                             })
                     }
+                guard refusal != nil else {
+                    self.preparedProbeTargets.remove(targetID)
+                    return nil
+                }
                 // The phone sends no cancel after a refused start, so a run it
-                // prepared would hold the room silent until the sheet closes.
+                // prepared would hold the room silent, and its owner and
+                // speakers would stay held, until the sheet closes. A start
+                // that joined that preparation got the existing claim, which
+                // the refusal path above does not give back, so both go here.
                 // Only this phone's preparation (or an unowned one): another
                 // phone's is not this refusal's to end.
                 let owner = self.alignmentOwners.current(targetID: targetID)
-                if refusal != nil, owner == nil || (owner?.kind == .probe && owner?.clientID == clientID) {
+                if owner == nil || (owner?.kind == .probe && owner?.clientID == clientID) {
                     (self.backend as? BTOutputControlling)?
                         .standDownPreparedCompanionAlignmentProbe(targetID: targetID)
+                    if self.preparedProbeTargets.remove(targetID) != nil {
+                        if let clientID {
+                            self.alignmentOwners.releaseOwned(targetID: targetID, clientID: clientID)
+                        }
+                        self.releaseEngaged(forTarget: targetID)
+                    }
                 }
                 return refusal
             },
@@ -1100,6 +1120,7 @@ public final class CompanionCoordinator {
                         return "Another phone is using these speaker clicks."
                     }
                 }
+                self.preparedProbeTargets.remove(targetID)
                 (self.backend as? BTOutputControlling)?
                     .cancelCompanionAlignmentProbe(targetID: targetID)
                 return nil

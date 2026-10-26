@@ -1749,14 +1749,14 @@ extension NativeBackend: BTOutputControlling {
     /// at the current value and no swap.
     private static let companionDemoLegSeconds: TimeInterval = 2
 
-    /// How long a stood-down run waits for the phone's measurement before
-    /// giving up and putting the suspended trim back. The timer starts when the
+    /// How long a run awaiting its report waits for the phone's measurement
+    /// before giving up and putting the suspended trim back. The timer starts when the
     /// last sweep frame enters the feed; the phone measures a tail after that,
     /// reports, then waits its own 20 s
     /// (`AlignmentRunController.applyTimeoutSeconds`) for the Mac's answer. So
     /// both sides give up about 20 s after the sweeps, and neither is left
     /// holding a run the other has abandoned for long.
-    private static let companionReportTimeoutSeconds: TimeInterval = 20
+    static let companionReportTimeoutSeconds: TimeInterval = 20
 
     public var onBTAlignmentChanged: (@Sendable () -> Void)? {
         get { btSpeakerTiming.onChange }
@@ -1912,13 +1912,22 @@ extension NativeBackend: BTOutputControlling {
         }) {
             abandonCompanionProbe(other)
         }
-        guard claimCompanionProbeRun(targetID: targetID, referenceID: referenceID,
-                                     phase: .prepared) != nil else {
+        guard let runID = claimCompanionProbeRun(targetID: targetID, referenceID: referenceID,
+                                                 phase: .prepared) else {
             return "This Mac is already measuring a speaker. Finish that first."
         }
         raiseCompanionProbeFeed(targetID: targetID, referenceID: referenceID,
                                 referenceIsBluetooth: check.referenceIsBluetooth)
         coordinator.prepareCompanionMicProbe()
+        // A phone left on its Start page would otherwise keep the user's audio
+        // off for as long as it stays connected. Keyed by run id, so the lease
+        // of a run already stood down never ends the one prepared after it.
+        delayClock(companionPreparedLeaseSeconds, captureControlQueue, DispatchWorkItem { [weak self] in
+            guard let self,
+                  let stale = self.takeCompanionProbeRun({ $0.id == runID && $0.phase == .prepared })
+            else { return }
+            self.abandonCompanionProbe(stale)
+        })
         return nil
     }
 
@@ -2056,12 +2065,14 @@ extension NativeBackend: BTOutputControlling {
             return true
         }
         guard moved else { return }
-        captureControlQueue.asyncAfter(
-            deadline: .now() + Self.companionReportTimeoutSeconds
-        ) { [weak self] in
-            guard let self, let run = self.takeCompanionProbeRun({ $0.id == runID }) else { return }
+        delayClock(Self.companionReportTimeoutSeconds, captureControlQueue, DispatchWorkItem { [weak self] in
+            // Only a run still awaiting: an applied run's `.handoff` keeps the
+            // same id and has its own grace.
+            guard let self,
+                  let run = self.takeCompanionProbeRun({ $0.id == runID && $0.phase == .awaitingReport })
+            else { return }
             self.abandonCompanionProbe(run)
-        }
+        })
     }
 
     /// Take the probe run (playing, awaiting its report, or handing off) that
@@ -2095,7 +2106,12 @@ extension NativeBackend: BTOutputControlling {
     public func applyCompanionAlignmentMeasurement(targetID: String,
                                                    offsetMs: Double,
                                                    confidence: Double) -> CompanionAlignmentApplyResult {
-        guard let run = takeCompanionProbeRun({ $0.targetUID == targetID }) else {
+        // A prepared run played no probe, and a handoff's measurement is
+        // already kept: a report reaching either would write a latency nobody
+        // measured, or add its offset on top of the one just kept.
+        guard let run = takeCompanionProbeRun({
+            $0.targetUID == targetID && ($0.phase == .probe || $0.phase == .awaitingReport)
+        }) else {
             return .refused("That measurement isn't running any more. Start it again.")
         }
         // A phone quick enough to report before the sweeps finished leaves

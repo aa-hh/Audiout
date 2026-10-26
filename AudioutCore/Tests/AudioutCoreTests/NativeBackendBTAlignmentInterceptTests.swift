@@ -2369,6 +2369,110 @@ extension SerializedSharedState {
         #expect(companionPhase(backend) == nil)
     }
 
+    /// Turns red if `applyCompanionAlignmentMeasurement` takes a `.handoff`
+    /// run again, adding a second offset on top of the latency the first
+    /// report kept.
+    @Test @MainActor func aSecondReportDuringTheHandoffIsRefused() async {
+        let clock = ManualDelayClock()
+        let (backend, sink, capture) = await companionRunHarness(clock: clock)
+        defer { backend.stop() }
+        #expect(backend.startCompanionAlignmentProbe(
+            targetID: btMove.id, referenceID: btFlip.id, onStarted: { _ in }, onFinished: {}) == nil)
+        await SuiteWait.until { sink.buffers.last == NativeBackend.btWizardReferenceBufferMs }
+        capture.finishProbe()
+        guard case .applied = backend.applyCompanionAlignmentMeasurement(
+            targetID: btMove.id, offsetMs: 300, confidence: 40) else {
+            Issue.record("the measurement was refused")
+            return
+        }
+        #expect(backend.btMeasuredLatencyMs(forDevice: btMove.id) == 300)
+
+        #expect(backend.applyCompanionAlignmentMeasurement(
+            targetID: btMove.id, offsetMs: 50, confidence: 40)
+                == .refused("That measurement isn't running any more. Start it again."))
+        #expect(backend.btMeasuredLatencyMs(forDevice: btMove.id) == 300, "the kept latency stands")
+        #expect(companionPhase(backend) == .handoff, "the handoff still waits for the clicks")
+    }
+
+    /// Turns red if `applyCompanionAlignmentMeasurement` takes a `.prepared`
+    /// run, writing a latency for a probe that never played.
+    @Test @MainActor func aReportAgainstAPreparedRunIsRefused() async {
+        let clock = ManualDelayClock()
+        let (backend, sink, capture) = await companionRunHarness(clock: clock)
+        defer { backend.stop() }
+        #expect(backend.prepareCompanionAlignmentProbe(targetID: btMove.id, referenceID: btFlip.id) == nil)
+        await SuiteWait.until { sink.buffers.last == NativeBackend.btWizardReferenceBufferMs }
+
+        #expect(backend.applyCompanionAlignmentMeasurement(
+            targetID: btMove.id, offsetMs: 300, confidence: 40)
+                == .refused("That measurement isn't running any more. Start it again."))
+        drainStateThenCapture(backend)
+        #expect(backend.btMeasuredLatencyMs(forDevice: btMove.id) == nil, "nothing was written")
+        #expect(companionPhase(backend) == .prepared)
+        #expect(capture.modes == [.wizard], "the prepared feed stays up")
+    }
+
+    /// Turns red if `prepareCompanionAlignmentProbe` arms no lease, so a phone
+    /// left on its Start page keeps the room silent, or if that lease stands
+    /// down a run a start has already adopted.
+    @Test @MainActor func aPreparedRunGivesTheRoomBackWhenItsLeaseRunsOut() async throws {
+        let dir = scratchDir
+        try BTTrimStore(directory: dir).save([btMove.id: 40])
+        let clock = ManualDelayClock()
+        let (backend, sink, capture) = await companionRunHarness(clock: clock, storeDirectory: dir)
+        defer { backend.stop() }
+        #expect(backend.prepareCompanionAlignmentProbe(targetID: btMove.id, referenceID: btFlip.id) == nil)
+        await SuiteWait.until { sink.buffers.last == NativeBackend.btWizardReferenceBufferMs }
+
+        clock.advance(by: backend.companionPreparedLeaseSeconds)
+        await SuiteWait.until {
+            sink.buffers.last == BTSyncedSink.defaultBTOnlyBufferMs
+                && sink.trims.last.map { $0.uid == self.btMove.id && $0.ms == 40 } == true
+        }
+        #expect(capture.modes == [.wizard, .off])
+        #expect(sink.buffers.last == 500)
+        #expect(sink.trims.last?.ms == 40, "the suspended trim is back: \(sink.trims)")
+        #expect(companionPhase(backend) == nil)
+
+        #expect(backend.prepareCompanionAlignmentProbe(targetID: btMove.id, referenceID: btFlip.id) == nil)
+        #expect(backend.startCompanionAlignmentProbe(
+            targetID: btMove.id, referenceID: btFlip.id, onStarted: { _ in }, onFinished: {}) == nil)
+        drainStateThenCapture(backend)
+        #expect(capture.stages == 1)
+        #expect(capture.modes == [.wizard, .off, .wizard], "a start inside the lease adopts the feed")
+
+        clock.advance(by: backend.companionPreparedLeaseSeconds)
+        backend.captureControlQueue.sync {}
+        drainStateThenCapture(backend)
+        #expect(companionPhase(backend) == .probe, "the second lease leaves the started probe alone")
+        #expect(capture.modes == [.wizard, .off, .wizard])
+    }
+
+    /// Turns red if the report timeout matches its run by id alone, so the
+    /// timer armed when the sweeps finished cuts short the `.handoff` the
+    /// same run became once its measurement was applied.
+    @Test @MainActor func theReportTimeoutLeavesAHandoffAlone() async {
+        let clock = ManualDelayClock()
+        let (backend, sink, capture) = await companionRunHarness(clock: clock)
+        defer { backend.stop() }
+        backend.companionHandoffGraceSeconds = NativeBackend.companionReportTimeoutSeconds * 2
+        #expect(backend.startCompanionAlignmentProbe(
+            targetID: btMove.id, referenceID: btFlip.id, onStarted: { _ in }, onFinished: {}) == nil)
+        await SuiteWait.until { sink.buffers.last == NativeBackend.btWizardReferenceBufferMs }
+        capture.finishProbe()
+        guard case .applied = backend.applyCompanionAlignmentMeasurement(
+            targetID: btMove.id, offsetMs: 300, confidence: 40) else {
+            Issue.record("the measurement was refused")
+            return
+        }
+
+        clock.advance(by: NativeBackend.companionReportTimeoutSeconds)
+        backend.captureControlQueue.sync {}
+        drainStateThenCapture(backend)
+        #expect(companionPhase(backend) == .handoff)
+        #expect(capture.modes == [.wizard], "the feed stays up for the clicks")
+    }
+
     /// Turns red if `prepareCompanionAlignmentProbe` refuses "already
     /// measuring" while a measurement's handoff for the same speaker holds
     /// the slot, instead of standing it down as a start does.

@@ -1485,8 +1485,9 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     ///   may be `nil` — a Mac reference hears its lane through the engine
     ///   fan-out instead.
     /// - Completing the probe does NOT hand over to the by-ear tick grid.
-    ///   The phone owns what happens next, and the Mac stands the run down on
-    ///   its own a moment later.
+    ///   The phone owns what happens next: the feed stays up until the
+    ///   measurement is applied, the run is cancelled, the 20 s report
+    ///   timeout passes, or the 4 s handoff grace after an apply runs out.
     /// - The microphone is the phone's, at the listening position, so the
     ///   engine lane plays at full amplitude and at level step 0. Its usual
     ///   scale pays for a Mac speaker inches from the Mac's own mic, which is

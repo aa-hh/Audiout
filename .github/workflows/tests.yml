@@ -156,29 +156,34 @@ jobs:
           key: ${{ runner.os }}-${{ runner.arch }}-xcode26.6-airplayengine-${{ hashFiles('AirPlayEngine/Package.swift', 'AirPlayEngine/Package.resolved') }}-${{ github.sha }}
 
   # The pre-commit shared-leak guard again, over the whole PR: the hook is
-  # skipped without core.hooksPath or with --no-verify. Not in `tests`' needs,
-  # so not required until the owner says so.
+  # skipped without core.hooksPath or with --no-verify. Required through
+  # `tests` (owner's call, 2026-10-26); push and manual runs have no base, so
+  # it skips there.
   shared-leak:
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
       - name: No local copy of an audiout-shared type
-        run: sh .githooks/guard-shared-leak.sh "origin/${{ github.base_ref }}"
+        run: sh .githooks/guard-shared-leak.sh "${{ github.event_name == 'merge_group' && github.event.merge_group.base_sha || format('origin/{0}', github.base_ref) }}"
 
   # The one required check the ruleset names.
   tests:
     runs-on: ubuntu-latest
-    needs: [suite, airplayengine]
+    needs: [suite, airplayengine, shared-leak]
     if: always()
     steps:
       - name: Every suite job passed
         run: |
-          echo "suite=${{ needs.suite.result }} airplayengine=${{ needs.airplayengine.result }}"
-          [ "${{ needs.suite.result }}" = success ] && [ "${{ needs.airplayengine.result }}" = success ]
+          echo "suite=${{ needs.suite.result }} airplayengine=${{ needs.airplayengine.result }} shared-leak=${{ needs.shared-leak.result }}"
+          [ "${{ needs.suite.result }}" = success ] && [ "${{ needs.airplayengine.result }}" = success ] || exit 1
+          case "${{ github.event_name }}/${{ needs.shared-leak.result }}" in
+            */success|push/skipped|workflow_dispatch/skipped) ;;
+            *) exit 1 ;;
+          esac
 
   # The ruleset requires a `review` commit status, which the session posts on
   # the PR head. A merge-queue run checks its own temporary merge commit,

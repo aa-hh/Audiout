@@ -162,6 +162,7 @@ public final class BTSpeakerTiming: @unchecked Sendable {
     // Nothing else in here can tell the two apart, and the row says which.
     private var measuredUIDs: Set<String> = []
     private let floorRebroadcastDelay: TimeInterval
+    private let delayClock: @Sendable (Double, DispatchQueue, DispatchWorkItem) -> Void
     private let storedOffsetMs: @Sendable (String) -> Double?
     private let speakerKey: @Sendable (String) -> String
     private let codec: @Sendable (String) -> String?
@@ -182,8 +183,13 @@ public final class BTSpeakerTiming: @unchecked Sendable {
     /// - Parameter deviceClassMinor: the pairing's device class, which
     ///   separates headphones from a loudspeaker from a car kit.
     /// - Parameter floorRebroadcastDelay: how long after a link-up to re-check
-    ///   whether ``settleSeconds`` expired with no evidence either way. Only
-    ///   the tests pass anything but the floor itself.
+    ///   whether ``settleSeconds`` expired with no evidence either way. No
+    ///   caller passes anything but the floor itself; tests hold the re-check
+    ///   on `delayClock` instead.
+    /// - Parameter delayClock: schedules that re-check: run the work item on
+    ///   the queue once the delay has passed. Spelled out rather than
+    ///   `NativeBackend.DelayClock` because this init is public; the tests pass
+    ///   a manual one.
     public init(storedOffsetMs: @escaping @Sendable (String) -> Double?,
                 speakerKey: @escaping @Sendable (String) -> String = { _ in "?" },
                 // razor: nothing reads the codec yet. No `bluetoothaudiod` line
@@ -194,12 +200,16 @@ public final class BTSpeakerTiming: @unchecked Sendable {
                 // line exists and is not private.
                 codec: @escaping @Sendable (String) -> String? = { _ in nil },
                 deviceClassMinor: @escaping @Sendable (String) -> UInt32? = { _ in nil },
-                floorRebroadcastDelay: TimeInterval = BTSpeakerTiming.settleSeconds) {
+                floorRebroadcastDelay: TimeInterval = BTSpeakerTiming.settleSeconds,
+                delayClock: @escaping @Sendable (_ delaySeconds: Double, _ queue: DispatchQueue,
+                                                 _ work: DispatchWorkItem) -> Void
+                    = { delaySeconds, queue, work in queue.asyncAfter(deadline: .now() + delaySeconds, execute: work) }) {
         self.storedOffsetMs = storedOffsetMs
         self.speakerKey = speakerKey
         self.codec = codec
         self.deviceClassMinor = deviceClassMinor
         self.floorRebroadcastDelay = floorRebroadcastDelay
+        self.delayClock = delayClock
     }
 
     // MARK: Recording
@@ -244,24 +254,23 @@ public final class BTSpeakerTiming: @unchecked Sendable {
     /// told. Skipped when a later link-up superseded this one, or when ten
     /// jump-free seconds settled the verdict and published for themselves.
     private func scheduleFloorRebroadcast(uid: String, linkUpAt: Date) {
-        DispatchQueue.global(qos: .utility)
-            .asyncAfter(deadline: .now() + floorRebroadcastDelay + 0.1) { [weak self] in
-                guard let self else { return }
-                let now = Date()
-                let (changed, settle) = self.lock.withLock {
-                    () -> ((@Sendable () -> Void)?, LinkSettleFacts?) in
-                    // Same link-up, not superseded; and steady by expiry
-                    // rather than by ten jump-free seconds, which published
-                    // for itself when it arrived.
-                    guard self.lastConnectedAtByUID[uid] == linkUpAt,
-                          self.stableForSecondsByUID[uid, default: 0] < BTClockStability.stableAfterSeconds,
-                          self.clockStateLocked(uid, now: now) == .steady
-                    else { return (nil, nil) }
-                    return (self._onChange, self.takeLinkSettleFactsLocked(uid: uid, at: now))
-                }
-                if let settle { self.emitLinkSettled(uid: uid, facts: settle) }
-                changed?()
+        delayClock(floorRebroadcastDelay + 0.1, .global(qos: .utility), DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            let now = Date()
+            let (changed, settle) = self.lock.withLock {
+                () -> ((@Sendable () -> Void)?, LinkSettleFacts?) in
+                // Same link-up, not superseded; and steady by expiry
+                // rather than by ten jump-free seconds, which published
+                // for itself when it arrived.
+                guard self.lastConnectedAtByUID[uid] == linkUpAt,
+                      self.stableForSecondsByUID[uid, default: 0] < BTClockStability.stableAfterSeconds,
+                      self.clockStateLocked(uid, now: now) == .steady
+                else { return (nil, nil) }
+                return (self._onChange, self.takeLinkSettleFactsLocked(uid: uid, at: now))
             }
+            if let settle { self.emitLinkSettled(uid: uid, facts: settle) }
+            changed?()
+        })
     }
 
     /// The link for this device went away, so the next ``noteConnected(uid:)``
@@ -652,15 +661,21 @@ public final class BTSpeakerTiming: @unchecked Sendable {
 /// under it.
 struct CompanionAlignmentRun {
     enum Phase {
+        /// The wizard feed is up and the speakers are releasing; no probe is
+        /// staged.
+        case prepared
         /// The probe is in the feed.
         case probe
-        /// The probe is silent and the room is back, but the run's record is
-        /// still standing because the phone is still recording its own tail,
-        /// transforming it, and has not reported yet. The AUDIO stands down
-        /// long before the RUN does, and a
-        /// measurement that arrives here still needs this record's
-        /// suspended trim.
+        /// The probe has left the feed, but the run's record is still
+        /// standing because the phone is still recording its own tail,
+        /// transforming it, and has not reported yet. The wizard feed stays
+        /// up meanwhile, and a measurement that arrives here still needs this
+        /// record's suspended trim.
         case awaitingReport
+        /// The measurement is applied and the wizard feed is kept up so the
+        /// clicks the phone asks for next need no second rebuild and arm
+        /// gate; a start, a cancel, or the grace timer stands it down.
+        case handoff
         /// A by-ear fine-tune session, whose metronome is running.
         case tick
     }
@@ -670,6 +685,9 @@ struct CompanionAlignmentRun {
     let id = UUID()
     /// The Bluetooth device being measured or tuned (its Core Audio UID).
     let targetUID: String
+    /// The probe's reference, so a click request naming the same pair can
+    /// take over a `.handoff` run's feed. `nil` for a `.tick` run.
+    let referenceUID: String?
     var phase: Phase
     /// The user's trim, put aside for the run's duration and restored when it
     /// ends without a measurement. A probe SUSPENDS the trim (pushes 0 to the
@@ -713,12 +731,20 @@ public struct BTSpeakerTimingReport: Equatable, Sendable {
     /// Always `nil` from ``BTSpeakerTiming/report(uid:now:)`` — see its doc.
     /// The wire field is still there for an older phone to decode.
     public let settleRemainingSeconds: Int?
+    /// The speaker's total delay in whole milliseconds, the number its row on
+    /// the Mac prints ("286 ms"): stored trim plus stored measured latency.
+    /// `nil` when neither is stored, which is when the row reads "Not set"
+    /// (or "Align"). Not part of ``BTSpeakerTiming/report(uid:now:)``, which
+    /// has no trim; `NativeBackend.btAlignmentReport(forDevice:)` fills it.
+    public var delayMs: Int?
 
     public init(status: BTSpeakerTiming.Status,
                 source: BTSpeakerTiming.Source? = nil,
                 clockState: BTSpeakerTiming.ClockState = .steady,
                 staleReason: String? = nil,
-                settleRemainingSeconds: Int? = nil) {
+                settleRemainingSeconds: Int? = nil,
+                delayMs: Int? = nil) {
+        self.delayMs = delayMs
         self.status = status
         self.source = source
         self.clockState = clockState
@@ -731,16 +757,16 @@ public struct BTSpeakerTimingReport: Equatable, Sendable {
 /// phone-driven run may be staged, and the sentence the phone shows when it
 /// isn't.
 ///
-/// Preconditions, deliberately — not engagement. Nothing here asks whether the
-/// user is interested; it asks whether a measurement could physically happen:
-/// the speaker under test has to be making sound, and something else has to be
-/// making sound for it to be compared against. Everything else the run needs
-/// (a live delay line, nothing already in flight) is the backend's to answer,
-/// because only the backend knows it.
+/// Preconditions, deliberately — not engagement. Neither speaker has to be
+/// playing: `CompanionCoordinator` selects the target and the reference for
+/// the run, so this asks only that the target is a Bluetooth speaker and that
+/// there is something it may be compared against. Everything else the run
+/// needs (a live delay line, nothing already in flight) is the backend's to
+/// answer, because only the backend knows it.
 ///
 /// Lives in the library rather than in `AppDelegate` for the reason that
 /// target's own AGENTS.md gives: behavior decided in the app target is
-/// invisible to the test suite. The four sentences travel with the rule that
+/// invisible to the test suite. The sentences travel with the rule that
 /// produces them — the phone shows them verbatim.
 public enum CompanionAlignmentPreconditions {
 
@@ -751,29 +777,37 @@ public enum CompanionAlignmentPreconditions {
         case refused(String)
     }
 
-    /// `isAudible` must be the GROUP-AWARE read (`GroupController
-    /// .isMainOutMember(_:)`), never `isSpeakerSelected(_:)` — the latter sees
-    /// Selected Devices only and is wrong in both directions under a group
-    /// target, which would refuse a speaker the room can plainly hear and hide
-    /// every reference in the group from the run.
+    /// `referenceID` is the speaker the phone named, or `nil` for the default
+    /// (`CompanionSnapshotBuilder.alignmentReferenceID`). A named one must be
+    /// one of the Mac's own outputs or that default. `isAudible` only breaks
+    /// the default's tie and must be the GROUP-AWARE read (`GroupController
+    /// .isMainOutMember(_:)`), never `isSpeakerSelected(_:)`, which is blind
+    /// to group membership.
     public static func evaluate(
         targetID: String,
+        referenceID: String?,
         among devices: [Device],
         isAudible: (String) -> Bool
     ) -> Outcome {
         guard let target = devices.first(where: { $0.id == targetID }), target.isBluetooth else {
             return .refused("Unknown speaker.")
         }
-        guard isAudible(targetID) else {
-            return .refused(
-                "\u{201C}\(target.name)\u{201D} isn't playing right now, so there's nothing to measure.")
-        }
-        guard let referenceID = CompanionSnapshotBuilder.alignmentReferenceID(
+        let defaultID = CompanionSnapshotBuilder.alignmentReferenceID(
             forTarget: targetID, among: devices, isAudible: isAudible)
-        else {
-            return .refused(
-                "Nothing else is playing to compare \u{201C}\(target.name)\u{201D} against.")
+        if let referenceID {
+            guard let reference = devices.first(where: { $0.id == referenceID }) else {
+                return .refused("Unknown speaker.")
+            }
+            let candidates = CompanionSnapshotBuilder.alignmentReferenceCandidateIDs(
+                forTarget: targetID, among: devices)
+            guard candidates.contains(referenceID) || referenceID == defaultID else {
+                return .refused("\u{201C}\(reference.name)\u{201D} can't be compared against right now.")
+            }
+            return .ready(referenceID: referenceID)
         }
-        return .ready(referenceID: referenceID)
+        guard let defaultID else {
+            return .refused("Nothing else to compare \u{201C}\(target.name)\u{201D} against.")
+        }
+        return .ready(referenceID: defaultID)
     }
 }

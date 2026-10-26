@@ -3028,26 +3028,26 @@ import AudioutProtocol
     @Test func mockBackendFixtureRoundTripsToDeviceRowLabel() async throws {
         let (popover, _, backend) = try await makePopover()
 
+        final class AppliedFlag: @unchecked Sendable {
+            private let lock = NSLock()
+            private var value = false
+            func set() { lock.withLock { value = true } }
+            var isSet: Bool { lock.withLock { value } }
+        }
+        let applied = AppliedFlag()
         let stream = backend.makeEventStream()
-        try await confirmation("routedApps event observed") { received in
-            let task = Task {
-                for await event in stream {
-                    if case .routedApps(let deviceID, let appNames) = event {
-                        await popover.applyRoutedApps(deviceID: deviceID, appNames: appNames)
-                        received()
-                        break
-                    }
+        let task = Task {
+            for await event in stream {
+                if case .routedApps(let deviceID, let appNames) = event {
+                    await popover.applyRoutedApps(deviceID: deviceID, appNames: appNames)
+                    applied.set()
+                    break
                 }
             }
-            defer { task.cancel() }
-            backend.test_emitRoutedApps(deviceID: "office", appNames: ["Music"])
-            try await withThrowingTaskGroup(of: Void.self) { group in
-                group.addTask { _ = await task.value }
-                group.addTask { try await Task.sleep(for: .seconds(2)) }
-                try await group.next()
-                group.cancelAll()
-            }
         }
+        defer { task.cancel() }
+        backend.test_emitRoutedApps(deviceID: "office", appNames: ["Music"])
+        await SuiteWait.until("the routedApps event to reach the popover") { applied.isSet }
 
         popover.update(devices: backend.devices)
         #expect(popover.test_deviceRow(for: "office")?.test_feedText == "Music", "the fixture's event reached the row via the same plumbing AppDelegate uses")
@@ -4885,8 +4885,8 @@ extension SerializedSharedState {
             let popover = trialEndedPopover(invite: invite)
             popover.test_simulateOpen()
             let seen = StructuredEvents.recording {
-                popover.surfaceDidHide()
-                popover.surfaceDidHide()
+                popover.surfaceDidHide(closed: true)
+                popover.surfaceDidHide(closed: true)
             }
             #expect(seen.names() == ["survey dismissed"])
             #expect(invite.spentCalls == 1)
@@ -4902,12 +4902,28 @@ extension SerializedSharedState {
             invite.unansweredIsLast = false
             let popover = trialEndedPopover(invite: invite)
             popover.test_simulateOpen()
-            let hidden = StructuredEvents.recording { popover.surfaceDidHide() }
+            let hidden = StructuredEvents.recording { popover.surfaceDidHide(closed: true) }
             #expect(hidden.names().isEmpty)
             #expect(invite.spentCalls == 0)
             #expect(invite.unansweredCalls == 1)
             let reopened = StructuredEvents.recording { popover.test_simulateOpen() }
             #expect(reopened.names() == ["survey shown"])
+            #expect(popover.test_systemAirPlayNoteText == PopoverController.surveyInviteText)
+        }
+
+        /// Red if a hide that is not a close (another window covering the
+        /// Mixer, a tab switch) goes through the unanswered-close count: three
+        /// cover-ups would spend the invite and send `survey dismissed`.
+        @Test func aHideThatIsNotACloseLeavesTheCountAlone() {
+            let invite = Invite()
+            invite.unansweredIsLast = true
+            let popover = trialEndedPopover(invite: invite)
+            popover.test_simulateOpen()
+            let hidden = StructuredEvents.recording { popover.surfaceDidHide() }
+            #expect(hidden.names().isEmpty)
+            #expect(invite.unansweredCalls == 0)
+            #expect(invite.spentCalls == 0)
+            popover.test_simulateOpen()
             #expect(popover.test_systemAirPlayNoteText == PopoverController.surveyInviteText)
         }
 

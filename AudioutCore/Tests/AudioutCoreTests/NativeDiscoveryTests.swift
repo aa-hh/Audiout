@@ -87,16 +87,17 @@ import AirPlayEngine
         )
     }
 
-    /// Every test builds its `NativeDiscovery` here, so the 3-second production
-    /// removal grace is unreachable from this file. `EventCollector.wait` polls
-    /// for 3 seconds by default, so a test that ran on the production grace would
-    /// race the timer instead of asserting against it.
+    /// Every test builds its `NativeDiscovery` here, so no removal grace in this
+    /// file runs on the wall clock. By default a removal is applied on the
+    /// discovery queue's next turn; the removal-grace tests pass a
+    /// `ManualDelayClock`'s `queueHoppingClock` and end the grace with `fireAll()`.
     private func makeDiscovery(
         browser: FakeBrowser,
         localHostname: String? = NativeDiscovery.systemLocalHostname(),
-        removeGrace: TimeInterval = 0.05
+        delayClock: @escaping NativeBackend.DelayClock = { _, queue, work in queue.async(execute: work) }
     ) -> NativeDiscovery {
-        NativeDiscovery(browser: browser, localHostname: localHostname, removeGrace: removeGrace)
+        NativeDiscovery(browser: browser, localHostname: localHostname,
+                        removeGrace: NativeDiscovery.defaultRemoveGrace, delayClock: delayClock)
     }
 
     // MARK: appear -> update -> disappear (AP2)
@@ -408,9 +409,9 @@ import AirPlayEngine
         service.txtRecord.removeValue(forKey: "deviceid")
         browser.resolve(service)
 
-        // Give the serial queue a beat, then assert nothing arrived.
-        let none = events.waitNone(timeout: 0.3)
-        #expect(none, "a resolve without a parseable deviceid must be dropped, not surfaced")
+        // Drain the serial queue, then assert nothing arrived.
+        #expect(events.count(afterDraining: discovery) == 0,
+                "a resolve without a parseable deviceid must be dropped, not surfaced")
 
         discovery.stop()
     }
@@ -445,9 +446,9 @@ import AirPlayEngine
         // event should fire (duplicate-resolve suppression) — still exactly one
         // event total and exactly one device in the snapshot.
         browser.resolve(raopService(id: id, name: "Both"))
-        // Give the serial queue a beat to process, then assert no NEW event.
-        let stillOne = events.waitCountStaysAt(1, timeout: 0.3)
-        #expect(stillOne, "an unchanged rebuild after de-dupe must not emit a spurious event")
+        // Drain the serial queue, then assert no NEW event.
+        #expect(events.count(afterDraining: discovery) == 1,
+                "an unchanged rebuild after de-dupe must not emit a spurious event")
 
         #expect(discovery.devices.count == 1, "one device, not two, despite two service types")
         #expect(discovery.devices.first?.id == id)
@@ -594,7 +595,8 @@ import AirPlayEngine
     /// for the `connection:failed` (`vanished`) flapping storm.
     @Test func transientAirplayDropWithinGraceEmitsNoVanish() {
         let browser = FakeBrowser()
-        let discovery = makeDiscovery(browser: browser, removeGrace: 0.3)
+        let clock = ManualDelayClock()
+        let discovery = makeDiscovery(browser: browser, delayClock: clock.queueHoppingClock)
         let events = EventCollector()
         discovery.onEvent = { events.append($0) }
         discovery.start()
@@ -610,7 +612,9 @@ import AirPlayEngine
 
         // No offline event ever fires (the re-resolve is an unchanged rebuild, so
         // it is suppressed too) and the grace elapses without surfacing anything.
-        #expect(events.waitCountStaysAt(1, timeout: 0.6),
+        _ = discovery.devices
+        clock.fireAll()
+        #expect(events.count(afterDraining: discovery) == 1,
                 "a transient airplay-advert drop that heals within the grace must not emit a vanish")
         #expect(discovery.devices.first?.isAvailable == true,
                 "the row stays available across a transient blip")
@@ -623,7 +627,8 @@ import AirPlayEngine
     /// it fires exactly once, not on a repeat schedule.
     @Test func sustainedAirplayDropAfterGraceEmitsVanishOnce() {
         let browser = FakeBrowser()
-        let discovery = makeDiscovery(browser: browser)
+        let clock = ManualDelayClock()
+        let discovery = makeDiscovery(browser: browser, delayClock: clock.queueHoppingClock)
         let events = EventCollector()
         discovery.onEvent = { events.append($0) }
         discovery.start()
@@ -634,13 +639,18 @@ import AirPlayEngine
         _ = events.wait(count: 1)
 
         browser.remove(RemovedService(serviceType: .airplay, deviceID: id, name: "Sonos"))
+        #expect(events.count(afterDraining: discovery) == 1, "the removal is held for the grace")
+        clock.fireAll()
         guard case .updated(let offline)? = events.wait(count: 2).last else {
             Issue.record("expected a vanish .updated once the grace elapses")
             return
         }
         #expect(!offline.isAvailable, "a sustained airplay-advert loss surfaces as offline")
         #expect(offline.isAirPlay2Supported, "still sticky-AP2")
-        #expect(events.waitCountStaysAt(2, timeout: 0.2), "the vanish fires once, not on a repeat schedule")
+        _ = discovery.devices
+        #expect(clock.pendingCount == 0, "nothing is re-armed after the vanish")
+        clock.fireAll()
+        #expect(events.count(afterDraining: discovery) == 2, "the vanish fires once, not on a repeat schedule")
 
         discovery.stop()
     }
@@ -651,7 +661,8 @@ import AirPlayEngine
     /// branch at once turns this red with a `.disappeared`.
     @Test func bothLegsDropAndReturnWithinGraceEmitNothing() {
         let browser = FakeBrowser()
-        let discovery = makeDiscovery(browser: browser, removeGrace: 0.3)
+        let clock = ManualDelayClock()
+        let discovery = makeDiscovery(browser: browser, delayClock: clock.queueHoppingClock)
         let events = EventCollector()
         discovery.onEvent = { events.append($0) }
         discovery.start()
@@ -667,7 +678,9 @@ import AirPlayEngine
         browser.resolve(airplayService(id: id, name: "Sonos", features: ap2Features))
         browser.resolve(raopService(id: id, name: "Sonos"))
 
-        #expect(events.waitCountStaysAt(1, timeout: 0.6),
+        _ = discovery.devices
+        clock.fireAll()
+        #expect(events.count(afterDraining: discovery) == 1,
                 "a two-leg blip that heals within the grace must emit nothing")
         #expect(discovery.devices.count == 1, "the device is still known")
         #expect(discovery.devices.first?.isAvailable == true,
@@ -680,16 +693,17 @@ import AirPlayEngine
     /// removal, so the device goes offline when the first timer fires and
     /// disappears when the second one fires. Offline first, then disappeared,
     /// is timer order rather than a cross-leg rule: the airplay removal is armed
-    /// first, the two `asyncAfter` deadlines are taken on separate queue turns
-    /// and so differ, and libdispatch fires timers in deadline order, so the
-    /// airplay commit (the offline `.updated`) lands before the raop commit (the
+    /// first, and the clock fires jobs in the order they were armed (as
+    /// libdispatch fires equal-length timers in deadline order), so the airplay
+    /// commit (the offline `.updated`) lands before the raop commit (the
     /// `.disappeared`). The defect this catches is a remove path that applies
-    /// the both-legs-gone branch before the grace: the
-    /// `.disappeared` would arrive as the second event rather than the third,
-    /// and `wait(count: 3)` would time out.
+    /// the both-legs-gone branch before the grace: an event would arrive before
+    /// `fireAll()`, and the `.disappeared` would be the second event rather
+    /// than the third.
     @Test func bothLegsDropSustainedGoOfflineThenDisappear() {
         let browser = FakeBrowser()
-        let discovery = makeDiscovery(browser: browser, removeGrace: 0.3)
+        let clock = ManualDelayClock()
+        let discovery = makeDiscovery(browser: browser, delayClock: clock.queueHoppingClock)
         let events = EventCollector()
         discovery.onEvent = { events.append($0) }
         discovery.start()
@@ -701,6 +715,8 @@ import AirPlayEngine
 
         browser.remove(RemovedService(serviceType: .airplay, deviceID: id, name: "Sonos"))
         browser.remove(RemovedService(serviceType: .raop, deviceID: id, name: "Sonos"))
+        #expect(events.count(afterDraining: discovery) == 1, "both removals are held for the grace")
+        clock.fireAll()
 
         let all = events.wait(count: 3)
         #expect(all.count == 3)
@@ -709,7 +725,9 @@ import AirPlayEngine
             return
         }
         #expect(goneID == id)
-        #expect(events.waitCountStaysAt(3, timeout: 0.4),
+        _ = discovery.devices
+        clock.fireAll()
+        #expect(events.count(afterDraining: discovery) == 3,
                 "each leg's timer fires once and nothing follows")
         #expect(discovery.devices.isEmpty)
 
@@ -742,7 +760,7 @@ import AirPlayEngine
         // The raop leg re-resolves with the same facts. The airplay advert is
         // still gone, so the row must stay offline and emit nothing.
         browser.resolve(raopService(id: id, name: "Sonos"))
-        #expect(events.waitCountStaysAt(2, timeout: 0.3),
+        #expect(events.count(afterDraining: discovery) == 2,
                 "a lone raop re-resolve is not a return to availability")
         #expect(discovery.devices.first?.isAvailable == false,
                 "the row stays offline until the airplay advert is back")
@@ -797,7 +815,8 @@ import AirPlayEngine
     /// leaves this device with no debounce at all.
     @Test func airplayOnlyDeviceDropIsDebouncedThenDisappears() {
         let browser = FakeBrowser()
-        let discovery = makeDiscovery(browser: browser, removeGrace: 0.3)
+        let clock = ManualDelayClock()
+        let discovery = makeDiscovery(browser: browser, delayClock: clock.queueHoppingClock)
         let events = EventCollector()
         discovery.onEvent = { events.append($0) }
         discovery.start()
@@ -809,18 +828,24 @@ import AirPlayEngine
         // Blip: the only advert drops and re-resolves inside the window.
         browser.remove(RemovedService(serviceType: .airplay, deviceID: id, name: "Sonos"))
         browser.resolve(airplayService(id: id, name: "Sonos", features: ap2Features))
-        #expect(events.waitCountStaysAt(1, timeout: 0.6),
+        _ = discovery.devices
+        clock.fireAll()
+        #expect(events.count(afterDraining: discovery) == 1,
                 "an airplay-only device's transient drop must emit nothing")
         #expect(discovery.devices.count == 1, "the device is still known")
 
         // Sustained: nothing comes back this time.
         browser.remove(RemovedService(serviceType: .airplay, deviceID: id, name: "Sonos"))
+        _ = discovery.devices
+        clock.fireAll()
         guard case .disappeared(let goneID, _)? = events.wait(count: 2).last else {
             Issue.record("expected .disappeared once the grace elapses")
             return
         }
         #expect(goneID == id)
-        #expect(events.waitCountStaysAt(2, timeout: 0.4), "it disappears once, not on a repeat schedule")
+        _ = discovery.devices
+        clock.fireAll()
+        #expect(events.count(afterDraining: discovery) == 2, "it disappears once, not on a repeat schedule")
         #expect(discovery.devices.isEmpty)
 
         discovery.stop()
@@ -1108,8 +1133,8 @@ import AirPlayEngine
         // Same device also on _raop._tcp, name-derived. Rebuilt device is unchanged
         // (airplay descriptor still wins, still AP2), so no NEW event should fire.
         browser.resolve(raopNameDerivedService(name: "6B2E52B73717@Combo"))
-        let stillOne = events.waitCountStaysAt(1, timeout: 0.3)
-        #expect(stillOne, "an unchanged rebuild after name-derived de-dupe must not emit a spurious event")
+        #expect(events.count(afterDraining: discovery) == 1,
+                "an unchanged rebuild after name-derived de-dupe must not emit a spurious event")
         #expect(discovery.devices.count == 1, "one device, not two, despite two service types")
         #expect(discovery.devices.first?.id == canonicalID)
         #expect(discovery.devices.first?.isAirPlay2Supported ?? false)
@@ -1134,8 +1159,8 @@ import AirPlayEngine
         // An "@"-prefixed name whose prefix is the wrong length is dropped too.
         browser.resolve(raopNameDerivedService(name: "6B2E52@Short"))
 
-        let none = events.waitNone(timeout: 0.3)
-        #expect(none, "a resolve with no derivable id must be dropped, not surfaced")
+        #expect(events.count(afterDraining: discovery) == 0,
+                "a resolve with no derivable id must be dropped, not surfaced")
         #expect(discovery.devices.isEmpty)
 
         discovery.stop()
@@ -1195,11 +1220,8 @@ import AirPlayEngine
         browser.resolve(airplayService(features: ap2Features))
         browser.resolve(raopService())
 
-        // Poll the synchronous snapshot (no callback needed) until both land.
-        let deadline = Date().addingTimeInterval(2)
-        while discovery.devices.count < 2 && Date() < deadline {
-            Thread.sleep(forTimeInterval: 0.01)
-        }
+        // `devices` reads on the discovery queue, behind both resolves, so no
+        // poll is needed.
         #expect(discovery.devices.count == 2)
         #expect(Set(discovery.devices.map(\.id)) == Set(["AA:BB:CC:DD:EE:01", "AA:BB:CC:DD:EE:99"]))
 
@@ -1377,16 +1399,13 @@ private final class EventCollector: @unchecked Sendable {
         return snapshot()
     }
 
-    /// Assert that no event arrives within `timeout`. Returns true if none did.
-    func waitNone(timeout: TimeInterval) -> Bool {
-        Thread.sleep(forTimeInterval: timeout)
-        return snapshot().isEmpty
-    }
-
-    /// Assert the event count stays exactly `count` for the duration of `timeout`
-    /// (used to prove a duplicate-resolve/rebuild produced no spurious event).
-    func waitCountStaysAt(_ count: Int, timeout: TimeInterval) -> Bool {
-        Thread.sleep(forTimeInterval: timeout)
-        return snapshot().count == count
+    /// The event count once every handler queued so far has run (used to prove
+    /// a dropped resolve or an unchanged rebuild produced no event). Every
+    /// handler and every `onEvent` call runs on the discovery queue, and
+    /// `devices` reads with a `sync` on that queue, so it returns only after
+    /// them.
+    func count(afterDraining discovery: NativeDiscovery) -> Int {
+        _ = discovery.devices
+        return snapshot().count
     }
 }

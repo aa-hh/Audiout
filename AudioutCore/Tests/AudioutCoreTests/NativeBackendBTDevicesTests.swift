@@ -314,8 +314,9 @@ import CoreAudio
         bt.fire([sonos, flip])
         waitFor { self.device(backend, self.flip.id) != nil }
 
+        // The pairedness check runs inside `retryOutput`'s own `stateQueue.sync`,
+        // and with no connection manager nothing is left in flight after it.
         backend.retryOutput(flip.id)   // flip IS in the merged list (paired)
-        SuiteWait.settle(0.3)
         if case .failed(let failure)? = device(backend, flip.id)?.connectionState {
             #expect(failure.cause != .notPaired, "pairedness comes from the merged list, not availability")
         }
@@ -348,6 +349,27 @@ import CoreAudio
         #expect(!second.btHasSyncTrim(forDevice: "never-set:output"),
                 "D10's honest signal: no ENTRY, not merely a zero value")
         second.stop()
+    }
+
+    /// The delay the phone shows is the number the Mac row prints
+    /// (`DeviceRowView.syncChipValueMs`): trim plus measured latency, rounded
+    /// half away from zero, nil with neither stored. Turns red if the report
+    /// carries only the latency or only the trim (the row then disagrees with
+    /// the phone), or rounds toward zero.
+    @Test func theAlignmentReportCarriesTheRowsTotalDelay() throws {
+        let (backend, _) = makeBackend()
+        #expect(backend.btAlignmentReport(forDevice: sonos.id)?.delayMs == nil, "nothing stored: the row says Not set")
+
+        backend.setBTSyncTrim(-40, forDevice: sonos.id, persist: false)
+        #expect(backend.btAlignmentReport(forDevice: sonos.id)?.delayMs == -40, "a trim alone is the row's number")
+
+        backend.btTrimLock.withLock { backend.btLatencyMsByUID[sonos.id] = 326.5 }
+        #expect(backend.btAlignmentReport(forDevice: sonos.id)?.delayMs == 287, "286.5 rounds away from zero")
+
+        backend.setBTSyncTrim(-500, forDevice: flip.id, persist: false)
+        backend.btTrimLock.withLock { backend.btLatencyMsByUID[flip.id] = 213.5 }
+        #expect(backend.btAlignmentReport(forDevice: flip.id)?.delayMs == -287, "−286.5 rounds away from zero too")
+        backend.stop()
     }
 
     /// The backend still supports an apply-without-persist write (`persist:

@@ -289,6 +289,10 @@ public final class NativeDiscovery: @unchecked Sendable {
     /// default: one browse blip is not a departure.
     public static let defaultRemoveGrace: TimeInterval = 3
 
+    /// Schedules each removal's `removeGrace` hold. Only the tests pass anything
+    /// but ``NativeBackend/dispatchDelayClock``, so they decide when a grace ends.
+    private let delayClock: NativeBackend.DelayClock
+
     /// Removal timers, keyed by device id then by service leg. Armed by
     /// `handleRemove` and fired on `queue`; a resolve of the same leg cancels
     /// that leg's timer (`handleResolve`); `stop()` clears them all.
@@ -326,11 +330,18 @@ public final class NativeDiscovery: @unchecked Sendable {
     ///   - localHostname: this machine's own mDNS hostname for the self-receiver
     ///     filter (see `localHostname` above). Defaults to the system's
     ///     `SCDynamicStoreCopyLocalHostName` + ".local"; tests inject a fixture.
-    public init(browser: ServiceBrowsing? = nil,
-                localHostname: String? = NativeDiscovery.systemLocalHostname(),
-                removeGrace: TimeInterval = NativeDiscovery.defaultRemoveGrace) {
+    public convenience init(browser: ServiceBrowsing? = nil,
+                            localHostname: String? = NativeDiscovery.systemLocalHostname(),
+                            removeGrace: TimeInterval = NativeDiscovery.defaultRemoveGrace) {
+        self.init(browser: browser, localHostname: localHostname, removeGrace: removeGrace,
+                  delayClock: NativeBackend.dispatchDelayClock)
+    }
+
+    init(browser: ServiceBrowsing?, localHostname: String?, removeGrace: TimeInterval,
+         delayClock: @escaping NativeBackend.DelayClock) {
         self.localHostname = localHostname.map(Self.normalizedHostname)
         self.removeGrace = removeGrace
+        self.delayClock = delayClock
         self.browser = browser ?? NetworkFrameworkBrowser()
         self.browser.onResolve = { [weak self] service in
             guard let self else { return }
@@ -499,7 +510,7 @@ public final class NativeDiscovery: @unchecked Sendable {
             self?.commitRemove(id: id, serviceType: serviceType)
         }
         pendingRemoves[id, default: [:]][serviceType] = work
-        queue.asyncAfter(deadline: .now() + removeGrace, execute: work)
+        delayClock(removeGrace, queue, work)
     }
 
     /// Applies a removal that outlasted `removeGrace`: clears the departed leg,

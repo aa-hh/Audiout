@@ -312,11 +312,12 @@ public protocol CaptureControlling: AnyObject, Sendable {
 
     /// Make the wizard's ticks audible (roadmap 056 Part B): the run opens on
     /// bed/silence so every sink can anchor and every amp can wake, and the
-    /// backend arms the beat grid once they have. Default no-op;
-    /// ``NativeCaptureCoordinator`` provides the real one.
-    func armWizardTicks()
+    /// backend arms the beat grid once they have. A nil
+    /// `firstTickAfterSeconds` puts the first tick one full beat away. Default
+    /// no-op; ``NativeCaptureCoordinator`` provides the real one.
+    func armWizardTicks(firstTickAfterSeconds: TimeInterval?)
     /// Swap the wizard's beat interval mid-run (search stage → blocks stage).
-    /// Same default-no-op posture as ``armWizardTicks()``.
+    /// Same default-no-op posture as ``armWizardTicks(firstTickAfterSeconds:)``.
     func setWizardTempo(bpm: Double)
 
     /// Stage the mic-probe calibration lanes on the live wizard feed
@@ -326,6 +327,13 @@ public protocol CaptureControlling: AnyObject, Sendable {
     func stageWizardMicProbe(levelStepDB: @escaping () -> Int,
                              onStarted: @escaping () -> Void,
                              onFinished: @escaping () -> Void)
+
+    /// Ready a PHONE-driven run before its probe is staged: the arm gate
+    /// that opens on this feed is remembered rather than arming ticks, so a
+    /// ``stageCompanionMicProbe(routed:referenceOnEngine:targetWindowUID:referenceWindowUID:onStarted:onFinished:)``
+    /// that follows starts its lanes at once. Default no-op;
+    /// ``NativeCaptureCoordinator`` provides the real one.
+    func prepareCompanionMicProbe()
 
     /// Stage the calibration lanes for a PHONE-driven run: same feed and arm
     /// gate as ``stageWizardMicProbe(levelStepDB:onStarted:onFinished:)``, but
@@ -427,13 +435,16 @@ extension CaptureControlling {
     /// Default no-op (leveled-app intercept), same posture.
     func setLeveledAppInjector(_ injector: LeveledAppInjector?) {}
     /// Default no-ops (roadmap 056 Part B wizard stimulus), same posture.
-    func armWizardTicks() {}
+    func armWizardTicks(firstTickAfterSeconds: TimeInterval?) {}
+    /// The arm with the first tick one full beat away.
+    func armWizardTicks() { armWizardTicks(firstTickAfterSeconds: nil) }
     func setWizardTempo(bpm: Double) {}
     /// Default no-op (roadmap 064 mic probe), same posture.
     func stageWizardMicProbe(levelStepDB: @escaping () -> Int,
                              onStarted: @escaping () -> Void,
                              onFinished: @escaping () -> Void) {}
-    /// Default no-op (the phone-driven sync-calibration run), same posture.
+    /// Default no-ops (the phone-driven sync-calibration run), same posture.
+    func prepareCompanionMicProbe() {}
     func stageCompanionMicProbe(routed: Bool,
                                 referenceOnEngine: Bool,
                                 targetWindowUID: String?,

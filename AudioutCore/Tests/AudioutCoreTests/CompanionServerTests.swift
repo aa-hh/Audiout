@@ -44,10 +44,14 @@ import AudioutProtocol
         private let lock = NSLock()
         private var _messages: [CompanionMessage] = []
         private var _closed = false
+        private var _pings = 0
         func append(_ message: CompanionMessage) { lock.withLock { _messages.append(message) } }
         func markClosed() { lock.withLock { _closed = true } }
+        func notePing() { lock.withLock { _pings += 1 } }
         var messages: [CompanionMessage] { lock.withLock { _messages } }
         var closed: Bool { lock.withLock { _closed } }
+        /// Server pings this client's own receive loop saw.
+        var pings: Int { lock.withLock { _pings } }
         func contains(_ message: CompanionMessage) -> Bool { messages.contains(message) }
     }
 
@@ -168,10 +172,12 @@ import AudioutProtocol
     private func receiveInto(_ log: MessageLog, from client: NWConnection) {
         client.receiveMessage { data, context, _, error in
             if error != nil { log.markClosed(); return }
-            if let metadata = context?.protocolMetadata(definition: NWProtocolWebSocket.definition) as? NWProtocolWebSocket.Metadata,
-               metadata.opcode == .close {
-                log.markClosed()
-                return
+            if let metadata = context?.protocolMetadata(definition: NWProtocolWebSocket.definition) as? NWProtocolWebSocket.Metadata {
+                if metadata.opcode == .close {
+                    log.markClosed()
+                    return
+                }
+                if metadata.opcode == .ping { log.notePing() }
             }
             guard let data, !data.isEmpty else { log.markClosed(); return }
             if let envelope = try? CompanionEnvelope.decode(data) {
@@ -209,13 +215,12 @@ import AudioutProtocol
     }
 
     /// Wait for this connection's challenge, sign it with `key` over
-    /// `fingerprint`, and send the version 2 hello — what a real phone does.
+    /// `fingerprint`, and send the hello — what a real phone does.
     private func sendAuthenticatedHello(over client: NWConnection, log: MessageLog,
                                         key: P256.Signing.PrivateKey = CompanionServerTests.testKey,
                                         name: String = "phone",
                                         protoVersion: Int = CompanionProto.version,
-                                        fingerprint: Data = CompanionServerTests.testFingerprint,
-                                        checksPairingCode: Bool = false) async throws {
+                                        fingerprint: Data = CompanionServerTests.testFingerprint) async throws {
         let nonce = try await challengeNonce(in: log)
         let signature = try key.signature(for: CompanionPairing.authenticationMessage(
             serverNonce: nonce, serverCertificateSHA256: fingerprint))
@@ -223,13 +228,15 @@ import AudioutProtocol
             clientKey: key.publicKey.rawRepresentation.base64EncodedString(),
             clientName: name,
             protoVersion: protoVersion,
-            signature: signature.rawRepresentation.base64EncodedString(),
-            checksPairingCode: checksPairingCode)).encoded(), over: client)
+            signature: signature.rawRepresentation.base64EncodedString())).encoded(), over: client)
     }
 
-    /// A server claiming ``testFingerprint`` as its certificate.
-    private func makeServer() -> CompanionServer {
-        let server = CompanionServer()
+    /// A server claiming ``testFingerprint`` as its certificate. Its
+    /// deadlines and liveness ticks run on `clock`, so none fires unless the
+    /// test advances it: on the wall clock a starved test could send its
+    /// hello after the 5 s pre-hello deadline had already closed the socket.
+    private func makeServer(clock: ManualDelayClock = ManualDelayClock()) -> CompanionServer {
+        let server = CompanionServer(delayClock: clock.queueHoppingClock, uptimeClock: clock.uptime)
         server.localCertificateSHA256 = Self.testFingerprint
         return server
     }
@@ -237,9 +244,9 @@ import AudioutProtocol
     /// A server whose T24 approval gate answers `.approved` instantly — what
     /// every pre-approval test below means by "a client hellos and is
     /// promoted". The gate's own behavior is tested separately at the end.
-    private func makeAutoApprovingServer() -> CompanionServer {
-        let server = makeServer()
-        server.onApprovalRequest = { _, _, _, _, _, decide in decide(.approved) }
+    private func makeAutoApprovingServer(clock: ManualDelayClock = ManualDelayClock()) -> CompanionServer {
+        let server = makeServer(clock: clock)
+        server.onApprovalRequest = { _, _, _, decide in decide(.approved) }
         return server
     }
 
@@ -372,14 +379,15 @@ import AudioutProtocol
     @Test func silentClientIsCancelledAfterTheHandshakeDeadline() async throws {
         let hub = try await makeHub()
         defer { hub.cancel() }
-        let server = makeAutoApprovingServer()
-        server.test_handshakeTimeoutOverride = 0.3 // real default is 10s
+        let clock = ManualDelayClock()
+        let server = makeAutoApprovingServer(clock: clock)
         defer { server.stop() }
 
         let (client, log) = try await connectClient(via: hub, to: server)
         defer { client.cancel() }
         // Deliberately never send hello — the exact idle-peer shape the
         // deadline exists for.
+        clock.advance(by: CompanionServer.preHelloTimeout)
         #expect(await waitUntil { log.closed },
                 "the server never cancelled the client that skipped its hello")
     }
@@ -503,22 +511,12 @@ import AudioutProtocol
 
     // MARK: - Client cap
 
-    /// Also turns red if a connection the gate approved into a full server
-    /// is not reported as closed unadmitted, which leaves its pairing-code
-    /// alert up.
     @Test func clientCapRefusesPolitelyAndKeepsExistingClients() async throws {
         let hub = try await makeHub()
         defer { hub.cancel() }
         let server = makeAutoApprovingServer()
         server.test_maxClientsOverride = 1 // real cap is 16
         defer { server.stop() }
-        let asked = LockedBox<[String: UUID]>([:])
-        server.onApprovalRequest = { _, name, _, _, connectionID, decide in
-            asked.withLock { $0[name] = connectionID }
-            decide(.approved)
-        }
-        let closedUnadmitted = LockedBox<[UUID]>([])
-        server.onAwaitingConnectionClosed = { id in closedUnadmitted.withLock { $0.append(id) } }
 
         let (kept, keptLog) = try await connectClient(via: hub, to: server)
         defer { kept.cancel() }
@@ -535,8 +533,6 @@ import AudioutProtocol
                 "the over-cap client never got its polite goodbye")
         #expect(await waitUntil { refusedLog.closed },
                 "the over-cap client's connection was never closed")
-        #expect(await waitUntil { closedUnadmitted.value == [asked.value["second"]].compactMap { $0 } },
-                "the over-cap client was never reported closed unadmitted")
 
         // The kept client said hello before any snapshot existed, so this
         // first broadcast also exercises the deferred-welcome path.
@@ -681,9 +677,8 @@ import AudioutProtocol
     @Test func silentDeadClientIsReapedByLivenessPings() async throws {
         let hub = try await makeHub()
         defer { hub.cancel() }
-        let server = makeAutoApprovingServer()
-        server.test_pingIntervalOverride = 0.1  // real default is 20 s
-        server.test_livenessTimeoutOverride = 0.3 // real default is 60 s
+        let clock = ManualDelayClock()
+        let server = makeAutoApprovingServer(clock: clock)
         defer { server.stop() }
         server.broadcast(makeSnapshot())
 
@@ -699,6 +694,14 @@ import AudioutProtocol
         try #require(await waitUntil { log.messages.contains { if case .welcome = $0 { return true } else { return false } } },
                      "the client was never welcomed")
 
+        // Every tick inside the liveness timeout pings; the next one reaps.
+        let unansweredPings = Int(CompanionServer.livenessTimeout / CompanionServer.pingInterval)
+        for ping in 1...unansweredPings {
+            clock.advance(by: CompanionServer.pingInterval)
+            try #require(await waitUntil { log.pings == ping }, "liveness tick \(ping) never pinged the client")
+        }
+        #expect(disconnected.value.isEmpty, "the client was reaped before the liveness timeout")
+        clock.advance(by: CompanionServer.pingInterval)
         #expect(await waitUntil { !disconnected.value.isEmpty },
                 "the server never reaped the client that stopped answering pings")
     }
@@ -706,11 +709,8 @@ import AudioutProtocol
     @Test func pongAnsweringClientSurvivesLivenessPings() async throws {
         let hub = try await makeHub()
         defer { hub.cancel() }
-        let server = makeAutoApprovingServer()
-        server.test_pingIntervalOverride = 0.1
-        // Generous vs. the 0.1 s ping cadence: several agents' suites share
-        // this machine, and a scheduling stall must not read as death.
-        server.test_livenessTimeoutOverride = 1.5
+        let clock = ManualDelayClock()
+        let server = makeAutoApprovingServer(clock: clock)
         defer { server.stop() }
         server.broadcast(makeSnapshot(volume: 10))
 
@@ -723,9 +723,16 @@ import AudioutProtocol
         try #require(await waitUntil { log.messages.contains { if case .welcome = $0 { return true } else { return false } } },
                      "the client was never welcomed")
 
-        // Observe past several ping cycles; the auto-ponging client must
-        // never be reaped, and must still be receiving broadcasts at the end.
-        _ = await waitUntil(timeout: 2) { !disconnected.value.isEmpty }
+        // Run ticks past the liveness timeout, letting each pong land before
+        // the next tick; the auto-ponging client must never be reaped, and
+        // must still be receiving broadcasts at the end.
+        let ticks = Int(CompanionServer.livenessTimeout / CompanionServer.pingInterval) + 1
+        for _ in 1...ticks {
+            clock.advance(by: CompanionServer.pingInterval)
+            let now = clock.uptime()
+            try #require(await waitUntil { server.test_lastActivities() == [now] },
+                         "the client's pong never refreshed its last activity")
+        }
         #expect(disconnected.value.isEmpty, "a pong-answering client was reaped as dead")
         let snap2 = makeSnapshot(volume: 20)
         server.broadcast(snap2)
@@ -752,11 +759,14 @@ import AudioutProtocol
                 "the attacker-controlled clientName was not truncated at parse")
     }
 
-    /// Turns red if a line break or control character in the hello's name
-    /// reaches a surface that shows it (an alert title, a Settings row), or
-    /// if the cut to 64 characters stops applying.
+    /// Turns red if a line break, control character or bidirectional
+    /// override in the hello's name reaches a surface that shows it (an
+    /// alert title, a Settings row), or if the cut to 64 characters stops
+    /// applying.
     @Test func aClientNameIsFlattenedToOneLine() {
         #expect(CompanionServer.displayName("  Ada's\niPhone\r\u{2028}\u{0007}  ") == "Ada's iPhone")
+        // U+202E and U+061C reorder the text around the name in the approval alert.
+        #expect(CompanionServer.displayName("Ada\u{202E}\u{061C}enohPi") == "Ada  enohPi")
         #expect(CompanionServer.displayName("\n\n") == "")
         #expect(CompanionServer.displayName(String(repeating: "b", count: 200)).count == 64)
     }
@@ -831,7 +841,7 @@ import AudioutProtocol
         server.broadcast(makeSnapshot())
 
         let asked = LockedBox<(id: String, name: String)?>(nil)
-        server.onApprovalRequest = { clientID, clientName, _, _, _, decide in
+        server.onApprovalRequest = { clientID, clientName, _, decide in
             asked.value = (clientID, clientName)
             decide(.approved)
         }
@@ -846,7 +856,7 @@ import AudioutProtocol
         #expect(request.name == "Owner's iPhone")
         // No awaitingApproval frame on the fast path: an already-approved
         // phone must never flash "check your Mac".
-        #expect(!log.contains(.awaitingApproval),
+        #expect(!log.messages.contains { if case .awaitingApproval = $0 { return true } else { return false } },
                 "an instantly-approved client must not be told it's awaiting approval")
     }
 
@@ -856,7 +866,7 @@ import AudioutProtocol
         let server = makeServer()
         defer { server.stop() }
         server.broadcast(makeSnapshot())
-        server.onApprovalRequest = { _, _, _, _, _, decide in decide(.denied) }
+        server.onApprovalRequest = { _, _, _, decide in decide(.denied) }
 
         let (client, log) = try await connectClient(via: hub, to: server)
         defer { client.cancel() }
@@ -875,15 +885,13 @@ import AudioutProtocol
     @Test func unknownClientIsHeldPastTheHandshakeDeadlineThenPromotedOnApproval() async throws {
         let hub = try await makeHub()
         defer { hub.cancel() }
-        let server = makeServer()
-        // Short enough to outlive cheaply below, long enough that the hello
-        // itself always lands inside it even on a loaded machine.
-        server.test_handshakeTimeoutOverride = 0.5
+        let clock = ManualDelayClock()
+        let server = makeServer(clock: clock)
         defer { server.stop() }
         server.broadcast(makeSnapshot())
 
         let decider = LockedBox<(@Sendable (CompanionServer.ApprovalDecision) -> Void)?>(nil)
-        server.onApprovalRequest = { _, _, _, _, _, decide in
+        server.onApprovalRequest = { _, _, _, decide in
             decide(.pending)
             decider.value = decide
         }
@@ -892,32 +900,36 @@ import AudioutProtocol
         defer { client.cancel() }
         try await sendAuthenticatedHello(over: client, log: log)
 
-        #expect(await waitUntil { log.contains(.awaitingApproval) },
+        #expect(await waitUntil { log.contains(.awaitingApproval(screenLocked: false)) },
                 "the unknown client was never told it's awaiting approval")
         // Outlive the pre-hello deadline several times over while the
-        // human decides.
-        try await Task.sleep(for: .seconds(1.5))
-        #expect(!log.closed, "the awaiting client was killed by the pre-hello deadline")
+        // human decides, staying inside the approval deadline. A connection
+        // the pre-hello deadline closed could not carry the welcome below.
+        clock.advance(by: CompanionServer.preHelloTimeout * 3)
 
         let decide = decider.value
         try #require(decide != nil, "the gate never asked the app layer")
         decide?(.approved)
         #expect(await waitUntil { log.messages.contains { if case .welcome = $0 { return true } else { return false } } },
                 "the late-approved client was never welcomed")
+        #expect(!log.closed, "the awaiting client was killed by the pre-hello deadline")
     }
 
     @Test func awaitingApprovalTimesOutWithARetryableReason() async throws {
         let hub = try await makeHub()
         defer { hub.cancel() }
-        let server = makeServer()
-        server.test_approvalTimeoutOverride = 0.3 // real default is 180s
+        let clock = ManualDelayClock()
+        let server = makeServer(clock: clock)
         defer { server.stop() }
         server.broadcast(makeSnapshot())
-        server.onApprovalRequest = { _, _, _, _, _, decide in decide(.pending) } // never answered
+        server.onApprovalRequest = { _, _, _, decide in decide(.pending) } // never answered
 
         let (client, log) = try await connectClient(via: hub, to: server)
         defer { client.cancel() }
         try await sendAuthenticatedHello(over: client, log: log)
+        try #require(await waitUntil { log.messages.contains { if case .awaitingApproval = $0 { return true } else { return false } } },
+                     "the client was never held for approval")
+        clock.advance(by: CompanionServer.approvalTimeout)
 
         #expect(await waitUntil { log.contains(.goodbye(reason: CompanionGoodbyeReason.approvalTimedOut)) },
                 "the unanswered client never got the timeout goodbye")
@@ -928,23 +940,15 @@ import AudioutProtocol
         #expect(server.test_awaitingCount() == 0)
     }
 
-    /// Also turns red if a connection dying before admission is not
-    /// reported, by its own id, as closed unadmitted.
     @Test func droppedAwaitingConnectionReportsAbandonment() async throws {
         let hub = try await makeHub()
         defer { hub.cancel() }
         let server = makeServer()
         defer { server.stop() }
         server.broadcast(makeSnapshot())
-        let asked = LockedBox<[UUID]>([])
-        server.onApprovalRequest = { _, _, _, _, connectionID, decide in
-            asked.withLock { $0.append(connectionID) }
-            decide(.pending)
-        }
+        server.onApprovalRequest = { _, _, _, decide in decide(.pending) }
         let abandoned = LockedBox<[String]>([])
         server.onApprovalAbandoned = { clientID in abandoned.withLock { $0.append(clientID) } }
-        let closedUnadmitted = LockedBox<[UUID]>([])
-        server.onAwaitingConnectionClosed = { id in closedUnadmitted.withLock { $0.append(id) } }
 
         let (client, log) = try await connectClient(via: hub, to: server)
         try await sendAuthenticatedHello(over: client, log: log)
@@ -957,24 +961,25 @@ import AudioutProtocol
                 "the dropped connection never reported abandonment")
         #expect(await waitUntil { server.test_awaitingCount() == 0 },
                 "the dropped connection's awaiting entry was never removed")
-        #expect(await waitUntil { !asked.value.isEmpty && closedUnadmitted.value == asked.value },
-                "the dropped connection was never reported closed unadmitted")
     }
 
     @Test func approvalDeadlineReportsAbandonment() async throws {
         let hub = try await makeHub()
         defer { hub.cancel() }
-        let server = makeServer()
-        server.test_approvalTimeoutOverride = 0.3 // real default is 180s
+        let clock = ManualDelayClock()
+        let server = makeServer(clock: clock)
         defer { server.stop() }
         server.broadcast(makeSnapshot())
-        server.onApprovalRequest = { _, _, _, _, _, decide in decide(.pending) } // never answered
+        server.onApprovalRequest = { _, _, _, decide in decide(.pending) } // never answered
         let abandoned = LockedBox<[String]>([])
         server.onApprovalAbandoned = { clientID in abandoned.withLock { $0.append(clientID) } }
 
         let (client, log) = try await connectClient(via: hub, to: server)
         defer { client.cancel() }
         try await sendAuthenticatedHello(over: client, log: log)
+        try #require(await waitUntil { log.messages.contains { if case .awaitingApproval = $0 { return true } else { return false } } },
+                     "the client was never held for approval")
+        clock.advance(by: CompanionServer.approvalTimeout)
 
         #expect(await waitUntil { abandoned.value == [Self.testClientID] },
                 "the approval-deadline reap never reported abandonment")
@@ -986,7 +991,7 @@ import AudioutProtocol
         let server = makeServer()
         defer { server.stop() }
         server.broadcast(makeSnapshot())
-        server.onApprovalRequest = { _, _, _, _, _, decide in decide(.pending) }
+        server.onApprovalRequest = { _, _, _, decide in decide(.pending) }
         let abandoned = LockedBox<[String]>([])
         server.onApprovalAbandoned = { clientID in abandoned.withLock { $0.append(clientID) } }
 
@@ -1111,10 +1116,8 @@ import AudioutProtocol
     }
 
     /// Turns red if the approval gate is handed anything other than the hash
-    /// of the verified key as the phone's id, a pairing code computed over
-    /// anything other than this Mac's fingerprint and that key, a code-check
-    /// flag other than the hello's, or a connection id other than the one
-    /// `onClientDisconnected` later reports (the code-check alert closes on it).
+    /// of the verified key as the phone's id, or a pairing code computed over
+    /// anything other than this Mac's fingerprint and that key.
     @Test func aValidHelloYieldsTheKeyHashAsClientIDAndAPairingCode() async throws {
         let hub = try await makeHub()
         defer { hub.cancel() }
@@ -1122,17 +1125,15 @@ import AudioutProtocol
         defer { server.stop() }
         server.broadcast(makeSnapshot())
 
-        let asked = LockedBox<(id: String, code: String, checks: Bool, connection: UUID)?>(nil)
-        server.onApprovalRequest = { clientID, _, pairingCode, checksPairingCode, connectionID, decide in
-            asked.value = (clientID, pairingCode, checksPairingCode, connectionID)
+        let asked = LockedBox<(id: String, code: String)?>(nil)
+        server.onApprovalRequest = { clientID, _, pairingCode, decide in
+            asked.value = (clientID, pairingCode)
             decide(.approved)
         }
-        let disconnected = LockedBox<UUID?>(nil)
-        server.onClientDisconnected = { disconnected.value = $0 }
 
         let (client, log) = try await connectClient(via: hub, to: server)
         defer { client.cancel() }
-        try await sendAuthenticatedHello(over: client, log: log, checksPairingCode: true)
+        try await sendAuthenticatedHello(over: client, log: log)
 
         let request = try #require(await waitUntil { asked.value != nil } ? asked.value : nil,
                                    "the gate was never asked")
@@ -1141,32 +1142,63 @@ import AudioutProtocol
         #expect(request.code == CompanionPairing.pairingCode(serverCertificateSHA256: Self.testFingerprint,
                                                             clientPublicKey: publicKey))
         #expect(request.code.count == 6 && request.code.allSatisfy(\.isNumber))
-        #expect(request.checks)
-
-        #expect(await waitUntil { log.messages.contains { if case .welcome = $0 { return true } else { return false } } })
-        client.cancel()
-        #expect(await waitUntil { disconnected.value != nil })
-        #expect(disconnected.value == request.connection)
     }
 
-    /// Turns red if `.pairingClosed` stops reaching the phone as its own
-    /// goodbye reason, which is what tells the user to click Pair an iPhone.
-    @Test func pairingClosedDecisionSendsThatGoodbye() async throws {
+    /// Turns red if `.paused` stops reaching the phone as the
+    /// `pairingPaused` goodbye carrying the seconds left, which is what the
+    /// phone turns into "Try again after …".
+    @Test func pausedDecisionSendsPairingPausedWithTheSecondsLeft() async throws {
         let hub = try await makeHub()
         defer { hub.cancel() }
         let server = makeServer()
         defer { server.stop() }
         server.broadcast(makeSnapshot())
-        server.onApprovalRequest = { _, _, _, _, _, decide in decide(.pairingClosed) }
+        server.onApprovalRequest = { _, _, _, decide in decide(.paused(seconds: 540)) }
 
         let (client, log) = try await connectClient(via: hub, to: server)
         defer { client.cancel() }
         try await sendAuthenticatedHello(over: client, log: log)
 
-        #expect(await waitUntil { log.contains(.goodbye(reason: CompanionGoodbyeReason.pairingClosed)) },
-                "the refused phone never learned the pairing window was closed")
+        #expect(await waitUntil {
+            log.contains(.goodbye(reason: CompanionGoodbyeReason.pairingPaused, retryAfterSeconds: 540))
+        }, "the paused phone never learned how long to wait")
         #expect(await waitUntil { log.closed }, "the refused client's connection was never closed")
         #expect(!log.messages.contains { if case .welcome = $0 { return true } else { return false } })
+    }
+
+    /// Turns red if a held phone is not told the screen is locked when it
+    /// already was at hello, is not told again when the lock changes, or if
+    /// a phone the gate let straight in is ever told it is waiting.
+    @Test func lockChangesReachEveryPhoneWaitingOnThePrompt() async throws {
+        let hub = try await makeHub()
+        defer { hub.cancel() }
+        let server = makeServer()
+        defer { server.stop() }
+        server.broadcast(makeSnapshot())
+        server.setScreenLocked(true)
+        let held = CompanionPairing.clientID(forPublicKey: Self.testKey.publicKey.rawRepresentation)
+        server.onApprovalRequest = { clientID, _, _, decide in decide(clientID == held ? .pending : .approved) }
+
+        let (waiting, waitingLog) = try await connectClient(via: hub, to: server)
+        defer { waiting.cancel() }
+        try await sendAuthenticatedHello(over: waiting, log: waitingLog)
+        let (admitted, admittedLog) = try await connectClient(via: hub, to: server)
+        defer { admitted.cancel() }
+        try await sendAuthenticatedHello(over: admitted, log: admittedLog, key: P256.Signing.PrivateKey())
+
+        #expect(await waitUntil { waitingLog.contains(.awaitingApproval(screenLocked: true)) },
+                "locked at hello: the phone must ask its user to unlock the Mac")
+        try #require(await waitUntil {
+            admittedLog.messages.contains { if case .welcome = $0 { return true } else { return false } }
+        })
+        server.setScreenLocked(true)
+        server.setScreenLocked(false)
+        #expect(await waitUntil { waitingLog.contains(.awaitingApproval(screenLocked: false)) },
+                "unlocking never reached the waiting phone")
+        let waits = waitingLog.messages.filter { if case .awaitingApproval = $0 { return true } else { return false } }
+        #expect(waits == [.awaitingApproval(screenLocked: true), .awaitingApproval(screenLocked: false)],
+                "a repeat of the current lock state sends nothing")
+        #expect(!admittedLog.messages.contains { if case .awaitingApproval = $0 { return true } else { return false } })
     }
 
     /// Turns red if `send` stops counting a frame's bytes against the
@@ -1206,12 +1238,12 @@ import AudioutProtocol
         server.test_awaitingCapOverride = 1 // real cap is 8
         defer { server.stop() }
         server.broadcast(makeSnapshot())
-        server.onApprovalRequest = { _, _, _, _, _, decide in decide(.pending) } // hold everyone
+        server.onApprovalRequest = { _, _, _, decide in decide(.pending) } // hold everyone
 
         let (held, heldLog) = try await connectClient(via: hub, to: server)
         defer { held.cancel() }
         try await sendAuthenticatedHello(over: held, log: heldLog, key: P256.Signing.PrivateKey())
-        try #require(await waitUntil { heldLog.contains(.awaitingApproval) },
+        try #require(await waitUntil { heldLog.contains(.awaitingApproval(screenLocked: false)) },
                      "the first client was never held")
 
         let (overflow, overflowLog) = try await connectClient(via: hub, to: server)
@@ -1244,11 +1276,21 @@ import AudioutProtocol
 
         server.dropClient(clientID: CompanionPairing.clientID(forPublicKey: revokedKey.publicKey.rawRepresentation))
 
+        // Turns red if dropClient goes back to a bare cancel: the phone then never hears "removed" and redials forever.
+        #expect(await waitUntil { revokedLog.contains(.goodbye(reason: "removed")) },
+                "the removed phone was never told it was removed")
+        #expect(!keptLog.contains(.goodbye(reason: "removed")))
         #expect(await waitUntil { revokedLog.closed }, "revoking never dropped the live client")
         #expect(await waitUntil { !disconnected.value.isEmpty },
                 "the revoked drop must fire the normal disconnect signal (orphaned-drag cleanup)")
         #expect(!keptLog.closed, "an unrelated client must survive another phone's revocation")
         #expect(await waitUntil { server.test_clientNames() == ["kept"] })
+
+        // Turns red if stop re-greets a client dropClient already said goodbye to.
+        let goodbyesBefore = revokedLog.messages.count
+        server.stop(reason: CompanionGoodbyeReason.disabled)
+        #expect(await waitUntil { keptLog.contains(.goodbye(reason: CompanionGoodbyeReason.disabled)) })
+        #expect(revokedLog.messages.count == goodbyesBefore, "stop sent a second goodbye to the removed client")
     }
 
     // MARK: - App icon pages
@@ -1313,9 +1355,13 @@ import AudioutProtocol
         server.sendAppIcons([AppIconPayload(bundleID: "com.example.app", png: nil)],
                             page: 0, pageCount: 1, to: UUID())
 
-        // Nothing to wait FOR — give the server queue a beat, then assert
-        // the connected client neither received a stray page nor died.
-        try await Task.sleep(for: .milliseconds(200))
+        // A later broadcast on the same socket is the barrier: the server
+        // queue runs the icon send first, so a stray page would arrive
+        // before this state frame.
+        let later = makeSnapshot(volume: 60)
+        server.broadcast(later)
+        try #require(await waitUntil { log.contains(.state(snapshot: later)) },
+                     "the client never received the later broadcast")
         #expect(!log.messages.contains { if case .appIcons = $0 { return true } else { return false } },
                 "a page addressed to an unknown client must not leak to anyone else")
         #expect(!log.closed, "a bad clientID must not disturb live connections")

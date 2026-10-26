@@ -174,20 +174,33 @@ extension SerializedSharedState {
         private let lock = NSLock()
         private var _modes: [AlignTickMode] = []
         private var _stages = 0
+        private var _armLeads: [TimeInterval?] = []
+        private var _prepares = 0
+        private var _finished: (() -> Void)?
         var modes: [AlignTickMode] { lock.withLock { _modes } }
         var stages: Int { lock.withLock { _stages } }
+        var arms: Int { lock.withLock { _armLeads.count } }
+        /// The first-tick lead each arm was given, nil for one full beat.
+        var armLeads: [TimeInterval?] { lock.withLock { _armLeads } }
+        var prepares: Int { lock.withLock { _prepares } }
         var onLevel: (@Sendable (_ rms: Float) -> Void)?
         var onStateChange: (@Sendable (_ state: NativeCaptureCoordinator.State) -> Void)?
         func start() {}
         func stop() {}
         func setAlignTickMode(_ mode: AlignTickMode) { lock.withLock { _modes.append(mode) } }
+        func armWizardTicks(firstTickAfterSeconds: TimeInterval?) {
+            lock.withLock { _armLeads.append(firstTickAfterSeconds) }
+        }
+        func prepareCompanionMicProbe() { lock.withLock { _prepares += 1 } }
         func stageCompanionMicProbe(routed: Bool, referenceOnEngine: Bool,
                                     targetWindowUID: String?, referenceWindowUID: String?,
                                     onStarted: @escaping () -> Void,
                                     onFinished: @escaping () -> Void) {
-            lock.withLock { _stages += 1 }
+            lock.withLock { _stages += 1; _finished = onFinished }
             onStarted()
         }
+        /// The last probe frame entering the feed, for the staged companion run.
+        func finishProbe() { lock.withLock { _finished }?() }
         func stageWizardMicProbe(levelStepDB: @escaping () -> Int,
                                  onStarted: @escaping () -> Void,
                                  onFinished: @escaping () -> Void) {
@@ -316,6 +329,16 @@ extension SerializedSharedState {
                 }
             }
         }
+        /// Whether a `.deviceUpdated` for `id` at `volume` has been collected.
+        /// The stream keeps emission order, so every earlier event is in too.
+        func sawVolume(_ volume: Int, for id: String) -> Bool {
+            lock.withLock {
+                _events.contains {
+                    if case .deviceUpdated(let device) = $0 { return device.id == id && device.volume == volume }
+                    return false
+                }
+            }
+        }
         func promptedDeviceIDs() -> [String] {
             lock.withLock {
                 _events.compactMap {
@@ -379,7 +402,7 @@ extension SerializedSharedState {
         // The 4 s production start deadline is wall time, and a stalled GitHub
         // runner has taken longer than that to answer the holds, so every start
         // was refused as "The speaker pair changed". A test about the deadline
-        // itself sets a short one.
+        // itself moves a `ManualDelayClock` past it.
         backend.companionAuditionPreparationSeconds = 60
         let sink = SpyBTSink()
         backend.btSyncedSinkFactory = { sink }
@@ -397,6 +420,46 @@ extension SerializedSharedState {
 
     private func device(_ backend: NativeBackend, _ id: String) -> Device? {
         backend.devices.first { $0.id == id }
+    }
+
+    /// Whether the audition's cleanup has begun. Cleanup schedules its stop
+    /// deadline in the same main-queue turn, so a test on main that sees this
+    /// can move the clock past that deadline.
+    private func cleanupStarted(_ backend: NativeBackend) -> Bool {
+        backend.btTrimLock.withLock { backend.companionAudition?.cleanupStarted == true }
+    }
+
+    /// Whether the audition reservation is gone.
+    private func auditionRetired(_ backend: NativeBackend) -> Bool {
+        backend.btTrimLock.withLock { backend.companionAudition == nil }
+    }
+
+    /// Run everything already queued on `stateQueue`, then everything that
+    /// work queued on main, where the lifetime callbacks are delivered.
+    @MainActor private func drainStateThenMain(_ backend: NativeBackend) async {
+        backend.stateQueue.sync {}
+        await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
+            DispatchQueue.main.async { done.resume() }
+        }
+    }
+
+    /// Run everything already queued on `stateQueue`, then everything that
+    /// work queued on `captureControlQueue`, where the sink pushes land.
+    private func drainStateThenCapture(_ backend: NativeBackend) {
+        backend.stateQueue.sync {}
+        backend.captureControlQueue.sync {}
+    }
+
+    /// Whether the wizard's arm gate is still waiting: a poll that does not arm
+    /// schedules the next one.
+    private func armGatePolling(_ backend: NativeBackend) -> Bool {
+        backend.captureControlQueue.sync { backend.wizardArmPollWork != nil }
+    }
+
+    /// Move `clock` one arm-gate interval and run the poll that fires.
+    private func runArmPoll(_ backend: NativeBackend, _ clock: ManualDelayClock) {
+        clock.advance(by: backend.wizardArmPollInterval)
+        backend.captureControlQueue.sync {}
     }
 
     /// The sink gain is the composed `Main × Group × Device` product; drive the
@@ -429,7 +492,7 @@ extension SerializedSharedState {
         await SuiteWait.until { start.value != nil }
         #expect(start.value == .some(nil))
         #expect(backend.startCompanionAlignmentProbe(targetID: btMove.id,
-            referenceID: btFlip.id, onStarted: {}, onFinished: {}) != nil)
+            referenceID: btFlip.id, onStarted: { _ in }, onFinished: {}) != nil)
 
         let stop = LockedBox<String??>(nil)
         backend.endCompanionAlignmentAudition(targetID: btMove.id) { stop.value = .some($0) }
@@ -573,14 +636,14 @@ extension SerializedSharedState {
         await SuiteWait.until { local.suppressions.contains(true) }
         #expect(first.value == nil && second.value == nil)
         #expect(backend.startCompanionAlignmentProbe(targetID: btMove.id,
-            referenceID: btFlip.id, onStarted: {}, onFinished: {}) != nil)
+            referenceID: btFlip.id, onStarted: { _ in }, onFinished: {}) != nil)
         let stop = LockedBox<String??>(nil)
         backend.endCompanionAlignmentAudition(targetID: btMove.id) { stop.value = .some($0) }
         await SuiteWait.until { first.value != nil && second.value != nil && local.suppressions.contains(false) }
         #expect(first.value.flatMap { $0 } != nil && second.value.flatMap { $0 } != nil)
         #expect(capture.modes.isEmpty, "the pacer never starts while preparation is pending")
         #expect(backend.startCompanionAlignmentProbe(targetID: btMove.id,
-            referenceID: btFlip.id, onStarted: {}, onFinished: {}) != nil,
+            referenceID: btFlip.id, onStarted: { _ in }, onFinished: {}) != nil,
             "cleaning retains the .tick reservation")
         local.release()
         await SuiteWait.until { stop.value != nil }
@@ -589,14 +652,17 @@ extension SerializedSharedState {
     }
 
     @Test @MainActor func preparationDeadlineRejectsJoinedStartsAndLateLocalCompletion() async {
-        let (backend, bt, _, _) = makeBackend()
+        // The start deadline expires when the test moves this clock past it.
+        let clock = ManualDelayClock()
+        let (backend, bt, _, _) = makeBackend(delayClock: clock.queueHoppingClock,
+                                              uptimeClock: clock.uptime)
         defer { backend.stop() }
         let capture = ProbeStagingCapture()
         let local = ScriptedLocalPlayback()
         local.holdsCompletions = true
         backend.captureCoordinator = capture
         backend.localPlaybackEngine = local
-        backend.companionAuditionPreparationSeconds = 0.1
+        backend.companionAuditionPreparationSeconds = 5
         backend.start()
         bt.fire([btMove, btFlip])
         await SuiteWait.until { self.device(backend, self.btFlip.id) != nil }
@@ -609,6 +675,10 @@ extension SerializedSharedState {
         backend.startCompanionAlignmentAudition(targetID: btMove.id, referenceID: btFlip.id) {
             second.value = .some($0)
         }
+        // Both starts have run on main once preparation reaches the local setter.
+        await SuiteWait.until { local.suppressions.contains(true) }
+        #expect(first.value == nil && second.value == nil)
+        clock.advance(by: backend.companionAuditionPreparationSeconds)
         await SuiteWait.until { first.value != nil && second.value != nil }
         #expect(first.value.flatMap { $0 }?.contains("too long") == true)
         #expect(second.value.flatMap { $0 }?.contains("too long") == true)
@@ -665,12 +735,12 @@ extension SerializedSharedState {
         #expect(second.value.flatMap { $0 } != nil)
         #expect(capture.modes.isEmpty, "a failed preparation never starts the pacer")
         #expect(backend.startCompanionAlignmentProbe(targetID: btMove.id,
-            referenceID: btFlip.id, onStarted: {}, onFinished: {}) != nil,
+            referenceID: btFlip.id, onStarted: { _ in }, onFinished: {}) != nil,
             "the reservation is held until cleanup finishes")
         engine.releaseWrites()
         local.release()   // the cleanup's own suppression callback
         await SuiteWait.until { backend.startCompanionAlignmentProbe(targetID: self.btMove.id,
-            referenceID: self.btFlip.id, onStarted: {}, onFinished: {}) == nil }
+            referenceID: self.btFlip.id, onStarted: { _ in }, onFinished: {}) == nil }
         #expect(first.value.flatMap { $0 } != nil && second.value.flatMap { $0 } != nil,
                 "each joined start is answered exactly once")
         backend.cancelCompanionAlignmentProbe(targetID: btMove.id)
@@ -720,7 +790,7 @@ extension SerializedSharedState {
         #expect(capture.modes.isEmpty, "a late acknowledgement cannot start clicks behind a refusal")
         engine.releaseWrites()
         await SuiteWait.until { backend.startCompanionAlignmentProbe(targetID: self.btMove.id,
-            referenceID: self.btFlip.id, onStarted: {}, onFinished: {}) == nil }
+            referenceID: self.btFlip.id, onStarted: { _ in }, onFinished: {}) == nil }
         backend.cancelCompanionAlignmentProbe(targetID: btMove.id)
     }
 
@@ -792,7 +862,7 @@ extension SerializedSharedState {
         #expect(start.value.flatMap { $0 }?.contains("Couldn't quiet") == true)
         await SuiteWait.until { engine.writes.last { $0.0 == ap1.outputID }?.1 != -1.0 }
         await SuiteWait.until { backend.startCompanionAlignmentProbe(targetID: self.btMove.id,
-            referenceID: self.btFlip.id, onStarted: {}, onFinished: {}) == nil }
+            referenceID: self.btFlip.id, onStarted: { _ in }, onFinished: {}) == nil }
         backend.cancelCompanionAlignmentProbe(targetID: btMove.id)
     }
 
@@ -800,10 +870,14 @@ extension SerializedSharedState {
     @Test @MainActor func timedOutStopKeepsReservationUntilAirPlayRestorationDrains() async {
         let engine = RecordingEngine()
         let discovery = FakeDiscovery()
-        let (backend, bt, _, _) = makeBackend(engine: engine, discovery: discovery)
+        // The stop deadline expires when the test moves this clock past it.
+        let clock = ManualDelayClock()
+        let (backend, bt, _, _) = makeBackend(engine: engine, discovery: discovery,
+                                              delayClock: clock.queueHoppingClock,
+                                              uptimeClock: clock.uptime)
         defer { engine.releaseWrites(); backend.stop() }
         backend.captureCoordinator = ProbeStagingCapture()
-        backend.companionAuditionStopSeconds = 0.1
+        backend.companionAuditionStopSeconds = 5
         backend.start()
         let ap1 = airPlay1()
         discovery.fire(.appeared(ap1))
@@ -823,14 +897,16 @@ extension SerializedSharedState {
         await SuiteWait.until { self.device(backend, ap1.id)?.volume == 75 }
         let stop = LockedBox<String??>(nil)
         backend.endCompanionAlignmentAudition(targetID: btMove.id) { stop.value = .some($0) }
+        await SuiteWait.until { self.cleanupStarted(backend) }
+        clock.advance(by: backend.companionAuditionStopSeconds)
         await SuiteWait.until { stop.value != nil }
         #expect(stop.value.flatMap { $0 }?.contains("took too long") == true)
         #expect(backend.startCompanionAlignmentProbe(targetID: btMove.id,
-            referenceID: btFlip.id, onStarted: {}, onFinished: {}) != nil,
+            referenceID: btFlip.id, onStarted: { _ in }, onFinished: {}) != nil,
             "the timeout may answer once but must keep the busy reservation")
         engine.releaseWrites()
         await SuiteWait.until { backend.startCompanionAlignmentProbe(targetID: self.btMove.id,
-            referenceID: self.btFlip.id, onStarted: {}, onFinished: {}) == nil }
+            referenceID: self.btFlip.id, onStarted: { _ in }, onFinished: {}) == nil }
         await SuiteWait.until { engine.writes.last { $0.0 == ap1.outputID }?.1 == -1.0 }
         #expect(engine.writes.last { $0.0 == ap1.outputID }?.1 == -1.0,
                 "the phone's probe silences every speaker outside the pair")
@@ -842,12 +918,15 @@ extension SerializedSharedState {
     }
 
     @Test @MainActor func timedOutLocalRestorationNamesTheLocalOutputAndStaysBusy() async {
-        let (backend, bt, _, _) = makeBackend()
+        // The stop deadline expires when the test moves this clock past it.
+        let clock = ManualDelayClock()
+        let (backend, bt, _, _) = makeBackend(delayClock: clock.queueHoppingClock,
+                                              uptimeClock: clock.uptime)
         defer { backend.stop() }
         let local = ScriptedLocalPlayback()
         backend.localPlaybackEngine = local
         backend.captureCoordinator = ProbeStagingCapture()
-        backend.companionAuditionStopSeconds = 0.1
+        backend.companionAuditionStopSeconds = 5
         backend.start()
         bt.fire([btMove, btFlip])
         await SuiteWait.until { self.device(backend, self.btFlip.id) != nil }
@@ -864,13 +943,15 @@ extension SerializedSharedState {
         backend.endCompanionAlignmentAudition(targetID: btMove.id) {
             replies.value = replies.value + [$0]
         }
+        await SuiteWait.until { self.cleanupStarted(backend) }
+        clock.advance(by: backend.companionAuditionStopSeconds)
         await SuiteWait.until { replies.value.count == 1 }
         #expect(replies.value[0]?.contains(localName) == true)
         #expect(backend.startCompanionAlignmentProbe(targetID: btMove.id,
-            referenceID: btFlip.id, onStarted: {}, onFinished: {}) != nil)
+            referenceID: btFlip.id, onStarted: { _ in }, onFinished: {}) != nil)
         local.release()
         await SuiteWait.until { backend.startCompanionAlignmentProbe(targetID: self.btMove.id,
-            referenceID: self.btFlip.id, onStarted: {}, onFinished: {}) == nil }
+            referenceID: self.btFlip.id, onStarted: { _ in }, onFinished: {}) == nil }
         #expect(replies.value.count == 1, "a timed-out stop answers only once after real drain")
         backend.cancelCompanionAlignmentProbe(targetID: btMove.id)
     }
@@ -1038,7 +1119,9 @@ extension SerializedSharedState {
         #expect(backend.btHasSyncTrim(forDevice: btMove.id) == true)
 
         backend.clearCompanionAlignmentTuning(targetID: btMove.id)
-        SuiteWait.settle(0.3)
+        // The drain persists the nudge before it retires the audition, so once
+        // the audition is gone no write-back can still be on its way.
+        await SuiteWait.until { self.auditionRetired(backend) }
         #expect(backend.btHasSyncTrim(forDevice: btMove.id) == false)
         #expect((try? BTTrimStore(directory: dir).load())?[btMove.id] == nil)
     }
@@ -1085,12 +1168,14 @@ extension SerializedSharedState {
         #expect(stop.value == .some(nil),
                 "the restoration completed; the user's own failed edit is not its failure")
         await SuiteWait.until { backend.startCompanionAlignmentProbe(targetID: self.btMove.id,
-            referenceID: self.btFlip.id, onStarted: {}, onFinished: {}) == nil }
+            referenceID: self.btFlip.id, onStarted: { _ in }, onFinished: {}) == nil }
         backend.cancelCompanionAlignmentProbe(targetID: btMove.id)
     }
 
     /// Without a lifetime signal the executable has to guess when cleanup
     /// ended, and a stop that refused on its timeout looks like the end.
+    /// Turns red if the timeout path fires the lifetime callback, or the drain
+    /// fires it twice.
     @Test @MainActor func theLifetimeCallbackFiresOnceAfterTheRealDrainNotTheTimeout() async {
         let engine = RecordingEngine()
         let discovery = FakeDiscovery()
@@ -1143,13 +1228,17 @@ extension SerializedSharedState {
         #expect(stop.value.flatMap { $0 }?.contains("took too long") == true)
         #expect(released.value == 0, "a refused stop does not consume the lifetime signal")
         #expect(backend.startCompanionAlignmentProbe(targetID: btMove.id,
-            referenceID: btFlip.id, onStarted: {}, onFinished: {}) != nil)
+            referenceID: btFlip.id, onStarted: { _ in }, onFinished: {}) != nil)
 
         engine.releaseWrites()
         await SuiteWait.until { released.value == 1 }
         await SuiteWait.until { backend.startCompanionAlignmentProbe(targetID: self.btMove.id,
-            referenceID: self.btFlip.id, onStarted: {}, onFinished: {}) == nil }
-        SuiteWait.settle(0.3)
+            referenceID: self.btFlip.id, onStarted: { _ in }, onFinished: {}) == nil }
+        // A late second signal would come from the timeout path or a second
+        // cleanup finish: move the clock past the timeout again, then run
+        // everything already queued on the state queue and on main.
+        clock.advance(by: backend.companionAuditionStopSeconds)
+        await drainStateThenMain(backend)
         #expect(released.value == 1, "the lifetime signal fires exactly once")
         #expect(refusedReleased.value == 1)
         backend.cancelCompanionAlignmentProbe(targetID: btMove.id)
@@ -1157,8 +1246,11 @@ extension SerializedSharedState {
 
     /// Backend teardown is the other honest end of a reservation: the engine
     /// sessions are gone, so no late write can reach a new one.
+    /// Turns red if teardown fires the lifetime callback more than once.
     @Test @MainActor func theLifetimeCallbackFiresOnceAfterBackendTeardown() async {
-        let (backend, bt, _, _) = makeBackend()
+        let clock = ManualDelayClock()
+        let (backend, bt, _, _) = makeBackend(
+            delayClock: clock.queueHoppingClock, uptimeClock: clock.uptime)
         backend.captureCoordinator = ProbeStagingCapture()
         backend.start()
         bt.fire([btMove, btFlip])
@@ -1174,7 +1266,11 @@ extension SerializedSharedState {
         #expect(start.value == .some(nil))
         backend.stop()
         await SuiteWait.until { released.value == 1 }
-        SuiteWait.settle(0.3)
+        // A late second signal would arrive on main after this point: move the
+        // clock past the stop timeout, then run everything already queued on
+        // the state queue and on main.
+        clock.advance(by: backend.companionAuditionStopSeconds)
+        await drainStateThenMain(backend)
         #expect(released.value == 1)
     }
 
@@ -1295,7 +1391,10 @@ extension SerializedSharedState {
         waitFor { self.device(backend, self.btFlip.id) != nil }
 
         backend.setOutputSet([btMove.id])
-        SuiteWait.settle(0.5)   // settle; nothing should fire
+        // A later event on the same stream: once it is collected, any prompt
+        // the solo select emitted has been collected too.
+        backend.setVolume(37, for: btMove.id)
+        waitFor { events.sawVolume(37, for: self.btMove.id) }
         #expect(events.promptedDeviceIDs().isEmpty)
 
         backend.setOutputSet([btMove.id, btFlip.id])
@@ -1339,7 +1438,10 @@ extension SerializedSharedState {
         waitFor { events.promptedDeviceIDs().count == 2 }
         backend.setOutputSet([btMove.id])
         backend.setOutputSet([btMove.id, btFlip.id])
-        SuiteWait.settle(0.5)   // settle
+        // A later event on the same stream: once it is collected, any re-prompt
+        // has been collected too.
+        backend.setVolume(37, for: btMove.id)
+        waitFor { events.sawVolume(37, for: self.btMove.id) }
 
         #expect(events.promptedDeviceIDs().count == 2, "no re-prompt on re-forming the mix")
     }
@@ -1636,7 +1738,7 @@ extension SerializedSharedState {
 
         func measure(offsetMs: Double) -> CompanionAlignmentApplyResult {
             #expect(backend.startCompanionAlignmentProbe(
-                targetID: uid, referenceID: "local", onStarted: {}, onFinished: {}) == nil)
+                targetID: uid, referenceID: "local", onStarted: { _ in }, onFinished: {}) == nil)
             return backend.applyCompanionAlignmentMeasurement(
                 targetID: uid, offsetMs: offsetMs, confidence: 40)
         }
@@ -1942,6 +2044,501 @@ extension SerializedSharedState {
         #expect(reported.value == Double(roomMs) / 1000)
     }
 
+    /// The phone places each speaker's turn from the delay the companion probe's
+    /// started callback carries. Turns red if
+    /// `NativeBackend.startCompanionAlignmentProbe` hands `onStarted` no delay,
+    /// the delay in milliseconds, or anything but the room delay.
+    @Test func theCompanionProbeReportsTheRoomDelayInSeconds() {
+        let (backend, bt, sink, _) = makeBackend()
+        defer { backend.stop() }
+        backend.captureCoordinator = ProbeStagingCapture()
+        backend.start()
+        bt.fire([btMove])
+        waitFor { self.device(backend, self.btMove.id) != nil }
+        backend.setOutputSet([btMove.id])
+        waitFor { !sink.buffers.isEmpty }
+        let reported = LockedBox<TimeInterval?>(nil)
+        #expect(backend.startCompanionAlignmentProbe(
+            targetID: btMove.id, referenceID: "local",
+            onStarted: { reported.value = $0 }, onFinished: {}) == nil)
+        waitFor { reported.value != nil }
+        let roomMs = backend.localSinkReferenceDelayMs()
+        #expect(roomMs > 0, "positive control: a zero room delay reads the same in any unit")
+        #expect(reported.value == Double(roomMs) / 1000)
+        backend.cancelCompanionAlignmentProbe(targetID: btMove.id)
+    }
+
+    /// Store `ms` as `uid`'s measured latency through a Keep. With `settled`,
+    /// ten jump-free clock seconds come first so it reads `.tuned`; without,
+    /// the clock has just jumped and it reads `.stale`.
+    private func keepLatency(_ backend: NativeBackend, _ uid: String, _ ms: Double,
+                             settled: Bool) {
+        let from = Date()
+        if settled {
+            for second in 0...10 {
+                backend.btSpeakerTiming.noteClockOutcome(
+                    uid: uid, outcome: .advanced, at: from.addingTimeInterval(Double(second)))
+            }
+        } else {
+            backend.btSpeakerTiming.noteClockOutcome(uid: uid, outcome: .jumped(magnitudeMs: 30), at: from)
+        }
+        backend.endBTWizardLatencyPreview(forDevice: uid, keepMs: ms)
+        waitFor { backend.btMeasuredLatencyMs(forDevice: uid) == ms }
+    }
+
+    /// A phone run's harness: `btMove` (the target) and `btFlip` selected, plus
+    /// `btExtra` when asked, the probe double installed, and every backend
+    /// delay on `clock`. The caller stops the backend.
+    @MainActor private func companionRunHarness(
+        clock: ManualDelayClock, storeDirectory: URL? = nil, withExtra: Bool = false
+    ) async -> (NativeBackend, SpyBTSink, ProbeStagingCapture) {
+        let (backend, bt, sink, _) = makeBackend(storeDirectory: storeDirectory,
+                                                 delayClock: clock.queueHoppingClock,
+                                                 uptimeClock: clock.uptime)
+        let capture = ProbeStagingCapture()
+        backend.captureCoordinator = capture
+        backend.start()
+        let speakers = withExtra ? [btMove, btFlip, btExtra] : [btMove, btFlip]
+        bt.fire(speakers)
+        await SuiteWait.until { speakers.allSatisfy { self.device(backend, $0.id) != nil } }
+        backend.setOutputSet(Set(speakers.map(\.id)))
+        await SuiteWait.until { !sink.buffers.isEmpty }
+        return (backend, sink, capture)
+    }
+
+    private func companionPhase(_ backend: NativeBackend) -> CompanionAlignmentRun.Phase? {
+        backend.btTrimLock.withLock { backend.companionAlignmentRun?.phase }
+    }
+
+    /// Turns red if `startCompanionAlignmentProbe` pins the 2 s default for a
+    /// tuned, measured speaker, sizes the pin from a latency that is stale or
+    /// absent, or `endBTWizardRun` leaves the pin set so the Mac's own wizard
+    /// inherits it.
+    @Test func aPhoneRunSizesTheRaisedReferenceToATunedMeasuredSpeaker() {
+        // (stored latency, clock settled before the Keep, the pinned reference)
+        let cases: [(latency: Double?, settled: Bool, pinned: Int)] = [
+            (287, true, 1_287), (287, false, 2_000), (nil, true, 2_000),
+        ]
+        for c in cases {
+            let (backend, bt, sink, _) = makeBackend()
+            defer { backend.stop() }
+            backend.captureCoordinator = ProbeStagingCapture()
+            backend.start()
+            bt.fire([btMove])
+            waitFor { self.device(backend, self.btMove.id) != nil }
+            backend.setOutputSet([btMove.id])
+            waitFor { !sink.buffers.isEmpty }
+            let uid = btMove.id
+            if let latency = c.latency { keepLatency(backend, uid, latency, settled: c.settled) }
+
+            #expect(backend.startCompanionAlignmentProbe(
+                targetID: uid, referenceID: "local", onStarted: { _ in }, onFinished: {}) == nil)
+            waitFor { sink.buffers.last == c.pinned }
+            #expect(sink.buffers.last == c.pinned, "case \(c)")
+            #expect(backend.btWizardLatencyRangeMs(forDevice: uid).upperBound
+                        == Double(c.pinned - BTSyncedSink.defaultBTOnlyBufferMs),
+                    "the ceiling follows the pin, one dry-ring buffer short — case \(c)")
+
+            backend.cancelCompanionAlignmentProbe(targetID: uid)
+            waitFor { sink.buffers.last == BTSyncedSink.defaultBTOnlyBufferMs }
+            backend.setBTWizardTickActive(true, btTargetDeviceID: uid, btReferenceDeviceID: nil)
+            waitFor { sink.buffers.last == NativeBackend.btWizardReferenceBufferMs }
+            #expect(sink.buffers.last == 2_000, "the Mac's own wizard keeps 2 s — case \(c)")
+            backend.setBTWizardTickActive(false, btTargetDeviceID: uid, btReferenceDeviceID: nil)
+            backend.endBTWizardRun()
+        }
+    }
+
+    /// Turns red if the probe's finish still stands the wizard feed down, if
+    /// `applyCompanionAlignmentMeasurement` ends the run instead of handing it
+    /// off, or if the audition for the same pair re-enters wizard mode or never
+    /// arms the clicks on the adopted feed, or arms them a full beat away
+    /// instead of on `companionAdoptedFirstTickLeadSeconds`.
+    @Test @MainActor func aMeasuredRunKeepsItsFeedUpForTheClicksOnTheSamePair() async {
+        let clock = ManualDelayClock()
+        let (backend, sink, capture) = await companionRunHarness(clock: clock)
+        defer { backend.stop() }
+        keepLatency(backend, btMove.id, 287, settled: true)
+        #expect(backend.startCompanionAlignmentProbe(
+            targetID: btMove.id, referenceID: btFlip.id, onStarted: { _ in }, onFinished: {}) == nil)
+        await SuiteWait.until { sink.buffers.last == 1_287 }
+
+        capture.finishProbe()
+        #expect(companionPhase(backend) == .awaitingReport, "no fixed tail before the run waits")
+        drainStateThenCapture(backend)
+        #expect(capture.modes == [.wizard], "the sweeps finishing leaves the feed up")
+        #expect(sink.buffers.last == 1_287)
+
+        guard case .applied = backend.applyCompanionAlignmentMeasurement(
+            targetID: btMove.id, offsetMs: 0, confidence: 40) else {
+            Issue.record("the measurement was refused")
+            return
+        }
+        #expect(companionPhase(backend) == .handoff)
+        drainStateThenCapture(backend)
+        #expect(capture.modes == [.wizard], "the apply leaves the feed up")
+        #expect(sink.buffers.last == 1_287, "and the pinned reference with it")
+
+        let start = LockedBox<String??>(nil)
+        backend.startCompanionAlignmentAudition(targetID: btMove.id, referenceID: btFlip.id) {
+            start.value = .some($0)
+        }
+        await SuiteWait.until { start.value != nil }
+        #expect(start.value == .some(nil))
+        #expect(capture.modes == [.wizard], "the clicks play on the probe's feed, no second rebuild")
+        #expect(capture.armLeads == [NativeBackend.companionAdoptedFirstTickLeadSeconds],
+                "the adopted feed's clicks are armed once, by activation, on the short lead")
+        #expect(companionPhase(backend) == .tick)
+    }
+
+    /// Turns red if the handoff's grace timer is never armed, or stands down
+    /// anything but the feed and the raised reference.
+    @Test @MainActor func anUnclaimedHandoffStandsDownAfterItsGrace() async {
+        let clock = ManualDelayClock()
+        let (backend, sink, capture) = await companionRunHarness(clock: clock)
+        defer { backend.stop() }
+        #expect(backend.startCompanionAlignmentProbe(
+            targetID: btMove.id, referenceID: btFlip.id, onStarted: { _ in }, onFinished: {}) == nil)
+        await SuiteWait.until { sink.buffers.last == NativeBackend.btWizardReferenceBufferMs }
+        capture.finishProbe()
+        guard case .applied = backend.applyCompanionAlignmentMeasurement(
+            targetID: btMove.id, offsetMs: 300, confidence: 40) else {
+            Issue.record("the measurement was refused")
+            return
+        }
+
+        clock.advance(by: backend.companionHandoffGraceSeconds)
+        await SuiteWait.until {
+            capture.modes.last == .off && sink.buffers.last == BTSyncedSink.defaultBTOnlyBufferMs
+        }
+        #expect(capture.modes == [.wizard, .off])
+        #expect(sink.buffers.last == 500, "300 ms measured + 100 headroom stays inside the floor")
+        #expect(companionPhase(backend) == nil)
+    }
+
+    /// Turns red if `abandonCompanionProbe` leaves an awaiting run's feed up
+    /// or skips putting back the trim the probe suspended.
+    @Test @MainActor func aCancelWhileAwaitingTheReportPutsTheRoomBack() async throws {
+        let dir = scratchDir
+        try BTTrimStore(directory: dir).save([btMove.id: 40])
+        let clock = ManualDelayClock()
+        let (backend, sink, capture) = await companionRunHarness(clock: clock, storeDirectory: dir)
+        defer { backend.stop() }
+        #expect(backend.startCompanionAlignmentProbe(
+            targetID: btMove.id, referenceID: btFlip.id, onStarted: { _ in }, onFinished: {}) == nil)
+        await SuiteWait.until { sink.buffers.last == NativeBackend.btWizardReferenceBufferMs }
+        capture.finishProbe()
+        #expect(companionPhase(backend) == .awaitingReport)
+
+        backend.cancelCompanionAlignmentProbe(targetID: btMove.id)
+        await SuiteWait.until {
+            sink.buffers.last == BTSyncedSink.defaultBTOnlyBufferMs
+                && sink.trims.last.map { $0.uid == self.btMove.id && $0.ms == 40 } == true
+        }
+        #expect(capture.modes == [.wizard, .off])
+        #expect(sink.buffers.last == 500)
+        #expect(sink.trims.last?.ms == 40, "the suspended trim is back: \(sink.trims)")
+        #expect(companionPhase(backend) == nil)
+    }
+
+    /// Turns red if a click request naming another reference adopts the
+    /// handoff's feed (whose holds and probe windows belong to the old pair)
+    /// instead of standing it down and starting fresh, or if that fresh start's
+    /// arm gate passes the adopted feed's short first-tick lead.
+    @Test @MainActor func clicksForAnotherReferenceStandTheHandoffDownFirst() async {
+        let clock = ManualDelayClock()
+        let (backend, sink, capture) = await companionRunHarness(clock: clock, withExtra: true)
+        defer { backend.stop() }
+        #expect(backend.startCompanionAlignmentProbe(
+            targetID: btMove.id, referenceID: btFlip.id, onStarted: { _ in }, onFinished: {}) == nil)
+        await SuiteWait.until { sink.buffers.last == NativeBackend.btWizardReferenceBufferMs }
+        capture.finishProbe()
+        guard case .applied = backend.applyCompanionAlignmentMeasurement(
+            targetID: btMove.id, offsetMs: 300, confidence: 40) else {
+            Issue.record("the measurement was refused")
+            return
+        }
+
+        let start = LockedBox<String??>(nil)
+        backend.startCompanionAlignmentAudition(targetID: btMove.id, referenceID: btExtra.id) {
+            start.value = .some($0)
+        }
+        await SuiteWait.until { start.value != nil }
+        #expect(start.value == .some(nil))
+        #expect(capture.modes == [.wizard, .off, .wizard])
+        #expect(capture.arms == 0, "a fresh start arms through its own gate, not by adoption")
+
+        drainStateThenCapture(backend)
+        clock.advance(by: backend.wizardArmCeilingSeconds)
+        await SuiteWait.until { capture.arms == 1 }
+        #expect(capture.armLeads == [nil], "the gate's arm keeps the full beat")
+    }
+
+    /// Turns red if `prepareCompanionAlignmentProbe` stages a probe, skips the
+    /// pin, or is not idempotent for the same pair, or if a start after it
+    /// re-enters wizard mode instead of staging onto the prepared feed.
+    @Test @MainActor func aPreparedRunStagesItsProbeOntoTheFeedAlreadyUp() async {
+        let clock = ManualDelayClock()
+        let (backend, sink, capture) = await companionRunHarness(clock: clock)
+        defer { backend.stop() }
+        keepLatency(backend, btMove.id, 287, settled: true)
+
+        #expect(backend.prepareCompanionAlignmentProbe(targetID: btMove.id, referenceID: btFlip.id) == nil)
+        await SuiteWait.until { sink.buffers.last == 1_287 }
+        #expect(backend.prepareCompanionAlignmentProbe(targetID: btMove.id, referenceID: btFlip.id) == nil,
+                "a repeat prepare for the same pair is accepted")
+        drainStateThenCapture(backend)
+        #expect(capture.modes == [.wizard])
+        #expect(capture.prepares == 1, "the repeat changed nothing")
+        #expect(capture.stages == 0, "no probe until the phone presses Start")
+        #expect(companionPhase(backend) == .prepared)
+
+        #expect(backend.startCompanionAlignmentProbe(
+            targetID: btMove.id, referenceID: btFlip.id, onStarted: { _ in }, onFinished: {}) == nil)
+        drainStateThenCapture(backend)
+        #expect(capture.stages == 1)
+        #expect(capture.modes == [.wizard], "the start reuses the prepared feed")
+        #expect(sink.buffers.last == 1_287, "and its pinned reference")
+        #expect(companionPhase(backend) == .probe)
+    }
+
+    /// Turns red if `abandonCompanionProbe` leaves a prepared run's feed up or
+    /// skips the trim it suspended. A phone that disconnects reaches the same
+    /// call: its `.probe` owner's `cancelLegacy` is this cancel.
+    @Test @MainActor func cancellingAPreparedRunPutsTheRoomBack() async throws {
+        let dir = scratchDir
+        try BTTrimStore(directory: dir).save([btMove.id: 40])
+        let clock = ManualDelayClock()
+        let (backend, sink, capture) = await companionRunHarness(clock: clock, storeDirectory: dir)
+        defer { backend.stop() }
+        #expect(backend.prepareCompanionAlignmentProbe(targetID: btMove.id, referenceID: btFlip.id) == nil)
+        await SuiteWait.until { sink.buffers.last == NativeBackend.btWizardReferenceBufferMs }
+
+        backend.cancelCompanionAlignmentProbe(targetID: btMove.id)
+        await SuiteWait.until {
+            sink.buffers.last == BTSyncedSink.defaultBTOnlyBufferMs
+                && sink.trims.last.map { $0.uid == self.btMove.id && $0.ms == 40 } == true
+        }
+        #expect(capture.modes == [.wizard, .off])
+        #expect(sink.buffers.last == 500)
+        #expect(sink.trims.last?.ms == 40, "the suspended trim is back: \(sink.trims)")
+        #expect(companionPhase(backend) == nil)
+    }
+
+    /// Turns red if a start naming another reference stages onto a feed
+    /// prepared for the old pair instead of standing it down and starting
+    /// fresh.
+    @Test @MainActor func aStartForAnotherReferenceStandsThePreparedRunDownFirst() async {
+        let clock = ManualDelayClock()
+        let (backend, sink, capture) = await companionRunHarness(clock: clock, withExtra: true)
+        defer { backend.stop() }
+        #expect(backend.prepareCompanionAlignmentProbe(targetID: btMove.id, referenceID: btFlip.id) == nil)
+        await SuiteWait.until { sink.buffers.last == NativeBackend.btWizardReferenceBufferMs }
+
+        #expect(backend.startCompanionAlignmentProbe(
+            targetID: btMove.id, referenceID: btExtra.id, onStarted: { _ in }, onFinished: {}) == nil)
+        drainStateThenCapture(backend)
+        #expect(capture.modes == [.wizard, .off, .wizard])
+        #expect(capture.stages == 1)
+        #expect(companionPhase(backend) == .probe)
+    }
+
+    /// Turns red if `startCompanionAlignmentProbe` returns its preflight
+    /// refusal without standing down the run prepared for that speaker,
+    /// which the phone never cancels after a refused start.
+    @Test @MainActor func aRefusedStartStandsThePreparedRunDown() async throws {
+        let dir = scratchDir
+        try BTTrimStore(directory: dir).save([btMove.id: 40])
+        let clock = ManualDelayClock()
+        let (backend, sink, capture) = await companionRunHarness(clock: clock, storeDirectory: dir)
+        defer { backend.stop() }
+        #expect(backend.prepareCompanionAlignmentProbe(targetID: btMove.id, referenceID: btFlip.id) == nil)
+        await SuiteWait.until { sink.buffers.last == NativeBackend.btWizardReferenceBufferMs }
+
+        backend.setOutputSet([btFlip.id])   // the target stops playing after the prepare
+        #expect(backend.startCompanionAlignmentProbe(
+            targetID: btMove.id, referenceID: btFlip.id, onStarted: { _ in }, onFinished: {}) != nil)
+        await SuiteWait.until {
+            sink.buffers.last == BTSyncedSink.defaultBTOnlyBufferMs
+                && sink.trims.last.map { $0.uid == self.btMove.id && $0.ms == 40 } == true
+        }
+        #expect(capture.modes == [.wizard, .off])
+        #expect(sink.buffers.last == 500)
+        #expect(sink.trims.last?.ms == 40, "the suspended trim is back: \(sink.trims)")
+        #expect(capture.stages == 0)
+        #expect(companionPhase(backend) == nil)
+    }
+
+    /// Turns red if `applyCompanionAlignmentMeasurement` takes a `.handoff`
+    /// run again, adding a second offset on top of the latency the first
+    /// report kept.
+    @Test @MainActor func aSecondReportDuringTheHandoffIsRefused() async {
+        let clock = ManualDelayClock()
+        let (backend, sink, capture) = await companionRunHarness(clock: clock)
+        defer { backend.stop() }
+        #expect(backend.startCompanionAlignmentProbe(
+            targetID: btMove.id, referenceID: btFlip.id, onStarted: { _ in }, onFinished: {}) == nil)
+        await SuiteWait.until { sink.buffers.last == NativeBackend.btWizardReferenceBufferMs }
+        capture.finishProbe()
+        guard case .applied = backend.applyCompanionAlignmentMeasurement(
+            targetID: btMove.id, offsetMs: 300, confidence: 40) else {
+            Issue.record("the measurement was refused")
+            return
+        }
+        #expect(backend.btMeasuredLatencyMs(forDevice: btMove.id) == 300)
+
+        #expect(backend.applyCompanionAlignmentMeasurement(
+            targetID: btMove.id, offsetMs: 50, confidence: 40)
+                == .refused("That measurement isn't running any more. Start it again."))
+        #expect(backend.btMeasuredLatencyMs(forDevice: btMove.id) == 300, "the kept latency stands")
+        #expect(companionPhase(backend) == .handoff, "the handoff still waits for the clicks")
+    }
+
+    /// Turns red if `applyCompanionAlignmentMeasurement` takes a `.prepared`
+    /// run, writing a latency for a probe that never played.
+    @Test @MainActor func aReportAgainstAPreparedRunIsRefused() async {
+        let clock = ManualDelayClock()
+        let (backend, sink, capture) = await companionRunHarness(clock: clock)
+        defer { backend.stop() }
+        #expect(backend.prepareCompanionAlignmentProbe(targetID: btMove.id, referenceID: btFlip.id) == nil)
+        await SuiteWait.until { sink.buffers.last == NativeBackend.btWizardReferenceBufferMs }
+
+        #expect(backend.applyCompanionAlignmentMeasurement(
+            targetID: btMove.id, offsetMs: 300, confidence: 40)
+                == .refused("That measurement isn't running any more. Start it again."))
+        drainStateThenCapture(backend)
+        #expect(backend.btMeasuredLatencyMs(forDevice: btMove.id) == nil, "nothing was written")
+        #expect(companionPhase(backend) == .prepared)
+        #expect(capture.modes == [.wizard], "the prepared feed stays up")
+    }
+
+    /// Turns red if `prepareCompanionAlignmentProbe` arms no lease, so a phone
+    /// left on its Start page keeps the room silent, or if that lease stands
+    /// down a run a start has already adopted. Also turns red if the lease
+    /// stops calling `onCompanionPreparedProbeLeaseEnded` with the target, or
+    /// calls it for a run a start adopted, so the wiring keeps or drops the
+    /// phone's claim wrongly. Also turns red if
+    /// `hasPreparedCompanionAlignmentProbe` stops reading the run's phase and
+    /// target, so a late lease report releases a newer preparation's claim.
+    @Test @MainActor func aPreparedRunGivesTheRoomBackWhenItsLeaseRunsOut() async throws {
+        let dir = scratchDir
+        try BTTrimStore(directory: dir).save([btMove.id: 40])
+        let clock = ManualDelayClock()
+        let (backend, sink, capture) = await companionRunHarness(clock: clock, storeDirectory: dir)
+        defer { backend.stop() }
+        let leaseEnded = LockedBox<[String]>([])
+        backend.onCompanionPreparedProbeLeaseEnded = { leaseEnded.value = leaseEnded.value + [$0] }
+        #expect(backend.prepareCompanionAlignmentProbe(targetID: btMove.id, referenceID: btFlip.id) == nil)
+        await SuiteWait.until { sink.buffers.last == NativeBackend.btWizardReferenceBufferMs }
+        #expect(backend.hasPreparedCompanionAlignmentProbe(targetID: btMove.id))
+        #expect(!backend.hasPreparedCompanionAlignmentProbe(targetID: btFlip.id), "only the target counts")
+
+        clock.advance(by: backend.companionPreparedLeaseSeconds)
+        await SuiteWait.until {
+            sink.buffers.last == BTSyncedSink.defaultBTOnlyBufferMs
+                && sink.trims.last.map { $0.uid == self.btMove.id && $0.ms == 40 } == true
+        }
+        #expect(capture.modes == [.wizard, .off])
+        #expect(sink.buffers.last == 500)
+        #expect(sink.trims.last?.ms == 40, "the suspended trim is back: \(sink.trims)")
+        #expect(companionPhase(backend) == nil)
+        #expect(leaseEnded.value == [btMove.id], "the wiring is told once, with the target")
+        #expect(!backend.hasPreparedCompanionAlignmentProbe(targetID: btMove.id), "the lease stood it down")
+
+        #expect(backend.prepareCompanionAlignmentProbe(targetID: btMove.id, referenceID: btFlip.id) == nil)
+        #expect(backend.hasPreparedCompanionAlignmentProbe(targetID: btMove.id))
+        #expect(backend.startCompanionAlignmentProbe(
+            targetID: btMove.id, referenceID: btFlip.id, onStarted: { _ in }, onFinished: {}) == nil)
+        #expect(!backend.hasPreparedCompanionAlignmentProbe(targetID: btMove.id), "the start moved it on")
+        drainStateThenCapture(backend)
+        #expect(capture.stages == 1)
+        #expect(capture.modes == [.wizard, .off, .wizard], "a start inside the lease adopts the feed")
+
+        clock.advance(by: backend.companionPreparedLeaseSeconds)
+        backend.captureControlQueue.sync {}
+        drainStateThenCapture(backend)
+        #expect(companionPhase(backend) == .probe, "the second lease leaves the started probe alone")
+        #expect(capture.modes == [.wizard, .off, .wizard])
+        #expect(leaseEnded.value == [btMove.id], "a started run's lease reports nothing")
+    }
+
+    /// Turns red if the report timeout matches its run by id alone, so the
+    /// timer armed when the sweeps finished cuts short the `.handoff` the
+    /// same run became once its measurement was applied.
+    @Test @MainActor func theReportTimeoutLeavesAHandoffAlone() async {
+        let clock = ManualDelayClock()
+        let (backend, sink, capture) = await companionRunHarness(clock: clock)
+        defer { backend.stop() }
+        backend.companionHandoffGraceSeconds = NativeBackend.companionReportTimeoutSeconds * 2
+        #expect(backend.startCompanionAlignmentProbe(
+            targetID: btMove.id, referenceID: btFlip.id, onStarted: { _ in }, onFinished: {}) == nil)
+        await SuiteWait.until { sink.buffers.last == NativeBackend.btWizardReferenceBufferMs }
+        capture.finishProbe()
+        guard case .applied = backend.applyCompanionAlignmentMeasurement(
+            targetID: btMove.id, offsetMs: 300, confidence: 40) else {
+            Issue.record("the measurement was refused")
+            return
+        }
+
+        clock.advance(by: NativeBackend.companionReportTimeoutSeconds)
+        backend.captureControlQueue.sync {}
+        drainStateThenCapture(backend)
+        #expect(companionPhase(backend) == .handoff)
+        #expect(capture.modes == [.wizard], "the feed stays up for the clicks")
+    }
+
+    /// Turns red if `prepareCompanionAlignmentProbe` refuses "already
+    /// measuring" while a measurement's handoff for the same speaker holds
+    /// the slot, instead of standing it down as a start does.
+    @Test @MainActor func aPrepareAfterAMeasurementTakesOverTheHandoff() async {
+        let clock = ManualDelayClock()
+        let (backend, sink, capture) = await companionRunHarness(clock: clock)
+        defer { backend.stop() }
+        #expect(backend.startCompanionAlignmentProbe(
+            targetID: btMove.id, referenceID: btFlip.id, onStarted: { _ in }, onFinished: {}) == nil)
+        await SuiteWait.until { sink.buffers.last == NativeBackend.btWizardReferenceBufferMs }
+        capture.finishProbe()
+        guard case .applied = backend.applyCompanionAlignmentMeasurement(
+            targetID: btMove.id, offsetMs: 300, confidence: 40) else {
+            Issue.record("the measurement was refused")
+            return
+        }
+        #expect(companionPhase(backend) == .handoff)
+
+        #expect(backend.prepareCompanionAlignmentProbe(targetID: btMove.id, referenceID: btFlip.id) == nil)
+        #expect(companionPhase(backend) == .prepared)
+        drainStateThenCapture(backend)
+        #expect(capture.modes == [.wizard, .off, .wizard], "the handoff stood down, then a fresh feed")
+
+        clock.advance(by: backend.companionHandoffGraceSeconds)
+        drainStateThenCapture(backend)
+        #expect(companionPhase(backend) == .prepared, "the old handoff's grace leaves the new run alone")
+    }
+
+    /// Turns red if `claimCompanionProbeRun` lets a phone run in while the
+    /// Mac's own wizard sits on its receipt (tick stopped, reference still
+    /// raised), where the run would measure against 2 s instead of its pin.
+    @Test @MainActor func aPhoneRunIsRefusedWhileTheMacWizardsReceiptHoldsTheReference() async {
+        let clock = ManualDelayClock()
+        let (backend, sink, capture) = await companionRunHarness(clock: clock)
+        defer { backend.stop() }
+        keepLatency(backend, btMove.id, 287, settled: true)
+        backend.setBTWizardTickActive(true, btTargetDeviceID: btMove.id, btReferenceDeviceID: nil)
+        await SuiteWait.until { sink.buffers.last == NativeBackend.btWizardReferenceBufferMs }
+        backend.setBTWizardTickActive(false, btTargetDeviceID: btMove.id, btReferenceDeviceID: nil)
+
+        #expect(backend.prepareCompanionAlignmentProbe(targetID: btMove.id, referenceID: btFlip.id) != nil)
+        #expect(backend.startCompanionAlignmentProbe(
+            targetID: btMove.id, referenceID: btFlip.id, onStarted: { _ in }, onFinished: {}) != nil)
+        drainStateThenCapture(backend)
+        #expect(companionPhase(backend) == nil)
+        #expect(backend.stateQueue.sync { backend.btWizardReferencePinnedMs }
+                    == NativeBackend.btWizardReferenceBufferMs, "nothing pinned for the 287 ms speaker")
+        #expect(sink.buffers.last == 2_000)
+        #expect(capture.prepares == 0 && capture.stages == 0)
+        backend.endBTWizardRun()
+    }
+
     /// Keep writes the measurement BEFORE the reference comes down, so the new
     /// floor is computed with it already in the table. The other order pushed a
     /// 640 ms latency against a 500 ms reference and the delay sat on its ≥ 0
@@ -2001,7 +2598,7 @@ extension SerializedSharedState {
 
         // The Done click.
         backend.setBTWizardTickActive(false, btTargetDeviceID: btMove.id, btReferenceDeviceID: nil)
-        waitFor(timeout: 0.2) { sink.reanchors.count > baseline + 2 }
+        drainStateThenCapture(backend)
         #expect(sink.reanchors.count == baseline + 2,
                 "one edge on, one edge off — got \(sink.reanchors)")
         #expect(backend.localSinkReferenceDelayMs() == 2_000,
@@ -2015,9 +2612,12 @@ extension SerializedSharedState {
     /// alone at the start while a Bluetooth engine was still coming up.
     @Test func theTicksArmOnlyOnceEverySinkIsPlaying() {
         let capture = LineCapture()
-        let (backend, bt, sink, _) = makeBackend()
+        // The arm gate polls when the test moves this clock.
+        let clock = ManualDelayClock()
+        let (backend, bt, sink, _) = makeBackend(delayClock: clock.queueHoppingClock,
+                                                 uptimeClock: clock.uptime)
         defer { backend.stop(); Telemetry._installTestSink(nil) }
-        backend.wizardArmPollInterval = 0.01
+        backend.wizardArmPollInterval = 1
         backend.wizardArmMinimumBedSeconds = 0
         backend.wizardArmCeilingSeconds = 60      // far out of reach: only a
                                                   // real release can arm here
@@ -2034,11 +2634,14 @@ extension SerializedSharedState {
 
         Telemetry._installTestSink { capture.append($0) }
         backend.setBTWizardTickActive(true, btTargetDeviceID: btMove.id, btReferenceDeviceID: nil)
+        backend.captureControlQueue.sync {}   // the gate has scheduled its first poll
         // Nothing is rendering yet, so the gate keeps polling.
-        waitFor(timeout: 0.3) { !capture.armedLines().isEmpty }
-        #expect(capture.armedLines().isEmpty, "no tick while a participant is silent")
+        for _ in 0..<3 { runArmPoll(backend, clock) }
+        #expect(armGatePolling(backend), "no tick while a participant is silent")
+        #expect(capture.armedLines().isEmpty)
 
         sink.rendering = [btMove.id]
+        runArmPoll(backend, clock)
         waitFor { !capture.armedLines().isEmpty }
         let line = capture.armedLines().first
         #expect(line != nil, "the ticks arm once everyone is playing")
@@ -2059,10 +2662,13 @@ extension SerializedSharedState {
     /// floor now runs from the release, however long the gate waited for it.
     @Test func theBedFloorIsTimedFromTheReleaseNotTheGateOpening() {
         let capture = LineCapture()
-        let (backend, bt, sink, _) = makeBackend()
+        // The arm gate polls when the test moves this clock.
+        let clock = ManualDelayClock()
+        let (backend, bt, sink, _) = makeBackend(delayClock: clock.queueHoppingClock,
+                                                 uptimeClock: clock.uptime)
         defer { backend.stop(); Telemetry._installTestSink(nil) }
-        backend.wizardArmPollInterval = 0.01
-        backend.wizardArmMinimumBedSeconds = 0.4
+        backend.wizardArmPollInterval = 1
+        backend.wizardArmMinimumBedSeconds = 3
         backend.wizardArmCeilingSeconds = 60
         backend.start()
         bt.fire([btMove])
@@ -2072,21 +2678,25 @@ extension SerializedSharedState {
 
         Telemetry._installTestSink { capture.append($0) }
         backend.setBTWizardTickActive(true, btTargetDeviceID: btMove.id, btReferenceDeviceID: nil)
+        backend.captureControlQueue.sync {}   // the gate has scheduled its first poll
         // The gate waits longer than the whole floor with nothing released.
-        waitFor(timeout: 0.6) { !capture.armedLines().isEmpty }
-        #expect(capture.armedLines().isEmpty, "no tick while the speaker is silent")
+        for _ in 0..<4 { runArmPoll(backend, clock) }
+        #expect(armGatePolling(backend), "no tick while the speaker is silent")
 
-        let releasedAt = Date()
+        // The first poll after the release dates it; the floor runs from there.
         sink.rendering = [btMove.id]
+        for _ in 0..<3 {
+            runArmPoll(backend, clock)
+            #expect(armGatePolling(backend),
+                    "the arm waits a full floor after the release, not after the gate")
+        }
+        runArmPoll(backend, clock)
         waitFor { !capture.armedLines().isEmpty }
-        let bedHeard = Date().timeIntervalSince(releasedAt)
-        #expect(bedHeard >= 0.4,
-                "the arm waited a full floor after the release, not after the gate: \(bedHeard) s")
         let line = capture.armedLines().first ?? ""
         #expect(line.contains("\"timedOut\":\"0\""), "\(line)")
         let bedMs = line.range(of: #""bedMs":"(\d+)""#, options: .regularExpression)
             .map { String(line[$0]).filter(\.isNumber) }.flatMap { Int($0) }
-        #expect((bedMs ?? 0) >= 400, "the line records the audible bed: \(line)")
+        #expect((bedMs ?? 0) >= 3_000, "the line records the audible bed: \(line)")
 
         backend.setBTWizardTickActive(false, btTargetDeviceID: btMove.id, btReferenceDeviceID: nil)
     }
@@ -2095,11 +2705,14 @@ extension SerializedSharedState {
     /// ceiling arms it anyway, and says so.
     @Test func theArmGateHasACeiling() {
         let capture = LineCapture()
-        let (backend, bt, sink, _) = makeBackend()
+        // The arm gate polls when the test moves this clock.
+        let clock = ManualDelayClock()
+        let (backend, bt, sink, _) = makeBackend(delayClock: clock.queueHoppingClock,
+                                                 uptimeClock: clock.uptime)
         defer { backend.stop(); Telemetry._installTestSink(nil) }
-        backend.wizardArmPollInterval = 0.01
+        backend.wizardArmPollInterval = 1
         backend.wizardArmMinimumBedSeconds = 0
-        backend.wizardArmCeilingSeconds = 0.05
+        backend.wizardArmCeilingSeconds = 5
         backend.start()
         bt.fire([btMove])
         waitFor { self.device(backend, self.btMove.id) != nil }
@@ -2113,6 +2726,8 @@ extension SerializedSharedState {
 
         Telemetry._installTestSink { capture.append($0) }
         backend.setBTWizardTickActive(true, btTargetDeviceID: btMove.id, btReferenceDeviceID: nil)
+        backend.captureControlQueue.sync {}   // the gate has scheduled its first poll
+        for _ in 0..<5 { runArmPoll(backend, clock) }
         waitFor { !capture.armedLines().isEmpty }
         #expect(capture.armedLines().first?.contains("\"timedOut\":\"1\"") == true,
                 "the ceiling arms regardless, and the line records that it did")
@@ -2298,11 +2913,11 @@ extension SerializedSharedState {
         backend.setOutputSet([sonos.id])                                 // 19:59:41
         backend.setBTSyncTrim(-205, forDevice: sonos.id, persist: true)  // 21:36:52
         backend.setOutputSet([])                                         // 21:46:57
-        SuiteWait.settle(0.3)
+        drainStateThenCapture(backend)
         let pushesBefore = sink.offsets.count
         backend.setOutputSet([sonos.id])                                 // 21:54:24
         await SuiteWait.until { sink.offsets.count > pushesBefore }
-        SuiteWait.settle(0.3)
+        drainStateThenCapture(backend)
 
         #expect(try store.loadLatencies()?[sonos.id] == 295, "deselect/reselect kept the latency")
         #expect(try store.load()?[sonos.id] == -205, "deselect/reselect kept the trim")

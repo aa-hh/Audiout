@@ -399,6 +399,9 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     /// to the by-ear tick grid — the phone decides what happens next.
     /// Pacer-queue confined.
     private var companionProbeActive = false
+    /// A prepared companion run's arm gate opened before its probe was
+    /// staged, so the probe arms the moment it stages. Pacer-queue confined.
+    private var companionGateOpened = false
 
     /// The engine's fixed feed format, which the pacer synthesizes directly.
     private static let wizardFeedRate = 44_100.0
@@ -1385,6 +1388,7 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
                 self?.micProbeLevelStep = nil
                 self?.companionProbeWindowUIDs = []
                 self?.companionProbeActive = false
+                self?.companionGateOpened = false
             }
             // Leaving `.wizard`: cancel and DRAIN the pacer before the new
             // snapshot goes out, so no in-flight pacer block can be delivered
@@ -1406,7 +1410,10 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     /// probe INSTEAD, and the tick grid arms automatically the moment the
     /// probe finishes — one gate, two payloads, so the backend's release gate
     /// needs no probe awareness at all.
-    public func armWizardTicks() {
+    ///
+    /// `firstTickAfterSeconds` places the first click that far past the arm
+    /// instead of one full beat away; see ``AlignmentTickInjector/armTicks(firstTickAfterFrames:)``.
+    public func armWizardTicks(firstTickAfterSeconds: TimeInterval?) {
         pacerQueue.async { [weak self] in
             guard let self, let injector = self.currentWizardInjector() else { return }
             if injector.probeStaged, !injector.test_probeArmed {
@@ -1414,8 +1421,14 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
                 let started = self.micProbeStarted
                 self.micProbeStarted = nil
                 if let started { DispatchQueue.global(qos: .userInitiated).async(execute: started) }
+            } else if self.companionProbeActive, !injector.probeStaged {
+                // A prepared companion run: no probe yet, and no clicks either.
+                // The stage that follows arms its probe at once.
+                self.companionGateOpened = true
             } else {
-                injector.armTicks()
+                injector.armTicks(firstTickAfterFrames: firstTickAfterSeconds.map {
+                    Int(($0 * injector.sampleRate).rounded())
+                })
             }
         }
     }
@@ -1472,8 +1485,8 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     ///   may be `nil` — a Mac reference hears its lane through the engine
     ///   fan-out instead.
     /// - Completing the probe does NOT hand over to the by-ear tick grid.
-    ///   The phone owns what happens next, and the Mac stands the run down on
-    ///   its own a moment later.
+    ///   The feed stays up until the backend's phone run ends, and that run
+    ///   decides when the feed comes down.
     /// - The microphone is the phone's, at the listening position, so the
     ///   engine lane plays at full amplitude and at level step 0. Its usual
     ///   scale pays for a Mac speaker inches from the Mac's own mic, which is
@@ -1493,8 +1506,26 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             self.companionProbeWindowUIDs = routed ? [targetWindowUID, referenceWindowUID] : []
             self.companionProbeActive = true
             self.micProbeLevelStep = nil
-            self.micProbeStarted = onStarted
             self.micProbeFinished = onFinished
+            if self.companionGateOpened {
+                // Prepared, and the gate already opened: start the lanes now.
+                injector.armProbe(levelStepDB: 0)
+                DispatchQueue.global(qos: .userInitiated).async(execute: onStarted)
+            } else {
+                self.micProbeStarted = onStarted
+            }
+        }
+    }
+
+    /// Ready a phone-driven run before its probe is staged: the next arm gate
+    /// is remembered instead of arming the click grid, so a
+    /// ``stageCompanionMicProbe(routed:referenceOnEngine:targetWindowUID:referenceWindowUID:onStarted:onFinished:)``
+    /// that follows starts its lanes at once. Call AFTER
+    /// ``setAlignTickMode(_:)`` has entered `.wizard`.
+    public func prepareCompanionMicProbe() {
+        pacerQueue.async { [weak self] in
+            self?.companionProbeActive = true
+            self?.companionGateOpened = false
         }
     }
 

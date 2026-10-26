@@ -359,6 +359,29 @@ import AudioToolbox
                 "…and the next tick lands exactly one new interval after it")
     }
 
+    /// Turns red if `armTicks(firstTickAfterFrames:)` ignores its lead, measures
+    /// it from anywhere but the cursor, or the nil default stops waiting one
+    /// full beat.
+    @Test func theFirstTickLandsOneLeadOrOneBeatPastTheArm() {
+        // 60 BPM at 1 kHz: a beat every 1000 frames. Armed 300 frames in.
+        for (lead, firstTick) in [(Int?.some(250), 250), (nil, 1_000)] {
+            let injector = AlignmentTickInjector(
+                sampleRate: 1_000,
+                config: .init(bpm: 60, maxTicks: AlignmentTickInjector.unlimitedTicks,
+                              armedAtStart: false, bedEnabled: false, replacesProgram: true))
+            var before = zeroBuffer(frames: 300)
+            injector.mix(into: &before)
+            injector.armTicks(firstTickAfterFrames: lead)
+            var pcm = zeroBuffer(frames: 1_050)
+            injector.mix(into: &pcm)
+            let samples = channel0(pcm)
+            #expect(!samples[0..<firstTick].contains { $0 != 0 },
+                    "silent before the first tick, lead \(String(describing: lead))")
+            #expect(samples[firstTick..<firstTick + 30].contains { $0 != 0 },
+                    "the first tick, lead \(String(describing: lead))")
+        }
+    }
+
     /// Two NOTES off one beat clock: the Bluetooth fan-out gets the higher
     /// note, the engine/Mac side the lower one, and the onset instant is
     /// sample-identical in both — the question is which side first, never which
@@ -681,7 +704,8 @@ import AudioToolbox
 
         coordinator.setAlignTickMode(.wizard)
         tap.deliverSilence(frames: 512, pts: timespec(tv_sec: 3, tv_nsec: 0))
-        waitFor(timeout: 0.3) { engineSink.writes.contains { $0.pts.tv_sec == 3 } }
+        // No wait: `handleBuffer` runs on the delivering thread and writes the
+        // sink before `deliverSilence` returns, so a leak would already show.
         #expect(!engineSink.writes.contains { $0.pts.tv_sec == 3 },
                 "during a wizard run captured buffers reach no consumer at all")
 
@@ -1058,6 +1082,86 @@ import AudioToolbox
         #expect(afterHandover.contains { abs($0) > 0.2 },
                 "the by-ear ticks follow the probe on their own")
 
+        coordinator.setAlignTickMode(.off)
+    }
+
+    /// A coordinator in wizard mode with the pacer timer off and a prepared
+    /// companion run, plus the two fan-outs it feeds.
+    private func preparedCompanionCoordinator()
+        -> (NativeCaptureCoordinator, SpyFanoutSink, SpyFanoutSink) {
+        let localSink = SpyFanoutSink()
+        let btSink = SpyFanoutSink()
+        let coordinator = NativeCaptureCoordinator(
+            makeTap: { FakeTap() },
+            sink: SpyPCMSink(),
+            makeConverter: { _ in ConstantConverter() },
+            processResolver: AudioProcessResolver(enumerator: EmptyEnumerator()),
+            muteBehavior: .mutedWhenTapped)
+        coordinator.setSyncedLocalSink(localSink, renderProcessPID: 212_121)
+        coordinator.setBTSink(btSink, renderProcessPID: 313_131)
+        coordinator.start()
+        waitFor {
+            if case .capturing = coordinator.state { return true }
+            return false
+        }
+        coordinator.test_setWizardModeWithoutPacerTimer()
+        coordinator.prepareCompanionMicProbe()
+        return (coordinator, localSink, btSink)
+    }
+
+    private final class StartCount: @unchecked Sendable {
+        let lock = NSLock()
+        var started = 0
+        func hit() { lock.withLock { started += 1 } }
+        var value: Int { lock.withLock { started } }
+    }
+
+    /// Turns red if `armWizardTicks()` arms the click grid for a prepared
+    /// companion run with no probe staged, or if `stageCompanionMicProbe`
+    /// ignores a gate that already opened and waits for a second arm.
+    @Test func aPreparedRunsProbeStartsAtOnceWhenTheGateOpenedFirst() {
+        let (coordinator, localSink, btSink) = preparedCompanionCoordinator()
+        coordinator.armWizardTicks()
+        // Past one search-tempo beat (3 s ≈ 33 blocks): an armed grid would tick.
+        let localBlocks = localSink.enqueued.count
+        for _ in 0..<40 { coordinator.test_pumpWizardTick(frames: 4_096) }
+        waitFor { localSink.enqueued.count == localBlocks + 40 }
+        #expect(!localSink.enqueued.flatMap { $0 }.contains { abs($0) > 0.2 },
+                "the gate opening on a prepared run plays no clicks")
+
+        let count = StartCount()
+        let btBlocksBeforeStage = btSink.enqueued.count
+        coordinator.stageCompanionMicProbe(
+            routed: false, referenceOnEngine: true,
+            targetWindowUID: nil, referenceWindowUID: nil,
+            onStarted: { count.hit() }, onFinished: {})
+        waitFor { count.value == 1 }
+        // 0.5 s lead + 8.5 s probe at the 44.1 kHz feed ≈ 397 000 frames.
+        for _ in 0..<100 { coordinator.test_pumpWizardTick(frames: 4_096) }
+        waitFor { btSink.enqueued.count == btBlocksBeforeStage + 100 }
+        #expect(btSink.enqueued[btBlocksBeforeStage...].flatMap { $0 }.contains { abs($0) > 0.1 },
+                "the Bluetooth lane plays with no second arm")
+        coordinator.setAlignTickMode(.off)
+    }
+
+    /// Turns red if a prepared run's probe staged before the gate opens starts
+    /// without waiting for `armWizardTicks()`.
+    @Test func aPreparedRunsProbeStagedBeforeTheGateWaitsForIt() {
+        let (coordinator, _, btSink) = preparedCompanionCoordinator()
+        let count = StartCount()
+        coordinator.stageCompanionMicProbe(
+            routed: false, referenceOnEngine: true,
+            targetWindowUID: nil, referenceWindowUID: nil,
+            onStarted: { count.hit() }, onFinished: {})
+        // The whole probe's length: an arm at stage time would have played it.
+        let btBlocks = btSink.enqueued.count
+        for _ in 0..<100 { coordinator.test_pumpWizardTick(frames: 4_096) }
+        waitFor { btSink.enqueued.count == btBlocks + 100 }
+        #expect(!btSink.enqueued.flatMap { $0 }.contains { abs($0) > 0.1 },
+                "no lane before the gate opens")
+
+        coordinator.armWizardTicks()
+        waitFor { count.value == 1 }
         coordinator.setAlignTickMode(.off)
     }
 

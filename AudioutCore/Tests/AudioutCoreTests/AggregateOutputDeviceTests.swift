@@ -401,7 +401,8 @@ extension SerializedSharedState {
     private func makeBackend(
         aggregateControl: FakeAggregateControl,
         currentDefaultOutputUIDBox: LockedBox<String?>,
-        currentDefaultOutputUID: (@Sendable () -> String?)? = nil
+        currentDefaultOutputUID: (@Sendable () -> String?)? = nil,
+        delayClock: @escaping NativeBackend.DelayClock = NativeBackend.dispatchDelayClock
     ) -> (NativeBackend, FakeSystemVolume) {
         let systemVolume = FakeSystemVolume()
         let backend = NativeBackend(
@@ -410,6 +411,7 @@ extension SerializedSharedState {
             dacpEndpoint: MinimalDACPEndpoint(),
             systemVolume: systemVolume,
             ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
+            delayClock: delayClock,
             aggregateControl: aggregateControl,
             currentDefaultOutputUID: currentDefaultOutputUID ?? { currentDefaultOutputUIDBox.get() },
             // D7 (adversarial review, Seamless handoff T3): this suite drives
@@ -431,62 +433,23 @@ extension SerializedSharedState {
         var isRunning: Bool { false }
     }
 
-    private actor EventBox {
+    /// Thread-safe accumulator for the routing-blocked events a helper collects.
+    private final class EventBox: @unchecked Sendable {
+        private let lock = NSLock()
         private var events: [BackendEvent] = []
-        func append(_ e: BackendEvent) -> [BackendEvent] { events.append(e); return events }
-        func snapshot() -> [BackendEvent] { events }
+        func append(_ e: BackendEvent) { lock.lock(); events.append(e); lock.unlock() }
+        func snapshot() -> [BackendEvent] { lock.lock(); defer { lock.unlock() }; return events }
     }
 
-    /// Subscribe, run `after` once the subscription is live, then collect
-    /// `.routingBlockedNeedsDefault` events (everything else — `.level`, and the
-    /// `.deviceAdded(local-mac)` `start()` always surfaces immediately,
-    /// irrelevant startup noise for these tests — is ignored) until `predicate`
-    /// holds or `timeout` elapses. Fails (via `confirmation`) if `predicate`
-    /// never holds.
+    /// Subscribe, run `after`, then collect `.routingBlockedNeedsDefault` events
+    /// (everything else — `.level`, and the `.deviceAdded(local-mac)` `start()`
+    /// always surfaces immediately, irrelevant startup noise for these tests — is
+    /// ignored) until `predicate` holds. Fails at the `SuiteWait` ceiling if
+    /// `predicate` never holds. No pause before the stimulus: `makeEventStream`
+    /// registers on `stateQueue`, ahead of anything the stimulus queues there.
     private func collect(
         from backend: NativeBackend,
-        timeout: Duration = .seconds(2),
         until predicate: @escaping @Sendable ([BackendEvent]) -> Bool,
-        after stimulus: @escaping () -> Void
-    ) async -> [BackendEvent] {
-        let stream = backend.makeEventStream()
-        let box = EventBox()
-        await confirmation("predicate satisfied") { done in
-            let task = Task {
-                for await event in stream {
-                    guard case .routingBlockedNeedsDefault = event else { continue }
-                    let all = await box.append(event)
-                    if predicate(all) { done(); break }
-                }
-            }
-            defer { task.cancel() }
-            try? await Task.sleep(nanoseconds: 20_000_000)
-            stimulus()
-            try? await withThrowingTaskGroup(of: Void.self) { group in
-                group.addTask { _ = await task.value }
-                group.addTask { try await Task.sleep(for: timeout) }
-                try await group.next()
-                // Cancel the CONSUMER before the group scope exits. `await
-                // task.value` does not respond to the group's own cancelAll — the
-                // group exit awaits that child, which awaits `task`, and the
-                // `defer { task.cancel() }` above only runs AFTER the group
-                // returns. Without this line, any predicate that never fires
-                // turned the 2s timeout into a permanent deadlock (found the hard
-                // way: it hid a real production bug behind an infinite hang).
-                task.cancel()
-                group.cancelAll()
-            }
-        }
-        return await box.snapshot()
-    }
-
-    /// Collect every `.routingBlockedNeedsDefault` event over a FIXED window
-    /// with no predicate — used to assert one did NOT happen (e.g. the
-    /// echo-guard: fire a stimulus, prove no such event follows within the
-    /// window). Same event filter as ``collect(from:timeout:until:after:)``.
-    private func collectQuiescent(
-        from backend: NativeBackend,
-        duration: Duration = .milliseconds(300),
         after stimulus: @escaping () -> Void
     ) async -> [BackendEvent] {
         let stream = backend.makeEventStream()
@@ -494,14 +457,46 @@ extension SerializedSharedState {
         let task = Task {
             for await event in stream {
                 guard case .routingBlockedNeedsDefault = event else { continue }
-                _ = await box.append(event)
+                box.append(event)
             }
         }
-        try? await Task.sleep(nanoseconds: 20_000_000)
+        defer { task.cancel() }
         stimulus()
-        try? await Task.sleep(for: duration)
+        await pollUntil { predicate(box.snapshot()) }
+        return box.snapshot()
+    }
+
+    /// Collect every `.routingBlockedNeedsDefault` event `after` causes, with no
+    /// predicate — used to assert one did NOT happen (e.g. the echo-guard: fire
+    /// a stimulus, prove no such event follows). Same event filter as
+    /// ``collect(from:until:after:)``.
+    ///
+    /// Waits on the backend's queues, not the clock. Every path that emits this
+    /// event runs on `stateQueue`, either directly or after one hop through
+    /// `captureControlQueue` (from `stateQueue` or to it), so draining
+    /// `stateQueue`, `captureControlQueue`, `stateQueue` in that order leaves all
+    /// of the stimulus's events in the stream. Cancelling the consumer ends the
+    /// stream, and an ended `AsyncStream` still hands over what it buffered
+    /// before the loop exits.
+    private func collectQuiescent(
+        from backend: NativeBackend,
+        after stimulus: @escaping () -> Void
+    ) async -> [BackendEvent] {
+        let stream = backend.makeEventStream()
+        let box = EventBox()
+        let task = Task {
+            for await event in stream {
+                guard case .routingBlockedNeedsDefault = event else { continue }
+                box.append(event)
+            }
+        }
+        stimulus()
+        backend.stateQueue.sync {}
+        backend.captureControlQueue.sync {}
+        backend.stateQueue.sync {}
         task.cancel()
-        return await box.snapshot()
+        await task.value
+        return box.snapshot()
     }
 
     private func isRoutingBlocked(_ event: BackendEvent, _ expected: Bool) -> Bool {
@@ -522,11 +517,13 @@ extension SerializedSharedState {
         let control = FakeAggregateControl(resolvable: [AggregateOutputDevice.productUID: 501])
         let armed = LockedBox<Bool>(false)
         let finished = LockedBox<Bool>(false)
-        let release = DispatchSemaphore(value: 0)
+        // A group entered once and left once: every read that arrives while it
+        // is entered blocks, and every read after the test leaves it passes.
+        let release = DispatchGroup()
+        release.enter()
         let provider: @Sendable () -> String? = {
             guard armed.get() else { return "com.other.speakers" }
-            // Hang-stop only, not a speed assert: the test releases it below.
-            _ = release.wait(timeout: .now() + 5)
+            release.wait()
             finished.set(true)
             return "com.other.speakers"
         }
@@ -544,7 +541,7 @@ extension SerializedSharedState {
         #expect(finished.get() == false)
         #expect(backend.test_expectedSelected == ["some-airplay-device"])
 
-        release.signal()
+        release.leave()
         await pollUntil { finished.get() }
         armed.set(false)
     }
@@ -636,7 +633,9 @@ extension SerializedSharedState {
         // Quit. The aggregate is no longer the current default, so the prior-default
         // restore must be SKIPPED — 601 (built-in) must never be written.
         backend.stop()
-        try? await Task.sleep(for: .milliseconds(300))
+        // The restore decision runs inside `stop()`'s `stateQueue` block, so this
+        // read returns only after it has run.
+        #expect(backend.test_aggregateDefaultActive == false, "stop()'s teardown has run")
         #expect(!control.setDefaultCalls.contains(601),
                 "stop() must not restore the stale prior default after the user chose another output")
         #expect(control.setDefaultCalls == [501], "only the activation write ever happened")
@@ -967,7 +966,12 @@ extension SerializedSharedState {
         await pollUntil { releaser.calls == 1 }
         #expect(releaser.calls == 1)
         #expect(!engine.removedOutputs.isEmpty)
-        #expect(sink.snapshot().contains { $0.contains(#""evt":"handoff_release""#) && $0.contains(#""reason":"blockedAttempt""#) },
+        // The sink delivers on its own queue, so wait for the line before reading it.
+        func releaseLogged() -> Bool {
+            sink.snapshot().contains { $0.contains(#""evt":"handoff_release""#) && $0.contains(#""reason":"blockedAttempt""#) }
+        }
+        await pollUntil { releaseLogged() }
+        #expect(releaseLogged(),
                 "Telemetry._installTestSink: the release's own log line records the blockedAttempt reason")
     }
 
@@ -1087,7 +1091,10 @@ extension SerializedSharedState {
         let addedBefore = engine.addedOutputs.count
         backend.handleSystemWillSleep()
         backend.handleSystemDidWake()
-        try? await Task.sleep(for: .milliseconds(200))
+        // A re-take marks the device converging inside `handleSystemDidWake`'s
+        // own `stateQueue.sync`, before its add starts, so once nothing is
+        // converging any re-add it caused is already counted.
+        await pollUntil { !backend.test_isConverging }
 
         #expect(engine.addedOutputs.count == addedBefore,
                 "T3.8-1: a sleep/wake mid-handoff-release must not re-grab the ports — only a resume affordance may")
@@ -1165,10 +1172,13 @@ extension SerializedSharedState {
     /// land, and return `backend`/`systemVolume` ready for a deselect. Every
     /// caller scripts the same two devices: the aggregate (501) and the
     /// pre-takeover built-in speakers (601).
+    /// The restore's landing check runs on `clock`, so it fires only when a
+    /// test fires it; a test that never does sees no read-back and no retry.
     private func makeRestoreBackend(
-        control: FakeAggregateControl, box: LockedBox<String?>
+        control: FakeAggregateControl, box: LockedBox<String?>, clock: ManualDelayClock = ManualDelayClock()
     ) async -> (NativeBackend, FakeSystemVolume) {
-        let (backend, systemVolume) = makeBackend(aggregateControl: control, currentDefaultOutputUIDBox: box)
+        let (backend, systemVolume) = makeBackend(
+            aggregateControl: control, currentDefaultOutputUIDBox: box, delayClock: clock.queueHoppingClock)
         backend.start()
         _ = await collectQuiescent(from: backend) { backend.setOutputSet(["some-airplay-device"]) }
         // The HAL's switch to the aggregate has landed — the state a deselect
@@ -1178,6 +1188,16 @@ extension SerializedSharedState {
     }
 
     private static let builtInSpeakers = "com.builtin.speakers"
+
+    /// Whether `sink` holds an `aggregate_default_restore` line carrying every
+    /// one of `fields`. The restore's landing check logs one of these from
+    /// inside its `captureControlQueue` block; the sink delivers on its own
+    /// queue, so wait for the line before reading it.
+    private func hasRestoreLine(_ sink: LinesBox, _ fields: String...) -> Bool {
+        sink.snapshot().contains { line in
+            line.contains(#""evt":"aggregate_default_restore""#) && fields.allSatisfy { line.contains($0) }
+        }
+    }
 
     /// Quit must REPORT the outcome of the restore write that hands the Mac's
     /// default output back. The result was discarded and the aggregate destroyed
@@ -1306,8 +1326,12 @@ extension SerializedSharedState {
             AggregateOutputDevice.productUID: 501,
             Self.builtInSpeakers: 601])
         let box = LockedBox<String?>(Self.builtInSpeakers)
-        let (backend, _) = await makeRestoreBackend(control: control, box: box)
+        let clock = ManualDelayClock()
+        let (backend, _) = await makeRestoreBackend(control: control, box: box, clock: clock)
         defer { backend.stop() }
+        let sink = LinesBox()
+        Telemetry._installTestSink { sink.append($0) }
+        defer { Telemetry._installTestSink(nil) }
 
         backend.setOutputSet([])
         await pollUntil { control.setDefaultCalls.count == 2 }
@@ -1316,7 +1340,9 @@ extension SerializedSharedState {
         // The re-select below lands INSIDE the landing-check window, and is exactly
         // what `verifyRestoreLanded` must not fight — no retry may follow it.
         _ = await collectQuiescent(from: backend) { backend.setOutputSet(["some-airplay-device"]) }
-        try? await Task.sleep(for: .milliseconds(700))   // past the landing check
+        clock.fireAll()   // the landing check, whatever its delay
+        backend.captureControlQueue.sync {}   // the check, and where a retry would write
+        await pollUntil { self.hasRestoreLine(sink, #""outcome":"did_not_land""#) }
 
         #expect(control.setDefaultCalls == [501, 601], "the aggregate already reads as default — no third write")
         #expect(backend.test_aggregateDefaultActive == true, "we own the default again")
@@ -1428,20 +1454,29 @@ extension SerializedSharedState {
             AggregateOutputDevice.productUID: 501,
             Self.builtInSpeakers: 601])
         let box = LockedBox<String?>(Self.builtInSpeakers)
-        let (backend, _) = await makeRestoreBackend(control: control, box: box)
+        let clock = ManualDelayClock()
+        let (backend, _) = await makeRestoreBackend(control: control, box: box, clock: clock)
         defer { backend.stop() }
+        let sink = LinesBox()
+        Telemetry._installTestSink { sink.append($0) }
+        defer { Telemetry._installTestSink(nil) }
 
         // The box keeps reporting the aggregate: every write is accepted (the fake
         // returns true) and none of them moves the default.
         backend.setOutputSet([])
-        await pollUntil { control.setDefaultCalls.count == 3 }
+        await pollUntil { control.setDefaultCalls.count == 2 }
+        backend.captureControlQueue.sync {}   // the rest of the restore, which schedules the check
+        clock.fireAll()
+        backend.captureControlQueue.sync {}   // the check and the retry it starts
 
         #expect(control.setDefaultCalls == [501, 601, 601], "the ignored write is retried exactly once")
 
         // Past the retry's OWN read-back: it stops there (no loop), and the flag
         // ends up back true — the aggregate is still the default, so we still hold
         // it and quit must still restore.
-        try? await Task.sleep(for: .milliseconds(900))
+        clock.fireAll()
+        backend.captureControlQueue.sync {}   // that check, where a third write would go
+        await pollUntil { self.hasRestoreLine(sink, #""outcome":"did_not_land""#, #""attempt":"2""#) }
         #expect(control.setDefaultCalls.count == 3, "one retry, never a loop")
         #expect(backend.test_aggregateDefaultActive == true)
     }
@@ -1453,14 +1488,21 @@ extension SerializedSharedState {
             AggregateOutputDevice.productUID: 501,
             Self.builtInSpeakers: 601])
         let box = LockedBox<String?>(Self.builtInSpeakers)
-        let (backend, _) = await makeRestoreBackend(control: control, box: box)
+        let clock = ManualDelayClock()
+        let (backend, _) = await makeRestoreBackend(control: control, box: box, clock: clock)
         defer { backend.stop() }
+        let sink = LinesBox()
+        Telemetry._installTestSink { sink.append($0) }
+        defer { Telemetry._installTestSink(nil) }
 
         backend.setOutputSet([])
         await pollUntil { control.setDefaultCalls.count == 2 }
-        box.set(Self.builtInSpeakers)   // landed, well inside the check window
+        box.set(Self.builtInSpeakers)   // landed, before the check reads it back
+        backend.captureControlQueue.sync {}   // the rest of the restore, which schedules the check
+        clock.fireAll()
+        backend.captureControlQueue.sync {}   // the check, and where a retry would write
 
-        try? await Task.sleep(for: .milliseconds(900))
+        await pollUntil { self.hasRestoreLine(sink, #""outcome":"landed""#) }
         #expect(control.setDefaultCalls == [501, 601], "a landed switch is never re-written")
         #expect(backend.test_aggregateDefaultActive == false)
     }

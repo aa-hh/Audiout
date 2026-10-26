@@ -552,12 +552,27 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         /// stop that refuses on its four-second timeout does not consume it.
         var releaseCallbacks: [@Sendable () -> Void] = []
         var cleanupDeadline: TimeInterval?
+        /// The audition took over a `.handoff` run's wizard feed, whose arm
+        /// gate already opened for the probe, so activation arms the clicks
+        /// itself.
+        var adoptsWizardFeed = false
     }
     /// The .tick run remains reserved during preparation and restoration.
     var companionAudition: CompanionAuditionLifecycle?
     var companionAuditionPreparationSeconds: TimeInterval = 4
+    /// Long enough that the first 90 ms click body starts clean, short because
+    /// the adopted feed has carried no click since the probe.
+    static let companionAdoptedFirstTickLeadSeconds: TimeInterval = 0.25
     var companionAuditionLeaseSeconds: TimeInterval = 600
     var companionAuditionStopSeconds: TimeInterval = 4
+    /// How long a `.handoff` run keeps the wizard feed up waiting for the
+    /// phone's click request before it stands down on its own.
+    var companionHandoffGraceSeconds: TimeInterval = 4
+    /// How long a prepared run may hold the room before the Mac gives it
+    /// back; the phone re-prepares on its next Hold still entry.
+    var companionPreparedLeaseSeconds: TimeInterval = 120
+    /// ``onCompanionPreparedProbeLeaseEnded``'s storage. `btTrimLock`.
+    var companionPreparedLeaseEnded: (@Sendable (_ targetID: String) -> Void)?
 
     /// The device an A/B receipt is playing for, if one is. Its own field
     /// rather than another ``CompanionAlignmentRun/Phase``: a receipt takes no
@@ -689,10 +704,14 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// Derived by ``updateBTRoomTermLocked()``; on `stateQueue`.
     var btRoomTermMs: Int?
     /// A Bluetooth-target wizard run is under way, so the reference is pinned
-    /// wide open (``btWizardReferenceBufferMs``) for the duration, except in a
+    /// wide open (``btWizardReferenceBufferMs``, or ``btWizardReferencePinnedMs``
+    /// for a phone run) for the duration, except in a
     /// presentation-timeline room, where the room delay is the reference and
     /// the wizard's ceiling follows it. On `stateQueue`.
     var btWizardReferenceRaised = false
+    /// The value a raised reference takes. The phone path sets it before
+    /// raising; ``endBTWizardRun()`` puts the default back. On `stateQueue`.
+    var btWizardReferencePinnedMs = NativeBackend.btWizardReferenceBufferMs
     /// Whether the wizard tick is currently on, so a redundant edge costs
     /// nothing — both edges re-anchor every sink, and the panel fires a second
     /// `false` on the terminal screens. Under ``btTrimLock``.
@@ -708,8 +727,8 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// The alignment wizard's first-tick ARM gate (roadmap 056 Part B): the
     /// in-flight poll, on `captureControlQueue` (which owns both sinks).
     var wizardArmPollWork: DispatchWorkItem?   // captureControlQueue
-    /// The three arm-gate timings, `var` so a suite can shrink them rather than
-    /// sleeping through the production values.
+    /// The three arm-gate timings, in ``delayClock`` and ``uptimeClock``
+    /// seconds, `var` so a suite can set its own.
     var wizardArmPollInterval: TimeInterval = 0.1
     /// A floor of bed-only time before the first tick, however fast the sinks
     /// release — the Sonos Move's amplifier needs it (live finding 2026-08-07).
@@ -1593,9 +1612,10 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     }
 
     /// Runs the backed-off retries, the companion audition's deadlines and
-    /// liveness poll, and the Bluetooth hold, sink-recovery and synced-local
-    /// settle timers, among others. Only the tests pass anything but
-    /// ``dispatchDelayClock``:
+    /// liveness poll, the wizard's arm-gate poll, the aggregate restore's
+    /// landing check, and the Bluetooth hold, sink-recovery and synced-local
+    /// settle timers, among others. Only the
+    /// tests pass anything but ``dispatchDelayClock``:
     /// on the wall clock, a loaded test run let a 0.05 s backoff burn every
     /// rebind attempt before the test's next step, and a 4 s stop deadline
     /// expire mid-restoration.
@@ -1610,9 +1630,18 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     }
 
     /// The backend's reading of "now" for the Bluetooth hold and sink-death
-    /// deadlines, the synced-local churn horizon and the companion audition
-    /// deadlines. Tests pass a manual one.
+    /// deadlines, the synced-local churn horizon, the companion audition
+    /// deadlines and the wizard's arm gate. Tests pass a manual one.
     let uptimeClock: UptimeClock
+
+    /// Times the meter's level drain and the coalescer's trailing flush. Kept
+    /// apart from ``delayClock`` so a test that holds retries by hand still gets
+    /// live meters. Only the tests pass anything but ``dispatchDelayClock``.
+    let levelDelayClock: DelayClock
+
+    /// The meter coalescer's reading of "now", in nanoseconds since boot. Only
+    /// the tests pass anything but `DispatchTime.now().uptimeNanoseconds`.
+    let levelUptimeNanos: @Sendable () -> UInt64
 
     // MARK: Metering (T3 — three real level sources through the event channel)
     //
@@ -1776,6 +1805,8 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         captureRetryMaxBackoff: TimeInterval = 10.0,
         delayClock: @escaping DelayClock = NativeBackend.dispatchDelayClock,
         uptimeClock: @escaping UptimeClock = NativeBackend.dispatchUptimeClock,
+        levelDelayClock: @escaping DelayClock = NativeBackend.dispatchDelayClock,
+        levelUptimeNanos: @escaping @Sendable () -> UInt64 = { DispatchTime.now().uptimeNanoseconds },
         takeoverStripDelay: TimeInterval = 3.0,
         watchdogScheduler: SilenceWatchdogScheduling? = nil,
         silenceFallbackDelay: TimeInterval = NativeBackend.defaultSilenceFallbackDelay,
@@ -1877,6 +1908,8 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         self.captureRetryMaxBackoff = captureRetryMaxBackoff
         self.delayClock = delayClock
         self.uptimeClock = uptimeClock
+        self.levelDelayClock = levelDelayClock
+        self.levelUptimeNanos = levelUptimeNanos
         self.takeoverStripDelay = takeoverStripDelay
 
         // Wire the per-app routing callback graph (T6/T8). All four are set once
@@ -6695,14 +6728,14 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         case app(String)
     }
 
-    /// Per-key leading-edge timestamp (`DispatchTime.now().uptimeNanoseconds`)
-    /// of the last emitted meter event.
+    /// Per-key leading-edge timestamp (``levelUptimeNanos``) of the last
+    /// emitted meter event.
     var lastLevelEmitNanos: [LevelKey: UInt64] = [:]
     /// Per-key latest value seen while inside the coalescing window, delivered
     /// by the trailing flush.
     var pendingLevel: [LevelKey: Float] = [:]
     /// Keys with a trailing flush already scheduled, so a burst schedules at most
-    /// one `asyncAfter` per key.
+    /// one trailing flush per key.
     var levelFlushScheduled: Set<LevelKey> = []
 
     /// The tap's IOProc delivery thread must not enqueue per buffer — a

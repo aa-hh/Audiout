@@ -45,17 +45,22 @@ public enum Analytics {
         /// ``captureStructured(_:_:)`` uses it; a sink that leaves it nil
         /// drops those events.
         public let captureStructured: (@Sendable (String, [String: any Sendable]) -> Void)?
+        /// The id the SDK files this Mac's events under, for Settings to show
+        /// so the user can quote it in a deletion or access request.
+        public let anonymousID: (@Sendable () -> String)?
 
         public init(capture: @escaping @Sendable (String, [String: String]) -> Void,
                     captureError: @escaping @Sendable (String, [String: String]) -> Void,
                     consentChanged: @escaping @Sendable (Bool) -> Void,
                     captureAt: (@Sendable (String, [String: String], Date) -> Void)? = nil,
-                    captureStructured: (@Sendable (String, [String: any Sendable]) -> Void)? = nil) {
+                    captureStructured: (@Sendable (String, [String: any Sendable]) -> Void)? = nil,
+                    anonymousID: (@Sendable () -> String)? = nil) {
             self.capture = capture
             self.captureError = captureError
             self.consentChanged = consentChanged
             self.captureAt = captureAt
             self.captureStructured = captureStructured
+            self.anonymousID = anonymousID
         }
     }
 
@@ -76,6 +81,13 @@ public enum Analytics {
     /// opt in to, so the ask must not appear there at all.
     public static var isAvailable: Bool {
         state.withLock { $0.sink != nil }
+    }
+
+    /// The sink's anonymous id while consent is on; nil with no sink or no
+    /// consent, so Settings never shows an id that nothing is being sent under.
+    public static var anonymousID: String? {
+        let read = state.withLock { s in s.consent ? s.sink?.anonymousID : nil }
+        return read?()
     }
 
     /// Updates the consent flag, then forwards the new value to the

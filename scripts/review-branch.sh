@@ -20,7 +20,7 @@
 # merging main in or a docs-only commit, uses no round: the run re-posts that
 # round's status on the new HEAD and exits with its result. Round 2
 # reviews only what was committed since round 1's head (the fix for its HIGH
-# findings) and never skips; a third run refuses. No PR yet means round 1
+# findings), less anything merged in from main, and never skips; a third run refuses. No PR yet means round 1
 # against main. Only a HIGH finding fails the status; MEDIUM and LOW are
 # posted and do not block.
 #
@@ -175,6 +175,12 @@ if [ "$round" = 2 ]; then
   base=$prev_head
   git rev-parse --verify -q "$base^{commit}" > /dev/null \
     || { echo "Round 1's head $base (from PR #$pr) is not in this clone; git fetch, then run again." >&2; exit 2; }
+  # Main merged in since round 1: compare against round 1's head with main
+  # merged into it, so main's own changes are not reviewed as the fix. If that
+  # merge conflicts, review the branch's whole change against main instead.
+  if ! git merge-base --is-ancestor "$main_base" "$base"; then
+    base=$(git merge-tree --write-tree "$base" "$main_base" 2> /dev/null) || base=$main_base
+  fi
 else
   base=$main_base
 fi

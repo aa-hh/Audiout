@@ -12447,9 +12447,17 @@ extension SerializedSharedState {
         defer { Telemetry._installTestSink(nil) }
         backend.test_pollSchedulingSnapshotNow()
 
+        // The sink is process-wide and every SpyEngine numbers streams from the
+        // same base, so a parallel test's row can carry this stream id; keep
+        // only rows naming no speaker or one of this test's.
+        func ours(_ line: String) -> Bool {
+            guard let start = line.range(of: "\"devices\":\"") else { return true }
+            let devices = line[start.upperBound...].prefix { $0 != "\"" }
+            return devices.isEmpty || [retired.id, kept.id].contains { devices.contains($0) }
+        }
         func rows(_ id: UInt32) -> [String] {
             box.snapshot().filter {
-                $0.contains("\"evt\":\"stream_health\"") && $0.contains("\"stream\":\"\(id)\"")
+                $0.contains("\"evt\":\"stream_health\"") && $0.contains("\"stream\":\"\(id)\"") && ours($0)
             }
         }
         await pollUntil { !rows(keptHome).isEmpty }

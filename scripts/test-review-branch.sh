@@ -410,6 +410,23 @@ review
   && status_call | grep -q "statuses/$(git rev-parse HEAD) .*-f state=success -f description=cheap, round 1, 0 HIGH$" \
   && ok "n2: main merged in → round 1 status re-posted on the merge commit, no round used" || { fail "n2: exit $rc"; show; }
 
+# (n3) Main merged in plus a fix: round 2 reviews the fix, not main's change.
+# Catches: round 2 diffing from round 1's head, which sweeps in every line main
+# gained since and blocks the branch on code it never touched.
+reset_answers
+make_branch main-merged-fix "$analytics" 120
+review
+git checkout -q main
+echo "// main-only change" >> "$license"; git commit -q --no-verify -am "main moves again"
+git checkout -q main-merged-fix
+git merge -q --no-verify --no-edit main > /dev/null 2>&1 || fail "n3: merging main did not merge cleanly"
+echo "// the n3 fix" >> "$analytics"; git commit -q --no-verify -am "fix"
+reset_answers
+review
+grep -q '^Review level: cheap (1 product lines), round 2' "$out" && ok "n3: round 2 is cheap over the one fix line" || { fail "n3: level line"; show; }
+grep -q '^+// the n3 fix$' "$PROMPTS/cheap.prompt" && ! grep -q 'main-only change' "$PROMPTS/cheap.prompt" \
+  && ok "n3: prompt holds the fix, not main's change" || fail "n3: prompt diff wrong"
+
 # (v) A commit between the handover and --continue means no review.
 # Catches: replies about older code recorded against the new code.
 reset_answers

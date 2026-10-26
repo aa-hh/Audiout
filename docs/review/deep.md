@@ -17,7 +17,7 @@ Where to look hardest, by path:
 - Tests: new suites inherit `IsolatedSuite`; `_installTestSink` users nest in `SerializedSharedState`; telemetry assertions poll the sink, not synchronously-set state; no weakened or skipped tests.
 - Privacy: excluded apps are never metered; no device names, bundle ids or free text in `Analytics.capture` properties.
 
-Severity: HIGH is a defect with a concrete failing scenario, a data-loss or lockout path, or a breach of a quoted `AGENTS.md` rule. MEDIUM is a likely defect without a confirmed scenario, or changed behaviour with no test. LOW is readability per `docs/REVIEW-RUBRIC.md` (never flag why-heavy trap comments, doc-anchored tags, `razor:` notes, trailing `isolation-ok`/`slop-ok`/`screen-ok` markers, string literals, vendored C).
+Severity: HIGH is a defect with a concrete failing scenario, a data-loss or lockout path, or a breach of a quoted `AGENTS.md` rule that changes what the app does (a rule about docs, comments, tests, word counts or telemetry calls is MEDIUM). MEDIUM is a likely defect without a confirmed scenario, or changed behaviour with no test. LOW is readability per `docs/REVIEW-RUBRIC.md` (never flag why-heavy trap comments, doc-anchored tags, `razor:` notes, trailing `isolation-ok`/`slop-ok`/`screen-ok` markers, string literals, vendored C).
 
 After the finding lines, add these informational lines (printed to the human, never counted):
 - Exactly one `COMPAT | Compatible | <why callers, persisted stores and grants are unaffected>` or `COMPAT | Incompatible | <exactly what breaks, for whom, when>` or `COMPAT | Not established | <what evidence is missing>`.

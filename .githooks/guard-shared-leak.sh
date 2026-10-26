@@ -128,9 +128,13 @@ done
 location=${pin% *}
 revision=${pin#* }
 
+# Git exports GIT_DIR and GIT_INDEX_FILE to a hook run in a linked worktree,
+# and they override `git -C`, so calls on the shared repo or the cache drop them.
+shared_git() { env -u GIT_DIR -u GIT_INDEX_FILE -u GIT_WORK_TREE git "$@"; }
+
 shared_repo=""
 for d in "${AUDIOUT_SHARED_DIR:-}" "$HOME/Projects/audiout-shared"; do
-    if [ -n "$d" ] && git -C "$d" cat-file -e "$revision^{commit}" 2>/dev/null; then
+    if [ -n "$d" ] && shared_git -C "$d" cat-file -e "$revision^{commit}" 2>/dev/null; then
         shared_repo=$d
         break
     fi
@@ -138,11 +142,11 @@ done
 if [ -z "$shared_repo" ]; then
     cache=${AUDIOUT_SHARED_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/audiout-shared-guard}
     if [ ! -d "$cache" ]; then
-        git clone -q --bare "$location" "$cache" 2>/dev/null
-    elif ! git -C "$cache" cat-file -e "$revision^{commit}" 2>/dev/null; then
-        git -C "$cache" fetch -q "$location" '+refs/heads/*:refs/heads/*' '+refs/tags/*:refs/tags/*' 2>/dev/null
+        shared_git clone -q --bare "$location" "$cache" 2>/dev/null
+    elif ! shared_git -C "$cache" cat-file -e "$revision^{commit}" 2>/dev/null; then
+        shared_git -C "$cache" fetch -q "$location" '+refs/heads/*:refs/heads/*' '+refs/tags/*:refs/tags/*' 2>/dev/null
     fi
-    git -C "$cache" cat-file -e "$revision^{commit}" 2>/dev/null && shared_repo=$cache
+    shared_git -C "$cache" cat-file -e "$revision^{commit}" 2>/dev/null && shared_repo=$cache
 fi
 [ -n "$shared_repo" ] || refuse "  REFUSED (shared-leak guard): cannot read audiout-shared at the pinned" \
     "  revision $revision (from $location)." \
@@ -150,12 +154,12 @@ fi
     "  clone that has it."
 
 n=0
-for f in $(git -C "$shared_repo" ls-tree -r --name-only "$revision" -- Sources | grep '\.swift$'); do
+for f in $(shared_git -C "$shared_repo" ls-tree -r --name-only "$revision" -- Sources | grep '\.swift$'); do
     n=$((n + 1))
-    git -C "$shared_repo" show "$revision:$f" > "$tmp/shared.$n.swift"
+    shared_git -C "$shared_repo" show "$revision:$f" > "$tmp/shared.$n.swift"
 done
 SHARED_TYPES=$(perl -e "$pl" types "$tmp"/shared.*.swift | tr '\n' ' ')
-shared_dirs=$(git -C "$shared_repo" ls-tree -d --name-only "$revision" -- Sources/ | sed 's|^Sources/||' | tr '\n' '|')
+shared_dirs=$(shared_git -C "$shared_repo" ls-tree -d --name-only "$revision" -- Sources/ | sed 's|^Sources/||' | tr '\n' '|')
 shared_dirs=${shared_dirs%|}
 [ -n "$SHARED_TYPES" ] && [ -n "$shared_dirs" ] || refuse "  REFUSED (shared-leak guard): found no public types in audiout-shared at" \
     "  $revision — the guard's parser no longer matches that code."

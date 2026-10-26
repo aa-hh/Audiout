@@ -127,6 +127,18 @@ reset; cp "$REPO/$REAL_RESOLVED" "$C/Package.resolved"; git -C "$C" add Package.
 write App/Leak.swift 'public final class StageLookState {}'; run_guard
 expect "real pin: a type the old hand list lacked (StageLookState)" 1 "StageLookState"
 
+echo "Inside a real git commit from a linked worktree (git exports GIT_DIR to the hook there):"
+HOOKS="$TMP_DIR/hooks"; mkdir -p "$HOOKS"
+printf '#!/bin/sh\nexec sh "%s"\n' "$GUARD" > "$HOOKS/pre-commit"; chmod +x "$HOOKS/pre-commit"
+WT="$TMP_DIR/worktree"; git -C "$C" worktree add -q -b hooked "$WT" "$BASE"
+commit_in_worktree() {  # commit_in_worktree <file> <swift source>
+  git -C "$WT" reset -q --hard "$BASE"; printf '%s\n' "$2" > "$WT/$1"; git -C "$WT" add -- "$1"
+  ERR="$(git -C "$WT" -c core.hooksPath="$HOOKS" commit -qm hooked 2>&1 >/dev/null)"; RC=$?
+}
+# Turns red if a lookup in the shared repo inherits the hook's GIT_DIR: it then reads the consumer and refuses with "cannot read".
+commit_in_worktree App/Leak.swift 'struct Snapshot {}'; expect "leak refused from a worktree's commit hook" 1 "re-declares"
+commit_in_worktree App/Fine.swift 'struct Fine {}'; expect "clean commit passes a worktree's commit hook" 0
+
 echo "Commit range (CI) mode:"
 reset; git -C "$C" checkout -q -b leak; write App/Leak.swift 'protocol Snapshot {}'; git -C "$C" commit -qm leak
 run_guard main; expect "leak committed on a branch, checked against main" 1 "re-declares"

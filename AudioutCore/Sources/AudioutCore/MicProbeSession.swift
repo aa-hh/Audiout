@@ -337,8 +337,6 @@ public final class MicProbeSession {
     /// The injector's lead before the probe; the wizard view reads it here
     /// because `AlignmentTickInjector` is internal to this module.
     public static let probeLeadSeconds = AlignmentTickInjector.probeLeadSeconds
-    /// Only the companion stand-down reads this fixed wait now.
-    public static let pipelineTailSeconds = 3.0
     /// Air lags the feed by the room delay the stage reports at the gate
     /// opening (the slowest participating lane). The recording runs that long
     /// past the last probe frame entering the feed, plus this margin, capped

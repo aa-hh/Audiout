@@ -195,9 +195,9 @@ let package = Package(
         // `startAlignmentProbe`/`setAlignmentTick` and the snapshot's
         // `referenceCandidateIDs`; 0.30.0 is protocol version 3 (no pairing
         // window, `awaitingApproval`'s `screenLocked`, the `pairingPaused`
-        // goodbye).
+        // goodbye); 0.31.0 adds `prepareAlignmentProbe`.
         .package(url: "https://github.com/aa-hh/audiout-shared.git",
-                 from: "0.30.0"),
+                 from: "0.31.0"),
         // Sparkle 2 (MIT) — in-app updates for the paid, notarised build only.
         // Scoped to the `AudioutApp` executable target so no library, test or
         // harness target ever links it.

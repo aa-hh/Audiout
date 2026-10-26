@@ -30,6 +30,8 @@ import AudioutProtocol
 /// a phone that walks out of range takes whatever it left playing down with it.
 @MainActor
 public struct CompanionAlignmentActions {
+    /// Readies the speakers for a `startProbe` that follows; same arguments.
+    public var prepareProbe: (_ targetID: String, _ referenceID: String?, _ clientID: UUID?) -> String?
     public var startProbe: (_ targetID: String, _ referenceID: String?, _ clientID: UUID?) -> String?
     /// Carries the asking client, like `startProbe` does: cancel is the
     /// owner's own exit, and without the id one phone's cancel can end
@@ -43,6 +45,7 @@ public struct CompanionAlignmentActions {
     public var playDemo: (_ targetID: String, _ clientID: UUID?) -> String?
 
     public init(
+        prepareProbe: @escaping (String, String?, UUID?) -> String?,
         startProbe: @escaping (String, String?, UUID?) -> String?,
         cancelProbe: @escaping (String, UUID?) -> String?,
         reportMeasurement: @escaping (String, Double, Double) -> String?,
@@ -52,6 +55,7 @@ public struct CompanionAlignmentActions {
         clearTuning: @escaping (String) -> String?,
         playDemo: @escaping (String, UUID?) -> String?
     ) {
+        self.prepareProbe = prepareProbe
         self.startProbe = startProbe
         self.cancelProbe = cancelProbe
         self.reportMeasurement = reportMeasurement
@@ -311,6 +315,9 @@ public final class CompanionCommandDispatcher {
             // has. Reaching this arm means the wiring didn't intercept — report
             // applied so the phone doesn't surface a spurious refusal toast.
             return .ok
+
+        case .prepareAlignmentProbe(let targetID, let referenceID):
+            return alignment(targetID) { actions, id in actions.prepareProbe(id, referenceID, clientID) }
 
         case .startAlignmentProbe(let targetID, let referenceID):
             return alignment(targetID) { actions, id in actions.startProbe(id, referenceID, clientID) }

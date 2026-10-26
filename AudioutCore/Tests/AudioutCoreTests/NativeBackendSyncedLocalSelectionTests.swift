@@ -228,7 +228,9 @@ import CoreAudio
 
         backend.setOutputSet(["airplay-1"])   // now Mac + 1 AirPlay device
         elapseSettleWindow()
-        waitFor { !sink.calls.isEmpty }
+        // Enabling makes two sink calls on the capture-control queue, each taking the spy's lock
+        // separately, so wait for both before asserting the list (every enable wait below does too).
+        waitFor { sink.calls.count >= 2 }
 
         #expect(sink.calls == ["start", "startObserving"],
                 "enabling must start the sink and begin lifecycle observation, in order")
@@ -317,7 +319,7 @@ import CoreAudio
 
         backend.setOutputSet(["airplay-1"])   // Mac + AirPlay: enabled
         elapseSettleWindow()
-        waitFor { !sink.calls.isEmpty }
+        waitFor { sink.calls.count >= 2 }
         #expect(sink.calls == ["start", "startObserving"])
 
         macSelected.set(false)                // user deselects the Mac row
@@ -338,7 +340,7 @@ import CoreAudio
 
         backend.setOutputSet(["airplay-1"])
         elapseSettleWindow()
-        waitFor { !sink.calls.isEmpty }
+        waitFor { sink.calls.count >= 2 }
         #expect(sink.calls == ["start", "startObserving"])
 
         backend.setOutputSet(["airplay-1", "airplay-2"])   // a second AirPlay device joins
@@ -372,7 +374,7 @@ import CoreAudio
 
         backend.setOutputSet(["airplay-1"])
         elapseSettleWindow()
-        waitFor { !sink.calls.isEmpty }
+        waitFor { sink.calls.count >= 2 }
 
         macSelected.set(false)
         backend.setOutputSet([])
@@ -409,7 +411,7 @@ import CoreAudio
         macSelected.set(true);  backend.setOutputSet(["airplay-1"])   // net: ON
 
         elapseSettleWindow()
-        waitFor { !sink.calls.isEmpty }
+        waitFor { sink.calls.count >= 2 }
         // Nothing else is armed, so no wrongly-uncoalesced extra transition can come.
         #expect(clock.pendingCount == 0)
 
@@ -430,7 +432,7 @@ import CoreAudio
         // Settle into ON first (applied == true), same as every other test here.
         backend.setOutputSet(["airplay-1"])
         elapseSettleWindow()
-        waitFor { !sink.calls.isEmpty }
+        waitFor { sink.calls.count >= 2 }
         #expect(sink.calls == ["start", "startObserving"])
 
         // A burst that flips away and back to the ALREADY-applied state: net no-op.
@@ -497,7 +499,7 @@ import CoreAudio
 
         backend.setOutputSet(["airplay-1"])   // Mac + AirPlay: enables the sink
         elapseSettleWindow()
-        waitFor { !sink.calls.isEmpty }
+        waitFor { sink.calls.count >= 2 }
         #expect(sink.calls == ["start", "startObserving"],
                 "precondition: the sink must be running before stop() is exercised")
 
@@ -584,7 +586,7 @@ import CoreAudio
                                        memberVolumes: [:]))
         controller.setMainOut(.group(id: "g1"))
         clock.fireAll()   // the production settle window, whatever its length
-        waitFor { !sink.calls.isEmpty }
+        waitFor { sink.calls.count >= 2 }
 
         #expect(router.lastOutputSet == ["airplay-1"],
                 "the Mac is filtered out of the engine output set …")
@@ -651,7 +653,7 @@ import CoreAudio
         defer { backend.stop() }
         backend.setOutputSet(["airplay-1"])
         elapseSettleWindow()
-        waitFor { !sink.calls.isEmpty }
+        waitFor { sink.calls.count >= 2 }
 
         // Relative to whatever is stored, so the assertion owns no assumption
         // about this machine's saved offset.
@@ -681,7 +683,7 @@ import CoreAudio
         defer { backend.stop() }
         backend.setOutputSet(["airplay-1"])
         elapseSettleWindow()
-        waitFor { !sink.calls.isEmpty }
+        waitFor { sink.calls.count >= 2 }
 
         let base = Double(backend.currentLocalSyncOffsetMs())
         for step in 1...8 { backend.setLocalTrimPreview(base + Double(step)) }
@@ -701,7 +703,7 @@ import CoreAudio
         defer { backend.stop() }
         backend.setOutputSet(["airplay-1"])
         elapseSettleWindow()
-        waitFor { !sink.calls.isEmpty }
+        waitFor { sink.calls.count >= 2 }
 
         backend.noteLocalSyncOffsetChanged()
         drainQueues(backend)   // the seek, if any, is a `captureControlQueue` job
@@ -716,7 +718,7 @@ import CoreAudio
         defer { backend.stop() }
         backend.setOutputSet(["airplay-1"])
         elapseSettleWindow()
-        waitFor { !sink.calls.isEmpty }
+        waitFor { sink.calls.count >= 2 }
         let stored = backend.currentLocalSyncOffsetMs()
 
         backend.setLocalTrimPreview(Double(stored) + 37)

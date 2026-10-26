@@ -552,12 +552,25 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         /// stop that refuses on its four-second timeout does not consume it.
         var releaseCallbacks: [@Sendable () -> Void] = []
         var cleanupDeadline: TimeInterval?
+        /// The audition took over a `.handoff` run's wizard feed, whose arm
+        /// gate already opened for the probe, so activation arms the clicks
+        /// itself.
+        var adoptsWizardFeed = false
     }
     /// The .tick run remains reserved during preparation and restoration.
     var companionAudition: CompanionAuditionLifecycle?
     var companionAuditionPreparationSeconds: TimeInterval = 4
+    /// Long enough that the first 90 ms click body starts clean, short because
+    /// the adopted feed has carried no click since the probe.
+    static let companionAdoptedFirstTickLeadSeconds: TimeInterval = 0.25
     var companionAuditionLeaseSeconds: TimeInterval = 600
     var companionAuditionStopSeconds: TimeInterval = 4
+    /// How long a `.handoff` run keeps the wizard feed up waiting for the
+    /// phone's click request before it stands down on its own.
+    var companionHandoffGraceSeconds: TimeInterval = 4
+    /// How long a prepared run may hold the room before the Mac gives it
+    /// back; the phone re-prepares on its next Hold still entry.
+    var companionPreparedLeaseSeconds: TimeInterval = 120
 
     /// The device an A/B receipt is playing for, if one is. Its own field
     /// rather than another ``CompanionAlignmentRun/Phase``: a receipt takes no
@@ -689,10 +702,14 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// Derived by ``updateBTRoomTermLocked()``; on `stateQueue`.
     var btRoomTermMs: Int?
     /// A Bluetooth-target wizard run is under way, so the reference is pinned
-    /// wide open (``btWizardReferenceBufferMs``) for the duration, except in a
+    /// wide open (``btWizardReferenceBufferMs``, or ``btWizardReferencePinnedMs``
+    /// for a phone run) for the duration, except in a
     /// presentation-timeline room, where the room delay is the reference and
     /// the wizard's ceiling follows it. On `stateQueue`.
     var btWizardReferenceRaised = false
+    /// The value a raised reference takes. The phone path sets it before
+    /// raising; ``endBTWizardRun()`` puts the default back. On `stateQueue`.
+    var btWizardReferencePinnedMs = NativeBackend.btWizardReferenceBufferMs
     /// Whether the wizard tick is currently on, so a redundant edge costs
     /// nothing — both edges re-anchor every sink, and the panel fires a second
     /// `false` on the terminal screens. Under ``btTrimLock``.

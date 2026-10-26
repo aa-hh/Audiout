@@ -248,8 +248,9 @@ post_result() {
   if [ "$level" = skip ]; then desc=skip; else desc="$level, round $round, $1 HIGH"; fi
   { echo "<!-- audiout-review round=$round head=$tip level=$level high=$1 changes=$changes -->"; cat "$2"; } > "$2.post" || exit 2
   if [ -n "$pr" ]; then
-    $GH pr comment "$pr" --body-file "$2.post" > /dev/null \
-      || { echo "Review result not posted: gh pr comment failed for PR #$pr." >&2; exit 2; }
+    # REST, not `gh pr comment`: cloud sessions refuse some GraphQL calls.
+    $GH api "repos/aa-hh/Audiout/issues/$pr/comments" -F "body=@$2.post" > /dev/null \
+      || { echo "Review result not posted: the comment post failed for PR #$pr." >&2; exit 2; }
     echo "Review comment posted to PR #$pr."
   else
     echo "No pull request for $branch, so no comment was posted (and no round recorded). Its body:"

@@ -243,6 +243,23 @@ grep -qx '### LOW' "$GH_COMMENT" && grep -qx -- '- a.swift:1: real' "$GH_COMMENT
   && ok "f: comment lists the LOW survivor with file:line, not the dropped ones" || { fail "f: comment wrong"; cat "$GH_COMMENT" >&2; }
 status_call | grep -q -- '-f state=success ' && ok "f: status success" || fail "f: status: $(status_call)"
 
+# (f2) Two passes citing the same path:line are one finding, scored once, at
+# the higher severity, tagged with both passes.
+# Catches: one defect posted twice (once as a second HIGH), or merged at the
+# lower severity so it stops blocking.
+reset_answers
+echo 'MEDIUM | a.swift:7 | timer survives hide' > "$ANSWERS/deep"
+echo 'HIGH | a.swift:7 | timer keeps running hidden' > "$ANSWERS/comments"
+echo 'LOW | a.swift:8 | other line' > "$ANSWERS/rules"
+make_branch dedupe "$license" 20
+review
+[ "$(printed 'model=haiku')" = 2 ] && ok "f2: two scorer passes for three findings" || fail "f2: $(printed 'model=haiku') scorer passes"
+grep -q '^  \[deep+comments\] (95) HIGH | a.swift:7 | timer survives hide$' "$out" \
+  && ok "f2: merged finding keeps the first text at HIGH, tagged deep+comments" || { fail "f2: merged line wrong"; show; }
+grep -q '^Findings: 1 high, 0 medium, 1 low (0 dropped)$' "$out" && [ "$rc" = 1 ] \
+  && ok "f2: counted once, still blocks" || { fail "f2: counts or exit $rc"; show; }
+[ "$(grep -c 'a.swift:7' "$GH_COMMENT")" = 1 ] && ok "f2: posted once" || { fail "f2: comment wrong"; cat "$GH_COMMENT" >&2; }
+
 # (g) A surviving HIGH exits 1, fails the status, and gets a fix group.
 # Catches: a HIGH from a non-deep reviewer being ignored.
 reset_answers

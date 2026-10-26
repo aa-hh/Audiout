@@ -3,7 +3,8 @@
 # and a throwaway consumer repo pinning it, stages each known way around the
 # guard, and expects a refusal; the controls expect a pass. One case reads the
 # real pin from this repo's Package.resolved, so it needs ~/Projects/
-# audiout-shared at that revision or network access to clone it.
+# audiout-shared at that revision or network access to clone it. This file is
+# byte-identical in the Mac repo and audiout-remote, like the guard.
 #
 # Usage: scripts/test-guard-shared-leak.sh
 
@@ -121,7 +122,8 @@ reset; resolved "$REV2" > "$C/Package.resolved"; git -C "$C" add Package.resolve
 write App/Leak.swift 'struct NewThing {}'; run_guard; expect "same type refused once the pin is bumped" 1 "NewThing"
 reset; resolved 0123456789012345678901234567890123456789 > "$C/Package.resolved"; git -C "$C" add Package.resolved
 write App/Leak.swift 'struct Fine {}'; run_guard; expect "unreadable pinned revision refuses" 1 "cannot read audiout-shared"
-reset; cp "$REPO/AudioutCore/Package.resolved" "$C/Package.resolved"; git -C "$C" add Package.resolved
+REAL_RESOLVED=$(cd "$REPO" && git grep -l audiout-shared -- '*Package.resolved' | head -n 1)
+reset; cp "$REPO/$REAL_RESOLVED" "$C/Package.resolved"; git -C "$C" add Package.resolved
 write App/Leak.swift 'public final class StageLookState {}'; run_guard
 expect "real pin: a type the old hand list lacked (StageLookState)" 1 "StageLookState"
 

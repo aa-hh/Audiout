@@ -68,10 +68,13 @@ struct CatalogPTPHelper: PTPHelperManaging {
 
 @MainActor
 func makeSettings() -> AppSettings {
-    // Both URLs set, or the License section never renders.
+    // Both URLs set, or the License section never renders. The secret store
+    // is the scratch suite: left nil, a non-headless run would use the real
+    // app's keychain items, and Register or Remove would overwrite them.
     AppSettings(defaults: defaults,
                 licenseServerURL: URL(string: "https://license.catalog.invalid"),
-                buyURL: URL(string: "https://audiout.app/buy"))
+                buyURL: URL(string: "https://audiout.app/buy"),
+                secrets: DefaultsSecretStore(defaults))
 }
 
 /// Same sections, order and symbols as the app's own Settings.
@@ -111,7 +114,7 @@ func makeOnboarding() -> OnboardingViewController {
                            ptpHelper: CatalogPTPHelper(),
                            bluetoothReader: bluetooth,
                            bluetoothPrimer: bluetooth,
-                           settings: AppSettings(defaults: defaults),
+                           settings: makeSettings(),
                            usageStatsAvailable: true)
     let controller = OnboardingViewController(model: model, onOpenSettings: { _ in }, onDone: {})
     controller.presentUsageStatsConsent = { deliver in deliver(true) }
@@ -338,11 +341,17 @@ final class ClosureTarget: NSObject {
 @MainActor
 final class MainSurface {
     private var keepAlive: [AnyObject] = []
+    private var surface: AppSurfaceController?
+    private var events: Task<Void, Never>?
 
     nonisolated init() {}
 
+    /// Builds the window once; later calls bring the same one back.
     func open() {
-        keepAlive.removeAll()
+        if let surface {
+            surface.show(anchorRect: nil)
+            return
+        }
         let settings = makeSettings()
         let dir = tempDir()
         let backend = MockBackend(fleet: .demoFleet, staggerDiscovery: false,
@@ -390,7 +399,29 @@ final class MainSurface {
         }
         surface.setPinned(true)
         surface.show(anchorRect: nil)
-        keepAlive = [backend, groups, routes, library, icons, window, popover, surface]
+        self.surface = surface
+        keepAlive = [backend, groups, routes, library, icons, window, popover]
+
+        // Toggles, volume and meters come back as backend events; fold them
+        // into the fleet and push it to the views, as the app delegate does.
+        var fleet = Dictionary(uniqueKeysWithValues: devices.map { ($0.id, $0) })
+        var order = devices.map(\.id)
+        let stream = backend.makeEventStream()
+        events = Task { @MainActor in
+            for await event in stream {
+                switch event {
+                case .deviceAdded(let device), .deviceUpdated(let device):
+                    if fleet[device.id] == nil { order.append(device.id) }
+                    fleet[device.id] = device
+                case .deviceRemoved(let id): fleet[id]?.isAvailable = false
+                default: continue
+                }
+                let devices = order.compactMap { fleet[$0] }
+                groups.updateDevices(devices)
+                popover.update(devices: devices)
+                window.update(devices: devices)
+            }
+        }
     }
 }
 

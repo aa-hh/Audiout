@@ -19,6 +19,9 @@ SRC_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/review-branch.XXXXXX")"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
+# A cloud session sets this; the cases below are the Mac's, and (z) sets it itself.
+unset CLAUDE_CODE_REMOTE
+
 FAILURES=0
 fail() { echo "FAIL: $1" >&2; FAILURES=$((FAILURES + 1)); }
 ok() { echo "  ok — $1"; }
@@ -495,6 +498,17 @@ if [ "$rc" = 1 ] && [ "$(grep -c '^fix-' "$out")" = 1 ] \
    && printf '%s\n' "$group" | grep -qx '    HIGH | b.swift:9 | second'; then
   ok "y: one file → one fix group with both lines"
 else fail "y: one-file group wrong (rc $rc)"; show; fi
+
+# (z) A cloud session posts the comment but no status, which the
+# review-status workflow posts from that comment.
+# Catches: a cloud run trying the status write its proxy refuses, or one that
+# drops the comment the workflow reads.
+reset_answers
+make_branch cloud docs/review-test-cloud.md 80
+CLAUDE_CODE_REMOTE=true review
+[ "$rc" = 0 ] && [ "$(comments)" = 1 ] && [ "$(statuses)" = 0 ] \
+  && grep -q 'by the review-status workflow' "$out" \
+  && ok "z: cloud run posts the comment and leaves the status to the workflow" || { fail "z: rc $rc, gh calls: $(cat "$GH_CALLS")"; show; }
 
 # (o) The script refuses to review main.
 git checkout -q main

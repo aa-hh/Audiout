@@ -33,7 +33,7 @@ A cloud session is a Linux container with a fresh clone, not this Mac. What chan
 
 - **Setup.** `.claude/hooks/session-start.sh` sets `core.hooksPath` (so the guards run), puts the setup script's Swift on `PATH`, and installs the `scope-and-run` plugin.
 - **Nothing compiles.** The app needs AppKit and CoreAudio. `build.sh`, `run-tests.sh`, `make-app.sh`, `run-app.sh` and `ios.sh` stop at once with exit 3, and Guards 4 and 6 skip. The pull request's `tests` workflow is the only test gate, and there is no mule, live-test slot or hardware.
-- **GitHub.** `gh` is installed. `gh api` (REST) works; some GraphQL-backed commands are refused with a 403 (`gh pr list` is one), so open, auto-merge and merge pull requests with the GitHub MCP tools rather than `gh pr create` / `gh pr merge`. `review-branch.sh` posts its comment and status over REST; it has not yet been run end to end in a cloud session.
+- **GitHub.** `gh` is installed. `gh api` (REST) works; some GraphQL-backed commands are refused with a 403 (`gh pr list` is one), so open, auto-merge and merge pull requests with the GitHub MCP tools rather than `gh pr create` / `gh pr merge`. `review-branch.sh` runs as on the Mac and posts its comment over REST, but the proxy refuses status writes: the `review-status` workflow posts the `review` status from that comment, and re-posts it on a push that leaves the branch's own changes as reviewed.
 - **Internal docs die with the container.** There is no main checkout to keep them in; anything gitignored is lost when the session ends.
 
 ## First steps in a fresh clone

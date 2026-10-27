@@ -132,8 +132,18 @@ changes=$(git diff "$main_base" "$tip" -- . ':!*.md' | git patch-id --stable | c
 pending_root="$PWD/.review-pending"
 review_log="$common/audiout-branch-reviews.log"
 
-# post_status <state> <description>: the `review` commit status on HEAD.
+# post_status <state> <description>: the `review` commit status on HEAD. A
+# cloud session's proxy refuses status writes, so there the review-status
+# workflow posts it from the PR comment (scripts/review-status.sh).
 post_status() {
+  if [ "${CLAUDE_CODE_REMOTE:-}" = true ]; then
+    if [ -n "$pr" ]; then
+      echo "Review status: $1 ($2), posted on ${tip:0:12} by the review-status workflow."
+    else
+      echo "No review status posted: in a cloud session it comes from the PR comment, and there is no PR yet."
+    fi
+    return
+  fi
   $GH api "repos/aa-hh/Audiout/statuses/$tip" -f context=review -f "state=$1" \
       -f "description=$2" > /dev/null \
     || { echo "Review result not posted: the review status on $tip failed. Push the branch (git push -u origin HEAD) and run the same command again." >&2; exit 2; }

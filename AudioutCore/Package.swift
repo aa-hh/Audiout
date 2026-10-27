@@ -123,6 +123,10 @@ let package = Package(
         // gate can be clicked through on screen. Run:
         // `swift run license-gate-preview`.
         .executable(name: "license-gate-preview", targets: ["license-gate-preview"]),
+        // A window listing the shared AppKit components and the screens, each
+        // shown as the real view over the mock fleet. Run:
+        // `AUDIOUT_RUN_PRODUCT=component-catalog bash scripts/run-app.sh`.
+        .executable(name: "component-catalog", targets: ["component-catalog"]),
         // Silent read-only Core Audio diagnostic for enumerating process objects and
         // their PIDs/bundle IDs, useful for diagnosing per-app routing (T7).
         .executable(name: "core-audio-diagnostic", targets: ["core-audio-diagnostic"]),
@@ -389,6 +393,13 @@ let package = Package(
             name: "license-gate-preview",
             dependencies: ["AudioutCore", "AudioutOnboardingUI", "AudioutPopoverUI",
                            "AudioutSettingsUI", "AudioutSharedUI"],
+            swiftSettings: [.unsafeFlags(swiftClangImporterFlags)]
+        ),
+        // Component catalog — see the product comment above.
+        .executableTarget(
+            name: "component-catalog",
+            dependencies: ["AudioutCore", "AudioutOnboardingUI", "AudioutPopoverUI",
+                           "AudioutSettingsUI", "AudioutSharedUI", "AudioutWindowUI"],
             swiftSettings: [.unsafeFlags(swiftClangImporterFlags)]
         ),
         // Offscreen PNG renderer for the mixer window (group-creation design

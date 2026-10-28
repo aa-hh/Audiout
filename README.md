@@ -6,7 +6,7 @@
 
 **Your speakers, synced at last.**
 
-Send every sound your Mac makes to all your AirPlay speakers at once — with a
+Send every sound your Mac makes to all your speakers at once — with a
 volume fader for each room, saved groups, and a phone remote.
 
 [About](#what-it-does) · [Get Audiout](#get-audiout) · [Build from source](#or-build-it-yourself) · [iPhone remote](#audiout-remote-for-iphone) · [Docs](#documentation)
@@ -32,27 +32,25 @@ volume fader for each room, saved groups, and a phone remote.
 
 ## What it does
 
-macOS will happily send Apple Music to a room full of AirPlay speakers. Send it
-Spotify, or a browser tab, or a game, and you get one speaker.
+Unless you want to spend time fiddling with static aggregate devices, macOS will only let you send audio to a single device.
 
-Audiout takes the sound leaving your Mac — all of it, whatever made it — and
-sends it to as many AirPlay 2 speakers as you own, playing together in sync. Each
-room gets its own fader and its own mute. You can save a set of rooms as a group
-and switch to it in two clicks, and you can send one app somewhere different from
-everything else: Chrome in the kitchen while the call stays on your laptop.
+Audiout takes the sound leaving your Mac and sends it to as many AirPlay, Bluetooth, 
+or Cast speakers as you own, playing together in sync. Each speaker gets its own fader
+and its own mute. You can save a set of speaker as a scene and switch to it in two
+clicks, and you can redirect audio per app: Spotify in the kitchen while the call stays on your laptop.
 
 It runs in the menu bar. Nothing about it touches the internet — discovery,
 routing, volume and playback all stay on your own network, and it keeps working
-with the machine offline.
+with the machine offline (with Bluetooth devices)
 
 ## Get Audiout
 
-**€30, one-time.** Covers the current major version and every update until the
+**€24.99, one-time.** Covers the current major version and every update until the
 next major release. No subscription.
 
 <div align="center">
 
-### [**Buy Audiout — €30**](https://audiout.app/buy)
+### [**Buy Audiout — €24.99**](https://audiout.app/buy)
 
 </div>
 
@@ -71,16 +69,15 @@ free.** No feature is held back, no key is required, nothing is crippled. See
 Homebrew libraries the source build expects.
 
 What the paid download adds is convenience, not capability: notarisation, bundled
-libraries, and in-app updates. If that is worth €30 to you, buy it. If it isn't,
+libraries, and in-app updates. If that is worth €24.99 to you, buy it. If it isn't,
 build it — that path is supported and it always will be.
 
 ## Features
 
 **Sound**
 - Multi-room AirPlay 2 playback, in sync, from any app on the Mac
-- Bluetooth speakers join the same synced group as AirPlay ones
-- Your Mac's own speakers stay in sync with the rest of the house
-- Per-device EQ and delay trim for rooms that need shaping
+- Auto delay detection wizard to sync Bluetooth speaker playback with the reset of the house
+- Per-device EQ
 
 **Control**
 - A volume fader and a mute for every speaker, live while audio plays
@@ -96,8 +93,7 @@ build it — that path is supported and it always will be.
 
 ## Audiout Remote for iPhone
 
-The house doesn't have a keyboard in it. **Audiout Remote** is a free iPhone app
-that mirrors the Mac fader for fader — per-speaker volume, per-app routing, and
+**Audiout Remote** is a free iPhone app that mirrors the Mac fader for fader — per-speaker volume, per-app routing, and
 mute one room or all of them, from wherever you're standing.
 
 There's no account and no sign-in. The phone finds your Mac on your own Wi-Fi,

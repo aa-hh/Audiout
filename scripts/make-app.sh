@@ -76,6 +76,15 @@ case "${AUDIOUT_LICENSE_URL:-}" in "") ;; https://*) ;; *) echo "ERROR: AUDIOUT_
 # updater will never offer: the appcast compares build numbers, so a release
 # that didn't bump one is invisible to every existing install.
 if [ -n "${SPARKLE_FEED_URL:-}" ] || [ -n "${SPARKLE_ED_PUBLIC_KEY:-}" ]; then [ -n "$BUILD_NUMBER_WAS_SET" ] || { echo "ERROR: a Sparkle release needs an explicit BUILD_NUMBER — the default CFBundleVersion=1 is an update the updater can never offer, since the appcast compares build numbers against what is already installed" >&2; exit 1; }; fi
+
+# Linux (a cloud session) has no Xcode, AppKit or /usr/bin/shlock, so nothing
+# here can compile and the permit wait would spin for 30 minutes. Stop now,
+# after the input guards above: test-license-guards.sh runs those on Linux.
+if [ "$(uname -s)" != Darwin ]; then
+    echo "  make-app.sh: needs macOS; nothing builds on $(uname -s). The pull request's tests workflow is the check." >&2
+    exit 3
+fi
+
 # Shown verbatim inside the macOS system-audio permission dialog. Written in the
 # user's mental model ("send my audio to speakers"), not the OS's ("record"),
 # and states the limit explicitly — this is the only text they get before

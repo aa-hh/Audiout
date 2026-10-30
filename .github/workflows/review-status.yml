@@ -1,0 +1,50 @@
+name: Review status
+
+# Posts the `review` commit status that main's ruleset requires, from the
+# marker comment scripts/review-branch.sh leaves on the PR. A cloud session
+# can post that comment, but its proxy refuses status writes, so the status
+# comes from here (scripts/review-status.sh has the rules). A Mac session also
+# posts the status itself; this posts the same value again.
+#
+# Runs on a new comment and on every push to a PR, so a push that leaves the
+# branch's own changes as reviewed (main merged in, a docs-only commit) gets
+# the last round's status on its new head without anyone re-running the
+# script. The script always comes from the default branch, never from the PR,
+# because this job holds a token that can write statuses.
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request:
+    types: [synchronize]
+
+permissions:
+  contents: read
+  pull-requests: read
+  statuses: write
+
+concurrency:
+  group: review-status-${{ github.event.issue.number || github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  status:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: >-
+      (github.event_name == 'issue_comment'
+        && github.event.issue.pull_request
+        && github.event.comment.user.login == 'aa-hh'
+        && startsWith(github.event.comment.body, '<!-- audiout-review round='))
+      || (github.event_name == 'pull_request'
+        && github.event.pull_request.head.repo.full_name == github.repository)
+    env:
+      GH_TOKEN: ${{ github.token }}
+      PR: ${{ github.event.issue.number || github.event.pull_request.number }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+      - name: Post the review status from the newest marker
+        run: bash scripts/review-status.sh "$PR"

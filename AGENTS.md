@@ -402,6 +402,10 @@ warn-only 3/5) are documented in the hook file itself:
   run the script again, and if the branch's own non-Markdown lines are
   unchanged (the marker's `changes=` patch id, e.g. after merging main in) it
   re-posts the last round's status on the new HEAD without using a round. `bash scripts/test-review-branch.sh` self-tests it.
+  A cloud session's proxy refuses status writes, so there the script posts only
+  the comment, and the `review-status` workflow (`scripts/review-status.sh`)
+  posts the status from the newest `aa-hh` marker, on every new marker and
+  every push; `bash scripts/test-review-status.sh` self-tests it.
 - **A change inside a review risk path is scoped before it is built.** The
   paths are the `is_risk_path` list at the top of `scripts/review-branch.sh`
   (the Bluetooth sinks, the sync and drift code, `NativeBackend*`, the capture

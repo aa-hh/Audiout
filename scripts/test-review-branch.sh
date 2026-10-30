@@ -19,6 +19,9 @@ SRC_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/review-branch.XXXXXX")"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
+# A cloud session sets this; the cases below are the Mac's, and (z) sets it itself.
+unset CLAUDE_CODE_REMOTE
+
 FAILURES=0
 fail() { echo "FAIL: $1" >&2; FAILURES=$((FAILURES + 1)); }
 ok() { echo "  ok — $1"; }
@@ -31,9 +34,9 @@ analytics="AudioutCore/Sources/AudioutCore/Analytics.swift"
 license="AudioutCore/Sources/AudioutCore/LicenseGate.swift"
 mkdir -p "$ANSWERS" "$PROMPTS"
 
-# The gh stub. GH_CALLS gets one line per call; `pr view` prints the number in
-# GH_PR (fails when the file is missing, as gh does with no PR); `pr comment`
-# copies the body to GH_COMMENT and appends it to GH_THREAD, the PR's comment
+# The gh stub. GH_CALLS gets one line per call; the open-PR lookup prints the
+# number in GH_PR (nothing when the file is missing, as the API does with no PR); a comment
+# post copies the body to GH_COMMENT and appends it to GH_THREAD, the PR's comment
 # history; reading the comments prints GH_THREAD; a status post exits with
 # the number in GH_API_EXIT.
 GH_CALLS="$TMP_DIR/gh-calls"; GH_PR="$TMP_DIR/gh-pr"; GH_THREAD="$TMP_DIR/gh-thread"
@@ -42,8 +45,8 @@ cat > "$TMP_DIR/gh" <<EOF
 #!/bin/bash
 echo "\$*" >> "$GH_CALLS"
 case "\$*" in
-  "pr view"*) [ -f "$GH_PR" ] && cat "$GH_PR" || exit 1 ;;
-  "pr comment"*) cp "\$5" "$GH_COMMENT"; cat "\$5" >> "$GH_THREAD" ;;
+  "api repos/aa-hh/Audiout/pulls?head="*) [ -f "$GH_PR" ] && cat "$GH_PR"; true ;;
+  "api repos/aa-hh/Audiout/issues/"*"/comments -F body=@"*) f="\${4#body=@}"; cp "\$f" "$GH_COMMENT"; cat "\$f" >> "$GH_THREAD" ;;
   *"/comments"*) cat "$GH_THREAD" 2> /dev/null; true ;;
   "api "*) exit "\$(cat "$GH_API_EXIT")" ;;
 esac
@@ -145,7 +148,7 @@ show() { cat "$out" >&2; }
 # status_call: the one `api` call, or nothing. statuses: how many were made.
 status_call() { grep '^api repos/aa-hh/Audiout/statuses/' "$GH_CALLS"; }
 statuses() { grep -c '^api repos/aa-hh/Audiout/statuses/' "$GH_CALLS"; }
-comments() { grep -c '^pr comment ' "$GH_CALLS"; }
+comments() { grep -c '^api repos/aa-hh/Audiout/issues/[0-9]*/comments -F ' "$GH_CALLS"; }
 
 # (a) Docs only: no model; a comment that records the round, and a success
 # status "skip".
@@ -185,13 +188,13 @@ else fail "c: cheap prompt wrong"; fi
 grep -q 'Then run: bash scripts/review-branch.sh --continue' "$out" && ok "c: handover steps printed" || { fail "c: no handover steps"; show; }
 [ ! -e "$(pending_path)" ] && ok "c: pending directory removed" || fail "c: pending directory left"
 [ "$rc" = 0 ] && ok "c: exit 0" || fail "c: exit $rc"
-grep -q '^pr comment 42 --body-file ' "$GH_CALLS" && [ "$(comments)" = 1 ] \
+grep -q '^api repos/aa-hh/Audiout/issues/42/comments -F body=@' "$GH_CALLS" && [ "$(comments)" = 1 ] \
   && head -n 1 "$GH_COMMENT" | grep -qx "<!-- audiout-review round=1 head=$(git rev-parse HEAD) level=cheap high=0 changes=[0-9a-f]* -->" \
   && sed -n 2p "$GH_COMMENT" | grep -qx '## Review: cheap, round 1' && grep -qx 'Review: no findings' "$GH_COMMENT" \
   && ok "c: one comment on PR 42: marker, heading, then 'Review: no findings'" || { fail "c: comment wrong"; cat "$GH_CALLS" "$GH_COMMENT" >&2; }
 status_call | grep -q -- '-f state=success -f description=cheap, round 1, 0 HIGH$' \
   && ok "c: success status 'cheap, round 1, 0 HIGH'" || fail "c: status: $(status_call)"
-[ "$(head -n 1 "$GH_CALLS" | cut -d' ' -f1-2)" = "pr view" ] && [ "$(tail -n 1 "$GH_CALLS" | cut -d' ' -f1)" = api ] \
+head -n 1 "$GH_CALLS" | grep -q '^api repos/aa-hh/Audiout/pulls?head=aa-hh:' && tail -n 1 "$GH_CALLS" | grep -q '^api repos/aa-hh/Audiout/statuses/' \
   && ok "c: comment posted before the status" || fail "c: gh call order: $(cat "$GH_CALLS")"
 last_log | grep -q "$(printf '\tcheap\t0\t0\t0\t0\t')" && ok "c: log counts 0 0 0 0" || fail "c: log line '$(last_log)'"
 
@@ -495,6 +498,17 @@ if [ "$rc" = 1 ] && [ "$(grep -c '^fix-' "$out")" = 1 ] \
    && printf '%s\n' "$group" | grep -qx '    HIGH | b.swift:9 | second'; then
   ok "y: one file → one fix group with both lines"
 else fail "y: one-file group wrong (rc $rc)"; show; fi
+
+# (z) A cloud session posts the comment but no status, which the
+# review-status workflow posts from that comment.
+# Catches: a cloud run trying the status write its proxy refuses, or one that
+# drops the comment the workflow reads.
+reset_answers
+make_branch cloud docs/review-test-cloud.md 80
+CLAUDE_CODE_REMOTE=true review
+[ "$rc" = 0 ] && [ "$(comments)" = 1 ] && [ "$(statuses)" = 0 ] \
+  && grep -q 'by the review-status workflow' "$out" \
+  && ok "z: cloud run posts the comment and leaves the status to the workflow" || { fail "z: rc $rc, gh calls: $(cat "$GH_CALLS")"; show; }
 
 # (o) The script refuses to review main.
 git checkout -q main

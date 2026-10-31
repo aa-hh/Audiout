@@ -4,7 +4,7 @@ import AppKit
 
 /// A gold text action: a tertiary call to action that must read as a route
 /// forward, the Mac's version of the iPhone's `TextAction`. Today only the
-/// licence gate's "click here to paste it".
+/// licence gate's "I have a key" and "Paste key".
 ///
 /// Semibold `bodyEmphasized` in `goldText`, no underline, no bezel; `label3`
 /// while disabled. The pointing-hand cursor shows only while it is enabled.

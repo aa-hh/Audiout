@@ -318,7 +318,7 @@ public final class AlignmentPlateCell: NSButtonCell {
         guard let chipSize = chipSize else { return rect }
         switch chipPlacement {
         case .trailing:
-            let reserve = Self.chipTrailingMargin + chipSize.width + Self.inlineChipGap
+            let reserve = KeycapChip.trailingMargin + chipSize.width + Self.inlineChipGap
             guard rect.width > 2 * reserve else { return rect }
             return rect.insetBy(dx: reserve, dy: 0)
         case .inline:
@@ -369,19 +369,14 @@ public final class AlignmentPlateCell: NSButtonCell {
     /// use, so `titleRect` returns the bounds untouched.
     private var chipSize: NSSize? {
         guard let keycap, !keycap.isEmpty else { return nil }
-        return keycap == Self.spaceKeycap
-            ? NSSize(width: Self.chipWideWidth, height: Self.chipWideHeight)
-            : NSSize(width: Self.chipNarrowSide, height: Self.chipNarrowSide)
+        return KeycapChip.size(for: keycap)
     }
 
-    /// Trailing placement: `chipTrailingMargin` in from the trailing edge,
-    /// centred on the plate's midline; a press shifts it visually DOWN
+    /// Trailing placement: `KeycapChip.trailingMargin` in from the trailing
+    /// edge, centred on the plate's midline; a press shifts it visually DOWN
     /// (+y, flipped).
     private func trailingChipRect(in frame: NSRect, size: NSSize, pressed: Bool) -> NSRect {
-        var originY = frame.midY - size.height / 2
-        if pressed { originY += Self.chipPressedShift }
-        return NSRect(x: (frame.maxX - Self.chipTrailingMargin - size.width).rounded(),
-                      y: originY.rounded(), width: size.width, height: size.height)
+        KeycapChip.trailingRect(in: frame, size: size, pressed: pressed)
     }
 
     /// The title's own intrinsic width (inline mode only) — used both to
@@ -416,48 +411,12 @@ public final class AlignmentPlateCell: NSButtonCell {
         case .inline:
             let groupMinX = inlineGroupMinX(in: frame, chipWidth: size.width)
             var originY = frame.midY - size.height / 2
-            if pressed { originY += Self.chipPressedShift }
+            if pressed { originY += KeycapChip.pressedShift }
             chipRect = NSRect(x: (groupMinX + inlineTitleWidth + Self.inlineChipGap).rounded(),
                               y: originY.rounded(),
                               width: size.width, height: size.height)
         }
-        let radius = Self.chipCornerRadius
-        let chipPath = NSBezierPath(roundedRect: chipRect, xRadius: radius, yRadius: radius)
-        let ink = chipInk
-
-        // Inner bottom lip (2 pt rest, 1 pt pressed) — the chip's own small
-        // recess, drawn INSIDE the clip so it never bleeds past the corners.
-        NSGraphicsContext.current?.saveGraphicsState()
-        chipPath.addClip()
-        let lipHeight = pressed ? Self.chipLipPressedHeight : Self.chipLipRestHeight
-        Tokens.Color.shadow.withAlphaComponent(Self.chipLipAlpha * alpha).setFill()
-        // Flipped: the chip's visual bottom edge is `maxY`.
-        NSRect(x: chipRect.minX, y: chipRect.maxY - lipHeight,
-               width: chipRect.width, height: lipHeight).fill()
-        NSGraphicsContext.current?.restoreGraphicsState()
-
-        // Rim — the chip's ink, a step quieter than its glyph.
-        ink.withAlphaComponent(Self.chipRimAlpha * alpha).setStroke()
-        let rimPath = NSBezierPath(
-            roundedRect: chipRect.insetBy(dx: Self.hairline / 2, dy: Self.hairline / 2),
-            xRadius: radius, yRadius: radius)
-        rimPath.lineWidth = Self.hairline
-        rimPath.stroke()
-
-        // Glyph — "electric on dark, Deep on light" (spec §2.1): the caller
-        // resolved the tint; this is it at full strength.
-        let paragraph = NSMutableParagraphStyle()
-        paragraph.alignment = .center
-        let attributed = NSAttributedString(string: keycap, attributes: [
-            .font: Tokens.Font.keycap,
-            .foregroundColor: ink.withAlphaComponent(alpha),
-            .paragraphStyle: paragraph,
-        ])
-        let textSize = attributed.size()
-        let textRect = NSRect(x: (chipRect.midX - textSize.width / 2).rounded(),
-                              y: (chipRect.midY - textSize.height / 2).rounded(),
-                              width: textSize.width, height: textSize.height)
-        attributed.draw(in: textRect)
+        KeycapChip.draw(keycap, in: chipRect, ink: chipInk, pressed: pressed, alpha: alpha)
     }
 
     // MARK: Geometry / constants
@@ -485,26 +444,6 @@ public final class AlignmentPlateCell: NSButtonCell {
     /// How far the PRIMARY plate's rim darkens the pinned gold toward `shadow`.
     private static let primaryRimShadowBlend: CGFloat = 0.35
 
-    /// The one wide keycap label; every other keycap string draws at the
-    /// narrow 22×22 size.
-    private static let spaceKeycap = "SPACE"
-    private static let chipNarrowSide: CGFloat = 22
-    private static let chipWideWidth: CGFloat = 44
-    private static let chipWideHeight: CGFloat = 20
-    /// The keycap chip's corner radius — the control radius, where iOS puts
-    /// chips. On the 22×22 glyph chips that is a rounded square; on the 44×20
-    /// "SPACE" chip 10 is exactly half the height, so that one lands on a
-    /// capsule. Left alone: it is the same radius, and the wide chip reading
-    /// as a key is the point.
-    private static let chipCornerRadius: CGFloat = Tokens.Layout.Radius.control
-    /// Trailing placement: the chip's inset from the plate's trailing edge.
-    private static let chipTrailingMargin: CGFloat = 14
-    /// The chip rim's alpha over its glyph ink.
-    private static let chipRimAlpha: CGFloat = 0.55
     /// Gap between the title and the chip in `inline` placement (spec §3).
     private static let inlineChipGap: CGFloat = 10
-    private static let chipPressedShift: CGFloat = 1
-    private static let chipLipRestHeight: CGFloat = 2
-    private static let chipLipPressedHeight: CGFloat = 1
-    private static let chipLipAlpha: CGFloat = 0.25
 }

@@ -172,7 +172,7 @@ func makeRoot() -> SettingsRootViewController {
               viewController: AudioSettingsViewController(excluded: excludedApps,
                                                           runningAppsProvider: { [] },
                                                           latency: latency)),
-        .init(title: "License", symbolName: "key",
+        .init(title: "Licence", symbolName: "key",
               viewController: LicenseSettingsViewController(settings: settings)),
     ]
     return SettingsRootViewController(sections: sections)

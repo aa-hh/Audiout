@@ -128,7 +128,7 @@ final class TrialSurveyCardView: NSView {
         let options: [Option]
     }
 
-    static let reasonQuestion = "What\u{2019}s kept you from buying a license?"
+    static let reasonQuestion = "What\u{2019}s kept you from buying a licence?"
     static let textQuestion = "Anything else we should know?"
     static let textSubline = "Optional."
     static let textPlaceholder = "What would make Audiout worth buying for you?"

@@ -121,7 +121,7 @@ public final class AboutViewController: NSViewController {
     static let privacyText = """
     Discovery, routing, volume, and playback stay entirely on your network — \
     none of it touches a server, even offline. Audiout’s only outside \
-    connections are about your license and updates: a check of your key, a \
+    connections are about your licence and updates: a check of your key, a \
     once-per-launch check-in (your key, a random per-Mac id, and the app \
     version — nothing else), and the update check when one runs. A build \
     compiled from source makes none of these.
@@ -219,7 +219,7 @@ public final class AboutViewController: NSViewController {
         sourceCodeButton.target = self
         sourceCodeButton.action = #selector(viewSourceCodeTapped)
         rows.append(SettingsForm.row(
-            title: "License",
+            title: "Licence",
             subtitle: "GPL-2.0-or-later. See Third-Party Notices below.",
             control: sourceCodeButton))
 

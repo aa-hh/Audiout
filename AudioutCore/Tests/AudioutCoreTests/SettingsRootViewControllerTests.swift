@@ -155,20 +155,20 @@ import AudioutSharedUI
         #expect(descendants(of: remote.view).contains { ($0 as? NSButton)?.title == "Open \(RemoteInviteView.pageAddress)" })
         #expect(explanation(in: remote.view, subject: "Get Audiout Remote for iPhone") == nil)
         let license = LicenseSettingsViewController(settings: settings)
-        #expect(explanation(in: license.view, subject: "License")?.isHidden == true)
+        #expect(explanation(in: license.view, subject: "Licence")?.isHidden == true)
         settings.licenseKey = "AUDT-AAAAA-BBBBB-CCCCC-DDDDD"
         settings.licenseStatus = .active
         license.viewWillAppear()
-        #expect(explanation(in: license.view, subject: "License")?.isHidden == false)
-        expectExplanation("Audiout checks in with the license server once per launch to spot a key shared across many machines. It sends your key, a random per-Mac id, and the app version. Nothing else.", subject: "License", in: license.view)
+        #expect(explanation(in: license.view, subject: "Licence")?.isHidden == false)
+        expectExplanation("Audiout checks in with the licence server once per launch to spot a key shared across many machines. It sends your key, a random per-Mac id, and the app version. Nothing else.", subject: "Licence", in: license.view)
         #expect(license.test_licenseStatusText?.isEmpty == false)
         settings.licenseKey = ""
         license.viewWillAppear()
-        #expect(explanation(in: license.view, subject: "License")?.isHidden == true)
+        #expect(explanation(in: license.view, subject: "Licence")?.isHidden == true)
         let sourceSettings = makeSettings()
         sourceSettings.licenseKey = "AUDT-AAAAA-BBBBB-CCCCC-DDDDD"
         let sourceLicense = LicenseSettingsViewController(settings: sourceSettings)
-        #expect(explanation(in: sourceLicense.view, subject: "License")?.isHidden == true)
+        #expect(explanation(in: sourceLicense.view, subject: "Licence")?.isHidden == true)
     }
 
     private let isolation = TestIsolation(owner: "SettingsRootViewControllerTests")
@@ -214,7 +214,7 @@ import AudioutSharedUI
             .init(title: "Audiout Remote", symbolName: "iphone", viewController: remote),
             .init(title: "Appearance", symbolName: "paintpalette", viewController: appearance),
             .init(title: "Audio", symbolName: "speaker.wave.2", viewController: audio),
-            .init(title: "License", symbolName: "key", viewController: license),
+            .init(title: "Licence", symbolName: "key", viewController: license),
         ])
         return (root, general, remote, appearance, audio, license)
     }
@@ -250,7 +250,7 @@ import AudioutSharedUI
 
     @Test func sectionTitlesInOrder() {
         let (root, _, _, _, _, _) = makeRoot()
-        #expect(root.sectionTitles == ["General", "Audiout Remote", "Appearance", "Audio", "License"])
+        #expect(root.sectionTitles == ["General", "Audiout Remote", "Appearance", "Audio", "Licence"])
     }
 
     @Test func runSetupAgainForwardsFromGeneralPane() {
@@ -370,8 +370,8 @@ import AudioutSharedUI
         let license = LicenseSettingsViewController(settings: settings)
         license.licenseTransport = transport.closure
 
-        #expect(license.test_licenseStatusText == "Unregistered. Audiout keeps working, on one speaker at a time, until it has a license key.")
-        #expect(license.test_enterLicenseButtonTitle == "Enter license…")
+        #expect(license.test_licenseStatusText == "Unregistered. Audiout keeps working, on one speaker at a time, until it has a licence key.")
+        #expect(license.test_enterLicenseButtonTitle == "Enter licence…")
 
         transport.replies(#"{"status":"active"}"#)
         license.test_setLicenseKey("AUDT-AAAAA-BBBBB-CCCCC-DDDDD")
@@ -518,7 +518,7 @@ import AudioutSharedUI
         license.test_licenseSheet?.test_tapRemove()
         #expect(settings.licenseKey == nil)
         #expect(settings.licenseStatus == nil, "the verdict goes with the key")
-        #expect(license.test_enterLicenseButtonTitle == "Enter license…")
+        #expect(license.test_enterLicenseButtonTitle == "Enter licence…")
     }
 
     /// The status line promises the key is saved, not that a retry is coming
@@ -644,7 +644,7 @@ import AudioutSharedUI
         transport.replies(#"{"status":"active"}"#)
         license.test_setLicenseKey("AUDT-AAAAA-BBBBB-CCCCC-DDDDD")
         await drainMainQueue()
-        #expect(license.test_checkInDisclosureText == "Audiout checks in with the license server once per launch to spot a key shared across many machines. It sends your key, a random per-Mac id, and the app version. Nothing else.")
+        #expect(license.test_checkInDisclosureText == "Audiout checks in with the licence server once per launch to spot a key shared across many machines. It sends your key, a random per-Mac id, and the app version. Nothing else.")
 
         license.test_removeLicense()
         #expect(license.test_checkInDisclosureText == nil)
@@ -1120,7 +1120,7 @@ import AudioutSharedUI
         #expect(headerCaption.stringValue == "Trial · 9 days left")
         #expect(license.test_licenseStatusText == "Audiout plays on every speaker until your trial ends on "
                 + "\(expiresAt.formatted(.dateTime.day().month(.wide))).")
-        #expect(license.test_enterLicenseButtonTitle == "Enter license…")
+        #expect(license.test_enterLicenseButtonTitle == "Enter licence…")
         #expect(license.test_buyButtonIsVisible)
         #expect(license.test_buyButtonIsProminent)
 
@@ -1134,7 +1134,7 @@ import AudioutSharedUI
         #expect(root.test_readoutLines(at: 4) == ["Trial · 8 days left"])
         #expect(license.test_licenseStatusText == "Audiout plays on every speaker until your trial ends on "
                 + "\(nextExpiry.formatted(.dateTime.day().month(.wide))).")
-        #expect(license.test_enterLicenseButtonTitle == "Enter license…")
+        #expect(license.test_enterLicenseButtonTitle == "Enter licence…")
         #expect(license.test_buyButtonIsVisible)
 
         settings.trialExpiresAt = Date().addingTimeInterval(-3_600)

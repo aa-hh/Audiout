@@ -231,7 +231,7 @@ func snapshot(appearanceName: NSAppearance.Name, label: String, outDir: URL) {
 
 /// The real one surface on the Mixer, the demo fleet loaded, and the
 /// first-open licence gate mounted over it — what a buyer sees after Setup:
-/// first the offer, then the key state "I already have a key" moves to.
+/// first the offer, then the key state "I have a key" moves to.
 /// Renders the shell window's content view (the toolbar strip lives in the
 /// title bar, so its band is empty here) over the `panel` ground the backing
 /// bubble would paint.

@@ -71,19 +71,19 @@ public final class LicenseSheetViewController: NSViewController {
     }
 
     public override func loadView() {
-        let heading = SettingsForm.label("Enter your license key")
+        let heading = SettingsForm.label("Enter your licence key")
 
         // The honest one-liner about what a key does in this model. Since the
         // first-open gate (2026-08-30) an official build ASKS for its key at
         // launch, so the old "fully functional without one" line would lie
         // here — the free path is the source build, and saying so is the pitch.
         let explainer = SettingsForm.hintLabel(
-            "Your license links this official build to your purchase and keeps it updated. Building Audiout from source is always free.")
+            "Your licence links this official build to your purchase and keeps it updated. Building Audiout from source is always free.")
         explainer.preferredMaxLayoutWidth = Self.sheetContentWidth
 
         keyField.stringValue = settings.licenseKey ?? ""
         keyField.placeholderString = Self.keyFormatHint
-        keyField.setAccessibilityLabel("License key")
+        keyField.setAccessibilityLabel("Licence key")
         keyField.translatesAutoresizingMaskIntoConstraints = false
         // A key is one line. Without this a pasted receipt fragment carrying a
         // newline wraps the field open mid-sheet; scrollable keeps an
@@ -103,7 +103,7 @@ public final class LicenseSheetViewController: NSViewController {
         // something to remove; a fresh sheet opened from "Enter License…"
         // never shows it. No Buy button here: the General pane behind the
         // sheet has its own, and the revoked verdict already says to buy.
-        removeButton.title = "Remove license…"
+        removeButton.title = "Remove licence…"
         removeButton.isBordered = false
         removeButton.controlSize = .small
         removeButton.font = Tokens.Font.caption
@@ -199,12 +199,12 @@ public final class LicenseSheetViewController: NSViewController {
         guard let window = view.window else { return performRemove() }
 
         let alert = NSAlert()
-        alert.messageText = "Remove your license key?"
+        alert.messageText = "Remove your licence key?"
         alert.informativeText = "Audiout keeps working for now, but it will ask "
             + "for a key the next time it opens and stops getting official "
             + "updates until you enter one."
         alert.addButton(withTitle: "Remove")
-        alert.addButton(withTitle: "Keep license")
+        alert.addButton(withTitle: "Keep licence")
         // Return keeps the key: the destructive button is never the one an
         // absent-minded Return press hits.
         alert.buttons[0].hasDestructiveAction = true

@@ -695,7 +695,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
             // pane has no window to host a sheet. A build with no license
             // server has no License section, and nothing to register against.
             guard let root = self?.settingsRootController,
-                  let index = root.sectionTitles.firstIndex(of: "License") else { return }
+                  let index = root.sectionTitles.firstIndex(of: "Licence") else { return }
             root.selectSection(at: index)
             self?.licenseSettingsController?.presentLicenseSheet(registering: key)
         }
@@ -1226,7 +1226,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
             showSurface(.settings)
             surface.whenRevealed { [weak self] in
                 guard let root = self?.settingsRootController,
-                      let index = root.sectionTitles.firstIndex(of: "License") else { return }
+                      let index = root.sectionTitles.firstIndex(of: "Licence") else { return }
                 root.selectSection(at: index)
                 self?.licenseSettingsController?.presentLicenseSheetFromNote()
             }
@@ -2654,7 +2654,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
         ]
         // A build with no license server has nothing to verify and nothing to sell.
         if license.isAvailable {
-            sections.append(.init(title: "License", symbolName: "key", viewController: license))
+            sections.append(.init(title: "Licence", symbolName: "key", viewController: license))
         }
         let root = SettingsRootViewController(sections: sections)
         settingsRootController = root
@@ -2939,7 +2939,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
         // ask a direct buyer sees.
         alert.messageText = "Share anonymous usage counts"
         alert.informativeText = "Audiout counts which features get used. "
-            + "No audio, speaker names or your license key are ever part of it."
+            + "No audio, speaker names or your licence key are ever part of it."
         alert.addButton(withTitle: "Share Usage Counts")
         alert.addButton(withTitle: "No Thanks")
         let granted = alert.runModal() == .alertFirstButtonReturn

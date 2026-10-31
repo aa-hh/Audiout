@@ -1609,7 +1609,7 @@ extension SerializedSharedState {
             surface.presentLicenseGate(gate)
             let overlay = try #require(surface.test_licenseGateView)
             let reachable = accessibleViews(under: content)
-            #expect(reachable.contains { $0.accessibilityLabel() == "Activate Audiout" && $0.accessibilityRole() == .group })
+            #expect(reachable.contains { $0.accessibilityLabel() == "Unlock Audiout" && $0.accessibilityRole() == .group })
             #expect(reachable.allSatisfy { $0.isDescendant(of: overlay) },
                     "Mixer views stay reachable: \(reachable.filter { !$0.isDescendant(of: overlay) })")
         }

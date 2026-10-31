@@ -159,12 +159,12 @@ print("""
 
   The surface is the real one over a mock fleet, with the gate drawn over the
   Mixer. It opens on the offer: "Buy Audiout" prints the checkout link instead
-  of opening a browser and moves to the key state; "I already have a key"
-  goes there without the checkout; the trial button starts the 14 days and
-  opens the gate.
+  of opening a browser and moves to the key state; "I have a key" goes
+  there without the checkout; the trial button starts the 14 days and opens
+  the gate.
 
-  In the key state, type or paste a key into the boxes (or use "click here to
-  paste it"); the status line counts down, the twentieth character verifies
+  In the key state, type or paste a key into the boxes (or use "Paste key");
+  the status line counts down, the twentieth character verifies
   it, and the verdict comes from the key itself, not from a server. "Back"
   at the bottom returns to the offer, where the trial button is:
 

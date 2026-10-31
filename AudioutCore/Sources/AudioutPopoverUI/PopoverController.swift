@@ -1362,7 +1362,7 @@ public final class PopoverController: NSObject {
 
     static let unregisteredTrialEndedNoteText = "Your trial has ended. Audiout plays on one speaker at a time until you buy."
     static let unregisteredKeyUnrecognizedNoteText = "This key isn\u{2019}t recognized, so Audiout plays on one speaker at a time."
-    static let unregisteredNoKeyNoteText = "Audiout plays on one speaker at a time until it has a license key."
+    static let unregisteredNoKeyNoteText = "Audiout plays on one speaker at a time until it has a licence key."
     /// A refused key's note names what happened to it: a refund, a reversed
     /// payment, or, for any other or no reason, a revoke.
     static func unregisteredKeyRefusedNoteText(reason: String?) -> String {
@@ -1593,7 +1593,7 @@ public final class PopoverController: NSObject {
     private var trialBuyAction: SystemAirPlayNoteBannerView.Action {
         SystemAirPlayNoteBannerView.Action(
             title: "Buy Audiout",
-            accessibilityLabel: "Buy an Audiout license",
+            accessibilityLabel: "Buy an Audiout licence",
             handler: { [weak self] in self?.onBuyAudiout?() })
     }
 
@@ -1712,7 +1712,7 @@ public final class PopoverController: NSObject {
     private var enterLicenseKeyAction: SystemAirPlayNoteBannerView.Action {
         SystemAirPlayNoteBannerView.Action(
             title: "I have a key",
-            accessibilityLabel: "Enter a license key",
+            accessibilityLabel: "Enter a licence key",
             handler: { [weak self] in self?.onEnterLicenseKey?() })
     }
 

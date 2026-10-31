@@ -19,8 +19,8 @@ public final class LicenseSettingsViewController: NSViewController, SettingsRead
     private let openURL: (URL) -> Void
     private let statusLabel = NSTextField(wrappingLabelWithString: "")
     private let checkAgainButton = NSButton()
-    private let checkInDisclosureHelp = HelpButton(subject: "License", text:
-        "Audiout checks in with the license server once per launch to spot a key "
+    private let checkInDisclosureHelp = HelpButton(subject: "Licence", text:
+        "Audiout checks in with the licence server once per launch to spot a key "
         + "shared across many machines. It sends your key, a random per-Mac id, and the "
         + "app version. Nothing else.")
     private let enterLicenseButton = NSButton()
@@ -63,7 +63,7 @@ public final class LicenseSettingsViewController: NSViewController, SettingsRead
         self.settings = settings
         self.openURL = openURL
         super.init(nibName: nil, bundle: nil)
-        title = "License"
+        title = "Licence"
     }
 
     public required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
@@ -119,7 +119,7 @@ public final class LicenseSettingsViewController: NSViewController, SettingsRead
     // MARK: Layout
 
     public override func loadView() {
-        let (header, glyph) = SettingsPane.makeHeader(symbolName: "key", title: "License",
+        let (header, glyph) = SettingsPane.makeHeader(symbolName: "key", title: "Licence",
                                                       caption: Self.readoutFirstLine(settings: settings),
                                                       helpButton: checkInDisclosureHelp)
         headerGlyph = glyph
@@ -208,7 +208,7 @@ public final class LicenseSettingsViewController: NSViewController, SettingsRead
             // Since 2026-09-26 an unregistered install is not gated; it runs
             // limited to one speaker (dev/notes/unregistered-mode-spec-2026-09-26.md).
             return "Unregistered. Audiout keeps working, on one speaker at a time, "
-                + "until it has a license key."
+                + "until it has a licence key."
         }
         guard let status else {
             return "Your key is saved. Audiout hasn’t been able to verify it yet."
@@ -276,7 +276,7 @@ public final class LicenseSettingsViewController: NSViewController, SettingsRead
         // once one is stored (the sheet then prefills it and offers Remove
         // License…).
         let trialActive = trialIsActive
-        enterLicenseButton.title = !hasKey || trialActive ? "Enter license…" : "Change…"
+        enterLicenseButton.title = !hasKey || trialActive ? "Enter licence…" : "Change…"
 
         // Buying is offered only where it can work (a server and a buy page)
         // and only where it would help (no key, a key the server won’t

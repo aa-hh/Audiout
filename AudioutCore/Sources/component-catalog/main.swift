@@ -68,7 +68,7 @@ struct CatalogPTPHelper: PTPHelperManaging {
 
 @MainActor
 func makeSettings() -> AppSettings {
-    // Both URLs set, or the License section never renders. The secret store
+    // Both URLs set, or the Licence section never renders. The secret store
     // is the scratch suite: left nil, a non-headless run would use the real
     // app's keychain items, and Register or Remove would overwrite them.
     AppSettings(defaults: defaults,

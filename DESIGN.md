@@ -724,9 +724,10 @@ one hero panel, gating Done until every check passes.
 
 Mostly flat, matching iOS: the dark ground ladder (canvas → panel → raised)
 and, in light, edge weight alone carry depth. `Tokens.Color.shadow` (an
-alias of `NSColor.black`) has five real consumers. Four are a flat clipped
+alias of `NSColor.black`) has six real consumers. Five are a flat clipped
 band rather than a blurred shadow: `AlignmentPlateCell` (the
-wizard's answer-plate lip shading, rim shadow blend, and chip shadow fill),
+wizard's answer-plate lip shading and rim shadow blend), `KeycapChip` (the
+keycap's bottom lip, on the wizard's plates and the licence gate's Buy),
 `WarmFaderCell` (the fader trough's inset shade at
 `Tokens.Color.insetShadeAlpha`, 0.18),
 `GroupedSectionView`'s `.well` style (a 1pt band at that same alpha, clipped

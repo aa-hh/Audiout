@@ -4,7 +4,7 @@ import AppKit
 import AudioutCore
 import AudioutSharedUI
 
-/// The "Enter License…" sheet (Settings › General): the ONLY place a key is
+/// The "Enter licence…" sheet (Settings › General): the ONLY place a key is
 /// typed. The pane itself never shows an editable field — the convention every
 /// respected optional-license app follows (Sublime's Help › Enter License,
 /// Little Snitch's Registration pane, Panic's license window): entry is a
@@ -100,7 +100,7 @@ public final class LicenseSheetViewController: NSViewController {
 
         // The tertiary action: a quiet link-style button on its own row, never
         // a third bezel beside Cancel and Register. Only offered when there is
-        // something to remove; a fresh sheet opened from "Enter License…"
+        // something to remove; a fresh sheet opened from "Enter licence…"
         // never shows it. No Buy button here: the General pane behind the
         // sheet has its own, and the revoked verdict already says to buy.
         removeButton.title = "Remove licence…"
@@ -192,7 +192,7 @@ public final class LicenseSheetViewController: NSViewController {
     }
 
     /// Removing is destructive and the key may be the only copy the user can
-    /// lay hands on, so the ellipsis in "Remove License…" is honoured: ask
+    /// lay hands on, so the ellipsis in "Remove licence…" is honoured: ask
     /// first. Headless (no window) there is nothing to ask with, so the removal
     /// happens directly — every existing test still means "confirmed remove".
     @objc private func removeTapped() {
@@ -329,7 +329,7 @@ public final class LicenseSheetViewController: NSViewController {
         cancelTapped()
     }
 
-    /// Invoke Remove License… as a click would.
+    /// Invoke Remove licence… as a click would.
     public func test_tapRemove() {
         _ = view
         removeTapped()
@@ -341,7 +341,7 @@ public final class LicenseSheetViewController: NSViewController {
         return resultLine.isHidden ? nil : resultLine.stringValue
     }
 
-    /// Whether Remove License… is offered (only when a key was stored).
+    /// Whether Remove licence… is offered (only when a key was stored).
     public var test_removeIsVisible: Bool {
         _ = view
         return !removeButton.isHidden

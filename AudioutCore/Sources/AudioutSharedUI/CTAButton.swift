@@ -10,8 +10,9 @@ import AppKit
 /// window's Return default (`keyEquivalent` "\r") it wears a "⏎"
 /// ``KeycapChip`` at its trailing end.
 ///
-/// Only the paint is custom (``CTAButtonCell``): tracking, key equivalents,
-/// `performClick` and VoiceOver are the stock `NSButton`'s. The fill is drawn
+/// Only the paint and the Return chip's help text are custom
+/// (``CTAButtonCell``, `keyEquivalent`): tracking, `performClick` and the
+/// rest of VoiceOver are the stock `NSButton`'s. The fill is drawn
 /// flat rather than set as `bezelColor`, so it does not drop to a plain bezel
 /// when the window is not key, and every colour is resolved at draw time.
 public final class CTAButton: NSButton {
@@ -74,7 +75,7 @@ public final class CTAButton: NSButton {
 }
 
 /// ``CTAButton``'s paint. A drawing-only cell, as `CodeBoxCell` is: the
-/// fill, the edge and the title change, nothing else does.
+/// fill, the edge, the title and the Return chip change, nothing else does.
 public final class CTAButtonCell: NSButtonCell {
 
     public static let edgeWidth: CGFloat = 1

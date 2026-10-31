@@ -372,13 +372,6 @@ public final class AlignmentPlateCell: NSButtonCell {
         return KeycapChip.size(for: keycap)
     }
 
-    /// Trailing placement: `KeycapChip.trailingMargin` in from the trailing
-    /// edge, centred on the plate's midline; a press shifts it visually DOWN
-    /// (+y, flipped).
-    private func trailingChipRect(in frame: NSRect, size: NSSize, pressed: Bool) -> NSRect {
-        KeycapChip.trailingRect(in: frame, size: size, pressed: pressed)
-    }
-
     /// The title's own intrinsic width (inline mode only) — used both to
     /// size `titleRect` and to lay the chip immediately beside it. Measured
     /// off `attributedTitle`: an `NSButtonCell`'s `attributedStringValue` is
@@ -407,7 +400,7 @@ public final class AlignmentPlateCell: NSButtonCell {
         let chipRect: NSRect
         switch chipPlacement {
         case .trailing:
-            chipRect = trailingChipRect(in: frame, size: size, pressed: pressed)
+            chipRect = KeycapChip.trailingRect(in: frame, size: size, pressed: pressed)
         case .inline:
             let groupMinX = inlineGroupMinX(in: frame, chipWidth: size.width)
             var originY = frame.midY - size.height / 2

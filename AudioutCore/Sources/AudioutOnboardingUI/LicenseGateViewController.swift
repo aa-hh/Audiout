@@ -24,7 +24,7 @@ import AudioutSharedUI
 /// can reach Buy or the trial again; hidden without a checkout URL).
 ///
 /// **The title never moves.** Both states' bodies sit in one slot as tall as
-/// the key state needs, so the panel is the same height in both and the
+/// the taller needs, so the panel is the same height in both and the
 /// transition is a crossfade of the bodies alone. In both, the subtitle sits
 /// right under the title and the rest is centred in the space below it. Inside
 /// `enter`, every state lands as words in the status label's two reserved
@@ -664,7 +664,7 @@ public final class LicenseGateViewController: NSViewController {
     }
 
     /// The key was validated and stored elsewhere (the companion path, or
-    /// Settings › License), so the gate opens as its own check would.
+    /// Settings › Licence), so the gate opens as its own check would.
     public func passWithStoredKey() { pass(afterBeat: false) }
 
     // MARK: Test-support hooks

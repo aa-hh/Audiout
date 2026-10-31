@@ -1227,6 +1227,31 @@ extension SerializedSharedState {
                     == [["source": "settings"], ["source": "note"]])
         }
 
+        /// Red if `settings:pane_selected` went back to sending the on-screen
+        /// title, so renaming "License" to "Licence" split the pane's stream.
+        @Test func aRenamedPaneKeepsItsAnalyticsName() {
+            let captured = Captured()
+            Analytics.install(Analytics.Sink(capture: { captured.append($0, $1) },
+                                             captureError: { _, _ in },
+                                             consentChanged: { _ in }), consent: true)
+            defer { Analytics.install(nil, consent: false) }
+
+            func pane() -> NSViewController {
+                let controller = NSViewController()
+                controller.view = NSView()
+                return controller
+            }
+            let root = SettingsRootViewController(sections: [
+                .init(title: "General", symbolName: "gearshape", viewController: pane()),
+                .init(title: "Licence", symbolName: "key", viewController: pane(),
+                      analyticsName: "License"),
+            ])
+            _ = root.view
+            root.selectSection(at: 1)
+
+            #expect(captured.properties(of: "settings:pane_selected").last == ["pane": "License"])
+        }
+
         /// Red if the Appearance row's readout stops naming the theme and the
         /// accent dial. Here rather than in the parallel suite because picking
         /// an accent remaps the process-global `Tokens.accentStyle`.

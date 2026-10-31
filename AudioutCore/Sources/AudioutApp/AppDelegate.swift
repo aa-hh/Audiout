@@ -229,10 +229,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
     /// `GroupController` as the Mixer, so the two screens stay in lockstep.
     private var mixerWindowController: MixerWindowController?
 
-    /// The Settings screen and its License pane, once built
+    /// The Settings screen and its Licence pane, once built
     /// (`makeSettingsRoot` runs on the first visit). Weak — the surface owns
     /// them; these references let `audiout://register` reach the license sheet
-    /// without the user navigating to the License pane first.
+    /// without the user navigating to the Licence pane first.
     private weak var settingsRootController: SettingsRootViewController?
     private weak var licenseSettingsController: LicenseSettingsViewController?
 
@@ -689,13 +689,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
         // settles, so the surface may not be on screen yet. Submitting into a
         // sheet that was never presented would validate the key with no UI at
         // all — and a REJECTED key would then leave the sheet held but
-        // invisible, wedging "Enter License…" for the rest of the session.
+        // invisible, wedging "Enter licence…" for the rest of the session.
         surface.whenRevealed { [weak self] in
-            // The License section has to be the MOUNTED one: an unmounted
+            // The Licence section has to be the MOUNTED one: an unmounted
             // pane has no window to host a sheet. A build with no license
-            // server has no License section, and nothing to register against.
+            // server has no Licence section, and nothing to register against.
             guard let root = self?.settingsRootController,
-                  let index = root.sectionTitles.firstIndex(of: "License") else { return }
+                  let index = root.sectionTitles.firstIndex(of: "Licence") else { return }
             root.selectSection(at: index)
             self?.licenseSettingsController?.presentLicenseSheet(registering: key)
         }
@@ -1226,7 +1226,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
             showSurface(.settings)
             surface.whenRevealed { [weak self] in
                 guard let root = self?.settingsRootController,
-                      let index = root.sectionTitles.firstIndex(of: "License") else { return }
+                      let index = root.sectionTitles.firstIndex(of: "Licence") else { return }
                 root.selectSection(at: index)
                 self?.licenseSettingsController?.presentLicenseSheetFromNote()
             }
@@ -2654,7 +2654,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
         ]
         // A build with no license server has nothing to verify and nothing to sell.
         if license.isAvailable {
-            sections.append(.init(title: "License", symbolName: "key", viewController: license))
+            // Spelled "Licence" on screen; analytics keeps the pane's old value.
+            sections.append(.init(title: "Licence", symbolName: "key", viewController: license,
+                                  analyticsName: "License"))
         }
         let root = SettingsRootViewController(sections: sections)
         settingsRootController = root
@@ -2867,7 +2869,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
     /// explains it, and the update feed's authorization header (the server
     /// serves the appcast and the download only to a key). Called at launch,
     /// on every validator answer, on a popover open while limited, and whenever
-    /// the License pane commits a key. Idempotent by construction — every write
+    /// the Licence pane commits a key. Idempotent by construction — every write
     /// is a plain assignment of a computed value.
     ///
     /// A build with no licence server is the free build: no limit and no note,
@@ -2939,7 +2941,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
         // ask a direct buyer sees.
         alert.messageText = "Share anonymous usage counts"
         alert.informativeText = "Audiout counts which features get used. "
-            + "No audio, speaker names or your license key are ever part of it."
+            + "No audio, speaker names or your licence key are ever part of it."
         alert.addButton(withTitle: "Share Usage Counts")
         alert.addButton(withTitle: "No Thanks")
         let granted = alert.runModal() == .alertFirstButtonReturn

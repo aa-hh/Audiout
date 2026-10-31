@@ -619,7 +619,7 @@ public final class AppSurfaceController {
     /// Draw `controller`'s view over the Mixer, Scenes and Speakers screens
     /// until ``dismissLicenseGate(animated:)``. It sits below the toolbar
     /// strip, so the four tabs stay live, and it is lifted off while Settings
-    /// is selected (Settings › License keeps its own key sheet). It survives
+    /// is selected (Settings › Licence keeps its own key sheet). It survives
     /// a close: a reopen shows it again. The frame is not resized for it.
     ///
     /// An `NSViewController` rather than the gate's own type, so this target

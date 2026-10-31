@@ -37,8 +37,15 @@ final class LicenseKeyEntryView: NSView, NSTextFieldDelegate {
 
     /// Uppercased, a leading `AUDT` prefix dropped, `O`/`I`/`L` mapped, and
     /// every other character outside the alphabet (dashes, spaces) dropped.
+    ///
+    /// "AU" and "AUD" come back unchanged: an `AUDT` prefix still being typed
+    /// by hand, kept until its `T` lands and the whole prefix drops. No real
+    /// key begins that way, since `U` is outside the alphabet. The count line
+    /// reads 19 and then 18 for those two keystrokes and returns to 20 when
+    /// the `T` lands.
     nonisolated static func normalised(_ text: String) -> String {
         var s = text.uppercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        if (2...3).contains(s.count), "AUDT".hasPrefix(s) { return s }
         if s.hasPrefix("AUDT") { s.removeFirst(4) }
         return String(s.compactMap { c -> Character? in
             switch c {

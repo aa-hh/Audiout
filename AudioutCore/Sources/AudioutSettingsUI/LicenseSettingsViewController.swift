@@ -19,8 +19,8 @@ public final class LicenseSettingsViewController: NSViewController, SettingsRead
     private let openURL: (URL) -> Void
     private let statusLabel = NSTextField(wrappingLabelWithString: "")
     private let checkAgainButton = NSButton()
-    private let checkInDisclosureHelp = HelpButton(subject: "License", text:
-        "Audiout checks in with the license server once per launch to spot a key "
+    private let checkInDisclosureHelp = HelpButton(subject: "Licence", text:
+        "Audiout checks in with the licence server once per launch to spot a key "
         + "shared across many machines. It sends your key, a random per-Mac id, and the "
         + "app version. Nothing else.")
     private let enterLicenseButton = NSButton()
@@ -32,12 +32,12 @@ public final class LicenseSettingsViewController: NSViewController, SettingsRead
     /// one is already out — the button is disabled too, but appearing re-entry
     /// has no button to disable.
     private var revalidateInFlight = false
-    /// The presented (or headlessly held) Enter License… sheet — strong, the
+    /// The presented (or headlessly held) Enter licence… sheet — strong, the
     /// `MixerWindowController.presentCreateSheet` idiom: headless tests never
     /// present, they hold this and drive its `test_` hooks.
     private var licenseSheet: LicenseSheetViewController?
 
-    /// Whether this build has a licence server, and so a License section.
+    /// Whether this build has a licence server, and so a Licence section.
     public var isAvailable: Bool { settings.licenseServerURL != nil }
 
     /// Fired after a licence status change that the app layer must apply.
@@ -63,7 +63,7 @@ public final class LicenseSettingsViewController: NSViewController, SettingsRead
         self.settings = settings
         self.openURL = openURL
         super.init(nibName: nil, bundle: nil)
-        title = "License"
+        title = "Licence"
     }
 
     public required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
@@ -119,7 +119,7 @@ public final class LicenseSettingsViewController: NSViewController, SettingsRead
     // MARK: Layout
 
     public override func loadView() {
-        let (header, glyph) = SettingsPane.makeHeader(symbolName: "key", title: "License",
+        let (header, glyph) = SettingsPane.makeHeader(symbolName: "key", title: "Licence",
                                                       caption: Self.readoutFirstLine(settings: settings),
                                                       helpButton: checkInDisclosureHelp)
         headerGlyph = glyph
@@ -208,7 +208,7 @@ public final class LicenseSettingsViewController: NSViewController, SettingsRead
             // Since 2026-09-26 an unregistered install is not gated; it runs
             // limited to one speaker (dev/notes/unregistered-mode-spec-2026-09-26.md).
             return "Unregistered. Audiout keeps working, on one speaker at a time, "
-                + "until it has a license key."
+                + "until it has a licence key."
         }
         guard let status else {
             return "Your key is saved. Audiout hasn’t been able to verify it yet."
@@ -276,7 +276,7 @@ public final class LicenseSettingsViewController: NSViewController, SettingsRead
         // once one is stored (the sheet then prefills it and offers Remove
         // License…).
         let trialActive = trialIsActive
-        enterLicenseButton.title = !hasKey || trialActive ? "Enter license…" : "Change…"
+        enterLicenseButton.title = !hasKey || trialActive ? "Enter licence…" : "Change…"
 
         // Buying is offered only where it can work (a server and a buy page)
         // and only where it would help (no key, a key the server won’t
@@ -291,7 +291,7 @@ public final class LicenseSettingsViewController: NSViewController, SettingsRead
         if notifyLicenseChanged { onLicenseChanged?() }
     }
 
-    /// Present the Enter License… sheet (`MixerWindowController
+    /// Present the Enter licence… sheet (`MixerWindowController
     /// .presentCreateSheet`'s idiom: strong reference always, `presentAsSheet`
     /// only when a visible window can host it — headless tests drive the held
     /// controller's hooks directly).
@@ -299,7 +299,7 @@ public final class LicenseSettingsViewController: NSViewController, SettingsRead
         presentLicenseSheet(source: "settings")
     }
 
-    /// Open the Enter License… sheet from the Mixer note's "I have a key".
+    /// Open the Enter licence… sheet from the Mixer note's "I have a key".
     public func presentLicenseSheetFromNote() {
         presentLicenseSheet(source: "note")
     }
@@ -323,7 +323,7 @@ public final class LicenseSettingsViewController: NSViewController, SettingsRead
         }
     }
 
-    /// Open the Enter License… sheet pre-filled with `key` and submit it — the
+    /// Open the Enter licence… sheet pre-filled with `key` and submit it — the
     /// landing point for the purchase flow's `audiout://register?key=…` link.
     /// The user already asked for this by following the link, so the Register
     /// click is not asked for a second time; the sheet is what shows the result.
@@ -377,7 +377,7 @@ public final class LicenseSettingsViewController: NSViewController, SettingsRead
     // MARK: Test-support hooks (License, roadmap 054)
 
     /// Register `text` through the REAL sheet path — open the sheet the way
-    /// "Enter License…" does (held headlessly), type into its field, click
+    /// "Enter licence…" does (held headlessly), type into its field, click
     /// Register — so what tests prove is the one commit path users have.
     public func test_setLicenseKey(_ text: String) {
         _ = view
@@ -386,21 +386,21 @@ public final class LicenseSettingsViewController: NSViewController, SettingsRead
         licenseSheet?.test_tapRegister()
     }
 
-    /// Remove the stored key through the sheet's Remove License… path.
+    /// Remove the stored key through the sheet's Remove licence… path.
     public func test_removeLicense() {
         _ = view
         enterLicenseTapped()
         licenseSheet?.test_tapRemove()
     }
 
-    /// Open the Enter License…/Change… sheet as a click would (held
+    /// Open the Enter licence…/Change… sheet as a click would (held
     /// headlessly; drive it via ``test_licenseSheet``).
     public func test_tapEnterLicense() {
         _ = view
         enterLicenseTapped()
     }
 
-    /// The held Enter License… sheet, while one is open (headless runs hold
+    /// The held Enter licence… sheet, while one is open (headless runs hold
     /// it without presenting).
     public var test_licenseSheet: LicenseSheetViewController? { licenseSheet }
 

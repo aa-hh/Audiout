@@ -168,7 +168,7 @@ import AudioutCore
     @Test func aboutStatesExactlyWhatTheAppSends() {
         let about = GeneralSettingsViewController(loginItem: FakeLoginItem())
             .test_about.test_aboutViewController
-        #expect(about.test_privacyText == "Discovery, routing, volume, and playback stay entirely on your network — none of it touches a server, even offline. Audiout’s only outside connections are about your license and updates: a check of your key, a once-per-launch check-in (your key, a random per-Mac id, and the app version — nothing else), and the update check when one runs. A build compiled from source makes none of these.")
+        #expect(about.test_privacyText == "Discovery, routing, volume, and playback stay entirely on your network — none of it touches a server, even offline. Audiout’s only outside connections are about your licence and updates: a check of your key, a once-per-launch check-in (your key, a random per-Mac id, and the app version — nothing else), and the update check when one runs. A build compiled from source makes none of these.")
     }
 
     @Test func viewSourceCodeButtonOpensTheRepositoryURLThroughTheInjectedSeam() {

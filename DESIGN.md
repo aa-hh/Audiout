@@ -71,14 +71,6 @@ typography:
     fontFamily: "SF Pro (system), monospacedDigit"
     fontSize: "28pt (off-scale)"
     fontWeight: 600
-  titleLarge:
-    fontFamily: "SF Pro (system)"
-    fontSize: "15pt (systemFontSize + 2)"
-    fontWeight: 400
-  subtitleLarge:
-    fontFamily: "SF Pro (system)"
-    fontSize: "12pt (systemFontSize - 1)"
-    fontWeight: 400
   caption:
     fontFamily: "SF Pro (system)"
     fontSize: "11pt (smallSystemFontSize)"
@@ -123,10 +115,6 @@ typography:
   display:
     fontFamily: "SF Pro (system)"
     fontSize: "20pt"
-    fontWeight: 700
-  displayLarge:
-    fontFamily: "SF Pro (system)"
-    fontSize: "24pt"
     fontWeight: 700
   wordmark:
     fontFamily: "ClashDisplay-Semibold (bundled at assembly, falls back to bold system)"
@@ -522,13 +510,10 @@ relative to a text style.
 
 ### Hierarchy
 - **Display** (700, 20pt): a window's own headline, where the headline is the
-  reason the window opened, and the licence gate's "Activate Audiout".
-  `displayLarge` (700, 24pt) has no consumer.
+  reason the window opened, and the licence gate's "Unlock Audiout".
 - **Heading** (600, 16pt; `headingDigits` 600/16pt with tabular digits for
   the Overview's counts): a window page's name and the "Equalizer" heading
   on the speaker page and the Main Audio page — one step above body.
-- **Title Large / Subtitle Large** (`titleLarge` 400/15pt, `subtitleLarge`
-  400/12pt): the licence gate's subtitles and status line.
 - **Body** (400, 13pt; `bodyEmphasized` 600/13pt for the sidebar plates and
   the password sheet's heading):
   list-row titles, form labels, and a section title above a box (the scene
@@ -641,23 +626,23 @@ glyph at the cell's leading edge and the readout in `caption`/`labelCool` 2pt
 under the name. Each readout follows one rule: something the user must act on,
 else what changes what they hear or who can control the Mac, else the
 section's headline setting. VoiceOver hears the row as "name, readout", each
-" · " spoken as a comma ("License, Trial, 9 days left"). Each pane opens with
+" · " spoken as a comma ("Licence, Trial, 9 days left"). Each pane opens with
 `PageHeaderView` carrying a bare 30pt glyph in the 48pt slot, no well; its
 content sits on the 14pt lane in `ListRowView` rows over `GroupedSectionView`
-`.card` boxes at the `row` radius, and the License pane is one `.well` at the
+`.card` boxes at the `row` radius, and the Licence pane is one `.well` at the
 same radius holding the status sentence and its buttons. Buy Audiout is a
 `ProminentButton` and shows in the trial and unregistered states (and for a
-key the server refused); Enter license… and Change… stay stock. The sidebar
-glyph and the License header glyph take `ring` in the states marked below and
+key the server refused); Enter licence… and Change… stay stock. The sidebar
+glyph and the Licence header glyph take `ring` in the states marked below and
 `labelCool` otherwise.
 
 Eight Settings explanations use stock help buttons immediately beside their
 row or page title: Touch Bar controls, anonymous usage statistics, iPhone
 control, connection volume, wake restore, Bluetooth pauses, Audio buffer and
-License. Hover shows a native tooltip; keyboard activation or a click opens
+Licence. Hover shows a native tooltip; keyboard activation or a click opens
 a transient text popover. The same copy is exposed to VoiceOver. Changing a
-setting updates its help text and any open popover. License check-in help
-appears beside License only while a server and saved key exist. Launch at
+setting updates its help text and any open popover. Licence check-in help
+appears beside Licence only while a server and saved key exist. Launch at
 login, reconnect, Theme, Accent, the Remote invitation and Apps that stay on
 this Mac have plain titles without explanatory subtitles.
 The empty Apps that stay on this Mac card fits one 44 pt Add app row plus
@@ -677,7 +662,7 @@ collapsing Advanced dismisses its popover.
 | Audiout Remote | "Off", "On · no iPhones yet", "On · 1 iPhone allowed", "On · N iPhones allowed" | `labelCool` |
 | Appearance | "{theme} · {accent}", e.g. "Match system · Full gold" | `labelCool` |
 | Audio | "No apps stay on this Mac", "1 app stays on this Mac", "N apps stay on this Mac"; second line "Buffer N ms" while the buffer is not 1000 ms | `labelCool` |
-| License (builds with a licence server only) | "Trial · N days left", "Registered", "Key saved, not verified" | `labelCool` |
+| Licence (builds with a licence server only) | "Trial · N days left", "Registered", "Key saved, not verified" | `labelCool` |
 | | "Unregistered", "Trial ended", "Key refunded", "Payment reversed", "Key revoked", "Key not recognized", "Not an Audiout key"; second line "One speaker at a time" while the install is limited and no trial runs | `ring` |
 
 The Scenes and Speakers content (`MixerWindowController`) has two independent
@@ -739,9 +724,10 @@ one hero panel, gating Done until every check passes.
 
 Mostly flat, matching iOS: the dark ground ladder (canvas → panel → raised)
 and, in light, edge weight alone carry depth. `Tokens.Color.shadow` (an
-alias of `NSColor.black`) has five real consumers. Four are a flat clipped
+alias of `NSColor.black`) has six real consumers. Five are a flat clipped
 band rather than a blurred shadow: `AlignmentPlateCell` (the
-wizard's answer-plate lip shading, rim shadow blend, and chip shadow fill),
+wizard's answer-plate lip shading and rim shadow blend), `KeycapChip` (the
+keycap's bottom lip, on the wizard's plates and the licence gate's Buy),
 `WarmFaderCell` (the fader trough's inset shade at
 `Tokens.Color.insetShadeAlpha`, 0.18),
 `GroupedSectionView`'s `.well` style (a 1pt band at that same alpha, clipped
@@ -1224,35 +1210,40 @@ other tab.
 - **Scrim:** the bottom 420 pt (or the whole overlay, if shorter), `canvas`
   from clear at its top to 0.55 at 42 % and solid from 82 %.
 - **Panel:** 14 pt in from both sides, 8 pt above the bottom; `raised` fill,
-  1 pt `rim` edge, `row` radius (16 pt), a black shadow at 0.18 dark / 0.10
-  light, 12 pt blur, 4 pt down. Padding 16 top, 15 sides. Everything is
-  centred. The title "Activate Audiout" (`display` / `label`, a heading) sits
-  at the top in both states; under it one slot holds the two states' bodies,
-  as tall as the taller needs, so the panel keeps one height and the title
-  never moves. In each state the subtitle sits 2 pt under the title and the
-  rest is centred in the space below it, at least 24 pt under the subtitle
-  and 28 pt above the panel's bottom edge.
+  1 pt `containerEdge` edge, `row` radius (16 pt), a black shadow at 0.18
+  dark / 0.10 light, 12 pt blur, 4 pt down. Padding 16 top, 15 sides. The
+  title "Unlock Audiout" (`display` / `label`, a heading) sits at the top
+  leading edge in both states; under it one slot holds the two states'
+  bodies, as tall as the taller needs, so the panel keeps one height and the
+  title never moves. In each state the sentence sits 2 pt under the title at
+  the leading edge, and the rest is centred in the space below it, at least
+  24 pt under the sentence and 28 pt above the panel's bottom edge.
 - **Offer** (the panel opens here when the build has a checkout URL), 12 pt
   apart unless stated:
-  1. "Purchasing Audiout provides a licence that unlocks both this Mac as
-     well as its companion iOS remote app." in `titleLarge` / `label2`,
-     wrapping at 520 pt. A build that does not offer the phone app
-     (`AppSettings.remoteAppIsOffered` false) reads "Purchasing Audiout
-     provides a licence that unlocks this Mac." instead.
-  2. One row, 16 pt apart: "Buy Audiout", the primary `CTAButton` (gold,
-     `heading`, 200 x 44 pt), the Return key, which opens the checkout and
-     moves to the key state; beside it "Start 14 day free trial", the
-     secondary `CTAButton` (`raised`, `pendingGlow` edge, `body`, 200 x 44
-     pt), only before any trial (Buy alone stays centred once it is gone). It
+  1. "One purchase covers this Mac and Audiout Remote on your iPhone." in
+     `body` / `label2`, leading-aligned, wrapping at 520 pt. A build that
+     does not offer the phone app (`AppSettings.remoteAppIsOffered` false)
+     reads "One purchase covers this Mac." instead.
+  2. "Buy Audiout", the primary `CTAButton` (gold, `heading`, 44 pt tall and
+     the slot's full width, 655 pt at the surface's 713 pt floor), the Return
+     key, so it wears the "⏎" chip at its trailing end. It opens the checkout
+     and moves to the key state.
+  3. Under it, "Try free for 14 days", the secondary `CTAButton` (`raised`,
+     1 pt `rim` edge, `heading`, the same size), only before any trial. It
      starts the trial and opens the gate at once. This is the only trial
      button on the gate.
-  3. 18 pt below the row, "I already have a key" (text link, `caption`): the
-     key state without the checkout.
+  4. 18 pt below the trial, "I have a key" (gold `TextActionButton`),
+     centred: the key state without the checkout.
+  5. Last, "No card or email. After 14 days, Audiout keeps playing on one
+     speaker until you buy." in `caption` / `label2`, centred, wrapping at
+     520 pt, shown with the trial button only, so only before any trial.
+     Once the trial and this line are gone, Buy and "I have a key" close up
+     with nothing left between them.
 - **Key state** (a build with no checkout URL opens here):
-  1. "Copy your licence key from your receipt email, enter it below, or" in
-     `titleLarge` / `label2`, then 4 pt after it on the same line "click here
-     to paste it" (gold `TextActionButton`), which fills the boxes from a
-     clipboard key starting `AUDT-`.
+  1. "Paste or type the key from your receipt email." in `body` / `label2`,
+     then 8 pt after it on the same line, first baselines aligned, "Paste
+     key" (gold `TextActionButton`), which fills the boxes from a clipboard
+     key starting `AUDT-`. The row is leading-aligned.
   2. The key entry (`LicenseKeyEntryView`), in its own band with 14 pt
      clear above and below it: an `AUDT` plate
      drawn by `CodeBoxCell` like the boxes but never editable, 104 x 40 pt in
@@ -1262,9 +1253,11 @@ other tab.
      row is 524 pt. The boxes take Crockford base32 only, uppercase, with `O`
      as `0` and `I`, `L` as `1`; the fifth character moves focus on, Delete
      on an empty box steps back, a pasted key spreads five per box from the
-     edited one.
-  3. Directly under the band (0 pt), the status label, `titleLarge`,
-     centred, two lines reserved. Line one is the status in `label2`: "20
+     edited one. A hand-typed AUDT at the start of the first box is dropped
+     like a pasted prefix: "AU" and "AUD" stay in the box while it is typed,
+     and the box empties when the T lands.
+  3. Directly under the band (0 pt), the status label, `body`, centred, two
+     lines reserved. Line one is the status in `label2`: "20
      characters to go" down to "1 character to go"; the twentieth character
      submits the key and shows "Verifying…", the whole label pulsing 1 →
      0.55 → 1 opacity on a 1.4 s ease-in-out cycle (none under Reduce
@@ -1284,7 +1277,7 @@ other tab.
 
   The two states crossfade over 0.25 s either way (at once under Reduce
   Motion); the title stays put. A purchase deep link moves straight to the
-  key state and verifies. A key the server accepts in Settings › License
+  key state and verifies. A key the server accepts in Settings › Licence
   (the one screen the gate leaves uncovered) lifts the gate too. There is no
   Register button: a full key verifies itself. No Quit either: the
   status-item menu has it.
@@ -1296,22 +1289,32 @@ Motion it goes at once.
 
 ### CTA Button
 `CTAButton` (`AudioutSharedUI`) is the iPhone's `GoldCTALabel` face restated:
-200 x 44 pt, control radius (10 pt), title centred, a flat drawn fill that
-stays the same when the window is not key. The primary is `gold` with
-`inkOnFill` ink, both pinned to their dark values in both appearances as
-`ProminentButton` pins them, in `heading`; pressed blends the fill 12 %
-toward black; disabled is a `well` fill with `labelCool2` ink. The secondary
-is `raised` with a 1 pt inside `pendingGlow` edge and `label` ink in `body`;
-pressed blends the fill 8 % toward `label`; disabled ink is `label3`. Users:
-the licence gate's "Buy Audiout" (primary) and its trial offer (secondary).
-Nowhere else yet.
+44 pt tall, never narrower than 200 pt and stretched to whatever width its
+layout pins (low horizontal hugging, required compression resistance),
+control radius (10 pt), title centred in the whole face in `heading`, a flat
+drawn fill with no bevel that stays the same when the window is not key. The
+primary is `gold` with `inkOnFill` ink, both pinned to their dark values in
+both appearances as `ProminentButton` pins them; pressed blends the fill
+12 % toward black; disabled is a `well` fill with `labelCool2` ink. The
+secondary is `raised` with a 1 pt inside `rim` edge and `label` ink; pressed
+blends the fill 8 % toward `label`; disabled ink is `label3`.
+
+While its key equivalent is Return, the button draws a "⏎" `KeycapChip`
+(`AudioutSharedUI`) at its trailing end in the face's ink, and VoiceOver reads
+"Press Return" as its help; the title stays centred in the whole face. The
+chip is the alignment wizard plates' own: 22 x 22 pt (44 x 20 for "SPACE"),
+control radius, no fill, a 1 pt rim in the ink at 0.55, the glyph in
+`keycap`, a 2 pt inner bottom lip in `shadow` at 0.25, 14 pt in from the
+trailing edge and centred on the midline; pressed, the lip drops to 1 pt and
+the chip moves down 1 pt. Users: the licence gate's "Buy Audiout" (primary,
+the Return default) and its trial offer (secondary). Nowhere else yet.
 
 ### Text Link
 `TextLinkButton` (`AudioutSharedUI`) is the app's one underlined text link:
 the underline is its only signal, in `label2` (`label3` while disabled), with
 the pointing-hand cursor, at `.body` or `.caption` size. Users: a note
-banner's text action, a row's "Enter Password…", the licence gate's "I
-already have a key".
+banner's text action, a row's "Enter Password…", the licence gate's "Back"
+and "Lost your key?".
 Never gold.
 
 ### Text Action (gold)
@@ -1319,7 +1322,8 @@ Never gold.
 `TextAction`: `bodyEmphasized` in `goldText`, no underline, no bezel,
 `label3` while disabled, the pointing-hand cursor while enabled, re-styled on
 an accent-dial change. It is for a tertiary call to action that must read as
-a route forward; today only the licence gate's "click here to paste it".
+a route forward; today only the licence gate's "I have a key" and "Paste
+key".
 Every other text action stays the quiet `TextLinkButton`.
 
 ### Failure Pill (Mixer FEED column)
@@ -1781,6 +1785,18 @@ is a change in two apps.
   the untuned chip, the row menu, the wizard page's trailing panel. The
   drawer's metronome toggle is **"Play ticks"** on the Mac and "Start the
   ticks" / "Stop the ticks" on the phone; both apps say "ticks".
+- **Purchase words, shared with the iPhone's lock screen** (the Mac's
+  licence gate first, the phone's `LockedView` second). Both apps spell it
+  **"licence"**.
+  - Title: "Unlock Audiout" / "Unlock Audiout on {Mac name}".
+  - Sentence: "One purchase covers this Mac and Audiout Remote on your
+    iPhone." / "One purchase covers your Mac and every iPhone that connects
+    to it."
+  - Buy: "Buy Audiout" / "Buy Mac licence for {price}".
+  - Trial: "Try free for 14 days", with "No card or email. After 14 days,
+    Audiout keeps playing on one speaker until you buy." under it / "Audiout
+    on your Mac offers a free 14-day trial when it first opens."
+  - Key: "I have a key" / "Restore purchase".
 
 ## Do's and Don'ts
 

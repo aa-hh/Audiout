@@ -41,33 +41,54 @@ import Testing
         #expect(abs(light.greenComponent - pinned.greenComponent) < 0.03, "drew \(light), not the gold \(pinned)")
     }
 
-    /// Red if the secondary's edge stopped being `pendingGlow` or the primary gained one.
-    @Test func theSecondaryEdgeIsPendingGlow() throws {
-        let secondary = CTAButton(title: "Start 14 day free trial", style: .secondary, target: nil, action: nil)
+    /// Red if the secondary's edge stopped being `rim` or the primary gained one.
+    @Test func theSecondaryEdgeIsTheRim() throws {
+        let secondary = CTAButton(title: "Try free for 14 days", style: .secondary, target: nil, action: nil)
         let primary = CTAButton(title: "Buy Audiout", style: .primary, target: nil, action: nil)
         let cell = try #require(secondary.cell as? CTAButtonCell)
         let edge = try #require(cell.edge)
-        // `pendingGlow` is a fresh dynamic colour on every read, so compare
-        // what it resolves to in each appearance.
+        // `rim` is a fresh dynamic colour on every read, so compare what it
+        // resolves to in each appearance.
         for name in [NSAppearance.Name.aqua, .darkAqua] {
             var drawn: NSColor?
             var expected: NSColor?
             try #require(NSAppearance(named: name)).performAsCurrentDrawingAppearance {
                 drawn = edge.usingColorSpace(.sRGB)
-                expected = Tokens.Color.pendingGlow.usingColorSpace(.sRGB)
+                expected = Tokens.Color.rim.usingColorSpace(.sRGB)
             }
             #expect(drawn != nil && drawn == expected, "\(name): edge \(String(describing: drawn))")
         }
         #expect(try #require(primary.cell as? CTAButtonCell).edge == nil)
     }
 
-    /// Red if either style stopped reporting 200 x 44 pt, or a
-    /// stock bezel's insets came back around the face.
+    /// Red if the floor moved from 200 x 44 pt, a stock bezel's insets came
+    /// back around the face, the face hugged its floor so a width pin could
+    /// not stretch it, or the secondary dropped to `body`.
     @Test(arguments: [CTAButton.Style.primary, .secondary])
     func theIntrinsicSizeIsTheiPhones(style: CTAButton.Style) {
         let button = CTAButton(title: "A title", style: style, target: nil, action: nil)
         #expect(button.intrinsicContentSize == NSSize(width: 200, height: 44))
         #expect(button.fittingSize == NSSize(width: 200, height: 44))
+        #expect(button.contentHuggingPriority(for: .horizontal) < .required)
+        #expect(button.font == Tokens.Font.heading)
+    }
+
+    /// Red if the chip stopped drawing on the Return default or its AX help
+    /// went missing.
+    @Test func theReturnDefaultWearsTheKeycapChip() throws {
+        func rendered(_ keyEquivalent: String) throws -> (Data, String?) {
+            let button = CTAButton(title: "Buy Audiout", style: .primary, target: nil, action: nil)
+            button.keyEquivalent = keyEquivalent
+            let rep = try #require(button.bitmapImageRepForCachingDisplay(in: button.bounds))
+            button.cacheDisplay(in: button.bounds, to: rep)
+            let bytes = try #require(rep.bitmapData)
+            return (Data(bytes: bytes, count: rep.bytesPerPlane * rep.numberOfPlanes), button.accessibilityHelp())
+        }
+        let (withChip, help) = try rendered("\r")
+        let (plain, plainHelp) = try rendered("")
+        #expect(withChip != plain)
+        #expect(help == "Press Return")
+        #expect(plainHelp == nil)
     }
 
     /// Red if the custom cell took over behaviour as well as paint, so a click

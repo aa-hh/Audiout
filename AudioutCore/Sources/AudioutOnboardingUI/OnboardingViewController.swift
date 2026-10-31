@@ -837,7 +837,7 @@ public final class OnboardingViewController: NSViewController {
                 activeTitle: "Share anonymous usage counts",
                 completedTitle: "Audiout counts feature use, anonymously",
                 detail: "Audiout counts which features get used. No audio, "
-                    + "speaker names or your license key are ever part of it.",
+                    + "speaker names or your licence key are ever part of it.",
                 // What the button gets: not a capability for the user, and the
                 // copy doesn't pretend otherwise. This is the one card where
                 // the person being helped is the one who wrote the app, and

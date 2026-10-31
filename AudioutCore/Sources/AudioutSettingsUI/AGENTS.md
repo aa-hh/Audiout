@@ -2,7 +2,7 @@
 
 ## Purpose
 
-The Settings content: General, Audiout Remote, Appearance, Audio and License as sections of a sidebar-plus-pane `SettingsRootViewController`, hosted as the one surface's Settings screen.
+The Settings content: General, Audiout Remote, Appearance, Audio and Licence as sections of a sidebar-plus-pane `SettingsRootViewController`, hosted as the one surface's Settings screen.
 
 ## Rules
 
@@ -28,6 +28,6 @@ The Settings content: General, Audiout Remote, Appearance, Audio and License as 
 - `GeneralSettingsViewController` → launch at login, reconnect, Touch Bar, usage statistics.
 - `RemoteSettingsViewController` → iPhone switch, invitation, remembered phones.
 - `LicenseSettingsViewController` → the licence well.
-- `LicenseSheetViewController` → the Enter License sheet, the only key field.
+- `LicenseSheetViewController` → the Enter Licence sheet, the only key field.
 - `AppearanceSettingsViewController` → theme tiles and the accent dial.
 - `AudioSettingsViewController` → excluded apps, connect volume, wake restore, Advanced.

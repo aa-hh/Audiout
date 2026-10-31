@@ -11,7 +11,7 @@
 // appearances.
 //
 // Settings is SIDEBAR content (General / Audiout Remote / Appearance / Audio /
-// License sections, one pane) hosted on the one-surface shell. Each render below is the PANE only —
+// Licence sections, one pane) hosted on the one-surface shell. Each render below is the PANE only —
 // the sidebar and the surface's chrome are deliberately absent. These goldens
 // verify each pane's own layout and dark-mode appearance; the sidebar itself
 // (labels, symbols, selection) is covered by the `SettingsRootViewController`
@@ -133,7 +133,7 @@ func makeSnapshotDefaults() -> UserDefaults {
 func makeRoot() -> SettingsRootViewController {
     // Seed the two URLs the app normally reads from its Info.plist: under a
     // bare `swift run` there is no such bundle, so without these the License
-    // section — status line, Enter License…, Buy — never renders and the
+    // section — status line, Enter licence…, Buy — never renders and the
     // golden records a build that cannot be licensed.
     let settings = AppSettings(defaults: makeSnapshotDefaults(),
                                licenseServerURL: URL(string: "https://license.audiout.app"),
@@ -172,7 +172,7 @@ func makeRoot() -> SettingsRootViewController {
               viewController: AudioSettingsViewController(excluded: excludedApps,
                                                           runningAppsProvider: { [] },
                                                           latency: latency)),
-        .init(title: "License", symbolName: "key",
+        .init(title: "Licence", symbolName: "key",
               viewController: LicenseSettingsViewController(settings: settings)),
     ]
     return SettingsRootViewController(sections: sections)

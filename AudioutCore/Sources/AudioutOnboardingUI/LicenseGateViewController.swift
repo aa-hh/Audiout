@@ -12,17 +12,19 @@ import AudioutSharedUI
 /// bottom 420 pt, and a raised panel 14 pt in from the sides and 8 pt above the
 /// bottom.
 ///
-/// The panel has two states, everything centred. `offer`: the title, a
-/// subtitle, the gold "Buy Audiout", the trial button (only before any trial)
-/// and "I already have a key". `enter`: the same title, a subtitle ending in
-/// "click here to paste it", the key boxes and a two-line status label.
-/// Buy opens the checkout and moves to `enter`; "I already have a key" moves
-/// there without the checkout; a build with no checkout URL opens in `enter`.
+/// The panel has two states, the title and subtitle leading-aligned in both.
+/// `offer`: the title, a subtitle, then the gold "Buy Audiout" and under it
+/// the trial button (only before any trial), both full width, then "I have a
+/// key" and the reassurance line (with the trial only), centred under them.
+/// `enter`: the same title, a subtitle with "Paste key" after it on the same
+/// line, the key boxes and a two-line status label, both centred.
+/// Buy opens the checkout and moves to `enter`; "I have a key" moves there
+/// without the checkout; a build with no checkout URL opens in `enter`.
 /// `enter` ends in "Back" (to `offer`, so a buyer who abandoned the checkout
 /// can reach Buy or the trial again; hidden without a checkout URL).
 ///
 /// **The title never moves.** Both states' bodies sit in one slot as tall as
-/// the key state needs, so the panel is the same height in both and the
+/// the taller needs, so the panel is the same height in both and the
 /// transition is a crossfade of the bodies alone. In both, the subtitle sits
 /// right under the title and the rest is centred in the space below it. Inside
 /// `enter`, every state lands as words in the status label's two reserved
@@ -51,23 +53,27 @@ public final class LicenseGateViewController: NSViewController {
     private let onPassed: () -> Void
 
     private let panel = GatePanelView()
-    private let headlineLabel = NSTextField(labelWithString: "Activate Audiout")
+    private let headlineLabel = NSTextField(labelWithString: "Unlock Audiout")
 
     // The offer.
     private let offerBody = NSView()
-    /// Buy, the trial and "I already have a key", centred in the space under
-    /// the offer's subtitle.
+    /// Buy and the trial at full width, then "I have a key" and the
+    /// reassurance line centred, all in the space under the offer's subtitle.
     private let offerActions = NSStackView()
     static let offerSubtitleWithPhone =
-        "Purchasing Audiout provides a licence that unlocks both this Mac as well as its companion iOS remote app."
-    static let offerSubtitleMacOnly = "Purchasing Audiout provides a licence that unlocks this Mac."
+        "One purchase covers this Mac and Audiout Remote on your iPhone."
+    static let offerSubtitleMacOnly = "One purchase covers this Mac."
     private let offerSubtitle = NSTextField(wrappingLabelWithString: AppSettings.remoteAppIsOffered
         ? LicenseGateViewController.offerSubtitleWithPhone : LicenseGateViewController.offerSubtitleMacOnly)
-    /// The panel's one gold button, the 200 x 44 gold `CTAButton`.
+    /// The panel's one gold button, a full-width gold `CTAButton` and the
+    /// offer's Return default.
     private var buyButton: CTAButton!
     private let trialButton = CTAButton(title: LicenseGateViewController.trialTitle,
                                         style: .secondary, target: nil, action: nil)
-    private let haveKeyButton = TextLinkButton(title: "I already have a key", size: .caption)
+    private let haveKeyButton = TextActionButton(title: "I have a key")
+    /// What the trial asks for and what happens at its end. Shown with the
+    /// trial button only.
+    private let reassuranceLabel = NSTextField(wrappingLabelWithString: LicenseGateViewController.reassuranceLine)
 
     // The key entry.
     private let enterBody = NSView()
@@ -75,8 +81,8 @@ public final class LicenseGateViewController: NSViewController {
     /// under the key state's subtitle.
     private let enterActions = NSStackView()
     private let enterSubtitle = NSTextField(labelWithString:
-        "Copy your licence key from your receipt email, enter it below, or")
-    private let pasteButton = TextActionButton(title: "click here to paste it")
+        "Paste or type the key from your receipt email.")
+    private let pasteButton = TextActionButton(title: "Paste key")
     private let keyEntry = LicenseKeyEntryView()
     /// Two reserved lines: the status, then its detail where there is one.
     private let statusLine = NSTextField(wrappingLabelWithString: "")
@@ -97,7 +103,7 @@ public final class LicenseGateViewController: NSViewController {
 
     /// Where a pre-filled key may come from, injectable so tests can offer one
     /// without touching the user's real pasteboard. Read when the user clicks
-    /// "click here to paste it", or once on arriving in `enter` when
+    /// "Paste key", or once on arriving in `enter` when
     /// `pasteboardAccessIsAlwaysAllowed` says this app may already read the
     /// pasteboard without being asked.
     public var pasteboardString: () -> String? = { NSPasteboard.general.string(forType: .string) }
@@ -120,9 +126,7 @@ public final class LicenseGateViewController: NSViewController {
     /// The air above and below each state's body.
     private static let bodyAir: CGFloat = 28
     private static let rowSpacing: CGFloat = 12
-    /// Between Buy and the trial button when they share a row.
-    private static let ctaGap: CGFloat = 16
-    /// From the Buy / trial row down to "I already have a key".
+    /// From the trial button down to "I have a key".
     private static let haveKeyGap: CGFloat = 18
     /// The key row's own band, above and below it.
     private static let keyBandInset: CGFloat = 14
@@ -132,7 +136,9 @@ public final class LicenseGateViewController: NSViewController {
     private static let subtitleWidth: CGFloat = 520
     private static let keyLength = LicenseKeyEntryView.boxCount * LicenseKeyEntryView.groupSize
 
-    private static let trialTitle = "Start 14 day free trial"
+    private static let trialTitle = "Try free for 14 days"
+    static let reassuranceLine =
+        "No card or email. After 14 days, Audiout keeps playing on one speaker until you buy."
 
     /// How long an accepted key's "Registered" stays readable before the
     /// overlay fades.
@@ -161,13 +167,13 @@ public final class LicenseGateViewController: NSViewController {
     public override func loadView() {
         headlineLabel.font = Tokens.Font.display
         headlineLabel.textColor = Tokens.Color.label
-        headlineLabel.alignment = .center
+        headlineLabel.alignment = .natural
         headlineLabel.setAccessibilityHeading()
 
         // The offer.
-        offerSubtitle.font = Tokens.Font.titleLarge
+        offerSubtitle.font = Tokens.Font.body
         offerSubtitle.textColor = Tokens.Color.label2
-        offerSubtitle.alignment = .center
+        offerSubtitle.alignment = .natural
         offerSubtitle.preferredMaxLayoutWidth = Self.subtitleWidth
 
         buyButton = CTAButton(title: "Buy Audiout", style: .primary, target: self,
@@ -183,31 +189,35 @@ public final class LicenseGateViewController: NSViewController {
         trialButton.target = self
         trialButton.action = #selector(trialTapped)
         trialButton.isHidden = settings.trialStartedAt != nil
+        reassuranceLabel.isHidden = settings.trialStartedAt != nil
 
         haveKeyButton.target = self
         haveKeyButton.action = #selector(haveKeyTapped)
 
-        // Buy and the trial side by side (owner's call 2026-10-20), the link
-        // under them. A hidden trial button DETACHES (the stack view's
-        // default), so Buy alone stays centred rather than leaving a gap.
-        let ctaRow = NSStackView(views: [buyButton, trialButton])
-        ctaRow.orientation = .horizontal
-        ctaRow.alignment = .centerY
-        ctaRow.spacing = Self.ctaGap
-        [ctaRow, haveKeyButton].forEach(offerActions.addArrangedSubview)
-        offerActions.setCustomSpacing(Self.haveKeyGap, after: ctaRow)
+        reassuranceLabel.font = Tokens.Font.caption
+        reassuranceLabel.textColor = Tokens.Color.label2
+        reassuranceLabel.alignment = .center
+        reassuranceLabel.preferredMaxLayoutWidth = Self.subtitleWidth
+
+        // Buy, then the trial under it, both full width; "I have a key" and
+        // the reassurance line centred under them. A hidden stack child
+        // DETACHES (the stack view's default), so Buy keeps its place when
+        // the trial and its line are gone.
+        [buyButton, trialButton, haveKeyButton, reassuranceLabel].forEach(offerActions.addArrangedSubview)
+        offerActions.setCustomSpacing(Self.haveKeyGap, after: trialButton)
 
         // The key entry.
-        enterSubtitle.font = Tokens.Font.titleLarge
+        enterSubtitle.font = Tokens.Font.body
         enterSubtitle.textColor = Tokens.Color.label2
+        enterSubtitle.alignment = .natural
         pasteButton.target = self
         pasteButton.action = #selector(pasteTapped)
         let subtitleRow = NSStackView(views: [enterSubtitle, pasteButton])
         subtitleRow.orientation = .horizontal
         subtitleRow.alignment = .firstBaseline
-        subtitleRow.spacing = 4
+        subtitleRow.spacing = 8
 
-        statusLine.font = Tokens.Font.titleLarge
+        statusLine.font = Tokens.Font.body
         statusLine.textColor = Tokens.Color.label2
         statusLine.alignment = .center
         statusLine.maximumNumberOfLines = 2
@@ -265,7 +275,8 @@ public final class LicenseGateViewController: NSViewController {
                 body.bottomAnchor.constraint(equalTo: slot.bottomAnchor),
                 subtitle.topAnchor.constraint(equalTo: body.topAnchor,
                                               constant: Tokens.Layout.titleSubtitleSpacing),
-                subtitle.centerXAnchor.constraint(equalTo: body.centerXAnchor),
+                subtitle.leadingAnchor.constraint(equalTo: body.leadingAnchor),
+                subtitle.trailingAnchor.constraint(lessThanOrEqualTo: body.trailingAnchor),
                 space.topAnchor.constraint(equalTo: subtitle.bottomAnchor),
                 space.bottomAnchor.constraint(equalTo: body.bottomAnchor),
                 actions.leadingAnchor.constraint(equalTo: body.leadingAnchor),
@@ -284,7 +295,7 @@ public final class LicenseGateViewController: NSViewController {
 
         let column = NSStackView(views: [headlineLabel, slot])
         column.orientation = .vertical
-        column.alignment = .centerX
+        column.alignment = .leading
         column.spacing = 0
         column.edgeInsets = NSEdgeInsets(top: Self.padTop, left: Self.padSide,
                                          bottom: 0, right: Self.padSide)
@@ -293,7 +304,7 @@ public final class LicenseGateViewController: NSViewController {
         panel.addSubview(column)
         panel.setAccessibilityElement(true)
         panel.setAccessibilityRole(.group)
-        panel.setAccessibilityLabel("Activate Audiout")
+        panel.setAccessibilityLabel("Unlock Audiout")
 
         let root = LicenseGateOverlayView()
         root.addSubview(panel)
@@ -310,15 +321,22 @@ public final class LicenseGateViewController: NSViewController {
             slot.widthAnchor.constraint(equalTo: column.widthAnchor, constant: -2 * Self.padSide),
             slotHug,
             offerSubtitle.widthAnchor.constraint(lessThanOrEqualToConstant: Self.subtitleWidth),
+            buyButton.widthAnchor.constraint(equalTo: offerActions.widthAnchor),
+            reassuranceLabel.widthAnchor.constraint(lessThanOrEqualToConstant: Self.subtitleWidth),
             subtitleRow.widthAnchor.constraint(lessThanOrEqualTo: slot.widthAnchor),
             keyEntry.topAnchor.constraint(equalTo: keyBand.topAnchor, constant: Self.keyBandInset),
             keyEntry.bottomAnchor.constraint(equalTo: keyBand.bottomAnchor, constant: -Self.keyBandInset),
             keyEntry.leadingAnchor.constraint(equalTo: keyBand.leadingAnchor),
             keyEntry.trailingAnchor.constraint(equalTo: keyBand.trailingAnchor),
-            statusLine.heightAnchor.constraint(equalToConstant: 2 * Self.lineHeight(Tokens.Font.titleLarge)),
+            statusLine.heightAnchor.constraint(equalToConstant: 2 * Self.lineHeight(Tokens.Font.body)),
             statusLine.widthAnchor.constraint(equalTo: slot.widthAnchor),
             bottomRow.widthAnchor.constraint(equalTo: slot.widthAnchor),
         ]
+        // A hidden trial button is detached from the stack, outside the view
+        // tree a pin to the stack needs, and it never comes back on this gate.
+        if !trialButton.isHidden {
+            constraints.append(trialButton.widthAnchor.constraint(equalTo: offerActions.widthAnchor))
+        }
         NSLayoutConstraint.activate(constraints)
         view = root
 
@@ -346,8 +364,8 @@ public final class LicenseGateViewController: NSViewController {
     }
 
     /// Authored rather than inferred from frames. The offer: Buy, the trial
-    /// where there is one, "I already have a key", and back. The key entry:
-    /// the paste link, the four boxes, Back where shown, and back.
+    /// where there is one, "I have a key", and back. The key entry: "Paste
+    /// key", the four boxes, Back where shown, and back.
     private func applyTabOrder() {
         if state == .offer {
             buyButton.nextKeyView = trialButton.isHidden ? haveKeyButton : trialButton
@@ -572,7 +590,7 @@ public final class LicenseGateViewController: NSViewController {
     }
 
     /// The status on line one in `color`, the detail (if any) on line two in
-    /// `label2`, both `titleLarge`, centred, each truncating on its own line.
+    /// `label2`, both `body`, centred, each truncating on its own line.
     private func setStatus(_ status: String, color: NSColor = Tokens.Color.label2, detail: String = "") {
         statusText = status
         statusColor = color
@@ -581,7 +599,7 @@ public final class LicenseGateViewController: NSViewController {
         paragraph.lineBreakMode = .byTruncatingTail
         let text = NSMutableAttributedString(
             string: detail.isEmpty ? status : "\(status)\n\(detail)",
-            attributes: [.font: Tokens.Font.titleLarge, .foregroundColor: Tokens.Color.label2,
+            attributes: [.font: Tokens.Font.body, .foregroundColor: Tokens.Color.label2,
                          .paragraphStyle: paragraph])
         text.addAttribute(.foregroundColor, value: color,
                           range: NSRange(location: 0, length: (status as NSString).length))
@@ -646,7 +664,7 @@ public final class LicenseGateViewController: NSViewController {
     }
 
     /// The key was validated and stored elsewhere (the companion path, or
-    /// Settings › License), so the gate opens as its own check would.
+    /// Settings › Licence), so the gate opens as its own check would.
     public func passWithStoredKey() { pass(afterBeat: false) }
 
     // MARK: Test-support hooks
@@ -663,7 +681,7 @@ public final class LicenseGateViewController: NSViewController {
         registerTapped()
     }
 
-    /// Invoke "click here to paste it" as a click would.
+    /// Invoke "Paste key" as a click would.
     public func test_tapPasteKey() {
         _ = view
         pasteTapped()
@@ -675,7 +693,7 @@ public final class LicenseGateViewController: NSViewController {
         buyTapped()
     }
 
-    /// Invoke "I already have a key" as a click would.
+    /// Invoke "I have a key" as a click would.
     public func test_tapHaveKey() {
         _ = view
         haveKeyTapped()
@@ -798,13 +816,14 @@ public final class LicenseGateViewController: NSViewController {
 
     /// Everything the current state shows, title first, for the layout
     /// tests. The offer: the title, the subtitle, Buy, the trial when
-    /// offered, and "I already have a key". The key entry: the title, the
-    /// subtitle, the paste link, the boxes, the status label, Back when
-    /// shown, and "Lost your key?" when there is a resend page.
+    /// offered, "I have a key", and the reassurance line with the trial. The
+    /// key entry: the title, the subtitle, "Paste key", the boxes, the status
+    /// label, Back when shown, and "Lost your key?" when there is a resend
+    /// page.
     var test_visibleControls: [NSView] {
         _ = view
         let controls: [NSView] = state == .offer
-            ? [headlineLabel, offerSubtitle, buyButton, trialButton, haveKeyButton]
+            ? [headlineLabel, offerSubtitle, buyButton, trialButton, haveKeyButton, reassuranceLabel]
             : [headlineLabel, enterSubtitle, pasteButton, keyEntry, statusLine, backButton, lostKeyButton]
         return controls.filter { !$0.isHidden }
     }
@@ -889,7 +908,7 @@ private final class LicenseGateOverlayView: NSView {
     }
 }
 
-/// The panel: `raised` fill, a 1 pt `rim` edge, the `row` radius, and a soft
+/// The panel: `raised` fill, a 1 pt `containerEdge` edge, the `row` radius, and a soft
 /// drop shadow 4 pt down — the iPhone `deckSurface`'s chrome. Layer-drawn, so
 /// colours are re-resolved in `updateLayer` on every appearance or contrast
 /// change.
@@ -912,7 +931,7 @@ private final class GatePanelView: NSView {
         layer.cornerCurve = .continuous
         layer.masksToBounds = false
         layer.backgroundColor = Tokens.Color.raised.cgColor
-        layer.borderColor = Tokens.Color.rim.cgColor
+        layer.borderColor = Tokens.Color.containerEdge.cgColor
         layer.borderWidth = 1
         layer.shadowColor = Tokens.Color.shadow.cgColor
         layer.shadowOpacity = dark ? 0.18 : 0.10

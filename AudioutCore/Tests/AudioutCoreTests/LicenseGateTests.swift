@@ -359,7 +359,7 @@ import AudioutSharedUI
 
     private static let offerCopy = AppSettings.remoteAppIsOffered
         ? LicenseGateViewController.offerSubtitleWithPhone : LicenseGateViewController.offerSubtitleMacOnly
-    private static let enterCopy = "Copy your licence key from your receipt email, enter it below, or"
+    private static let enterCopy = "Paste or type the key from your receipt email."
 
     // MARK: The two states
 
@@ -367,28 +367,31 @@ import AudioutSharedUI
     /// and invited buyers to the phone app in a build that does not offer it.
     @Test func theOfferSubtitleMentionsThePhoneOnlyWhenTheRemoteAppIsOffered() {
         #expect(LicenseGateViewController.offerSubtitleWithPhone ==
-            "Purchasing Audiout provides a licence that unlocks both this Mac as well as its companion iOS remote app.")
+            "One purchase covers this Mac and Audiout Remote on your iPhone.")
         #expect(LicenseGateViewController.offerSubtitleMacOnly ==
-            "Purchasing Audiout provides a licence that unlocks this Mac.")
+            "One purchase covers this Mac.")
         #expect(Self.offerCopy == (AppSettings.remoteAppIsOffered
             ? LicenseGateViewController.offerSubtitleWithPhone : LicenseGateViewController.offerSubtitleMacOnly))
     }
 
 
     /// Red if a build with a checkout stopped opening on the offer, the title
-    /// or subtitle copy changed, Buy or the trial went missing before any
-    /// trial, or the status line showed through the offer.
+    /// or subtitle copy changed, Buy, the trial or its reassurance line went
+    /// missing before any trial, or the status line showed through the offer.
     @MainActor
     @Test func theGateOpensOnTheOffer() {
         let gate = makeContent(settings(withBuy: true), Transport())
         #expect(gate.test_state == .offer)
-        #expect(gate.test_headlineText == "Activate Audiout")
+        #expect(gate.test_headlineText == "Unlock Audiout")
         #expect(gate.test_bodyText == Self.offerCopy)
         #expect(gate.test_buyIsVisible)
         #expect(gate.test_trialIsVisible)
-        #expect(gate.test_trialTitle == "Start 14 day free trial")
-        let haveKey = gate.test_visibleControls.compactMap { $0 as? TextLinkButton }
-        #expect(haveKey.map(\.linkTitle) == ["I already have a key"])
+        #expect(gate.test_trialTitle == "Try free for 14 days")
+        let haveKey = gate.test_visibleControls.compactMap { $0 as? TextActionButton }
+        #expect(haveKey.map(\.actionTitle) == ["I have a key"])
+        #expect(gate.test_visibleControls.contains {
+            ($0 as? NSTextField)?.stringValue == LicenseGateViewController.reassuranceLine
+        })
         #expect(gate.test_resultText == nil)
     }
 
@@ -403,13 +406,13 @@ import AudioutSharedUI
         #expect(opened == [settings.buyURL].compactMap { $0 })
         #expect(opened.count == 1)
         #expect(gate.test_state == .enter)
-        #expect(gate.test_headlineText == "Activate Audiout")
+        #expect(gate.test_headlineText == "Unlock Audiout")
         #expect(gate.test_bodyText == Self.enterCopy)
         #expect(!gate.test_buyIsVisible)
         #expect(gate.test_resultText == "20 characters to go")
     }
 
-    /// Red if "I already have a key" opened the checkout on its way to the
+    /// Red if "I have a key" opened the checkout on its way to the
     /// key state, or stopped going there.
     @MainActor
     @Test func haveAKeyEntersWithoutTheCheckout() {
@@ -725,8 +728,8 @@ import AudioutSharedUI
         #expect(content.test_resultText == "20 characters to go")
     }
 
-    /// The click is the gesture that earns the read. Red if "click here to
-    /// paste it" stopped filling the boxes where arrival may not look,
+    /// The click is the gesture that earns the read. Red if "Paste key"
+    /// stopped filling the boxes where arrival may not look,
     /// stopped replacing what was typed, or a full key stopped verifying.
     @MainActor
     @Test func pasteLinkFillsFromTheClipboard() async {
@@ -771,13 +774,13 @@ import AudioutSharedUI
         let settings = settings(withBuy: true)
         var passed = 0
         let gate = makeContent(settings, Transport(), onPassed: { passed += 1 })
-        let isTrial = { (view: NSView) in (view as? NSButton)?.title == "Start 14 day free trial" }
+        let isTrial = { (view: NSView) in (view as? NSButton)?.title == "Try free for 14 days" }
         gate.test_tapHaveKey()
         #expect(!gate.test_trialIsVisible)
         #expect(!gate.test_visibleControls.contains(where: isTrial))
         gate.test_tapBack()
         #expect(gate.test_trialIsVisible)
-        #expect(gate.test_trialTitle == "Start 14 day free trial")
+        #expect(gate.test_trialTitle == "Try free for 14 days")
         let trials = gate.test_visibleControls.filter(isTrial).compactMap { $0 as? NSButton }
         #expect(trials.count == 1)
         let button = try #require(trials.first)
@@ -787,8 +790,9 @@ import AudioutSharedUI
     }
 
     /// The offer is for someone who has never had a trial, and for nobody
-    /// else. Red if it came back for a trial already running or already spent
-    /// — a second trial is not a thing this app has.
+    /// else. Red if it, or its reassurance line, came back for a trial
+    /// already running or already spent — a second trial is not a thing this
+    /// app has.
     @MainActor
     @Test func theTrialOfferIsOnlyThereBeforeAnyTrial() {
         let fresh = makeContent(settings(withBuy: true), Transport())
@@ -799,6 +803,9 @@ import AudioutSharedUI
             startTrial(started, daysAgo: daysAgo)
             let gate = makeContent(started, Transport())
             #expect(!gate.test_trialIsVisible)
+            #expect(!gate.test_visibleControls.contains {
+                ($0 as? NSTextField)?.stringValue == LicenseGateViewController.reassuranceLine
+            })
             gate.test_tapHaveKey()
             #expect(!gate.test_trialIsVisible)
         }
@@ -885,6 +892,21 @@ import AudioutSharedUI
         }
     }
 
+    /// Red if `normalised` went back to dropping `U` before the fourth letter
+    /// of a hand-typed AUDT landed, which left "ADT" in the first box.
+    @MainActor
+    @Test func aHandTypedPrefixIsDroppedLikeAPastedOne() {
+        let typed = makeContent(settings(), Transport()).test_keyEntry
+        for letter in ["a", "u", "d", "t"] { typed.test_type(letter) }
+        #expect(typed.test_boxTexts[0] == "")
+        typed.test_type("b")
+        #expect(typed.test_boxTexts[0] == "B")
+
+        let notAPrefix = makeContent(settings(), Transport()).test_keyEntry
+        for letter in ["a", "d", "t"] { notAPrefix.test_type(letter) }
+        #expect(notAPrefix.test_boxTexts[0] == "ADT")
+    }
+
     /// Red if focus moved before the fifth character or stopped moving on
     /// it, or Delete on an empty box stopped stepping back to the box before
     /// without deleting there.
@@ -960,11 +982,12 @@ import AudioutSharedUI
     /// the overlay, and everything the current state shows lies inside it.
     /// Red if the panel's insets change, it outgrows the overlay at the
     /// surface's 713 x 600 floor, a row spills out of it in either state (the
-    /// paste link beside the subtitle and the status label are the widest),
-    /// the key state gained a control beyond title, subtitle, paste link,
-    /// boxes, status, Back and "Lost your key?", or a Quit button comes back. The trial is only
-    /// on the offer and only before any trial; Back is there in the key state
-    /// of a build with a checkout.
+    /// full-width Buy and trial, "Paste key" beside the subtitle and the
+    /// status label are the widest), the key state gained a control beyond
+    /// title, subtitle, "Paste key", boxes, status, Back and "Lost your key?",
+    /// or a Quit button comes back. The trial and its reassurance line are
+    /// only on the offer and only before any trial; Back is there in the key
+    /// state of a build with a checkout.
     @MainActor
     @Test(arguments: [nil, 1.0, 20.0] as [Double?], [false, true])
     func thePanelHoldsEveryControlAtTheSurfaceFloor(trialStartedDaysAgo: Double?, enter: Bool) {
@@ -985,7 +1008,7 @@ import AudioutSharedUI
 
         let controls = gate.test_visibleControls
         let trial = trialStartedDaysAgo == nil ? 1 : 0
-        let expected = enter ? 7 : 4 + trial
+        let expected = enter ? 7 : 4 + 2 * trial
         #expect(controls.count == expected)
         for control in controls {
             let frame = control.convert(control.bounds, to: gate.view)
@@ -996,7 +1019,7 @@ import AudioutSharedUI
 
     /// Red if the panel stopped holding one height across the two states, so
     /// the title (pinned to a bottom-anchored panel) jumps when Buy or "I
-    /// already have a key" moves to the key state.
+    /// have a key" moves to the key state.
     @MainActor
     @Test func theTitleDoesNotMoveBetweenStates() throws {
         let gate = makeContent(settings(withBuy: true), Transport())
@@ -1011,25 +1034,30 @@ import AudioutSharedUI
         #expect(title.convert(title.bounds, to: gate.view) == before)
     }
 
-    /// Buy and the trial button are 200 x 44 pt `CTAButton`s, Buy in
-    /// `heading` and the trial in `body`. Red if either went back to a stock
-    /// push button's height or the 150 pt width, Buy regained a minimum
-    /// width, or the faces swapped fonts.
+    /// Buy and the trial button are 44 pt `CTAButton`s as wide as the
+    /// panel's inner width, Buy above the trial, both in `heading`, and Buy is
+    /// the offer's Return default. Red if either went back to 200 pt or side
+    /// by side, the faces split fonts again, or Buy stopped being the Return
+    /// default.
     @MainActor
     @Test func theCTAsAreTheiPhoneSize() throws {
         let gate = makeContent(settings(withBuy: true), Transport())
         gate.view.frame = NSRect(x: 0, y: 0, width: 713, height: 600)
         gate.view.layoutSubtreeIfNeeded()
-        let cta = CGSize(width: 200, height: 44)
+        // The panel's inner width: 713 − 2 × 14 (panel insets) − 2 × 15 (padding).
+        let cta = CGSize(width: 655, height: 44)
         #expect(gate.test_buyFrame.size == cta)
         #expect(gate.test_trialFrame.size == cta)
+        // Unflipped overlay: above means a larger y.
+        #expect(gate.test_buyFrame.minY > gate.test_trialFrame.maxY)
         let buttons = gate.test_visibleControls.compactMap { $0 as? CTAButton }
         let buy = try #require(buttons.first { $0.title == "Buy Audiout" })
         #expect(buy.style == .primary)
         #expect(buy.font == Tokens.Font.heading)
-        let trial = try #require(buttons.first { $0.title == "Start 14 day free trial" })
+        #expect(buy.keyEquivalent == "\r")
+        let trial = try #require(buttons.first { $0.title == "Try free for 14 days" })
         #expect(trial.style == .secondary)
-        #expect(trial.font == Tokens.Font.body)
+        #expect(trial.font == Tokens.Font.heading)
     }
 }
 

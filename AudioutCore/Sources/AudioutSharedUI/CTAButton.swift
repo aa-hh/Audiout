@@ -2,13 +2,17 @@
 
 import AppKit
 
-/// The iPhone's `GoldCTALabel` face on the Mac: a flat 200 x 44 pt button on
-/// the control radius, its title centred. `.primary` is the gold one, the
-/// licence gate's "Buy Audiout"; `.secondary` is the raised one with a
-/// `pendingGlow` edge, the gate's trial offer.
+/// The iPhone's `GoldCTALabel` face on the Mac: a flat button 44 pt tall on
+/// the control radius, never narrower than 200 pt and stretched to the full
+/// width of whatever pins it, its title centred in `heading`. `.primary` is
+/// the gold one, the licence gate's "Buy Audiout"; `.secondary` is `raised`
+/// with a 1 pt `rim` edge, the gate's trial offer. While the button is its
+/// window's Return default (`keyEquivalent` "\r") it wears a "⏎"
+/// ``KeycapChip`` at its trailing end.
 ///
-/// Only the paint is custom (``CTAButtonCell``): tracking, key equivalents,
-/// `performClick` and VoiceOver are the stock `NSButton`'s. The fill is drawn
+/// Only the paint and the Return chip's help text are custom
+/// (``CTAButtonCell``, `keyEquivalent`): tracking, `performClick` and the
+/// rest of VoiceOver are the stock `NSButton`'s. The fill is drawn
 /// flat rather than set as `bezelColor`, so it does not drop to a plain bezel
 /// when the window is not key, and every colour is resolved at draw time.
 public final class CTAButton: NSButton {
@@ -28,10 +32,12 @@ public final class CTAButton: NSButton {
         self.title = title
         self.target = target
         self.action = action
-        font = style == .primary ? Tokens.Font.heading : Tokens.Font.body
+        font = Tokens.Font.heading
         focusRingType = .default
+        // A width pin stretches the face; nothing shrinks it below 200.
+        setContentHuggingPriority(.defaultLow, for: .horizontal)
+        setContentHuggingPriority(.required, for: .vertical)
         for orientation in [NSLayoutConstraint.Orientation.horizontal, .vertical] {
-            setContentHuggingPriority(.required, for: orientation)
             setContentCompressionResistancePriority(.required, for: orientation)
         }
         redrawOnAccessibilityDisplayChange()
@@ -43,6 +49,15 @@ public final class CTAButton: NSButton {
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     @objc private func accentStyleChanged() { needsDisplay = true }
+
+    /// Return as the key equivalent draws the "⏎" chip, which VoiceOver reads
+    /// as this help rather than as an element of its own.
+    public override var keyEquivalent: String {
+        didSet {
+            needsDisplay = true
+            setAccessibilityHelp(keyEquivalent == "\r" ? "Press Return" : nil)
+        }
+    }
 
     public override var intrinsicContentSize: NSSize { NSSize(width: Self.width, height: Self.height) }
 
@@ -60,7 +75,7 @@ public final class CTAButton: NSButton {
 }
 
 /// ``CTAButton``'s paint. A drawing-only cell, as `CodeBoxCell` is: the
-/// fill, the edge and the title change, nothing else does.
+/// fill, the edge, the title and the Return chip change, nothing else does.
 public final class CTAButtonCell: NSButtonCell {
 
     public static let edgeWidth: CGFloat = 1
@@ -76,9 +91,10 @@ public final class CTAButtonCell: NSButtonCell {
     public required init(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     /// The face's fill for the current state, resolved in the current drawing
-    /// appearance. The primary's gold is `gold`'s dark value in both
-    /// appearances (`ProminentButton.pinnedDark`); pressed blends it 12 %
-    /// toward black. The secondary's `raised` blends 8 % toward `label`.
+    /// appearance, flat with no bevel. The primary's gold is `gold`'s dark
+    /// value in both appearances (`ProminentButton.pinnedDark`); pressed
+    /// blends it 12 % toward black. The secondary is `raised`, blended 8 %
+    /// toward `label` while pressed.
     public var fill: NSColor {
         switch style {
         case .primary:
@@ -98,8 +114,8 @@ public final class CTAButtonCell: NSButtonCell {
         }
     }
 
-    /// The 1 pt inside edge: the secondary's only.
-    public var edge: NSColor? { style == .secondary ? Tokens.Color.pendingGlow : nil }
+    /// The 1 pt inside edge, `rim`: the secondary's only.
+    public var edge: NSColor? { style == .secondary ? Tokens.Color.rim : nil }
 
     private static func mix(_ base: NSColor, _ other: NSColor, _ fraction: CGFloat) -> NSColor {
         guard let a = base.usingColorSpace(.sRGB), let b = other.usingColorSpace(.sRGB) else { return base }
@@ -126,6 +142,13 @@ public final class CTAButtonCell: NSButtonCell {
         let size = text.size()
         text.draw(at: NSPoint(x: floor(cellFrame.midX - size.width / 2),
                               y: floor(cellFrame.midY - size.height / 2)))
+        // The title stays centred in the whole face; the chip overlays the
+        // trailing end.
+        if (controlView as? NSButton)?.keyEquivalent == "\r" {
+            let chip = KeycapChip.trailingRect(in: cellFrame, size: KeycapChip.size(for: "⏎"),
+                                               pressed: isHighlighted)
+            KeycapChip.draw("⏎", in: chip, ink: ink, pressed: isHighlighted, alpha: 1)
+        }
     }
 
     public override func focusRingMaskBounds(forFrame cellFrame: NSRect, in controlView: NSView) -> NSRect {

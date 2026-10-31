@@ -40,11 +40,17 @@ public final class SettingsRootViewController: NSSplitViewController {
         let title: String
         let symbolName: String
         let viewController: NSViewController
+        /// The `pane` value `settings:pane_selected` sends, when it must not
+        /// follow the title: PostHog keys the stream on it, so renaming a
+        /// pane on screen would otherwise split its history.
+        let analyticsName: String?
 
-        public init(title: String, symbolName: String, viewController: NSViewController) {
+        public init(title: String, symbolName: String, viewController: NSViewController,
+                    analyticsName: String? = nil) {
             self.title = title
             self.symbolName = symbolName
             self.viewController = viewController
+            self.analyticsName = analyticsName
         }
     }
 
@@ -147,7 +153,8 @@ public final class SettingsRootViewController: NSSplitViewController {
     private func showSection(at index: Int) {
         guard sections.indices.contains(index) else { return }
         if index != selectedSectionIndex {
-            Analytics.capture("settings:pane_selected", ["pane": sections[index].title])
+            Analytics.capture("settings:pane_selected",
+                              ["pane": sections[index].analyticsName ?? sections[index].title])
         }
         paneHost.setContent(sections[index].viewController)
         selectedSectionIndex = index

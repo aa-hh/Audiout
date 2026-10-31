@@ -1345,17 +1345,6 @@ public enum Tokens {
         public static var pairingCode: NSFont {
             .monospacedDigitSystemFont(ofSize: 28, weight: .semibold)
         }
-        /// A large message title (mixer-window empty state, +2pt regular).
-        /// Alias of `NSFont.systemFont(ofSize: NSFont.systemFontSize + 2)`.
-        public static var titleLarge: NSFont {
-            .systemFont(ofSize: NSFont.systemFontSize + 2)
-        }
-        /// A message subtitle paired with `titleLarge` (mixer-window empty
-        /// state, −1pt regular). Alias of
-        /// `NSFont.systemFont(ofSize: NSFont.systemFontSize - 1)`.
-        public static var subtitleLarge: NSFont {
-            .systemFont(ofSize: NSFont.systemFontSize - 1)
-        }
         /// The small system font size — the app's secondary/detail text size
         /// (sublabels, readouts, hints, footers). Alias of
         /// `NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)`.
@@ -1431,13 +1420,6 @@ public enum Tokens {
         /// P1-4): a 20 pt bold size two exact-duplicate call sites already
         /// used independently.
         public static var display: NSFont { .systemFont(ofSize: 20, weight: .bold) }
-        /// One step above ``display``, for a window whose headline is the
-        /// whole reason it opened rather than the title of a step: the
-        /// first-open licence gate's "Welcome to Audiout"
-        /// (`LicenseGateViewController`, its only consumer). 20 pt read small
-        /// on that window's 560 × 440 stage, where the headline has no
-        /// sibling chrome to be measured against.
-        public static var displayLarge: NSFont { .systemFont(ofSize: 24, weight: .bold) }
 
         /// The WORDMARK face — Clash Display Semibold, for the product name
         /// and nothing else (the iPhone companion's "Name Only Rule": a

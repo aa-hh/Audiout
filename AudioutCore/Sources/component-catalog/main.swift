@@ -68,7 +68,7 @@ struct CatalogPTPHelper: PTPHelperManaging {
 
 @MainActor
 func makeSettings() -> AppSettings {
-    // Both URLs set, or the License section never renders. The secret store
+    // Both URLs set, or the Licence section never renders. The secret store
     // is the scratch suite: left nil, a non-headless run would use the real
     // app's keychain items, and Register or Remove would overwrite them.
     AppSettings(defaults: defaults,
@@ -99,7 +99,7 @@ func makeSettingsRoot(settings: AppSettings) -> SettingsRootViewController {
         .init(title: "Audio", symbolName: "speaker.wave.2",
               viewController: AudioSettingsViewController(excluded: excluded, runningAppsProvider: { [] },
                                                           latency: latency)),
-        .init(title: "License", symbolName: "key",
+        .init(title: "Licence", symbolName: "key",
               viewController: LicenseSettingsViewController(settings: settings)),
     ]
     return SettingsRootViewController(sections: sections)
@@ -278,8 +278,12 @@ let components: [Entry] = [
     component("Buttons") {
         page([
             ("Prominent (gold only while this window is active)", ProminentButton(title: "Start Free Trial", target: nil, action: nil)),
-            ("Call to action, primary", CTAButton(title: "Buy Audiout", style: .primary, target: nil, action: nil)),
-            ("Call to action, secondary", CTAButton(title: "I already have a key", style: .secondary,
+            ("Call to action, primary", {
+                let button = CTAButton(title: "Buy Audiout", style: .primary, target: nil, action: nil)
+                button.keyEquivalent = "\r"
+                return button
+            }()),
+            ("Call to action, secondary", CTAButton(title: "Try free for 14 days", style: .secondary,
                                                     target: nil, action: nil)),
             ("Text action", TextActionButton(title: "Manage Speakers…")),
         ])

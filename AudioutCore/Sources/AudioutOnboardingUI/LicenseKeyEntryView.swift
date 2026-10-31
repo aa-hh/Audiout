@@ -20,18 +20,18 @@ final class LicenseKeyEntryView: NSView, NSTextFieldDelegate {
 
     static let boxCount = 4
     static let groupSize = 5
-    /// The row is 8/10 of the panel's inner width (655): the `AUDT` plate takes
-    /// a fifth of it, and the four boxes share the rest with one gap size
+    /// The row is about 8/10 of the panel's inner width (645): the `AUDT` plate
+    /// takes a fifth of it, and the four boxes share the rest with one gap size
     /// between every segment, so the key reads as five plates in a line.
     /// 104 + 4 × 16 + 4 × 89 = 524.
     static let plateWidth: CGFloat = 104
     static let boxWidth: CGFloat = 89
-    static let boxHeight: CGFloat = 40
+    /// The gate's button height, so the boxes and the buttons are one size.
+    static let boxHeight: CGFloat = 36
     static let dashWidth: CGFloat = 16
     /// Tracking between characters, so five of them read as a group.
     static let kern: CGFloat = 1
-    /// The code sheet's 24 pt medium monospaced digits, sized for a group of five.
-    static var font: NSFont { .monospacedSystemFont(ofSize: 17, weight: .medium) }
+    static var font: NSFont { Tokens.Font.licenceKey }
 
     private nonisolated static let alphabet = Set("0123456789ABCDEFGHJKMNPQRSTVWXYZ")
 

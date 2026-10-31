@@ -2,9 +2,10 @@
 
 import AppKit
 
-/// The iPhone's `GoldCTALabel` face on the Mac: a flat button 44 pt tall on
-/// the control radius, never narrower than 200 pt and stretched to the full
-/// width of whatever pins it, its title centred in `heading`. `.primary` is
+/// The iPhone's `GoldCTALabel` face at Mac size: a flat 320 x 36 pt button on
+/// the control radius, its title centred in `plateTitle`, one notch above
+/// Setup's `ProminentButton` and the wizard's plate voice. The iPhone's 44 pt
+/// full-width face is a touch target and stays on the iPhone. `.primary` is
 /// the gold one, the licence gate's "Buy Audiout"; `.secondary` is `raised`
 /// with a 1 pt `rim` edge, the gate's trial offer. While the button is its
 /// window's Return default (`keyEquivalent` "\r") it wears a "⏎"
@@ -19,8 +20,8 @@ public final class CTAButton: NSButton {
 
     public enum Style: Sendable { case primary, secondary }
 
-    public static let width: CGFloat = 200
-    public static let height: CGFloat = 44
+    public static let width: CGFloat = 320
+    public static let height: CGFloat = 36
 
     public let style: Style
 
@@ -32,10 +33,9 @@ public final class CTAButton: NSButton {
         self.title = title
         self.target = target
         self.action = action
-        font = Tokens.Font.heading
+        font = Tokens.Font.plateTitle
         focusRingType = .default
-        // A width pin stretches the face; nothing shrinks it below 200.
-        setContentHuggingPriority(.defaultLow, for: .horizontal)
+        setContentHuggingPriority(.required, for: .horizontal)
         setContentHuggingPriority(.required, for: .vertical)
         for orientation in [NSLayoutConstraint.Orientation.horizontal, .vertical] {
             setContentCompressionResistancePriority(.required, for: orientation)
@@ -62,7 +62,7 @@ public final class CTAButton: NSButton {
     public override var intrinsicContentSize: NSSize { NSSize(width: Self.width, height: Self.height) }
 
     /// The face fills the whole frame; a stock push button's bezel insets
-    /// would make the laid-out frame bigger than the 200 x 44 the face draws.
+    /// would make the laid-out frame bigger than the 320 x 36 the face draws.
     public override var alignmentRectInsets: NSEdgeInsets { NSEdgeInsetsZero }
 
     /// Act on the click that activates the app, as `ProminentButton` does.

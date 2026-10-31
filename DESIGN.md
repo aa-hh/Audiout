@@ -1269,11 +1269,14 @@ other tab.
      AUDT-." A refused key leaves the boxes editable with the caret in the
      first; editing it short of twenty characters brings the count back and
      clears the detail.
-  4. 4 pt below, "Back" (text link) at the leading edge, back to the
+  4. On the panel's bottom line, 28 pt above its edge and level with the
+     offer's last line: "Back" (text link) at the leading edge, back to the
      offer (absent without a checkout URL), and "Lost your key?" (text link)
      at the trailing edge, opening the website's resend page
-     (`AppSettings.resendURL`; absent without a checkout URL). The key state
-     has no trial button; the trial is on the offer.
+     (`AppSettings.resendURL`; absent without a checkout URL). The boxes and
+     the status label centre in the space between the subtitle and that row,
+     at least 4 pt above it. The key state has no trial button; the trial is
+     on the offer.
 
   The two states crossfade over 0.25 s either way (at once under Reduce
   Motion); the title stays put. A purchase deep link moves straight to the

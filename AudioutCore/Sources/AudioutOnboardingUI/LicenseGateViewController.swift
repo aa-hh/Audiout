@@ -130,7 +130,7 @@ public final class LicenseGateViewController: NSViewController {
     private static let haveKeyGap: CGFloat = 18
     /// The key row's own band, above and below it.
     private static let keyBandInset: CGFloat = 14
-    /// From the status label down to Back.
+    /// The least room between the status label and Back's row.
     private static let backGap: CGFloat = 4
     private static let sectionSpacing: CGFloat = 24
     private static let subtitleWidth: CGFloat = 520
@@ -244,20 +244,24 @@ public final class LicenseGateViewController: NSViewController {
         bottomRow.alignment = .centerY
         bottomRow.spacing = Self.rowSpacing
 
-        [keyBand, statusLine, bottomRow].forEach(enterActions.addArrangedSubview)
+        [keyBand, statusLine].forEach(enterActions.addArrangedSubview)
         enterActions.setCustomSpacing(0, after: keyBand)
-        enterActions.setCustomSpacing(Self.backGap, after: statusLine)
 
         // Both bodies share one slot, so the panel keeps one height and the
         // title above never moves. In each, the subtitle sits right under the
         // title and the rest is centred in the space left below it, at least
         // `sectionSpacing` under the subtitle and `bodyAir` above the panel's
-        // bottom edge. The taller body sets the slot's height.
+        // bottom edge. The taller body sets the slot's height. The key state's
+        // Back row is pinned `bodyAir` above the bottom edge, level with the
+        // offer's last line, and the boxes centre in the space above that row,
+        // so the shorter state leaves no empty band under its last line.
         let slot = NSView()
         slot.translatesAutoresizingMaskIntoConstraints = false
         var constraints: [NSLayoutConstraint] = []
-        for (body, subtitle, actions) in [(offerBody, offerSubtitle as NSView, offerActions),
-                                          (enterBody, subtitleRow, enterActions)] {
+        for (body, subtitle, actions, footer) in [
+            (offerBody, offerSubtitle as NSView, offerActions, nil as NSView?),
+            (enterBody, subtitleRow, enterActions, bottomRow),
+        ] {
             actions.orientation = .vertical
             actions.alignment = .centerX
             actions.spacing = Self.rowSpacing
@@ -268,6 +272,23 @@ public final class LicenseGateViewController: NSViewController {
             slot.addSubview(body)
             let space = NSLayoutGuide()
             body.addLayoutGuide(space)
+            if let footer {
+                footer.translatesAutoresizingMaskIntoConstraints = false
+                body.addSubview(footer)
+                constraints += [
+                    footer.leadingAnchor.constraint(equalTo: body.leadingAnchor),
+                    footer.bottomAnchor.constraint(equalTo: body.bottomAnchor, constant: -Self.bodyAir),
+                    space.bottomAnchor.constraint(equalTo: footer.topAnchor),
+                    actions.bottomAnchor.constraint(lessThanOrEqualTo: footer.topAnchor,
+                                                    constant: -Self.backGap),
+                ]
+            } else {
+                constraints += [
+                    space.bottomAnchor.constraint(equalTo: body.bottomAnchor),
+                    actions.bottomAnchor.constraint(lessThanOrEqualTo: body.bottomAnchor,
+                                                    constant: -Self.bodyAir),
+                ]
+            }
             constraints += [
                 body.leadingAnchor.constraint(equalTo: slot.leadingAnchor),
                 body.trailingAnchor.constraint(equalTo: slot.trailingAnchor),
@@ -278,14 +299,11 @@ public final class LicenseGateViewController: NSViewController {
                 subtitle.leadingAnchor.constraint(equalTo: body.leadingAnchor),
                 subtitle.trailingAnchor.constraint(lessThanOrEqualTo: body.trailingAnchor),
                 space.topAnchor.constraint(equalTo: subtitle.bottomAnchor),
-                space.bottomAnchor.constraint(equalTo: body.bottomAnchor),
                 actions.leadingAnchor.constraint(equalTo: body.leadingAnchor),
                 actions.trailingAnchor.constraint(equalTo: body.trailingAnchor),
                 actions.centerYAnchor.constraint(equalTo: space.centerYAnchor),
                 actions.topAnchor.constraint(greaterThanOrEqualTo: subtitle.bottomAnchor,
                                              constant: Self.sectionSpacing),
-                actions.bottomAnchor.constraint(lessThanOrEqualTo: body.bottomAnchor,
-                                                constant: -Self.bodyAir),
             ]
         }
         let slotHug = slot.heightAnchor.constraint(equalToConstant: 0)

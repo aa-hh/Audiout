@@ -1034,6 +1034,24 @@ import AudioutSharedUI
         #expect(title.convert(title.bounds, to: gate.view) == before)
     }
 
+    /// Red if Back went back to riding under the status line, which left an
+    /// empty band below it because the offer sets the panel's height.
+    @MainActor
+    @Test func backSitsOnTheOffersBottomLine() throws {
+        let gate = makeContent(settings(withBuy: true), Transport())
+        gate.view.frame = NSRect(x: 0, y: 0, width: 713, height: 600)
+        gate.view.layoutSubtreeIfNeeded()
+        let lastLine = try #require(gate.test_visibleControls.last)
+        let offerBottom = lastLine.convert(lastLine.bounds, to: gate.view).minY
+
+        gate.test_tapHaveKey()
+        gate.view.layoutSubtreeIfNeeded()
+        let back = try #require(gate.test_visibleControls.first {
+            ($0 as? TextLinkButton)?.linkTitle == "Back"
+        })
+        #expect(abs(back.convert(back.bounds, to: gate.view).minY - offerBottom) < 0.5)
+    }
+
     /// Buy and the trial button are 44 pt `CTAButton`s as wide as the
     /// panel's inner width, Buy above the trial, both in `heading`, and Buy is
     /// the offer's Return default. Red if either went back to 200 pt or side

@@ -17,9 +17,11 @@ import AudioutProtocol
 /// ## Transport
 /// TLS 1.3 under the WebSocket, presenting the Mac's self-signed
 /// ``CompanionIdentity``. The phone trusts no chain: it pins the SHA-256 of
-/// the certificate, which the Bonjour TXT `fp` key advertises. The service
-/// is named `CompanionPairing.instanceName`, so the computer's name never
-/// leaves the Mac outside TLS; it reaches the phone only in `welcome`.
+/// the certificate, which the Bonjour TXT `fp` key advertises; the `model`
+/// key carries the hardware model code (`MacBookPro17,1`) so a phone can say
+/// "MacBook Pro" before it connects. The service is named
+/// `CompanionPairing.instanceName`, so the computer's name never leaves the
+/// Mac outside TLS; it reaches the phone only in `welcome`.
 ///
 /// ## Session shape
 /// 1. Client connects; it enters a bounded PENDING pool — it does NOT count
@@ -364,7 +366,8 @@ public final class CompanionServer: @unchecked Sendable {
     // MARK: - Lifecycle
 
     /// Advertise `_audiout._tcp` as `CompanionPairing.instanceName` (TXT:
-    /// proto + the certificate fingerprint) on an ephemeral port and start
+    /// proto, the certificate fingerprint and the hardware model code, never
+    /// the computer's name) on an ephemeral port and start
     /// accepting TLS 1.3 connections that present `identity`. Idempotent-ish:
     /// a second call restarts. `.async` for the same reason as
     /// `DACPServer.start`: `listener.start` is itself asynchronous, so there
@@ -373,6 +376,16 @@ public final class CompanionServer: @unchecked Sendable {
         queue.async { [weak self] in
             self?.startLocked(identity: identity)
         }
+    }
+
+    /// The Bonjour TXT record ``start(identity:)`` advertises. An empty
+    /// `modelCode` (sysctl unreadable) leaves the `model` key out.
+    static func txtRecord(fingerprint: Data, modelCode: String) -> NWTXTRecord {
+        var txt = NWTXTRecord()
+        txt[CompanionProto.TXTKey.proto] = String(CompanionProto.version)
+        txt[CompanionProto.TXTKey.fingerprint] = CompanionPairing.fingerprintHex(fingerprint)
+        if !modelCode.isEmpty { txt[CompanionProto.TXTKey.model] = modelCode }
+        return txt
     }
 
     /// MUST only run on ``queue``. Calls `stopLocked()` directly, never the
@@ -409,9 +422,8 @@ public final class CompanionServer: @unchecked Sendable {
 
         localCertificateSHA256 = identity.fingerprint
         let serviceName = CompanionPairing.instanceName(serverCertificateSHA256: identity.fingerprint)
-        var txt = NWTXTRecord()
-        txt[CompanionProto.TXTKey.proto] = String(CompanionProto.version)
-        txt[CompanionProto.TXTKey.fingerprint] = CompanionPairing.fingerprintHex(identity.fingerprint)
+        let txt = Self.txtRecord(fingerprint: identity.fingerprint,
+                                 modelCode: TouchBarHardware.hardwareModel() ?? "")
         listener.service = NWListener.Service(name: serviceName, type: CompanionProto.serviceType, txtRecord: txt)
 
         listener.newConnectionHandler = { [weak self] connection in

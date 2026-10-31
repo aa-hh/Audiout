@@ -218,8 +218,9 @@ public struct Device: Identifiable, Equatable, Sendable {
     /// Advertised strings are trimmed and capped (``advertisedModel(_:)``);
     /// `nil` when nothing identified the product. It goes to the phone in the
     /// snapshot, where the sync events report which product a measurement was
-    /// taken on; nothing on the Mac draws it, and it is never the user-given
-    /// name — that name is the one thing no event may carry.
+    /// taken on. The only thing it draws is a HomePod mini's row glyph (see
+    /// ``symbolName``), and it is never the user-given name — that name is the
+    /// one thing no event may carry.
     public var model: String?
 
     /// Product phrases that make a Bluetooth device's model unambiguous, and
@@ -301,8 +302,19 @@ public struct Device: Identifiable, Equatable, Sendable {
         return String(trimmed.prefix(40))
     }
 
-    /// The SF Symbol for this device's row icon. Everything but Bluetooth is
-    /// decided by ``Kind/symbolName`` alone; a Bluetooth pairing also states
+    /// The model code a HomePod mini advertises in its AirPlay TXT `model`
+    /// key, per EveryMac and The Apple Wiki (model number A2374). The
+    /// full-size HomePods advertise `AudioAccessory1,x` (1st generation) and
+    /// `AudioAccessory6,1` (2nd generation).
+    static let homePodMiniModel = "AudioAccessory5,1"
+
+    /// The SF Symbol for this device's row icon. Everything but a HomePod and
+    /// Bluetooth is decided by ``Kind/symbolName`` alone. A HomePod whose
+    /// advertised ``model`` is exactly ``homePodMiniModel`` draws the mini's
+    /// own glyph, so the phone can tell a mini from a full-size HomePod;
+    /// `homepodmini.fill` rather than `homepod.mini.fill`, which needs
+    /// macOS 15 against the 14.2 floor. Any other or missing model keeps the
+    /// kind's glyph. A Bluetooth pairing also states
     /// what it IS, and headphones drawn as a speaker cabinet was the defect
     /// this exists to fix (owner's call, 2026-09-04).
     ///
@@ -329,6 +341,7 @@ public struct Device: Identifiable, Equatable, Sendable {
     /// availability check against the 14.2 floor, and every product glyph
     /// resolves on this AppKit (`DeviceBluetoothKindTests`).
     public var symbolName: String {
+        if kind == .homePod, model == Self.homePodMiniModel { return "homepodmini.fill" }
         guard kind == .bluetooth else { return kind.symbolName }
         if let product = Self.bluetoothProductSymbol(forName: name) { return product }
         guard let minor = bluetoothDeviceClassMinor else { return kind.symbolName }

@@ -221,6 +221,19 @@ import AppKit
         return far / Self.scale
     }
 
+    /// Turns red if a glyph `Device.symbolName` can return has no `rowGlyphFits`
+    /// entry, which draws it at the default size and keeps it out of the
+    /// ring-clearance check below.
+    @Test func everyDeviceGlyphHasARowFit() {
+        let mini = Device(id: "m", name: "Kitchen", kind: .homePod, model: Device.homePodMiniModel).symbolName
+        let names = Device.Kind.allCases.map(\.symbolName)
+            + Device.bluetoothProductGlyphs.map(\.symbol)
+            + ["headphones", "car.fill", mini]
+        for name in names {
+            #expect(DeviceIcon.rowGlyphFits[name] != nil, "\(name) has no row fit")
+        }
+    }
+
     /// Turns red if a `rowGlyphFits` size or offset pushes a glyph within 1 pt of its ring.
     @Test func noRowGlyphTouchesItsRing() throws {
         let names = Set(DeviceIcon.rowGlyphFits.keys).union(DeviceIcon.curated.filter(DeviceIcon.isValid))

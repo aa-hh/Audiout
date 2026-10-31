@@ -1982,6 +1982,15 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         #expect(d?.model == "AirPort10,115", "an AP1-only receiver's `am` product must land in Device.model")
     }
 
+    /// Turns red if a HomePod its owner renamed stops being a HomePod: its
+    /// `AudioAccessoryN,M` model code is the only thing that still says so, and
+    /// without it a mini called "Kitchen" draws the generic speaker glyph.
+    @Test func aRenamedHomePodIsStillAHomePodByItsModelCode() {
+        #expect(NativeBackend.kind(for: ap2Device(name: "Kitchen", model: "AudioAccessory5,1")) == .homePod)
+        #expect(NativeBackend.kind(for: ap2Device(name: "Kitchen", model: "AudioAccessory6,1")) == .homePod)
+        #expect(NativeBackend.kind(for: ap2Device(name: "Kitchen", model: "S13")) == .generic)
+    }
+
     /// Selecting an AP1 device converges it through the SAME engine surface as AP2:
     /// it is `addOutput`-ed, marked selected/available/connected, and accepts
     /// volume + mute control (which reach `engine.setVolume`). `supportsAirPlay2`

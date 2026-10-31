@@ -5842,7 +5842,10 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         // pollute the substring heuristics below. No-op for AP2/local names.
         let name = NativeDiscovery.strippedRaopDisplayName(discovered.descriptor.name).lowercased()
         let hay = model + " " + name
-        if hay.contains("homepod") { return .homePod }
+        // Every HomePod advertises an `AudioAccessoryN,M` model code (1,x the
+        // original, 5,1 the mini, 6,1 the second generation) and never the word
+        // "homepod", so without this one renamed "Kitchen" falls to `.generic`.
+        if hay.contains("homepod") || model.hasPrefix("audioaccessory") { return .homePod }
         if hay.contains("appletv") || hay.contains("apple tv") || name.contains(" tv") || name.hasSuffix("tv") { return .appleTV }
         if hay.contains("airport") || hay.contains("express") { return .airportExpress }
         if hay.contains("sonos") || hay.contains("move") || hay.contains("roam") { return .sonos }

@@ -771,6 +771,21 @@ import AudioutProtocol
         #expect(CompanionServer.displayName(String(repeating: "b", count: 200)).count == 64)
     }
 
+    /// Turns red if the Bonjour TXT record stops carrying the Mac's model
+    /// code, so a phone that has never connected shows `Audiout-…` again.
+    @Test func theTXTRecordAdvertisesTheModelCode() {
+        let txt = CompanionServer.txtRecord(fingerprint: Self.testFingerprint, modelCode: "MacBookPro17,1")
+        #expect(txt[CompanionProto.TXTKey.model] == "MacBookPro17,1")
+    }
+
+    /// Turns red if an unreadable model code is advertised as an empty
+    /// `model` key instead of being left out.
+    @Test func theTXTRecordOmitsAnEmptyModelCode() {
+        let txt = CompanionServer.txtRecord(fingerprint: Self.testFingerprint, modelCode: "")
+        #expect(txt[CompanionProto.TXTKey.model] == nil)
+        #expect(txt[CompanionProto.TXTKey.fingerprint] == CompanionPairing.fingerprintHex(Self.testFingerprint))
+    }
+
     /// Refuse-forward must hold on EVERY frame, not just the hello — a peer
     /// that hellos at a compatible version and then sends newer-versioned
     /// envelopes gets the same goodbye a newer hello would.

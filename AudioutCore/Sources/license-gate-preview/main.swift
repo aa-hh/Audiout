@@ -96,6 +96,7 @@ final class PreviewDelegate: NSObject, NSApplicationDelegate {
     private var groups: GroupController?
     private var popover: PopoverController?
     private var surface: AppSurfaceController?
+    private var gate: LicenseGateViewController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
@@ -119,7 +120,22 @@ final class PreviewDelegate: NSObject, NSApplicationDelegate {
             popoverController: popover, settings: settings,
             groupsContent: { emptyScreen() },
             speakersContent: { emptyScreen() },
-            settingsContent: { SettingsRootViewController(sections: []) },
+            // The one tab the gate leaves uncovered. A key accepted in its
+            // Licence pane lifts the gate, as it does in the app.
+            settingsContent: { [weak self, settings] in
+                let license = LicenseSettingsViewController(settings: settings, openURL: { url in
+                    print("  (Buy would open \(url.absoluteString))")
+                })
+                license.licenseTransport = previewTransport
+                license.onLicenseChanged = {
+                    if let gate = self?.gate, !gate.isChecking, settings.licenseStatus == .active {
+                        gate.passWithStoredKey()
+                    }
+                }
+                return SettingsRootViewController(sections: [
+                    .init(title: "Licence", symbolName: "key", viewController: license),
+                ])
+            },
             frameAutosaveName: "LicenseGatePreviewSurface")
         // Pinned, so clicking the terminal does not tuck the surface away.
         surface.setPinned(true)
@@ -149,6 +165,7 @@ final class PreviewDelegate: NSObject, NSApplicationDelegate {
                 self?.surface?.dismissLicenseGate(animated: true)
                 DispatchQueue.main.asyncAfter(deadline: .now() + 2) { self?.presentGate() }
             })
+        self.gate = gate
         surface?.presentLicenseGate(gate)
     }
 }
@@ -175,6 +192,7 @@ print("""
     AUDT-OFFLI-NEOFF-LINEO-FFLIN   server unreachable — "Key saved", gate opens
 
   Switch tabs: Scenes and Speakers stay covered, Settings is left uncovered.
+  Its Licence pane takes the same keys, and an accepted one lifts the gate.
   Quit, or closing the surface, ends the preview.
 
 """)

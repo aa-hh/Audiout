@@ -71,6 +71,10 @@ typography:
     fontFamily: "SF Pro (system), monospacedDigit"
     fontSize: "28pt (off-scale)"
     fontWeight: 600
+  licenceKey:
+    fontFamily: "SF Mono (system), monospaced"
+    fontSize: "17pt (off-scale)"
+    fontWeight: 500
   caption:
     fontFamily: "SF Pro (system)"
     fontSize: "11pt (smallSystemFontSize)"
@@ -510,10 +514,12 @@ relative to a text style.
 
 ### Hierarchy
 - **Display** (700, 20pt): a window's own headline, where the headline is the
-  reason the window opened, and the licence gate's "Unlock Audiout".
+  reason the window opened.
 - **Heading** (600, 16pt; `headingDigits` 600/16pt with tabular digits for
-  the Overview's counts): a window page's name and the "Equalizer" heading
-  on the speaker page and the Main Audio page — one step above body.
+  the Overview's counts): a window page's name, the "Equalizer" heading
+  on the speaker page and the Main Audio page, and the titles of the cards
+  drawn over the Mixer (the thank-you card, the licence gate's "Unlock
+  Audiout") — one step above body.
 - **Body** (400, 13pt; `bodyEmphasized` 600/13pt for the sidebar plates and
   the password sheet's heading):
   list-row titles, form labels, and a section title above a box (the scene
@@ -566,8 +572,9 @@ their declaration: `syncReadout` (12pt monospaced semibold, the BT sync
 drawer's editable value; while a Cast offset edit or reset waits out the
 stream lag its digits breathe `pendingInkDim` to `goldText`, a `pendingGlow`
 halo 2.5pt around the field breathes with the fader thumb's curve, and the
-field's label adds "applying") and `plateTitle` (15pt semibold, the wizard's two
-hero answer plates). `detail` and `keycap` are names for intent only: they
+field's label adds "applying"), `plateTitle` (15pt semibold, the wizard's two
+hero answer plates and the licence gate's `CTAButton`s) and `licenceKey` (17pt
+medium monospaced, the licence gate's key boxes). `detail` and `keycap` are names for intent only: they
 equal `caption` and `captionEmphasized`.
 
 **Titles Are Headings.** A window page's name and every section title (the
@@ -1200,45 +1207,48 @@ so Escape keeps the surface's order (thank-you card, then the bubble closes). Th
 `LicenseGateViewController` (`AudioutOnboardingUI`), mounted by
 `AppSurfaceController.presentLicenseGate` after Setup for a build with a
 licence server and an install with no key and no trial. It is the iPhone
-`LockedView`'s chrome restated: an overlay on the one surface, below the
-toolbar strip, over the live Mixer, Scenes or Speakers screen. Settings is
-never covered; the overlay lifts off while it is selected and returns with any
-other tab.
+`LockedView` said in the Mac's own sizes: the same words in the same order,
+over the live screen, but the iPhone's 44 pt full-width buttons, heavy veil
+and 22 pt title are touch-screen measures, so the Mac steps one notch above
+the Mixer instead (`heading` title, `plateTitle` buttons, the wizard's
+voices). It is an overlay on the one surface, below the toolbar strip, over
+the live Mixer, Scenes or Speakers screen. Settings is never covered; the
+overlay lifts off while it is selected and returns with any other tab.
 
-- **Veil:** flat `canvas` at 0.66 over the whole overlay, so the screen under
-  it reads at about 34 %. No blur.
-- **Scrim:** the bottom 420 pt (or the whole overlay, if shorter), `canvas`
+- **Veil:** flat `canvas` at 0.5 over the whole overlay, so the screen under
+  it reads at about half strength and the panel sits on the user's Mixer
+  rather than replacing it. No blur.
+- **Scrim:** the bottom 280 pt (or the whole overlay, if shorter), `canvas`
   from clear at its top to 0.55 at 42 % and solid from 82 %.
 - **Panel:** 14 pt in from both sides, 8 pt above the bottom; `raised` fill,
   1 pt `containerEdge` edge, `row` radius (16 pt), a black shadow at 0.18
-  dark / 0.10 light, 12 pt blur, 4 pt down. Padding 16 top, 15 sides. The
-  title "Unlock Audiout" (`display` / `label`, a heading) sits at the top
+  dark / 0.10 light, 12 pt blur, 4 pt down. Padding 20 pt on every side. The
+  title "Unlock Audiout" (`heading` / `label`, a heading) sits at the top
   leading edge in both states; under it one slot holds the two states'
   bodies, as tall as the taller needs, so the panel keeps one height and the
   title never moves. In each state the sentence sits 2 pt under the title at
-  the leading edge, and the rest is centred in the space below it, at least
-  24 pt under the sentence and 28 pt above the panel's bottom edge.
+  the leading edge, a bottom row sits 20 pt above the panel's edge on one
+  line across both states, and the rest is centred in the space between
+  them, at least 24 pt under the sentence and 4 pt above the bottom row.
 - **Offer** (the panel opens here when the build has a checkout URL), 12 pt
   apart unless stated:
   1. "One purchase covers this Mac and Audiout Remote on your iPhone." in
      `body` / `label2`, leading-aligned, wrapping at 520 pt. A build that
      does not offer the phone app (`AppSettings.remoteAppIsOffered` false)
      reads "One purchase covers this Mac." instead.
-  2. "Buy Audiout", the primary `CTAButton` (gold, `heading`, 44 pt tall and
-     the slot's full width, 655 pt at the surface's 713 pt floor), the Return
-     key, so it wears the "⏎" chip at its trailing end. It opens the checkout
-     and moves to the key state.
+  2. "Buy Audiout", the primary `CTAButton` (gold, `plateTitle`, 320 x 36 pt,
+     centred), the Return key, so it wears the "⏎" chip at its trailing end.
+     It opens the checkout and moves to the key state.
   3. Under it, "Try free for 14 days", the secondary `CTAButton` (`raised`,
-     1 pt `rim` edge, `heading`, the same size), only before any trial. It
-     starts the trial and opens the gate at once. This is the only trial
+     1 pt `rim` edge, `plateTitle`, the same size), only before any trial.
+     It starts the trial and opens the gate at once. This is the only trial
      button on the gate.
-  4. 18 pt below the trial, "I have a key" (gold `TextActionButton`),
-     centred: the key state without the checkout.
-  5. Last, "No card or email. After 14 days, Audiout keeps playing on one
-     speaker until you buy." in `caption` / `label2`, centred, wrapping at
-     520 pt, shown with the trial button only, so only before any trial.
-     Once the trial and this line are gone, Buy and "I have a key" close up
-     with nothing left between them.
+  4. 6 pt under the trial, the line that explains it: "No card or email.
+     After 14 days, Audiout keeps playing on one speaker until you buy." in
+     `caption` / `label2`, centred, wrapping at 520 pt, shown with the trial
+     button only, so only before any trial.
+  5. On the bottom row, "I have a key" (gold `TextActionButton`), centred:
+     the key state without the checkout.
 - **Key state** (a build with no checkout URL opens here):
   1. "Paste or type the key from your receipt email." in `body` / `label2`,
      then 8 pt after it on the same line, first baselines aligned, "Paste
@@ -1246,10 +1256,12 @@ other tab.
      key starting `AUDT-`. The row is leading-aligned.
   2. The key entry (`LicenseKeyEntryView`), in its own band with 14 pt
      clear above and below it: an `AUDT` plate
-     drawn by `CodeBoxCell` like the boxes but never editable, 104 x 40 pt in
-     `label2`, then four `CodeBoxCell` boxes of five characters, 89 x 40 pt,
-     each after an en dash in `label2` centred in a 16 pt slot; 17 pt medium
-     monospaced, box text in `label` with 1 pt kerning, no placeholder. The
+     drawn by `CodeBoxCell` like the boxes but never editable, 104 x 36 pt in
+     `label2`, then four `CodeBoxCell` boxes of five characters, 89 x 36 pt
+     (the buttons' height), each after an en dash in `label2` centred in a
+     16 pt slot; `licenceKey` (17 pt medium monospaced, a notch above body so
+     a misread character is easy to spot), box text in `label` with 1 pt
+     kerning, no placeholder. The
      row is 524 pt. The boxes take Crockford base32 only, uppercase, with `O`
      as `0` and `I`, `L` as `1`; the fifth character moves focus on, Delete
      on an empty box steps back, a pasted key spreads five per box from the
@@ -1269,8 +1281,8 @@ other tab.
      AUDT-." A refused key leaves the boxes editable with the caret in the
      first; editing it short of twenty characters brings the count back and
      clears the detail.
-  4. On the panel's bottom line, 28 pt above its edge and level with the
-     offer's last line: "Back" (text link) at the leading edge, back to the
+  4. On the bottom row, level with the offer's "I have a key": "Back" (text
+     link) at the leading edge, back to the
      offer (absent without a checkout URL), and "Lost your key?" (text link)
      at the trailing edge, opening the website's resend page
      (`AppSettings.resendURL`; absent without a checkout URL). The boxes and
@@ -1291,10 +1303,12 @@ action. Escape does not dismiss it. A pass fades it out over 0.55 s ease-out
 Motion it goes at once.
 
 ### CTA Button
-`CTAButton` (`AudioutSharedUI`) is the iPhone's `GoldCTALabel` face restated:
-44 pt tall, never narrower than 200 pt and stretched to whatever width its
-layout pins (low horizontal hugging, required compression resistance),
-control radius (10 pt), title centred in the whole face in `heading`, a flat
+`CTAButton` (`AudioutSharedUI`) is the iPhone's `GoldCTALabel` face at Mac
+size: 320 x 36 pt, holding its size (required hugging and compression
+resistance), control radius (10 pt), title centred in the whole face in
+`plateTitle`, one notch above Setup's `ProminentButton` and the wizard plates'
+own voice. The iPhone's 44 pt full-width face is a touch target and stays on
+the iPhone. A flat
 drawn fill with no bevel that stays the same when the window is not key. The
 primary is `gold` with `inkOnFill` ink, both pinned to their dark values in
 both appearances as `ProminentButton` pins them; pressed blends the fill

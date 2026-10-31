@@ -1052,30 +1052,52 @@ import AudioutSharedUI
         #expect(abs(back.convert(back.bounds, to: gate.view).minY - offerBottom) < 0.5)
     }
 
-    /// Buy and the trial button are 44 pt `CTAButton`s as wide as the
-    /// panel's inner width, Buy above the trial, both in `heading`, and Buy is
-    /// the offer's Return default. Red if either went back to 200 pt or side
-    /// by side, the faces split fonts again, or Buy stopped being the Return
-    /// default.
+    /// Buy and the trial button are 320 x 36 pt `CTAButton`s stacked and
+    /// centred in the panel, Buy above the trial, both in `plateTitle`, the
+    /// title one step down in `heading`, and Buy is the offer's Return
+    /// default. Red if the buttons went back to the iPhone's full-width 44 pt
+    /// face, the faces split fonts, the title went back to `display`, or Buy
+    /// stopped being the Return default.
     @MainActor
-    @Test func theCTAsAreTheiPhoneSize() throws {
+    @Test func theCTAsAreMacSized() throws {
         let gate = makeContent(settings(withBuy: true), Transport())
         gate.view.frame = NSRect(x: 0, y: 0, width: 713, height: 600)
         gate.view.layoutSubtreeIfNeeded()
-        // The panel's inner width: 713 − 2 × 14 (panel insets) − 2 × 15 (padding).
-        let cta = CGSize(width: 655, height: 44)
+        let cta = CGSize(width: 320, height: 36)
         #expect(gate.test_buyFrame.size == cta)
         #expect(gate.test_trialFrame.size == cta)
+        // Within the half point a centred 320 pt face rounds to on a 713 pt surface.
+        #expect(abs(gate.test_buyFrame.midX - gate.view.bounds.midX) <= 0.5)
+        #expect(abs(gate.test_trialFrame.midX - gate.view.bounds.midX) <= 0.5)
         // Unflipped overlay: above means a larger y.
         #expect(gate.test_buyFrame.minY > gate.test_trialFrame.maxY)
-        let buttons = gate.test_visibleControls.compactMap { $0 as? CTAButton }
+        let controls = gate.test_visibleControls
+        #expect((controls.first as? NSTextField)?.font == Tokens.Font.heading)
+        let buttons = controls.compactMap { $0 as? CTAButton }
         let buy = try #require(buttons.first { $0.title == "Buy Audiout" })
         #expect(buy.style == .primary)
-        #expect(buy.font == Tokens.Font.heading)
+        #expect(buy.font == Tokens.Font.plateTitle)
         #expect(buy.keyEquivalent == "\r")
         let trial = try #require(buttons.first { $0.title == "Try free for 14 days" })
         #expect(trial.style == .secondary)
-        #expect(trial.font == Tokens.Font.heading)
+        #expect(trial.font == Tokens.Font.plateTitle)
+    }
+
+    /// Red if the line explaining the trial drifted away from the trial
+    /// button again, with "I have a key" between them.
+    @MainActor
+    @Test func theTrialTermsSitUnderTheTrial() throws {
+        let gate = makeContent(settings(withBuy: true), Transport())
+        gate.view.frame = NSRect(x: 0, y: 0, width: 713, height: 600)
+        gate.view.layoutSubtreeIfNeeded()
+        let controls = gate.test_visibleControls
+        let terms = try #require(controls.first {
+            ($0 as? NSTextField)?.stringValue == LicenseGateViewController.reassuranceLine
+        })
+        let haveKey = try #require(controls.first { ($0 as? TextActionButton)?.actionTitle == "I have a key" })
+        let termsFrame = terms.convert(terms.bounds, to: gate.view)
+        #expect(gate.test_trialFrame.minY - termsFrame.maxY < 10)
+        #expect(termsFrame.minY > haveKey.convert(haveKey.bounds, to: gate.view).maxY)
     }
 }
 

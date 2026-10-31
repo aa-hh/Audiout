@@ -7,17 +7,20 @@ import AudioutSharedUI
 /// The first-open licence gate: an overlay the one surface draws over the live
 /// Mixer, Scenes and Speakers screens (`AppSurfaceController.presentLicenseGate`)
 /// after Setup, the way the iPhone's `LockedView` sits over its Speakers tab.
-/// This controller's view IS the whole overlay: a `canvas` veil that leaves the
-/// screen under it at about a third of its strength, a scrim darkening the
-/// bottom 420 pt, and a raised panel 14 pt in from the sides and 8 pt above the
-/// bottom.
+/// It says what the iPhone says in the Mac's own sizes: the iPhone's 44 pt
+/// full-width buttons and heavy veil are touch-screen measures. This
+/// controller's view IS the whole overlay: a `canvas` veil that leaves the
+/// screen under it at about half its strength, a scrim darkening the bottom
+/// 280 pt, and a raised panel 14 pt in from the sides and 8 pt above the
+/// bottom, padded 20 pt.
 ///
 /// The panel has two states, the title and subtitle leading-aligned in both.
 /// `offer`: the title, a subtitle, then the gold "Buy Audiout" and under it
-/// the trial button (only before any trial), both full width, then "I have a
-/// key" and the reassurance line (with the trial only), centred under them.
-/// `enter`: the same title, a subtitle with "Paste key" after it on the same
-/// line, the key boxes and a two-line status label, both centred.
+/// the trial button (only before any trial), both 320 x 36 pt and centred,
+/// the reassurance line under the trial (with the trial only), and "I have a
+/// key" on the bottom row. `enter`: the same title, a subtitle with "Paste
+/// key" after it on the same line, the key boxes and a two-line status label,
+/// both centred, and Back and "Lost your key?" on the bottom row.
 /// Buy opens the checkout and moves to `enter`; "I have a key" moves there
 /// without the checkout; a build with no checkout URL opens in `enter`.
 /// `enter` ends in "Back" (to `offer`, so a buyer who abandoned the checkout
@@ -26,7 +29,8 @@ import AudioutSharedUI
 /// **The title never moves.** Both states' bodies sit in one slot as tall as
 /// the taller needs, so the panel is the same height in both and the
 /// transition is a crossfade of the bodies alone. In both, the subtitle sits
-/// right under the title and the rest is centred in the space below it. Inside
+/// right under the title, the bottom row sits on one line across the two
+/// states, and the rest is centred in the space between them. Inside
 /// `enter`, every state lands as words in the status label's two reserved
 /// lines under the boxes; nothing appears and pushes the rest down.
 ///
@@ -57,16 +61,16 @@ public final class LicenseGateViewController: NSViewController {
 
     // The offer.
     private let offerBody = NSView()
-    /// Buy and the trial at full width, then "I have a key" and the
-    /// reassurance line centred, all in the space under the offer's subtitle.
+    /// Buy, the trial and its reassurance line, centred in the space between
+    /// the offer's subtitle and "I have a key".
     private let offerActions = NSStackView()
     static let offerSubtitleWithPhone =
         "One purchase covers this Mac and Audiout Remote on your iPhone."
     static let offerSubtitleMacOnly = "One purchase covers this Mac."
     private let offerSubtitle = NSTextField(wrappingLabelWithString: AppSettings.remoteAppIsOffered
         ? LicenseGateViewController.offerSubtitleWithPhone : LicenseGateViewController.offerSubtitleMacOnly)
-    /// The panel's one gold button, a full-width gold `CTAButton` and the
-    /// offer's Return default.
+    /// The panel's one gold button, a gold `CTAButton` and the offer's Return
+    /// default.
     private var buyButton: CTAButton!
     private let trialButton = CTAButton(title: LicenseGateViewController.trialTitle,
                                         style: .secondary, target: nil, action: nil)
@@ -121,16 +125,16 @@ public final class LicenseGateViewController: NSViewController {
     /// The panel's edges against the overlay, and its padding.
     static let panelSideInset: CGFloat = 14
     static let panelBottomInset: CGFloat = 8
-    private static let padTop: CGFloat = 16
-    private static let padSide: CGFloat = 15
-    /// The air above and below each state's body.
-    private static let bodyAir: CGFloat = 28
+    private static let padTop: CGFloat = 20
+    private static let padSide: CGFloat = 20
+    /// The air below each state's body, matching the panel's other padding.
+    private static let bodyAir: CGFloat = 20
     private static let rowSpacing: CGFloat = 12
-    /// From the trial button down to "I have a key".
-    private static let haveKeyGap: CGFloat = 18
+    /// From the trial button down to its reassurance line, which explains it.
+    private static let reassuranceGap: CGFloat = 6
     /// The key row's own band, above and below it.
     private static let keyBandInset: CGFloat = 14
-    /// The least room between the status label and Back's row.
+    /// The least room between a state's centred group and its bottom row.
     private static let backGap: CGFloat = 4
     private static let sectionSpacing: CGFloat = 24
     private static let subtitleWidth: CGFloat = 520
@@ -165,7 +169,7 @@ public final class LicenseGateViewController: NSViewController {
     public required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     public override func loadView() {
-        headlineLabel.font = Tokens.Font.display
+        headlineLabel.font = Tokens.Font.heading
         headlineLabel.textColor = Tokens.Color.label
         headlineLabel.alignment = .natural
         headlineLabel.setAccessibilityHeading()
@@ -199,12 +203,12 @@ public final class LicenseGateViewController: NSViewController {
         reassuranceLabel.alignment = .center
         reassuranceLabel.preferredMaxLayoutWidth = Self.subtitleWidth
 
-        // Buy, then the trial under it, both full width; "I have a key" and
-        // the reassurance line centred under them. A hidden stack child
-        // DETACHES (the stack view's default), so Buy keeps its place when
-        // the trial and its line are gone.
-        [buyButton, trialButton, haveKeyButton, reassuranceLabel].forEach(offerActions.addArrangedSubview)
-        offerActions.setCustomSpacing(Self.haveKeyGap, after: trialButton)
+        // Buy, then the trial under it, then the line that explains the trial,
+        // all centred; "I have a key" is the offer's bottom row, below. A
+        // hidden stack child DETACHES (the stack view's default), so Buy keeps
+        // its place when the trial and its line are gone.
+        [buyButton, trialButton, reassuranceLabel].forEach(offerActions.addArrangedSubview)
+        offerActions.setCustomSpacing(Self.reassuranceGap, after: trialButton)
 
         // The key entry.
         enterSubtitle.font = Tokens.Font.body
@@ -249,17 +253,16 @@ public final class LicenseGateViewController: NSViewController {
 
         // Both bodies share one slot, so the panel keeps one height and the
         // title above never moves. In each, the subtitle sits right under the
-        // title and the rest is centred in the space left below it, at least
-        // `sectionSpacing` under the subtitle and `bodyAir` above the panel's
-        // bottom edge. The taller body sets the slot's height. The key state's
-        // Back row is pinned `bodyAir` above the bottom edge, level with the
-        // offer's last line, and the boxes centre in the space above that row,
-        // so the shorter state leaves no empty band under its last line.
+        // title, a bottom row ("I have a key"; Back and "Lost your key?") is
+        // pinned `bodyAir` above the panel's bottom edge, level across the two
+        // states, and the rest is centred in the space between them, at least
+        // `sectionSpacing` under the subtitle. The taller body sets the slot's
+        // height, and the shorter one leaves no empty band under its last line.
         let slot = NSView()
         slot.translatesAutoresizingMaskIntoConstraints = false
         var constraints: [NSLayoutConstraint] = []
         for (body, subtitle, actions, footer) in [
-            (offerBody, offerSubtitle as NSView, offerActions, nil as NSView?),
+            (offerBody, offerSubtitle as NSView, offerActions, haveKeyButton as NSView),
             (enterBody, subtitleRow, enterActions, bottomRow),
         ] {
             actions.orientation = .vertical
@@ -272,23 +275,15 @@ public final class LicenseGateViewController: NSViewController {
             slot.addSubview(body)
             let space = NSLayoutGuide()
             body.addLayoutGuide(space)
-            if let footer {
-                footer.translatesAutoresizingMaskIntoConstraints = false
-                body.addSubview(footer)
-                constraints += [
-                    footer.leadingAnchor.constraint(equalTo: body.leadingAnchor),
-                    footer.bottomAnchor.constraint(equalTo: body.bottomAnchor, constant: -Self.bodyAir),
-                    space.bottomAnchor.constraint(equalTo: footer.topAnchor),
-                    actions.bottomAnchor.constraint(lessThanOrEqualTo: footer.topAnchor,
-                                                    constant: -Self.backGap),
-                ]
-            } else {
-                constraints += [
-                    space.bottomAnchor.constraint(equalTo: body.bottomAnchor),
-                    actions.bottomAnchor.constraint(lessThanOrEqualTo: body.bottomAnchor,
-                                                    constant: -Self.bodyAir),
-                ]
-            }
+            footer.translatesAutoresizingMaskIntoConstraints = false
+            body.addSubview(footer)
+            constraints += [
+                footer.centerXAnchor.constraint(equalTo: body.centerXAnchor),
+                footer.bottomAnchor.constraint(equalTo: body.bottomAnchor, constant: -Self.bodyAir),
+                space.bottomAnchor.constraint(equalTo: footer.topAnchor),
+                actions.bottomAnchor.constraint(lessThanOrEqualTo: footer.topAnchor,
+                                                constant: -Self.backGap),
+            ]
             constraints += [
                 body.leadingAnchor.constraint(equalTo: slot.leadingAnchor),
                 body.trailingAnchor.constraint(equalTo: slot.trailingAnchor),
@@ -339,7 +334,6 @@ public final class LicenseGateViewController: NSViewController {
             slot.widthAnchor.constraint(equalTo: column.widthAnchor, constant: -2 * Self.padSide),
             slotHug,
             offerSubtitle.widthAnchor.constraint(lessThanOrEqualToConstant: Self.subtitleWidth),
-            buyButton.widthAnchor.constraint(equalTo: offerActions.widthAnchor),
             reassuranceLabel.widthAnchor.constraint(lessThanOrEqualToConstant: Self.subtitleWidth),
             subtitleRow.widthAnchor.constraint(lessThanOrEqualTo: slot.widthAnchor),
             keyEntry.topAnchor.constraint(equalTo: keyBand.topAnchor, constant: Self.keyBandInset),
@@ -350,11 +344,6 @@ public final class LicenseGateViewController: NSViewController {
             statusLine.widthAnchor.constraint(equalTo: slot.widthAnchor),
             bottomRow.widthAnchor.constraint(equalTo: slot.widthAnchor),
         ]
-        // A hidden trial button is detached from the stack, outside the view
-        // tree a pin to the stack needs, and it never comes back on this gate.
-        if !trialButton.isHidden {
-            constraints.append(trialButton.widthAnchor.constraint(equalTo: offerActions.widthAnchor))
-        }
         NSLayoutConstraint.activate(constraints)
         view = root
 
@@ -833,15 +822,15 @@ public final class LicenseGateViewController: NSViewController {
     }
 
     /// Everything the current state shows, title first, for the layout
-    /// tests. The offer: the title, the subtitle, Buy, the trial when
-    /// offered, "I have a key", and the reassurance line with the trial. The
+    /// tests. The offer: the title, the subtitle, Buy, the trial and its
+    /// reassurance line when offered, and "I have a key". The
     /// key entry: the title, the subtitle, "Paste key", the boxes, the status
     /// label, Back when shown, and "Lost your key?" when there is a resend
     /// page.
     var test_visibleControls: [NSView] {
         _ = view
         let controls: [NSView] = state == .offer
-            ? [headlineLabel, offerSubtitle, buyButton, trialButton, haveKeyButton, reassuranceLabel]
+            ? [headlineLabel, offerSubtitle, buyButton, trialButton, reassuranceLabel, haveKeyButton]
             : [headlineLabel, enterSubtitle, pasteButton, keyEntry, statusLine, backButton, lostKeyButton]
         return controls.filter { !$0.isHidden }
     }
@@ -858,11 +847,12 @@ public final class LicenseGateViewController: NSViewController {
 /// controls still hit normally.
 private final class LicenseGateOverlayView: NSView {
 
-    /// The veil's opacity: the screen under it reads at about 34 %.
-    static let veilAlpha: CGFloat = 0.66
+    /// The veil's opacity: the screen under it reads at about half strength,
+    /// so the panel sits on the user's Mixer rather than replacing it.
+    static let veilAlpha: CGFloat = 0.5
     /// The scrim covers this much of the bottom (or the whole overlay, if
     /// shorter): clear at its top, `canvas` at 0.55 at 42 %, solid from 82 %.
-    static let scrimHeight: CGFloat = 420
+    static let scrimHeight: CGFloat = 280
 
     /// Called when the overlay enters a window and whenever that window
     /// becomes key.

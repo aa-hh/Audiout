@@ -61,16 +61,15 @@ import Testing
         #expect(try #require(primary.cell as? CTAButtonCell).edge == nil)
     }
 
-    /// Red if the floor moved from 200 x 44 pt, a stock bezel's insets came
-    /// back around the face, the face hugged its floor so a width pin could
-    /// not stretch it, or the secondary dropped to `body`.
+    /// Red if the face moved off 320 x 36 pt back toward the iPhone's 44 pt
+    /// touch-target size, a stock bezel's insets came back around the face,
+    /// or a style left the wizard's `plateTitle` voice.
     @Test(arguments: [CTAButton.Style.primary, .secondary])
-    func theIntrinsicSizeIsTheiPhones(style: CTAButton.Style) {
+    func theIntrinsicSizeIsMacSized(style: CTAButton.Style) {
         let button = CTAButton(title: "A title", style: style, target: nil, action: nil)
-        #expect(button.intrinsicContentSize == NSSize(width: 200, height: 44))
-        #expect(button.fittingSize == NSSize(width: 200, height: 44))
-        #expect(button.contentHuggingPriority(for: .horizontal) < .required)
-        #expect(button.font == Tokens.Font.heading)
+        #expect(button.intrinsicContentSize == NSSize(width: 320, height: 36))
+        #expect(button.fittingSize == NSSize(width: 320, height: 36))
+        #expect(button.font == Tokens.Font.plateTitle)
     }
 
     /// Red if the chip stopped drawing on the Return default or its AX help

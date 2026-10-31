@@ -1345,6 +1345,12 @@ public enum Tokens {
         public static var pairingCode: NSFont {
             .monospacedDigitSystemFont(ofSize: 28, weight: .semibold)
         }
+        /// The licence gate's key boxes, copied by eye from a receipt email
+        /// five characters at a time: 17 pt medium, monospaced, a notch above
+        /// body so a misread character is easy to spot.
+        public static var licenceKey: NSFont {
+            .monospacedSystemFont(ofSize: 17, weight: .medium)
+        }
         /// The small system font size — the app's secondary/detail text size
         /// (sublabels, readouts, hints, footers). Alias of
         /// `NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)`.
@@ -1409,8 +1415,8 @@ public enum Tokens {
         public static var keycap: NSFont { captionEmphasized }
         /// The wizard's two ANSWER plates' title (owner ruling 2026-08-23:
         /// 236×88 hero plates with a 15 pt semibold title). Neither
-        /// ``bodyEmphasized`` (13) nor ``heading`` (16) is that size; only
-        /// `BTAlignmentWizardView` consumes it.
+        /// ``bodyEmphasized`` (13) nor ``heading`` (16) is that size. Also the
+        /// licence gate's `CTAButton` titles, the same step above body.
         public static var plateTitle: NSFont { .systemFont(ofSize: 15, weight: .semibold) }
         /// The compact explanatory voice: the alignment note and prompt copy and
         /// the card note line. The same font as ``caption``; the name keeps the

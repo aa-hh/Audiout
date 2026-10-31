@@ -88,6 +88,7 @@ public enum DeviceIcon {
     static let rowGlyphFits: [String: (pointSize: CGFloat, dx: CGFloat, dy: CGFloat)] = [
         "hifispeaker.fill": (18, 0, 0),
         "homepod.fill": (19, 0, 0),
+        "homepodmini.fill": (19, 0, 0),
         "appletv.fill": (16, 0, 0),
         "wifi.router.fill": (14.75, 0.25, 1.25),
         "laptopcomputer": (14.25, 0, 0.25),

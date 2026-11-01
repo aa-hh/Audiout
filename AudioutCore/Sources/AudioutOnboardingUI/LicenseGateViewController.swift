@@ -492,9 +492,10 @@ public final class LicenseGateViewController: NSViewController {
     /// remove.
     ///
     /// The pass is granted by the trial that `TrialClock` actually wrote, never
-    /// by the click. `start` refuses a Mac that has had a trial before, and
-    /// letting the click through anyway would open the app on no trial and no
-    /// valid key, then do it again at every launch.
+    /// by the click. `start` refuses a Mac that has had a trial before, and a
+    /// click let through with nothing stored would open the app on no trial and
+    /// no valid key, then show the gate again at every launch. The one pass
+    /// with no key and no trial is `continueTapped`, which stores its choice.
     @objc private func trialTapped() {
         TrialClock.start(settings: settings)
         guard case .active = TrialClock.state(settings: settings) else { return }
@@ -504,7 +505,11 @@ public final class LicenseGateViewController: NSViewController {
 
     /// A Mac that has held a paid licence gets no trial and opens on one
     /// speaker: the limit `LicenseGate.limitsToOneSpeaker` applies with no key.
+    /// The choice is stored (`AppSettings.hasChosenOneSpeaker`) so the gate
+    /// does not come back at every launch; the Mixer's one-speaker note is the
+    /// reminder from then on.
     @objc private func continueTapped() {
+        settings.hasChosenOneSpeaker = true
         pass(afterBeat: false)
     }
 

@@ -263,6 +263,23 @@ import Testing
         #expect(LicenseGate.limitsToOneSpeaker(settings: settings) == true)
     }
 
+    /// The decision `AppDelegate.useNewTrialKey` reads after this refusal to
+    /// put the welcome back on screen in the same session; that wiring lives in
+    /// the app target, which tests cannot reach, so only the decision is pinned.
+    /// Red if `shouldPresent` stops answering true after a paid refusal, or
+    /// keeps answering true once "Continue on one speaker" was chosen.
+    @Test func aPaidHistoryRefusalOwesTheGateUntilOneSpeakerIsChosen() async {
+        let settings = unregisteredTrial()
+        #expect(!LicenseGate.shouldPresent(settings: settings, presentation: .auto))
+        let transport = Transport()
+        transport.stub(status: 200, json: #"{"outcome":"refused","reason":"previously_paid"}"#)
+
+        #expect(await register(settings, transport) == true)
+        #expect(LicenseGate.shouldPresent(settings: settings, presentation: .auto))
+        settings.hasChosenOneSpeaker = true
+        #expect(!LicenseGate.shouldPresent(settings: settings, presentation: .auto))
+    }
+
     /// Red if the refusal overwrote state after the user entered a key.
     @Test func aPaidHistoryRefusalLeavesAKeyThatArrivedMidFlightAlone() async {
         let settings = unregisteredTrial()

@@ -761,6 +761,17 @@ import Testing
         #expect(settings.hasHeldPaidLicense == false)
     }
 
+    /// Red if the "Continue on one speaker" choice does not survive a fresh
+    /// `AppSettings`, or a dev build's server switch keeps it, which would hide
+    /// the welcome on a server that never saw the paid licence.
+    @Test func changingTheLicenseServerForgetsTheOneSpeakerChoice() {
+        let settings = AppSettings(defaults: defaults, isDevBuild: true)
+        settings.hasChosenOneSpeaker = true
+        #expect(AppSettings(defaults: defaults).hasChosenOneSpeaker == true)
+        settings.licenseServerChoice = .staging
+        #expect(settings.hasChosenOneSpeaker == false)
+    }
+
     /// Turns red if the Sparkle feed override is offered for "Build default"
     /// or on a shipping build, or points anywhere but the chosen server.
     @Test func licenseServerChoiceAppcastURLOnlyForADevBuildWithAChosenServer() {

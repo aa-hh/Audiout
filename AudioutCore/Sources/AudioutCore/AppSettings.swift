@@ -176,6 +176,7 @@ public struct AppSettings {
         static let licenseMaxMajor = "license.maxMajor"
         static let licenseReason = "license.reason"
         static let licenseHasHeldPaid = "license.hasHeldPaid"
+        static let licenseHasChosenOneSpeaker = "license.hasChosenOneSpeaker"
         static let companionToken = "license.companionToken"
         static let remoteConfigData = "remoteConfig.data"
         static let remoteConfigFetchedAt = "remoteConfig.fetchedAt"
@@ -501,7 +502,7 @@ public struct AppSettings {
     /// popup, read by ``licenseServerURL`` only when this is a dev build.
     /// Changing it clears the stored verdict (``licenseStatus``,
     /// ``licenseReason``, ``licenseMaxMajor``, ``companionToken``,
-    /// ``trialExpiresAt``) and ``hasHeldPaidLicense``, because a verdict from
+    /// ``trialExpiresAt``), ``hasHeldPaidLicense`` and ``hasChosenOneSpeaker``, because a verdict from
     /// one server says nothing about another; the key and the trial start are kept, so the next check
     /// asks the new server about the same key.
     public var licenseServerChoice: LicenseServerChoice {
@@ -519,6 +520,7 @@ public struct AppSettings {
             companionToken = nil
             trialExpiresAt = nil
             hasHeldPaidLicense = false
+            hasChosenOneSpeaker = false
         }
     }
 
@@ -776,6 +778,17 @@ public struct AppSettings {
     public var hasHeldPaidLicense: Bool {
         get { defaults.bool(forKey: Keys.licenseHasHeldPaid) }
         nonmutating set { defaults.set(newValue, forKey: Keys.licenseHasHeldPaid) }
+    }
+
+    /// Whether the user tapped "Continue on one speaker" on the licence gate,
+    /// the choice a Mac that has held a paid licence gets instead of a trial.
+    /// Once set, ``LicenseGate/shouldPresent(settings:presentation:)`` stops
+    /// showing the gate at launch and the Mac runs limited to one speaker.
+    /// Cleared, like ``hasHeldPaidLicense``, only by a dev build's
+    /// ``licenseServerChoice`` switch.
+    public var hasChosenOneSpeaker: Bool {
+        get { defaults.bool(forKey: Keys.licenseHasChosenOneSpeaker) }
+        nonmutating set { defaults.set(newValue, forKey: Keys.licenseHasChosenOneSpeaker) }
     }
 
     /// The licence server's signed proof for the companion server to hand

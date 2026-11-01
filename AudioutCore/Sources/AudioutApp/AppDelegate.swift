@@ -1894,7 +1894,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
             self?.groupController?.licenseAnswered()
         }
         applyLicenseState()
-        if LicenseGate.shouldPresent(settings: settings) { presentLicenseGate() }
+        if LicenseGate.shouldPresent(settings: settings) {
+            // Setup first, as at launch: the gate waits for it to close.
+            if onboardingWindowController != nil {
+                licenseGateAwaitsSetup = true
+            } else {
+                presentLicenseGate()
+            }
+        }
     }
 
     /// Offer to fix it when Gatekeeper is running us from its randomized

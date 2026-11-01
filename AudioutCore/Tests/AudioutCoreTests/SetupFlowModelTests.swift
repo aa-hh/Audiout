@@ -126,7 +126,8 @@ import Testing
         remoteControlTrusted: Bool = false,
         localNetworkGated: Bool = true,
         usageStatsAvailable: Bool = false,
-        remoteAppAvailable: Bool = false
+        remoteAppAvailable: Bool? = false,
+        settings: AppSettings? = nil
     ) -> SetupModel {
         SetupModel(audioProbe: CannedAudioProbe(result: audio),
                    localNetwork: localNetwork ?? CannedLocalNetwork(reachable: localNetworkReachable),
@@ -134,7 +135,7 @@ import Testing
                    ptpHelper: ptpHelperManager ?? CannedPTPHelper(status: ptpHelper),
                    bluetoothReader: SimulatedBluetoothPermission(status: bluetooth),
                    bluetoothPrimer: bluetoothPrimer ?? SimulatedBluetoothPermission(status: bluetooth),
-                   settings: AppSettings(defaults: isolatedDefaults),
+                   settings: settings ?? AppSettings(defaults: isolatedDefaults),
                    localNetworkGated: localNetworkGated,
                    usageStatsAvailable: usageStatsAvailable,
                    remoteAppAvailable: remoteAppAvailable,
@@ -184,6 +185,29 @@ import Testing
         #expect(accepts.steps.contains(.audioutRemote))
         #expect(!accepts.isComplete(.audioutRemote),
                 "an Allow switch that is on is not a phone in the room")
+    }
+
+    /// Red if `refreshRemoteAppAvailability()` stopped re-reading the switches
+    /// (a kept Setup model would show the iPhone card as it was when built,
+    /// before `app-config.json` arrived) or overrode a value passed to `init`.
+    @Test func aKeptModelRereadsTheIPhoneCardFromTheSwitches() {
+        let settings = AppSettings(defaults: isolatedDefaults)
+        settings.allowRemoteControl = true
+        let kept = makeSetup(remoteAppAvailable: nil, settings: settings)
+        #expect(!kept.remoteAppIsAvailable, "no app-config.json, no card")
+
+        settings.remoteConfigData = Data(#"{"v": 1, "mac": {"remote": {"visible": true}}}"#.utf8)
+        kept.refreshRemoteAppAvailability(environment: [:])
+        #expect(kept.remoteAppIsAvailable)
+        #expect(SetupFlowModel(setup: kept).steps.contains(.audioutRemote))
+
+        settings.allowRemoteControl = false
+        kept.refreshRemoteAppAvailability(environment: [:])
+        #expect(!kept.remoteAppIsAvailable, "a Mac that refuses phones offers no card")
+
+        let fixed = makeSetup(remoteAppAvailable: true, settings: settings)
+        fixed.refreshRemoteAppAvailability(environment: [:])
+        #expect(fixed.remoteAppIsAvailable)
     }
 
     /// Defect this names: the card completing on an approval on file rather

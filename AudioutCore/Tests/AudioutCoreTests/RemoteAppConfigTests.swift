@@ -99,6 +99,74 @@ import Testing
         #expect(!boolean.licenseCheckDisabled(build: 1))
     }
 
+    // MARK: iPhone app visibility
+
+    private static let visible = Data(#"{"v": 1, "mac": {"remote": {"visible": true}}}"#.utf8)
+
+    private func isVisible(_ data: Data?, environment: [String: String] = [:],
+                           isDevBuild: Bool = false, offered: Bool = true) -> Bool {
+        let settings = AppSettings(defaults: isolation.makeDefaults())
+        settings.remoteConfigData = data
+        return AppSettings.remoteAppIsVisible(settings: settings, environment: environment,
+                                              isDevBuild: isDevBuild, offered: offered)
+    }
+
+    /// Red if anything but the JSON boolean `true` at `mac.remote.visible` in a
+    /// version-1 file showed the iPhone app: no file, a bare file, `false`,
+    /// the number 1 (which Swift bridges to true), the string "true", or a
+    /// file of another version would then reveal it by accident.
+    @Test func onlyABooleanTrueShowsTheIPhoneApp() {
+        #expect(!isVisible(nil))
+        #expect(!isVisible(Data(#"{"v": 1}"#.utf8)))
+        #expect(!isVisible(Data(#"{"v": 1, "mac": {"remote": {"visible": false}}}"#.utf8)))
+        #expect(!isVisible(Data(#"{"v": 1, "mac": {"remote": {"visible": 1}}}"#.utf8)))
+        #expect(!isVisible(Data(#"{"v": 1, "mac": {"remote": {"visible": "true"}}}"#.utf8)))
+        #expect(!isVisible(Data(#"{"v": 2, "mac": {"remote": {"visible": true}}}"#.utf8)))
+        #expect(!isVisible(Data("<html>".utf8)))
+        #expect(isVisible(Self.visible))
+    }
+
+    /// Red if visibility started expiring with ``RemoteAppConfig/maxAge`` like
+    /// the licence switch (a Mac offline for a week would hide the iPhone app
+    /// it had shown), or if the licence switch stopped expiring.
+    @Test func visibilityIgnoresTheFilesAge() {
+        let settings = AppSettings(defaults: defaults)
+        settings.remoteConfigData = Data(
+            #"{"v": 1, "mac": {"remote": {"visible": true}, "licenseCheck": {"disabled": true}}}"#.utf8)
+        settings.remoteConfigFetchedAt = Date(timeIntervalSinceNow: -30 * 86_400)
+        #expect(AppSettings.remoteAppIsVisible(settings: settings, environment: [:], isDevBuild: false))
+        #expect(!RemoteAppConfig.licenseCheckWaived(settings: settings, build: 1))
+    }
+
+    /// Red if a dev build or `AUDIOUT_COMPANION=1`/`on` stopped showing the
+    /// iPhone app without a file, `0`/`off` stopped hiding it over a file
+    /// and a dev build, or a build that does not offer the companion showed it
+    /// without the launch option.
+    @Test func devBuildsAndTheLaunchOptionOverrideTheFile() {
+        #expect(isVisible(nil, isDevBuild: true))
+        #expect(isVisible(nil, environment: ["AUDIOUT_COMPANION": "1"]))
+        #expect(isVisible(nil, environment: ["AUDIOUT_COMPANION": "ON"]))
+        #expect(isVisible(nil, environment: ["AUDIOUT_COMPANION": "on"], offered: false))
+        #expect(!isVisible(Self.visible, environment: ["AUDIOUT_COMPANION": "off"], isDevBuild: true))
+        #expect(!isVisible(Self.visible, environment: ["AUDIOUT_COMPANION": "0"]))
+        #expect(!isVisible(Self.visible, offered: false))
+        #expect(!isVisible(nil, environment: ["AUDIOUT_COMPANION": "maybe"]))
+    }
+
+    /// Red if a fetched file with `mac.remote.visible` false stopped replacing
+    /// a stored one where it was true: turning the switch off on the website
+    /// would then never hide the iPhone app again.
+    @Test func aLaterFileHidesTheIPhoneAppAgain() async {
+        let settings = AppSettings(defaults: defaults)
+        settings.remoteConfigData = Self.visible
+        let transport = Transport()
+        transport.stub(status: 200, body: Data(#"{"v": 1, "mac": {"remote": {"visible": false}}}"#.utf8))
+
+        await refresh(settings, transport)
+
+        #expect(!AppSettings.remoteAppIsVisible(settings: settings, environment: [:], isDevBuild: false))
+    }
+
     // MARK: Fetching
 
     /// Red if a 200 with a valid body stopped storing the body and the fetch

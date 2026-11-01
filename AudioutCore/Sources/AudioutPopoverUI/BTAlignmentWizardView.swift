@@ -279,11 +279,11 @@ public final class BTAlignmentWizardView: NSView {
     /// switch and the companion server's clients. The intro reads only
     /// whether it is `unavailable`, which hides the iPhone link.
     public enum RemoteInviteState: Equatable {
-        /// This build does not carry Audiout Remote at all
-        /// (`AppSettings.remoteAppIsOffered`), so the intro offers no link to
-        /// an app nobody can download.
+        /// The iPhone app is hidden (`AppSettings.remoteAppIsVisible`), so the
+        /// intro offers no link to it.
         case unavailable
-        /// Allow control from iPhone resolves off (setting or launch option).
+        /// The stored Allow control from iPhone setting is off.
+        /// `AUDIOUT_COMPANION=off` hides the iPhone app, so it gives `.unavailable`.
         case allowOff
         /// Allow is on and no phone has connected: the code and the address.
         case notConnected
@@ -293,7 +293,7 @@ public final class BTAlignmentWizardView: NSView {
     }
 
     /// Repaints the intro when it changes, so the link appears or goes with
-    /// the build's phone app.
+    /// the phone app's visibility.
     public var remoteInvite: RemoteInviteState = .notConnected {
         didSet {
             guard remoteInvite != oldValue else { return }

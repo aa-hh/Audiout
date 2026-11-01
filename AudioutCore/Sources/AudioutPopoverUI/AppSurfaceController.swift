@@ -151,6 +151,8 @@ public final class AppSurfaceController {
     private var speakersScreen: SurfaceScreenViewController?
     private var settingsScreen: SurfaceScreenViewController?
     private var settingsRoot: SettingsRootViewController?
+    /// Set by ``invalidateSettingsScreen()``: the next mount builds Settings afresh.
+    private var settingsScreenIsStale = false
 
     public private(set) var selectedScreen: SurfaceScreen = .mixer
 
@@ -1048,8 +1050,16 @@ public final class AppSurfaceController {
         return screen
     }
 
+    /// Drop the built Settings screen, so the next time it is mounted it is
+    /// built again from `settingsContent`. A Settings screen on screen now
+    /// stays as it is until then; nothing is rebuilt under the user.
+    public func invalidateSettingsScreen() {
+        settingsScreenIsStale = settingsScreen != nil
+    }
+
     private func builtSettingsScreen() -> SurfaceScreenViewController {
-        if let settingsScreen { return settingsScreen }
+        if let settingsScreen, !settingsScreenIsStale { return settingsScreen }
+        settingsScreenIsStale = false
         let root = makeSettingsContent()
         settingsRoot = root
         let screen = SurfaceScreenViewController(content: root)

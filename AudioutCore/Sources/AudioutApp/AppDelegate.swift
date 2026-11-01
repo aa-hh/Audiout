@@ -304,6 +304,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
     /// mounts it, once.
     private var licenseGateAwaitsSetup = false
 
+    /// First-run Setup on an install with no stored `app-config.json`, held
+    /// until the launch fetch answers so the iPhone card can be in it. The
+    /// fetch's 5 s timeout bounds the wait.
+    private var setupAwaitsRemoteConfig: (@MainActor () -> Void)?
+    /// Set when the launch fetch of `app-config.json` has answered, either way.
+    private var launchRemoteConfigFetched = false
+
     /// The `SetupModel` behind the last-presented onboarding window, kept alive
     /// after the window closes and REUSED by every subsequent automatic
     /// revocation audit (see `auditRequiredPermissionsIfNeeded`) rather than
@@ -1056,7 +1063,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
             self?.licenseProofRefresher?.start()
         }
         applyLicenseState()
-        RemoteAppConfigFetcher(settings: settings).refresh { [weak self] in self?.applyLicenseState() }
+        refreshRemoteConfig { [weak self] in
+            guard let self else { return }
+            self.launchRemoteConfigFetched = true
+            let present = self.setupAwaitsRemoteConfig
+            self.setupAwaitsRemoteConfig = nil
+            present?()
+        }
 
     }
 
@@ -1509,9 +1522,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
             // that is only now becoming visible.
             if screen == .settings { self?.settingsRootController?.reloadFromSettings() }
             if screen == .mixer, let self {
-                RemoteAppConfigFetcher(settings: settings).refresh(minimumInterval: 3600) { [weak self] in
-                    self?.applyLicenseState()
-                }
+                self.refreshRemoteConfig(minimumInterval: 3600)
                 // A limited install re-asks the server on every open, so a key
                 // bought elsewhere lifts the limit without a relaunch.
                 if LicenseGate.limitsToOneSpeaker(settings: settings) {
@@ -1653,7 +1664,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
         // carries no server URL and never gates.
         if LicenseGate.shouldPresent(settings: settings) {
             log("Audiout launched — first-open license gate")
-            if onboardingWindowController != nil {
+            if onboardingWindowController != nil || setupAwaitsRemoteConfig != nil {
                 licenseGateAwaitsSetup = true
             } else {
                 presentLicenseGate()
@@ -1766,7 +1777,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
         ])
         if presentOnLaunch {
             log("Audiout launched (backend: \(type(of: backend))) — first-run setup")
-            presentSetup()
+            // A fresh install has no stored app-config.json yet, so a Setup
+            // built now would leave out the iPhone card whatever the website
+            // says. Wait for the launch fetch; any stored file, even an old
+            // one, answers at once.
+            if settings.remoteConfigData == nil, !launchRemoteConfigFetched {
+                setupAwaitsRemoteConfig = { [weak self] in self?.presentSetup() }
+            } else {
+                presentSetup()
+            }
         } else {
             startBackendIfNeeded()
             log("Audiout launched (backend: \(type(of: backend)))")
@@ -1896,7 +1915,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
         applyLicenseState()
         if LicenseGate.shouldPresent(settings: settings) {
             // Setup first, as at launch: the gate waits for it to close.
-            if onboardingWindowController != nil {
+            if onboardingWindowController != nil || setupAwaitsRemoteConfig != nil {
                 licenseGateAwaitsSetup = true
             } else {
                 presentLicenseGate()
@@ -2161,6 +2180,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
 
         let model = permissionAuditModel ?? makeSetupModel()
         permissionAuditModel = model
+        // The kept model is reused for its Local Network state, but its
+        // iPhone card must follow the website and Allow switches as they are
+        // now, for a `.permissionLost` reopen.
+        model.refreshRemoteAppAvailability()
 
         isAuditingRequiredPermissions = true
         Task { @MainActor [weak self] in
@@ -2226,6 +2249,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
     @discardableResult
     @MainActor
     private func presentSetupForUndeterminedIfNeeded() -> Bool {
+        // First-run Setup is already owed, waiting on app-config.json: let
+        // that one open, with the iPhone card the website asks for.
+        if setupAwaitsRemoteConfig != nil { return true }
         guard onboardingWindowController == nil else { return false }
         guard !didAutoPresentSetupForUndetermined else { return false }
         if let cooldownUntil = permissionAuditCooldownUntil, Date() < cooldownUntil { return false }
@@ -2608,6 +2634,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
         NSWorkspace.shared.open(SystemSettingsPane.bluetooth.url)
     }
 
+    /// Fetches `app-config.json`, then re-applies the licence state. When the
+    /// new file shows or hides the iPhone app, the Settings screen is rebuilt
+    /// on its next open; every other surface asks at the moment it is built.
+    /// `completion` runs on main after that, whatever the fetch did.
+    @MainActor
+    private func refreshRemoteConfig(minimumInterval: TimeInterval = 0,
+                                     completion: (@MainActor () -> Void)? = nil) {
+        let wasVisible = AppSettings.remoteAppIsVisible(settings: settings)
+        RemoteAppConfigFetcher(settings: settings).refresh(minimumInterval: minimumInterval) { [weak self] in
+            guard let self else { return }
+            self.applyLicenseState()
+            if AppSettings.remoteAppIsVisible(settings: self.settings) != wasVisible {
+                self.surface?.invalidateSettingsScreen()
+            }
+            completion?()
+        }
+    }
+
     /// The Settings screen's content, built on the first visit: a Groups-style
     /// sidebar of sections and one pane.
     @MainActor
@@ -2689,8 +2733,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
         var sections: [SettingsRootViewController.Section] = [
             .init(title: "General", symbolName: "gearshape", viewController: general),
         ]
-        // A build with no companion shows no Audiout Remote section at all.
-        if remote.isOffered {
+        // While the iPhone app is hidden there is no Audiout Remote section at
+        // all; `refreshRemoteConfig` rebuilds this screen when that changes.
+        if remote.isVisible {
             sections.append(.init(title: "Audiout Remote", symbolName: "iphone", viewController: remote))
         }
         sections += [
@@ -3105,11 +3150,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
     /// file, so the Mac never guesses which one is in the room.
     @MainActor
     private func remoteInviteState() -> BTAlignmentWizardView.RemoteInviteState {
-        let resolution = AppSettings.resolvedAllowRemoteControlWithSource(settings: settings)
-        // A build with no phone app drops the panel; a Mac that merely refuses
-        // phones keeps it and says how to allow them.
-        if resolution.isUnoffered { return .unavailable }
-        guard resolution.value else { return .allowOff }
+        // While the iPhone app is hidden the panel goes; a Mac that merely
+        // refuses phones keeps it and says how to allow them.
+        guard AppSettings.remoteAppIsVisible(settings: settings) else { return .unavailable }
+        guard AppSettings.resolvedAllowRemoteControl(settings: settings) else { return .allowOff }
         guard companionCoordinator.clientCount > 0 else { return .notConnected }
         return .connected(phoneName: companionCoordinator.invitePhoneName)
     }
@@ -3606,7 +3650,8 @@ extension AppDelegate: CompanionCoordinatorHost {
         guard !HeadlessRuntime.isActive, !isTerminating else { return }
         let alert = NSAlert()
         alert.messageText = CompanionApprovalPrompt.messageText
-        alert.informativeText = CompanionApprovalPrompt.informativeText(clientName: clientName)
+        alert.informativeText = CompanionApprovalPrompt.informativeText(
+            clientName: clientName, settingsPaneVisible: AppSettings.remoteAppIsVisible(settings: settings))
         alert.icon = Self.lockBadgedAppIcon()
         alert.accessoryView = Self.pairingCodeBoxes(pairingCode)
         let allow = alert.addButton(withTitle: "Allow")

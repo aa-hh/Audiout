@@ -292,6 +292,10 @@ import Testing
                 == "Allow only if the iPhone shows the same code. It calls itself \"Ada's iPhone\".\n\n"
                 + "It will see and control what's playing on this Mac's speakers, including which apps are playing. "
                 + "You can remove it later in Settings › Audiout Remote.")
+        #expect(CompanionApprovalPrompt.informativeText(clientName: "iPhone", settingsPaneVisible: false)
+                == "Allow only if the iPhone shows the same code.\n\n"
+                + "It will see and control what's playing on this Mac's speakers, including which apps are playing.",
+                "no pointer to a Settings pane that is hidden")
         #expect(CompanionApprovalPrompt.messageText == "Allow an iPhone to control Audiout on this Mac?")
     }
 

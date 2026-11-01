@@ -17,10 +17,8 @@
 // (labels, symbols, selection) is covered by the `SettingsRootViewController`
 // tests, not a pixel snapshot.
 //
-// One PNG per (section × appearance) — eight total, ten in a build that
-// carries the iPhone companion:
+// One PNG per (section × appearance) — ten total:
 //   settings-{general,audiout-remote,appearance,audio,license}-{light,dark}.png
-// (`audiout-remote` only when `RemoteSettingsViewController.isOffered`).
 //
 // Run: `swift run settings-snapshot [output-dir]`.
 
@@ -161,10 +159,9 @@ func makeRoot() -> SettingsRootViewController {
               viewController: GeneralSettingsViewController(loginItem: SnapshotLoginItem(),
                                                             settings: settings)),
     ]
-    let remote = RemoteSettingsViewController(settings: settings)
-    if remote.isOffered {
-        sections.append(.init(title: "Audiout Remote", symbolName: "iphone", viewController: remote))
-    }
+    // Drawn whatever app-config.json says, so the pane always has a picture.
+    sections.append(.init(title: "Audiout Remote", symbolName: "iphone",
+                          viewController: RemoteSettingsViewController(settings: settings)))
     sections += [
         .init(title: "Appearance", symbolName: "paintpalette",
               viewController: AppearanceSettingsViewController(settings: settings)),

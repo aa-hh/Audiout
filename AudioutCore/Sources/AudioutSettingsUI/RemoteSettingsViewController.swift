@@ -6,8 +6,8 @@ import AudioutSharedUI
 
 /// Settings › **Audiout Remote**: the "Allow control from iPhone on this
 /// network" switch, how to add an iPhone and the invitation to the iPhone
-/// app while it is on, and the remembered iPhones. A build that does not carry the companion
-/// (``isOffered`` false) never builds this section at all.
+/// app while it is on, and the remembered iPhones. While the iPhone app is
+/// hidden (``isVisible`` false) the app never builds this section at all.
 @MainActor
 public final class RemoteSettingsViewController: NSViewController, SettingsReadoutProviding {
 
@@ -44,10 +44,10 @@ public final class RemoteSettingsViewController: NSViewController, SettingsReado
     /// renders disabled and ``remoteControlOverrideNote`` explains why.
     private let remoteControlResolution: AppSettings.RemoteControlResolution
 
-    /// Whether this build carries the iPhone companion; every build does now.
-    /// The app builds the section only when it does: an off switch reads as
-    /// "you could turn this on".
-    public var isOffered: Bool { !remoteControlResolution.isUnoffered }
+    /// Whether the iPhone app is visible
+    /// (``AppSettings/remoteAppIsVisible(settings:environment:isDevBuild:offered:)``),
+    /// decided once at init. The app builds the section only when it is.
+    public let isVisible: Bool
 
     /// Fired after "Allow control from iPhone on this network" changes and
     /// persists (T6), so the app layer can start/stop the companion server to
@@ -80,6 +80,8 @@ public final class RemoteSettingsViewController: NSViewController, SettingsReado
         self.approvals = approvals
         self.remoteControlResolution = AppSettings.resolvedAllowRemoteControlWithSource(
             environment: environment, offered: remoteAppIsOffered, settings: settings)
+        self.isVisible = AppSettings.remoteAppIsVisible(
+            settings: settings, environment: environment, offered: remoteAppIsOffered)
         super.init(nibName: nil, bundle: nil)
         title = "Audiout Remote"
         // Claimed here, not in `loadView`, so the sidebar's readout follows a

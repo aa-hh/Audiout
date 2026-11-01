@@ -71,6 +71,15 @@ public enum CompanionSnapshotBuilder {
         }
     }
 
+    /// When ``macLicense(settings:now:)`` next changes with nothing but the
+    /// clock moving: the end of a running trial. Nil for every other state,
+    /// which changes only when the stored licence does.
+    public static func macLicenseRecomputeAt(settings: AppSettings, now: Date = Date()) -> Date? {
+        let license = macLicense(settings: settings, now: now)
+        guard license.status == .trial, let end = license.trialEndsAt, end > now else { return nil }
+        return end
+    }
+
     /// - Parameters:
     ///   - devices: the live device list (already resolved by the caller —
     ///     this mapper never talks to a backend directly).

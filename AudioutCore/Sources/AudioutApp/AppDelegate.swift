@@ -2905,8 +2905,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
         // force-unwrap — a launch crash on any Mac holding a stored token
         // (2026-09-26). No phone is connected that early, so there is nobody
         // to push to; the passes after wiring cover every later licence change.
-        // The snapshot's licence state is re-read here too, so a refund or a
-        // trial ending reaches connected phones.
+        // The snapshot's licence state is re-read here too, so a refund
+        // reaches connected phones. A trial running out by the clock changes
+        // nothing stored, so `licenseStateDidChange()` also sets a one-shot
+        // timer at the trial's end that re-reads it then.
         if groupController != nil {
             if let token = settings.companionToken {
                 companionCoordinator.pushCompanionToken(token)

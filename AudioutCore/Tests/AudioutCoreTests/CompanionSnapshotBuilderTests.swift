@@ -1001,6 +1001,38 @@ import AudioutProtocol
         }
     }
 
+    /// Red if a running trial set no recompute at its end, so connected phones
+    /// kept showing a trial after it ran out by the clock; red too if a state
+    /// the clock cannot change set one.
+    @Test func theLicenceIsRecomputedWhenARunningTrialEnds() {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let day: TimeInterval = 86_400
+        let key = "AUDT-AAAAA-BBBBB-CCCCC-DDDDD"
+        let rows: [(String, (AppSettings) -> Void, Date?)] = [
+            ("no key, no trial", { _ in }, nil),
+            ("local trial, no key", { TrialClock.start(settings: $0, now: now - day) }, now + 13 * day),
+            ("local trial ended, no key", { TrialClock.start(settings: $0, now: now - 15 * day) }, nil),
+            ("active trial key", {
+                $0.licenseKey = key; $0.licenseStatus = .active
+                $0.trialStartedAt = now - day; $0.trialExpiresAt = now + 13 * day
+            }, now + 13 * day),
+            ("active trial key past its end", {
+                $0.licenseKey = key; $0.licenseStatus = .active
+                $0.trialStartedAt = now - day; $0.trialExpiresAt = now - 60
+            }, nil),
+            ("paid key", { $0.licenseKey = key; $0.licenseStatus = .active }, nil),
+            ("refunded key", { $0.licenseKey = key; $0.licenseStatus = .revoked }, nil),
+        ]
+        for (name, setUp, expected) in rows {
+            let settings = AppSettings(defaults: isolation.makeDefaults(),
+                                       licenseServerURL: URL(string: "https://license.example.com")!)
+            settings.licenseKey = nil
+            setUp(settings)
+            #expect(CompanionSnapshotBuilder.macLicenseRecomputeAt(settings: settings, now: now) == expected,
+                    Comment(rawValue: name))
+        }
+    }
+
     /// Red if the builder stops passing `macLicense` through to the snapshot,
     /// or starts inventing one when the caller gives it none.
     @Test func macLicenseIsAPassthroughAndDefaultsToNothing() async throws {

@@ -138,6 +138,10 @@ public final class CompanionCoordinator {
     /// touches the keychain.
     private var macLicense: MacLicense?
 
+    /// Fires at the end of a running trial and recomputes ``macLicense``,
+    /// because no licence change marks a trial running out by the clock.
+    private var licenseRecomputeTimer: Timer?
+
     /// Mirrors whether `server` is currently running, so the many broadcast
     /// triggers can no-op cheaply while the feature is off (the default) and
     /// ``updateServerState()`` only acts on a real edge.
@@ -592,10 +596,22 @@ public final class CompanionCoordinator {
     }
 
     /// The host calls this from every licence change; the snapshot carries
-    /// the new state to every phone (M3).
+    /// the new state to every phone (M3). A running trial also re-arms a
+    /// one-shot call of this at its end, so phones see the trial end without
+    /// waiting for the next licence change.
     public func licenseStateDidChange() {
         macLicense = CompanionSnapshotBuilder.macLicense(settings: settings)
         scheduleBroadcast()
+        licenseRecomputeTimer?.invalidate()
+        licenseRecomputeTimer = nil
+        guard !HeadlessRuntime.isActive,
+              let end = CompanionSnapshotBuilder.macLicenseRecomputeAt(settings: settings)
+        else { return }
+        let timer = Timer(fire: end, interval: 0, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated { self?.licenseStateDidChange() }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        licenseRecomputeTimer = timer
     }
 
     // MARK: Snapshot inputs owned by the app's event handler

@@ -77,6 +77,19 @@ public struct LicenseValidator {
                     completion(.unreachable)
                     return
                 }
+                // A key typed over a trial that the server says does not
+                // exist. Recording this answer would end the trial (it carries
+                // no expiry), so the trial's own key goes back instead and
+                // nothing else is written. The trial is on record by either
+                // of its two records, as in ``TrialClock/hasEnded(settings:now:)``.
+                // A revoked or refunded key is a real key and is recorded.
+                if status == .unknown || status == .invalid, key != settings.trialKey,
+                   TrialClock.state(settings: settings) != .none
+                    || settings.licenseReason == "trial_expired" {
+                    settings.restoreTrialKey()
+                    completion(.verified(status))
+                    return
+                }
                 settings.licenseStatus = status
                 // An active answer that is not a trial's is a paid licence (a
                 // converted trial answers with the paid body). Never set false
@@ -124,6 +137,34 @@ public struct LicenseValidator {
                 }
                 completion(.verified(status))
             }
+        }
+    }
+
+    /// Stores a key the person typed (the licence sheet's Register, the
+    /// welcome gate's boxes) over the stored one, then validates it.
+    ///
+    /// When ``validate(completion:)`` takes a typed key the server says does
+    /// not exist back off a trial, the key it replaced comes back with the
+    /// verdict it had. Only this path knows them: the plain path puts back
+    /// the trial's recorded key, which a Mac whose settings are gone no
+    /// longer has. An unreachable server keeps the typed key, which may well
+    /// be real.
+    public func validate(typedKey key: String, completion: @escaping (Result) -> Void) {
+        let previous = (key: settings.licenseKey, status: settings.licenseStatus)
+
+        // A different key is an unanswered question: the previous key's
+        // verdict must not stand in for it while the server is asked.
+        if key != previous.key { settings.licenseStatus = nil }
+        settings.licenseKey = key
+
+        validate { result in
+            if result == .verified(.unknown) || result == .verified(.invalid),
+               settings.licenseKey == settings.trialKey {
+                // Never set to nil here: that would clear the trial.
+                if let previousKey = previous.key { settings.licenseKey = previousKey }
+                settings.licenseStatus = previous.status
+            }
+            completion(result)
         }
     }
 

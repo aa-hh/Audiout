@@ -81,7 +81,7 @@ public final class LicenseSheetViewController: NSViewController {
             "Your licence links this official build to your purchase and keeps it updated. Building Audiout from source is always free.")
         explainer.preferredMaxLayoutWidth = Self.sheetContentWidth
 
-        keyField.stringValue = settings.licenseKey ?? ""
+        keyField.stringValue = storedKeyToShow
         keyField.placeholderString = Self.keyFormatHint
         keyField.setAccessibilityLabel("Licence key")
         keyField.translatesAutoresizingMaskIntoConstraints = false
@@ -180,9 +180,17 @@ public final class LicenseSheetViewController: NSViewController {
     }
 
     /// The ONE place Remove decides whether it is on screen, so every state
-    /// change lands the same way: shown exactly when there is a stored key.
+    /// change lands the same way: shown exactly when there is a stored key the
+    /// user put there. A trial's key is internal (``TrialClock/holdsKey``), so
+    /// it is never offered for removal.
     private func refreshButtons() {
-        removeButton.isHidden = !settings.hasLicenseKey
+        removeButton.isHidden = !settings.hasLicenseKey || TrialClock.holdsKey(settings: settings)
+    }
+
+    /// The stored key for the field, or empty while it is the trial's own:
+    /// a key typed or arrived during the trial replaces it unseen.
+    private var storedKeyToShow: String {
+        TrialClock.holdsKey(settings: settings) ? "" : settings.licenseKey ?? ""
     }
 
     public override func viewDidAppear() {
@@ -240,20 +248,15 @@ public final class LicenseSheetViewController: NSViewController {
             return
         }
 
-        // A different key is an unanswered question: the previous key's
-        // verdict must not stand in for it while the server is asked.
-        if text != settings.licenseKey { settings.licenseStatus = nil }
-        settings.licenseKey = text
-        refreshButtons()
-        onStateChange?()
-
         keyField.isEnabled = false
         registerButton.isEnabled = false
         show(result: "Checking…")
 
         let validator = transport.map { LicenseValidator(settings: settings, transport: $0) }
             ?? LicenseValidator(settings: settings)
-        validator.validate { [weak self] result in
+        // Stores the key now and answers later; a typo typed over a trial
+        // puts the trial back (`validate(typedKey:)`).
+        validator.validate(typedKey: text) { [weak self] result in
             guard let self else { return }
             let outcome: String
             switch result {
@@ -270,7 +273,13 @@ public final class LicenseSheetViewController: NSViewController {
             case .verified(let status):
                 self.keyField.isEnabled = true
                 self.registerButton.isEnabled = true
-                self.keyField.stringValue = self.settings.licenseKey ?? ""
+                // The person's key in the server's spelling. A typo over a
+                // trial put the trial's key back, which stays hidden, or left
+                // no key at all for a trial never given one; either way the
+                // typo stays in the field to be corrected.
+                if let stored = self.settings.licenseKey, !TrialClock.holdsKey(settings: self.settings) {
+                    self.keyField.stringValue = stored
+                }
                 self.show(result: Self.statusLine(for: status, reason: self.settings.licenseReason))
                 self.refreshButtons()
                 self.onStateChange?()
@@ -281,6 +290,8 @@ public final class LicenseSheetViewController: NSViewController {
                 self.finish()
             }
         }
+        refreshButtons()
+        onStateChange?()
     }
 
     private func show(result: String) {
@@ -333,6 +344,12 @@ public final class LicenseSheetViewController: NSViewController {
     public func test_tapRemove() {
         _ = view
         removeTapped()
+    }
+
+    /// The key field's text.
+    public var test_keyText: String {
+        _ = view
+        return keyField.stringValue
     }
 
     /// The inline result line's text, or `nil` while it is hidden.

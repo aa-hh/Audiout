@@ -184,6 +184,7 @@ public struct AppSettings {
         static let trialStartedAt = "trial.startedAt"
         static let trialExpiresAt = "trial.expiresAt"
         static let trialRegistered = "trial.registered"
+        static let trialKey = "trial.key"
         static let trialBannerThreeDaysShown = "trial.bannerThreeDaysShown"
         static let trialBannerLastDayShown = "trial.bannerLastDayShown"
         static let telemetryOptIn = "telemetry.optIn"
@@ -876,6 +877,26 @@ public struct AppSettings {
         }
     }
 
+    /// The key the licence server issued for this Mac's trial, recorded by
+    /// ``TrialClock/apply(settings:startedAt:expiresAt:key:)`` beside the
+    /// copy it stores as ``licenseKey``. ``TrialClock/holdsKey(settings:now:)``
+    /// compares the two, so a key typed over the trial's is never mistaken
+    /// for it. `nil` for a trial that never registered, one started on a
+    /// build that did not record it, and a Mac with no trial.
+    public var trialKey: String? {
+        get { defaults.string(forKey: Keys.trialKey) }
+        nonmutating set { defaults.set(newValue, forKey: Keys.trialKey) }
+    }
+
+    /// Stores ``trialKey`` back as ``licenseKey``, or removes the stored key
+    /// when the trial was never given one, and touches nothing else. Setting
+    /// ``licenseKey`` to `nil` would clear the trial with it; this is for
+    /// taking a key the server says does not exist back off a trial
+    /// (``LicenseValidator``), where the trial must stay exactly as it was.
+    func restoreTrialKey() {
+        writeSecret(trialKey, for: Keys.licenseKey)
+    }
+
     /// Whether the licence server has answered about this trial. `false` is
     /// ordinary, not a failure: a trial may start with no network at all and
     /// registers on the first connection.
@@ -906,6 +927,7 @@ public struct AppSettings {
         defaults.removeObject(forKey: Keys.trialRegistered)
         defaults.removeObject(forKey: Keys.trialBannerThreeDaysShown)
         defaults.removeObject(forKey: Keys.trialBannerLastDayShown)
+        defaults.removeObject(forKey: Keys.trialKey)
     }
 
     /// The license server this build talks to, from the bundle's
@@ -943,12 +965,7 @@ public struct AppSettings {
               var components = URLComponents(url: page, resolvingAgainstBaseURL: false)
         else { return buyPageURL }
         var items = (components.queryItems ?? []) + [URLQueryItem(name: "s", value: Self.buySourceTag)]
-        let trialHoldsKey: Bool
-        switch TrialClock.state(settings: self) {
-        case .active, .expired: trialHoldsKey = true
-        case .none: trialHoldsKey = false
-        }
-        if trialHoldsKey, let key = licenseKey, !key.isEmpty {
+        if TrialClock.holdsKey(settings: self), let key = licenseKey, !key.isEmpty {
             items.append(URLQueryItem(name: "t", value: key))
         }
         components.queryItems = items

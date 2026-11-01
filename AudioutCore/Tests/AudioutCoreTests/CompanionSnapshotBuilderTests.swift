@@ -1001,9 +1001,9 @@ import AudioutProtocol
         }
     }
 
-    /// Red if a running trial set no recompute at its end, so connected phones
-    /// kept showing a trial after it ran out by the clock; red too if a state
-    /// the clock cannot change set one.
+    /// Red if a running trial set no recompute at its end, so connected phones,
+    /// the one-speaker limit and the Mixer note kept a trial after it ran out
+    /// by the clock; red too if a state the clock cannot change set one.
     @Test func theLicenceIsRecomputedWhenARunningTrialEnds() {
         let now = Date(timeIntervalSince1970: 1_800_000_000)
         let day: TimeInterval = 86_400
@@ -1028,7 +1028,8 @@ import AudioutProtocol
                                        licenseServerURL: URL(string: "https://license.example.com")!)
             settings.licenseKey = nil
             setUp(settings)
-            #expect(CompanionSnapshotBuilder.macLicenseRecomputeAt(settings: settings, now: now) == expected,
+            let license = CompanionSnapshotBuilder.macLicense(settings: settings, now: now)
+            #expect(CompanionSnapshotBuilder.macLicenseRecomputeAt(license, now: now) == expected,
                     Comment(rawValue: name))
         }
     }

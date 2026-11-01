@@ -263,6 +263,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
     /// by the launch check's answer.
     private var licenseProofRefresher: LicenseProofRefresher?
 
+    /// Fires at the end of a running trial, which no licence change marks,
+    /// and re-asks the server before anything acts on the trial being over.
+    /// Re-armed by `applyLicenseState()`; never armed under tests.
+    private var trialEndTimer: Timer?
+
     /// The resolved backend kind (same resolution `makeBackend()` used). The
     /// first-run setup flow only presents on `.native` — the sole path that taps
     /// audio in-process and discovers under the app's own identity, so the sole
@@ -2891,8 +2896,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
     /// the Licence pane commits a key. Its writes are plain assignments of
     /// computed values. Beyond them it has side effects: once phones can be
     /// connected it pushes a new proof to them (only a token not pushed
-    /// before) and has the companion coordinator recompute the snapshot's
-    /// licence state, schedule a broadcast and re-arm the one-shot timer at a
+    /// before) and hands the companion coordinator the snapshot's licence
+    /// state, which schedules a broadcast; it re-arms `trialEndTimer` at a
     /// running trial's end; and it has `LicenseProofRefresher` re-time its
     /// timer when the stored proof changed.
     ///
@@ -2917,15 +2922,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
         // (2026-09-26). No phone is connected that early, so there is nobody
         // to push to; the passes after wiring cover every later licence change.
         // The snapshot's licence state is re-read here too, so a refund
-        // reaches connected phones. A trial running out by the clock changes
-        // nothing stored, so `licenseStateDidChange()` also sets a one-shot
-        // timer at the trial's end that re-reads it then.
+        // reaches connected phones. Read once: it touches the keychain.
+        let macLicense = CompanionSnapshotBuilder.macLicense(settings: settings)
         if groupController != nil {
             if let token = settings.companionToken {
                 companionCoordinator.pushCompanionToken(token)
             }
-            companionCoordinator.licenseStateDidChange()
+            companionCoordinator.licenseStateDidChange(macLicense)
         }
+        armTrialEndTimer(at: CompanionSnapshotBuilder.macLicenseRecomputeAt(macLicense))
 
         // A new proof can last a different time (a staging proof lasts
         // minutes), so the refresher re-times its check.
@@ -2955,6 +2960,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
             Analytics.setConsent(settings.telemetryEnabled)
         }
         trialSurveyFetcher.refresh(analyticsAvailable: analyticsAvailable)
+    }
+
+    /// A trial running out by the clock changes nothing stored, so a one-shot
+    /// timer at its end re-asks the server, as a limited install's Mixer open
+    /// does, and applies the answer: a trial converted on the website arrives
+    /// as paid before phones are told anything, and the one-speaker limit,
+    /// the Mixer note and the phones move together. With no answer,
+    /// `applyLicenseState()` still runs and the local clock decides.
+    private func armTrialEndTimer(at end: Date?) {
+        trialEndTimer?.invalidate()
+        trialEndTimer = nil
+        guard !HeadlessRuntime.isActive, let end else { return }
+        let timer = Timer(fire: end, interval: 0, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                LicenseValidator(settings: self.settings).validate { [weak self] _ in
+                    self?.applyLicenseState()
+                    self?.groupController?.licenseAnswered()
+                }
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        trialEndTimer = timer
     }
 
     /// The one-time ask a trial user gets right after their paid key is

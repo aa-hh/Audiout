@@ -3,30 +3,42 @@ import Foundation
 
 /// Re-checks an active licence before the phones' proof of it runs out.
 ///
-/// The licence server's signed proof (``AppSettings/companionToken``) lasts 14
-/// days, and without this the Mac asks the server only at launch, so a Mac
-/// left running for two weeks would lock every phone that relies on it. This
-/// asks again once fewer than seven days remain.
+/// Without this the Mac asks the server only at launch, so a Mac left running
+/// past the end of the licence server's signed proof
+/// (``AppSettings/companionToken``) would lock every phone that relies on it.
+/// The timings come from the proof's own lifetime: ask once less than half of
+/// it remains, hold off a quarter of it after an answer (at most an hour) and
+/// check on a timer every quarter (at most 24 hours), never more often than
+/// once a minute. For the 14-day production proof that is seven days, an hour
+/// and a day, and a staging proof of minutes is re-asked in minutes.
 ///
 /// Four triggers call ``refreshIfNeeded()``: the Mac waking, a phone
-/// connecting, a 24-hour timer, and a usable network path appearing. They
-/// cannot stack: a request in flight blocks the next, and an answered request
-/// holds off further ones for an hour. A request that never reached the server
-/// does not start that hour, so a Mac that tried offline asks again as soon as
-/// the network returns.
+/// connecting, the timer, and a usable network path appearing. They cannot
+/// stack: a request in flight blocks the next, and an answered request holds
+/// off further ones. A request that never reached the server does not start
+/// that hold-off, so a Mac that tried offline asks again as soon as the
+/// network returns.
 ///
 /// Main queue only, like ``TrialReachability``.
 public final class LicenseProofRefresher {
 
-    /// How long before the proof's expiry the Mac starts asking for a new one.
+    /// How long before the proof's expiry the Mac starts asking for a new
+    /// one, for a 14-day proof and for a proof whose lifetime cannot be read.
     public static let refreshWindow: TimeInterval = 7 * 86_400
 
-    /// The quiet period after an answered request.
+    /// The quiet period after an answered request, for a 14-day proof and for
+    /// a proof whose lifetime cannot be read.
     public static let minimumInterval: TimeInterval = 3_600
 
     /// How often the timer checks, for a Mac that never sleeps and never sees a
-    /// phone connect.
+    /// phone connect, for a 14-day proof and for a proof whose lifetime cannot
+    /// be read.
     public static let timerInterval: TimeInterval = 86_400
+
+    /// The least time between answered requests and between timer checks
+    /// however short the proof, which keeps a Mac far under the server's 10
+    /// validates per key per minute.
+    public static let shortestInterval: TimeInterval = 60
 
     private let settings: AppSettings
     private let transport: LicenseValidator.Transport
@@ -55,21 +67,53 @@ public final class LicenseProofRefresher {
     /// signature (the phone does that). Nil for anything that is not a proof
     /// with a numeric `exp`.
     static func proofExpiry(_ token: String) -> Date? {
+        guard let exp = payload(token)?["exp"] as? NSNumber else { return nil }
+        return Date(timeIntervalSince1970: exp.doubleValue)
+    }
+
+    /// A proof's payload as a JSON object, unsigned. Nil when it is not two
+    /// dot-separated parts whose first decodes to a JSON object.
+    private static func payload(_ token: String) -> [String: Any]? {
         let parts = token.split(separator: ".", omittingEmptySubsequences: false)
         guard parts.count == 2 else { return nil }
         var base64 = String(parts[0])
             .replacingOccurrences(of: "-", with: "+")
             .replacingOccurrences(of: "_", with: "/")
         while base64.count % 4 != 0 { base64.append("=") }
-        guard let data = Data(base64Encoded: base64),
-              let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
-              let exp = object["exp"] as? NSNumber
-        else { return nil }
-        return Date(timeIntervalSince1970: exp.doubleValue)
+        guard let data = Data(base64Encoded: base64) else { return nil }
+        return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+    }
+
+    /// When to ask, how long to hold off after an answer, and how often the
+    /// timer checks, for one proof.
+    struct Timings: Equatable {
+        let window: TimeInterval
+        let minimumInterval: TimeInterval
+        let timerInterval: TimeInterval
+    }
+
+    /// The timings for a proof, from its own lifetime (`exp` minus `iat`):
+    /// half of it for the window, a quarter of it (at least
+    /// ``shortestInterval``) for the hold-off and the timer, each capped at
+    /// the 14-day proof's value. The 14-day values when there is no proof or
+    /// its lifetime cannot be read.
+    static func timings(for token: String?) -> Timings {
+        guard let token,
+              let payload = payload(token),
+              let iat = payload["iat"] as? NSNumber,
+              let exp = payload["exp"] as? NSNumber
+        else {
+            return Timings(window: refreshWindow, minimumInterval: minimumInterval, timerInterval: timerInterval)
+        }
+        let lifetime = max(0, exp.doubleValue - iat.doubleValue)
+        let quarter = max(shortestInterval, lifetime / 4)
+        return Timings(window: lifetime / 2,
+                       minimumInterval: min(minimumInterval, quarter),
+                       timerInterval: min(timerInterval, quarter))
     }
 
     /// Whether the stored licence is active and its proof is missing,
-    /// unreadable, or inside its last ``refreshWindow``.
+    /// unreadable, or inside its window from ``timings(for:)``.
     static func needsRefresh(settings: AppSettings, now: Date) -> Bool {
         guard settings.licenseServerURL != nil,
               settings.hasLicenseKey,
@@ -78,25 +122,42 @@ public final class LicenseProofRefresher {
         guard let token = settings.companionToken,
               let expiry = proofExpiry(token)
         else { return true }
-        return expiry.timeIntervalSince(now) < refreshWindow
+        return expiry.timeIntervalSince(now) < timings(for: token).window
     }
 
-    /// Arms the triggers and the daily timer. Called once the launch check has
+    /// Arms the triggers and the timer. Called once the launch check has
     /// answered, so it does not ask again straight away.
     public func start() {
         if started { return }
         started = true
+        scheduleTimer()
+    }
+
+    /// Re-times the timer for the stored proof. The host calls it after every
+    /// licence change, because a new proof can have a different lifetime.
+    public func licenseDidChange() {
+        guard started else { return }
+        scheduleTimer()
+    }
+
+    /// One check after the stored proof's timer interval, which then schedules
+    /// the next, so each wait follows the proof stored at the time.
+    private func scheduleTimer() {
+        timer?.invalidate()
         guard !HeadlessRuntime.isActive else { return }
-        timer = Timer.scheduledTimer(withTimeInterval: Self.timerInterval, repeats: true) { [weak self] _ in
+        timer = Timer.scheduledTimer(withTimeInterval: Self.timings(for: settings.companionToken).timerInterval,
+                                     repeats: false) { [weak self] _ in
             self?.refreshIfNeeded()
+            self?.scheduleTimer()
         }
     }
 
     /// Asks the server about the stored key when the proof needs it and no
-    /// other request is in flight or answered within the last hour.
+    /// other request is in flight or answered within the proof's hold-off.
     public func refreshIfNeeded() {
         guard started, !inFlight else { return }
-        if let lastAnsweredAt, now().timeIntervalSince(lastAnsweredAt) < Self.minimumInterval { return }
+        if let lastAnsweredAt,
+           now().timeIntervalSince(lastAnsweredAt) < Self.timings(for: settings.companionToken).minimumInterval { return }
         guard Self.needsRefresh(settings: settings, now: now()) else { return }
         inFlight = true
         LicenseValidator(settings: settings, transport: transport).validate { [weak self] result in

@@ -2914,6 +2914,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
             companionCoordinator.licenseStateDidChange()
         }
 
+        // A new proof can last a different time (a staging proof lasts
+        // minutes), so the refresher re-times its check.
+        licenseProofRefresher?.licenseDidChange()
+
         // License identity for analytics (PRODUCT.md Data Collection stream 1,
         // owner-approved): the installID stays the identity even when the
         // license is removed — only the super properties change. Never

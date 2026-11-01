@@ -49,10 +49,12 @@ import Testing
         var count = 0
     }
 
-    /// An unsigned proof whose payload carries `exp`, shaped as the server
-    /// mints it: unpadded base64url payload, a dot, a stand-in signature.
-    private static func token(exp: Date) -> String {
-        let json = "{\"v\":1,\"key_hash\":\"x\",\"iat\":0,\"exp\":\(Int(exp.timeIntervalSince1970))}"
+    /// An unsigned proof whose payload carries `iat` and `exp`, shaped as the
+    /// server mints it: unpadded base64url payload, a dot, a stand-in
+    /// signature. With no `iat` it is a 14-day production proof.
+    private static func token(exp: Date, iat: Date? = nil) -> String {
+        let issued = iat ?? exp.addingTimeInterval(-14 * day)
+        let json = "{\"v\":1,\"key_hash\":\"x\",\"iat\":\(Int(issued.timeIntervalSince1970)),\"exp\":\(Int(exp.timeIntervalSince1970))}"
         let payload = Data(json.utf8).base64EncodedString()
             .replacingOccurrences(of: "+", with: "-")
             .replacingOccurrences(of: "/", with: "_")
@@ -95,6 +97,34 @@ import Testing
         let outside = settings(token: Self.token(exp: Self.now0.addingTimeInterval(7 * Self.day + 60)))
         #expect(LicenseProofRefresher.needsRefresh(settings: outside, now: Self.now0) == false)
         let inside = settings(token: Self.token(exp: Self.now0.addingTimeInterval(7 * Self.day - 60)))
+        #expect(LicenseProofRefresher.needsRefresh(settings: inside, now: Self.now0) == true)
+    }
+
+    /// Red if a 14-day proof's timings change, or a short staging proof kept
+    /// them and lapsed between checks.
+    @Test func theTimingsFollowTheProofsLifetime() {
+        typealias Timings = LicenseProofRefresher.Timings
+        let production = Timings(window: 7 * Self.day, minimumInterval: 3_600, timerInterval: 86_400)
+        #expect(LicenseProofRefresher.timings(for: Self.token(exp: Self.now0.addingTimeInterval(14 * Self.day),
+                                                              iat: Self.now0)) == production)
+        #expect(LicenseProofRefresher.timings(for: Self.token(exp: Self.now0.addingTimeInterval(600),
+                                                              iat: Self.now0))
+                == Timings(window: 300, minimumInterval: 150, timerInterval: 150))
+        #expect(LicenseProofRefresher.timings(for: Self.token(exp: Self.now0.addingTimeInterval(120),
+                                                              iat: Self.now0))
+                == Timings(window: 60, minimumInterval: 60, timerInterval: 60))
+        #expect(LicenseProofRefresher.timings(for: nil) == production)
+        #expect(LicenseProofRefresher.timings(for: "garbage") == production)
+        #expect(LicenseProofRefresher.timings(for: "eyJ2IjoxfQ.c2ln") == production)
+    }
+
+    /// Red if the window stopped following the proof's lifetime.
+    @Test func aTenMinuteProofIsRefreshedOnlyInItsLastFiveMinutes() {
+        let outside = settings(token: Self.token(exp: Self.now0.addingTimeInterval(310),
+                                                 iat: Self.now0.addingTimeInterval(-290)))
+        #expect(LicenseProofRefresher.needsRefresh(settings: outside, now: Self.now0) == false)
+        let inside = settings(token: Self.token(exp: Self.now0.addingTimeInterval(290),
+                                                iat: Self.now0.addingTimeInterval(-310)))
         #expect(LicenseProofRefresher.needsRefresh(settings: inside, now: Self.now0) == true)
     }
 
@@ -168,6 +198,27 @@ import Testing
         #expect(transport.requests.count == 1)
 
         clock.now = Self.now0.addingTimeInterval(61 * 60)
+        refresher.refreshIfNeeded()
+        #expect(transport.requests.count == 2)
+    }
+
+    /// Red if a short proof kept the one-hour hold-off and lapsed waiting.
+    @Test func anAnsweredRefreshOfATenMinuteProofHoldsOffForAQuarterOfItsLife() async {
+        let transport = Transport()
+        transport.stub(status: 200, json: #"{"status":"active"}"#)
+        let clock = Clock()
+        let counter = Counter()
+        let shortProof = Self.token(exp: Self.now0.addingTimeInterval(120), iat: Self.now0.addingTimeInterval(-480))
+        let refresher = refresher(settings(token: shortProof), transport, clock, counter)
+        refresher.start()
+        refresher.refreshIfNeeded()
+        await SuiteWait.until { counter.count == 1 }
+
+        clock.now = Self.now0.addingTimeInterval(149)
+        refresher.refreshIfNeeded()
+        #expect(transport.requests.count == 1)
+
+        clock.now = Self.now0.addingTimeInterval(151)
         refresher.refreshIfNeeded()
         #expect(transport.requests.count == 2)
     }

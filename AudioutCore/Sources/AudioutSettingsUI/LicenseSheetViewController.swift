@@ -274,10 +274,11 @@ public final class LicenseSheetViewController: NSViewController {
                 self.keyField.isEnabled = true
                 self.registerButton.isEnabled = true
                 // The person's key in the server's spelling. A typo over a
-                // trial put the trial's key back, which stays hidden, so the
+                // trial put the trial's key back, which stays hidden, or left
+                // no key at all for a trial never given one; either way the
                 // typo stays in the field to be corrected.
-                if !TrialClock.holdsKey(settings: self.settings) {
-                    self.keyField.stringValue = self.settings.licenseKey ?? ""
+                if let stored = self.settings.licenseKey, !TrialClock.holdsKey(settings: self.settings) {
+                    self.keyField.stringValue = stored
                 }
                 self.show(result: Self.statusLine(for: status, reason: self.settings.licenseReason))
                 self.refreshButtons()

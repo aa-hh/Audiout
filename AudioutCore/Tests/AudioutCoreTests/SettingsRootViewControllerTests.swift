@@ -800,6 +800,29 @@ import AudioutSharedUI
         #expect(sheet.test_removeIsVisible == false)
     }
 
+    /// Red if a typo typed during a trial that never registered (so has no
+    /// key to put back) ended the trial, or the sheet emptied the field
+    /// instead of keeping the typo to correct.
+    @Test func aTypoDuringAnUnregisteredTrialKeepsTheTrialAndTheTypo() async throws {
+        let settings = makePaidBuildSettings()
+        TrialClock.start(settings: settings)
+        let expires = settings.trialExpiresAt
+        let transport = StubTransport()
+        transport.replies(#"{"status":"unknown"}"#)
+        let license = LicenseSettingsViewController(settings: settings)
+        license.licenseTransport = transport.closure
+
+        license.test_tapEnterLicense()
+        let sheet = try #require(license.test_licenseSheet)
+        sheet.test_setKeyText("AUDT-AAAAA-BBBBB-CCCCC-DDDDX")
+        sheet.test_tapRegister()
+        await drainMainQueue()
+
+        #expect(settings.licenseKey == nil)
+        #expect(settings.trialExpiresAt == expires)
+        #expect(sheet.test_keyText == "AUDT-AAAAA-BBBBB-CCCCC-DDDDX")
+    }
+
     /// A second `audiout://register` link that arrives while the first key is
     /// still being checked is DROPPED, not stacked: Register is disabled for
     /// exactly that window, and restarting the commit under the answer the user

@@ -249,6 +249,47 @@ import Testing
         #expect(!LicenseGate.shouldPresent(settings: settings, presentation: .auto))
     }
 
+    /// The trials a key can be typed over and stored while the server was
+    /// unreachable.
+    enum TrialUnderATypedKey: CaseIterable {
+        case registeredRunning, registeredEnded, unregisteredRunning
+    }
+
+    /// Red if a later plain check of a key typed over a trial, which the
+    /// server says does not exist, ended the trial (that answer carries no
+    /// expiry) or left the Mac on the dead key instead of the trial's own
+    /// key (none, for a trial that never registered).
+    @Test(arguments: TrialUnderATypedKey.allCases)
+    func aTypedKeyTheServerSaysDoesNotExistGivesTheTrialBack(_ trial: TrialUnderATypedKey) async {
+        let settings = AppSettings(defaults: defaults, licenseServerURL: Self.server)
+        let trialKey = "AUDT-TTTTT-TTTTT-TTTTT-TTTTT"
+        switch trial {
+        case .registeredRunning:
+            TrialClock.apply(settings: settings, startedAt: Date(timeIntervalSinceNow: -86_400),
+                             expiresAt: Date(timeIntervalSinceNow: 13 * 86_400), key: trialKey)
+            settings.licenseStatus = .active
+        case .registeredEnded:
+            TrialClock.apply(settings: settings, startedAt: Date(timeIntervalSinceNow: -20 * 86_400),
+                             expiresAt: Date(timeIntervalSinceNow: -6 * 86_400), key: trialKey)
+            settings.licenseStatus = .revoked
+            settings.licenseReason = "trial_expired"
+        case .unregisteredRunning:
+            TrialClock.start(settings: settings)
+        }
+        let expires = settings.trialExpiresAt
+        // Typed while the server was unreachable: stored, unanswered.
+        settings.licenseStatus = nil
+        settings.licenseKey = Self.key
+        let transport = Transport()
+        transport.stub(status: 200, json: #"{"status":"unknown"}"#)
+
+        #expect(await validate(settings, transport) == .verified(.unknown))
+        #expect(settings.licenseKey == (trial == .unregisteredRunning ? nil : trialKey))
+        #expect(settings.trialExpiresAt == expires)
+        #expect(TrialClock.state(settings: settings) != .none)
+        #expect(TrialClock.hasEnded(settings: settings) == (trial == .registeredEnded))
+    }
+
     /// The trial key is kept after the trial ends so a purchase made later
     /// still converts it: the server answers the ENDED trial key with the paid
     /// key. Red if that answer stopped swapping the paid key in, or left the

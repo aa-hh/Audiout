@@ -178,13 +178,13 @@ public struct AppSettings {
         static let licenseHasHeldPaid = "license.hasHeldPaid"
         static let licenseHasChosenOneSpeaker = "license.hasChosenOneSpeaker"
         static let companionToken = "license.companionToken"
-        static let trialKey = "license.trialKey"
         static let remoteConfigData = "remoteConfig.data"
         static let remoteConfigFetchedAt = "remoteConfig.fetchedAt"
         static let companionServerID = "companion.serverID"
         static let trialStartedAt = "trial.startedAt"
         static let trialExpiresAt = "trial.expiresAt"
         static let trialRegistered = "trial.registered"
+        static let trialKey = "trial.key"
         static let trialBannerThreeDaysShown = "trial.bannerThreeDaysShown"
         static let trialBannerLastDayShown = "trial.bannerLastDayShown"
         static let telemetryOptIn = "telemetry.optIn"
@@ -886,6 +886,15 @@ public struct AppSettings {
     public var trialKey: String? {
         get { defaults.string(forKey: Keys.trialKey) }
         nonmutating set { defaults.set(newValue, forKey: Keys.trialKey) }
+    }
+
+    /// Stores ``trialKey`` back as ``licenseKey``, or removes the stored key
+    /// when the trial was never given one, and touches nothing else. Setting
+    /// ``licenseKey`` to `nil` would clear the trial with it; this is for
+    /// taking a key the server says does not exist back off a trial
+    /// (``LicenseValidator``), where the trial must stay exactly as it was.
+    func restoreTrialKey() {
+        writeSecret(trialKey, for: Keys.licenseKey)
     }
 
     /// Whether the licence server has answered about this trial. `false` is

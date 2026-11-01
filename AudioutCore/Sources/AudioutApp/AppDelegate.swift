@@ -1000,11 +1000,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
         }
 
         // A trial can start with no network, so the server may not know about
-        // it yet. `TrialReachability` is the whole of the asking: `NWPathMonitor`
+        // it yet. `TrialReachability` does all of the trial asking: `NWPathMonitor`
         // delivers the current path the moment it starts, so a trial begun on an
         // earlier launch is announced right here, and one that has to wait for a
-        // network is announced when a usable path appears. One asker is enough:
-        // a direct call beside it posts the same registration a second time.
+        // network is announced when a usable path appears. One trial asker is
+        // enough: a direct call beside it posts the same registration a second
+        // time. Its `onPathSatisfied` also asks `LicenseProofRefresher` to
+        // re-check an active licence's proof when a usable path appears.
         // The case the monitor cannot see — a trial started at the gate while
         // the app is already running, which follows no path change — belongs to
         // the gate's own pass handler. The monitor also re-asks about a stored
@@ -1037,8 +1039,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
         // The SOFT licence check. Ask the server what it thinks of the stored
         // key, and meanwhile show whatever it said last time — an unreachable
         // server must never change what the user sees, and nothing here gates
-        // a single feature. `applyLicenseState()` is idempotent, so running it
-        // now and again on the answer costs nothing.
+        // a single feature. Running `applyLicenseState()` now and again on the
+        // answer costs nothing: its writes are plain assignments, and its side
+        // effects (a coalesced snapshot broadcast, a proof push only for a new
+        // token, the refresher's timer re-timed only for a new proof, the
+        // one-shot timer at a running trial's end re-armed) do not stack.
         LicenseValidator(settings: settings).validate { [weak self] _ in
             self?.applyLicenseState()
             self?.groupController?.licenseAnswered()
@@ -2882,8 +2887,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
     /// explains it, and the update feed's authorization header (the server
     /// serves the appcast and the download only to a key). Called at launch,
     /// on every validator answer, on a popover open while limited, and whenever
-    /// the Licence pane commits a key. Idempotent by construction — every write
-    /// is a plain assignment of a computed value.
+    /// the Licence pane commits a key. Its writes are plain assignments of
+    /// computed values. Beyond them it has side effects: once phones can be
+    /// connected it pushes a new proof to them (only a token not pushed
+    /// before) and has the companion coordinator recompute the snapshot's
+    /// licence state, schedule a broadcast and re-arm the one-shot timer at a
+    /// running trial's end; and it has `LicenseProofRefresher` re-time its
+    /// timer when the stored proof changed.
     ///
     /// A build with no licence server is the free build: no limit and no note,
     /// no matter what is stored. `groupController` and `popoverController` are

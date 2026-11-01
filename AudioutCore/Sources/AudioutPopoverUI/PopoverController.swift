@@ -601,6 +601,13 @@ public final class PopoverController: NSObject {
     /// `→ .off` (panel teardown).
     private var lastConnectionStates: [String: ConnectionState] = [:]
 
+    /// When each wanted speaker's current run of failures began: set by the
+    /// first reported `connection:failed`, cleared by the `connection:connected`
+    /// that ends it, which then reports `recovered`. A run that never connects
+    /// sends nothing more, so a failure with no recovered connect after it is
+    /// one the user gave up on.
+    private var failingSince: [String: Date] = [:]
+
     /// Ids whose diagnosis panel should currently be OPEN. This is the
     /// persistent intent — it survives `rebuild()` (which recreates the panel
     /// views). Seeded automatically on a `→ .failed` transition (auto-expand ONCE
@@ -3485,6 +3492,15 @@ public final class PopoverController: NSObject {
     /// the edge-triggered reactions above. Also prunes state for devices that
     /// vanished from the snapshot entirely (`deviceRemoved` — `.failed → .off`
     /// per §1, so the panel goes too).
+    static func recoveryBucket(_ seconds: TimeInterval) -> String {
+        switch seconds {
+        case ..<10: return "0-9"
+        case ..<60: return "10-59"
+        case ..<300: return "60-299"
+        default: return "300+"
+        }
+    }
+
     private func handleConnectionTransitions(_ devices: [Device]) {
         for device in devices {
             let previous = lastConnectionStates[device.id] ?? .off
@@ -3513,8 +3529,11 @@ public final class PopoverController: NSObject {
                 // group member that never appears in Selected Devices.
                 if case .failed(let failure) = current,
                    wantsAudio(device.id) || (groupController?.isMainOutMember(device.id) ?? false) {
-                    Analytics.capture("connection:failed", ["kind": device.kind.rawValue,
-                                                              "cause": String(describing: failure.cause)])
+                    var properties = groupController?.connectionAnalytics(for: device.id) ?? [:]
+                    properties["kind"] = device.kind.rawValue
+                    properties["cause"] = String(describing: failure.cause)
+                    Analytics.capture("connection:failed", properties)
+                    if failingSince[device.id] == nil { failingSince[device.id] = Date() }
                 }
                 // A fresh `→ .failed` edge is a NEW episode: its auto-expand wins
                 // over any prior dismissal, so clear the dismissal record before
@@ -3542,7 +3561,15 @@ public final class PopoverController: NSObject {
                 // speaker nobody asked for is the backend's business.
                 if current == .connected && previous != .connected && !device.isLocalDevice
                     && (wantsAudio(device.id) || (groupController?.isMainOutMember(device.id) ?? false)) {
-                    Analytics.capture("connection:connected", ["kind": device.kind.rawValue])
+                    var properties = groupController?.connectionAnalytics(for: device.id) ?? [:]
+                    properties["kind"] = device.kind.rawValue
+                    if let since = failingSince.removeValue(forKey: device.id) {
+                        properties["recovered"] = "true"
+                        properties["recovery_seconds_bucket"] = Self.recoveryBucket(Date().timeIntervalSince(since))
+                    } else {
+                        properties["recovered"] = "false"
+                    }
+                    Analytics.capture("connection:connected", properties)
                 }
                 // Leaving `.failed` ends the episode — clear both the open intent
                 // and the dismissal record so a future failure re-expands afresh.

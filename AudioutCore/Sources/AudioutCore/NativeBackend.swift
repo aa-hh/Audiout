@@ -3599,7 +3599,8 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                         }
                         Telemetry.fail(.airplay, "airplay:connect_failed",
                                        local: ["device": id],
-                                       shared: ["cause": "timingUnavailable", "reason": gate.telemetryName])
+                                       shared: ["cause": "timingUnavailable", "reason": gate.telemetryName,
+                                                "speaker": self.btSpeakerKey(forDevice: id)])
                         return
                     }
 
@@ -3810,7 +3811,8 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                     // what `reason` shares.
                     Telemetry.fail(.airplay, "airplay:connect_failed",
                                    local: ["device": id, "detail": String(describing: error)],
-                                   shared: ["cause": "\(outcome.cause)", "reason": Self.failureReason(error)])
+                                   shared: ["cause": "\(outcome.cause)", "reason": Self.failureReason(error),
+                                            "speaker": self.btSpeakerKey(forDevice: id)])
                     return
                 }
             } else {
@@ -5507,6 +5509,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                                                "state": "\(state)",
                                                "cause": "\(cause)",
                                                "wasStreaming": wasStreaming ? "true" : "false",
+                                               "speaker": self.btSpeakerKey(forDevice: id),
                                            ])
                         }
                     } else if self.streamBindings[id] != nil, !self.isWholeSystemOperationallyClaimedLocked(id) {
@@ -5532,6 +5535,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                                                "state": "\(state)",
                                                "cause": "\(cause)",
                                                "wasStreaming": wasConnected ? "true" : "false",
+                                               "speaker": self.btSpeakerKey(forDevice: id),
                                            ])
                         }
                     }
@@ -6386,7 +6390,8 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 }
                 Telemetry.fail(.airplay, "airplay:connect_failed",
                                local: ["device": id, "detail": String(describing: error)],
-                               shared: ["cause": "\(cause)", "reason": Self.failureReason(error)])
+                               shared: ["cause": "\(cause)", "reason": Self.failureReason(error),
+                                        "speaker": self?.btSpeakerKey(forDevice: id) ?? ""])
             }
         }
     }

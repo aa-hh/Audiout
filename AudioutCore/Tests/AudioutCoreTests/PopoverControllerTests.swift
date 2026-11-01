@@ -4005,8 +4005,36 @@ import AudioutProtocol
             break
         }
         let (popover, _, _) = try await makePopover()
-        popover.setUnregisteredNote(.resolve(settings: settings))
+        popover.setUnregisteredNote(.resolve(settings: settings, licenseGateShown: false))
         #expect(popover.test_systemAirPlayNoteText == expected)
+    }
+
+    /// Red if the one-speaker note showed behind the first-open licence gate
+    /// (it repeats the gate's own message), stayed away once the gate passed
+    /// onto a key the server refused, or appeared after "Try free for 14
+    /// days" started a trial.
+    @Test func theNoteWaitsForTheLicenceGateAndSkipsAStartedTrial() async throws {
+        func freshSettings() -> AppSettings {
+            AppSettings(defaults: TestIsolation(owner: "PopoverControllerTests").makeDefaults(),
+                        licenseServerURL: URL(string: "https://license.example.invalid")!)
+        }
+        let (popover, _, _) = try await makePopover()
+
+        let settings = freshSettings()
+        popover.setUnregisteredNote(.resolve(settings: settings, licenseGateShown: true))
+        #expect(popover.test_systemAirPlayNoteText == nil, "no note behind the gate")
+
+        settings.licenseKey = "AUDT-AAAAA-BBBBB-CCCCC-DDDDD"
+        settings.licenseStatus = .unknown
+        popover.setUnregisteredNote(.resolve(settings: settings, licenseGateShown: false))
+        #expect(popover.test_systemAirPlayNoteText == PopoverController.unregisteredKeyUnrecognizedNoteText,
+                "still limited once the gate passes, so the note shows")
+
+        popover.setUnregisteredNote(nil)
+        let trial = freshSettings()
+        TrialClock.start(settings: trial)
+        popover.setUnregisteredNote(.resolve(settings: trial, licenseGateShown: false))
+        #expect(popover.test_systemAirPlayNoteText == nil, "a running trial is not limited")
     }
 
     /// Leaves exactly "office" selected with the limit on and the trial-ended

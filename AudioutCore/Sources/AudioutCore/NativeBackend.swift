@@ -426,13 +426,13 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// the wizard never rewrites the latter. Same lock, same read/write
     /// pattern, and persisted in the same file's second map.
     var btLatencyMsByUID: [String: Double] = [:]   // btTrimLock
-    /// A small counting number per Bluetooth device UID, handed out in order
-    /// of first sighting. It is what the release analytics event names a
-    /// speaker by: the UID is derived from the MAC address, and the address
-    /// space is small enough that even a hash of one is reversible by
-    /// enumeration, while an index carries nothing but the order this install
-    /// met its speakers in. Same lock and same file as the maps above, its own
-    /// third map.
+    /// A small counting number per speaker id, handed out in order of first
+    /// sighting: Bluetooth UIDs, and since 2026-11-01 AirPlay and Cast ids too.
+    /// It is what the release analytics events name a speaker by: the UID is
+    /// derived from the MAC address, and the address space is small enough
+    /// that even a hash of one is reversible by enumeration, while an index
+    /// carries nothing but the order this install met its speakers in. Same
+    /// lock and same file as the maps above, its own third map.
     var btSpeakerIndexByUID: [String: Int] = [:]   // btTrimLock
 
     // MARK: Bluetooth hardware volume (BT-HW-VOL)
@@ -3599,7 +3599,8 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                         }
                         Telemetry.fail(.airplay, "airplay:connect_failed",
                                        local: ["device": id],
-                                       shared: ["cause": "timingUnavailable", "reason": gate.telemetryName])
+                                       shared: ["cause": "timingUnavailable", "reason": gate.telemetryName,
+                                                "speaker": self.btSpeakerKey(forDevice: id)])
                         return
                     }
 
@@ -3810,7 +3811,8 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                     // what `reason` shares.
                     Telemetry.fail(.airplay, "airplay:connect_failed",
                                    local: ["device": id, "detail": String(describing: error)],
-                                   shared: ["cause": "\(outcome.cause)", "reason": Self.failureReason(error)])
+                                   shared: ["cause": "\(outcome.cause)", "reason": Self.failureReason(error),
+                                            "speaker": self.btSpeakerKey(forDevice: id)])
                     return
                 }
             } else {
@@ -5507,6 +5509,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                                                "state": "\(state)",
                                                "cause": "\(cause)",
                                                "wasStreaming": wasStreaming ? "true" : "false",
+                                               "speaker": self.btSpeakerKey(forDevice: id),
                                            ])
                         }
                     } else if self.streamBindings[id] != nil, !self.isWholeSystemOperationallyClaimedLocked(id) {
@@ -5532,6 +5535,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                                                "state": "\(state)",
                                                "cause": "\(cause)",
                                                "wasStreaming": wasConnected ? "true" : "false",
+                                               "speaker": self.btSpeakerKey(forDevice: id),
                                            ])
                         }
                     }
@@ -6384,9 +6388,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                     if refused { self?.applyLocal(id) { $0.isAvailable = false } }
                     self?.enterFailure(id, cause: cause, detail: String(describing: error))
                 }
+                var shared = ["cause": "\(cause)", "reason": Self.failureReason(error)]
+                shared["speaker"] = self?.btSpeakerKey(forDevice: id)
                 Telemetry.fail(.airplay, "airplay:connect_failed",
                                local: ["device": id, "detail": String(describing: error)],
-                               shared: ["cause": "\(cause)", "reason": Self.failureReason(error)])
+                               shared: shared)
             }
         }
     }

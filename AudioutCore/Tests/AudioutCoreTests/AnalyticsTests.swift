@@ -182,6 +182,25 @@ extension SerializedSharedState {
             #expect(errors.events().map(\.0) == ["settings:save_failed"])
         }
 
+        // Turns red if an error with a `cause` stops getting its own PostHog issue, which folds every cause back into one.
+        @Test func anErrorWithACauseIsGroupedByThatCause() {
+            let errors = Captured()
+            Analytics.install(Analytics.Sink(capture: { _, _ in },
+                                             captureError: { errors.append($0, $1) },
+                                             consentChanged: { _ in }), consent: true)
+            defer { Analytics.install(nil, consent: false) }
+
+            Analytics.captureError("airplay:connect_failed", ["cause": "timedOut", "reason": "opTimedOut"])
+            Analytics.captureError("settings:save_failed", ["store": "groups"])
+
+            #expect(errors.events().map(\.1) == [
+                ["cause": "timedOut", "reason": "opTimedOut",
+                 "$exception_fingerprint": "airplay:connect_failed:timedOut",
+                 "$issue_name": "airplay:connect_failed (timedOut)"],
+                ["store": "groups"],
+            ])
+        }
+
         @Test func setConsentForwardsToConsentChangedAndGatesSubsequentCaptures() {
             let captured = Captured()
             let consentChanges = ConsentChanges()

@@ -2179,7 +2179,8 @@ extension NativeBackend {
                 self.fedDescriptors[deviceID]?.authKey = nil
                 Telemetry.fail(.airplay, "airplay:connect_failed",
                                local: ["device": deviceID, "op": op, "stream": "\(stream)", "error": "\(error)"],
-                               shared: ["cause": "\(cause)", "reason": Self.failureReason(error)])
+                               shared: ["cause": "\(cause)", "reason": Self.failureReason(error),
+                                        "speaker": self.btSpeakerKey(forDevice: deviceID)])
             }
             if self.streamBindings[deviceID] != nil {
                 self.setPerAppConnectionStateLocked(

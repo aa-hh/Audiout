@@ -4501,7 +4501,7 @@ import AudioutProtocol
 ///
 /// Nested under `SerializedSharedState` because `Analytics.install` mutates
 /// process-global state — the rule in `SerializedSharedStateSuite.swift`. Only
-/// these six cases pay for the global sink.
+/// these cases pay for the global sink.
 extension SerializedSharedState {
     @MainActor
     @Suite struct PopoverConnectionAnalyticsTests {
@@ -4598,7 +4598,7 @@ extension SerializedSharedState {
                 popover.update(devices: fleet(office: .failed(ConnectionFailure(cause: .vanished))))
             }
             #expect(seen.properties(of: "connection:failed")
-                    == (intent == .unwanted ? [] : [["kind": "homePod", "cause": "vanished"]]))
+                    == (intent == .unwanted ? [] : [["kind": "homePod", "cause": "vanished", "trigger": "user"]]))
         }
 
         /// The same two gate breakages on the connect capture. A speaker the
@@ -4610,7 +4610,56 @@ extension SerializedSharedState {
                 popover.update(devices: fleet(office: .connected))
             }
             #expect(seen.properties(of: "connection:connected")
-                    == (intent == .unwanted ? [] : [["kind": "homePod"]]))
+                    == (intent == .unwanted ? [] : [["kind": "homePod", "trigger": "user", "recovered": "false"]]))
+        }
+
+        // Turns red if `trigger` stops expiring: a failure 30 s after the user's click is the app's own retry.
+        @Test func aFailureLongAfterTheUsersRequestIsAutomatic() throws {
+            let popover = try makePopover(intent: .selected)
+            let later = Date().addingTimeInterval(31)
+            popover.groupController?.now = { later }
+            let seen = captured {
+                popover.update(devices: fleet(office: .failed(ConnectionFailure(cause: .timedOut))))
+            }
+            #expect(seen.properties(of: "connection:failed").map { $0["trigger"] } == ["auto"])
+        }
+
+        // Turns red if a connect after a failure stops saying it ended that failure, which is what separates a fluke from a user who gave up.
+        @Test func aConnectAfterAFailureReportsTheRecovery() throws {
+            let popover = try makePopover(intent: .selected)
+            let seen = captured {
+                popover.update(devices: fleet(office: .failed(ConnectionFailure(cause: .timedOut))))
+                popover.update(devices: fleet(office: .connecting))
+                popover.update(devices: fleet(office: .failed(ConnectionFailure(cause: .timedOut))))
+                popover.update(devices: fleet(office: .connecting))
+                popover.update(devices: fleet(office: .connected))
+                popover.update(devices: fleet(office: .off))
+                popover.update(devices: fleet(office: .connected))
+            }
+            let connects = seen.properties(of: "connection:connected")
+            #expect(connects.map { $0["recovered"] } == ["true", "false"])
+            #expect(connects.first?["recovery_seconds_bucket"] == "0-9")
+        }
+
+        // Turns red if a failure the user walked away from is still open later, so their next connect reads as a recovery.
+        @Test func aConnectAfterTheUserDroppedAFailingSpeakerIsNotARecovery() throws {
+            let popover = try makePopover(intent: .selected)
+            let failed = fleet(office: .failed(ConnectionFailure(cause: .timedOut)))
+            let seen = captured {
+                popover.update(devices: failed)
+                _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: false)
+                popover.update(devices: failed)
+                _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
+                popover.update(devices: fleet(office: .connecting))
+                popover.update(devices: fleet(office: .connected))
+            }
+            #expect(seen.properties(of: "connection:connected").map { $0["recovered"] } == ["false"])
+        }
+
+        // Turns red if a bucket edge moves, which would split the dashboard's recovery times differently from the shared event doc.
+        @Test func recoveryBucketsSplitAtTenSecondsAMinuteAndFiveMinutes() {
+            #expect([0, 9.9, 10, 59.9, 60, 299.9, 300, 7200].map(PopoverController.recoveryBucket)
+                    == ["0-9", "0-9", "10-59", "10-59", "60-299", "60-299", "300+", "300+"])
         }
 
         // Turns red when `mixer:reconnect_requested` fires for a name click that reconnects nothing: an AirPlay speaker looked for on the network, or a Bluetooth speaker the backend no longer lists.

@@ -81,7 +81,7 @@ public final class LicenseSheetViewController: NSViewController {
             "Your licence links this official build to your purchase and keeps it updated. Building Audiout from source is always free.")
         explainer.preferredMaxLayoutWidth = Self.sheetContentWidth
 
-        keyField.stringValue = settings.licenseKey ?? ""
+        keyField.stringValue = storedKeyToShow
         keyField.placeholderString = Self.keyFormatHint
         keyField.setAccessibilityLabel("Licence key")
         keyField.translatesAutoresizingMaskIntoConstraints = false
@@ -180,9 +180,17 @@ public final class LicenseSheetViewController: NSViewController {
     }
 
     /// The ONE place Remove decides whether it is on screen, so every state
-    /// change lands the same way: shown exactly when there is a stored key.
+    /// change lands the same way: shown exactly when there is a stored key the
+    /// user put there. A trial's key is internal (``TrialClock/holdsKey``), so
+    /// it is never offered for removal.
     private func refreshButtons() {
-        removeButton.isHidden = !settings.hasLicenseKey
+        removeButton.isHidden = !settings.hasLicenseKey || TrialClock.holdsKey(settings: settings)
+    }
+
+    /// The stored key for the field, or empty while it is the trial's own:
+    /// a key typed or arrived during the trial replaces it unseen.
+    private var storedKeyToShow: String {
+        TrialClock.holdsKey(settings: settings) ? "" : settings.licenseKey ?? ""
     }
 
     public override func viewDidAppear() {
@@ -270,7 +278,7 @@ public final class LicenseSheetViewController: NSViewController {
             case .verified(let status):
                 self.keyField.isEnabled = true
                 self.registerButton.isEnabled = true
-                self.keyField.stringValue = self.settings.licenseKey ?? ""
+                self.keyField.stringValue = self.storedKeyToShow
                 self.show(result: Self.statusLine(for: status, reason: self.settings.licenseReason))
                 self.refreshButtons()
                 self.onStateChange?()
@@ -333,6 +341,12 @@ public final class LicenseSheetViewController: NSViewController {
     public func test_tapRemove() {
         _ = view
         removeTapped()
+    }
+
+    /// The key field's text.
+    public var test_keyText: String {
+        _ = view
+        return keyField.stringValue
     }
 
     /// The inline result line's text, or `nil` while it is hidden.

@@ -1021,6 +1021,19 @@ import AudioutSharedUI
         #expect(entry.test_boxTexts == ["AAAAA", "BBBBB", "", ""])
     }
 
+    /// Owner's ruling: the trial key is internal. Red if the gate's key boxes
+    /// started arriving filled with a stored trial key, running or ended.
+    @MainActor
+    @Test(arguments: [-1.0, -20.0])
+    func theGateNeverFillsTheTrialKey(startedDaysAgo: Double) {
+        let settings = settings()
+        TrialClock.apply(settings: settings,
+                         startedAt: Date(timeIntervalSinceNow: startedDaysAgo * 86_400),
+                         expiresAt: Date(timeIntervalSinceNow: (startedDaysAgo + 14) * 86_400),
+                         key: "AUDT-TTTTT-TTTTT-TTTTT-TTTTT")
+        #expect(makeContent(settings, Transport()).test_keyText == "")
+    }
+
     /// Red if the box geometry drifted from the four 92 pt boxes, their
     /// 16 pt dash slots and the plate, or the row went back to stretching
     /// across the panel instead of keeping its natural width.

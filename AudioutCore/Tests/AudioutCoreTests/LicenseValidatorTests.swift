@@ -249,6 +249,29 @@ import Testing
         #expect(!LicenseGate.shouldPresent(settings: settings, presentation: .auto))
     }
 
+    /// The trial key is kept after the trial ends so a purchase made later
+    /// still converts it: the server answers the ENDED trial key with the paid
+    /// key. Red if that answer stopped swapping the paid key in, or left the
+    /// Mac reading as an ended trial.
+    @Test func aConvertedEndedTrialKeySwapsInThePaidKey() async {
+        let settings = settingsMidTrial()
+        settings.licenseStatus = .revoked
+        settings.licenseReason = "trial_expired"
+        let transport = Transport()
+        transport.stub(status: 200,
+                       json: #"{"status":"active","key":"\#(Self.paidKey)","max_major":1}"#)
+
+        let afterTheTrial = Self.trialExpires.addingTimeInterval(6 * 86_400)
+        #expect(TrialClock.hasEnded(settings: settings, now: afterTheTrial), "precondition: an ended trial")
+        #expect(await validate(settings, transport) == .verified(.active))
+        #expect(settings.licenseKey == Self.paidKey, "the paid key replaces the ended trial key")
+        #expect(settings.licenseStatus == .active)
+        #expect(settings.licenseReason == nil)
+        #expect(!TrialClock.hasEnded(settings: settings, now: afterTheTrial))
+        #expect(!TrialClock.holdsKey(settings: settings, now: afterTheTrial))
+        #expect(!LicenseGate.limitsToOneSpeaker(settings: settings))
+    }
+
     /// A trial ends by the server saying so, and the one-speaker limit is what
     /// the user then meets, never the gate (2026-09-26). Red if the reason
     /// stopped being stored — the standing note cannot tell a spent trial from

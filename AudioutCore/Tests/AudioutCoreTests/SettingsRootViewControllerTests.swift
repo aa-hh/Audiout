@@ -670,6 +670,71 @@ import AudioutSharedUI
         #expect(sheet?.test_removeIsVisible == true)
     }
 
+    /// A Mac holding its trial's key, running (`ended == false`) or ended, as
+    /// the registrar and the validator leave it.
+    private func makeTrialKeySettings(ended: Bool) -> AppSettings {
+        let settings = makePaidBuildSettings()
+        settings.licenseKey = "AUDT-TTTTT-TTTTT-TTTTT-TTTTT"
+        settings.trialRegistered = true
+        if ended {
+            settings.trialStartedAt = Date().addingTimeInterval(-20 * 86_400)
+            settings.trialExpiresAt = Date().addingTimeInterval(-6 * 86_400)
+            settings.licenseStatus = .revoked
+            settings.licenseReason = "trial_expired"
+        } else {
+            settings.trialStartedAt = Date().addingTimeInterval(-86_400)
+            settings.trialExpiresAt = Date().addingTimeInterval(13 * 86_400)
+            settings.licenseStatus = .active
+        }
+        return settings
+    }
+
+    /// Owner's ruling: the trial key is internal. Red if the sheet started
+    /// showing the trial's key, offering to remove it, or the pane's button
+    /// read "Change…" as if the person had a key of their own.
+    @Test(arguments: [false, true])
+    func theSheetHidesTheTrialKey(ended: Bool) throws {
+        let settings = makeTrialKeySettings(ended: ended)
+        let license = LicenseSettingsViewController(settings: settings)
+        _ = license.view
+        #expect(license.test_enterLicenseButtonTitle == "Enter licence…")
+
+        license.test_tapEnterLicense()
+        let sheet = try #require(license.test_licenseSheet)
+        #expect(sheet.test_keyText == "", "the trial key never reaches the field")
+        #expect(!sheet.test_removeIsVisible, "the trial key is not the person's to remove")
+        let shown = descendants(of: license.view).compactMap { ($0 as? NSTextField)?.stringValue }
+        #expect(!shown.contains { $0.contains("TTTTT") }, "no readout prints the trial key")
+        #expect(settings.licenseKey == "AUDT-TTTTT-TTTTT-TTTTT-TTTTT", "opening the sheet deletes nothing")
+    }
+
+    /// Red if a key typed during or after the trial stopped replacing the
+    /// trial key, or the sheet then hid the person's own key.
+    @Test(arguments: [false, true])
+    func aTypedKeyReplacesTheTrialKey(ended: Bool) async throws {
+        let settings = makeTrialKeySettings(ended: ended)
+        let started = settings.trialStartedAt
+        let transport = StubTransport()
+        transport.replies(#"{"status":"active","key":"AUDT-AAAAA-BBBBB-CCCCC-DDDDD"}"#)
+        let license = LicenseSettingsViewController(settings: settings)
+        license.licenseTransport = transport.closure
+
+        license.test_tapEnterLicense()
+        let sheet = try #require(license.test_licenseSheet)
+        sheet.test_setKeyText("AUDT-AAAAA-BBBBB-CCCCC-DDDDD")
+        sheet.test_tapRegister()
+        await drainMainQueue()
+
+        #expect(settings.licenseKey == "AUDT-AAAAA-BBBBB-CCCCC-DDDDD")
+        #expect(settings.licenseStatus == .active)
+        #expect(settings.trialStartedAt == started, "the trial stays on record: no second trial")
+        #expect(!TrialClock.holdsKey(settings: settings))
+
+        license.test_tapEnterLicense()
+        #expect(license.test_licenseSheet?.test_keyText == "AUDT-AAAAA-BBBBB-CCCCC-DDDDD")
+        #expect(license.test_licenseSheet?.test_removeIsVisible == true)
+    }
+
     /// A second `audiout://register` link that arrives while the first key is
     /// still being checked is DROPPED, not stacked: Register is disabled for
     /// exactly that window, and restarting the commit under the answer the user
@@ -1144,7 +1209,7 @@ import AudioutSharedUI
         #expect(root.test_readoutLines(at: 4) == ["Trial ended", "One speaker at a time"])
         #expect(license.test_licenseStatusText
                 == "Your trial has ended. Audiout plays on one speaker at a time until you buy.")
-        #expect(license.test_enterLicenseButtonTitle == "Change…")
+        #expect(license.test_enterLicenseButtonTitle == "Enter licence…", "an ended trial's key is not the person's own")
         #expect(license.test_buyButtonIsVisible)
         #expect(sameInk(license.test_headerGlyphTint, Tokens.Color.ring))
         #expect(licenseChangedCount == 0)

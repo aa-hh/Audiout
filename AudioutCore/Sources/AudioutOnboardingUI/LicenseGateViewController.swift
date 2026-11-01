@@ -365,7 +365,8 @@ public final class LicenseGateViewController: NSViewController {
         NSLayoutConstraint.activate(constraints)
         view = root
 
-        keyEntry.fill(settings.licenseKey ?? "")
+        // A trial's key is internal (`TrialClock.holdsKey`): never shown.
+        keyEntry.fill(TrialClock.holdsKey(settings: settings) ? "" : settings.licenseKey ?? "")
         keyEntry.onChange = { [weak self] in self?.entryChanged() }
         // Set rather than shown: the count on arrival is not news, so
         // VoiceOver is not told.

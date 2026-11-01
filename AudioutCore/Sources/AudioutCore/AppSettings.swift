@@ -943,12 +943,7 @@ public struct AppSettings {
               var components = URLComponents(url: page, resolvingAgainstBaseURL: false)
         else { return buyPageURL }
         var items = (components.queryItems ?? []) + [URLQueryItem(name: "s", value: Self.buySourceTag)]
-        let trialHoldsKey: Bool
-        switch TrialClock.state(settings: self) {
-        case .active, .expired: trialHoldsKey = true
-        case .none: trialHoldsKey = false
-        }
-        if trialHoldsKey, let key = licenseKey, !key.isEmpty {
+        if TrialClock.holdsKey(settings: self), let key = licenseKey, !key.isEmpty {
             items.append(URLQueryItem(name: "t", value: key))
         }
         components.queryItems = items

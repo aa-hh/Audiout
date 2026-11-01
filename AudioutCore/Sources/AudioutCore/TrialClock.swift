@@ -85,6 +85,18 @@ public enum TrialClock {
         return settings.licenseReason == "trial_expired"
     }
 
+    /// Whether the stored licence key is the trial's own, running or ended.
+    ///
+    /// Only a trial key's answer carries an expiry, and a converted trial's
+    /// paid answer clears it (``LicenseValidator``), so the trial dates being
+    /// on record is what says the stored key came from the trial. The trial
+    /// key is internal: key-entry surfaces open empty and offer no removal
+    /// while this is true, and the Buy link carries it as `?t=`.
+    public static func holdsKey(settings: AppSettings, now: Date = Date()) -> Bool {
+        if case .none = state(settings: settings, now: now) { return false }
+        return true
+    }
+
     /// Which one-time banner this Mac is still owed, or `nil` for none.
     ///
     /// Only a running trial is owed one. The last-day warning wins whenever

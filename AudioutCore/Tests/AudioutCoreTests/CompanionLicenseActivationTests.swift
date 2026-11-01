@@ -305,6 +305,28 @@ import AudioutProtocol
         #expect(settings.trialBannerLastDayShown)
     }
 
+    /// Red if a phone purchase stopped replacing the Mac's ENDED trial key,
+    /// which stays stored after the trial so a later purchase can convert it.
+    @Test func anActivePhoneKeyReplacesAnEndedTrialKey() async {
+        let settings = AppSettings(defaults: defaults, licenseServerURL: Self.server)
+        settings.licenseKey = Self.key
+        settings.licenseStatus = .revoked
+        settings.licenseReason = "trial_expired"
+        settings.trialStartedAt = Date().addingTimeInterval(-20 * 86_400)
+        settings.trialExpiresAt = Date().addingTimeInterval(-6 * 86_400)
+        settings.trialRegistered = true
+        let transport = Transport()
+        transport.stub(status: 200, json: #"{"status":"active","key":"\#(Self.newKey)","companion_token":"tok-b"}"#)
+
+        let result = await activate(settings, Self.newKey, transport)
+
+        #expect(result == CompanionServer.CommandResult(applied: true))
+        #expect(settings.licenseKey == Self.newKey)
+        #expect(settings.licenseStatus == .active)
+        #expect(settings.trialExpiresAt == nil)
+        #expect(!TrialClock.holdsKey(settings: settings))
+    }
+
     /// Red if a build with no licence server stopped refusing as `cannotCheck`
     /// or left the phone's key on file.
     @Test func aMacWithNoLicenceServerRefusesAsCannotCheck() async {

@@ -559,11 +559,6 @@ public final class LicenseGateViewController: NSViewController {
         let text = keyEntry.keyText
         guard !text.isEmpty else { return }
 
-        // A different key is an unanswered question: the previous key's
-        // verdict must not stand in for it while the server is asked.
-        if text != settings.licenseKey { settings.licenseStatus = nil }
-        settings.licenseKey = text
-
         keyEntry.isEnabled = false
         checking = true
         show("Verifying…")
@@ -571,7 +566,9 @@ public final class LicenseGateViewController: NSViewController {
 
         let validator = transport.map { LicenseValidator(settings: settings, transport: $0) }
             ?? LicenseValidator(settings: settings)
-        validator.validate { [weak self] result in
+        // Stores the key now and answers later; a typo typed over a trial
+        // puts the trial back (`validate(typedKey:)`).
+        validator.validate(typedKey: text) { [weak self] result in
             guard let self else { return }
             let outcome: String
             switch result {

@@ -675,6 +675,7 @@ import AudioutSharedUI
     private func makeTrialKeySettings(ended: Bool) -> AppSettings {
         let settings = makePaidBuildSettings()
         settings.licenseKey = "AUDT-TTTTT-TTTTT-TTTTT-TTTTT"
+        settings.trialKey = "AUDT-TTTTT-TTTTT-TTTTT-TTTTT"
         settings.trialRegistered = true
         if ended {
             settings.trialStartedAt = Date().addingTimeInterval(-20 * 86_400)
@@ -733,6 +734,70 @@ import AudioutSharedUI
         license.test_tapEnterLicense()
         #expect(license.test_licenseSheet?.test_keyText == "AUDT-AAAAA-BBBBB-CCCCC-DDDDD")
         #expect(license.test_licenseSheet?.test_removeIsVisible == true)
+    }
+
+    /// Red if a key typed over the trial's while the server is unreachable
+    /// were taken for the trial's own: hidden from the field, not removable,
+    /// the pane's button still "Enter licence…", or sent to the Buy page as
+    /// `?t=`, which would hand the person's own key to the checkout.
+    @Test(arguments: [false, true])
+    func aTypedKeyTheServerCouldNotCheckIsThePersonsOwn(ended: Bool) async throws {
+        let settings = makeTrialKeySettings(ended: ended)
+        let license = LicenseSettingsViewController(settings: settings)
+        license.licenseTransport = StubTransport().closure   // unreachable
+        _ = license.view
+
+        license.test_tapEnterLicense()
+        let sheet = try #require(license.test_licenseSheet)
+        sheet.test_setKeyText("AUDT-AAAAA-BBBBB-CCCCC-DDDDD")
+        sheet.test_tapRegister()
+        await drainMainQueue()
+
+        #expect(settings.licenseKey == "AUDT-AAAAA-BBBBB-CCCCC-DDDDD", "an unreachable server keeps the typed key")
+        #expect(settings.trialExpiresAt != nil, "precondition: the trial dates are still on record")
+        #expect(license.test_enterLicenseButtonTitle == "Change…")
+        let buyURL = try #require(settings.buyURL)
+        let buyQuery = URLComponents(url: buyURL, resolvingAgainstBaseURL: false)?.queryItems ?? []
+        #expect(!buyQuery.contains { $0.name == "t" }, "the person's key never rides the Buy link")
+
+        license.test_tapEnterLicense()
+        #expect(license.test_licenseSheet?.test_keyText == "AUDT-AAAAA-BBBBB-CCCCC-DDDDD")
+        #expect(license.test_licenseSheet?.test_removeIsVisible == true)
+    }
+
+    /// Red if a typo typed over the trial's key ended the trial (the answer
+    /// to a key that does not exist carries no expiry) or left the Mac on the
+    /// typo instead of putting the trial's key back, or the sheet stopped
+    /// saying why and keeping the typo to correct.
+    @Test(arguments: [false, true])
+    func aTypoOverTheTrialKeyPutsTheTrialBack(ended: Bool) async throws {
+        let settings = makeTrialKeySettings(ended: ended)
+        let expires = settings.trialExpiresAt
+        let transport = StubTransport()
+        transport.replies(#"{"status":"unknown"}"#)
+        let license = LicenseSettingsViewController(settings: settings)
+        license.licenseTransport = transport.closure
+
+        license.test_tapEnterLicense()
+        let sheet = try #require(license.test_licenseSheet)
+        sheet.test_setKeyText("AUDT-AAAAA-BBBBB-CCCCC-DDDDX")
+        sheet.test_tapRegister()
+        await drainMainQueue()
+
+        #expect(settings.licenseKey == "AUDT-TTTTT-TTTTT-TTTTT-TTTTT")
+        #expect(settings.trialExpiresAt == expires)
+        #expect(settings.licenseStatus == (ended ? .revoked : .active))
+        #expect(TrialClock.hasEnded(settings: settings) == ended)
+        if !ended {
+            guard case .active = TrialClock.state(settings: settings) else {
+                Issue.record("the trial is still running")
+                return
+            }
+        }
+        #expect(TrialClock.holdsKey(settings: settings), "the trial key is hidden again")
+        #expect(sheet.test_resultText == LicenseCopy.statusLine(for: .unknown, reason: nil))
+        #expect(sheet.test_keyText == "AUDT-AAAAA-BBBBB-CCCCC-DDDDX", "the typo stays to be corrected")
+        #expect(sheet.test_removeIsVisible == false)
     }
 
     /// A second `audiout://register` link that arrives while the first key is

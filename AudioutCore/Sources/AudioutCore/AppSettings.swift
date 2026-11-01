@@ -178,6 +178,7 @@ public struct AppSettings {
         static let licenseHasHeldPaid = "license.hasHeldPaid"
         static let licenseHasChosenOneSpeaker = "license.hasChosenOneSpeaker"
         static let companionToken = "license.companionToken"
+        static let trialKey = "license.trialKey"
         static let remoteConfigData = "remoteConfig.data"
         static let remoteConfigFetchedAt = "remoteConfig.fetchedAt"
         static let companionServerID = "companion.serverID"
@@ -876,6 +877,17 @@ public struct AppSettings {
         }
     }
 
+    /// The key the licence server issued for this Mac's trial, recorded by
+    /// ``TrialClock/apply(settings:startedAt:expiresAt:key:)`` beside the
+    /// copy it stores as ``licenseKey``. ``TrialClock/holdsKey(settings:now:)``
+    /// compares the two, so a key typed over the trial's is never mistaken
+    /// for it. `nil` for a trial that never registered, one started on a
+    /// build that did not record it, and a Mac with no trial.
+    public var trialKey: String? {
+        get { defaults.string(forKey: Keys.trialKey) }
+        nonmutating set { defaults.set(newValue, forKey: Keys.trialKey) }
+    }
+
     /// Whether the licence server has answered about this trial. `false` is
     /// ordinary, not a failure: a trial may start with no network at all and
     /// registers on the first connection.
@@ -906,6 +918,7 @@ public struct AppSettings {
         defaults.removeObject(forKey: Keys.trialRegistered)
         defaults.removeObject(forKey: Keys.trialBannerThreeDaysShown)
         defaults.removeObject(forKey: Keys.trialBannerLastDayShown)
+        defaults.removeObject(forKey: Keys.trialKey)
     }
 
     /// The license server this build talks to, from the bundle's

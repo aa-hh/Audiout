@@ -248,20 +248,15 @@ public final class LicenseSheetViewController: NSViewController {
             return
         }
 
-        // A different key is an unanswered question: the previous key's
-        // verdict must not stand in for it while the server is asked.
-        if text != settings.licenseKey { settings.licenseStatus = nil }
-        settings.licenseKey = text
-        refreshButtons()
-        onStateChange?()
-
         keyField.isEnabled = false
         registerButton.isEnabled = false
         show(result: "Checking…")
 
         let validator = transport.map { LicenseValidator(settings: settings, transport: $0) }
             ?? LicenseValidator(settings: settings)
-        validator.validate { [weak self] result in
+        // Stores the key now and answers later; a typo typed over a trial
+        // puts the trial back (`validate(typedKey:)`).
+        validator.validate(typedKey: text) { [weak self] result in
             guard let self else { return }
             let outcome: String
             switch result {
@@ -278,7 +273,12 @@ public final class LicenseSheetViewController: NSViewController {
             case .verified(let status):
                 self.keyField.isEnabled = true
                 self.registerButton.isEnabled = true
-                self.keyField.stringValue = self.storedKeyToShow
+                // The person's key in the server's spelling. A typo over a
+                // trial put the trial's key back, which stays hidden, so the
+                // typo stays in the field to be corrected.
+                if !TrialClock.holdsKey(settings: self.settings) {
+                    self.keyField.stringValue = self.settings.licenseKey ?? ""
+                }
                 self.show(result: Self.statusLine(for: status, reason: self.settings.licenseReason))
                 self.refreshButtons()
                 self.onStateChange?()
@@ -289,6 +289,8 @@ public final class LicenseSheetViewController: NSViewController {
                 self.finish()
             }
         }
+        refreshButtons()
+        onStateChange?()
     }
 
     private func show(result: String) {

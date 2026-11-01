@@ -127,6 +127,56 @@ public struct LicenseValidator {
         }
     }
 
+    /// Stores a key the person typed (the licence sheet's Register, the
+    /// welcome gate's boxes) over the stored one, then validates it.
+    ///
+    /// When a trial is on record (the stored key is the trial's, by
+    /// ``TrialClock/holdsKey(settings:now:)``, or its dates are still here,
+    /// as for a trial that has not registered yet) and the server answers
+    /// that the typed key is no key at all, `unknown` or `invalid`, the Mac
+    /// is put back exactly as it was before. A typo must not end a trial, and
+    /// the answer to one carries no expiry, which would. Every other answer
+    /// stands as ``validate(completion:)`` wrote it; a revoked or refunded
+    /// key is a real key. An unreachable server keeps the typed key, which
+    /// may well be real.
+    public func validate(typedKey key: String, completion: @escaping (Result) -> Void) {
+        let duringTrial = TrialClock.holdsKey(settings: settings)
+            || TrialClock.state(settings: settings) != .none
+        // The validator overwrites these on a verdict, so keep a copy to put
+        // back. Same set `CompanionLicenseActivation` keeps for a phone key.
+        let previous = (key: settings.licenseKey, trialKey: settings.trialKey,
+                        status: settings.licenseStatus, reason: settings.licenseReason,
+                        maxMajor: settings.licenseMaxMajor, companionToken: settings.companionToken,
+                        trialStartedAt: settings.trialStartedAt, trialExpiresAt: settings.trialExpiresAt,
+                        trialRegistered: settings.trialRegistered,
+                        trialBannerThreeDaysShown: settings.trialBannerThreeDaysShown,
+                        trialBannerLastDayShown: settings.trialBannerLastDayShown)
+
+        // A different key is an unanswered question: the previous key's
+        // verdict must not stand in for it while the server is asked.
+        if key != settings.licenseKey { settings.licenseStatus = nil }
+        settings.licenseKey = key
+
+        validate { result in
+            if duringTrial, result == .verified(.unknown) || result == .verified(.invalid) {
+                // The key goes first: setting it to nil clears the trial,
+                // which the lines below then put back.
+                settings.licenseKey = previous.key
+                settings.trialKey = previous.trialKey
+                settings.licenseStatus = previous.status
+                settings.licenseReason = previous.reason
+                settings.licenseMaxMajor = previous.maxMajor
+                settings.companionToken = previous.companionToken
+                settings.trialStartedAt = previous.trialStartedAt
+                settings.trialExpiresAt = previous.trialExpiresAt
+                settings.trialRegistered = previous.trialRegistered
+                settings.trialBannerThreeDaysShown = previous.trialBannerThreeDaysShown
+                settings.trialBannerLastDayShown = previous.trialBannerLastDayShown
+            }
+            completion(result)
+        }
+    }
+
     /// A 200 with a body we can read, or `nil` for every other outcome — a
     /// transport error, a non-200, or JSON that isn't the documented shape.
     /// All of those are "no answer", never "the key is bad".

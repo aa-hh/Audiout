@@ -49,6 +49,12 @@ public final class LicenseProofRefresher {
     private var inFlight = false
     private var lastAnsweredAt: Date?
     private var timer: Timer?
+    /// The proof the timer was last timed for, so a licence change that kept
+    /// the same proof leaves the timer alone.
+    private var timedToken: String?
+    /// When the timer is due, recorded even where no timer is armed (under
+    /// tests), so the timing can be checked without one.
+    private(set) var timerDue: Date?
 
     /// `onRefreshed` runs on the main queue after every request this sends,
     /// answered or not, so the host can apply the stored state and push a new
@@ -133,10 +139,12 @@ public final class LicenseProofRefresher {
         scheduleTimer()
     }
 
-    /// Re-times the timer for the stored proof. The host calls it after every
-    /// licence change, because a new proof can have a different lifetime.
+    /// Re-times the timer when the stored proof changed, because a new proof
+    /// can have a different lifetime. The host calls it after every licence
+    /// change, including every Mixer open, so an unchanged proof must leave
+    /// the timer running or a daily Mixer user would never reach it.
     public func licenseDidChange() {
-        guard started else { return }
+        guard started, settings.companionToken != timedToken else { return }
         scheduleTimer()
     }
 
@@ -144,9 +152,11 @@ public final class LicenseProofRefresher {
     /// the next, so each wait follows the proof stored at the time.
     private func scheduleTimer() {
         timer?.invalidate()
+        timedToken = settings.companionToken
+        let interval = Self.timings(for: timedToken).timerInterval
+        timerDue = now().addingTimeInterval(interval)
         guard !HeadlessRuntime.isActive else { return }
-        timer = Timer.scheduledTimer(withTimeInterval: Self.timings(for: settings.companionToken).timerInterval,
-                                     repeats: false) { [weak self] _ in
+        timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: false) { [weak self] _ in
             self?.refreshIfNeeded()
             self?.scheduleTimer()
         }

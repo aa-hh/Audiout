@@ -237,6 +237,25 @@ import Testing
         #expect(transport.requests.count == 2)
     }
 
+    /// Red if every licence change re-armed the timer: the host applies the
+    /// licence on every Mixer open, so a daily Mixer user would never reach
+    /// the check. Red too if a new proof kept the old proof's timing.
+    @Test func theTimerIsReTimedOnlyWhenTheProofChanges() {
+        let clock = Clock()
+        let settings = nearExpirySettings()
+        let refresher = refresher(settings, Transport(), clock, Counter())
+        refresher.start()
+        #expect(refresher.timerDue == Self.now0.addingTimeInterval(Self.day))
+
+        clock.now = Self.now0.addingTimeInterval(3_600)
+        refresher.licenseDidChange()
+        #expect(refresher.timerDue == Self.now0.addingTimeInterval(Self.day))
+
+        settings.companionToken = Self.token(exp: clock.now.addingTimeInterval(600), iat: clock.now)
+        refresher.licenseDidChange()
+        #expect(refresher.timerDue == clock.now.addingTimeInterval(150))
+    }
+
     /// Red if a refresh stopped storing the server's new proof, or stopped
     /// reporting so the host could push it to phones.
     @Test func aSuccessfulRefreshStoresTheNewProofAndReports() async {

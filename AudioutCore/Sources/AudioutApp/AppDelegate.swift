@@ -304,6 +304,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
     /// mounts it, once.
     private var licenseGateAwaitsSetup = false
 
+    /// First-run Setup on an install with no stored `app-config.json`, held
+    /// until the launch fetch answers so the iPhone card can be in it. The
+    /// fetch's 5 s timeout bounds the wait.
+    private var setupAwaitsRemoteConfig: (@MainActor () -> Void)?
+    /// Set when the launch fetch of `app-config.json` has answered, either way.
+    private var launchRemoteConfigFetched = false
+
     /// The `SetupModel` behind the last-presented onboarding window, kept alive
     /// after the window closes and REUSED by every subsequent automatic
     /// revocation audit (see `auditRequiredPermissionsIfNeeded`) rather than
@@ -1056,7 +1063,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
             self?.licenseProofRefresher?.start()
         }
         applyLicenseState()
-        refreshRemoteConfig()
+        refreshRemoteConfig { [weak self] in
+            guard let self else { return }
+            self.launchRemoteConfigFetched = true
+            let present = self.setupAwaitsRemoteConfig
+            self.setupAwaitsRemoteConfig = nil
+            present?()
+        }
 
     }
 
@@ -1651,7 +1664,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
         // carries no server URL and never gates.
         if LicenseGate.shouldPresent(settings: settings) {
             log("Audiout launched — first-open license gate")
-            if onboardingWindowController != nil {
+            if onboardingWindowController != nil || setupAwaitsRemoteConfig != nil {
                 licenseGateAwaitsSetup = true
             } else {
                 presentLicenseGate()
@@ -1764,7 +1777,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
         ])
         if presentOnLaunch {
             log("Audiout launched (backend: \(type(of: backend))) — first-run setup")
-            presentSetup()
+            // A fresh install has no stored app-config.json yet, so a Setup
+            // built now would leave out the iPhone card whatever the website
+            // says. Wait for the launch fetch; any stored file, even an old
+            // one, answers at once.
+            if settings.remoteConfigData == nil, !launchRemoteConfigFetched {
+                setupAwaitsRemoteConfig = { [weak self] in self?.presentSetup() }
+            } else {
+                presentSetup()
+            }
         } else {
             startBackendIfNeeded()
             log("Audiout launched (backend: \(type(of: backend)))")
@@ -1894,7 +1915,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
         applyLicenseState()
         if LicenseGate.shouldPresent(settings: settings) {
             // Setup first, as at launch: the gate waits for it to close.
-            if onboardingWindowController != nil {
+            if onboardingWindowController != nil || setupAwaitsRemoteConfig != nil {
                 licenseGateAwaitsSetup = true
             } else {
                 presentLicenseGate()
@@ -2159,6 +2180,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
 
         let model = permissionAuditModel ?? makeSetupModel()
         permissionAuditModel = model
+        // The kept model is reused for its Local Network state, but its
+        // iPhone card must follow the website and Allow switches as they are
+        // now, for a `.permissionLost` reopen.
+        model.refreshRemoteAppAvailability()
 
         isAuditingRequiredPermissions = true
         Task { @MainActor [weak self] in
@@ -2609,8 +2634,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
     /// Fetches `app-config.json`, then re-applies the licence state. When the
     /// new file shows or hides the iPhone app, the Settings screen is rebuilt
     /// on its next open; every other surface asks at the moment it is built.
+    /// `completion` runs on main after that, whatever the fetch did.
     @MainActor
-    private func refreshRemoteConfig(minimumInterval: TimeInterval = 0) {
+    private func refreshRemoteConfig(minimumInterval: TimeInterval = 0,
+                                     completion: (@MainActor () -> Void)? = nil) {
         let wasVisible = AppSettings.remoteAppIsVisible(settings: settings)
         RemoteAppConfigFetcher(settings: settings).refresh(minimumInterval: minimumInterval) { [weak self] in
             guard let self else { return }
@@ -2618,6 +2645,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
             if AppSettings.remoteAppIsVisible(settings: self.settings) != wasVisible {
                 self.surface?.invalidateSettingsScreen()
             }
+            completion?()
         }
     }
 

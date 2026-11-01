@@ -549,9 +549,9 @@ public final class SetupModel {
         // — the iPhone app is visible AND the EFFECTIVE Allow setting is on,
         // launch option included. Tests pass a fixed value so a card's
         // presence never depends on a real default.
+        self.remoteAppAvailableOverride = remoteAppAvailable
         self.remoteAppIsAvailable = remoteAppAvailable
-            ?? (AppSettings.remoteAppIsVisible(settings: settings)
-                && AppSettings.resolvedAllowRemoteControl(settings: settings))
+            ?? Self.remoteAppIsAvailable(settings: settings)
         self.bluetoothPromptTimeout = bluetoothPromptTimeout
         self.audioProbe = audioProbe
         self.localNetwork = localNetwork
@@ -1074,7 +1074,24 @@ public final class SetupModel {
     /// and the EFFECTIVE Allow setting is on, launch option included. False
     /// drops the card from the flow rather than auto-passing it — an
     /// invitation on a Mac that refuses phones would be a claim that is not real.
-    public let remoteAppIsAvailable: Bool
+    public private(set) var remoteAppIsAvailable: Bool
+    private let remoteAppAvailableOverride: Bool?
+
+    /// Re-read ``remoteAppIsAvailable`` from the switches, for a model kept
+    /// across Setup windows. A value passed to `init` stays as it was.
+    public func refreshRemoteAppAvailability() {
+        remoteAppIsAvailable = remoteAppAvailableOverride ?? Self.remoteAppIsAvailable(settings: settings)
+    }
+
+    /// What ``remoteAppIsAvailable`` reads when the caller passes nothing.
+    public static func remoteAppIsAvailable(
+        settings: AppSettings,
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        isDevBuild: Bool = AppSettings.isDevBuild
+    ) -> Bool {
+        AppSettings.remoteAppIsVisible(settings: settings, environment: environment, isDevBuild: isDevBuild)
+            && AppSettings.resolvedAllowRemoteControl(environment: environment, settings: settings)
+    }
 
     /// The app layer's push. Repaints on a real change only, so a reconnect
     /// storm does not redraw the window per socket.

@@ -64,8 +64,6 @@ public final class RemoteSettingsViewController: NSViewController, SettingsReado
     ///     process environment, injected as a fixed dictionary in tests.
     ///   - remoteAppIsOffered: whether this build carries the iPhone companion
     ///     at all; defaults to ``AppSettings/remoteAppIsOffered``.
-    ///   - remoteAppIsVisible: overrides ``isVisible``; `nil` (the default)
-    ///     asks ``AppSettings/remoteAppIsVisible(settings:environment:isDevBuild:offered:)``.
     ///   - openURL: opens the invitation's page; injected as a recording
     ///     closure in tests so a test run never launches a browser.
     ///   - approvals: the per-phone approval model (T24) backing the
@@ -75,7 +73,6 @@ public final class RemoteSettingsViewController: NSViewController, SettingsReado
     public init(settings: AppSettings = AppSettings(),
                 environment: [String: String] = ProcessInfo.processInfo.environment,
                 remoteAppIsOffered: Bool = AppSettings.remoteAppIsOffered,
-                remoteAppIsVisible: Bool? = nil,
                 openURL: @escaping (URL) -> Void = { NSWorkspace.shared.open($0) },
                 approvals: CompanionApprovalController? = nil) {
         self.settings = settings
@@ -83,7 +80,7 @@ public final class RemoteSettingsViewController: NSViewController, SettingsReado
         self.approvals = approvals
         self.remoteControlResolution = AppSettings.resolvedAllowRemoteControlWithSource(
             environment: environment, offered: remoteAppIsOffered, settings: settings)
-        self.isVisible = remoteAppIsVisible ?? AppSettings.remoteAppIsVisible(
+        self.isVisible = AppSettings.remoteAppIsVisible(
             settings: settings, environment: environment, offered: remoteAppIsOffered)
         super.init(nibName: nil, bundle: nil)
         title = "Audiout Remote"

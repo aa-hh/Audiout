@@ -1222,9 +1222,10 @@ overlay lifts off while it is selected and returns with any other tab.
 - **Offer** (the panel opens here when the build has a checkout URL), 12 pt
   apart unless stated:
   1. "One purchase covers this Mac and Audiout Remote on your iPhone." in
-     `body` / `label2`, leading-aligned, wrapping at 520 pt. A build that
-     does not offer the phone app (`AppSettings.remoteAppIsOffered` false)
-     reads "One purchase covers this Mac." instead.
+     `body` / `label2`, leading-aligned, wrapping at 520 pt. It names the
+     phone only while the iPhone app is visible
+     (`AppSettings.remoteAppIsVisible`); otherwise it reads "One purchase
+     covers this Mac."
   2. "Buy Audiout", the primary `CTAButton` (gold, `plateTitle`, 320 x 36 pt,
      centred), the Return key, so it wears the "⏎" chip at its trailing end.
      It opens the checkout and moves to the key state.

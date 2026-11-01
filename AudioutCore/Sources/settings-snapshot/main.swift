@@ -160,10 +160,8 @@ func makeRoot() -> SettingsRootViewController {
                                                             settings: settings)),
     ]
     // Drawn whatever app-config.json says, so the pane always has a picture.
-    let remote = RemoteSettingsViewController(settings: settings, remoteAppIsVisible: true)
-    if remote.isVisible {
-        sections.append(.init(title: "Audiout Remote", symbolName: "iphone", viewController: remote))
-    }
+    sections.append(.init(title: "Audiout Remote", symbolName: "iphone",
+                          viewController: RemoteSettingsViewController(settings: settings)))
     sections += [
         .init(title: "Appearance", symbolName: "paintpalette",
               viewController: AppearanceSettingsViewController(settings: settings)),

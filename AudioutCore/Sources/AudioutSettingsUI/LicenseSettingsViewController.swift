@@ -276,9 +276,10 @@ public final class LicenseSettingsViewController: NSViewController, SettingsRead
 
         // "Enter license…" before a key of the user's own exists; "Change…"
         // once one is stored (the sheet then prefills it and offers Remove
-        // License…).
+        // License…). A trial's key, running or ended, is not the user's own.
         let trialActive = trialIsActive
-        enterLicenseButton.title = !hasKey || trialActive ? "Enter licence…" : "Change…"
+        enterLicenseButton.title = !hasKey || TrialClock.holdsKey(settings: settings)
+            ? "Enter licence…" : "Change…"
 
         // Buying is offered only where it can work (a server and a buy page)
         // and only where it would help (no key, a key the server won’t

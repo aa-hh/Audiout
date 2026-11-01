@@ -211,5 +211,47 @@ import Testing
         #expect(!settings.trialRegistered)
         #expect(!settings.trialBannerThreeDaysShown)
         #expect(!settings.trialBannerLastDayShown)
+        #expect(settings.trialKey == nil)
+    }
+
+    // MARK: Whose key is stored
+
+    /// The Macs `holdsKey` must tell apart.
+    enum StoredKeyCase: CaseIterable {
+        /// The trial's key, its trial running.
+        case trialKeyRunning
+        /// The trial's key, its trial ended by the dates.
+        case trialKeyEnded
+        /// A Mac whose dates and recorded trial key are gone, still holding
+        /// the key the server last called `trial_expired`.
+        case datesGoneServerSaysEnded
+        /// A key the person typed over the trial's, not yet answered.
+        case typedOverTheTrialKey
+    }
+
+    /// Red if `holdsKey` hid a key the person typed over the trial's (it
+    /// would vanish from the field and ride the Buy link as `?t=`), or stopped
+    /// hiding the trial's key, running, ended, or on a Mac with only the
+    /// server's `trial_expired` left to say so.
+    @Test(arguments: StoredKeyCase.allCases)
+    func holdsKeyTellsTheTrialKeyFromThePersonsOwn(_ storedKey: StoredKeyCase) {
+        let settings = settings()
+        let expiresAt = Self.started.addingTimeInterval(TrialClock.length)
+        var now = Self.started.addingTimeInterval(86_400)
+        switch storedKey {
+        case .trialKeyRunning:
+            TrialClock.apply(settings: settings, startedAt: Self.started, expiresAt: expiresAt, key: Self.key)
+        case .trialKeyEnded:
+            TrialClock.apply(settings: settings, startedAt: Self.started, expiresAt: expiresAt, key: Self.key)
+            now = expiresAt.addingTimeInterval(86_400)
+        case .datesGoneServerSaysEnded:
+            settings.licenseKey = Self.key
+            settings.licenseStatus = .revoked
+            settings.licenseReason = "trial_expired"
+        case .typedOverTheTrialKey:
+            TrialClock.apply(settings: settings, startedAt: Self.started, expiresAt: expiresAt, key: Self.key)
+            settings.licenseKey = "AUDT-EEEEE-FFFFF-GGGGG-HHHHH"
+        }
+        #expect(TrialClock.holdsKey(settings: settings, now: now) == (storedKey != .typedOverTheTrialKey))
     }
 }

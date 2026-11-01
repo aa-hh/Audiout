@@ -85,6 +85,33 @@ public enum TrialClock {
         return settings.licenseReason == "trial_expired"
     }
 
+    /// Whether the stored licence key is the trial's own, running or ended.
+    ///
+    /// The trial key is internal: key-entry surfaces open empty and offer no
+    /// removal while this is true, and the Buy link carries it as `?t=`.
+    ///
+    /// When the trial's key is on record (``AppSettings/trialKey``), the
+    /// stored key must be that very key, and the trial must still be on
+    /// record by either of the two that can say so: its dates, or the
+    /// server's `trial_expired` reason. A key typed over it, even one the
+    /// server has not answered about yet, is the person's own.
+    ///
+    /// A trial that registered on a build that did not record its key, or a
+    /// Mac whose stored settings are gone, falls back to what is left: a
+    /// registered trial's dates on record, or a stored key the server last
+    /// called `trial_expired` with no dates at all. A trial that never
+    /// registered was never given a key, so any key stored then is the
+    /// person's own.
+    public static func holdsKey(settings: AppSettings, now: Date = Date()) -> Bool {
+        let key = settings.licenseKey
+        let onRecord = state(settings: settings, now: now) != .none
+        let endedByServer = key != nil && settings.licenseReason == "trial_expired"
+        if let trialKey = settings.trialKey {
+            return key == trialKey && (onRecord || endedByServer)
+        }
+        return (onRecord && settings.trialRegistered) || (!onRecord && endedByServer)
+    }
+
     /// Which one-time banner this Mac is still owed, or `nil` for none.
     ///
     /// Only a running trial is owed one. The last-day warning wins whenever
@@ -133,5 +160,6 @@ public enum TrialClock {
         settings.trialExpiresAt = expiresAt
         settings.trialRegistered = true
         settings.licenseKey = key
+        settings.trialKey = key
     }
 }

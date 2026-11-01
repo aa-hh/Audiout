@@ -1021,6 +1021,61 @@ import AudioutSharedUI
         #expect(entry.test_boxTexts == ["AAAAA", "BBBBB", "", ""])
     }
 
+    /// Owner's ruling: the trial key is internal. Red if the gate's key boxes
+    /// started arriving filled with a stored trial key, running or ended.
+    @MainActor
+    @Test(arguments: [-1.0, -20.0])
+    func theGateNeverFillsTheTrialKey(startedDaysAgo: Double) {
+        let settings = settings()
+        TrialClock.apply(settings: settings,
+                         startedAt: Date(timeIntervalSinceNow: startedDaysAgo * 86_400),
+                         expiresAt: Date(timeIntervalSinceNow: (startedDaysAgo + 14) * 86_400),
+                         key: "AUDT-TTTTT-TTTTT-TTTTT-TTTTT")
+        #expect(makeContent(settings, Transport()).test_keyText == "")
+    }
+
+    /// Red if a key typed over the trial's while the server is unreachable
+    /// came back hidden, as if it were the trial's, when the gate is made
+    /// again.
+    @MainActor
+    @Test(arguments: [-1.0, -20.0])
+    func aTypedKeyTheServerCouldNotCheckRefillsTheBoxes(startedDaysAgo: Double) async {
+        let settings = settings()
+        TrialClock.apply(settings: settings,
+                         startedAt: Date(timeIntervalSinceNow: startedDaysAgo * 86_400),
+                         expiresAt: Date(timeIntervalSinceNow: (startedDaysAgo + 14) * 86_400),
+                         key: "AUDT-TTTTT-TTTTT-TTTTT-TTTTT")
+        let gate = makeContent(settings, Transport())   // unreachable
+        gate.test_setKeyText(Self.key)
+        await drainMain()
+
+        #expect(settings.licenseKey == Self.key)
+        #expect(makeContent(settings, Transport()).test_keyText == Self.key)
+    }
+
+    /// Red if the gate stopped putting the trial back when the server says
+    /// a key typed over the trial's does not exist: that answer carries no
+    /// expiry, so storing it ends the trial.
+    @MainActor
+    @Test func aTypoOverTheTrialKeyPutsTheTrialBack() async {
+        let settings = settings()
+        TrialClock.apply(settings: settings,
+                         startedAt: Date(timeIntervalSinceNow: -86_400),
+                         expiresAt: Date(timeIntervalSinceNow: 13 * 86_400),
+                         key: "AUDT-TTTTT-TTTTT-TTTTT-TTTTT")
+        let expires = settings.trialExpiresAt
+        let transport = Transport()
+        transport.stub(status: 200, json: #"{"status":"unknown"}"#)
+        let gate = makeContent(settings, transport)
+        gate.test_setKeyText(Self.key)
+        await drainMain()
+
+        #expect(settings.licenseKey == "AUDT-TTTTT-TTTTT-TTTTT-TTTTT")
+        #expect(settings.trialExpiresAt == expires)
+        #expect(gate.test_detailText == LicenseCopy.statusLine(for: .unknown, reason: nil))
+        #expect(gate.test_keyText == Self.key, "the boxes keep the typo")
+    }
+
     /// Red if the box geometry drifted from the four 92 pt boxes, their
     /// 16 pt dash slots and the plate, or the row went back to stretching
     /// across the panel instead of keeping its natural width.

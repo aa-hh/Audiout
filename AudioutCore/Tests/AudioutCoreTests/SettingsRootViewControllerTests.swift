@@ -670,6 +670,159 @@ import AudioutSharedUI
         #expect(sheet?.test_removeIsVisible == true)
     }
 
+    /// A Mac holding its trial's key, running (`ended == false`) or ended, as
+    /// the registrar and the validator leave it.
+    private func makeTrialKeySettings(ended: Bool) -> AppSettings {
+        let settings = makePaidBuildSettings()
+        settings.licenseKey = "AUDT-TTTTT-TTTTT-TTTTT-TTTTT"
+        settings.trialKey = "AUDT-TTTTT-TTTTT-TTTTT-TTTTT"
+        settings.trialRegistered = true
+        if ended {
+            settings.trialStartedAt = Date().addingTimeInterval(-20 * 86_400)
+            settings.trialExpiresAt = Date().addingTimeInterval(-6 * 86_400)
+            settings.licenseStatus = .revoked
+            settings.licenseReason = "trial_expired"
+        } else {
+            settings.trialStartedAt = Date().addingTimeInterval(-86_400)
+            settings.trialExpiresAt = Date().addingTimeInterval(13 * 86_400)
+            settings.licenseStatus = .active
+        }
+        return settings
+    }
+
+    /// Owner's ruling: the trial key is internal. Red if the sheet started
+    /// showing the trial's key, offering to remove it, or the pane's button
+    /// read "Change…" as if the person had a key of their own.
+    @Test(arguments: [false, true])
+    func theSheetHidesTheTrialKey(ended: Bool) throws {
+        let settings = makeTrialKeySettings(ended: ended)
+        let license = LicenseSettingsViewController(settings: settings)
+        _ = license.view
+        #expect(license.test_enterLicenseButtonTitle == "Enter licence…")
+
+        license.test_tapEnterLicense()
+        let sheet = try #require(license.test_licenseSheet)
+        #expect(sheet.test_keyText == "", "the trial key never reaches the field")
+        #expect(!sheet.test_removeIsVisible, "the trial key is not the person's to remove")
+        let shown = descendants(of: license.view).compactMap { ($0 as? NSTextField)?.stringValue }
+        #expect(!shown.contains { $0.contains("TTTTT") }, "no readout prints the trial key")
+        #expect(settings.licenseKey == "AUDT-TTTTT-TTTTT-TTTTT-TTTTT", "opening the sheet deletes nothing")
+    }
+
+    /// Red if a key typed during or after the trial stopped replacing the
+    /// trial key, or the sheet then hid the person's own key.
+    @Test(arguments: [false, true])
+    func aTypedKeyReplacesTheTrialKey(ended: Bool) async throws {
+        let settings = makeTrialKeySettings(ended: ended)
+        let started = settings.trialStartedAt
+        let transport = StubTransport()
+        transport.replies(#"{"status":"active","key":"AUDT-AAAAA-BBBBB-CCCCC-DDDDD"}"#)
+        let license = LicenseSettingsViewController(settings: settings)
+        license.licenseTransport = transport.closure
+
+        license.test_tapEnterLicense()
+        let sheet = try #require(license.test_licenseSheet)
+        sheet.test_setKeyText("AUDT-AAAAA-BBBBB-CCCCC-DDDDD")
+        sheet.test_tapRegister()
+        await drainMainQueue()
+
+        #expect(settings.licenseKey == "AUDT-AAAAA-BBBBB-CCCCC-DDDDD")
+        #expect(settings.licenseStatus == .active)
+        #expect(settings.trialStartedAt == started, "the trial stays on record: no second trial")
+        #expect(!TrialClock.holdsKey(settings: settings))
+
+        license.test_tapEnterLicense()
+        #expect(license.test_licenseSheet?.test_keyText == "AUDT-AAAAA-BBBBB-CCCCC-DDDDD")
+        #expect(license.test_licenseSheet?.test_removeIsVisible == true)
+    }
+
+    /// Red if a key typed over the trial's while the server is unreachable
+    /// were taken for the trial's own: hidden from the field, not removable,
+    /// the pane's button still "Enter licence…", or sent to the Buy page as
+    /// `?t=`, which would hand the person's own key to the checkout.
+    @Test(arguments: [false, true])
+    func aTypedKeyTheServerCouldNotCheckIsThePersonsOwn(ended: Bool) async throws {
+        let settings = makeTrialKeySettings(ended: ended)
+        let license = LicenseSettingsViewController(settings: settings)
+        license.licenseTransport = StubTransport().closure   // unreachable
+        _ = license.view
+
+        license.test_tapEnterLicense()
+        let sheet = try #require(license.test_licenseSheet)
+        sheet.test_setKeyText("AUDT-AAAAA-BBBBB-CCCCC-DDDDD")
+        sheet.test_tapRegister()
+        await drainMainQueue()
+
+        #expect(settings.licenseKey == "AUDT-AAAAA-BBBBB-CCCCC-DDDDD", "an unreachable server keeps the typed key")
+        #expect(settings.trialExpiresAt != nil, "precondition: the trial dates are still on record")
+        #expect(license.test_enterLicenseButtonTitle == "Change…")
+        let buyURL = try #require(settings.buyURL)
+        let buyQuery = URLComponents(url: buyURL, resolvingAgainstBaseURL: false)?.queryItems ?? []
+        #expect(!buyQuery.contains { $0.name == "t" }, "the person's key never rides the Buy link")
+
+        license.test_tapEnterLicense()
+        #expect(license.test_licenseSheet?.test_keyText == "AUDT-AAAAA-BBBBB-CCCCC-DDDDD")
+        #expect(license.test_licenseSheet?.test_removeIsVisible == true)
+    }
+
+    /// Red if a typo typed over the trial's key ended the trial (the answer
+    /// to a key that does not exist carries no expiry) or left the Mac on the
+    /// typo instead of putting the trial's key back, or the sheet stopped
+    /// saying why and keeping the typo to correct.
+    @Test(arguments: [false, true])
+    func aTypoOverTheTrialKeyPutsTheTrialBack(ended: Bool) async throws {
+        let settings = makeTrialKeySettings(ended: ended)
+        let expires = settings.trialExpiresAt
+        let transport = StubTransport()
+        transport.replies(#"{"status":"unknown"}"#)
+        let license = LicenseSettingsViewController(settings: settings)
+        license.licenseTransport = transport.closure
+
+        license.test_tapEnterLicense()
+        let sheet = try #require(license.test_licenseSheet)
+        sheet.test_setKeyText("AUDT-AAAAA-BBBBB-CCCCC-DDDDX")
+        sheet.test_tapRegister()
+        await drainMainQueue()
+
+        #expect(settings.licenseKey == "AUDT-TTTTT-TTTTT-TTTTT-TTTTT")
+        #expect(settings.trialExpiresAt == expires)
+        #expect(settings.licenseStatus == (ended ? .revoked : .active))
+        #expect(TrialClock.hasEnded(settings: settings) == ended)
+        if !ended {
+            guard case .active = TrialClock.state(settings: settings) else {
+                Issue.record("the trial is still running")
+                return
+            }
+        }
+        #expect(TrialClock.holdsKey(settings: settings), "the trial key is hidden again")
+        #expect(sheet.test_resultText == LicenseCopy.statusLine(for: .unknown, reason: nil))
+        #expect(sheet.test_keyText == "AUDT-AAAAA-BBBBB-CCCCC-DDDDX", "the typo stays to be corrected")
+        #expect(sheet.test_removeIsVisible == false)
+    }
+
+    /// Red if a typo typed during a trial that never registered (so has no
+    /// key to put back) ended the trial, or the sheet emptied the field
+    /// instead of keeping the typo to correct.
+    @Test func aTypoDuringAnUnregisteredTrialKeepsTheTrialAndTheTypo() async throws {
+        let settings = makePaidBuildSettings()
+        TrialClock.start(settings: settings)
+        let expires = settings.trialExpiresAt
+        let transport = StubTransport()
+        transport.replies(#"{"status":"unknown"}"#)
+        let license = LicenseSettingsViewController(settings: settings)
+        license.licenseTransport = transport.closure
+
+        license.test_tapEnterLicense()
+        let sheet = try #require(license.test_licenseSheet)
+        sheet.test_setKeyText("AUDT-AAAAA-BBBBB-CCCCC-DDDDX")
+        sheet.test_tapRegister()
+        await drainMainQueue()
+
+        #expect(settings.licenseKey == nil)
+        #expect(settings.trialExpiresAt == expires)
+        #expect(sheet.test_keyText == "AUDT-AAAAA-BBBBB-CCCCC-DDDDX")
+    }
+
     /// A second `audiout://register` link that arrives while the first key is
     /// still being checked is DROPPED, not stacked: Register is disabled for
     /// exactly that window, and restarting the commit under the answer the user
@@ -1144,7 +1297,7 @@ import AudioutSharedUI
         #expect(root.test_readoutLines(at: 4) == ["Trial ended", "One speaker at a time"])
         #expect(license.test_licenseStatusText
                 == "Your trial has ended. Audiout plays on one speaker at a time until you buy.")
-        #expect(license.test_enterLicenseButtonTitle == "Change…")
+        #expect(license.test_enterLicenseButtonTitle == "Enter licence…", "an ended trial's key is not the person's own")
         #expect(license.test_buyButtonIsVisible)
         #expect(sameInk(license.test_headerGlyphTint, Tokens.Color.ring))
         #expect(licenseChangedCount == 0)

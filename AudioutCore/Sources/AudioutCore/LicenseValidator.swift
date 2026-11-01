@@ -148,6 +148,29 @@ public struct LicenseValidator {
         DispatchQueue.main.async { completion(result) }
     }
 
+    /// The key in the server's stored spelling, or nil when it cannot be a
+    /// key. Must match `canonicalizeKey` in the licence server's `src/keys.ts`
+    /// rule for rule: the proof's `key_hash` hashes this spelling, so a drift
+    /// here makes the snapshot's key hash disagree with every proof.
+    public static func canonicalKey(_ raw: String) -> String? {
+        let stripped = raw.uppercased().filter { $0.isASCII && ($0.isLetter || $0.isNumber) }
+        guard stripped.hasPrefix("AUDT") else { return nil }
+        let body = String(stripped.dropFirst(4).map { c -> Character in
+            switch c {
+            case "O": return "0"
+            case "I", "L": return "1"
+            default: return c
+            }
+        })
+        let alphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+        guard body.count == 20, body.allSatisfy({ alphabet.contains($0) }) else { return nil }
+        let groups = stride(from: 0, to: 20, by: 5).map { start -> String in
+            let from = body.index(body.startIndex, offsetBy: start)
+            return String(body[from..<body.index(from, offsetBy: 5)])
+        }
+        return "AUDT-" + groups.joined(separator: "-")
+    }
+
     public static func defaultTransport(_ request: URLRequest,
                                         _ completion: @escaping (Data?, URLResponse?, Error?) -> Void) {
         URLSession.shared.dataTask(with: request, completionHandler: completion).resume()

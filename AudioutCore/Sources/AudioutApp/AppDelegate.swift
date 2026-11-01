@@ -3687,7 +3687,8 @@ extension AppDelegate: CompanionCoordinatorHost {
         // key, so the phone is told to retry rather than silently dropped or
         // falsely accepted.
         if licenseGateController?.isChecking == true {
-            reply(CompanionServer.CommandResult(applied: false, refusalReason: "Your Mac is checking another licence key. Try again in a moment."))
+            reply(CompanionServer.CommandResult(applied: false, refusalReason: "Your Mac is checking another licence key. Try again in a moment.",
+                                                refusalCode: CompanionRefusalCode.busy))
             return
         }
         CompanionLicenseActivation(settings: settings).activate(key: key) { [weak self] result in

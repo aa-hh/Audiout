@@ -13,12 +13,13 @@ import Foundation
 /// and a day, and a staging proof of minutes is re-asked in minutes. A request
 /// that got no answer (offline, a 429, a server error) holds off one minute.
 ///
-/// Four triggers call ``refreshIfNeeded()``: the Mac waking, a phone
-/// connecting, the timer, and a usable network path appearing. They cannot
-/// stack: a request in flight blocks the next, and every finished request
-/// holds off further ones. A request with no answer holds off only a minute,
-/// so a Mac that tried offline asks again soon after the network returns
-/// without sending back to back while the server is down.
+/// Four triggers call ``refreshIfNeeded(networkReturned:)``: the Mac waking,
+/// a phone connecting, the timer, and a usable network path appearing. They
+/// cannot stack: a request in flight blocks the next, and every finished
+/// request holds off further ones. A request with no answer holds off only a
+/// minute, which the network path appearing skips, so a Mac that tried
+/// offline (a wake usually fires before Wi-Fi is up) asks again as soon as
+/// the network returns without sending back to back while the server is down.
 ///
 /// Main queue only, like ``TrialReachability``.
 public final class LicenseProofRefresher {
@@ -52,6 +53,9 @@ public final class LicenseProofRefresher {
     /// No request before this time: the end of the hold-off after the last
     /// finished request.
     private var holdOffUntil: Date?
+    /// Whether that request got no answer, so ``holdOffUntil`` is the
+    /// one-minute hold-off a returning network may skip.
+    private var lastRequestFailed = false
     private var timer: Timer?
     /// The proof the timer was last timed for, so a licence change that kept
     /// the same proof leaves the timer alone.
@@ -169,9 +173,12 @@ public final class LicenseProofRefresher {
     /// Asks the server about the stored key when the proof needs it, no other
     /// request is in flight, and the last one's hold-off has passed: the
     /// proof's hold-off after an answer, ``shortestInterval`` after none.
-    public func refreshIfNeeded() {
+    /// `networkReturned` (a usable path appeared) skips the hold-off after
+    /// none, since the failure it waits out was likely the missing network;
+    /// path changes are rare and the in-flight check still holds.
+    public func refreshIfNeeded(networkReturned: Bool = false) {
         guard started, !inFlight else { return }
-        if let holdOffUntil, now() < holdOffUntil { return }
+        if let holdOffUntil, now() < holdOffUntil, !(networkReturned && lastRequestFailed) { return }
         guard Self.needsRefresh(settings: settings, now: now()) else { return }
         inFlight = true
         LicenseValidator(settings: settings, transport: transport).validate { [weak self] result in
@@ -180,8 +187,10 @@ public final class LicenseProofRefresher {
             let holdOff: TimeInterval
             if case .verified = result {
                 holdOff = Self.timings(for: self.settings.companionToken).minimumInterval
+                self.lastRequestFailed = false
             } else {
                 holdOff = Self.shortestInterval
+                self.lastRequestFailed = true
             }
             self.holdOffUntil = self.now().addingTimeInterval(holdOff)
             self.onRefreshed()

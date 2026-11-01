@@ -245,6 +245,39 @@ import Testing
         #expect(transport.requests.count == 2)
     }
 
+    /// Red if a network coming back inside the minute after a failed request
+    /// were dropped, so a Mac that woke before its Wi-Fi waited for the timer,
+    /// up to a day; red too if it skipped the hold-off after an answer, or if
+    /// any other trigger skipped the failure's minute.
+    @Test func aReturningNetworkSkipsOnlyTheFailureHoldOff() async {
+        let failedTransport = Transport()
+        let failedClock = Clock()
+        let failedCounter = Counter()
+        let failed = refresher(nearExpirySettings(), failedTransport, failedClock, failedCounter)
+        failed.start()
+        failed.refreshIfNeeded()
+        await SuiteWait.until { failedCounter.count == 1 }
+
+        failedClock.now = Self.now0.addingTimeInterval(30)
+        failed.refreshIfNeeded()
+        #expect(failedTransport.requests.count == 1)
+        failed.refreshIfNeeded(networkReturned: true)
+        #expect(failedTransport.requests.count == 2)
+
+        let answeredTransport = Transport()
+        answeredTransport.stub(status: 200, json: #"{"status":"active"}"#)
+        let answeredClock = Clock()
+        let answeredCounter = Counter()
+        let answered = refresher(nearExpirySettings(), answeredTransport, answeredClock, answeredCounter)
+        answered.start()
+        answered.refreshIfNeeded()
+        await SuiteWait.until { answeredCounter.count == 1 }
+
+        answeredClock.now = Self.now0.addingTimeInterval(30)
+        answered.refreshIfNeeded(networkReturned: true)
+        #expect(answeredTransport.requests.count == 1)
+    }
+
     /// Red if every licence change re-armed the timer: the host applies the
     /// licence on every Mixer open, so a daily Mixer user would never reach
     /// the check. Red too if a new proof kept the old proof's timing.

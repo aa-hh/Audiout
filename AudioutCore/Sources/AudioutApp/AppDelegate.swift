@@ -1006,7 +1006,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
         // network is announced when a usable path appears. One trial asker is
         // enough: a direct call beside it posts the same registration a second
         // time. Its `onPathSatisfied` also asks `LicenseProofRefresher` to
-        // re-check an active licence's proof when a usable path appears.
+        // re-check an active licence's proof when a usable path appears,
+        // skipping the minute's hold-off a request sent offline left behind.
         // The case the monitor cannot see — a trial started at the gate while
         // the app is already running, which follows no path change — belongs to
         // the gate's own pass handler. The monitor also re-asks about a stored
@@ -1027,7 +1028,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
             self?.applyLicenseState()
             self?.groupController?.licenseAnswered()
         }, onPathSatisfied: { [weak self] in
-            self?.licenseProofRefresher?.refreshIfNeeded()
+            self?.licenseProofRefresher?.refreshIfNeeded(networkReturned: true)
         })
         trialReachability?.start()
 

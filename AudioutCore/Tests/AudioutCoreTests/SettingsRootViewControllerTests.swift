@@ -1072,6 +1072,7 @@ import AudioutSharedUI
         let revoked: [(reason: String?, line: String)] = [
             ("refund", "Key refunded"),
             ("chargeback", "Payment reversed"),
+            ("test_purchase_expired", "Test purchase expired"),
             (nil, "Key revoked"),
         ]
         for (reason, line) in revoked {

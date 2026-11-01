@@ -3961,6 +3961,7 @@ import AudioutProtocol
         ("refund", "This key was refunded, so Audiout plays on one speaker at a time."),
         ("chargeback", "This key\u{2019}s payment was reversed, so Audiout plays on one speaker at a time."),
         ("manual", "This key was revoked, so Audiout plays on one speaker at a time."),
+        ("test_purchase_expired", "This test purchase has expired, so Audiout plays on one speaker at a time."),
         (nil, "This key was revoked, so Audiout plays on one speaker at a time."),
     ] as [(String?, String)])
     func keyRefusedNoteNamesTheReason(reason: String?, expected: String) async throws {

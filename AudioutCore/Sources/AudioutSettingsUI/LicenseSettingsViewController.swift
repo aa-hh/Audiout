@@ -109,6 +109,7 @@ public final class LicenseSettingsViewController: NSViewController, SettingsRead
             switch settings.licenseReason {
             case "refund": return "Key refunded"
             case "chargeback": return "Payment reversed"
+            case "test_purchase_expired": return "Test purchase expired"
             default: return "Key revoked"
             }
         case .unknown: return "Key not recognized"

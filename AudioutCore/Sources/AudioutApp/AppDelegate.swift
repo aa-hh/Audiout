@@ -255,9 +255,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
 
     /// Watches for the network coming back so a trial that started offline can
     /// still reach the licence server. Held here because it owns a monitor that
-    /// has to outlive `applicationDidFinishLaunching`; it cancels itself once
-    /// there is nothing left to register.
+    /// has to outlive `applicationDidFinishLaunching`; it also reports every
+    /// usable network path to `licenseProofRefresher`.
     private var trialReachability: TrialReachability?
+
+    /// Re-checks the licence before the phones' 14-day proof runs out; started
+    /// by the launch check's answer.
+    private var licenseProofRefresher: LicenseProofRefresher?
+
+    /// Fires at the end of a running trial, which no licence change marks,
+    /// and re-asks the server before anything acts on the trial being over.
+    /// Re-armed by `applyLicenseState()`; never armed under tests.
+    private var trialEndTimer: Timer?
 
     /// The resolved backend kind (same resolution `makeBackend()` used). The
     /// first-run setup flow only presents on `.native` — the sole path that taps
@@ -996,11 +1005,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
         }
 
         // A trial can start with no network, so the server may not know about
-        // it yet. `TrialReachability` is the whole of the asking: `NWPathMonitor`
+        // it yet. `TrialReachability` does all of the trial asking: `NWPathMonitor`
         // delivers the current path the moment it starts, so a trial begun on an
         // earlier launch is announced right here, and one that has to wait for a
-        // network is announced when a usable path appears. One asker is enough:
-        // a direct call beside it posts the same registration a second time.
+        // network is announced when a usable path appears. One trial asker is
+        // enough: a direct call beside it posts the same registration a second
+        // time. Its `onPathSatisfied` also asks `LicenseProofRefresher` to
+        // re-check an active licence's proof when a usable path appears,
+        // skipping the minute's hold-off a request sent offline left behind.
         // The case the monitor cannot see — a trial started at the gate while
         // the app is already running, which follows no path change — belongs to
         // the gate's own pass handler. The monitor also re-asks about a stored
@@ -1010,12 +1022,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
         // The check-in and validate calls below run on the state as it stands
         // now: nothing waits on an answer here, so a key that arrives later is
         // put to work by `useNewTrialKey` rather than by them.
+        licenseProofRefresher = LicenseProofRefresher(settings: settings, onRefreshed: { [weak self] in
+            self?.applyLicenseState()
+            self?.groupController?.licenseAnswered()
+        })
         trialReachability = TrialReachability(settings: settings,
                                               onRegistered: { [weak self] in
             self?.useNewTrialKey()
         }, onValidated: { [weak self] in
             self?.applyLicenseState()
             self?.groupController?.licenseAnswered()
+        }, onPathSatisfied: { [weak self] in
+            self?.licenseProofRefresher?.refreshIfNeeded(networkReturned: true)
         })
         trialReachability?.start()
 
@@ -1027,11 +1045,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
         // The SOFT licence check. Ask the server what it thinks of the stored
         // key, and meanwhile show whatever it said last time — an unreachable
         // server must never change what the user sees, and nothing here gates
-        // a single feature. `applyLicenseState()` is idempotent, so running it
-        // now and again on the answer costs nothing.
+        // a single feature. Running `applyLicenseState()` now and again on the
+        // answer costs nothing: its writes are plain assignments, and its side
+        // effects (a coalesced snapshot broadcast, a proof push only for a new
+        // token, the refresher's timer re-timed only for a new proof, the
+        // one-shot timer at a running trial's end re-armed) do not stack.
         LicenseValidator(settings: settings).validate { [weak self] _ in
             self?.applyLicenseState()
             self?.groupController?.licenseAnswered()
+            self?.licenseProofRefresher?.start()
         }
         applyLicenseState()
         RemoteAppConfigFetcher(settings: settings).refresh { [weak self] in self?.applyLicenseState() }
@@ -1712,6 +1734,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
                 // Sleep can leave the volume-key tap disabled or gone. No-op
                 // unless we own the volume.
                 self.volumeKeyInterceptor.reassertIfOwned()
+                // A Mac asleep for days wakes with a proof near its end.
+                self.licenseProofRefresher?.refreshIfNeeded()
             }
         }
 
@@ -1832,6 +1856,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
                 })
             licenseGateController = gate
             surface.presentLicenseGate(gate)
+            // The gate says what the one-speaker note says, so the note
+            // waits; the pass's `applyLicenseState` brings it back if the Mac
+            // is still limited.
+            popoverController?.setUnregisteredNote(nil)
         }
         // At launch the menu bar icon has no place yet; wait for it so the
         // surface opens under it.
@@ -2869,8 +2897,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
     /// explains it, and the update feed's authorization header (the server
     /// serves the appcast and the download only to a key). Called at launch,
     /// on every validator answer, on a popover open while limited, and whenever
-    /// the Licence pane commits a key. Idempotent by construction — every write
-    /// is a plain assignment of a computed value.
+    /// the Licence pane commits a key. Its writes are plain assignments of
+    /// computed values. Beyond them it has side effects: once phones can be
+    /// connected it pushes a new proof to them (only a token not pushed
+    /// before) and hands the companion coordinator the snapshot's licence
+    /// state, which schedules a broadcast; it re-arms `trialEndTimer` at a
+    /// running trial's end; and it has `LicenseProofRefresher` re-time its
+    /// timer when the stored proof changed.
     ///
     /// A build with no licence server is the free build: no limit and no note,
     /// no matter what is stored. `groupController` and `popoverController` are
@@ -2882,7 +2915,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
         let status = settings.licenseStatus
         let limited = LicenseGate.limitsToOneSpeaker(settings: settings)
         groupController?.limitsToOneSpeaker = limited
-        popoverController?.setUnregisteredNote(.resolve(settings: settings))
+        popoverController?.setUnregisteredNote(
+            .resolve(settings: settings, licenseGateShown: licenseGateController != nil))
         updaterController?.updater.httpHeaders = key.isEmpty ? nil : ["Authorization": "Bearer \(key)"]
 
         // A licence that lands while phones are connected: push the token
@@ -2892,9 +2926,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
         // force-unwrap — a launch crash on any Mac holding a stored token
         // (2026-09-26). No phone is connected that early, so there is nobody
         // to push to; the passes after wiring cover every later licence change.
-        if groupController != nil, let token = settings.companionToken {
-            companionCoordinator.pushCompanionToken(token)
+        // The snapshot's licence state is re-read here too, so a refund
+        // reaches connected phones. Read once: it touches the keychain.
+        let macLicense = CompanionSnapshotBuilder.macLicense(settings: settings)
+        if groupController != nil {
+            if let token = settings.companionToken {
+                companionCoordinator.pushCompanionToken(token)
+            }
+            companionCoordinator.licenseStateDidChange(macLicense)
         }
+        armTrialEndTimer(at: CompanionSnapshotBuilder.macLicenseRecomputeAt(macLicense))
+
+        // A new proof can last a different time (a staging proof lasts
+        // minutes), so the refresher re-times its check.
+        licenseProofRefresher?.licenseDidChange()
 
         // License identity for analytics (PRODUCT.md Data Collection stream 1,
         // owner-approved): the installID stays the identity even when the
@@ -2920,6 +2965,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
             Analytics.setConsent(settings.telemetryEnabled)
         }
         trialSurveyFetcher.refresh(analyticsAvailable: analyticsAvailable)
+    }
+
+    /// A trial running out by the clock changes nothing stored, so a one-shot
+    /// timer at its end re-asks the server, as a limited install's Mixer open
+    /// does, and applies the answer: a trial converted on the website arrives
+    /// as paid before phones are told anything, and the one-speaker limit,
+    /// the Mixer note and the phones move together. With no answer,
+    /// `applyLicenseState()` still runs and the local clock decides.
+    private func armTrialEndTimer(at end: Date?) {
+        trialEndTimer?.invalidate()
+        trialEndTimer = nil
+        guard !HeadlessRuntime.isActive, let end else { return }
+        let timer = Timer(fire: end, interval: 0, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                LicenseValidator(settings: self.settings).validate { [weak self] _ in
+                    self?.applyLicenseState()
+                    self?.groupController?.licenseAnswered()
+                }
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        trialEndTimer = timer
     }
 
     /// The one-time ask a trial user gets right after their paid key is
@@ -3674,7 +3742,8 @@ extension AppDelegate: CompanionCoordinatorHost {
         // key, so the phone is told to retry rather than silently dropped or
         // falsely accepted.
         if licenseGateController?.isChecking == true {
-            reply(CompanionServer.CommandResult(applied: false, refusalReason: "Your Mac is checking another licence key. Try again in a moment."))
+            reply(CompanionServer.CommandResult(applied: false, refusalReason: "Your Mac is checking another licence key. Try again in a moment.",
+                                                refusalCode: CompanionRefusalCode.busy))
             return
         }
         CompanionLicenseActivation(settings: settings).activate(key: key) { [weak self] result in
@@ -3709,6 +3778,11 @@ extension AppDelegate: CompanionCoordinatorHost {
     func clientCountDidChange(_ count: Int) {
         permissionAuditModel?.noteRemoteAppClientCount(count)
         popoverController?.refreshRemoteInviteState()
+        // A phone arriving is when a stale proof matters; a refreshed one
+        // reaches it through `applyLicenseState`'s push.
+        if count > 0 {
+            licenseProofRefresher?.refreshIfNeeded()
+        }
     }
 
     @MainActor

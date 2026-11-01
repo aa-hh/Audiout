@@ -86,11 +86,15 @@ public final class CompanionServer: @unchecked Sendable {
     public struct CommandResult: Equatable, Sendable {
         public var applied: Bool
         public var refusalReason: String?
+        /// One of `CompanionRefusalCode`'s constants, for a refused `activateLicenseKey`; nil otherwise.
+        public var refusalCode: String?
         public var autoSwappedCurrentDevice: Bool
 
-        public init(applied: Bool, refusalReason: String? = nil, autoSwappedCurrentDevice: Bool = false) {
+        public init(applied: Bool, refusalReason: String? = nil, refusalCode: String? = nil,
+                    autoSwappedCurrentDevice: Bool = false) {
             self.applied = applied
             self.refusalReason = refusalReason
+            self.refusalCode = refusalCode
             self.autoSwappedCurrentDevice = autoSwappedCurrentDevice
         }
     }
@@ -1078,7 +1082,8 @@ public final class CompanionServer: @unchecked Sendable {
                         requestID: requestID,
                         applied: result.applied,
                         refusalReason: result.refusalReason,
-                        autoSwappedCurrentDevice: result.autoSwappedCurrentDevice
+                        autoSwappedCurrentDevice: result.autoSwappedCurrentDevice,
+                        refusalCode: result.refusalCode
                     ), to: stillConnected)
                 }
             }

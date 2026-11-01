@@ -765,10 +765,13 @@ public struct AppSettings {
         nonmutating set { defaults.set(newValue, forKey: Keys.licenseReason) }
     }
 
-    /// The opaque licence-server token for the companion server to forward
-    /// to approved iPhones in `welcome`, so the iOS app can unlock offline.
-    /// Written only by ``LicenseValidator``. `nil` when never issued, or
-    /// cleared alongside ``licenseKey``/``licenseStatus``.
+    /// The licence server's signed proof for the companion server to hand
+    /// approved iPhones, in their `welcome` and pushed live when it changes,
+    /// so the iOS app can unlock offline. Written by ``LicenseValidator``, put
+    /// back by ``CompanionLicenseActivation`` when a phone's key is refused,
+    /// and cleared alongside ``licenseKey``/``licenseStatus`` and on a
+    /// licence-server switch. ``LicenseProofRefresher`` reads its expiry,
+    /// unsigned. `nil` when never issued.
     public var companionToken: String? {
         get { readSecret(Keys.companionToken) }
         nonmutating set { writeSecret(newValue, for: Keys.companionToken) }

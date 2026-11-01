@@ -104,9 +104,10 @@ public struct BTTrimStore: Sendable {
         /// user's `trims` nudge on top of it. Optional so a file holding only
         /// trims still decodes; no schema bump needed.
         var latencyMs: [String: Double]?
-        /// A small counting number per Bluetooth device UID, handed out in
-        /// order of first sighting and never reused. It is what the release
-        /// analytics event names a speaker by, because the UID itself is
+        /// A small counting number per speaker id (Bluetooth UIDs, and since
+        /// 2026-11-01 AirPlay and Cast ids), handed out in order of first
+        /// sighting and never reused. It is what the release analytics events
+        /// name a speaker by, because the UID itself is
         /// derived from the MAC address and a hash of one is reversible by
         /// enumerating the address space. An index carries nothing but "this
         /// install's second speaker". Optional for the same reason

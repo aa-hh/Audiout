@@ -284,4 +284,15 @@ import Testing
         settings.licenseKey = nil
         #expect(settings.licenseStatus == nil, "only a deleted key clears the verdict")
     }
+
+    /// Red if the port drifts from `src/keys.ts`, so the snapshot's key hash
+    /// stops matching the proof's `key_hash`.
+    @Test func canonicalKeyMatchesTheServersCanonicalizeKey() {
+        #expect(LicenseValidator.canonicalKey("audt-aaaaa-bbbbb-ccccc-ddddd") == "AUDT-AAAAA-BBBBB-CCCCC-DDDDD")
+        #expect(LicenseValidator.canonicalKey("AUDT AAAAO BBBBI CCCCL DDDDD") == "AUDT-AAAA0-BBBB1-CCCC1-DDDDD")
+        #expect(LicenseValidator.canonicalKey("AUDTAAAAABBBBBCCCCCDDDDD") == "AUDT-AAAAA-BBBBB-CCCCC-DDDDD")
+        #expect(LicenseValidator.canonicalKey("AUDT-AAAAA-BBBBB-CCCCC-DDDD") == nil)
+        #expect(LicenseValidator.canonicalKey("XUDT-AAAAA-BBBBB-CCCCC-DDDDD") == nil)
+        #expect(LicenseValidator.canonicalKey("AUDT-AAAAA-BBBBB-CCCCC-DDDDU") == nil)
+    }
 }

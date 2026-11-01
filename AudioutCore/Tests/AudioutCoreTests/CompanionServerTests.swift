@@ -394,6 +394,7 @@ import AudioutProtocol
 
     // MARK: - Commands
 
+    /// Red if `CommandResult.refusalCode` stopped reaching the wire.
     @Test func commandRoundTripDeliversTheReply() async throws {
         let hub = try await makeHub()
         defer { hub.cancel() }
@@ -406,7 +407,7 @@ import AudioutProtocol
             // Reply from off the server queue, like the wiring layer's
             // main-thread hop will.
             DispatchQueue.global().async {
-                reply(.init(applied: false, refusalReason: "no such device", autoSwappedCurrentDevice: true))
+                reply(.init(applied: false, refusalReason: "no such device", refusalCode: CompanionRefusalCode.busy, autoSwappedCurrentDevice: true))
             }
         }
 
@@ -420,7 +421,7 @@ import AudioutProtocol
                      "the client was never promoted")
         sendText(try CompanionEnvelope(message: .command(requestID: "req-1", command: .setDeviceVolume(id: "dev-1", volume: 40))).encoded(), over: client)
 
-        #expect(await waitUntil { log.contains(.commandResult(requestID: "req-1", applied: false, refusalReason: "no such device", autoSwappedCurrentDevice: true)) },
+        #expect(await waitUntil { log.contains(.commandResult(requestID: "req-1", applied: false, refusalReason: "no such device", autoSwappedCurrentDevice: true, refusalCode: CompanionRefusalCode.busy)) },
                 "the command's result never came back")
     }
 

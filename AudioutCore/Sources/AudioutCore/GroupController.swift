@@ -477,6 +477,37 @@ public final class GroupController {
     /// launch clamp's.
     public func licenseAnswered() { pendingLaunchClamp = nil }
 
+    /// When a person last asked for each speaker: a selection, a "Play here",
+    /// a Main Out change, a retry or a reconnect, from the Mac or the phone.
+    /// Every caller of those entry points is a person. The reconnect sent when
+    /// a speaker reappears on the network counts too: only a click on that
+    /// speaker's name starts the 10-second search it ends. The backend's own
+    /// retries never pass through them.
+    private var userRequestedAt: [String: Date] = [:]
+    /// The clock `connectionAnalytics(for:)` reads. Tests move it forward.
+    var now: () -> Date = Date.init
+
+    private func noteUserRequest<S: Sequence<String>>(_ ids: S) {
+        let at = now()
+        for id in ids { userRequestedAt[id] = at }
+    }
+
+    /// The properties the connection analytics events share for `id`:
+    /// `speaker`, the backend's per-install number for it, and `trigger`,
+    /// `user` when a person asked for this speaker in the last 30 seconds,
+    /// else `auto`.
+    ///
+    /// razor: a time window, not a token carried through every connect path.
+    /// An automatic retry inside the window reads `user`, a slow user-started
+    /// connect past it reads `auto`. Thread the trigger through
+    /// `setOutputSet`/`retryOutput` if that blur ever shows up in the data.
+    public func connectionAnalytics(for id: String) -> [String: String] {
+        let asked = userRequestedAt[id].map { now().timeIntervalSince($0) < 30 } ?? false
+        var properties = ["trigger": asked ? "user" : "auto"]
+        properties["speaker"] = backend.analyticsSpeakerKey(forDevice: id)
+        return properties
+    }
+
     /// The refusal reason `setDeviceSelected` returns under the limit.
     public static let oneSpeakerLimitReason = "one_speaker_limit"
 
@@ -496,6 +527,7 @@ public final class GroupController {
     @discardableResult
     public func switchSelection(to id: String) -> SelectionResult {
         guard device(id) != nil else { return .ok }
+        noteUserRequest([id])
         selectedDeviceIDs = [id]
         mainOut = .selectedDevices
         pushMasterGain(mirrorToSystemVolume: false)
@@ -547,6 +579,7 @@ public final class GroupController {
     public func setDeviceSelected(_ id: String, _ selected: Bool) -> SelectionResult {
         guard let d = device(id) else { return .ok }
         if selected {
+            noteUserRequest([id])
             guard !selectedDeviceIDs.contains(id) else { return .ok }
 
             // Auto-swap: an AirPlay device turning ON while the local device is
@@ -618,6 +651,7 @@ public final class GroupController {
     /// entry point.
     @discardableResult
     public func retryConnection(for id: String) -> SelectionResult {
+        noteUserRequest([id])
         if case .group(let groupID) = mainOut,
            let group = groups.first(where: { $0.id == groupID }),
            group.memberIDs.contains(id) {
@@ -657,6 +691,7 @@ public final class GroupController {
     /// deliberately requires no membership (Section D tap-to-reconnect), so
     /// this is a straight pass-through.
     public func requestReconnect(for id: String) {
+        noteUserRequest([id])
         backend.retryOutput(id)
     }
 
@@ -705,6 +740,7 @@ public final class GroupController {
     public func setMainOut(_ target: MainOutTarget) {
         if limitsToOneSpeaker, case .group = target { return }
         mainOut = target
+        noteUserRequest(mainOutMemberIDs)
         pushMasterGain(mirrorToSystemVolume: false)
         applyRouting()
         persistRouting()

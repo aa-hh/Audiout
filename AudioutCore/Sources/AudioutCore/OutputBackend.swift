@@ -421,6 +421,10 @@ public protocol OutputBackend: AnyObject {
     /// attempts). Don't tighten either direction without checking both.
     func retryOutput(_ id: String)
 
+    /// The `speaker` property of the connection analytics events: a number
+    /// this install gives each speaker, never its id or name. Nil sends none.
+    func analyticsSpeakerKey(forDevice id: String) -> String?
+
     /// Store `password` as speaker `id`'s AirPlay password, then call
     /// `completion` on the main thread; the caller retries the speaker from it,
     /// so the retry reads the new password. `source` is `"mac"` or `"phone"` and
@@ -469,6 +473,9 @@ public extension OutputBackend {
     func submitAirPlayPassword(_ password: String, for id: String, source: String,
                                completion: @escaping @Sendable () -> Void) { completion() }
     func forgetAirPlayPassword(for id: String) {}
+
+    /// Only ``NativeBackend`` keeps the per-install speaker numbers.
+    func analyticsSpeakerKey(forDevice id: String) -> String? { nil }
 
     /// Backends with no real streaming sessions (the mock) have nothing to
     /// disconnect on sleep and no capture gate/watchdog to drive, so they inherit

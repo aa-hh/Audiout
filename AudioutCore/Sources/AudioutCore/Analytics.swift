@@ -175,10 +175,20 @@ public enum Analytics {
     /// One difference from ``capture(_:_:)``: a failure that happens before
     /// the user answers the consent ask is dropped, not held for a later
     /// grant. Only events are buffered.
+    ///
+    /// A `cause` property gets its own error-tracking issue. These errors
+    /// share one synthetic stack, so PostHog grouped them by name alone, and
+    /// in October 2026 a Home-restricted speaker's refusals were 88 of the
+    /// 100 `airplay:connect_failed` events, hiding the timeouts beside them.
     public static func captureError(_ name: StaticString, _ properties: [String: String] = [:]) {
         let snapshot: Sink? = state.withLock { s in
             guard s.consent else { return nil }
             return s.sink
+        }
+        var properties = properties
+        if let cause = properties["cause"] {
+            properties["$exception_fingerprint"] = "\(name):\(cause)"
+            properties["$issue_name"] = "\(name) (\(cause))"
         }
         snapshot?.captureError(name.description, properties)
     }

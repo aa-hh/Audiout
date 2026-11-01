@@ -601,6 +601,14 @@ public final class PopoverController: NSObject {
     /// `→ .off` (panel teardown).
     private var lastConnectionStates: [String: ConnectionState] = [:]
 
+    /// When each wanted speaker's current run of failures began: set by the
+    /// first reported `connection:failed`, cleared by the `connection:connected`
+    /// that ends it, which then reports `recovered`, or dropped unrecovered when
+    /// the speaker leaves the snapshot or the user stops wanting it. A run that never connects
+    /// sends nothing more, so a failure with no recovered connect after it is
+    /// one the user gave up on.
+    private var failingSince: [String: Date] = [:]
+
     /// Ids whose diagnosis panel should currently be OPEN. This is the
     /// persistent intent — it survives `rebuild()` (which recreates the panel
     /// views). Seeded automatically on a `→ .failed` transition (auto-expand ONCE
@@ -1346,10 +1354,12 @@ public final class PopoverController: NSObject {
         case noKey
 
         /// Which note a limited install shows, from what is stored; `nil` when
-        /// the install is not limited. An ended trial wins over the verdict it
-        /// left behind (the server answers one with `revoked`).
-        public static func resolve(settings: AppSettings) -> UnregisteredNote? {
-            guard LicenseGate.limitsToOneSpeaker(settings: settings) else { return nil }
+        /// the install is not limited, or while the first-open licence gate is
+        /// up (`licenseGateShown`), which already says the same thing. An ended
+        /// trial wins over the verdict it left behind (the server answers one
+        /// with `revoked`).
+        public static func resolve(settings: AppSettings, licenseGateShown: Bool) -> UnregisteredNote? {
+            guard !licenseGateShown, LicenseGate.limitsToOneSpeaker(settings: settings) else { return nil }
             if TrialClock.hasEnded(settings: settings) { return .trialEnded }
             if !settings.hasLicenseKey { return .noKey }
             switch settings.licenseStatus {
@@ -3481,6 +3491,15 @@ public final class PopoverController: NSObject {
     // never touches membership. The panel is purely auto-driven off these
     // transitions — the manual warning-button toggle was retired 2026-07-17.
 
+    static func recoveryBucket(_ seconds: TimeInterval) -> String {
+        switch seconds {
+        case ..<10: return "0-9"
+        case ..<60: return "10-59"
+        case ..<300: return "60-299"
+        default: return "300+"
+        }
+    }
+
     /// Diff the new snapshot's connection states against the last one and run
     /// the edge-triggered reactions above. Also prunes state for devices that
     /// vanished from the snapshot entirely (`deviceRemoved` — `.failed → .off`
@@ -3513,8 +3532,11 @@ public final class PopoverController: NSObject {
                 // group member that never appears in Selected Devices.
                 if case .failed(let failure) = current,
                    wantsAudio(device.id) || (groupController?.isMainOutMember(device.id) ?? false) {
-                    Analytics.capture("connection:failed", ["kind": device.kind.rawValue,
-                                                              "cause": String(describing: failure.cause)])
+                    var properties = groupController?.connectionAnalytics(for: device.id) ?? [:]
+                    properties["kind"] = device.kind.rawValue
+                    properties["cause"] = String(describing: failure.cause)
+                    Analytics.capture("connection:failed", properties)
+                    if failingSince[device.id] == nil { failingSince[device.id] = Date() }
                 }
                 // A fresh `→ .failed` edge is a NEW episode: its auto-expand wins
                 // over any prior dismissal, so clear the dismissal record before
@@ -3542,7 +3564,15 @@ public final class PopoverController: NSObject {
                 // speaker nobody asked for is the backend's business.
                 if current == .connected && previous != .connected && !device.isLocalDevice
                     && (wantsAudio(device.id) || (groupController?.isMainOutMember(device.id) ?? false)) {
-                    Analytics.capture("connection:connected", ["kind": device.kind.rawValue])
+                    var properties = groupController?.connectionAnalytics(for: device.id) ?? [:]
+                    properties["kind"] = device.kind.rawValue
+                    if let since = failingSince.removeValue(forKey: device.id) {
+                        properties["recovered"] = "true"
+                        properties["recovery_seconds_bucket"] = Self.recoveryBucket(Date().timeIntervalSince(since))
+                    } else {
+                        properties["recovered"] = "false"
+                    }
+                    Analytics.capture("connection:connected", properties)
                 }
                 // Leaving `.failed` ends the episode — clear both the open intent
                 // and the dismissal record so a future failure re-expands afresh.
@@ -3577,6 +3607,7 @@ public final class PopoverController: NSObject {
             lastConnectionStates.removeValue(forKey: id)
             openDiagnosisIDs.remove(id)
             dismissedDiagnosisIDs.remove(id)
+            failingSince.removeValue(forKey: id)
         }
 
         // Devices the user no longer wants audio on: drop the panel even though the
@@ -3593,6 +3624,13 @@ public final class PopoverController: NSObject {
         for id in openDiagnosisIDs.union(dismissedDiagnosisIDs) where !wantsAudio(id) {
             openDiagnosisIDs.remove(id)
             dismissedDiagnosisIDs.remove(id)
+        }
+        // The same drop for the failure run: a speaker the user walked away from
+        // ended unrecovered, so its next connect is a fresh start, not a recovery.
+        // Group members count as wanted here, as at the capture gate.
+        for id in failingSince.keys
+        where !wantsAudio(id) && !(groupController?.isMainOutMember(id) ?? false) {
+            failingSince.removeValue(forKey: id)
         }
     }
 

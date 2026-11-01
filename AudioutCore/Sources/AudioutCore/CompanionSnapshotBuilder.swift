@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+import CryptoKit
 import Foundation
 import AudioutProtocol
 
@@ -36,6 +37,49 @@ public enum CompanionSnapshotBuilder {
     /// Ceiling on names per device in `Snapshot.liveRoutedAppNames`
     /// (stable prefix of the backend's confirmed-streaming list).
     public static let maxLiveRoutedAppNamesPerDevice = 20
+
+    /// The Mac's licence state for the phone. Unsigned and used for wording
+    /// only; the phone never unlocks on it. Reads the keychain, so the
+    /// coordinator caches it.
+    public static func macLicense(settings: AppSettings, now: Date = Date()) -> MacLicense {
+        let keyHash = settings.licenseKey.flatMap(LicenseValidator.canonicalKey).map {
+            SHA256.hash(data: Data($0.utf8)).map { String(format: "%02x", $0) }.joined()
+        }
+        switch settings.licenseStatus {
+        case .active:
+            guard let expiresAt = settings.trialExpiresAt else {
+                return MacLicense(status: .active, keyHash: keyHash)
+            }
+            return MacLicense(status: now < expiresAt ? .trial : .trialEnded,
+                              keyHash: keyHash, trialEndsAt: expiresAt)
+        case .revoked:
+            if settings.licenseReason == "trial_expired" {
+                return MacLicense(status: .trialEnded, keyHash: keyHash, trialEndsAt: settings.trialExpiresAt)
+            }
+            return MacLicense(status: .revoked, keyHash: keyHash)
+        case .unknown, .invalid:
+            return MacLicense(status: .unlicensed, keyHash: keyHash)
+        case nil:
+            switch TrialClock.state(settings: settings, now: now) {
+            case .active(_, let expiresAt, _):
+                return MacLicense(status: .trial, keyHash: keyHash, trialEndsAt: expiresAt)
+            case .expired(let expiresAt):
+                return MacLicense(status: .trialEnded, keyHash: keyHash, trialEndsAt: expiresAt)
+            case .none:
+                return MacLicense(status: settings.hasLicenseKey ? .unchecked : .unlicensed, keyHash: keyHash)
+            }
+        }
+    }
+
+    /// When `license`, computed by ``macLicense(settings:now:)``, next changes
+    /// with nothing but the clock moving: the end of a running trial. Nil for
+    /// every other state, which changes only when the stored licence does.
+    /// Takes the computed licence rather than settings so callers read the
+    /// keychain once.
+    public static func macLicenseRecomputeAt(_ license: MacLicense, now: Date = Date()) -> Date? {
+        guard license.status == .trial, let end = license.trialEndsAt, end > now else { return nil }
+        return end
+    }
 
     /// - Parameters:
     ///   - devices: the live device list (already resolved by the caller —
@@ -107,6 +151,7 @@ public enum CompanionSnapshotBuilder {
     ///   - macAppVersion: passthrough to `Snapshot.macAppVersion`, the Mac
     ///     app's `CFBundleShortVersionString`. `nil` from a dev run with no
     ///     bundle to read; the phone only names it in a problem report.
+    ///   - macLicense: passthrough to `Snapshot.macLicense`.
     public static func build(
         devices: [Device],
         groupController: GroupController,
@@ -130,7 +175,8 @@ public enum CompanionSnapshotBuilder {
         speakerRecord: (Device) -> SpeakerPresentationRecord? = { _ in nil },
         missingSpeakers: [(id: String, name: String, kind: String?)] = [],
         note: (text: String, severity: String)? = nil,
-        macAppVersion: String? = nil
+        macAppVersion: String? = nil,
+        macLicense: MacLicense? = nil
     ) -> Snapshot {
         let deviceStates = devices.map { device in
             deviceState(for: device, groupController: groupController, iconFor: iconFor,
@@ -216,6 +262,7 @@ public enum CompanionSnapshotBuilder {
                 .map { MissingSpeakerState(id: $0.id, name: $0.name, kind: $0.kind) },
             note: note.map { NoteState(text: $0.text, severity: $0.severity) },
             macAppVersion: macAppVersion,
+            macLicense: macLicense,
             settings: SettingsState(
                 connectVolume: connectVolume,
                 connectVolumeMin: connectVolumeMin,

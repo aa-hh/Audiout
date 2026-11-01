@@ -1821,11 +1821,12 @@ extension NativeBackend: BTOutputControlling {
         btTrimLock.withLock { btLatencyMsByUID[id] ?? btTrimsByUID[id] }
     }
 
-    /// What names this speaker in the release analytics event: its
+    /// What names this speaker in the release analytics events: its
     /// ``btSpeakerIndexByUID`` entry, minted here the first time this install
-    /// is asked about the UID and written to the same file the trims live in.
+    /// is asked about the id and written to the same file the trims live in.
     /// Highest index plus one rather than a count, so a map that ever loses an
-    /// entry cannot hand a second speaker the first one's number.
+    /// entry cannot hand a second speaker the first one's number. AirPlay and
+    /// Cast ids share the map since 2026-11-01, for the connection events.
     func btSpeakerKey(forDevice id: String) -> String {
         let (index, all) = btTrimLock.withLock { () -> (Int, [String: Int]?) in
             if let existing = btSpeakerIndexByUID[id] { return (existing, nil) }
@@ -1838,6 +1839,8 @@ extension NativeBackend: BTOutputControlling {
         }
         return String(index)
     }
+
+    public func analyticsSpeakerKey(forDevice id: String) -> String? { btSpeakerKey(forDevice: id) }
 
     /// The pairing's device class, from the stash ``applyBTSnapshots(_:)``
     /// keeps — `known` is `stateQueue`-confined and this is read from three

@@ -13,14 +13,12 @@ import Network
 /// welcome gate in this same session, which follows no path change — the gate's
 /// own pass handler asks for that one.
 ///
-/// Deliberately narrow. It watches for exactly one thing, and cancels itself
-/// once no later path update could produce a registration — a trial already
-/// registered or already over, or a Mac holding a licence key, which is a
-/// bought copy or a converted trial and never starts a trial again. A stored
-/// key with no verdict is also watched, and asked about when a usable path
-/// appears; the monitor delivers the current path on start, so at launch that
-/// key is asked about here as well as by the launch validation, and that
-/// duplicate request is accepted.
+/// It never cancels itself: besides the trial, it tells its owner every time a
+/// usable path appears, which is how a Mac that launched offline re-checks its
+/// licence proof. A stored key with no verdict is also asked about when a
+/// usable path appears; the monitor delivers the current path on start, so at
+/// launch that key is asked about here as well as by the launch validation,
+/// and that duplicate request is accepted.
 public final class TrialReachability {
 
     /// What a path update leads to. Split out from the monitor so the decision
@@ -36,14 +34,12 @@ public final class TrialReachability {
 
         /// Nothing to do with this update, but keep watching.
         case wait
-
-        /// Nothing will ever come of watching — cancel the monitor.
-        case stop
     }
 
     private let settings: AppSettings
     private let onRegistered: () -> Void
     private let onValidated: () -> Void
+    private let onPathSatisfied: () -> Void
     private let monitor = NWPathMonitor()
 
     /// `onRegistered` runs on the main queue after the server has answered and
@@ -52,12 +48,16 @@ public final class TrialReachability {
     /// here.
     /// `onValidated` runs on the main queue after the server has answered about
     /// a stored key that had no verdict.
+    /// `onPathSatisfied` runs on the main queue on every path update that is
+    /// usable, so the licence proof can be re-checked once the network returns.
     public init(settings: AppSettings,
                 onRegistered: @escaping () -> Void = {},
-                onValidated: @escaping () -> Void = {}) {
+                onValidated: @escaping () -> Void = {},
+                onPathSatisfied: @escaping () -> Void = {}) {
         self.settings = settings
         self.onRegistered = onRegistered
         self.onValidated = onValidated
+        self.onPathSatisfied = onPathSatisfied
     }
 
     /// Starts watching, unless this build has no licence server to talk to.
@@ -82,8 +82,9 @@ public final class TrialReachability {
                 }
             case .wait:
                 break
-            case .stop:
-                self.monitor.cancel()
+            }
+            if path.status == .satisfied {
+                self.onPathSatisfied()
             }
         }
         // Main queue: `TrialRegistrar` writes settings through `TrialClock` and
@@ -92,23 +93,19 @@ public final class TrialReachability {
         monitor.start(queue: .main)
     }
 
-    /// The whole rule, as one decision.
-    ///
-    /// A registered trial and an expired one are both final — no later path
-    /// update can change either, so the monitor stops. A Mac with no trial
-    /// splits on the key: one holding a key has bought the app or converted its
-    /// trial, and will never start another, so watching is watching forever;
-    /// one with no key can still be handed a trial by the welcome gate while
-    /// the app runs, and cancelling there would leave that trial with no retry
-    /// until the next launch. Only a running, unregistered trial on a usable
-    /// path asks, and so does a stored key the server never answered about.
+    /// The trial and unverified-key half of each path update. A registered
+    /// trial, an expired one, and a key that already has a verdict have nothing
+    /// to ask; a Mac with no trial and no key waits, because the welcome gate
+    /// can start a trial later while the app runs. Only a running, unregistered trial
+    /// on a usable path asks, and so does a stored key the server never
+    /// answered about.
     static func step(for state: TrialState, hasKey: Bool, hasVerdict: Bool, satisfied: Bool) -> Step {
         switch state {
         case .active(_, _, registered: true), .expired:
-            return .stop
+            return .wait
         case .none:
             guard hasKey else { return .wait }
-            guard !hasVerdict else { return .stop }
+            guard !hasVerdict else { return .wait }
             return satisfied ? .validate : .wait
         case .active(_, _, registered: false):
             return satisfied ? .register : .wait

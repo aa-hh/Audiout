@@ -157,6 +157,7 @@ public enum LicenseCopy {
         switch reason {
         case "refund": return "This key was refunded"
         case "chargeback": return "This key\u{2019}s payment was reversed"
+        case "test_purchase_expired": return "This test purchase has expired"
         default: return "This key was revoked"
         }
     }

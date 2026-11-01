@@ -21,8 +21,9 @@ public final class LicenseSettingsViewController: NSViewController, SettingsRead
     private let checkAgainButton = NSButton()
     private let checkInDisclosureHelp = HelpButton(subject: "Licence", text:
         "Audiout checks in with the licence server once per launch to spot a key "
-        + "shared across many machines. It sends your key, a random per-Mac id, and the "
-        + "app version. Nothing else.")
+        + "shared across many machines and to stop a free trial on a Mac that has used a "
+        + "paid licence. It sends your key, a random per-Mac id, a one-way hash that "
+        + "identifies this Mac, and the app version. Nothing else.")
     private let enterLicenseButton = NSButton()
     private lazy var buyButton = ProminentButton(title: "Buy Audiout", target: self, action: #selector(buyTapped))
     private var well: NSView?

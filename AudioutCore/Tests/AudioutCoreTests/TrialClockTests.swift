@@ -107,6 +107,15 @@ import Testing
         #expect(settings.trialExpiresAt == Self.started.addingTimeInterval(TrialClock.length))
     }
 
+    /// Red if the start guard ignores the mark.
+    @Test func startRefusesAMacThatHasHeldAPaidLicence() {
+        let settings = settings()
+        settings.hasHeldPaidLicense = true
+        TrialClock.start(settings: settings, now: Self.started)
+        #expect(settings.trialStartedAt == nil)
+        #expect(TrialClock.state(settings: settings, now: Self.started) == .none)
+    }
+
     // MARK: The server's answer
 
     /// Red if `apply` stopped overwriting the local dates or stopped storing

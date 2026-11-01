@@ -175,6 +175,8 @@ public struct AppSettings {
         static let licenseStatus = "license.status"
         static let licenseMaxMajor = "license.maxMajor"
         static let licenseReason = "license.reason"
+        static let licenseHasHeldPaid = "license.hasHeldPaid"
+        static let licenseHasChosenOneSpeaker = "license.hasChosenOneSpeaker"
         static let companionToken = "license.companionToken"
         static let remoteConfigData = "remoteConfig.data"
         static let remoteConfigFetchedAt = "remoteConfig.fetchedAt"
@@ -500,8 +502,8 @@ public struct AppSettings {
     /// popup, read by ``licenseServerURL`` only when this is a dev build.
     /// Changing it clears the stored verdict (``licenseStatus``,
     /// ``licenseReason``, ``licenseMaxMajor``, ``companionToken``,
-    /// ``trialExpiresAt``), because a verdict from one server says nothing
-    /// about another; the key and the trial start are kept, so the next check
+    /// ``trialExpiresAt``), ``hasHeldPaidLicense`` and ``hasChosenOneSpeaker``, because a verdict from
+    /// one server says nothing about another; the key and the trial start are kept, so the next check
     /// asks the new server about the same key.
     public var licenseServerChoice: LicenseServerChoice {
         get {
@@ -517,6 +519,8 @@ public struct AppSettings {
             licenseMaxMajor = nil
             companionToken = nil
             trialExpiresAt = nil
+            hasHeldPaidLicense = false
+            hasChosenOneSpeaker = false
         }
     }
 
@@ -763,6 +767,28 @@ public struct AppSettings {
     public var licenseReason: String? {
         get { defaults.string(forKey: Keys.licenseReason) }
         nonmutating set { defaults.set(newValue, forKey: Keys.licenseReason) }
+    }
+
+    /// Whether this Mac has ever held a paid licence. Set by
+    /// ``LicenseValidator`` on an active answer that is not a trial, and by
+    /// ``TrialRegistrar`` on the server's paid refusal. Never cleared by
+    /// removing the key or the trial; cleared only by a dev build's
+    /// ``licenseServerChoice`` switch. Read by ``TrialClock/start(settings:now:)``
+    /// and the licence gate, so such a Mac never starts a free trial.
+    public var hasHeldPaidLicense: Bool {
+        get { defaults.bool(forKey: Keys.licenseHasHeldPaid) }
+        nonmutating set { defaults.set(newValue, forKey: Keys.licenseHasHeldPaid) }
+    }
+
+    /// Whether the user tapped "Continue on one speaker" on the licence gate,
+    /// the choice a Mac that has held a paid licence gets instead of a trial.
+    /// Once set, ``LicenseGate/shouldPresent(settings:presentation:)`` stops
+    /// showing the gate at launch and the Mac runs limited to one speaker.
+    /// Cleared, like ``hasHeldPaidLicense``, only by a dev build's
+    /// ``licenseServerChoice`` switch.
+    public var hasChosenOneSpeaker: Bool {
+        get { defaults.bool(forKey: Keys.licenseHasChosenOneSpeaker) }
+        nonmutating set { defaults.set(newValue, forKey: Keys.licenseHasChosenOneSpeaker) }
     }
 
     /// The licence server's signed proof for the companion server to hand

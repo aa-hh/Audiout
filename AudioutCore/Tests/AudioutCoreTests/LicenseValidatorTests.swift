@@ -285,6 +285,65 @@ import Testing
         #expect(settings.licenseStatus == nil, "only a deleted key clears the verdict")
     }
 
+    // MARK: The paid-licence mark
+
+    /// Red if an active answer without `kind` stops marking the Mac, which
+    /// would let a refunded buyer start a trial.
+    @Test func anActivePaidAnswerMarksTheMac() async {
+        let settings = AppSettings(defaults: defaults, licenseServerURL: Self.server)
+        settings.licenseKey = Self.key
+        let transport = Transport()
+        transport.stub(status: 200,
+                       json: #"{"status":"active","key":"\#(Self.key)","max_major":1}"#)
+
+        #expect(await validate(settings, transport) == .verified(.active))
+        #expect(settings.hasHeldPaidLicense)
+    }
+
+    /// Red if a live trial's answer marked the Mac as paid.
+    @Test func anActiveTrialAnswerDoesNotMarkTheMac() async {
+        let settings = settingsMidTrial()
+        let transport = Transport()
+        transport.stub(status: 200,
+                       json: #"{"status":"active","key":"\#(Self.key)","max_major":1,"kind":"trial","expires_at":"2027-01-29T08:00:00Z"}"#)
+
+        #expect(await validate(settings, transport) == .verified(.active))
+        #expect(!settings.hasHeldPaidLicense)
+    }
+
+    /// Red if a trial that converted stops counting as a paid licence.
+    @Test func aConvertedTrialMarksTheMac() async {
+        let settings = settingsMidTrial()
+        let transport = Transport()
+        transport.stub(status: 200,
+                       json: #"{"status":"active","key":"\#(Self.paidKey)","max_major":1}"#)
+
+        #expect(await validate(settings, transport) == .verified(.active))
+        #expect(settings.hasHeldPaidLicense)
+    }
+
+    /// Red if a refused key marked a Mac that never held it active, or a
+    /// refund cleared the mark.
+    @Test func aRevokedAnswerNeitherSetsNorClearsTheMark() async {
+        let revoked = #"{"status":"revoked","key":"\#(Self.key)","max_major":1,"reason":"refund"}"#
+
+        let fresh = AppSettings(defaults: defaults, licenseServerURL: Self.server)
+        fresh.licenseKey = Self.key
+        let first = Transport()
+        first.stub(status: 200, json: revoked)
+        #expect(await validate(fresh, first) == .verified(.revoked))
+        #expect(fresh.hasHeldPaidLicense == false)
+
+        let other = TestIsolation(owner: "LicenseValidatorTests.marked")
+        let marked = AppSettings(defaults: other.isolatedDefaults, licenseServerURL: Self.server)
+        marked.licenseKey = Self.key
+        marked.hasHeldPaidLicense = true
+        let second = Transport()
+        second.stub(status: 200, json: revoked)
+        #expect(await validate(marked, second) == .verified(.revoked))
+        #expect(marked.hasHeldPaidLicense == true)
+    }
+
     /// Red if the port drifts from `src/keys.ts`, so the snapshot's key hash
     /// stops matching the proof's `key_hash`.
     @Test func canonicalKeyMatchesTheServersCanonicalizeKey() {

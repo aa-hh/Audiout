@@ -160,7 +160,7 @@ import AudioutSharedUI
         settings.licenseStatus = .active
         license.viewWillAppear()
         #expect(explanation(in: license.view, subject: "Licence")?.isHidden == false)
-        expectExplanation("Audiout checks in with the licence server once per launch to spot a key shared across many machines. It sends your key, a random per-Mac id, and the app version. Nothing else.", subject: "Licence", in: license.view)
+        expectExplanation("Audiout checks in with the licence server once per launch to spot a key shared across many machines and to stop a free trial on a Mac that has used a paid licence. It sends your key, a random per-Mac id, a one-way hash that identifies this Mac, and the app version. Nothing else.", subject: "Licence", in: license.view)
         #expect(license.test_licenseStatusText?.isEmpty == false)
         settings.licenseKey = ""
         license.viewWillAppear()
@@ -644,7 +644,7 @@ import AudioutSharedUI
         transport.replies(#"{"status":"active"}"#)
         license.test_setLicenseKey("AUDT-AAAAA-BBBBB-CCCCC-DDDDD")
         await drainMainQueue()
-        #expect(license.test_checkInDisclosureText == "Audiout checks in with the licence server once per launch to spot a key shared across many machines. It sends your key, a random per-Mac id, and the app version. Nothing else.")
+        #expect(license.test_checkInDisclosureText == "Audiout checks in with the licence server once per launch to spot a key shared across many machines and to stop a free trial on a Mac that has used a paid licence. It sends your key, a random per-Mac id, a one-way hash that identifies this Mac, and the app version. Nothing else.")
 
         license.test_removeLicense()
         #expect(license.test_checkInDisclosureText == nil)

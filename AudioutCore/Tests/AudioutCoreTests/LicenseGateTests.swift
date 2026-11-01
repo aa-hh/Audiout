@@ -140,6 +140,19 @@ import AudioutSharedUI
         #expect(LicenseGate.limitsToOneSpeaker(settings: settings))
     }
 
+    /// Red if `shouldPresent` ignores the remembered "Continue on one speaker"
+    /// choice (the welcome would come back at every launch), or if that choice
+    /// stops the dev knob from forcing the gate.
+    @Test func choosingOneSpeakerKeepsTheGateAwayUnlessForced() {
+        let settings = settings()
+        settings.hasHeldPaidLicense = true
+        #expect(LicenseGate.shouldPresent(settings: settings, presentation: .auto))
+        settings.hasChosenOneSpeaker = true
+        #expect(!LicenseGate.shouldPresent(settings: settings, presentation: .auto))
+        #expect(LicenseGate.shouldPresent(settings: settings, presentation: .forceShow))
+        #expect(LicenseGate.limitsToOneSpeaker(settings: settings))
+    }
+
     @Test func forceOverridesEvenASourceBuild() {
         #expect(LicenseGate.shouldPresent(settings: settings(withServer: false),
                                           presentation: .forceShow))
@@ -809,6 +822,54 @@ import AudioutSharedUI
             gate.test_tapHaveKey()
             #expect(!gate.test_trialIsVisible)
         }
+    }
+
+    /// Red if a Mac that held a paid licence is offered a trial, is left with
+    /// no way past the gate, or the line under the button is missing.
+    @MainActor
+    @Test func aMacThatHasHeldAPaidLicenceIsOfferedOneSpeakerInsteadOfATrial() throws {
+        let fresh = isolation.makeDefaults()
+        let spent = isolation.makeDefaults()
+        for store in [fresh, spent] {
+            let settings = settings(withBuy: true, store: store)
+            if store === spent { startTrial(settings, daysAgo: 20) }
+            settings.hasHeldPaidLicense = true
+            var passed = 0
+            let gate = makeContent(settings, Transport(), onPassed: { passed += 1 })
+
+            #expect(gate.test_trialIsVisible)
+            #expect(gate.test_trialTitle == "Continue on one speaker")
+            #expect(gate.test_visibleControls.contains {
+                ($0 as? NSTextField)?.stringValue == LicenseGateViewController.previouslyPaidLine
+            })
+            #expect(!gate.test_visibleControls.contains {
+                ($0 as? NSTextField)?.stringValue == LicenseGateViewController.reassuranceLine
+            })
+            let button = try #require(gate.test_visibleControls
+                .compactMap { $0 as? NSButton }
+                .first { $0.title == "Continue on one speaker" })
+            _ = (button.target as? NSObject)?.perform(button.action, with: button)
+            #expect(passed == 1)
+            if store === fresh { #expect(settings.trialStartedAt == nil) }
+        }
+    }
+
+    /// Red if tapping "Continue on one speaker" stores nothing, so
+    /// `shouldPresent` shows the welcome again at the next launch.
+    @MainActor
+    @Test func continuingOnOneSpeakerIsRemembered() throws {
+        let settings = settings(withBuy: true)
+        settings.hasHeldPaidLicense = true
+        var passed = 0
+        let gate = makeContent(settings, Transport(), onPassed: { passed += 1 })
+        let button = try #require(gate.test_visibleControls
+            .compactMap { $0 as? NSButton }
+            .first { $0.title == "Continue on one speaker" })
+        _ = (button.target as? NSObject)?.perform(button.action, with: button)
+
+        #expect(passed == 1)
+        #expect(settings.hasChosenOneSpeaker)
+        #expect(!LicenseGate.shouldPresent(settings: settings, presentation: .auto))
     }
 
     /// The tap starts the 14 days and opens the gate in the same turn. Red if

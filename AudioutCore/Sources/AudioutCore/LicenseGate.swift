@@ -14,8 +14,11 @@ import Foundation
 /// keeps it structurally unreachable there.
 ///
 /// The gate is the first-open welcome for an install with no key and no trial.
-/// Everything else the server declines — an ended trial, a refunded or revoked
-/// key — keeps running, limited to one speaker (`limitsToOneSpeaker`).
+/// A Mac that has held a paid licence (`AppSettings.hasHeldPaidLicense`) meets
+/// it too, offered "Continue on one speaker" instead of a trial; once tapped
+/// (`AppSettings.hasChosenOneSpeaker`) the gate stays away and the Mac runs
+/// limited. Everything else the server declines — an ended trial, a refunded or
+/// revoked key — keeps running, limited to one speaker (`limitsToOneSpeaker`).
 ///
 /// Both stay offline-tolerant: `licenseUnregistered` treats a stored key with
 /// no verdict as registered (the soft-check posture), so a key accepted while
@@ -33,6 +36,7 @@ public enum LicenseGate {
         case .auto:
             guard settings.licenseServerURL != nil,
                   !settings.hasLicenseKey,
+                  !settings.hasChosenOneSpeaker,
                   case .none = TrialClock.state(settings: settings) else {
                 return false
             }

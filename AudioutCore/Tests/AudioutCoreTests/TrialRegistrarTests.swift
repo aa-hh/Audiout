@@ -244,6 +244,67 @@ import Testing
         #expect(!settings.trialRegistered)
     }
 
+    // MARK: The paid-history refusal
+
+    /// Red if the server's paid refusal left the local trial running, or did
+    /// not mark the Mac, or the callers were not told to re-apply licence state.
+    @Test func aPaidHistoryRefusalEndsTheLocalTrialAndMarksTheMac() async {
+        let settings = unregisteredTrial()
+        let transport = Transport()
+        transport.stub(status: 200, json: #"{"outcome":"refused","reason":"previously_paid"}"#)
+
+        #expect(await register(settings, transport) == true)
+        #expect(settings.hasHeldPaidLicense)
+        #expect(settings.trialStartedAt == nil)
+        #expect(settings.trialExpiresAt == nil)
+        #expect(!settings.trialRegistered)
+        #expect(settings.licenseKey == nil)
+        #expect(TrialClock.state(settings: settings) == .none)
+        #expect(LicenseGate.limitsToOneSpeaker(settings: settings) == true)
+    }
+
+    /// The decision `AppDelegate.useNewTrialKey` reads after this refusal to
+    /// put the welcome back on screen in the same session; that wiring lives in
+    /// the app target, which tests cannot reach, so only the decision is pinned.
+    /// Red if `shouldPresent` stops answering true after a paid refusal, or
+    /// keeps answering true once "Continue on one speaker" was chosen.
+    @Test func aPaidHistoryRefusalOwesTheGateUntilOneSpeakerIsChosen() async {
+        let settings = unregisteredTrial()
+        #expect(!LicenseGate.shouldPresent(settings: settings, presentation: .auto))
+        let transport = Transport()
+        transport.stub(status: 200, json: #"{"outcome":"refused","reason":"previously_paid"}"#)
+
+        #expect(await register(settings, transport) == true)
+        #expect(LicenseGate.shouldPresent(settings: settings, presentation: .auto))
+        settings.hasChosenOneSpeaker = true
+        #expect(!LicenseGate.shouldPresent(settings: settings, presentation: .auto))
+    }
+
+    /// Red if the refusal overwrote state after the user entered a key.
+    @Test func aPaidHistoryRefusalLeavesAKeyThatArrivedMidFlightAlone() async {
+        let settings = unregisteredTrial()
+        let transport = Transport()
+        transport.stub(status: 200, json: #"{"outcome":"refused","reason":"previously_paid"}"#)
+        transport.whileInFlight = { settings.licenseKey = "AUDT-PAID0-PAID0-PAID0-PAID0" }
+
+        #expect(await register(settings, transport) == false)
+        #expect(!settings.hasHeldPaidLicense)
+        #expect(settings.trialStartedAt != nil)
+    }
+
+    /// Red if any reason other than `previously_paid` ended a trial.
+    @Test func aRefusalWithNoRowAndAnotherReasonIsNoAnswer() async {
+        let settings = unregisteredTrial()
+        let transport = Transport()
+        transport.stub(status: 200, json: #"{"outcome":"refused","reason":"something_else"}"#)
+
+        #expect(await register(settings, transport) == false)
+        #expect(TrialClock.state(settings: settings, now: Self.started)
+                == .active(daysLeft: 14,
+                           expiresAt: Self.started.addingTimeInterval(TrialClock.length),
+                           registered: false))
+    }
+
     /// Red if a non-200 were read as an answer. The server rejects a malformed
     /// body with a 400, and that must not mark anything registered.
     @Test func aRejectedRequestLeavesTheTrialAlone() async {

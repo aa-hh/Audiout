@@ -1824,8 +1824,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
     }
 
     /// Draw the first-open licence gate over the surface and open the surface
-    /// on the Mixer. There is no way past it but a key or a trial; the panel's
-    /// Quit is the way out. Its pass re-applies licence state and takes it
+    /// on the Mixer. There is no way past it but a key, a trial, or, on a Mac
+    /// that has held a paid licence, one speaker; the panel's Quit is the way
+    /// out. Its pass re-applies licence state and takes it
     /// away.
     @MainActor
     private func presentLicenseGate() {
@@ -1877,6 +1878,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
     /// The Buy link needs no step of its own: `AppSettings.buyURL` composes the
     /// trial's `?t=` when the link is opened, so it carries the key from the
     /// moment one is stored.
+    ///
+    /// Both registrar callers land here on the server's `previously_paid`
+    /// refusal too, which ends the trial and leaves no key. The gate comes back
+    /// at once so its "Continue on one speaker" line explains why, rather than
+    /// at the next launch. It cannot loop: tapping Continue stores
+    /// `hasChosenOneSpeaker`, which `shouldPresent` reads, and the gate's pass
+    /// asks the registrar again only for a running trial, which this Mac no
+    /// longer has.
     @MainActor
     private func useNewTrialKey() {
         LicenseCheckIn(settings: settings).checkInIfNeeded()
@@ -1885,6 +1894,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
             self?.groupController?.licenseAnswered()
         }
         applyLicenseState()
+        if LicenseGate.shouldPresent(settings: settings) {
+            // Setup first, as at launch: the gate waits for it to close.
+            if onboardingWindowController != nil {
+                licenseGateAwaitsSetup = true
+            } else {
+                presentLicenseGate()
+            }
+        }
     }
 
     /// Offer to fix it when Gatekeeper is running us from its randomized

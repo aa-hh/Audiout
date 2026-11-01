@@ -78,6 +78,12 @@ public struct LicenseValidator {
                     return
                 }
                 settings.licenseStatus = status
+                // An active answer that is not a trial's is a paid licence (a
+                // converted trial answers with the paid body). Never set false
+                // here: a later refund does not give the trial back.
+                if status == .active, body.kind != "trial" {
+                    settings.hasHeldPaidLicense = true
+                }
                 // Written on every answer, present or not. An answer with no
                 // reason is the server saying this verdict needs no
                 // explaining, and yesterday's reason left in place would
@@ -125,9 +131,8 @@ public struct LicenseValidator {
     /// transport error, a non-200, or JSON that isn't the documented shape.
     /// All of those are "no answer", never "the key is bad".
     ///
-    /// `kind` is read and not stored: `"trial"` marks an active trial, and
-    /// every reader of that fact reads ``TrialClock`` instead, which the
-    /// stored `expires_at` already answers for.
+    /// `kind` is read for one thing, marking the Mac as having held a paid
+    /// licence; every other reader of a running trial reads ``TrialClock``.
     private static func parse(data: Data?, response: URLResponse?)
         -> (status: LicenseStatus?, key: String?, maxMajor: Int?, companionToken: String?,
             reason: String?, kind: String?, expiresAt: Date?)? {

@@ -26,8 +26,10 @@ public enum TrialRegistrar {
     /// Does nothing unless the trial is running and unregistered: a Mac with no
     /// trial, an expired one, or one the server has already answered about all
     /// return `false` through `completion` without a request. `completion`
-    /// reports whether the server's record was stored, always on the main
-    /// queue, including on the paths that ask nothing.
+    /// reports whether the server's answer was stored, always on the main
+    /// queue, including on the paths that ask nothing. The paid refusal is
+    /// stored by ending the local trial and marking the Mac
+    /// (``AppSettings/hasHeldPaidLicense``).
     ///
     /// A stored key stops it too, and that guard is not redundant with the
     /// state above: an unregistered trial holds no key of its own, so a key
@@ -42,7 +44,9 @@ public enum TrialRegistrar {
     /// come back with the real dates and key of the row the server holds for
     /// this Mac, and that row is the one that decides, so `refused` is as much
     /// worth storing as `issued`: it is how a Mac learns it already used its
-    /// trial up.
+    /// trial up. The one answer with no row is the paid refusal
+    /// (`"reason": "previously_paid"`): this Mac has checked in with a paid
+    /// key, so it gets no trial, and the answer ends the local one.
     ///
     /// razor: one shot, no retry and no schedule of its own. A caller decides
     /// when to try again — at launch, or when the network comes back. Upgrade
@@ -83,29 +87,46 @@ public enum TrialRegistrar {
                 guard let answer, !settings.hasLicenseKey else {
                     return completion(false)
                 }
-                TrialClock.apply(settings: settings,
-                                 startedAt: answer.startedAt,
-                                 expiresAt: answer.expiresAt,
-                                 key: answer.key)
+                switch answer {
+                case let .trial(key, startedAt, expiresAt):
+                    TrialClock.apply(settings: settings,
+                                     startedAt: startedAt,
+                                     expiresAt: expiresAt,
+                                     key: key)
+                case .previouslyPaid:
+                    settings.hasHeldPaidLicense = true
+                    settings.trialStartedAt = nil
+                    settings.trialExpiresAt = nil
+                    settings.trialRegistered = false
+                }
                 completion(true)
             }
         }
     }
 
-    /// A 200 carrying all three fields the trial needs, or `nil` for every
-    /// other outcome — a transport error, a non-200, or a body missing a date
-    /// or the key. Storing half an answer would leave the trial registered
-    /// against dates nobody agreed on, so a partial body counts as no answer.
-    private static func parse(data: Data?, response: URLResponse?)
-        -> (key: String, startedAt: Date, expiresAt: Date)? {
+    /// What a readable answer says: the trial row the server holds, or the
+    /// paid refusal, which carries no row.
+    private enum Answer {
+        case trial(key: String, startedAt: Date, expiresAt: Date)
+        case previouslyPaid
+    }
+
+    /// A 200 carrying all three fields the trial needs, a 200 whose `reason`
+    /// is exactly `previously_paid`, or `nil` for every other outcome — a
+    /// transport error, a non-200, or a body missing a date or the key.
+    /// Storing half an answer would leave the trial registered against dates
+    /// nobody agreed on, so a partial body counts as no answer.
+    private static func parse(data: Data?, response: URLResponse?) -> Answer? {
         guard let http = response as? HTTPURLResponse, http.statusCode == 200,
               let data,
-              let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
-              let key = object["key"] as? String, !key.isEmpty,
+              let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        else { return nil }
+        if object["reason"] as? String == "previously_paid" { return .previouslyPaid }
+        guard let key = object["key"] as? String, !key.isEmpty,
               let startedAt = (object["started_at"] as? String).flatMap(AppSettings.date(fromServerText:)),
               let expiresAt = (object["expires_at"] as? String).flatMap(AppSettings.date(fromServerText:))
         else { return nil }
-        return (key, startedAt, expiresAt)
+        return .trial(key: key, startedAt: startedAt, expiresAt: expiresAt)
     }
 
     private static func finish(_ registered: Bool, _ completion: @escaping (Bool) -> Void) {

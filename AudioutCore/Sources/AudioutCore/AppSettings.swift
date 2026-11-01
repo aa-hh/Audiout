@@ -175,6 +175,7 @@ public struct AppSettings {
         static let licenseStatus = "license.status"
         static let licenseMaxMajor = "license.maxMajor"
         static let licenseReason = "license.reason"
+        static let licenseHasHeldPaid = "license.hasHeldPaid"
         static let companionToken = "license.companionToken"
         static let remoteConfigData = "remoteConfig.data"
         static let remoteConfigFetchedAt = "remoteConfig.fetchedAt"
@@ -500,8 +501,8 @@ public struct AppSettings {
     /// popup, read by ``licenseServerURL`` only when this is a dev build.
     /// Changing it clears the stored verdict (``licenseStatus``,
     /// ``licenseReason``, ``licenseMaxMajor``, ``companionToken``,
-    /// ``trialExpiresAt``), because a verdict from one server says nothing
-    /// about another; the key and the trial start are kept, so the next check
+    /// ``trialExpiresAt``) and ``hasHeldPaidLicense``, because a verdict from
+    /// one server says nothing about another; the key and the trial start are kept, so the next check
     /// asks the new server about the same key.
     public var licenseServerChoice: LicenseServerChoice {
         get {
@@ -517,6 +518,7 @@ public struct AppSettings {
             licenseMaxMajor = nil
             companionToken = nil
             trialExpiresAt = nil
+            hasHeldPaidLicense = false
         }
     }
 
@@ -763,6 +765,17 @@ public struct AppSettings {
     public var licenseReason: String? {
         get { defaults.string(forKey: Keys.licenseReason) }
         nonmutating set { defaults.set(newValue, forKey: Keys.licenseReason) }
+    }
+
+    /// Whether this Mac has ever held a paid licence. Set by
+    /// ``LicenseValidator`` on an active answer that is not a trial, and by
+    /// ``TrialRegistrar`` on the server's paid refusal. Never cleared by
+    /// removing the key or the trial; cleared only by a dev build's
+    /// ``licenseServerChoice`` switch. Read by ``TrialClock/start(settings:now:)``
+    /// and the licence gate, so such a Mac never starts a free trial.
+    public var hasHeldPaidLicense: Bool {
+        get { defaults.bool(forKey: Keys.licenseHasHeldPaid) }
+        nonmutating set { defaults.set(newValue, forKey: Keys.licenseHasHeldPaid) }
     }
 
     /// The licence server's signed proof for the companion server to hand

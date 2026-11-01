@@ -739,6 +739,28 @@ import Testing
         #expect(settings.trialExpiresAt == started.addingTimeInterval(86_400))
     }
 
+    /// Turns red if removing the key, clearing the trial, or a fresh
+    /// `AppSettings` over the same store forgets that this Mac held a paid licence.
+    @Test func thePaidLicenceMarkOutlivesTheKeyAndTheTrial() {
+        let settings = AppSettings(defaults: defaults)
+        settings.hasHeldPaidLicense = true
+        settings.licenseKey = "audt-test-key"
+        settings.licenseKey = nil
+        #expect(settings.hasHeldPaidLicense)
+        #expect(AppSettings(defaults: defaults).hasHeldPaidLicense == true)
+        let fresh = TestIsolation(owner: "AppSettingsTests.paidMark")
+        #expect(AppSettings(defaults: fresh.isolatedDefaults).hasHeldPaidLicense == false)
+    }
+
+    /// Turns red if a dev build's server switch keeps the mark, which would
+    /// block a staging trial on a Mac that only used a production key.
+    @Test func changingTheLicenseServerForgetsThePaidLicenceMark() {
+        let settings = AppSettings(defaults: defaults, isDevBuild: true)
+        settings.hasHeldPaidLicense = true
+        settings.licenseServerChoice = .staging
+        #expect(settings.hasHeldPaidLicense == false)
+    }
+
     /// Turns red if the Sparkle feed override is offered for "Build default"
     /// or on a shipping build, or points anywhere but the chosen server.
     @Test func licenseServerChoiceAppcastURLOnlyForADevBuildWithAChosenServer() {

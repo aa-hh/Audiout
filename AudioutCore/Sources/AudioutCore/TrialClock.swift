@@ -63,9 +63,9 @@ public enum TrialClock {
     ///
     /// Idempotent: a trial that has already started keeps its own dates, so a
     /// caller may run this on every launch without shortening or extending
-    /// anything.
+    /// anything. A Mac that has held a paid licence never starts one.
     public static func start(settings: AppSettings, now: Date = Date()) {
-        guard settings.trialStartedAt == nil else { return }
+        guard settings.trialStartedAt == nil, !settings.hasHeldPaidLicense else { return }
         settings.trialStartedAt = now
         settings.trialExpiresAt = now.addingTimeInterval(length)
         settings.trialRegistered = false

@@ -22,6 +22,8 @@ import AudioutProtocol
 /// (the type is only ever inferred, never spelled).
 @Suite struct CompanionSnapshotBuilderTests {
 
+    private let isolation = TestIsolation(owner: "CompanionSnapshotBuilderTests")
+
     // MARK: Shared inert defaults (plain stdlib types only — see the note above)
 
     private let noExcludedBundleIDs: Set<String> = []
@@ -949,5 +951,118 @@ import AudioutProtocol
             startBufferOptionsMs: defaultStartBufferOptionsMs
         )
         #expect(omitted.macAppVersion == nil, "a caller with no version to give sends none")
+    }
+
+    // MARK: The Mac's licence state
+
+    /// Red if any state maps to a different status or the hash stops matching
+    /// the proof's `key_hash`.
+    @Test func macLicenseMapsEveryLicenceStateToOneStatus() {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let day: TimeInterval = 86_400
+        let key = "AUDT-AAAAA-BBBBB-CCCCC-DDDDD"
+        let h = "6f62d73e8c909255e4e316529181272822590cba0c8512748ac133d1ba141994"
+        let settings = AppSettings(defaults: isolation.isolatedDefaults,
+                                   licenseServerURL: URL(string: "https://license.example.com")!)
+        let rows: [(String, (AppSettings) -> Void, MacLicense)] = [
+            ("no key, no trial", { _ in }, MacLicense(status: .unlicensed)),
+            ("local trial, no key", { TrialClock.start(settings: $0, now: now - day) },
+             MacLicense(status: .trial, trialEndsAt: now + 13 * day)),
+            ("active trial key", {
+                $0.licenseKey = key; $0.licenseStatus = .active
+                $0.trialStartedAt = now - day; $0.trialExpiresAt = now + 13 * day
+            }, MacLicense(status: .trial, keyHash: h, trialEndsAt: now + 13 * day)),
+            ("active trial key past its end", {
+                $0.licenseKey = key; $0.licenseStatus = .active
+                $0.trialStartedAt = now - day; $0.trialExpiresAt = now - 60
+            }, MacLicense(status: .trialEnded, keyHash: h, trialEndsAt: now - 60)),
+            ("trial key revoked as expired", {
+                $0.licenseKey = key; $0.licenseStatus = .revoked; $0.licenseReason = "trial_expired"
+            }, MacLicense(status: .trialEnded, keyHash: h)),
+            ("paid key after a trial", {
+                $0.licenseKey = key; $0.licenseStatus = .active; $0.trialStartedAt = now - 30 * day
+            }, MacLicense(status: .active, keyHash: h)),
+            ("refunded key", {
+                $0.licenseKey = key; $0.licenseStatus = .revoked; $0.licenseReason = "refund"
+            }, MacLicense(status: .revoked, keyHash: h)),
+            ("unknown key", { $0.licenseKey = key; $0.licenseStatus = .unknown },
+             MacLicense(status: .unlicensed, keyHash: h)),
+            ("key with no verdict", { $0.licenseKey = key }, MacLicense(status: .unchecked, keyHash: h)),
+            ("key typed in lower case, no verdict", { $0.licenseKey = "audt-aaaaa-bbbbb-ccccc-ddddd" },
+             MacLicense(status: .unchecked, keyHash: h)),
+            ("local trial ended, no key", { TrialClock.start(settings: $0, now: now - 15 * day) },
+             MacLicense(status: .trialEnded, trialEndsAt: now - day)),
+        ]
+        for (name, setUp, expected) in rows {
+            settings.licenseKey = nil
+            setUp(settings)
+            #expect(CompanionSnapshotBuilder.macLicense(settings: settings, now: now) == expected,
+                    Comment(rawValue: name))
+        }
+    }
+
+    /// Red if a running trial's recompute date were not its end, or a state the
+    /// clock cannot change got one. It checks only the date: AppDelegate's
+    /// timer that acts on it has no test (the app target has none).
+    @Test func theLicenceIsRecomputedWhenARunningTrialEnds() {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let day: TimeInterval = 86_400
+        let key = "AUDT-AAAAA-BBBBB-CCCCC-DDDDD"
+        let rows: [(String, (AppSettings) -> Void, Date?)] = [
+            ("no key, no trial", { _ in }, nil),
+            ("local trial, no key", { TrialClock.start(settings: $0, now: now - day) }, now + 13 * day),
+            ("local trial ended, no key", { TrialClock.start(settings: $0, now: now - 15 * day) }, nil),
+            ("active trial key", {
+                $0.licenseKey = key; $0.licenseStatus = .active
+                $0.trialStartedAt = now - day; $0.trialExpiresAt = now + 13 * day
+            }, now + 13 * day),
+            ("active trial key past its end", {
+                $0.licenseKey = key; $0.licenseStatus = .active
+                $0.trialStartedAt = now - day; $0.trialExpiresAt = now - 60
+            }, nil),
+            ("paid key", { $0.licenseKey = key; $0.licenseStatus = .active }, nil),
+            ("refunded key", { $0.licenseKey = key; $0.licenseStatus = .revoked }, nil),
+        ]
+        for (name, setUp, expected) in rows {
+            let settings = AppSettings(defaults: isolation.makeDefaults(),
+                                       licenseServerURL: URL(string: "https://license.example.com")!)
+            settings.licenseKey = nil
+            setUp(settings)
+            let license = CompanionSnapshotBuilder.macLicense(settings: settings, now: now)
+            #expect(CompanionSnapshotBuilder.macLicenseRecomputeAt(license, now: now) == expected,
+                    Comment(rawValue: name))
+        }
+    }
+
+    /// Red if the builder stops passing `macLicense` through to the snapshot,
+    /// or starts inventing one when the caller gives it none.
+    @Test func macLicenseIsAPassthroughAndDefaultsToNothing() async throws {
+        let backend = try await makeBackend()
+        let controller = makeGroupController(backend: backend)
+        let appRouting = makeAppRouting()
+        let license = MacLicense(status: .active, keyHash: "ab12")
+
+        let given = CompanionSnapshotBuilder.build(
+            devices: backend.devices, groupController: controller, appRouting: appRouting,
+            excludedBundleIDs: noExcludedBundleIDs, iconFor: iconFor, addableApps: noAddableApps,
+            runningRouted: noRunningRouted, liveRoutedAppNames: noLiveRoutedAppNames,
+            localFallbackActive: false, takeoverStatus: nil, serverName: defaultServerName,
+            connectVolume: defaultConnectVolume, connectVolumeMin: defaultConnectVolumeMin,
+            connectVolumeMax: defaultConnectVolumeMax, startBufferMs: defaultStartBufferMs,
+            startBufferOptionsMs: defaultStartBufferOptionsMs,
+            macLicense: license
+        )
+        #expect(given.macLicense == license)
+
+        let omitted = CompanionSnapshotBuilder.build(
+            devices: backend.devices, groupController: controller, appRouting: appRouting,
+            excludedBundleIDs: noExcludedBundleIDs, iconFor: iconFor, addableApps: noAddableApps,
+            runningRouted: noRunningRouted, liveRoutedAppNames: noLiveRoutedAppNames,
+            localFallbackActive: false, takeoverStatus: nil, serverName: defaultServerName,
+            connectVolume: defaultConnectVolume, connectVolumeMin: defaultConnectVolumeMin,
+            connectVolumeMax: defaultConnectVolumeMax, startBufferMs: defaultStartBufferMs,
+            startBufferOptionsMs: defaultStartBufferOptionsMs
+        )
+        #expect(omitted.macLicense == nil, "a caller with no licence state to give sends none")
     }
 }

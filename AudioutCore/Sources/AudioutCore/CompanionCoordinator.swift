@@ -133,6 +133,11 @@ public final class CompanionCoordinator {
     /// the many callers of that method don't resend an unchanged one.
     private var pushedCompanionToken: String?
 
+    /// The Mac's licence state for the snapshot, computed from settings when
+    /// the licence changes rather than on every broadcast, because reading it
+    /// touches the keychain.
+    private var macLicense: MacLicense?
+
     /// Mirrors whether `server` is currently running, so the many broadcast
     /// triggers can no-op cheaply while the feature is off (the default) and
     /// ``updateServerState()`` only acts on a real edge.
@@ -586,6 +591,16 @@ public final class CompanionCoordinator {
         server.sendCompanionToken(token)
     }
 
+    /// The host calls this from every licence change with
+    /// ``CompanionSnapshotBuilder/macLicense(settings:now:)``, which it has
+    /// already read; the snapshot carries the new state to every phone (M3).
+    /// The host also calls it when a running trial ends, after asking the
+    /// server, so a trial paid for elsewhere never reaches phones as ended.
+    public func licenseStateDidChange(_ license: MacLicense) {
+        macLicense = license
+        scheduleBroadcast()
+    }
+
     // MARK: Snapshot inputs owned by the app's event handler
 
     /// A phone arrived or left.
@@ -650,6 +665,7 @@ public final class CompanionCoordinator {
         let running = runningApps()
         let routedIDs = Set(appRouting.appRoutes.map(\.bundleID))
         let addable = addableApps()
+        if macLicense == nil { macLicense = CompanionSnapshotBuilder.macLicense(settings: settings) }
         let snapshot = CompanionSnapshotBuilder.build(
             // Sorted for a deterministic wire order: the host's fleet is a
             // dictionary's values, and an order flap would defeat the server's
@@ -684,7 +700,8 @@ public final class CompanionCoordinator {
                 .map { ($0.id, $0.displayName, $0.kind?.rawValue) },
             note: Self.noteSlot(captureFailure: captureFailureMessage, routingBlocked: routingBlocked,
                                 takeover: takeoverStatus, doublePath: systemDefaultIsAirPlayActive),
-            macAppVersion: Self.appVersion)
+            macAppVersion: Self.appVersion,
+            macLicense: macLicense)
         server.broadcast(snapshot)
     }
 

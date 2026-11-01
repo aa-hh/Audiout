@@ -371,10 +371,9 @@ final class AlignmentStageView: NSView {
     /// 112 until the lights were scaled 1.8× (see `look(for:)`), and the 20 pt
     /// it grew by is the price of that scale rather than a separate decision —
     /// the halo is the tallest thing on the plate, and a halo that did not
-    /// grow with the light would have stopped reading as a halo. It feeds
-    /// `BTAlignmentWizardView.chassisHeight` 1:1, so it is also the sheet's
-    /// height: every screen gets 20 pt taller, none of them reflows, and the
-    /// stage goes from 27 % of the question sheet to 30 % — the ratio the
+    /// grow with the light would have stopped reading as a halo. Every wizard
+    /// screen carries the stage at this fixed height, so every screen got
+    /// 20 pt taller, and the stage went from 27 % of the question sheet to 30 % — the ratio the
     /// answer plates' primacy actually rests on. Going further (a 2.2× scale
     /// wanted 152, i.e. 33 %) is what tips the stage into being the hero.
     static let stageHeight: CGFloat = 132
@@ -745,7 +744,7 @@ final class AlignmentStageView: NSView {
         if newRung.ladderIndex < previousRung.ladderIndex { return .demotion }
 
         // Same rung. A belief that WIDENED gave ground even though it stayed
-        // on its rung — ⌘Z Back is exactly this — and gave-ground always plays
+        // on its rung — a rejected proposal is exactly this — and gave-ground always plays
         // the demotion, never a brightening slide.
         if let was = intervalWidth(previousState), let now = intervalWidth(newState),
            now > was + 0.01 {

@@ -42,7 +42,9 @@ public final class BTAlignmentWizardSession {
         case listening(isRealignment: Bool)
         /// `progress` feeds the narrowing indicator, `credibleIntervalMs` the
         /// confidence line (already in VALUE space — the panel never does the
-        /// sign conversion), and `answersSoFar` gates Back. The candidate ms
+        /// sign conversion), and `answersSoFar` — every answer this run, across
+        /// rejected proposals — drives the click count and the note only the
+        /// first question carries. The candidate ms
         /// is deliberately NOT for display: the number is named once, on the
         /// proposal.
         case question(progress: Double, credibleIntervalMs: ClosedRange<Double>,
@@ -227,6 +229,15 @@ public final class BTAlignmentWizardSession {
 
     /// How many listening passes this run has started so far.
     public private(set) var micAttempts = 0
+
+    /// The mic spent its budget without a read and the run fell to the by-ear
+    /// questions — the one case the questions say why they are there.
+    public private(set) var listeningFailed = false
+
+    /// The mic path was open but the microphone was refused (now, or earlier
+    /// in System Settings), so the run went to the by-ear questions without
+    /// listening — the other case the questions say why they are there.
+    public private(set) var micRefused = false
 
     public private(set) var screen: Screen = .intro
 
@@ -436,6 +447,7 @@ public final class BTAlignmentWizardSession {
             guard let self, self.startPending, !self.ended else { return }
             self.startPending = false
             Analytics.capture("bt_sync:mic_permission_answered", ["granted": granted ? "true" : "false"])
+            self.micRefused = !granted
             self.beginRun(listening: granted)
         }
     }
@@ -498,6 +510,7 @@ public final class BTAlignmentWizardSession {
             return
         }
         if estimator.openingProposalStands { estimator = makeEstimator() }
+        listeningFailed = true
         presentEstimatorPhase()
     }
 
@@ -588,17 +601,6 @@ public final class BTAlignmentWizardSession {
         case ..<200: "100-199"
         default: "200+"
         }
-    }
-
-    /// Undo the last answer and ask that question again. Available only while
-    /// questions are running and at least one answer stands — which is exactly
-    /// what `.question`'s `answersSoFar` reports, so the button's enabled state
-    /// and this guard can never disagree.
-    public func back() {
-        guard case .question = screen, !ended,
-              estimator.undoableAnswerCount > 0 else { return }
-        estimator.back()
-        presentEstimatorPhase()
     }
 
     /// The proposal's "Sounds right": accepting IS keeping. The value the user
@@ -700,7 +702,7 @@ public final class BTAlignmentWizardSession {
 
     /// Put whatever the estimator is now on, on screen — the ONE place a
     /// candidate is applied and a screen is chosen, so every intent
-    /// (start/answer/back/reject/restart) lands on identical behaviour.
+    /// (start/answer/reject/restart) lands on identical behaviour.
     /// `measured` records whether a proposal reached here from a mic
     /// measurement, so a later earned or recalled proposal clears the flag.
     private func presentEstimatorPhase(measured: Bool = false) {
@@ -756,7 +758,7 @@ public final class BTAlignmentWizardSession {
     private func questionScreen() -> Screen {
         .question(progress: estimator.progress,
                   credibleIntervalMs: valueSpaceCredibleInterval(),
-                  answersSoFar: estimator.undoableAnswerCount)
+                  answersSoFar: estimator.answerCount)
     }
 
     /// The credible interval the panel shows, converted once here so the view

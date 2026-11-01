@@ -264,7 +264,8 @@ let package = Package(
             // compiles it into `Contents/Resources/Assets.car` instead, beside
             // the wordmark font, and the app reads it through `Bundle.main`.
             exclude: ["Resources/Symbols.xcassets"],
-            resources: [.copy("Resources/Audiout-Hero-1024.svg")],
+            resources: [.copy("Resources/Audiout-Hero-1024.svg"),
+                        .copy("Resources/Audiout-Remote-QR.pdf")],
             swiftSettings: [.unsafeFlags(swiftClangImporterFlags)]
         ),
         // The pure-AppKit popover dropdown (SPEC §9 revised — NSMenu → NSPopover):

@@ -351,36 +351,6 @@ import Testing
                 "the run ran \(answers) answers past its cap")
     }
 
-    // MARK: Back
-
-    /// The undo is a REFOLD from the flat prior, not a stack of saved states —
-    /// a posterior does not care what order its evidence arrived in, so
-    /// replaying it has to land on exactly the same numbers.
-    @Test func backRefoldsToABitwiseIdenticalBelief() {
-        var straight = BTAlignmentPosterior(range: Self.range)
-        var undone = BTAlignmentPosterior(range: Self.range)
-        straight.record(.target)
-        straight.record(.reference)
-
-        undone.record(.target)
-        undone.record(.reference)
-        undone.back()
-        #expect(undone.answerCount == 1)
-        undone.record(.reference)
-
-        #expect(undone.test_belief == straight.test_belief,
-                "the refolded belief is not bit-for-bit the straight one")
-        #expect(undone.phase == straight.phase)
-    }
-
-    @Test func backBeforeAnyAnswerIsInert() {
-        var estimator = BTAlignmentPosterior(range: Self.range)
-        let opening = estimator.phase
-        estimator.back()
-        #expect(estimator.phase == opening)
-        #expect(estimator.answerCount == 0)
-    }
-
     // MARK: The zero-click opening
 
     @Test func anOpeningProposalStartsOnTheProposalOverAFlatPrior() {

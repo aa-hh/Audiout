@@ -153,8 +153,8 @@ struct BTAlignmentPosterior {
     private static let negligibleMass = 1e-12
 
     private(set) var phase: Phase
-    /// Every answer this run has taken, undone ones excluded — the number the
-    /// bow-out rules and the telemetry count.
+    /// Every answer this run has taken, across rejected proposals — the number
+    /// the bow-out rules, the telemetry and the panel's click count read.
     private(set) var answerCount = 0
     /// Whether the CURRENT proposal is still the opening one (the stored
     /// value, never judged) — the one proposal a measurement may still
@@ -168,13 +168,6 @@ struct BTAlignmentPosterior {
     private let range: ClosedRange<Double>
     private let gridLowerMs: Int
     private var belief: [Double]
-    /// The belief at the start of the current undoable stretch: the flat prior,
-    /// or whatever a rejected proposal left behind. ``back()`` refolds from
-    /// here rather than snapshotting whole states.
-    private var baseBelief: [Double]
-    /// The answers since that point, in order — what ``back()`` can undo. The
-    /// posterior is order-independent, so replaying them is exact.
-    private var history: [(levelMs: Double, answer: Answer)] = []
     /// The 95% half-width at the start and after each answer: the stagnation
     /// rule's ledger.
     private var halfWidths: [Double]
@@ -203,7 +196,6 @@ struct BTAlignmentPosterior {
         let count = upper - lower + 1
         gridLowerMs = lower
         belief = Array(repeating: 1 / Double(count), count: count)
-        baseBelief = belief
 
         let span = count - 1
         lutOffset = span + Self.lutMarginMs
@@ -269,35 +261,15 @@ struct BTAlignmentPosterior {
         return Swift.min(Swift.max(value, 0), 1)
     }
 
-    /// Answers that can still be taken back: the stretch since the last
-    /// rejected proposal. The panel's Back button keys off this, so its
-    /// enabled state and ``back()``'s own guard can never disagree.
-    var undoableAnswerCount: Int { history.count }
-
     // MARK: Intents
 
     /// Fold one answer in. No-op unless currently ``Phase/asking(candidateMs:)``.
     mutating func record(_ answer: Answer) {
         guard case .asking(let levelMs) = phase else { return }
-        history.append((levelMs: levelMs, answer: answer))
         answerCount += 1
         fold(answer, atLevel: levelMs)
         halfWidths.append(credibleHalfWidthMs)
         phase = phaseAfterAnswer()
-    }
-
-    /// Undo the newest answer and put its question straight back. The belief is
-    /// REFOLDED from where the stretch began rather than restored from a
-    /// snapshot — a posterior does not care what order its evidence arrived in,
-    /// and replaying a few dozen multiplies is cheaper than keeping undo
-    /// states around.
-    mutating func back() {
-        guard case .asking = phase, !history.isEmpty else { return }
-        history.removeLast()
-        answerCount -= 1
-        halfWidths.removeLast()
-        refold()
-        phase = .asking(candidateMs: nextLevelMs())
     }
 
     /// "Sounds right": the user has just heard the proposed value and says the
@@ -353,10 +325,6 @@ struct BTAlignmentPosterior {
         guard case .proposing(let valueMs) = phase else { return }
         foldFusedJudgment(atLevel: valueMs, fused: false)
         openingProposalStands = false
-        // The rejection is not an ANSWER, so it is not undoable: it becomes the
-        // floor the next stretch of answers refolds from.
-        baseBelief = belief
-        history = []
         if answerCount >= Self.maxAnswers {
             phase = .unsettled(bestGuessMs: medianMs)
         } else {
@@ -403,11 +371,6 @@ struct BTAlignmentPosterior {
             return
         }
         for i in belief.indices { belief[i] /= total }
-    }
-
-    private mutating func refold() {
-        belief = baseBelief
-        for entry in history { fold(entry.answer, atLevel: entry.levelMs) }
     }
 
     // MARK: Where to ask next

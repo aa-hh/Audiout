@@ -205,10 +205,14 @@ private func proposalValue(_ session: BTAlignmentWizardSession) -> Double? {
             return
         }
         session.rejectProposal()
-        guard case .question = session.screen else {
+        guard case .question(_, _, let answersSoFar) = session.screen else {
             Issue.record("expected the questions back, got \(session.screen)")
             return
         }
+        // Turns red if the count restarts after a rejection: the panel would
+        // print "Click 1" again and re-show the note only the first question
+        // carries.
+        #expect(answersSoFar > 0, "the run's answers still count after a rejection")
         #expect(recorder.ticks == [true], "the tick never stopped, so it never restarts")
         #expect(recorder.ends.isEmpty, "a rejection persists and restores nothing")
         session.cancel()
@@ -414,39 +418,6 @@ private func proposalValue(_ session: BTAlignmentWizardSession) -> Double? {
         session.cancel()
     }
 
-    // MARK: Back
-
-    @Test func backUndoesTheLastAnswerAndReAsksThatQuestion() {
-        let recorder = Recorder()
-        let session = recorder.makeSession(baseTrimMs: 12)
-        session.start()
-        let first = recorder.previews[0]
-        session.answer(.target)
-        let second = recorder.previews[1]
-
-        session.back()
-        #expect(recorder.previews.last == first, "the undone question is asked again")
-        guard case .question(_, _, let answers) = session.screen, answers == 0 else {
-            Issue.record("expected the first question back, got \(session.screen)")
-            return
-        }
-
-        session.answer(.target)
-        #expect(recorder.previews.last == second, "and the run resumes where it was")
-        session.cancel()
-    }
-
-    @Test func backBeforeAnyAnswerIsInert() {
-        let recorder = Recorder()
-        let session = recorder.makeSession()
-        session.start()
-        let screensBefore = recorder.screens.count
-        session.back()
-        #expect(recorder.previews.count == 1, "nothing re-applied")
-        #expect(recorder.screens.count == screensBefore, "and nothing repainted")
-        session.cancel()
-    }
-
     // MARK: Reference (the speaker the target is compared against)
 
     @Test func startIsRefusedWithoutAReference() {
@@ -633,11 +604,13 @@ private func proposalValue(_ session: BTAlignmentWizardSession) -> Double? {
 
         session.endListening()
         #expect(session.screen == .listening(isRealignment: true), "got \(session.screen)")
+        #expect(!session.listeningFailed, "one miss still has a retry in hand")
         session.endListening()
         guard case .question = session.screen else {
             Issue.record("expected the questions, got \(session.screen)")
             return
         }
+        #expect(session.listeningFailed)
         #expect(recorder.ends.isEmpty, "the run is still live")
         #expect(recorder.ticks == [true, false, true])
         session.cancel()

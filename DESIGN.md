@@ -769,17 +769,6 @@ The popover's own
 `NSPanel` has no arrow) is a separate, named custom-drawn exception that
 does not itself draw a shadow.
 
-`BetaChipView`, in the alignment wizard's title row, is the other named
-exception: a layer-backed `well` capsule with a 1pt `rim` border carrying
-`Beta` in `microLabel` `label2`. Alignment ships as a beta and the window
-that offers it says so, between the speaker's name and the click count. No
-stock control is a label on a tinted capsule — `NSButton`'s recessed bezel
-is the nearest look and it is a control, which this is not. It is
-fixed-width chrome, so the truncating name is the half that gives way, and
-it is one accessibility element, not two. The iPhone draws the same capsule
-as `BetaBadge` on its three alignment doors; neither app puts the word in a
-menu item, where a capsule cannot go.
-
 ### Named Rules
 
 **Custom Drawing Is a Short, Named List.** Root `AGENTS.md` names the
@@ -1689,12 +1678,16 @@ carries no state, so re-expanding restores the identical rail.
 `BusRailCollapseResolveTests` and `PopoverDeviceVisibilityTests` pin it.
 
 ### QR Tile (invitations to Audiout Remote, Mac-only)
-`RemoteInviteView` (`AudioutSharedUI`) is one view hosted three times: the
-alignment wizard sheet's first page at 96 pt, Settings › Audiout Remote under the
-Allow switch at 72 pt, and the Setup window's iPhone card at 160 pt. It
-encodes `https://audiout.app/remote` and nothing else, generated with
-CoreImage's own QR filter at error-correction level M — a system framework,
-no dependency, and no bundled image.
+`RemoteInviteView` (`AudioutSharedUI`) is one view hosted twice: Settings ›
+Audiout Remote under the Allow switch at 96 pt, and the Setup window's iPhone
+card at 160 pt. The alignment wizard has no tile since 2026-11-01; its title
+row carries a "Measure with your iPhone" text link to the same App Store page
+instead. The code is designed artwork (rounded modules, the brand mark in the
+middle) bundled as `Resources/Audiout-Remote-QR.pdf`, encoding Audiout
+Remote's App Store listing,
+`https://apps.apple.com/app/audiout-remote/id6804838945`. It is a PDF, not the
+designer's SVG, because NSImage's own SVG renderer ignores the artwork's clip
+path and draws the module layer as one black square.
 
 Black modules on a white tile, FIXED in every appearance, every accent-dial
 position and under Increase Contrast. A QR code is a print artifact a camera
@@ -1703,11 +1696,12 @@ reads, not chrome, so it joins the wizard stage and the EQ scope under
 literal colour is sanctioned, because `NSColor.white` is the specification.
 No corner radius, no edge, no shadow: the quiet zone is the boundary.
 
-Modules are drawn at a whole number of DEVICE pixels with interpolation off,
-so none lands on a half pixel and blurs, and the code carries at least the
-standard four-module quiet zone (the generator draws one of those itself).
-Whatever the integer scale leaves over stays white, which is more quiet zone
-and never worse. The tile is never a button and never gold: the pressable way
+The artwork is drawn smoothed at any scale, inset so the white margin is at
+least the standard four-module quiet zone (the artwork carries under three
+modules of its own). It has 41 modules, so it needs room: 84 pt is the
+smallest tile that still decodes on a 1x display, which is why Settings uses
+96, and `RemoteInviteViewTests` decodes every size rendered at one pixel per
+point. The tile is never a button and never gold: the pressable way
 to the same page is a stock push button beside it. The tile is hidden from
 accessibility and the address printed under it — `audiout.app/remote`, no
 scheme, in the surface's own caption voice — is the element, so a person who

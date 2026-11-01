@@ -95,7 +95,12 @@ public final class AlignmentWizardViewController: NSViewController {
     /// renderer) nothing resizes the view for free, so it is framed directly.
     public func fitToContent() {
         canvas.layoutSubtreeIfNeeded()
-        let size = NSSize(width: Self.contentWidth, height: canvas.fittingSize.height)
+        // Measured off the WIZARD VIEW, never the canvas: the canvas is the
+        // controller's root view, so its frame is itself a constraint, and its
+        // fitting height never drops below the current frame — the sheet
+        // could grow onto a taller screen but never shrink back off it.
+        let height = wizardView.fittingSize.height + 2 * Self.verticalInset
+        let size = NSSize(width: Self.contentWidth, height: height)
         preferredContentSize = size
         if viewIfLoaded?.window == nil {
             canvas.setFrameSize(size)

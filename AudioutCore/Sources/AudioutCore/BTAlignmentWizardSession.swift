@@ -42,7 +42,9 @@ public final class BTAlignmentWizardSession {
         case listening(isRealignment: Bool)
         /// `progress` feeds the narrowing indicator, `credibleIntervalMs` the
         /// confidence line (already in VALUE space — the panel never does the
-        /// sign conversion), and `answersSoFar` gates Back. The candidate ms
+        /// sign conversion), and `answersSoFar` — every answer this run, across
+        /// rejected proposals — drives the click count and the note only the
+        /// first question carries. The candidate ms
         /// is deliberately NOT for display: the number is named once, on the
         /// proposal.
         case question(progress: Double, credibleIntervalMs: ClosedRange<Double>,
@@ -700,7 +702,7 @@ public final class BTAlignmentWizardSession {
 
     /// Put whatever the estimator is now on, on screen — the ONE place a
     /// candidate is applied and a screen is chosen, so every intent
-    /// (start/answer/back/reject/restart) lands on identical behaviour.
+    /// (start/answer/reject/restart) lands on identical behaviour.
     /// `measured` records whether a proposal reached here from a mic
     /// measurement, so a later earned or recalled proposal clears the flag.
     private func presentEstimatorPhase(measured: Bool = false) {
@@ -756,7 +758,7 @@ public final class BTAlignmentWizardSession {
     private func questionScreen() -> Screen {
         .question(progress: estimator.progress,
                   credibleIntervalMs: valueSpaceCredibleInterval(),
-                  answersSoFar: estimator.undoableAnswerCount)
+                  answersSoFar: estimator.answerCount)
     }
 
     /// The credible interval the panel shows, converted once here so the view

@@ -205,10 +205,14 @@ private func proposalValue(_ session: BTAlignmentWizardSession) -> Double? {
             return
         }
         session.rejectProposal()
-        guard case .question = session.screen else {
+        guard case .question(_, _, let answersSoFar) = session.screen else {
             Issue.record("expected the questions back, got \(session.screen)")
             return
         }
+        // Turns red if the count restarts after a rejection: the panel would
+        // print "Click 1" again and re-show the note only the first question
+        // carries.
+        #expect(answersSoFar > 0, "the run's answers still count after a rejection")
         #expect(recorder.ticks == [true], "the tick never stopped, so it never restarts")
         #expect(recorder.ends.isEmpty, "a rejection persists and restores nothing")
         session.cancel()

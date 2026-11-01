@@ -18,7 +18,9 @@ import AudioutSharedUI
 /// `offer`: the title, a subtitle, then the gold "Buy Audiout" and under it
 /// the trial button (only before any trial), both 320 x 36 pt and centred,
 /// the reassurance line under the trial (with the trial only), and "I have a
-/// key" on the bottom row. `enter`: the same title, a subtitle with "Paste
+/// key" on the bottom row. On a Mac that has held a paid licence the trial
+/// slot reads "Continue on one speaker" and the line under it says there is
+/// no free trial. `enter`: the same title, a subtitle with "Paste
 /// key" after it on the same line, the key boxes and a two-line status label,
 /// both centred, and Back and "Lost your key?" on the bottom row.
 /// Buy opens the checkout and moves to `enter`; "I have a key" moves there
@@ -141,6 +143,8 @@ public final class LicenseGateViewController: NSViewController {
     private static let keyLength = LicenseKeyEntryView.boxCount * LicenseKeyEntryView.groupSize
 
     private static let trialTitle = "Try free for 14 days"
+    private static let continueTitle = "Continue on one speaker"
+    static let previouslyPaidLine = "This Mac has used a paid licence before, so there’s no free trial."
     static let reassuranceLine =
         "No card or email. After 14 days, Audiout keeps playing on one speaker until you buy."
 
@@ -184,16 +188,30 @@ public final class LicenseGateViewController: NSViewController {
                               action: #selector(buyTapped))
         buyButton.keyEquivalent = state == .offer ? "\r" : ""
 
-        // The offer for someone who has no key and never had one. The question
-        // is whether a trial has ever STARTED here, not whether one is running:
-        // a trial that converted to a purchase has no expiry left (the server's
-        // answer to a paid key clears it), so it reads as no trial at all, and
-        // if that key is later refunded this gate comes back — offering a
-        // second trial that `TrialClock.start` would refuse to give.
+        // A Mac that has held a paid licence gets no trial, ever: the trial
+        // slot reads "Continue on one speaker" and opens the gate with no
+        // trial, and the line under it says why. Without that exit the gate
+        // would have no way past but a key. This wins over the rule below.
+        //
+        // Otherwise, the offer for someone who has no key and never had one.
+        // The question is whether a trial has ever STARTED here, not whether
+        // one is running: a trial that converted to a purchase has no expiry
+        // left (the server's answer to a paid key clears it), so it reads as
+        // no trial at all, and if that key is later refunded this gate comes
+        // back — offering a second trial that `TrialClock.start` would refuse
+        // to give.
         trialButton.target = self
-        trialButton.action = #selector(trialTapped)
-        trialButton.isHidden = settings.trialStartedAt != nil
-        reassuranceLabel.isHidden = settings.trialStartedAt != nil
+        if settings.hasHeldPaidLicense {
+            trialButton.title = Self.continueTitle
+            trialButton.action = #selector(continueTapped)
+            trialButton.isHidden = false
+            reassuranceLabel.stringValue = Self.previouslyPaidLine
+            reassuranceLabel.isHidden = false
+        } else {
+            trialButton.action = #selector(trialTapped)
+            trialButton.isHidden = settings.trialStartedAt != nil
+            reassuranceLabel.isHidden = settings.trialStartedAt != nil
+        }
 
         haveKeyButton.target = self
         haveKeyButton.action = #selector(haveKeyTapped)
@@ -481,6 +499,12 @@ public final class LicenseGateViewController: NSViewController {
         TrialClock.start(settings: settings)
         guard case .active = TrialClock.state(settings: settings) else { return }
         Analytics.capture("license:trial_started")
+        pass(afterBeat: false)
+    }
+
+    /// A Mac that has held a paid licence gets no trial and opens on one
+    /// speaker: the limit `LicenseGate.limitsToOneSpeaker` applies with no key.
+    @objc private func continueTapped() {
         pass(afterBeat: false)
     }
 

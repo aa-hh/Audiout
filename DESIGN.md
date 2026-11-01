@@ -1247,6 +1247,12 @@ overlay lifts off while it is selected and returns with any other tab.
      After 14 days, Audiout keeps playing on one speaker until you buy." in
      `caption` / `label2`, centred, wrapping at 520 pt, shown with the trial
      button only, so only before any trial.
+
+  On a Mac that has ever held a paid licence (`AppSettings.hasHeldPaidLicense`)
+  items 3 and 4 are always shown, trial or no trial, and read differently: the
+  button is "Continue on one speaker" and opens the gate with no trial, so the
+  Mac runs on one speaker until it has a key; the line under it is "This Mac
+  has used a paid licence before, so there’s no free trial."
   5. On the bottom row, "I have a key" (gold `TextActionButton`), centred:
      the key state without the checkout.
 - **Key state** (a build with no checkout URL opens here):
@@ -1812,7 +1818,10 @@ is a change in two apps.
   - Buy: "Buy Audiout" / "Buy Mac licence for {price}".
   - Trial: "Try free for 14 days", with "No card or email. After 14 days,
     Audiout keeps playing on one speaker until you buy." under it / "Audiout
-    on your Mac offers a free 14-day trial when it first opens."
+    on your Mac offers a free 14-day trial when it first opens." On a Mac
+    that has held a paid licence the Mac's trial slot reads "Continue on one
+    speaker", with "This Mac has used a paid licence before, so there’s no
+    free trial." under it.
   - Key: "I have a key" / "Restore purchase".
 
 ## Do's and Don'ts

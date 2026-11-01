@@ -1824,8 +1824,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
     }
 
     /// Draw the first-open licence gate over the surface and open the surface
-    /// on the Mixer. There is no way past it but a key or a trial; the panel's
-    /// Quit is the way out. Its pass re-applies licence state and takes it
+    /// on the Mixer. There is no way past it but a key, a trial, or, on a Mac
+    /// that has held a paid licence, one speaker; the panel's Quit is the way
+    /// out. Its pass re-applies licence state and takes it
     /// away.
     @MainActor
     private func presentLicenseGate() {

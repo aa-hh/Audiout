@@ -811,6 +811,36 @@ import AudioutSharedUI
         }
     }
 
+    /// Red if a Mac that held a paid licence is offered a trial, is left with
+    /// no way past the gate, or the line under the button is missing.
+    @MainActor
+    @Test func aMacThatHasHeldAPaidLicenceIsOfferedOneSpeakerInsteadOfATrial() throws {
+        let fresh = isolation.makeDefaults()
+        let spent = isolation.makeDefaults()
+        for store in [fresh, spent] {
+            let settings = settings(withBuy: true, store: store)
+            if store === spent { startTrial(settings, daysAgo: 20) }
+            settings.hasHeldPaidLicense = true
+            var passed = 0
+            let gate = makeContent(settings, Transport(), onPassed: { passed += 1 })
+
+            #expect(gate.test_trialIsVisible)
+            #expect(gate.test_trialTitle == "Continue on one speaker")
+            #expect(gate.test_visibleControls.contains {
+                ($0 as? NSTextField)?.stringValue == LicenseGateViewController.previouslyPaidLine
+            })
+            #expect(!gate.test_visibleControls.contains {
+                ($0 as? NSTextField)?.stringValue == LicenseGateViewController.reassuranceLine
+            })
+            let button = try #require(gate.test_visibleControls
+                .compactMap { $0 as? NSButton }
+                .first { $0.title == "Continue on one speaker" })
+            _ = (button.target as? NSObject)?.perform(button.action, with: button)
+            #expect(passed == 1)
+            if store === fresh { #expect(settings.trialStartedAt == nil) }
+        }
+    }
+
     /// The tap starts the 14 days and opens the gate in the same turn. Red if
     /// anything network-shaped got between the button and `onPassed` — telling
     /// the licence server is a later, silent job, and a start that waited on a

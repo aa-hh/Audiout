@@ -2905,8 +2905,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
         // force-unwrap — a launch crash on any Mac holding a stored token
         // (2026-09-26). No phone is connected that early, so there is nobody
         // to push to; the passes after wiring cover every later licence change.
-        if groupController != nil, let token = settings.companionToken {
-            companionCoordinator.pushCompanionToken(token)
+        // The snapshot's licence state is re-read here too, so a refund or a
+        // trial ending reaches connected phones.
+        if groupController != nil {
+            if let token = settings.companionToken {
+                companionCoordinator.pushCompanionToken(token)
+            }
+            companionCoordinator.licenseStateDidChange()
         }
 
         // License identity for analytics (PRODUCT.md Data Collection stream 1,

@@ -1001,9 +1001,9 @@ import AudioutProtocol
         }
     }
 
-    /// Red if a running trial set no recompute at its end, so connected phones,
-    /// the one-speaker limit and the Mixer note kept a trial after it ran out
-    /// by the clock; red too if a state the clock cannot change set one.
+    /// Red if a running trial's recompute date were not its end, or a state the
+    /// clock cannot change got one. It checks only the date: AppDelegate's
+    /// timer that acts on it has no test (the app target has none).
     @Test func theLicenceIsRecomputedWhenARunningTrialEnds() {
         let now = Date(timeIntervalSince1970: 1_800_000_000)
         let day: TimeInterval = 86_400

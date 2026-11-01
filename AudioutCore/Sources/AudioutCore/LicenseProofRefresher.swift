@@ -174,8 +174,10 @@ public final class LicenseProofRefresher {
     /// request is in flight, and the last one's hold-off has passed: the
     /// proof's hold-off after an answer, ``shortestInterval`` after none.
     /// `networkReturned` (a usable path appeared) skips the hold-off after
-    /// none, since the failure it waits out was likely the missing network;
-    /// path changes are rare and the in-flight check still holds.
+    /// none, since the failure it waits out was likely the missing network.
+    /// Every usable path update counts (a VPN reconnect or Wi-Fi roaming too),
+    /// so during a server incident this can ask once per path update rather
+    /// than once a minute; the in-flight check keeps requests from stacking.
     public func refreshIfNeeded(networkReturned: Bool = false) {
         guard started, !inFlight else { return }
         if let holdOffUntil, now() < holdOffUntil, !(networkReturned && lastRequestFailed) { return }

@@ -443,7 +443,7 @@ import AudioutProtocol
 
         #expect(await waitUntil {
             log.messages.contains {
-                if case .commandResult(let requestID, let applied, let refusalReason, _) = $0 {
+                if case .commandResult(let requestID, let applied, let refusalReason, _, _) = $0 {
                     return requestID == "r-refuse" && applied == false && refusalReason != nil
                 }
                 return false
@@ -468,7 +468,7 @@ import AudioutProtocol
 
         #expect(await waitUntil {
             log.messages.contains {
-                if case .commandResult(let requestID, let applied, let refusalReason, _) = $0 {
+                if case .commandResult(let requestID, let applied, let refusalReason, _, _) = $0 {
                     return requestID == "r-excl" && applied == false && refusalReason != nil
                 }
                 return false

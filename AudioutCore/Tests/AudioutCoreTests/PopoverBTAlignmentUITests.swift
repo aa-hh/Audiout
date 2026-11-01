@@ -396,8 +396,7 @@ import AppKit
     /// entirely and is delivered to the window's FIRST RESPONDER as an
     /// ordinary `keyDown`. A test that calls `performKeyEquivalent` directly
     /// therefore says nothing about what a real key press does — so the
-    /// unmodified keys are driven through this window's `sendEvent`, and only
-    /// ⌘Z keeps the key-equivalent seam.
+    /// keys are driven through this window's `sendEvent`.
     private func hostSheetInWindow(_ popover: PopoverController) -> NSWindow? {
         guard let sheet = popover.test_btWizardSheet() else {
             Issue.record("expected a wizard sheet to host in a window")
@@ -515,10 +514,8 @@ import AppKit
                 "the interval is on the stage's tooltip, got \(String(describing: wizard?.test_stage.toolTip))")
         #expect(wizard?.test_buttonTitles
                 == ["Move 2", "This Mac", BTAlignmentWizardView.togetherTitle,
-                    BTAlignmentWizardView.backTitle, BTAlignmentWizardView.stopTitle],
+                    BTAlignmentWizardView.stopTitle],
                 "the which-side buttons carry the ACTUAL device names, and there is a way out")
-        #expect(wizard?.test_buttonIsEnabled(BTAlignmentWizardView.backTitle) == false,
-                "there is nothing to go back to yet")
         // The progress bar is gone: the stage above the question IS the
         // readout, showing the live belief as a lit interval rather than a
         // fraction of a run that has no fixed length.
@@ -552,19 +549,6 @@ import AppKit
         #expect(reference.blueComponent > reference.redComponent + 0.15
                     && reference.greenComponent > reference.redComponent,
                 "the reference plate is blue-led, got \(reference)")
-    }
-
-    @Test func backUndoesTheLastAnswerAndReAsksThatTrial() {
-        let (popover, recorder) = makePopover()
-        let wizard = openWizard(popover)
-        wizard?.test_clickButton(titled: "Start")
-        let first = recorder.previews[0].ms
-        wizard?.test_clickButton(titled: "Move 2")
-        #expect(wizard?.test_buttonIsEnabled(BTAlignmentWizardView.backTitle) == true)
-
-        wizard?.test_clickButton(titled: BTAlignmentWizardView.backTitle)
-        #expect(recorder.previews.last?.ms == first, "the undone question is asked again")
-        #expect(wizard?.test_buttonIsEnabled(BTAlignmentWizardView.backTitle) == false)
     }
 
     @Test func answersNarrowToAProposalThenSoundsRightPersists() {
@@ -1657,7 +1641,7 @@ import AppKit
 
     /// The locked key map, each key through the seam AppKit really uses for
     /// it — the unmodified three as a first-responder `keyDown` delivered by a
-    /// real window, ⌘Z as a genuine key equivalent, and each carrying the
+    /// real window, each carrying the
     /// flags AppKit itself stamps on it (`sendKey` — the arrows arrive
     /// `.function` + `.numericPad`, never bare). See `hostSheetInWindow` for
     /// why the old `performKeyEquivalent`-only version of this test could pass
@@ -1678,15 +1662,7 @@ import AppKit
             return
         }
         #expect(answers == 3, "three keys, three answers")
-
-        #expect(wizard?.test_sendKey(keyCode: 6, characters: "z", modifiers: .command) == true,
-                "⌘Z is Undo — carrying a modifier, it really is a key equivalent")
-        guard case .question(_, _, let afterBack)? = wizard?.test_screen else {
-            Issue.record("expected a question, got \(String(describing: wizard?.test_screen))")
-            return
-        }
-        #expect(afterBack == 2)
-        #expect(recorder.previews.count == 5, "each key applied a fresh candidate")
+        #expect(recorder.previews.count == 4, "each key applied a fresh candidate")
     }
 
     /// Escape belongs to the WIZARD while its sheet is up — the view's own

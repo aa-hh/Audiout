@@ -1354,10 +1354,12 @@ public final class PopoverController: NSObject {
         case noKey
 
         /// Which note a limited install shows, from what is stored; `nil` when
-        /// the install is not limited. An ended trial wins over the verdict it
-        /// left behind (the server answers one with `revoked`).
-        public static func resolve(settings: AppSettings) -> UnregisteredNote? {
-            guard LicenseGate.limitsToOneSpeaker(settings: settings) else { return nil }
+        /// the install is not limited, or while the first-open licence gate is
+        /// up (`licenseGateShown`), which already says the same thing. An ended
+        /// trial wins over the verdict it left behind (the server answers one
+        /// with `revoked`).
+        public static func resolve(settings: AppSettings, licenseGateShown: Bool) -> UnregisteredNote? {
+            guard !licenseGateShown, LicenseGate.limitsToOneSpeaker(settings: settings) else { return nil }
             if TrialClock.hasEnded(settings: settings) { return .trialEnded }
             if !settings.hasLicenseKey { return .noKey }
             switch settings.licenseStatus {

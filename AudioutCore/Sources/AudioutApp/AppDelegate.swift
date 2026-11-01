@@ -1857,6 +1857,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
                 })
             licenseGateController = gate
             surface.presentLicenseGate(gate)
+            // The gate says what the one-speaker note says, so the note
+            // waits; the pass's `applyLicenseState` brings it back if the Mac
+            // is still limited.
+            popoverController?.setUnregisteredNote(nil)
         }
         // At launch the menu bar icon has no place yet; wait for it so the
         // surface opens under it.
@@ -2921,7 +2925,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
         let status = settings.licenseStatus
         let limited = LicenseGate.limitsToOneSpeaker(settings: settings)
         groupController?.limitsToOneSpeaker = limited
-        popoverController?.setUnregisteredNote(.resolve(settings: settings))
+        popoverController?.setUnregisteredNote(
+            .resolve(settings: settings, licenseGateShown: licenseGateController != nil))
         updaterController?.updater.httpHeaders = key.isEmpty ? nil : ["Authorization": "Bearer \(key)"]
 
         // A licence that lands while phones are connected: push the token

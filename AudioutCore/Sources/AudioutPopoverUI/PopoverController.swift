@@ -603,7 +603,8 @@ public final class PopoverController: NSObject {
 
     /// When each wanted speaker's current run of failures began: set by the
     /// first reported `connection:failed`, cleared by the `connection:connected`
-    /// that ends it, which then reports `recovered`. A run that never connects
+    /// that ends it, which then reports `recovered`, or dropped unrecovered when
+    /// the speaker leaves the snapshot or the user stops wanting it. A run that never connects
     /// sends nothing more, so a failure with no recovered connect after it is
     /// one the user gave up on.
     private var failingSince: [String: Date] = [:]
@@ -855,7 +856,7 @@ public final class PopoverController: NSObject {
                   let device = self.devicesByID[id] else { return }
             switch device.connectionState {
             case .connecting, .reconnecting, .connected, .awaitingPassword: return
-            case .off, .failed: self.groupController?.requestReconnect(for: id)
+            case .off, .failed: self.groupController?.requestReconnect(for: id, userAsked: false)
             }
         }
         rebuild()
@@ -3488,10 +3489,6 @@ public final class PopoverController: NSObject {
     // never touches membership. The panel is purely auto-driven off these
     // transitions — the manual warning-button toggle was retired 2026-07-17.
 
-    /// Diff the new snapshot's connection states against the last one and run
-    /// the edge-triggered reactions above. Also prunes state for devices that
-    /// vanished from the snapshot entirely (`deviceRemoved` — `.failed → .off`
-    /// per §1, so the panel goes too).
     static func recoveryBucket(_ seconds: TimeInterval) -> String {
         switch seconds {
         case ..<10: return "0-9"
@@ -3501,6 +3498,10 @@ public final class PopoverController: NSObject {
         }
     }
 
+    /// Diff the new snapshot's connection states against the last one and run
+    /// the edge-triggered reactions above. Also prunes state for devices that
+    /// vanished from the snapshot entirely (`deviceRemoved` — `.failed → .off`
+    /// per §1, so the panel goes too).
     private func handleConnectionTransitions(_ devices: [Device]) {
         for device in devices {
             let previous = lastConnectionStates[device.id] ?? .off
@@ -3604,6 +3605,7 @@ public final class PopoverController: NSObject {
             lastConnectionStates.removeValue(forKey: id)
             openDiagnosisIDs.remove(id)
             dismissedDiagnosisIDs.remove(id)
+            failingSince.removeValue(forKey: id)
         }
 
         // Devices the user no longer wants audio on: drop the panel even though the
@@ -3620,6 +3622,13 @@ public final class PopoverController: NSObject {
         for id in openDiagnosisIDs.union(dismissedDiagnosisIDs) where !wantsAudio(id) {
             openDiagnosisIDs.remove(id)
             dismissedDiagnosisIDs.remove(id)
+        }
+        // The same drop for the failure run: a speaker the user walked away from
+        // ended unrecovered, so its next connect is a fresh start, not a recovery.
+        // Group members count as wanted here, as at the capture gate.
+        for id in failingSince.keys
+        where !wantsAudio(id) && !(groupController?.isMainOutMember(id) ?? false) {
+            failingSince.removeValue(forKey: id)
         }
     }
 

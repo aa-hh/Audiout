@@ -214,12 +214,15 @@ public final class BTAlignmentWizardView: NSView {
     /// is spliced from ``introCopyNamingSounds`` verbatim so the two can never
     /// drift — lower-cased at the seam because it follows a dash.
     static let listeningFailedLead = "The microphone couldn’t get a clear read."
-    static func listeningFailedCopy(target: String, targetIsBluetooth: Bool,
-                                    reference: String) -> String {
+    /// The same first question when the microphone was refused
+    /// (``BTAlignmentWizardSession/micRefused``) and the run never listened.
+    static let micRefusedLead = "Audiout can’t use the microphone."
+    static func byEarFallbackCopy(lead: String, target: String, targetIsBluetooth: Bool,
+                                  reference: String) -> String {
         let naming = introCopyNamingSounds(target: target,
                                            targetIsBluetooth: targetIsBluetooth,
                                            reference: reference)
-        return listeningFailedLead + " Match it by ear — "
+        return lead + " Match it by ear — "
             + naming.prefix(1).lowercased() + naming.dropFirst()
     }
     /// The listening screen's headline — the focal point of a screen that is
@@ -366,15 +369,13 @@ public final class BTAlignmentWizardView: NSView {
     /// click count — never both at once: the count starts after the intro.
     private lazy var remoteLink = makeCornerButton(Self.remoteLinkTitle,
                                                    #selector(remoteLinkClicked(_:)))
+    /// Holds the title clear of the link — active only while the link shows,
+    /// or a hidden button would still squeeze a long name on every screen.
+    private lazy var titleClearOfRemoteLink = titleLabel.trailingAnchor.constraint(
+        lessThanOrEqualTo: remoteLink.leadingAnchor, constant: -Self.spacingRow)
     /// The stage's accessible caption — a REAL text field, never layer text.
     private let readout = NSTextField(labelWithString: "")
     private let contentStack = NSStackView()
-    /// The band under the readout holds the per-screen content one of two
-    /// ways, and exactly one of these is ever active. Centred is the default
-    /// (a short bow-out floats in the middle of the slack rather than leaving
-    /// a hole under it); the INTRO pins to the top instead — its own content
-    /// is short enough that centring dropped the opening sentence into the
-    /// middle of the sheet, well below where the eye lands off the stage.
     /// The readout's own height, which goes to ZERO on the four screens that
     /// print no caption. The stage does not move — the readout hangs BELOW it
     /// — so this only closes the gap under the instrument, and closing it is
@@ -501,9 +502,6 @@ public final class BTAlignmentWizardView: NSView {
                 equalTo: titleLabel.firstBaselineAnchor),
             titleLabel.trailingAnchor.constraint(
                 lessThanOrEqualTo: clickCountLabel.leadingAnchor,
-                constant: -Self.spacingRow),
-            titleLabel.trailingAnchor.constraint(
-                lessThanOrEqualTo: remoteLink.leadingAnchor,
                 constant: -Self.spacingRow),
 
             stage.topAnchor.constraint(
@@ -672,7 +670,7 @@ public final class BTAlignmentWizardView: NSView {
     ///
     /// **TRAP: `.deviceIndependentFlagsMask` is NOT that question** (live bug,
     /// build wizardv7 — ←/→ did nothing on the question screen while Space,
-    /// Esc, Return and ⌘Z all worked). AppKit stamps every ARROW keyDown with
+    /// Esc and Return all worked). AppKit stamps every ARROW keyDown with
     /// `.function` + `.numericPad`, and both bits sit inside that mask, so the
     /// map's "no modifiers" guard rejected exactly the two keys that carry
     /// them and nothing else. Probed via `NSEvent(cgEvent:)` on a real ←:
@@ -739,9 +737,8 @@ public final class BTAlignmentWizardView: NSView {
             // the only exit was Esc — and with no reference to compare
             // against, Start is disabled and the screen had no enabled
             // control at all. Same corner row, same trailing corner as the
-            // question and proposal screens; there is simply no Undo to put
-            // in the other corner yet. Esc still stops the run — only the
-            // printed chip is gone (owner ruling 2026-09-13).
+            // question and proposal screens. Esc still stops the run — only
+            // the printed chip is gone (owner ruling 2026-09-13).
             addCornerRow(trailing: (Self.stopTitle, #selector(stopClicked(_:))))
             // The panel is spoken as it reads — the hands-free lead when the
             // mic path is available, plain by-ear otherwise.
@@ -755,7 +752,7 @@ public final class BTAlignmentWizardView: NSView {
 
         case .listening(let isRealignment):
             // The mic is doing the work, so the screen asks for nothing: no
-            // plates, no Undo, no click count. The HEADLINE carries the state
+            // plates, no click count. The HEADLINE carries the state
             // (the selling point of this guided step is out loud, not buried in
             // grey), so the readout above the band stays empty and the band
             // centres cleanly.
@@ -772,12 +769,16 @@ public final class BTAlignmentWizardView: NSView {
         case .question(_, let intervalMs, let answersSoFar):
             let referenceName = session.reference?.name ?? ""
             // Why the user is suddenly being asked: said once, over the first
-            // question, and only when the mic tried and failed.
-            let failureNote: String? = session.listeningFailed && answersSoFar == 0
-                ? Self.listeningFailedCopy(target: session.targetName,
-                                           targetIsBluetooth: session.targetIsBluetooth,
-                                           reference: referenceName)
+            // question, and only when the hands-free run could not listen.
+            let failureLead: String? = answersSoFar > 0 ? nil
+                : session.listeningFailed ? Self.listeningFailedLead
+                : session.micRefused ? Self.micRefusedLead
                 : nil
+            let failureNote = failureLead.map {
+                Self.byEarFallbackCopy(lead: $0, target: session.targetName,
+                                       targetIsBluetooth: session.targetIsBluetooth,
+                                       reference: referenceName)
+            }
             if let failureNote { addBody(failureNote) }
             // The QUESTION is the headline; the rung is the stage's to decide
             // and the readout only says the word it settled on (spec §1/§5).
@@ -945,6 +946,8 @@ public final class BTAlignmentWizardView: NSView {
         readout.stringValue = ""
         titleLabel.stringValue = Self.wizardTitle(target: session.targetName)
         clickCountLabel.stringValue = ""
+        remoteLink.isHidden = true
+        titleClearOfRemoteLink.isActive = false
         setReadoutShown(false)
         stage.apply(.dormant, animated: true)
         let copy = Self.targetLostCopy(target: session.targetName)
@@ -1011,6 +1014,7 @@ public final class BTAlignmentWizardView: NSView {
         var showsRemoteLink = false
         if case .intro = screen { showsRemoteLink = remoteInvite != .unavailable }
         remoteLink.isHidden = !showsRemoteLink
+        titleClearOfRemoteLink.isActive = showsRemoteLink
         switch screen {
         // "About 15 clicks" rides the by-ear panel, so this slot holds the
         // iPhone link there and stays empty until the run starts counting.
@@ -1618,13 +1622,14 @@ public final class BTAlignmentWizardView: NSView {
             .compactMap { $0 as? NSStackView }
             .allSatisfy { $0.fittingSize.width <= available }
     }
-    /// Do the title row's two slots stay clear of each other? The name and
-    /// the click count are pinned to OPPOSITE edges of a plain container, so a
-    /// long device name has nothing but its truncation guard between it and
-    /// overprinting the count.
+    /// Do the title row's slots stay clear of each other? The name and the
+    /// right slot (the click count, or the intro's iPhone link) are pinned to
+    /// OPPOSITE edges of a plain container, so a long device name has nothing
+    /// but its truncation guard between it and overprinting either.
     var test_titleSlotsAreClear: Bool {
         layoutSubtreeIfNeeded()
-        return titleLabel.frame.maxX <= clickCountLabel.frame.minX
+        let right = remoteLink.isHidden ? clickCountLabel.frame.minX : remoteLink.frame.minX
+        return titleLabel.frame.maxX <= right
     }
     private func clickButton(titled title: String) {
         actionButtons.first { $0.title == title }?.performClick(nil)

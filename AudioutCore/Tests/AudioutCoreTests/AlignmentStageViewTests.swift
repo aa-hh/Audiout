@@ -309,7 +309,7 @@ import AudioutSharedUI
         #expect(stage.test_lastTransition == .promotion(steps: 1),
                 "open → closing is one rung climbed")
 
-        // ⌘Z Back and a rejected proposal both WIDEN, and a widening never
+        // A rejected proposal WIDENS, and a widening never
         // brightens: it plays the demotion even when the rung holds.
         stage.apply(.question(intervalMs: interval(halfWidth: 200), range: range),
                     animated: false)

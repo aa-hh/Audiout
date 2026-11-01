@@ -7,7 +7,7 @@ import AppKit
 /// text under it. Each host writes its own heading and line around this.
 ///
 /// Two hosts mount this same view at two sizes — Settings › Audiout Remote
-/// (72 pt) and the Setup window's iPhone card (160 pt). The alignment wizard
+/// (96 pt) and the Setup window's iPhone card (160 pt). The alignment wizard
 /// dropped its tile for a text link (owner ruling 2026-11-01). It is never a button
 /// and never gold: it is information a person takes to their phone, and the
 /// only pressable way to the same page is the stock push button each host
@@ -46,8 +46,11 @@ public final class RemoteInviteView: NSView {
     /// buttons.
     public static var pageURL: URL { URL(string: pageURLString)! }
 
-    /// The tile sizes, one per host (`shape-mac-invites.md` §5.1).
-    public static let settingsTileSide: CGFloat = 72
+    /// The tile sizes, one per host (`shape-mac-invites.md` §5.1). The
+    /// designed code is denser than the generated one it replaced (41 modules
+    /// against 25), and at 72 pt it stops scanning on a 1x display; 84 pt is
+    /// the measured floor, 96 the size with room above it.
+    public static let settingsTileSide: CGFloat = 96
     public static let setupTileSide: CGFloat = 160
 
     private let tile: QRTileView
@@ -152,12 +155,21 @@ private final class QRTileView: NSView {
         code.draw(in: NSRect(x: origin, y: origin, width: drawn, height: drawn))
     }
 
-    /// The tile as an image, for the test that decodes it back.
+    /// The tile as an image, for the test that decodes it back — at ONE
+    /// pixel per point, the hardest display it ships to, rather than the test
+    /// Mac's own Retina scale, where a code too dense for 1x still decodes.
     func render() -> NSImage {
-        let image = NSImage(size: NSSize(width: side, height: side))
-        image.lockFocus()
+        let pixels = Int(side)
+        guard let rep = NSBitmapImageRep(
+            bitmapDataPlanes: nil, pixelsWide: pixels, pixelsHigh: pixels,
+            bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+            colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0) else { return NSImage() }
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
         draw(bounds)
-        image.unlockFocus()
+        NSGraphicsContext.restoreGraphicsState()
+        let image = NSImage(size: NSSize(width: side, height: side))
+        image.addRepresentation(rep)
         return image
     }
 }

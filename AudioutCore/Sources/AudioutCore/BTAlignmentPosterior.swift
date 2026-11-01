@@ -286,20 +286,6 @@ struct BTAlignmentPosterior {
         phase = phaseAfterAnswer()
     }
 
-    /// Undo the newest answer and put its question straight back. The belief is
-    /// REFOLDED from where the stretch began rather than restored from a
-    /// snapshot — a posterior does not care what order its evidence arrived in,
-    /// and replaying a few dozen multiplies is cheaper than keeping undo
-    /// states around.
-    mutating func back() {
-        guard case .asking = phase, !history.isEmpty else { return }
-        history.removeLast()
-        answerCount -= 1
-        halfWidths.removeLast()
-        refold()
-        phase = .asking(candidateMs: nextLevelMs())
-    }
-
     /// "Sounds right": the user has just heard the proposed value and says the
     /// clicks land as one, which is itself a judgment — fold it in as such
     /// rather than simply stopping.

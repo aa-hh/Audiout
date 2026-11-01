@@ -414,39 +414,6 @@ private func proposalValue(_ session: BTAlignmentWizardSession) -> Double? {
         session.cancel()
     }
 
-    // MARK: Back
-
-    @Test func backUndoesTheLastAnswerAndReAsksThatQuestion() {
-        let recorder = Recorder()
-        let session = recorder.makeSession(baseTrimMs: 12)
-        session.start()
-        let first = recorder.previews[0]
-        session.answer(.target)
-        let second = recorder.previews[1]
-
-        session.back()
-        #expect(recorder.previews.last == first, "the undone question is asked again")
-        guard case .question(_, _, let answers) = session.screen, answers == 0 else {
-            Issue.record("expected the first question back, got \(session.screen)")
-            return
-        }
-
-        session.answer(.target)
-        #expect(recorder.previews.last == second, "and the run resumes where it was")
-        session.cancel()
-    }
-
-    @Test func backBeforeAnyAnswerIsInert() {
-        let recorder = Recorder()
-        let session = recorder.makeSession()
-        session.start()
-        let screensBefore = recorder.screens.count
-        session.back()
-        #expect(recorder.previews.count == 1, "nothing re-applied")
-        #expect(recorder.screens.count == screensBefore, "and nothing repainted")
-        session.cancel()
-    }
-
     // MARK: Reference (the speaker the target is compared against)
 
     @Test func startIsRefusedWithoutAReference() {

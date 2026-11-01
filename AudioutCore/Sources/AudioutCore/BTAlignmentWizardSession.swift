@@ -232,6 +232,11 @@ public final class BTAlignmentWizardSession {
     /// questions — the one case the questions say why they are there.
     public private(set) var listeningFailed = false
 
+    /// The mic path was open but the microphone was refused (now, or earlier
+    /// in System Settings), so the run went to the by-ear questions without
+    /// listening — the other case the questions say why they are there.
+    public private(set) var micRefused = false
+
     public private(set) var screen: Screen = .intro
 
     /// Whether the current on-screen proposal came from a mic measurement. Set
@@ -440,6 +445,7 @@ public final class BTAlignmentWizardSession {
             guard let self, self.startPending, !self.ended else { return }
             self.startPending = false
             Analytics.capture("bt_sync:mic_permission_answered", ["granted": granted ? "true" : "false"])
+            self.micRefused = !granted
             self.beginRun(listening: granted)
         }
     }
@@ -593,17 +599,6 @@ public final class BTAlignmentWizardSession {
         case ..<200: "100-199"
         default: "200+"
         }
-    }
-
-    /// Undo the last answer and ask that question again. Available only while
-    /// questions are running and at least one answer stands — which is exactly
-    /// what `.question`'s `answersSoFar` reports, so the button's enabled state
-    /// and this guard can never disagree.
-    public func back() {
-        guard case .question = screen, !ended,
-              estimator.undoableAnswerCount > 0 else { return }
-        estimator.back()
-        presentEstimatorPhase()
     }
 
     /// The proposal's "Sounds right": accepting IS keeping. The value the user

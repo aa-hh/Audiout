@@ -350,6 +350,18 @@ import AppKit
         #expect(wizard?.test_remoteLinkTitle == nil, "got \(screenName(wizard))")
     }
 
+    /// Turns red if a speaker that goes away while the intro is up leaves the
+    /// iPhone link standing on the "went away" screen.
+    @Test func theIPhoneLinkLeavesWithALostTarget() {
+        let (popover, _) = makePopover()
+        showNote(popover)
+        popover.test_btAlignmentNoteView("bt-a:output")?.test_clickAlign()
+        let wizard = popover.test_btWizardView()
+        #expect(wizard?.test_remoteLinkTitle != nil)
+        wizard?.showTargetLost()
+        #expect(wizard?.test_remoteLinkTitle == nil)
+    }
+
     /// Defect this names: a by-ear sheet left standing over a measurement the
     /// phone has already taken over — the Mac runs one alignment at a time,
     /// so the two would fight over the wizard feed.
@@ -1335,6 +1347,11 @@ import AppKit
             return
         }
         #expect(recorder.ticks == [true])
+        // The intro promised a hands-free run, so the first question says why
+        // it is asking — and which note is which speaker.
+        #expect(wizard?.test_bandLabels.contains {
+            $0.hasPrefix(BTAlignmentWizardView.micRefusedLead)
+        } == true, "got \(String(describing: wizard?.test_bandLabels))")
     }
 
     /// Defect this would catch: a probe that finds nothing leaving the user

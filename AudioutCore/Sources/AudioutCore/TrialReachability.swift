@@ -96,7 +96,7 @@ public final class TrialReachability {
     /// The trial and unverified-key half of each path update. A registered
     /// trial, an expired one, and a key that already has a verdict have nothing
     /// to ask; a Mac with no trial and no key waits, because the welcome gate
-    /// can start a trial later this session. Only a running, unregistered trial // slop-ok
+    /// can start a trial later while the app runs. Only a running, unregistered trial
     /// on a usable path asks, and so does a stored key the server never
     /// answered about.
     static func step(for state: TrialState, hasKey: Bool, hasVerdict: Bool, satisfied: Bool) -> Step {

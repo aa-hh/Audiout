@@ -4641,18 +4641,6 @@ extension SerializedSharedState {
             #expect(connects.first?["recovery_seconds_bucket"] == "0-9")
         }
 
-        // Turns red if the reconnect sent when a speaker reappears on the network starts counting as the user's request.
-        @Test func onlyAReconnectThePersonAskedForCountsAsTheirs() throws {
-            let popover = try makePopover(intent: .selected)
-            let controller = try #require(popover.groupController)
-            let later = Date().addingTimeInterval(31)
-            controller.now = { later }
-            controller.requestReconnect(for: "office", userAsked: false)
-            #expect(controller.connectionAnalytics(for: "office")["trigger"] == "auto")
-            controller.requestReconnect(for: "office")
-            #expect(controller.connectionAnalytics(for: "office")["trigger"] == "user")
-        }
-
         // Turns red if a failure the user walked away from is still open later, so their next connect reads as a recovery.
         @Test func aConnectAfterTheUserDroppedAFailingSpeakerIsNotARecovery() throws {
             let popover = try makePopover(intent: .selected)

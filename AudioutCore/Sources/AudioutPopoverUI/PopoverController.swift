@@ -856,7 +856,7 @@ public final class PopoverController: NSObject {
                   let device = self.devicesByID[id] else { return }
             switch device.connectionState {
             case .connecting, .reconnecting, .connected, .awaitingPassword: return
-            case .off, .failed: self.groupController?.requestReconnect(for: id, userAsked: false)
+            case .off, .failed: self.groupController?.requestReconnect(for: id)
             }
         }
         rebuild()

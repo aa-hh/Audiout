@@ -479,9 +479,10 @@ public final class GroupController {
 
     /// When a person last asked for each speaker: a selection, a "Play here",
     /// a Main Out change, a retry or a reconnect, from the Mac or the phone.
-    /// The one automatic caller among those entry points, the reconnect when a
-    /// speaker reappears on the network, passes `userAsked: false`; the
-    /// backend's own retries never pass through them.
+    /// Every caller of those entry points is a person. The reconnect sent when
+    /// a speaker reappears on the network counts too: only a click on that
+    /// speaker's name starts the 10-second search it ends. The backend's own
+    /// retries never pass through them.
     private var userRequestedAt: [String: Date] = [:]
     /// The clock `connectionAnalytics(for:)` reads. Tests move it forward.
     var now: () -> Date = Date.init
@@ -689,8 +690,8 @@ public final class GroupController {
     /// the click never asked for. `NativeBackend.retryOutput`'s BT arm
     /// deliberately requires no membership (Section D tap-to-reconnect), so
     /// this is a straight pass-through.
-    public func requestReconnect(for id: String, userAsked: Bool = true) {
-        if userAsked { noteUserRequest([id]) }
+    public func requestReconnect(for id: String) {
+        noteUserRequest([id])
         backend.retryOutput(id)
     }
 

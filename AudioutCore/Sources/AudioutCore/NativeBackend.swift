@@ -428,11 +428,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     var btLatencyMsByUID: [String: Double] = [:]   // btTrimLock
     /// A small counting number per speaker id, handed out in order of first
     /// sighting: Bluetooth UIDs, and since 2026-11-01 AirPlay and Cast ids too.
-    /// It is what the release analytics events name a speaker by: the UID is derived from the MAC address, and the address
-    /// space is small enough that even a hash of one is reversible by
-    /// enumeration, while an index carries nothing but the order this install
-    /// met its speakers in. Same lock and same file as the maps above, its own
-    /// third map.
+    /// It is what the release analytics events name a speaker by: the UID is
+    /// derived from the MAC address, and the address space is small enough
+    /// that even a hash of one is reversible by enumeration, while an index
+    /// carries nothing but the order this install met its speakers in. Same
+    /// lock and same file as the maps above, its own third map.
     var btSpeakerIndexByUID: [String: Int] = [:]   // btTrimLock
 
     // MARK: Bluetooth hardware volume (BT-HW-VOL)

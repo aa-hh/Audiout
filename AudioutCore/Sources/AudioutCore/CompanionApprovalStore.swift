@@ -368,14 +368,16 @@ public enum CompanionApprovalPrompt {
 
     /// The prompt's body. The phone's self-reported name is quoted only when
     /// it says more than "iPhone", which is all iOS reports without the
-    /// device-name entitlement.
-    public static func informativeText(clientName: String) -> String {
+    /// device-name entitlement. The line pointing at Settings › Audiout Remote
+    /// is left out while that pane is hidden
+    /// (``AppSettings/remoteAppIsVisible(settings:environment:isDevBuild:offered:)``).
+    public static func informativeText(clientName: String, settingsPaneVisible: Bool = true) -> String {
         let name = clientName.trimmingCharacters(in: .whitespacesAndNewlines)
         let isGeneric = name.isEmpty || name.caseInsensitiveCompare("iPhone") == .orderedSame
         let calls = isGeneric ? "" : " It calls itself \"\(name)\"."
         return "Allow only if the iPhone shows the same code.\(calls)\n\n"
-            + "It will see and control what's playing on this Mac's speakers, including which apps are playing. "
-            + "You can remove it later in Settings › Audiout Remote."
+            + "It will see and control what's playing on this Mac's speakers, including which apps are playing."
+            + (settingsPaneVisible ? " You can remove it later in Settings › Audiout Remote." : "")
     }
 
     /// "482913" → "Pairing code 4 8 2 9 1 3", so VoiceOver reads digits,

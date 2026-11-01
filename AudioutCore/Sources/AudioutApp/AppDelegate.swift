@@ -3619,7 +3619,8 @@ extension AppDelegate: CompanionCoordinatorHost {
         guard !HeadlessRuntime.isActive, !isTerminating else { return }
         let alert = NSAlert()
         alert.messageText = CompanionApprovalPrompt.messageText
-        alert.informativeText = CompanionApprovalPrompt.informativeText(clientName: clientName)
+        alert.informativeText = CompanionApprovalPrompt.informativeText(
+            clientName: clientName, settingsPaneVisible: AppSettings.remoteAppIsVisible(settings: settings))
         alert.icon = Self.lockBadgedAppIcon()
         alert.accessoryView = Self.pairingCodeBoxes(pairingCode)
         let allow = alert.addButton(withTitle: "Allow")

@@ -13,22 +13,22 @@ import AudioutProtocol
 @Suite struct RemoteInviteViewTests {
 
     /// Defect this names: the tile renders a code that reads as something
-    /// other than the invitation's own page — a truncated URL, a blank tile,
+    /// other than the App Store listing — artwork swapped for one carrying
+    /// another address, a missing bundled asset (a blank tile),
     /// a mirrored draw, or a scale that blurs the modules past reading. A
     /// real QR reader on the DRAWN pixels is the only check that catches all
-    /// four; asserting the generator's input catches none of them.
+    /// four; asserting which file is bundled catches none of them.
     @Test func everySizeDrawsACodeAScannerReadsBackAsThePage() throws {
         let detector = try #require(CIDetector(ofType: CIDetectorTypeQRCode, context: nil,
                                                options: [CIDetectorAccuracy: CIDetectorAccuracyHigh]))
         for side in [RemoteInviteView.settingsTileSide,
-                     RemoteInviteView.wizardTileSide,
                      RemoteInviteView.setupTileSide] {
             let view = RemoteInviteView(tileSide: side)
             let data = try #require(view.test_renderTile().tiffRepresentation)
             let image = try #require(CIImage(data: data))
             let decoded = detector.features(in: image)
                 .compactMap { ($0 as? CIQRCodeFeature)?.messageString }
-            #expect(decoded == [RemoteInviteView.pageURLString],
+            #expect(decoded == [RemoteInviteView.codeURLString],
                     "the \(side) pt tile decoded as \(decoded)")
         }
     }
@@ -36,7 +36,7 @@ import AudioutProtocol
     /// Defect this names: a tile shipped without the address beside it, which
     /// leaves a VoiceOver user and anyone without a camera at a dead end.
     @Test func theAddressIsPrintedUnderTheTileWithNoScheme() {
-        let view = RemoteInviteView(tileSide: RemoteInviteView.wizardTileSide)
+        let view = RemoteInviteView(tileSide: RemoteInviteView.settingsTileSide)
         #expect(view.test_addressText == "audiout.app/remote")
         #expect(!RemoteInviteView.pageAddress.contains("://"),
                 "the printed address carries no scheme")

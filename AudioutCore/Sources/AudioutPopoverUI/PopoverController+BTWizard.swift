@@ -81,12 +81,6 @@ extension PopoverController {
             // reference and drive the view through the test hooks instead.
             if let host = panel.viewIfLoaded?.window, host.isVisible {
                 panel.presentAsSheet(sheet)
-                // No event where no invitation was drawn: a build without the
-                // phone app shows no iPhone panel, so "the sheet showed an
-                // invitation" never happened.
-                if let state = Self.remoteInviteAnalyticsState(view.remoteInvite) {
-                    Analytics.capture("remote_invite:sheet_shown", ["state": state])
-                }
             }
         }
     }
@@ -110,22 +104,7 @@ extension PopoverController {
         remoteInviteStateProvider?() ?? .notConnected
     }
 
-    /// `remote_invite:sheet_shown`'s `state` property, per the vocabulary doc's
-    /// three allowed values — `nil` where there was no invitation to report,
-    /// which keeps that list of three intact rather than adding a fourth value
-    /// for an event that should simply not fire.
-    private static func remoteInviteAnalyticsState(
-        _ state: BTAlignmentWizardView.RemoteInviteState
-    ) -> String? {
-        switch state {
-        case .unavailable: return nil
-        case .allowOff: return "allow_off"
-        case .notConnected: return "qr"
-        case .connected: return "connected"
-        }
-    }
-
-    /// Repaint the wizard's iPhone panel — the app layer calls this when a
+    /// Repaint the wizard's iPhone link — the app layer calls this when a
     /// phone connects or leaves, or the Allow switch moves.
     public func refreshRemoteInviteState() {
         btWizardView?.remoteInvite = remoteInviteState()

@@ -173,27 +173,13 @@ public final class BTAlignmentWizardView: NSView {
     /// the intro, where the click count lives once the run is under way.
     private static let introSlotText = "About 15 clicks"
 
-    // MARK: The iPhone panel (`shape-mac-invites.md` §2.2)
+    // MARK: The iPhone link
 
-    /// The leading panel's heading. It is not pressable and carries no gold:
-    /// Start is still the page's one primary control. The panel LEADS because
-    /// measuring from the room is the better answer, and reading order is how
-    /// the page says so — to the eye and to VoiceOver alike.
-    static let remotePanelTitle = "Measure with your iPhone"
-    /// The panel's one line, with a code and the address under it.
-    static let remotePanelLine =
-        "Audiout Remote listens from where you sit and sets the offset in seconds."
-    /// The Mac refuses phones, so the panel points at the switch instead of
-    /// showing a code that would lead nowhere.
-    static let remoteAllowOffLine =
-        "To measure with your iPhone, turn on Allow control from iPhone in "
-        + "Audiout's settings, under Audiout Remote."
-    /// A phone is already here: no code, just what to do on it. The phone's
-    /// name is the approval's own, the only phone identity this Mac shows.
-    static func remoteConnectedLine(phoneName: String?, target: String) -> String {
-        "Open Audiout Remote on \(phoneName.map { "\($0)" } ?? "your iPhone") "
-            + "and tap the tuning fork beside \(target)."
-    }
+    /// The title row's trailing link on the intro: the way to Audiout Remote's
+    /// App Store page. A quiet text button, never gold and never a panel —
+    /// the page's job is the Mac's own run, and a QR column in the middle of
+    /// it read as an advert (owner ruling 2026-11-01).
+    static let remoteLinkTitle = "Measure with your iPhone"
     /// The trailing panel's heading when the two speakers make ONE sound and
     /// there is no automatic mic path — the Mac's own by-ear run, named the one
     /// thing it is (the glossary in `audiout-shared/CONTEXT.md`). The automatic
@@ -213,28 +199,31 @@ public final class BTAlignmentWizardView: NSView {
 
     // MARK: Copy awaiting the owner's eye (2026-09-13)
 
-    /// The intro's right panel when the Mac can measure through its own mic
-    /// (``BTAlignmentWizardSession/listeningIsPossible``) LEADS with the
-    /// automatic measurement — that is the selling point, and the by-ear
-    /// clicks are the fallback. The heading parallels the left panel's
-    /// "Measure with your iPhone": both measure, this one through the Mac's
-    /// own microphone.
-    static let autoPanelTitle = "Measure on this Mac"
+    /// The intro's heading when the Mac can measure through its own mic
+    /// (``BTAlignmentWizardSession/listeningIsPossible``): the run asks for
+    /// nothing until the mic fails to get a read, so it is billed as what it
+    /// is, with no word of a fallback until one happens (owner ruling
+    /// 2026-11-01). Where the two speakers make one sound
+    /// there is no mic path and the user really does tap, so that page keeps
+    /// ``byEarPanelTitle``.
+    static let autoPanelTitle = "Hands-free alignment"
     /// The lead line on the automatic path: what the Mac does the moment Start
     /// is pressed, which is also why the mic prompt is expected rather than a
     /// surprise.
     static let autoLeadCopy =
         "This Mac measures the offset itself, listening through its built-in microphone."
-    /// The by-ear clicks, reframed as the fallback under the automatic lead.
-    /// The naming half is spliced from ``introCopyNamingSounds`` verbatim so
-    /// the two can never drift — lower-cased at the seam because it now follows
-    /// a dash rather than opening the sentence.
-    static func byEarFallbackCopy(target: String, targetIsBluetooth: Bool,
-                                  reference: String) -> String {
+    /// The first question after the mic spent its budget without a read
+    /// (``BTAlignmentWizardSession/listeningFailed``) — and only then: the
+    /// intro promises a hands-free run and does not hedge it. The naming half
+    /// is spliced from ``introCopyNamingSounds`` verbatim so the two can never
+    /// drift — lower-cased at the seam because it follows a dash.
+    static let listeningFailedLead = "The microphone couldn’t get a clear read."
+    static func listeningFailedCopy(target: String, targetIsBluetooth: Bool,
+                                    reference: String) -> String {
         let naming = introCopyNamingSounds(target: target,
                                            targetIsBluetooth: targetIsBluetooth,
                                            reference: reference)
-        return "No clear read? Match it by ear — "
+        return listeningFailedLead + " Match it by ear — "
             + naming.prefix(1).lowercased() + naming.dropFirst()
     }
     /// The listening screen's headline — the focal point of a screen that is
@@ -274,6 +263,9 @@ public final class BTAlignmentWizardView: NSView {
     /// re-fits itself around it.
     var onContentSizeChange: (() -> Void)?
 
+    /// Opens the iPhone link. Replaced by tests so a click opens nothing.
+    var openURL: (URL) -> Void = { NSWorkspace.shared.open($0) }
+
     /// The picker's menu, pushed by the host on every reconcile so devices
     /// coming and going are reflected. Repaints only on a real change.
     public var referenceOptions: [ReferenceOption] = [] {
@@ -283,14 +275,14 @@ public final class BTAlignmentWizardView: NSView {
         }
     }
 
-    /// What the iPhone panel says right now — pushed by the host, the way
+    /// Where the phone app stands — pushed by the host, the way
     /// ``referenceOptions`` is, because only the app layer can see the Allow
-    /// switch and the companion server's clients.
+    /// switch and the companion server's clients. The intro reads only
+    /// whether it is `unavailable`, which hides the iPhone link.
     public enum RemoteInviteState: Equatable {
         /// This build does not carry Audiout Remote at all
-        /// (`AppSettings.remoteAppIsOffered`), so the panel is absent and the
-        /// by-ear one is the intro's only column. Distinct from `allowOff`,
-        /// which tells the reader how to turn a feature they have back on.
+        /// (`AppSettings.remoteAppIsOffered`), so the intro offers no link to
+        /// an app nobody can download.
         case unavailable
         /// Allow control from iPhone resolves off (setting or launch option).
         case allowOff
@@ -301,8 +293,8 @@ public final class BTAlignmentWizardView: NSView {
         case connected(phoneName: String?)
     }
 
-    /// Repaints the intro when it changes — a phone connecting while the page
-    /// is up swaps the code for the sentence naming that phone.
+    /// Repaints the intro when it changes, so the link appears or goes with
+    /// the build's phone app.
     public var remoteInvite: RemoteInviteState = .notConnected {
         didSet {
             guard remoteInvite != oldValue else { return }
@@ -356,10 +348,9 @@ public final class BTAlignmentWizardView: NSView {
     private static let answerPlateWidth: CGFloat = 236
     private static let answerPlateHeight: CGFloat = 88
     private static let answerPlateGap: CGFloat = 32
-    /// The intro's two panels: 236 + 32 + 236 fills the content width, the
-    /// same arithmetic the answer plates use.
-    private static let introPanelWidth: CGFloat = answerPlateWidth
-    private static let introPanelGap: CGFloat = answerPlateGap
+    /// The intro's one centred panel, at the body measure every other
+    /// centred paragraph on the sheet uses.
+    private static let introPanelWidth: CGFloat = bodyMeasure
     /// The unsettled screen's three-up: 160 × 3 + 12 × 2 also fills the width.
     private static let narrowPlateWidth: CGFloat = 160
     private static let togetherBarWidth: CGFloat = 400
@@ -382,8 +373,11 @@ public final class BTAlignmentWizardView: NSView {
 
     let stage = AlignmentStageView()
     private let titleLabel = NSTextField(labelWithString: "")
-    private let betaChip = BetaChipView()
     private let clickCountLabel = NSTextField(labelWithString: "")
+    /// The intro's iPhone link, sharing the title row's right slot with the
+    /// click count — never both at once: the count starts after the intro.
+    private lazy var remoteLink = makeCornerButton(Self.remoteLinkTitle,
+                                                   #selector(remoteLinkClicked(_:)))
     /// The stage's accessible caption — a REAL text field, never layer text.
     private let readout = NSTextField(labelWithString: "")
     private let contentStack = NSStackView()
@@ -438,7 +432,7 @@ public final class BTAlignmentWizardView: NSView {
 
         let titleRow = NSView()
         titleRow.translatesAutoresizingMaskIntoConstraints = false
-        titleRow.addSubview(betaChip)
+        titleRow.addSubview(remoteLink)
         for label in [titleLabel, clickCountLabel] {
             label.translatesAutoresizingMaskIntoConstraints = false
             // MANDATORY on the RIGHT slot and harmless on the left: a label
@@ -455,11 +449,10 @@ public final class BTAlignmentWizardView: NSView {
         clickCountLabel.textColor = Tokens.Color.label2
         clickCountLabel.alignment = .right
         // The two slots are pinned to OPPOSITE edges of a plain container,
-        // with the Beta chip between them, so nothing but this stops a long
-        // device name running straight under the chip and `Click n of about
-        // 15` — labels overprinting each other. The name is the half that
-        // gives way: the chip and the click count are fixed-width chrome and
-        // always say the same thing.
+        // so nothing but this stops a long device name running straight under
+        // `Click n of about 15` or the iPhone link — labels overprinting each
+        // other. The name is the half that gives way: the right slot is
+        // fixed-width chrome and always says the same thing.
         titleLabel.lineBreakMode = .byTruncatingTail
         titleLabel.setContentCompressionResistancePriority(
             .defaultLow, for: .horizontal)
@@ -524,12 +517,14 @@ public final class BTAlignmentWizardView: NSView {
             // below the larger's, which reads as a subscript.
             clickCountLabel.firstBaselineAnchor.constraint(
                 equalTo: titleLabel.firstBaselineAnchor),
-            betaChip.leadingAnchor.constraint(
-                equalTo: titleLabel.trailingAnchor, constant: Self.spacingTight * 2),
-            betaChip.centerYAnchor.constraint(equalTo: titleRow.centerYAnchor),
-            betaChip.heightAnchor.constraint(equalToConstant: Self.titleRowHeight),
-            betaChip.trailingAnchor.constraint(
+            remoteLink.trailingAnchor.constraint(equalTo: titleRow.trailingAnchor),
+            remoteLink.firstBaselineAnchor.constraint(
+                equalTo: titleLabel.firstBaselineAnchor),
+            titleLabel.trailingAnchor.constraint(
                 lessThanOrEqualTo: clickCountLabel.leadingAnchor,
+                constant: -Self.spacingRow),
+            titleLabel.trailingAnchor.constraint(
+                lessThanOrEqualTo: remoteLink.leadingAnchor,
                 constant: -Self.spacingRow),
 
             stage.topAnchor.constraint(
@@ -796,23 +791,15 @@ public final class BTAlignmentWizardView: NSView {
             // in the other corner yet. Esc still stops the run — only the
             // printed chip is gone (owner ruling 2026-09-13).
             addCornerRow(trailing: (Self.stopTitle, #selector(stopClicked(_:)), nil))
-            // The iPhone panel leads, so it is what VoiceOver hears first;
-            // the right panel is spoken as it reads — automatic lead plus
-            // fallback when the mic path is available, plain by-ear otherwise.
-            let rightPanelSpoken: String
-            if session.listeningIsPossible, let reference = session.reference {
-                rightPanelSpoken = "\(Self.autoPanelTitle): \(Self.autoLeadCopy) "
-                    + Self.byEarFallbackCopy(target: session.targetName,
-                                             targetIsBluetooth: session.targetIsBluetooth,
-                                             reference: reference.name)
+            // The panel is spoken as it reads — the hands-free lead when the
+            // mic path is available, plain by-ear otherwise.
+            let panelSpoken: String
+            if session.listeningIsPossible, session.reference != nil {
+                panelSpoken = "\(Self.autoPanelTitle): \(Self.autoLeadCopy)"
             } else {
-                rightPanelSpoken = "\(Self.byEarPanelTitle): \(introBody())"
+                panelSpoken = "\(Self.byEarPanelTitle): \(introBody())"
             }
-            // The iPhone panel is spoken only where it is drawn.
-            let leftPanelSpoken = remoteInviteLine
-                .map { "\(Self.remotePanelTitle): \($0). " } ?? ""
-            setAccessibilityLabel(
-                "Align \(session.targetName). " + leftPanelSpoken + rightPanelSpoken)
+            setAccessibilityLabel("Align \(session.targetName). " + panelSpoken)
 
         case .listening(let isRealignment):
             // The mic is doing the work, so the screen asks for nothing: no
@@ -832,6 +819,14 @@ public final class BTAlignmentWizardView: NSView {
 
         case .question(_, let intervalMs, let answersSoFar):
             let referenceName = session.reference?.name ?? ""
+            // Why the user is suddenly being asked: said once, over the first
+            // question, and only when the mic tried and failed.
+            let failureNote: String? = session.listeningFailed && answersSoFar == 0
+                ? Self.listeningFailedCopy(target: session.targetName,
+                                           targetIsBluetooth: session.targetIsBluetooth,
+                                           reference: referenceName)
+                : nil
+            if let failureNote { addBody(failureNote) }
             // The QUESTION is the headline; the rung is the stage's to decide
             // and the readout only says the word it settled on (spec §1/§5).
             // The interval itself is the stage's tooltip.
@@ -848,7 +843,7 @@ public final class BTAlignmentWizardView: NSView {
             referencePlate = reference
             addEdgePlateRow(target, reference, gap: Self.answerPlateGap)
             contentStack.setCustomSpacing(Self.spacingRow,
-                                          after: contentStack.arrangedSubviews[0])
+                                          after: contentStack.arrangedSubviews.last!)
             let together = makePlate(Self.togetherTitle, keycap: "SPACE",
                                      action: #selector(togetherClicked(_:)),
                                      width: Self.togetherBarWidth,
@@ -862,7 +857,8 @@ public final class BTAlignmentWizardView: NSView {
             // asked with a different verb ("ticked") and offered only two of
             // the three answers.
             setAccessibilityLabel(
-                "\(Self.questionPrompt) \(session.targetName), \(referenceName), "
+                (failureNote.map { "\($0) " } ?? "")
+                + "\(Self.questionPrompt) \(session.targetName), \(referenceName), "
                 + "or \(Self.togetherTitle)?")
 
         case .proposal(let valueMs):
@@ -1062,10 +1058,12 @@ public final class BTAlignmentWizardView: NSView {
 
     private func updateTitleRow(for screen: BTAlignmentWizardSession.Screen) {
         titleLabel.stringValue = Self.wizardTitle(target: session.targetName)
+        var showsRemoteLink = false
+        if case .intro = screen { showsRemoteLink = remoteInvite != .unavailable }
+        remoteLink.isHidden = !showsRemoteLink
         switch screen {
-        // The intro's title row shares the page with two panel headings, and
-        // "About 15 clicks" belongs to one of them — so it rides the by-ear
-        // panel and this slot stays empty until the run starts counting.
+        // "About 15 clicks" rides the by-ear panel, so this slot holds the
+        // iPhone link there and stays empty until the run starts counting.
         // Nothing has been asked yet on either screen.
         case .intro, .listening: clickCountLabel.stringValue = ""
         case .question(_, _, let answersSoFar):
@@ -1228,88 +1226,38 @@ public final class BTAlignmentWizardView: NSView {
         probeProgress = nil
     }
 
-    /// The intro's panels: measuring from the room on the LEADING side, the
-    /// Mac's own paired-click run on the trailing one. Neither is pressable —
-    /// Start, below both, stays the page's one primary control and the only
-    /// gold on the screen (`shape-mac-invites.md` §2.2).
-    ///
-    /// A build with no companion (`remoteInvite == .unavailable`) drops the
-    /// leading panel entirely and the by-ear panel is the intro's one column,
-    /// centred by `contentStack`'s own `.centerX`.
+    /// The intro's one panel: the Mac's own run, centred by `contentStack`'s
+    /// `.centerX`. Not pressable — Start, below it, stays the page's one
+    /// primary control and the only gold on the screen.
     private func addIntroPanels(byEarBody: String) {
         let byEar = NSStackView()
         byEar.orientation = .vertical
         byEar.alignment = .centerX
         byEar.spacing = Self.spacingRow
         byEar.translatesAutoresizingMaskIntoConstraints = false
-        // When the Mac can measure through its own mic, the panel LEADS with
-        // that and the by-ear clicks become the fallback; otherwise the two
-        // speakers make one sound, there is no automatic path, and the panel
-        // stays the plain by-ear instructions.
-        if session.listeningIsPossible, let reference = session.reference {
+        // When the Mac can measure through its own mic, the panel says that
+        // and nothing else — not even the click count, which is the cost of a
+        // by-ear run this page does not promise. Otherwise the two speakers
+        // make one sound, there is no automatic path, and the panel stays the
+        // by-ear instructions with their cost.
+        if session.listeningIsPossible, session.reference != nil {
             byEar.addArrangedSubview(panelHeading(Self.autoPanelTitle))
             byEar.addArrangedSubview(panelLine(Self.autoLeadCopy))
-            byEar.addArrangedSubview(panelLine(Self.byEarFallbackCopy(
-                target: session.targetName,
-                targetIsBluetooth: session.targetIsBluetooth,
-                reference: reference.name)))
         } else {
             byEar.addArrangedSubview(panelHeading(Self.byEarPanelTitle))
             byEar.addArrangedSubview(panelLine(byEarBody))
+            byEar.addArrangedSubview(panelLine(Self.introSlotText))
         }
-        byEar.addArrangedSubview(panelLine(Self.introSlotText))
 
-        let panels = [makeRemotePanel(), byEar].compactMap { $0 }
-        for panel in panels {
-            panel.widthAnchor.constraint(equalToConstant: Self.introPanelWidth).isActive = true
-        }
-        let row = NSStackView(views: panels)
+        byEar.widthAnchor.constraint(equalToConstant: Self.introPanelWidth).isActive = true
+        let row = NSStackView(views: [byEar])
         row.orientation = .horizontal
-        // TOP, not centre: two columns of different lengths have to start on
-        // the same line or neither heading reads as a heading.
-        row.alignment = .top
-        row.spacing = Self.introPanelGap
         contentStack.addArrangedSubview(row)
     }
 
-    /// The leading "Measure with your iPhone" panel, or `nil` in a build that
-    /// does not carry the companion — there is no app to measure with, so the
-    /// heading and its line would name a thing the reader cannot get.
-    private func makeRemotePanel() -> NSStackView? {
-        guard let line = remoteInviteLine else { return nil }
-        let remote = NSStackView()
-        remote.identifier = Self.remotePanelIdentifier
-        remote.orientation = .vertical
-        remote.alignment = .centerX
-        remote.spacing = Self.spacingRow
-        remote.translatesAutoresizingMaskIntoConstraints = false
-        remote.addArrangedSubview(panelHeading(Self.remotePanelTitle))
-        remote.addArrangedSubview(panelLine(line))
-        // No code on a Mac that refuses phones, and none where a phone is
-        // already here: a QR either of those users scans answers nothing.
-        if case .notConnected = remoteInvite {
-            remote.addArrangedSubview(
-                RemoteInviteView(tileSide: RemoteInviteView.wizardTileSide))
-        }
-        return remote
-    }
-
-    /// Marks the leading panel so the test hooks and the QR lookup find it by
-    /// identity: with the panel gone, position alone would read the by-ear
-    /// panel's labels and report them as the iPhone panel's.
-    private static let remotePanelIdentifier =
-        NSUserInterfaceItemIdentifier("introRemotePanel")
-
-    /// The iPhone panel's one line, per state — `nil` where the panel itself
-    /// does not exist.
-    private var remoteInviteLine: String? {
-        switch remoteInvite {
-        case .unavailable: return nil
-        case .allowOff: return Self.remoteAllowOffLine
-        case .notConnected: return Self.remotePanelLine
-        case .connected(let phoneName):
-            return Self.remoteConnectedLine(phoneName: phoneName, target: session.targetName)
-        }
+    @objc private func remoteLinkClicked(_ sender: NSButton) {
+        guard let url = URL(string: RemoteInviteView.codeURLString) else { return }
+        openURL(url)
     }
 
     /// A panel's title — the plate voice, on the CHASSIS ink. `stageInk`
@@ -1669,47 +1617,18 @@ public final class BTAlignmentWizardView: NSView {
         return byEarPanelLabels.dropFirst().first?.stringValue
     }
 
-    /// The iPhone panel's heading, line, and whether a QR is on the page —
-    /// the four states of `shape-mac-invites.md` §2.2, read the way a user
-    /// sees them.
-    public var test_remotePanelHeading: String? {
-        introPanelLabels.first?.stringValue
-    }
-
-    public var test_remotePanelLine: String? {
-        introPanelLabels.dropFirst().first?.stringValue
-    }
-
-    /// Read off the LIVE panel rather than a stored reference, so a state
-    /// that removes the code cannot report a stale one.
-    private var remoteInviteView: RemoteInviteView? {
-        remotePanelStack?.arrangedSubviews.compactMap { $0 as? RemoteInviteView }.first
-    }
-
-    public var test_remoteInviteAddress: String? { remoteInviteView?.test_addressText }
-    public var test_remoteInviteTileSide: CGFloat? { remoteInviteView?.test_tileSide }
+    /// The title row's iPhone link, or `nil` where it is hidden.
+    public var test_remoteLinkTitle: String? { remoteLink.isHidden ? nil : remoteLink.title }
+    func test_clickRemoteLink() { remoteLink.performClick(nil) }
     public var test_byEarPanelHeading: String? { byEarPanelLabels.first?.stringValue }
-    /// Every line of the trailing intro panel, in reading order — heading, the
+    /// Every line of the intro panel, in reading order — heading, the
     /// lead/instruction lines, and the cost note — where `test_bodyText` (which
-    /// reads the leading panel's instruction alone) cannot see them.
+    /// reads one instruction line alone) cannot see them.
     var test_byEarPanelLines: [String] { byEarPanelLabels.map(\.stringValue) }
 
-    /// The labels of the TRAILING intro panel, in reading order.
+    /// The labels of the intro panel, in reading order.
     private var byEarPanelLabels: [NSTextField] {
         (introPanelStacks.last?.arrangedSubviews ?? []).compactMap { $0 as? NSTextField }
-    }
-
-    /// The labels of the LEADING intro panel, in reading order — empty where
-    /// that panel is not drawn at all.
-    private var introPanelLabels: [NSTextField] {
-        (remotePanelStack?.arrangedSubviews ?? []).compactMap { $0 as? NSTextField }
-    }
-
-    /// The leading panel, found by its identifier rather than by position:
-    /// when it is absent the by-ear panel is `introPanelStacks.first`, and
-    /// reporting its lines as the iPhone panel's would be a silent lie.
-    private var remotePanelStack: NSStackView? {
-        introPanelStacks.first { $0.identifier == Self.remotePanelIdentifier }
     }
 
     private var introPanelStacks: [NSStackView] {
@@ -1808,24 +1727,13 @@ public final class BTAlignmentWizardView: NSView {
             .compactMap { $0 as? NSStackView }
             .allSatisfy { $0.fittingSize.width <= available }
     }
-    /// Do the title row's three slots stay clear of each other? The name and
-    /// the click count are pinned to OPPOSITE edges of a plain container with
-    /// the Beta chip between them, so a long device name has nothing but its
-    /// truncation guard between it and overprinting either of them.
+    /// Do the title row's two slots stay clear of each other? The name and
+    /// the click count are pinned to OPPOSITE edges of a plain container, so a
+    /// long device name has nothing but its truncation guard between it and
+    /// overprinting the count.
     var test_titleSlotsAreClear: Bool {
         layoutSubtreeIfNeeded()
-        return titleLabel.frame.maxX <= betaChip.frame.minX
-            && betaChip.frame.maxX <= clickCountLabel.frame.minX
-    }
-    /// The title row's middle slot: the word the chip is DRAWING, or `nil`
-    /// when it is not in the row, hidden, or laid out to nothing. Reads the
-    /// label's own `stringValue` and the chip's real placement rather than the
-    /// static constant, so it can actually fail.
-    var test_betaChipText: String? {
-        layoutSubtreeIfNeeded()
-        guard betaChip.superview != nil, !betaChip.isHiddenOrHasHiddenAncestor,
-              !betaChip.frame.isEmpty else { return nil }
-        return betaChip.drawnText
+        return titleLabel.frame.maxX <= clickCountLabel.frame.minX
     }
     private func clickButton(titled title: String) {
         actionButtons.first { $0.title == title }?.performClick(nil)
@@ -1844,69 +1752,5 @@ public final class BTAlignmentWizardView: NSView {
         guard let item = referencePopUp.menu?.items.first(where: { $0.title == title }),
               let action = item.action, let target = item.target as? NSObject else { return }
         _ = target.perform(action, with: item)
-    }
-}
-
-/// The "Beta" capsule in the wizard's title row. Deliberately NEUTRAL — a
-/// recessed well, a control rim and secondary ink — because beta is a fact
-/// about alignment itself, not a state this run is reporting, so it gets no
-/// hue. Local to this file: the wizard is the only Mac surface that wears it.
-private final class BetaChipView: NSView {
-
-    static let text = "Beta"
-
-    private let label = NSTextField(labelWithString: BetaChipView.text)
-
-    /// What the chip's label actually holds, for the test hook to read.
-    var drawnText: String? { label.stringValue.isEmpty ? nil : label.stringValue }
-
-    init() {
-        super.init(frame: .zero)
-        translatesAutoresizingMaskIntoConstraints = false
-        wantsLayer = true
-        label.translatesAutoresizingMaskIntoConstraints = false
-        // Same reason as the title row's own labels: a label left in the
-        // default multi-line mode publishes no horizontal content size, and a
-        // chip sized to its text would then collapse to the empty-field
-        // bearing.
-        label.usesSingleLineMode = true
-        label.alignment = .center
-        label.font = Tokens.Font.microLabel
-        label.textColor = Tokens.Color.label2
-        // The capsule is the accessibility element, so the label inside it
-        // must not be one too — VoiceOver would say "Beta" twice.
-        label.setAccessibilityElement(false)
-        addSubview(label)
-        NSLayoutConstraint.activate([
-            label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
-            label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
-            label.centerYAnchor.constraint(equalTo: centerYAnchor),
-        ])
-        // The chip is fixed-width chrome beside a name that truncates: it
-        // never gives up a point of its width.
-        setContentHuggingPriority(.required, for: .horizontal)
-        setContentCompressionResistancePriority(.required, for: .horizontal)
-        setAccessibilityElement(true)
-        setAccessibilityRole(.staticText)
-        setAccessibilityLabel(Self.text)
-    }
-
-    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-
-    override var wantsUpdateLayer: Bool { true }
-
-    /// The corner radius is half the live height, so the capsule re-stamps
-    /// itself whenever the row's geometry changes.
-    override func layout() {
-        super.layout()
-        needsDisplay = true
-    }
-
-    override func updateLayer() {
-        layer?.backgroundColor = Tokens.Color.well.cgColor
-        layer?.borderColor = Tokens.Color.rim.cgColor
-        layer?.borderWidth = 1
-        layer?.cornerRadius = bounds.height / 2
-        layer?.cornerCurve = .continuous
     }
 }

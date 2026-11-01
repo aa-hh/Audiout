@@ -228,6 +228,10 @@ public final class BTAlignmentWizardSession {
     /// How many listening passes this run has started so far.
     public private(set) var micAttempts = 0
 
+    /// The mic spent its budget without a read and the run fell to the by-ear
+    /// questions — the one case the questions say why they are there.
+    public private(set) var listeningFailed = false
+
     public private(set) var screen: Screen = .intro
 
     /// Whether the current on-screen proposal came from a mic measurement. Set
@@ -498,6 +502,7 @@ public final class BTAlignmentWizardSession {
             return
         }
         if estimator.openingProposalStands { estimator = makeEstimator() }
+        listeningFailed = true
         presentEstimatorPhase()
     }
 

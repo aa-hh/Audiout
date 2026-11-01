@@ -293,48 +293,37 @@ import AppKit
                 "the door answers with the limit note")
     }
 
-    // MARK: The wizard's iPhone panel (`shape-mac-invites.md` §2.2)
+    // MARK: The wizard's iPhone link
 
-    /// Defect this names: the page showing a QR to someone it cannot help —
-    /// a Mac whose Allow switch is off, or a user whose phone is already
-    /// connected and only needs telling what to tap. Each state is read
-    /// through the panel the user sees, not through the pushed value.
-    @Test func theIPhonePanelSaysSomethingUsefulInEveryState() {
+    /// Turns red if the intro's iPhone link opens anything but the App Store
+    /// page, or if the QR column it replaced comes back in the middle of the
+    /// page. Read through the page the user sees.
+    @Test func theIPhoneLinkOpensTheAppStoreFromTheTitleRow() {
         let (popover, _) = makePopover()
         showNote(popover)
         popover.test_btAlignmentNoteView("bt-a:output")?.test_clickAlign()
         let wizard = popover.test_btWizardView()
+        var opened: [URL] = []
+        wizard?.openURL = { opened.append($0) }
 
-        #expect(wizard?.test_remotePanelHeading == "Measure with your iPhone")
-        #expect(wizard?.test_remotePanelLine == BTAlignmentWizardView.remotePanelLine)
-        #expect(wizard?.test_remoteInviteTileSide == RemoteInviteView.wizardTileSide)
+        #expect(wizard?.test_remoteLinkTitle == "Measure with your iPhone")
         #expect(wizard?.test_byEarPanelHeading == "Align by ear",
-                "the trailing panel names the Mac's own run")
+                "the panel names the Mac's own run, and it is the only one")
+        #expect(wizard?.test_byEarPanelLines.contains(
+            BTAlignmentWizardView.remoteLinkTitle) == false)
 
-        wizard?.remoteInvite = .allowOff
-        #expect(wizard?.test_remoteInviteTileSide == nil,
-                "no code on a Mac that refuses phones")
-        #expect(wizard?.test_remotePanelLine == BTAlignmentWizardView.remoteAllowOffLine)
+        wizard?.test_clickRemoteLink()
+        #expect(opened.map(\.absoluteString) == [RemoteInviteView.codeURLString])
 
         wizard?.remoteInvite = .connected(phoneName: "Alec's iPhone")
-        #expect(wizard?.test_remoteInviteTileSide == nil,
-                "no code where the phone is already here")
-        #expect(wizard?.test_remotePanelLine
-                == "Open Audiout Remote on Alec's iPhone and tap the tuning fork beside Move 2.")
-
-        wizard?.remoteInvite = .connected(phoneName: nil)
-        #expect(wizard?.test_remotePanelLine
-                == "Open Audiout Remote on your iPhone and tap the tuning fork beside Move 2.",
-                "several phones, or no name on file: the Mac never guesses which one")
+        #expect(wizard?.test_remoteLinkTitle == "Measure with your iPhone",
+                "a phone already here changes nothing on the page")
     }
 
-    /// Defect this names: a release built before Audiout Remote is approved
-    /// still offering "Measure with your iPhone" on the wizard's first page —
-    /// a heading, a line and a QR for an app nobody can download. The second
-    /// half pins the panel lookup: with the iPhone panel gone, reading the
-    /// leading panel by POSITION returns the by-ear panel's lines and reports
-    /// them as the iPhone panel's.
-    @Test func aBuildWithoutTheCompanionDropsTheIPhonePanel() {
+    /// Turns red if a release built before Audiout Remote is approved still
+    /// offers "Measure with your iPhone" on the wizard's first page — a link
+    /// to an app nobody can download.
+    @Test func aBuildWithoutTheCompanionDropsTheIPhoneLink() {
         let (popover, _) = makePopover()
         showNote(popover)
         popover.test_btAlignmentNoteView("bt-a:output")?.test_clickAlign()
@@ -342,17 +331,23 @@ import AppKit
         let byEarBody = wizard?.test_bodyText
 
         wizard?.remoteInvite = .unavailable
-        #expect(wizard?.test_remotePanelHeading == nil)
-        #expect(wizard?.test_remotePanelLine == nil)
-        #expect(wizard?.test_remoteInviteTileSide == nil)
-        #expect(wizard?.test_byEarPanelHeading == "Align by ear",
-                "the Mac's own run is left as the intro's one column")
-        #expect(wizard?.test_bodyText == byEarBody,
-                "carrying the same instructions it did beside the iPhone panel")
+        #expect(wizard?.test_remoteLinkTitle == nil)
+        #expect(wizard?.test_bodyText == byEarBody, "the panel itself is untouched")
 
         wizard?.remoteInvite = .notConnected
-        #expect(wizard?.test_remotePanelHeading == "Measure with your iPhone",
-                "the panel comes back when the build carries the phone app")
+        #expect(wizard?.test_remoteLinkTitle == "Measure with your iPhone",
+                "the link comes back when the build carries the phone app")
+    }
+
+    /// Turns red if the iPhone link follows the run past the intro, where the
+    /// title row's right slot belongs to the click count.
+    @Test func theIPhoneLinkIsIntroOnly() {
+        let (popover, _) = makePopover()
+        showNote(popover)
+        popover.test_btAlignmentNoteView("bt-a:output")?.test_clickAlign()
+        let wizard = popover.test_btWizardView()
+        wizard?.test_clickButton(titled: "Start")
+        #expect(wizard?.test_remoteLinkTitle == nil, "got \(screenName(wizard))")
     }
 
     /// Defect this names: a by-ear sheet left standing over a measurement the
@@ -972,24 +967,6 @@ import AppKit
                 "the name gives way to the click count, never overprints it")
     }
 
-    /// Alignment ships as a beta, and the title row is where this window says
-    /// so. Turns red if the chip leaves the title row on any screen, or if it
-    /// overprints the name or the click count once it is there.
-    @Test func theBetaChipStaysInTheTitleRowThroughTheRun() {
-        let fleet = [local(), airplay(), bt()]
-        let (popover, _) = makePopover(fleet: fleet)
-        popover.update(devices: fleet)
-        popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
-        popover.test_toggleDeviceEnabled(deviceID: "bt-a:output", on: true)
-        popover.startBTAlignmentWizard(deviceID: "bt-a:output", door: .menu)
-        let wizard = popover.test_btWizardView()
-        #expect(wizard?.test_betaChipText == "Beta")
-        wizard?.test_clickButton(titled: "Start")
-        #expect(wizard?.test_betaChipText == "Beta")
-        #expect(wizard?.test_titleSlotsAreClear == true,
-                "the chip sits between the name and the click count, clear of both")
-    }
-
     // MARK: Manual relaunch (the wizard outlives "Not now" — locked UX)
 
     /// The mix-selected row without any card: ⌥-click on the DRAWER's
@@ -1359,6 +1336,13 @@ import AppKit
         // The intro's right panel leads with the automatic measurement, which
         // is what makes the mic prompt on Start expected rather than a surprise
         // (the denial only happens once Start is pressed).
+        #expect(wizard?.test_byEarPanelHeading == "Hands-free alignment")
+        #expect(wizard?.test_byEarPanelLines.contains {
+            $0.contains(BTAlignmentWizardView.listeningFailedLead) || $0.contains("No clear read")
+        } == false, "the intro promises a hands-free run and does not hedge it")
+        #expect(wizard?.test_byEarPanelLines == [BTAlignmentWizardView.autoPanelTitle,
+                                                 BTAlignmentWizardView.autoLeadCopy],
+                "no click count on a run that asks for no clicks")
         #expect(wizard?.test_byEarPanelLines.contains(BTAlignmentWizardView.autoLeadCopy)
                 == true, "got \(String(describing: wizard?.test_byEarPanelLines))")
         wizard?.test_clickButton(titled: "Start")
@@ -1396,6 +1380,10 @@ import AppKit
             return false
         }
         #expect(recorder.ticks == [true, false, true])
+        // Only now does the page say why it is asking.
+        #expect(wizard?.test_bandLabels.contains {
+            $0.hasPrefix(BTAlignmentWizardView.listeningFailedLead)
+        } == true, "got \(String(describing: wizard?.test_bandLabels))")
     }
 
     /// Turns red if the host stops forwarding the probe's lane verdicts into

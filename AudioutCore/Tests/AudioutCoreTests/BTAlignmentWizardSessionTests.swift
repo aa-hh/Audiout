@@ -633,11 +633,13 @@ private func proposalValue(_ session: BTAlignmentWizardSession) -> Double? {
 
         session.endListening()
         #expect(session.screen == .listening(isRealignment: true), "got \(session.screen)")
+        #expect(!session.listeningFailed, "one miss still has a retry in hand")
         session.endListening()
         guard case .question = session.screen else {
             Issue.record("expected the questions, got \(session.screen)")
             return
         }
+        #expect(session.listeningFailed)
         #expect(recorder.ends.isEmpty, "the run is still live")
         #expect(recorder.ticks == [true, false, true])
         session.cancel()

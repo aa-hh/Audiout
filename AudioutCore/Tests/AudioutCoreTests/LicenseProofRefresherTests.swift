@@ -223,16 +223,24 @@ import Testing
         #expect(transport.requests.count == 2)
     }
 
-    /// Red if the hour started on an unreachable answer, so a Mac that tried
-    /// offline waits an hour after the network returns.
-    @Test func aFailedRequestDoesNotHoldOff() async {
+    /// Red if an unreachable answer started no hold-off, so wake, path
+    /// changes and phone connects re-sent back to back; red too if it held off
+    /// the full hour, so a Mac that tried offline waited an hour after the
+    /// network returned.
+    @Test func aFailedRequestHoldsOffOnlyAMinute() async {
         let transport = Transport()
+        let clock = Clock()
         let counter = Counter()
-        let refresher = refresher(nearExpirySettings(), transport, Clock(), counter)
+        let refresher = refresher(nearExpirySettings(), transport, clock, counter)
         refresher.start()
         refresher.refreshIfNeeded()
         await SuiteWait.until { counter.count == 1 }
 
+        clock.now = Self.now0.addingTimeInterval(59)
+        refresher.refreshIfNeeded()
+        #expect(transport.requests.count == 1)
+
+        clock.now = Self.now0.addingTimeInterval(61)
         refresher.refreshIfNeeded()
         #expect(transport.requests.count == 2)
     }

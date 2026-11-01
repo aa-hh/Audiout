@@ -10,14 +10,15 @@ import Foundation
 /// it remains, hold off a quarter of it after an answer (at most an hour) and
 /// check on a timer every quarter (at most 24 hours), never more often than
 /// once a minute. For the 14-day production proof that is seven days, an hour
-/// and a day, and a staging proof of minutes is re-asked in minutes.
+/// and a day, and a staging proof of minutes is re-asked in minutes. A request
+/// that got no answer (offline, a 429, a server error) holds off one minute.
 ///
 /// Four triggers call ``refreshIfNeeded()``: the Mac waking, a phone
 /// connecting, the timer, and a usable network path appearing. They cannot
-/// stack: a request in flight blocks the next, and an answered request holds
-/// off further ones. A request that never reached the server does not start
-/// that hold-off, so a Mac that tried offline asks again as soon as the
-/// network returns.
+/// stack: a request in flight blocks the next, and every finished request
+/// holds off further ones. A request with no answer holds off only a minute,
+/// so a Mac that tried offline asks again soon after the network returns
+/// without sending back to back while the server is down.
 ///
 /// Main queue only, like ``TrialReachability``.
 public final class LicenseProofRefresher {
@@ -35,9 +36,10 @@ public final class LicenseProofRefresher {
     /// be read.
     public static let timerInterval: TimeInterval = 86_400
 
-    /// The least time between answered requests and between timer checks
-    /// however short the proof, which keeps a Mac far under the server's 10
-    /// validates per key per minute.
+    /// The least time between requests and between timer checks however
+    /// short the proof, and the hold-off after a request with no answer,
+    /// which keeps a Mac far under the server's 10 validates per key per
+    /// minute.
     public static let shortestInterval: TimeInterval = 60
 
     private let settings: AppSettings
@@ -47,7 +49,9 @@ public final class LicenseProofRefresher {
 
     private var started = false
     private var inFlight = false
-    private var lastAnsweredAt: Date?
+    /// No request before this time: the end of the hold-off after the last
+    /// finished request.
+    private var holdOffUntil: Date?
     private var timer: Timer?
     /// The proof the timer was last timed for, so a licence change that kept
     /// the same proof leaves the timer alone.
@@ -162,20 +166,24 @@ public final class LicenseProofRefresher {
         }
     }
 
-    /// Asks the server about the stored key when the proof needs it and no
-    /// other request is in flight or answered within the proof's hold-off.
+    /// Asks the server about the stored key when the proof needs it, no other
+    /// request is in flight, and the last one's hold-off has passed: the
+    /// proof's hold-off after an answer, ``shortestInterval`` after none.
     public func refreshIfNeeded() {
         guard started, !inFlight else { return }
-        if let lastAnsweredAt,
-           now().timeIntervalSince(lastAnsweredAt) < Self.timings(for: settings.companionToken).minimumInterval { return }
+        if let holdOffUntil, now() < holdOffUntil { return }
         guard Self.needsRefresh(settings: settings, now: now()) else { return }
         inFlight = true
         LicenseValidator(settings: settings, transport: transport).validate { [weak self] result in
             guard let self else { return }
             self.inFlight = false
+            let holdOff: TimeInterval
             if case .verified = result {
-                self.lastAnsweredAt = self.now()
+                holdOff = Self.timings(for: self.settings.companionToken).minimumInterval
+            } else {
+                holdOff = Self.shortestInterval
             }
+            self.holdOffUntil = self.now().addingTimeInterval(holdOff)
             self.onRefreshed()
         }
     }

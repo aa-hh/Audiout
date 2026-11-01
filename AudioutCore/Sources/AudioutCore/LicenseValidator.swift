@@ -32,6 +32,10 @@ public struct LicenseValidator {
     private let settings: AppSettings
     private let transport: Transport
 
+    /// Main queue only. One line per launch is enough to point at a server
+    /// missing its signing secret.
+    private nonisolated(unsafe) static var loggedMissingToken = false
+
     public init(settings: AppSettings, transport: @escaping Transport = LicenseValidator.defaultTransport) {
         self.settings = settings
         self.transport = transport
@@ -101,9 +105,13 @@ public struct LicenseValidator {
                 // other verified status revokes it; `.active` with no token
                 // (old server, or the secret isn't configured) leaves the
                 // stored value as-is — its own expiry bounds the staleness.
+                // Such an answer is logged once per launch.
                 if status == .active {
                     if let token = body.companionToken, !token.isEmpty {
                         settings.companionToken = token
+                    } else if !Self.loggedMissingToken {
+                        Self.loggedMissingToken = true
+                        Telemetry.log(.settings, "companion_token_missing")
                     }
                 } else {
                     settings.companionToken = nil

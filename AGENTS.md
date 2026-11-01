@@ -110,13 +110,16 @@ repo. `AudioutCore` pins it by version.
   `AirPlayEngine/docs/VENDORED-DIFFS.md` with license, rationale and hunk.
 - **UI targets depend on the model, never the reverse.** The
   `AudioutCore` library target imports no AppKit, and that is verified.
-- **Every build offers the iPhone companion**: `AppSettings.remoteAppIsOffered`
-  is `true`. Everything that names the phone app still reads the resolution it
-  feeds — the Setup card, the Settings switch with its QR row and phone list,
-  the alignment wizard's iPhone panel, and the companion server itself — and a
-  NEW surface mentioning the phone must ask it too. A dev build (bundle id
-  `com.audiout.Audiout.<suffix>`) has the Settings switch defaulting OFF;
-  `AUDIOUT_COMPANION=on` still overrides everything.
+- **Every build runs the iPhone companion server, but shows the phone app only
+  when `app-config.json` says so.** `AppSettings.remoteAppIsOffered` is `true`,
+  so the server follows the Allow switch as before. Everything that names the
+  phone app — the Setup card, the Settings › Audiout Remote section, the
+  alignment wizard's iPhone link, the licence gate's phone line — asks
+  `AppSettings.remoteAppIsVisible(settings:)` instead, which is true only for
+  `"mac": {"remote": {"visible": true}}` in the website's file, a dev build, or
+  `AUDIOUT_COMPANION=on`. A NEW surface mentioning the phone must ask it too. A
+  dev build (bundle id `com.audiout.Audiout.<suffix>`) has the Settings switch
+  defaulting OFF; `AUDIOUT_COMPANION=on`/`off` still overrides everything.
 - **Read `dev/notes/` before a non-trivial phase** — briefs exist to de-risk work
   before it starts. They live in the main checkout only, so a worktree reads them
   at `~/Projects/AirPlay Controller/dev/notes/`.

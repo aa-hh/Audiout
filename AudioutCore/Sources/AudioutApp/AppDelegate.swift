@@ -1056,7 +1056,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
             self?.licenseProofRefresher?.start()
         }
         applyLicenseState()
-        RemoteAppConfigFetcher(settings: settings).refresh { [weak self] in self?.applyLicenseState() }
+        refreshRemoteConfig()
 
     }
 
@@ -1509,9 +1509,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
             // that is only now becoming visible.
             if screen == .settings { self?.settingsRootController?.reloadFromSettings() }
             if screen == .mixer, let self {
-                RemoteAppConfigFetcher(settings: settings).refresh(minimumInterval: 3600) { [weak self] in
-                    self?.applyLicenseState()
-                }
+                self.refreshRemoteConfig(minimumInterval: 3600)
                 // A limited install re-asks the server on every open, so a key
                 // bought elsewhere lifts the limit without a relaunch.
                 if LicenseGate.limitsToOneSpeaker(settings: settings) {
@@ -2608,6 +2606,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
         NSWorkspace.shared.open(SystemSettingsPane.bluetooth.url)
     }
 
+    /// Fetches `app-config.json`, then re-applies the licence state. When the
+    /// new file shows or hides the iPhone app, the Settings screen is rebuilt
+    /// on its next open; every other surface asks at the moment it is built.
+    @MainActor
+    private func refreshRemoteConfig(minimumInterval: TimeInterval = 0) {
+        let wasVisible = AppSettings.remoteAppIsVisible(settings: settings)
+        RemoteAppConfigFetcher(settings: settings).refresh(minimumInterval: minimumInterval) { [weak self] in
+            guard let self else { return }
+            self.applyLicenseState()
+            if AppSettings.remoteAppIsVisible(settings: self.settings) != wasVisible {
+                self.surface?.invalidateSettingsScreen()
+            }
+        }
+    }
+
     /// The Settings screen's content, built on the first visit: a Groups-style
     /// sidebar of sections and one pane.
     @MainActor
@@ -2689,8 +2702,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
         var sections: [SettingsRootViewController.Section] = [
             .init(title: "General", symbolName: "gearshape", viewController: general),
         ]
-        // A build with no companion shows no Audiout Remote section at all.
-        if remote.isOffered {
+        // While the iPhone app is hidden there is no Audiout Remote section at
+        // all; `refreshRemoteConfig` rebuilds this screen when that changes.
+        if remote.isVisible {
             sections.append(.init(title: "Audiout Remote", symbolName: "iphone", viewController: remote))
         }
         sections += [
@@ -3105,11 +3119,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
     /// file, so the Mac never guesses which one is in the room.
     @MainActor
     private func remoteInviteState() -> BTAlignmentWizardView.RemoteInviteState {
-        let resolution = AppSettings.resolvedAllowRemoteControlWithSource(settings: settings)
-        // A build with no phone app drops the panel; a Mac that merely refuses
-        // phones keeps it and says how to allow them.
-        if resolution.isUnoffered { return .unavailable }
-        guard resolution.value else { return .allowOff }
+        // While the iPhone app is hidden the panel goes; a Mac that merely
+        // refuses phones keeps it and says how to allow them.
+        guard AppSettings.remoteAppIsVisible(settings: settings) else { return .unavailable }
+        guard AppSettings.resolvedAllowRemoteControl(settings: settings) else { return .allowOff }
         guard companionCoordinator.clientCount > 0 else { return .notConnected }
         return .connected(phoneName: companionCoordinator.invitePhoneName)
     }

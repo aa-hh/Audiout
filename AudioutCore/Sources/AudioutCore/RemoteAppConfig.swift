@@ -3,14 +3,19 @@
 import Foundation
 
 /// The Mac half of the website's `app-config.json`: a static file Alec edits
-/// to switch a behaviour off for a range of builds without shipping a release.
-/// Today it carries one switch, `mac.licenseCheck`, which waives the
-/// one-speaker limit (``LicenseGate/limitsToOneSpeaker(settings:)``) while the
-/// licence server is being repaired.
+/// to change a behaviour in installed copies without shipping a release.
+/// It carries two switches:
+/// - `mac.licenseCheck` waives the one-speaker limit
+///   (``LicenseGate/limitsToOneSpeaker(settings:)``) while the licence server
+///   is being repaired. The Mac never writes a licence or token to stand in
+///   for the waiver; it only skips the limit.
+/// - `mac.remote.visible` shows every mention of the iPhone app
+///   (``AppSettings/remoteAppIsVisible(settings:environment:isDevBuild:offered:)``).
+///   The companion server ignores it.
 ///
-/// **A failed fetch never changes anything.** A stale, missing, unparseable or
-/// unfamiliar file means normal behaviour, and the Mac never writes a licence
-/// or token to stand in for the waiver; it only skips the limit.
+/// **A failed fetch never changes anything.** A missing, unparseable or
+/// unfamiliar file means normal behaviour: the limit applies and the iPhone
+/// app stays hidden.
 public struct RemoteAppConfig {
 
     public static let url = URL(string: "https://audiout.app/app-config.json")!
@@ -22,12 +27,18 @@ public struct RemoteAppConfig {
     private let licenseCheckIsOff: Bool
     private let licenseCheckUpToBuild: Int?
 
+    /// True only when `mac.remote.visible` is the JSON boolean `true`.
+    let remoteIsVisible: Bool
+
     /// `nil` unless the body is a JSON object whose `v` is 1. Only
-    /// `mac.licenseCheck` is read; a missing or malformed key means no switch.
+    /// `mac.licenseCheck` and `mac.remote` are read; a missing or malformed key
+    /// means no switch.
     public static func parse(_ data: Data) -> RemoteAppConfig? {
         guard let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
               jsonInt(root["v"]) == 1 else { return nil }
-        let check = ((root["mac"] as? [String: Any])?["licenseCheck"]) as? [String: Any]
+        let mac = root["mac"] as? [String: Any]
+        let check = mac?["licenseCheck"] as? [String: Any]
+        let remote = mac?["remote"] as? [String: Any]
         var off = jsonBool(check?["disabled"]) == true
         var upTo: Int?
         if let raw = check?["upToBuild"], !(raw is NSNull) {
@@ -36,7 +47,8 @@ public struct RemoteAppConfig {
             upTo = jsonInt(raw)
             if upTo == nil { off = false }
         }
-        return RemoteAppConfig(licenseCheckIsOff: off, licenseCheckUpToBuild: upTo)
+        return RemoteAppConfig(licenseCheckIsOff: off, licenseCheckUpToBuild: upTo,
+                               remoteIsVisible: jsonBool(remote?["visible"]) == true)
     }
 
     /// JSONSerialization hands back every number and boolean as an NSNumber, and

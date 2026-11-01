@@ -256,20 +256,25 @@ import AppKit
 
     // MARK: The invitation to Audiout Remote
 
-    /// Defect this names: a release built before Audiout Remote is approved
-    /// still offers the Audiout Remote section — the Allow switch, the QR
-    /// invitation and the phone list, three offers to pair with an app nobody
-    /// can download. The app builds the section only while `isOffered`.
-    @Test func aBuildWithoutTheCompanionOffersNoRemoteSection() throws {
+    /// Defect this names: the Audiout Remote section shows before
+    /// `app-config.json` turns the iPhone app on, stays hidden after it does,
+    /// or a build without the companion offers the Allow switch, the QR
+    /// invitation and the phone list for an app nobody can download. The app
+    /// builds the section only while `isVisible`.
+    @Test func theRemoteSectionShowsOnlyWhileTheIPhoneAppIsVisible() throws {
         let settings = AppSettings(defaults: isolatedDefaults)
         settings.allowRemoteControl = true
+        #expect(!RemoteSettingsViewController(settings: settings, environment: [:]).isVisible)
+        settings.remoteConfigData = Data(#"{"v": 1, "mac": {"remote": {"visible": true}}}"#.utf8)
+        #expect(RemoteSettingsViewController(settings: settings, environment: [:]).isVisible)
+
         let pane = RemoteSettingsViewController(settings: settings, environment: [:],
                                                  remoteAppIsOffered: false,
                                                  approvals: try makeController(records: [
                                                     record(Self.ownerID, name: "Owner's iPhone",
                                                            decision: .approved),
                                                  ]))
-        #expect(!pane.isOffered)
+        #expect(!pane.isVisible)
         #expect(!pane.test_remoteInviteRowIsMounted)
         #expect(!pane.test_allowRemoteControlIsOn,
                 "the effective state is off, whatever the persisted setting says")

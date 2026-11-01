@@ -546,10 +546,12 @@ public final class SetupModel {
                 bluetoothPromptTimeout: TimeInterval = 10) {
         self.usageStatsAreAvailable = usageStatsAvailable
         // Nil means "read the switch", which is what the app wants everywhere
-        // — the EFFECTIVE Allow setting, launch option included. Tests pass a
-        // fixed value so a card's presence never depends on a real default.
+        // — the iPhone app is visible AND the EFFECTIVE Allow setting is on,
+        // launch option included. Tests pass a fixed value so a card's
+        // presence never depends on a real default.
         self.remoteAppIsAvailable = remoteAppAvailable
-            ?? AppSettings.resolvedAllowRemoteControl(settings: settings)
+            ?? (AppSettings.remoteAppIsVisible(settings: settings)
+                && AppSettings.resolvedAllowRemoteControl(settings: settings))
         self.bluetoothPromptTimeout = bluetoothPromptTimeout
         self.audioProbe = audioProbe
         self.localNetwork = localNetwork
@@ -1067,10 +1069,11 @@ public final class SetupModel {
     /// this model owns no socket.
     public private(set) var remoteAppIsConnected = false
 
-    /// Whether the Mac will accept a phone at all: the EFFECTIVE Allow
-    /// setting, launch option included. False drops the card from the flow
-    /// rather than auto-passing it — an invitation on a Mac that refuses
-    /// phones would be a claim that is not real.
+    /// Whether the Setup window offers the iPhone card: the iPhone app is
+    /// visible (``AppSettings/remoteAppIsVisible(settings:environment:isDevBuild:offered:)``)
+    /// and the EFFECTIVE Allow setting is on, launch option included. False
+    /// drops the card from the flow rather than auto-passing it — an
+    /// invitation on a Mac that refuses phones would be a claim that is not real.
     public let remoteAppIsAvailable: Bool
 
     /// The app layer's push. Repaints on a real change only, so a reconnect

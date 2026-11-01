@@ -370,21 +370,23 @@ import AudioutSharedUI
         }
     }
 
-    private static let offerCopy = AppSettings.remoteAppIsOffered
-        ? LicenseGateViewController.offerSubtitleWithPhone : LicenseGateViewController.offerSubtitleMacOnly
+    /// No stored `app-config.json`, so the iPhone app is hidden.
+    private static let offerCopy = LicenseGateViewController.offerSubtitleMacOnly
     private static let enterCopy = "Paste or type the key from your receipt email."
 
     // MARK: The two states
 
-    /// Red if the offer subtitle stopped asking `AppSettings.remoteAppIsOffered`
-    /// and invited buyers to the phone app in a build that does not offer it.
-    @Test func theOfferSubtitleMentionsThePhoneOnlyWhenTheRemoteAppIsOffered() {
-        #expect(LicenseGateViewController.offerSubtitleWithPhone ==
-            "One purchase covers this Mac and Audiout Remote on your iPhone.")
-        #expect(LicenseGateViewController.offerSubtitleMacOnly ==
+    /// Red if the offer subtitle stopped asking `AppSettings.remoteAppIsVisible`:
+    /// it would name the phone app before `app-config.json` turns it on, or
+    /// stop naming it after.
+    @MainActor
+    @Test func theOfferSubtitleMentionsThePhoneOnlyWhileTheRemoteAppIsVisible() {
+        #expect(makeContent(settings(withBuy: true), Transport()).test_bodyText ==
             "One purchase covers this Mac.")
-        #expect(Self.offerCopy == (AppSettings.remoteAppIsOffered
-            ? LicenseGateViewController.offerSubtitleWithPhone : LicenseGateViewController.offerSubtitleMacOnly))
+        let visible = settings(withBuy: true)
+        visible.remoteConfigData = Data(#"{"v": 1, "mac": {"remote": {"visible": true}}}"#.utf8)
+        #expect(makeContent(visible, Transport()).test_bodyText ==
+            "One purchase covers this Mac and Audiout Remote on your iPhone.")
     }
 
 

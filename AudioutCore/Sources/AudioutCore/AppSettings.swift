@@ -488,6 +488,35 @@ public struct AppSettings {
     /// build, shipping and dev alike. `AUDIOUT_COMPANION` still wins over it.
     public static var remoteAppIsOffered: Bool { true }
 
+    /// Whether the Mac shows anything that names the iPhone app: the Settings
+    /// pane, the Setup card, the alignment wizard's iPhone link, the licence
+    /// gate's phone line. Every such surface asks this and nothing else. The
+    /// companion server does not: it follows
+    /// ``resolvedAllowRemoteControlWithSource(explicit:environment:offered:settings:)``,
+    /// so a phone can still connect while every mention is hidden.
+    ///
+    /// In order: `AUDIOUT_COMPANION` `1`/`on` shows and `0`/`off` hides; a build
+    /// that does not offer the companion hides; a dev build shows; otherwise
+    /// the stored `app-config.json` decides, and only a JSON `true` at
+    /// `mac.remote.visible` shows. Unlike the licence switch, the file's age is
+    /// not checked: the last file that parsed stays in force until a newer one
+    /// replaces it.
+    public static func remoteAppIsVisible(
+        settings: AppSettings,
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        isDevBuild: Bool = Self.isDevBuild,
+        offered: Bool = remoteAppIsOffered
+    ) -> Bool {
+        switch environment[allowRemoteControlEnvironmentVariableName]?.lowercased() {
+        case "1", "on": return true
+        case "0", "off": return false
+        default: break
+        }
+        guard offered else { return false }
+        if isDevBuild { return true }
+        return settings.remoteConfigData.flatMap(RemoteAppConfig.parse)?.remoteIsVisible ?? false
+    }
+
     /// Dev builds only: the Settings › General › Developer "Licence gate"
     /// popup. ``LicenseGatePresentation/resolved(environment:settings:isDevBuild:)``
     /// reads it only when ``isDevBuild``; a shipping build never does.
@@ -561,8 +590,9 @@ public struct AppSettings {
         /// (``remoteAppIsOffered`` is `false`). Distinct from `.setting(false)`
         /// and `.forced(false)` because those two are a feature turned off,
         /// which a UI shows as a switch the user may turn back on, and this
-        /// one is a feature that is not here: every surface naming the phone
-        /// app is absent rather than off.
+        /// one is a feature that is not here: no server runs, and
+        /// ``remoteAppIsVisible(settings:environment:isDevBuild:offered:)``
+        /// hides every surface naming the phone app.
         case unoffered
 
         /// The resolved value, regardless of what decided it.
@@ -581,8 +611,9 @@ public struct AppSettings {
         }
 
         /// Whether the companion is missing from this build entirely. A caller
-        /// deciding whether to MOUNT a companion surface asks this, not
-        /// ``value``: an off switch is a promise the feature exists.
+        /// deciding whether to MOUNT a companion surface asks
+        /// ``remoteAppIsVisible(settings:environment:isDevBuild:offered:)``
+        /// instead, which is false here too.
         public var isUnoffered: Bool { self == .unoffered }
     }
 

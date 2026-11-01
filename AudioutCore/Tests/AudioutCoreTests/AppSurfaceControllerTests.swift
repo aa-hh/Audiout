@@ -101,6 +101,29 @@ import AppKit
         _ = popover
     }
 
+    /// Red if `invalidateSettingsScreen()` stopped making the next Settings
+    /// mount build afresh (a pane shown or hidden by `app-config.json` would
+    /// keep its launch-time list), or swapped out the Settings screen the
+    /// user is looking at.
+    @Test func anInvalidatedSettingsScreenIsRebuiltOnItsNextMountOnly() throws {
+        let (surface, _, _, settingsBuilds) = makeSurface()
+        surface.show(anchorRect: nil)
+        surface.select(.settings)
+        let first = try #require(surface.test_settingsScreen)
+
+        surface.invalidateSettingsScreen()
+        #expect(surface.test_hostedContentViewController === first, "the screen on show stays")
+
+        surface.select(.mixer)
+        surface.select(.settings)
+        #expect(settingsBuilds() == 2)
+        #expect(surface.test_hostedContentViewController !== first)
+
+        surface.select(.mixer)
+        surface.select(.settings)
+        #expect(settingsBuilds() == 2, "one invalidation, one rebuild")
+    }
+
     @Test func selectingScreensBuildsEachExactlyOnceAndRoutesThroughSetContent() throws {
         let (surface, _, groupsBuilds, settingsBuilds) = makeSurface()
         surface.show(anchorRect: nil)

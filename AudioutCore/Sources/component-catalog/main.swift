@@ -89,8 +89,9 @@ func makeSettingsRoot(settings: AppSettings) -> SettingsRootViewController {
         .init(title: "General", symbolName: "gearshape",
               viewController: GeneralSettingsViewController(loginItem: CatalogLoginItem(), settings: settings)),
     ]
-    let remote = RemoteSettingsViewController(settings: settings)
-    if remote.isOffered {
+    // Drawn whatever app-config.json says, so the pane always has a picture.
+    let remote = RemoteSettingsViewController(settings: settings, remoteAppIsVisible: true)
+    if remote.isVisible {
         sections.append(.init(title: "Audiout Remote", symbolName: "iphone", viewController: remote))
     }
     sections += [

@@ -69,8 +69,8 @@ public final class LicenseGateViewController: NSViewController {
     static let offerSubtitleWithPhone =
         "One purchase covers this Mac and Audiout Remote on your iPhone."
     static let offerSubtitleMacOnly = "One purchase covers this Mac."
-    private let offerSubtitle = NSTextField(wrappingLabelWithString: AppSettings.remoteAppIsOffered
-        ? LicenseGateViewController.offerSubtitleWithPhone : LicenseGateViewController.offerSubtitleMacOnly)
+    /// Names the phone only while the iPhone app is visible; set in `init`.
+    private let offerSubtitle = NSTextField(wrappingLabelWithString: "")
     /// The panel's one gold button, a gold `CTAButton` and the offer's Return
     /// default.
     private var buyButton: CTAButton!
@@ -168,6 +168,8 @@ public final class LicenseGateViewController: NSViewController {
         // A build from source has no checkout, so there is nothing to offer.
         self.state = settings.buyURL == nil ? .enter : .offer
         super.init(nibName: nil, bundle: nil)
+        offerSubtitle.stringValue = AppSettings.remoteAppIsVisible(settings: settings)
+            ? Self.offerSubtitleWithPhone : Self.offerSubtitleMacOnly
     }
 
     public required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }

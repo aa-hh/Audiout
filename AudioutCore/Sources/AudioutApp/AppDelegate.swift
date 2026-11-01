@@ -1874,6 +1874,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
     /// The Buy link needs no step of its own: `AppSettings.buyURL` composes the
     /// trial's `?t=` when the link is opened, so it carries the key from the
     /// moment one is stored.
+    ///
+    /// Both registrar callers land here on the server's `previously_paid`
+    /// refusal too, which ends the trial and leaves no key. The gate comes back
+    /// at once so its "Continue on one speaker" line explains why, rather than
+    /// at the next launch. It cannot loop: tapping Continue stores
+    /// `hasChosenOneSpeaker`, which `shouldPresent` reads, and the gate's pass
+    /// asks the registrar again only for a running trial, which this Mac no
+    /// longer has.
     @MainActor
     private func useNewTrialKey() {
         LicenseCheckIn(settings: settings).checkInIfNeeded()
@@ -1882,6 +1890,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
             self?.groupController?.licenseAnswered()
         }
         applyLicenseState()
+        if LicenseGate.shouldPresent(settings: settings) { presentLicenseGate() }
     }
 
     /// Offer to fix it when Gatekeeper is running us from its randomized

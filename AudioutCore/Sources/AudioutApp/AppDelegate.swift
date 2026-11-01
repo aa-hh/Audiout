@@ -2249,6 +2249,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
     @discardableResult
     @MainActor
     private func presentSetupForUndeterminedIfNeeded() -> Bool {
+        // First-run Setup is already owed, waiting on app-config.json: let
+        // that one open, with the iPhone card the website asks for.
+        if setupAwaitsRemoteConfig != nil { return true }
         guard onboardingWindowController == nil else { return false }
         guard !didAutoPresentSetupForUndetermined else { return false }
         if let cooldownUntil = permissionAuditCooldownUntil, Date() < cooldownUntil { return false }

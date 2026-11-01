@@ -157,7 +157,10 @@ public final class LicenseGateViewController: NSViewController {
     private static let pulseCycle: CFTimeInterval = 1.4
     private static let pulseKey = "verifyingPulse"
 
+    /// - Parameter environment: decides, with `settings`, whether the offer
+    ///   names the iPhone app; injected as a fixed dictionary in tests.
     public init(settings: AppSettings,
+                environment: [String: String] = ProcessInfo.processInfo.environment,
                 transport: LicenseValidator.Transport? = nil,
                 openURL: @escaping (URL) -> Void,
                 onPassed: @escaping () -> Void) {
@@ -168,7 +171,7 @@ public final class LicenseGateViewController: NSViewController {
         // A build from source has no checkout, so there is nothing to offer.
         self.state = settings.buyURL == nil ? .enter : .offer
         super.init(nibName: nil, bundle: nil)
-        offerSubtitle.stringValue = AppSettings.remoteAppIsVisible(settings: settings)
+        offerSubtitle.stringValue = AppSettings.remoteAppIsVisible(settings: settings, environment: environment)
             ? Self.offerSubtitleWithPhone : Self.offerSubtitleMacOnly
     }
 

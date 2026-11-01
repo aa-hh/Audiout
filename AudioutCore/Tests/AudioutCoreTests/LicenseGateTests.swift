@@ -355,9 +355,10 @@ import AudioutSharedUI
     /// The gate on its own (the clipboard offer's seam is set after `init`).
     @MainActor
     private func makeContent(_ settings: AppSettings, _ transport: Transport,
+                             environment: [String: String] = [:],
                              openURL: @escaping (URL) -> Void = { _ in },
                              onPassed: @escaping () -> Void = {}) -> LicenseGateViewController {
-        LicenseGateViewController(settings: settings, transport: transport.closure,
+        LicenseGateViewController(settings: settings, environment: environment, transport: transport.closure,
                                   openURL: openURL, onPassed: onPassed)
     }
 
@@ -381,11 +382,11 @@ import AudioutSharedUI
     /// stop naming it after.
     @MainActor
     @Test func theOfferSubtitleMentionsThePhoneOnlyWhileTheRemoteAppIsVisible() {
-        #expect(makeContent(settings(withBuy: true), Transport()).test_bodyText ==
+        #expect(makeContent(settings(withBuy: true), Transport(), environment: [:]).test_bodyText ==
             "One purchase covers this Mac.")
         let visible = settings(withBuy: true)
         visible.remoteConfigData = Data(#"{"v": 1, "mac": {"remote": {"visible": true}}}"#.utf8)
-        #expect(makeContent(visible, Transport()).test_bodyText ==
+        #expect(makeContent(visible, Transport(), environment: [:]).test_bodyText ==
             "One purchase covers this Mac and Audiout Remote on your iPhone.")
     }
 

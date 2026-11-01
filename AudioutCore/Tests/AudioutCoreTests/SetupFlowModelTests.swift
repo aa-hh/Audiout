@@ -197,16 +197,16 @@ import Testing
         #expect(!kept.remoteAppIsAvailable, "no app-config.json, no card")
 
         settings.remoteConfigData = Data(#"{"v": 1, "mac": {"remote": {"visible": true}}}"#.utf8)
-        kept.refreshRemoteAppAvailability()
+        kept.refreshRemoteAppAvailability(environment: [:])
         #expect(kept.remoteAppIsAvailable)
         #expect(SetupFlowModel(setup: kept).steps.contains(.audioutRemote))
 
         settings.allowRemoteControl = false
-        kept.refreshRemoteAppAvailability()
+        kept.refreshRemoteAppAvailability(environment: [:])
         #expect(!kept.remoteAppIsAvailable, "a Mac that refuses phones offers no card")
 
         let fixed = makeSetup(remoteAppAvailable: true, settings: settings)
-        fixed.refreshRemoteAppAvailability()
+        fixed.refreshRemoteAppAvailability(environment: [:])
         #expect(fixed.remoteAppIsAvailable)
     }
 

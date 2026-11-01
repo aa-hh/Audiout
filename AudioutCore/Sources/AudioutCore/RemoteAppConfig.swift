@@ -20,8 +20,9 @@ public struct RemoteAppConfig {
 
     public static let url = URL(string: "https://audiout.app/app-config.json")!
 
-    /// How long a fetched file stays in force. After that the limit is back
-    /// until a fetch succeeds.
+    /// How long a fetched file's `mac.licenseCheck` stays in force. After that
+    /// the limit is back until a fetch succeeds. `mac.remote.visible` ignores
+    /// the file's age.
     public static let maxAge: TimeInterval = 7 * 86_400
 
     private let licenseCheckIsOff: Bool

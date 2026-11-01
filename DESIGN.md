@@ -1683,7 +1683,11 @@ carries no state, so re-expanding restores the identical rail.
 Audiout Remote under the Allow switch at 96 pt, and the Setup window's iPhone
 card at 160 pt. The alignment wizard has no tile since 2026-11-01; its title
 row carries a "Measure with your iPhone" text link to the same App Store page
-instead. The code is designed artwork (rounded modules, the brand mark in the
+instead. All three (the Settings pane, the Setup card and the wizard's link)
+exist only while the iPhone app is visible (`AppSettings.remoteAppIsVisible`):
+`mac.remote.visible` is `true` in the website's `app-config.json`, the build is
+a dev build, or `AUDIOUT_COMPANION=on`. Otherwise they are absent, not
+disabled. The code is designed artwork (rounded modules, the brand mark in the
 middle) bundled as `Resources/Audiout-Remote-QR.pdf`, encoding Audiout
 Remote's App Store listing,
 `https://apps.apple.com/app/audiout-remote/id6804838945`. It is a PDF, not the
@@ -1795,7 +1799,7 @@ is a change in two apps.
   guess. One line breaks this and the full-name rule, on the owner's call:
   Settings › Audiout Remote ends with "The iPhone app is coming soon to the
   App Store." in caption voice, one section gap under the last card, whatever
-  the switch says.
+  the Allow switch says, while the pane itself is shown (see QR Tile).
 - Source words are the glossary's, verbatim: **"Measured"**, **"First pass"**,
   **"Timing from last time"** (`BTOffsetSource` in `AudioutSharedUI` owns the
   sentences; `AudioutProtocol.AlignmentSource` owns the wire strings).

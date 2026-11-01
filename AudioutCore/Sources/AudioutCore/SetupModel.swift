@@ -1079,8 +1079,11 @@ public final class SetupModel {
 
     /// Re-read ``remoteAppIsAvailable`` from the switches, for a model kept
     /// across Setup windows. A value passed to `init` stays as it was.
-    public func refreshRemoteAppAvailability() {
-        remoteAppIsAvailable = remoteAppAvailableOverride ?? Self.remoteAppIsAvailable(settings: settings)
+    public func refreshRemoteAppAvailability(
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) {
+        remoteAppIsAvailable = remoteAppAvailableOverride
+            ?? Self.remoteAppIsAvailable(settings: settings, environment: environment)
     }
 
     /// What ``remoteAppIsAvailable`` reads when the caller passes nothing.

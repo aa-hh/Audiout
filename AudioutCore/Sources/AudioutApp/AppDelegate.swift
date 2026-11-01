@@ -255,9 +255,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
 
     /// Watches for the network coming back so a trial that started offline can
     /// still reach the licence server. Held here because it owns a monitor that
-    /// has to outlive `applicationDidFinishLaunching`; it cancels itself once
-    /// there is nothing left to register.
+    /// has to outlive `applicationDidFinishLaunching`; it also reports every
+    /// usable network path to `licenseProofRefresher`.
     private var trialReachability: TrialReachability?
+
+    /// Re-checks the licence before the phones' 14-day proof runs out; started
+    /// by the launch check's answer.
+    private var licenseProofRefresher: LicenseProofRefresher?
 
     /// The resolved backend kind (same resolution `makeBackend()` used). The
     /// first-run setup flow only presents on `.native` — the sole path that taps
@@ -1010,12 +1014,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
         // The check-in and validate calls below run on the state as it stands
         // now: nothing waits on an answer here, so a key that arrives later is
         // put to work by `useNewTrialKey` rather than by them.
+        licenseProofRefresher = LicenseProofRefresher(settings: settings, onRefreshed: { [weak self] in
+            self?.applyLicenseState()
+            self?.groupController?.licenseAnswered()
+        })
         trialReachability = TrialReachability(settings: settings,
                                               onRegistered: { [weak self] in
             self?.useNewTrialKey()
         }, onValidated: { [weak self] in
             self?.applyLicenseState()
             self?.groupController?.licenseAnswered()
+        }, onPathSatisfied: { [weak self] in
+            self?.licenseProofRefresher?.refreshIfNeeded()
         })
         trialReachability?.start()
 
@@ -1032,6 +1042,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
         LicenseValidator(settings: settings).validate { [weak self] _ in
             self?.applyLicenseState()
             self?.groupController?.licenseAnswered()
+            self?.licenseProofRefresher?.start()
         }
         applyLicenseState()
         RemoteAppConfigFetcher(settings: settings).refresh { [weak self] in self?.applyLicenseState() }
@@ -1712,6 +1723,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
                 // Sleep can leave the volume-key tap disabled or gone. No-op
                 // unless we own the volume.
                 self.volumeKeyInterceptor.reassertIfOwned()
+                // A Mac asleep for days wakes with a proof near its end.
+                self.licenseProofRefresher?.refreshIfNeeded()
             }
         }
 
@@ -3709,6 +3722,11 @@ extension AppDelegate: CompanionCoordinatorHost {
     func clientCountDidChange(_ count: Int) {
         permissionAuditModel?.noteRemoteAppClientCount(count)
         popoverController?.refreshRemoteInviteState()
+        // A phone arriving is when a stale proof matters; a refreshed one
+        // reaches it through `applyLicenseState`'s push.
+        if count > 0 {
+            licenseProofRefresher?.refreshIfNeeded()
+        }
     }
 
     @MainActor

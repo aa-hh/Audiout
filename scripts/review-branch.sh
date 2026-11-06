@@ -132,8 +132,18 @@ changes=$(git diff "$main_base" "$tip" -- . ':!*.md' | git patch-id --stable | c
 pending_root="$PWD/.review-pending"
 review_log="$common/audiout-branch-reviews.log"
 
-# post_status <state> <description>: the `review` commit status on HEAD.
+# post_status <state> <description>: the `review` commit status on HEAD. A
+# cloud session's proxy refuses status writes, so there the review-status
+# workflow posts it from the PR comment (scripts/review-status.sh).
 post_status() {
+  if [ "${CLAUDE_CODE_REMOTE:-}" = true ]; then
+    if [ -n "$pr" ]; then
+      echo "Review status: $1 ($2), posted on ${tip:0:12} by the review-status workflow."
+    else
+      echo "No review status posted: in a cloud session it comes from the PR comment, and there is no PR yet."
+    fi
+    return
+  fi
   $GH api "repos/aa-hh/Audiout/statuses/$tip" -f context=review -f "state=$1" \
       -f "description=$2" > /dev/null \
     || { echo "Review result not posted: the review status on $tip failed. Push the branch (git push -u origin HEAD) and run the same command again." >&2; exit 2; }
@@ -142,7 +152,8 @@ post_status() {
 
 # The last round posted on this branch's PR: prev_round, prev_head,
 # prev_level, prev_high, prev_changes (prev_round 0 when none or no PR).
-pr=$($GH pr view --json number -q .number 2>/dev/null)
+# REST, not `gh pr view`: cloud sessions refuse its GraphQL lookup.
+pr=$($GH api "repos/aa-hh/Audiout/pulls?head=aa-hh:$branch&state=open" --jq '.[0].number // empty' 2>/dev/null)
 prev_round=0; prev_head=""; prev_level=""; prev_high=0; prev_changes=""
 if [ -n "$pr" ]; then
   bodies=$($GH api --paginate "repos/aa-hh/Audiout/issues/$pr/comments" --jq '.[].body') \
@@ -248,8 +259,9 @@ post_result() {
   if [ "$level" = skip ]; then desc=skip; else desc="$level, round $round, $1 HIGH"; fi
   { echo "<!-- audiout-review round=$round head=$tip level=$level high=$1 changes=$changes -->"; cat "$2"; } > "$2.post" || exit 2
   if [ -n "$pr" ]; then
-    $GH pr comment "$pr" --body-file "$2.post" > /dev/null \
-      || { echo "Review result not posted: gh pr comment failed for PR #$pr." >&2; exit 2; }
+    # REST, not `gh pr comment`: cloud sessions refuse some GraphQL calls.
+    $GH api "repos/aa-hh/Audiout/issues/$pr/comments" -F "body=@$2.post" > /dev/null \
+      || { echo "Review result not posted: the comment post failed for PR #$pr." >&2; exit 2; }
     echo "Review comment posted to PR #$pr."
   else
     echo "No pull request for $branch, so no comment was posted (and no round recorded). Its body:"

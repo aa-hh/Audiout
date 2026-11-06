@@ -25,6 +25,13 @@
 # remote/local split and fetches the products it needs.
 set -eu
 
+# Linux (a cloud session) has no Xcode, AppKit or /usr/bin/shlock, so nothing
+# here can compile and the permit wait would spin for 30 minutes. Stop now.
+if [ "$(uname -s)" != Darwin ]; then
+    echo "  build.sh: needs macOS; nothing builds on $(uname -s). The pull request's tests workflow is the check." >&2
+    exit 3
+fi
+
 # A compiler orphaned by a killed wrapper holds the .build lock and makes
 # this script hang with no output at all. Clear it first -- see
 # scripts/reap-orphaned-swift.sh.

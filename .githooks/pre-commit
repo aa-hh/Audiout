@@ -203,7 +203,14 @@ fi
 # that can't build).
 staged_swift=$(git diff --cached --name-only --diff-filter=ACM -- \
     'AudioutCore/Sources/' 'AudioutCore/Tests/' 2>/dev/null | grep '\.swift$')
-if [ -n "$staged_swift" ] && command -v swift >/dev/null 2>&1; then
+# Guards 4 and 6 need macOS: a Linux cloud session may have a Swift toolchain,
+# but no AppKit to compile against, so its test gate is the pull request's run.
+on_macos=0
+[ "$(uname -s)" = Darwin ] && on_macos=1
+if [ -n "$staged_swift" ] && [ "$on_macos" = 0 ]; then
+    echo "  Guard 4: skipped on $(uname -s); the pull request's tests workflow runs the suite." >&2
+fi
+if [ -n "$staged_swift" ] && [ "$on_macos" = 1 ] && command -v swift >/dev/null 2>&1; then
     repo_root=$(git rev-parse --show-toplevel 2>/dev/null)
     # Scope first — see guard-test-scope.sh for the mapping and why it fails
     # closed. Missing helper => full suite, the old behaviour.
@@ -361,7 +368,10 @@ fi
 # toolchain => skip.
 staged_airplayengine=$(git diff --cached --name-only --diff-filter=ACM -- \
     'AirPlayEngine/Sources/' 'AirPlayEngine/Tests/' 2>/dev/null | grep '\.swift$')
-if [ -n "$staged_airplayengine" ] && command -v swift >/dev/null 2>&1; then
+if [ -n "$staged_airplayengine" ] && [ "$on_macos" = 0 ]; then
+    echo "  Guard 6: skipped on $(uname -s); the pull request's tests workflow runs the suite." >&2
+fi
+if [ -n "$staged_airplayengine" ] && [ "$on_macos" = 1 ] && command -v swift >/dev/null 2>&1; then
     repo_root=$(git rev-parse --show-toplevel 2>/dev/null)
     echo "" >&2
     echo "  Guard 6: AirPlayEngine Swift changed — running its test suite" >&2

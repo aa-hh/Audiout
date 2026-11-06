@@ -18,6 +18,13 @@ esac
 
 set -eu
 
+# Linux (a cloud session) has no Xcode, AppKit or /usr/bin/shlock, so nothing
+# here can compile and the permit wait would spin for 30 minutes. Stop now.
+if [ "$(uname -s)" != Darwin ]; then
+    echo "  run-app.sh: needs macOS; nothing builds on $(uname -s). The pull request's tests workflow is the check." >&2
+    exit 3
+fi
+
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 # shellcheck source=lib/remote.sh
 . "$SCRIPT_DIR/lib/remote.sh"

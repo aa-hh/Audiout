@@ -32,6 +32,13 @@
 #                            AUDIOUT_CAPACITY_TIMEOUT, see scripts/lib/remote.sh
 set -eu
 
+# Linux (a cloud session) has no Xcode, AppKit or /usr/bin/shlock, so nothing
+# here can compile and the permit wait would spin for 30 minutes. Stop now.
+if [ "$(uname -s)" != Darwin ]; then
+    echo "  run-tests.sh: needs macOS; nothing builds on $(uname -s). The pull request's tests workflow is the check." >&2
+    exit 3
+fi
+
 repo_root=$(git rev-parse --show-toplevel)
 # Which package's tests to run. AudioutCore by default -- it is what Guard 4
 # and every inner-loop run mean by "the suite". SwiftPM never runs a

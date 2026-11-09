@@ -361,7 +361,9 @@ public final class DACPServer: @unchecked Sendable {
             command = String(tail[..<q])
             let queryString = String(tail[tail.index(after: q)...])
             for pair in queryString.split(separator: "&") {
-                let kv = pair.split(separator: "=", maxSplits: 1)
+                // Keep empty parts: "=" must yield ["", ""], not [] (kv[0] would trap).
+                let kv = pair.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+                guard !kv[0].isEmpty else { continue }
                 let key = String(kv[0]).removingPercentEncoding ?? String(kv[0])
                 let value = kv.count > 1 ? (String(kv[1]).removingPercentEncoding ?? String(kv[1])) : ""
                 query[key] = value

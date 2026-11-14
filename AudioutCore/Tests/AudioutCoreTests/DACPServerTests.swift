@@ -74,6 +74,18 @@ import Network
         #expect(DACPServer.level(fromDb: -.infinity) == 0)
     }
 
+    /// The bug this guards: a query pair that is just `=` made
+    /// `split(separator: "=")` return no parts (empty subsequences are
+    /// dropped), so `kv[0]` trapped and one unauthenticated LAN packet
+    /// crashed the app.
+    @Test func emptyKeyQueryPairIsIgnoredNotATrap() {
+        let req = request("GET /ctrl-int/1/setproperty?= HTTP/1.1\r\nActive-Remote: 7\r\n\r\n")
+        #expect(req?.command == "setproperty")
+        #expect(req?.query.isEmpty == true)
+        let mixed = request("GET /ctrl-int/1/setproperty?a=1&=&=x&b= HTTP/1.1\r\n\r\n")
+        #expect(mixed?.query == ["a": "1", "b": ""])
+    }
+
     // MARK: - Idle-connection timeout (unbounded-growth hardening)
     //
     // These drive `accept(_:)` directly with a real loopback `NWConnection`,

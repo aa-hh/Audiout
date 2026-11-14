@@ -1575,7 +1575,7 @@ public final class PopoverController: NSObject {
     static func trialBannerText(for banner: TrialBanner) -> String {
         switch banner {
         case .threeDays:
-            return "Your trial ends in 3 days. €30 once keeps everything, including updates."
+            return "Your trial ends in 3 days. €24.99 once keeps everything, including updates."
         case .lastDay:
             return "Last day of your trial. From tomorrow Audiout plays on one speaker at a time."
         }

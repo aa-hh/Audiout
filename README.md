@@ -17,7 +17,7 @@ volume fader for each room, saved groups, and a phone remote.
 ![Apple Silicon](https://img.shields.io/badge/Apple%20Silicon-native-333333?style=flat-square)
 ![Swift 5.10](https://img.shields.io/badge/Swift-5.10-F05138?style=flat-square&logo=swift&logoColor=white)
 [![Licence: GPL-2.0-or-later](https://img.shields.io/badge/licence-GPL--2.0--or--later-4c8b2b?style=flat-square)](LICENSE)
-[![€30 one-time](https://img.shields.io/badge/%E2%82%AC30-one--time-c9a227?style=flat-square)](https://audiout.app/buy)
+[![€24.99 one-time](https://img.shields.io/badge/%E2%82%AC24.99-one--time-c9a227?style=flat-square)](https://audiout.app/buy)
 [![audiout.app](https://img.shields.io/badge/audiout.app-1a1a1a?style=flat-square)](https://audiout.app)
 
 <br>

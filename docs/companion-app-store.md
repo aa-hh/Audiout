@@ -8,7 +8,7 @@ branch as of 2026-09-06.
 ## 1. Review notes (paste into App Store Connect › App Review Information › Notes)
 
 ```
-Audiout Remote is a free companion app for Audiout, a paid Mac app (€30,
+Audiout Remote is a free companion app for Audiout, a paid Mac app (€24.99,
 one-time) that sends system audio to AirPlay 2, Bluetooth, and Chromecast
 speakers. There is no account and no sign-in. For every control action the
 phone talks directly to the Mac app over the local Wi-Fi network, using

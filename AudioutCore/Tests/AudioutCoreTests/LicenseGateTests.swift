@@ -1202,6 +1202,33 @@ import AudioutSharedUI
         #expect(trial.font == Tokens.Font.plateTitle)
     }
 
+    /// Red if the gold button stops showing the licence server's price, keeps a
+    /// cleared price, loses a price set before its view loaded, or changes size
+    /// when the price arrives.
+    @MainActor
+    @Test func theBuyButtonCarriesThePriceWhenOneIsKnown() throws {
+        let gate = makeContent(settings(withBuy: true), Transport())
+        gate.view.frame = NSRect(x: 0, y: 0, width: 713, height: 600)
+        gate.view.layoutSubtreeIfNeeded()
+        let buy = try #require(gate.test_visibleControls.compactMap { $0 as? CTAButton }
+            .first { $0.style == .primary })
+        #expect(buy.title == "Buy Audiout")
+
+        gate.setLocalPrice("€24.99")
+        gate.view.layoutSubtreeIfNeeded()
+        #expect(buy.title == "Buy Audiout · €24.99")
+        #expect(gate.test_buyFrame.size == CGSize(width: 320, height: 36))
+
+        gate.setLocalPrice(nil)
+        #expect(buy.title == "Buy Audiout")
+
+        let early = makeContent(settings(withBuy: true), Transport())
+        early.setLocalPrice("$24.99")
+        let earlyBuy = try #require(early.test_visibleControls.compactMap { $0 as? CTAButton }
+            .first { $0.style == .primary })
+        #expect(earlyBuy.title == "Buy Audiout · $24.99")
+    }
+
     /// Red if the line explaining the trial drifted away from the trial
     /// button again, with "I have a key" between them.
     @MainActor

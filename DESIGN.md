@@ -1226,8 +1226,10 @@ overlay lifts off while it is selected and returns with any other tab.
      phone only while the iPhone app is visible
      (`AppSettings.remoteAppIsVisible`); otherwise it reads "One purchase
      covers this Mac."
-  2. "Buy Audiout", the primary `CTAButton` (gold, `plateTitle`, 320 x 36 pt,
-     centred), the Return key, so it wears the "⏎" chip at its trailing end.
+  2. "Buy Audiout", or "Buy Audiout · " followed by the licence server's
+     price for this buyer when one arrived this launch, the primary
+     `CTAButton` (gold, `plateTitle`, 320 x 36 pt, centred), the Return key,
+     so it wears the "⏎" chip at its trailing end.
      It opens the checkout and moves to the key state.
   3. Under it, "Try free for 14 days", the secondary `CTAButton` (`raised`,
      1 pt `rim` edge, `plateTitle`, the same size), only before any trial.
@@ -1814,7 +1816,9 @@ is a change in two apps.
   - Sentence: "One purchase covers this Mac and Audiout Remote on your
     iPhone." / "One purchase covers your Mac and every iPhone that connects
     to it."
-  - Buy: "Buy Audiout" / "Buy Mac licence for {price}".
+  - Buy: "Buy Audiout", or "Buy Audiout · {price}" on the first-run gate
+    when the licence server sent a price this launch / "Buy Mac licence for
+    {price}".
   - Trial: "Try free for 14 days", with "No card or email. After 14 days,
     Audiout keeps playing on one speaker until you buy." under it / "Audiout
     on your Mac offers a free 14-day trial when it first opens." On a Mac

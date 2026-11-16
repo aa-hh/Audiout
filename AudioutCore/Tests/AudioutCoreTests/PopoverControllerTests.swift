@@ -4211,7 +4211,7 @@ import AudioutProtocol
 
         popover.rebuild()
         #expect(popover.test_systemAirPlayNoteText
-                == "Your trial ends in 3 days. €24.99 once keeps everything, including updates.")
+                == "Your trial ends in 3 days. Buying once keeps everything, including updates.")
         #expect(raised.banners == [.threeDays], "reported as it goes up")
         #expect(popover.test_systemAirPlayNoteHasTextAction, "the nudge offers I have a key")
 
@@ -4224,6 +4224,22 @@ import AudioutProtocol
         popover.test_isShownOverride = true
         popover.rebuildForOpen()
         #expect(popover.test_systemAirPlayNoteText == "Trial · 3 days left")
+    }
+
+    /// Red if the three-day banner went back to a figure written in the code,
+    /// or a price arriving late re-raised the banner.
+    @Test func theThreeDayBannerNamesThePriceOnlyOnceItArrives() async throws {
+        let (popover, _, _) = try await makePopover()
+        let raised = wireTrial(popover, daysLeft: 3, owed: .threeDays)
+
+        popover.rebuild()
+        #expect(popover.test_systemAirPlayNoteText
+                == "Your trial ends in 3 days. Buying once keeps everything, including updates.")
+
+        popover.setLocalPrice("€24.99")
+        #expect(popover.test_systemAirPlayNoteText
+                == "Your trial ends in 3 days. €24.99 once keeps everything, including updates.")
+        #expect(raised.banners == [.threeDays])
     }
 
     /// Red if the last-day banner stopped being the one a Mac sees when both

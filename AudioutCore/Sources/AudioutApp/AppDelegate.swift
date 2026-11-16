@@ -200,6 +200,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
     private var postHogProjectToken = ""
     private var postHogHost = ""
 
+    private lazy var localPrice = LocalPrice(settings: settings)
     private lazy var trialSurveyFetcher = ExpiredTrialSurvey.Fetcher(settings: settings) { [weak self] completion in
         guard let self else { completion(nil); return }
         ExpiredTrialSurvey.fetch(host: self.postHogHost, token: self.postHogProjectToken,
@@ -1063,6 +1064,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
             self?.licenseProofRefresher?.start()
         }
         applyLicenseState()
+        localPrice.fetchOnce { [weak self] price in
+            self?.popoverController?.setLocalPrice(price)
+            self?.licenseGateController?.setLocalPrice(price)
+        }
         refreshRemoteConfig { [weak self] in
             guard let self else { return }
             self.launchRemoteConfigFetched = true
@@ -1294,6 +1299,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
         popoverController.onTrialBannerShown = { [settings] banner in
             TrialClock.markBannerShown(banner, settings: settings)
         }
+        popoverController.setLocalPrice(localPrice.formatted)
         // Metering-active gate (T-GATE): only compute/emit `.level` while the
         // popover is actually open. `backend as? MeteringControlling` is nil for
         // backends without the capability, so this is a no-op
@@ -1875,6 +1881,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
                         })
                 })
             licenseGateController = gate
+            gate.setLocalPrice(localPrice.formatted)
             surface.presentLicenseGate(gate)
             // The gate says what the one-speaker note says, so the note
             // waits; the pass's `applyLicenseState` brings it back if the Mac

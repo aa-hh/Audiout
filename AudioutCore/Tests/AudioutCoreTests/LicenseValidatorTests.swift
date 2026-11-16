@@ -418,4 +418,81 @@ import Testing
         #expect(LicenseValidator.canonicalKey("XUDT-AAAAA-BBBBB-CCCCC-DDDDD") == nil)
         #expect(LicenseValidator.canonicalKey("AUDT-AAAAA-BBBBB-CCCCC-DDDDU") == nil)
     }
+
+    // MARK: Local price
+
+    private func fetchPrice(_ price: LocalPrice) async -> String? {
+        await withCheckedContinuation { continuation in
+            price.fetchOnce { continuation.resume(returning: $0) }
+        }
+    }
+
+    /// Red if the price request gains a country query, a licence key, a header
+    /// or a body, or stops reading `formatted` from the server's answer.
+    @Test func localPriceAsksPlainlyAndKeepsTheFormattedPrice() async {
+        let transport = Transport()
+        transport.stub(status: 200, json: #"{"country":"DE","currency":"EUR","total":"24.99","formatted":"€24.99"}"#)
+        let price = LocalPrice(settings: AppSettings(defaults: defaults, licenseServerURL: Self.server),
+                               transport: transport.closure)
+
+        #expect(await fetchPrice(price) == "€24.99")
+        #expect(price.formatted == "€24.99")
+        #expect(transport.requests.count == 1)
+        let request = transport.requests.first
+        #expect(request?.httpMethod == "GET")
+        #expect(request?.url?.absoluteString == "https://license.example.com/v1/price")
+        #expect(request?.url?.query == nil)
+        #expect(request?.httpBody == nil)
+        #expect(request?.allHTTPHeaderFields?.isEmpty ?? true)
+    }
+
+    /// Red if any reply other than a 200 carrying a short, printable
+    /// `formatted` string ends up shown as a price.
+    @Test(arguments: [
+        (400, #"{"error":"bad_country"}"#, nil),
+        (503, #"{"error":"unavailable"}"#, nil),
+        (200, #"{"currency":"EUR","total":"24.99"}"#, nil),
+        (200, #"{"formatted":24.99}"#, nil),
+        (200, #"{"formatted":""}"#, nil),
+        (200, #"{"formatted":"\#(String(repeating: "9", count: 25))"}"#, nil),
+        (200, #"{"formatted":"€24\n.99"}"#, nil),
+        (200, "€24.99", nil),
+        (nil, nil, nil),
+        (200, #"{"formatted":"\#(String(repeating: "9", count: 24))"}"#, String(repeating: "9", count: 24)),
+    ] as [(Int?, String?, String?)])
+    func localPriceAcceptsOnlyAValidFormattedString(status: Int?, body: String?, expected: String?) {
+        let response = status.flatMap {
+            HTTPURLResponse(url: Self.server, statusCode: $0, httpVersion: nil, headerFields: nil)
+        }
+        #expect(LocalPrice.formattedPrice(data: body.map { Data($0.utf8) }, response: response) == expected)
+    }
+
+    /// Red if `fetchOnce` asks the server more than once a launch, or a failed
+    /// answer frees the instance to ask again.
+    @Test func localPriceAsksOncePerLaunch() async {
+        let answered = Transport()
+        answered.stub(status: 200, json: #"{"formatted":"€24.99"}"#)
+        let price = LocalPrice(settings: AppSettings(defaults: defaults, licenseServerURL: Self.server),
+                               transport: answered.closure)
+        #expect(await fetchPrice(price) == "€24.99")
+        #expect(await fetchPrice(price) == "€24.99")
+        #expect(answered.requests.count == 1)
+
+        let failed = Transport()
+        failed.stub(status: 503, json: #"{"error":"unavailable"}"#)
+        let unpriced = LocalPrice(settings: AppSettings(defaults: defaults, licenseServerURL: Self.server),
+                                  transport: failed.closure)
+        #expect(await fetchPrice(unpriced) == nil)
+        #expect(await fetchPrice(unpriced) == nil)
+        #expect(failed.requests.count == 1)
+    }
+
+    /// Red if a build with no licence server asks anyone for a price.
+    @Test func localPriceWithNoLicenseServerAsksNothing() async {
+        let transport = Transport()
+        let price = LocalPrice(settings: AppSettings(defaults: defaults), transport: transport.closure)
+
+        #expect(await fetchPrice(price) == nil)
+        #expect(transport.requests.isEmpty)
+    }
 }

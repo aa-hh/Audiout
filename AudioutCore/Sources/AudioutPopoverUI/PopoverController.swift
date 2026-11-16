@@ -1294,6 +1294,9 @@ public final class PopoverController: NSObject {
     /// `rebuild()` so a rebuild mid-condition keeps it pinned.
     private var systemAirPlayNoteActive = false
 
+    /// This launch's price from the licence server, or `nil` when none arrived.
+    private var localPrice: String?
+
     /// The takeover status strip's current state (T6), or `nil` when there's
     /// nothing to explain. Drives the note (see PRECEDENCE above); re-applied on
     /// every `rebuild()` so a rebuild mid-takeover keeps it pinned.
@@ -1571,11 +1574,16 @@ public final class PopoverController: NSObject {
         LicenseCopy.trialPillText(daysLeft: daysLeft)
     }
 
-    /// Each banner's copy, verbatim from the trial spec's § Copy.
-    static func trialBannerText(for banner: TrialBanner) -> String {
+    /// Each banner's copy, from the trial spec's § Copy. The three-day
+    /// banner's figure is the licence server's price for this buyer, never
+    /// written in the code; with no price it names no figure.
+    static func trialBannerText(for banner: TrialBanner, price: String?) -> String {
         switch banner {
         case .threeDays:
-            return "Your trial ends in 3 days. €24.99 once keeps everything, including updates."
+            if let price {
+                return "Your trial ends in 3 days. \(price) once keeps everything, including updates."
+            }
+            return "Your trial ends in 3 days. Buying once keeps everything, including updates."
         case .lastDay:
             return "Last day of your trial. From tomorrow Audiout plays on one speaker at a time."
         }
@@ -1615,6 +1623,15 @@ public final class PopoverController: NSObject {
     public func setSystemAirPlayNoteActive(_ active: Bool) {
         guard active != systemAirPlayNoteActive else { return }
         systemAirPlayNoteActive = active
+        applyNoteSlot()
+    }
+
+    /// The licence server's price for this buyer, shown in the three-day trial
+    /// banner. Called by the host (`AppDelegate`) directly, same shape as
+    /// ``setSystemAirPlayNoteActive(_:)``. Idempotent: a repeat is a no-op.
+    public func setLocalPrice(_ formatted: String?) {
+        guard formatted != localPrice else { return }
+        localPrice = formatted
         applyNoteSlot()
     }
 
@@ -1673,7 +1690,7 @@ public final class PopoverController: NSObject {
             return (Self.systemAirPlayNoteText, nil, nil, .info)
         }
         if let raisedTrialBanner {
-            return (Self.trialBannerText(for: raisedTrialBanner), trialBuyAction, enterLicenseKeyAction, .info)
+            return (Self.trialBannerText(for: raisedTrialBanner, price: localPrice), trialBuyAction, enterLicenseKeyAction, .info)
         }
         if let trialDaysLeft {
             return (Self.trialPillText(daysLeft: trialDaysLeft), trialBuyAction, enterLicenseKeyAction, .info)

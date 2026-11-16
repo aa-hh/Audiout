@@ -6,7 +6,7 @@ two layers of "dummy," solving two different problems.
 | Layer | Lives in | Exercises | Does **not** exercise |
 |---|---|---|---|
 | **In-app mock backend** | `../AudioutCore` | All UI + control logic: discovery, multiple devices, groups/output-sets, per-device volume/mute/solo, level meters, drop/reconnect | The wire/audio path (by design) |
-| **shairport-sync fake speaker** | `fake-speakers.sh` | Real Bonjour discovery + AirPlay-1 send against a real receiver | AirPlay-2 **PTP sync**, Sonos quirks (need real hardware) |
+| **shairport-sync fake speaker** | `fake-speakers.sh` | Real Bonjour discovery + AirPlay-1 send against a real receiver (under the native backend, from the app on a second Mac) | AirPlay-2 **PTP sync**, Sonos quirks (need real hardware) |
 
 **The mock backend is the primary tool.** The shairport receiver is an optional
 sanity check for the real wire path — and on a single Mac it's limited to *one*
@@ -75,8 +75,9 @@ system-audio-recording TCC permission granted to the app.
   is documented in **`notes/p2b-nativebackend-runbook.md`**. Read that before
   attempting a live `native` run; don't wing it with a bare `swift run`, the
   TCC grant won't reliably stick to an unstable binary identity.
-- AP1-only devices (this repo's `fake-speakers.sh` receiver included) are
-  discovered, selectable, and driven through the same engine as AirPlay 2 —
+- AP1-only devices (this repo's `fake-speakers.sh` receiver included, when the
+  app runs on another Mac than the one hosting it) are discovered, selectable,
+  and driven through the same engine as AirPlay 2 —
   the D6 gate that once dimmed them is gone (`NativeBackend.swift:39-48`). The
   one thing still false for them is `supportsAirPlay2`, which now means only
   "no perfect multi-room sync", not "unsupported".
@@ -86,7 +87,9 @@ system-audio-recording TCC permission granted to the app.
 ## Layer 2 — shairport-sync fake speaker (optional, one device)
 
 A real AirPlay-1 receiver on this Mac, advertised over Bonjour, for occasionally
-checking that real `NWBrowser` discovery and the AirPlay-1 send path work.
+checking that real `NWBrowser` discovery and the AirPlay-1 send path work. Run
+that check from the app on a second Mac: `NativeDiscovery` drops receivers
+hosted on the Mac running the app.
 
 ```bash
 brew install shairport-sync   # already installed

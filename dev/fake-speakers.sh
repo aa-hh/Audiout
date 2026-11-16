@@ -7,7 +7,9 @@
 # (NWBrowser on `_raop._tcp`) sees several real devices with NO hardware.
 #
 # What this exercises:   Bonjour discovery, device appear/disappear, AirPlay-1
-#                        RTSP/RAOP send path.
+#                        RTSP/RAOP send path. Under AIRPLAY_BACKEND=native the app
+#                        must run on another Mac: NativeDiscovery drops receivers
+#                        hosted on the Mac running it.
 # What it does NOT:      AirPlay-2 PTP sync, Sonos-specific behaviour. Those need
 #                        real speakers (or a second host) — the in-app mock
 #                        backend stands in for them at the UI layer.

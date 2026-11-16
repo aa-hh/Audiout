@@ -15,7 +15,8 @@ import AirPlayEngine
 ///   AIRPLAY_LIVE_DISCOVERY=1 swift test --filter NativeDiscoveryLive
 ///
 /// For full ground-truth coverage (including an AP1-only device), first start
-/// exactly one fake speaker:
+/// exactly one fake speaker on another Mac, because the self-receiver filter in
+/// ``NativeDiscovery`` drops a receiver hosted on the Mac running the tests:
 ///   dev/fake-speakers.sh
 /// and stop it afterwards:
 ///   dev/stop-fake-speakers.sh

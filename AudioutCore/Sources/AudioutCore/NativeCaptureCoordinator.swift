@@ -723,28 +723,37 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             let format = try newTap.createAndStart(
                 muteBehavior: muteBehavior, excludedProcessObjectIDs: claim.excludedProcessObjectIDs)
             try Self.validate(format)
-            let orphan: SystemAudioTap? = queue.sync {
+            let commit: (orphan: SystemAudioTap?, replay: Bool) = queue.sync {
                 // A stop() may have raced in while we were creating: don't clobber an
                 // idle/stopping state with a fresh capturing one — stop() wins.
                 guard case .creatingTap = _state else {
-                    return newTap // orphan; tear down OUTSIDE the lock
+                    return (newTap, false) // orphan; tear down OUTSIDE the lock
                 }
                 self.tap = newTap
                 self.converter = makeConverter(format)
                 self.publishBufferSnapshot()
                 self.lastExcludedObjects = claim.excludedProcessObjectIDs // W1-T7 compare-before-rebuild baseline
                 self.transition(to: .capturing(format))
-                return nil
+                // A device or rate change that arrives during the first create is marked
+                // pending by `recreateTap`; this commit is the only place that can consume
+                // it for this start.
+                return (nil, rebuildCoalescer.takePending())
             }
-            orphan?.teardown()
+            commit.orphan?.teardown()
             // T7 EDGE 1 — join the engine thread to the AGGREGATE's I/O workgroup,
             // now that the aggregate exists and we have actually committed to
             // `.capturing`. Skipped when `orphan != nil`: a racing `stop()` won, the
             // tap we just built is being destroyed, and joining a workgroup we are
             // about to tear down would only have to be unwound again. Fired OFF the
             // state lock, like every other handler call in this file.
-            if orphan == nil, let id = newTap.workgroupDeviceID {
+            if commit.orphan == nil, let id = newTap.workgroupDeviceID {
                 workgroup?.join(deviceID: id)
+            }
+            // The trigger may have been a device or rate change, so it is replayed as
+            // one, as `recreateTap`'s own commit does.
+            if commit.replay {
+                Telemetry.log(.captureWS, "rebuild_replay", [:])
+                recreateTap(cause: .deviceOrRateChange)
             }
         } catch {
             // createAndStart may have created the tap/aggregate before failing on a

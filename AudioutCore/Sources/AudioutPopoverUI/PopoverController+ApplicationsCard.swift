@@ -135,12 +135,21 @@ extension PopoverController {
             // offered at all is decided by `availableAirPlayDestinations`
             // (`Device.canBePerAppRouteTarget()`). The reverse conflict —
             // selecting a speaker that already has a redirect — is resolved by
-            // `AppRoutingController.clearRoutes(toDevices:)` (selection wins), so
-            // by the time this renders, no kept route targets a Main Out member.
+            // `AppRoutingController.clearRoutes(toDevices:)` (selection wins).
             // Deliberately NOT filtered inside `availableAirPlayDestinations`:
             // that set also drives R5 disappearance tracking, where a Main Out
             // member must still count as present.
-            if groupController?.isMainOutMember(device.id) == true { continue }
+            // A Cast receiver is the exception: its route survives selection
+            // (the backend lets whole system win it), so the row's own kept
+            // route stays listed, saying where its audio is going meanwhile.
+            if groupController?.isMainOutMember(device.id) == true {
+                if current == .device(id: device.id) {
+                    entries.append(.init(id: device.id, title: device.name, isLocal: false,
+                                         symbolName: device.symbolName,
+                                         subtitle: Self.mainOutputDestinationSubtitle))
+                }
+                continue
+            }
             // R3 stopgap: a device already carrying a DIFFERENT app's redirect
             // gets an honest heads-up rather than a silent quality regression —
             // two independently-captured streams mixed onto one speaker warble
@@ -300,6 +309,8 @@ extension PopoverController {
     /// selection points — and the redirect resumes on its own once the device is
     /// back, with nothing for the user to re-pick.
     static let offlineDestinationSubtitle = "Offline, playing with system audio"
+    /// A kept route whose receiver is also a main output: whole system wins it.
+    static let mainOutputDestinationSubtitle = "Main output, playing with system audio"
 
     /// The secondary line on an AirPlay device entry that already carries a
     /// DIFFERENT app's redirect (R3 stopgap). The real fix — resampling

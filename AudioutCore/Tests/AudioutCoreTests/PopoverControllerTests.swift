@@ -2366,6 +2366,28 @@ import AudioutProtocol
                 "the offline entry is injected only into the row that actually targets it")
     }
 
+    /// A route kept while its receiver is a main output (the Cast case: whole
+    /// system wins it and the route waits) still selects that receiver, saying
+    /// so. Turns red if `appDestinations` drops a main-output member without
+    /// keeping the row's own current target, which paints "Follows main output".
+    @Test func aKeptRouteToAMainOutputMemberStaysSelected() async throws {
+        let appRouting = tempAppRoutingController()
+        seedRoute(appRouting, bundleID: "com.example.music", displayName: "Music",
+                  destination: .device(id: "office"))
+        let (popover, controller, backend) = try await makePopover(appRouting: appRouting,
+                                                                    runningAppsProvider: routedApps)
+        controller.setMainOut(.selectedDevices)
+        _ = controller.setDeviceSelected("office", true)
+        try #require(controller.isMainOutMember("office"))
+        popover.update(devices: backend.devices)
+
+        #expect(popover.test_appRowSelectedDestinationID(for: "com.example.music") == "office")
+        let officeItem = try #require(
+            popover.test_appRow(for: "com.example.music")?
+                .test_destinationPopUpMenuItem(forDestinationID: "office"))
+        #expect(officeItem.toolTip == PopoverController.mainOutputDestinationSubtitle)
+    }
+
     /// R3 stopgap: a device that already carries a DIFFERENT app's redirect must
     /// show an honest heads-up on its OWN destination entry — the real mixing fix
     /// is a separate follow-up; this only stops the surprise. Comparing by
